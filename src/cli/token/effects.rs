@@ -1,5 +1,5 @@
 use crate::api::Value;
-use crate::core::Value as CoreValue;
+use crate::core::{Dict, Key, Value as CoreValue};
 use crate::eval;
 use crate::reflection::{
     EffectRequestSpec, RequestContext, RequestResult, TaskHalt, TaskSpecialization,
@@ -124,6 +124,7 @@ fn regex_span(
     let pattern = text_value(context, pattern, "`.token.regex`")?;
     let matcher = TextPattern::parse(&pattern)
         .map_err(|error| TaskHalt::new(format!("invalid `.token.regex` pattern: {error}")))?;
+    let values = context.eval_context().values().clone();
     let mut transaction = context
         .transaction()
         .ok_or_else(|| TaskHalt::new("token reader escaped its isolated transaction"))?;
@@ -146,10 +147,7 @@ fn regex_span(
         return Ok(RequestResult::Fail);
     }
     journal.cursor = cursor + matched.len();
-    Ok(RequestResult::Return(Value::record([(
-        "span",
-        Value::text(matched),
-    )])))
+    Ok(RequestResult::Return(span_value(&values, matched)))
 }
 
 fn text_span(
@@ -159,6 +157,7 @@ fn text_span(
     let []: [Value; 0] = arguments
         .try_into()
         .map_err(|_| TaskHalt::new("`.token.text_span` received arguments"))?;
+    let values = context.eval_context().values().clone();
     let mut transaction = context
         .transaction()
         .ok_or_else(|| TaskHalt::new("token reader escaped its isolated transaction"))?;
@@ -180,10 +179,7 @@ fn text_span(
         return Ok(RequestResult::Fail);
     }
     journal.cursor = snapshot.input.len();
-    Ok(RequestResult::Return(Value::record([(
-        "span",
-        Value::text(remaining),
-    )])))
+    Ok(RequestResult::Return(span_value(&values, remaining)))
 }
 
 fn any(
@@ -209,7 +205,20 @@ fn any(
         return Ok(RequestResult::Fail);
     };
     journal.cursor += character.len_utf8();
-    Ok(RequestResult::Return(Value::text(character.to_string())))
+    Ok(RequestResult::Return(Value::from_core(
+        context.eval_context().values(),
+        CoreValue::binary_from_text(&character.to_string()),
+    )))
+}
+
+fn span_value(values: &crate::core::CoreValueFactory, span: &str) -> Value {
+    Value::from_core(
+        values,
+        CoreValue::Dict(Dict::new_sync().insert(
+            Key::atom_from_text("span"),
+            CoreValue::binary_from_text(span),
+        )),
+    )
 }
 
 fn end(

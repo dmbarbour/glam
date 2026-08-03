@@ -17,6 +17,7 @@ use crate::core::{
     CoreValueFactory, DeferredValueId, EvaluationFailure, LazyCycle, LazyCycleMember, LazyValue,
     PromiseAssignment, PromisedValue, Value,
 };
+use crate::runtime::{EvaluationRuntimeId, RuntimeValueRoot};
 
 mod executor;
 pub(crate) use executor::EvaluationExecutor;
@@ -53,6 +54,7 @@ fn allocate_wait_token(
 ) -> Result<EvaluationWaitToken, Arc<str>> {
     Ok(EvaluationWaitToken(Arc::new(EvaluationWaitState {
         id: session.values.ids().evaluation_wait()?,
+        runtime: session.values.runtime_id(),
         owner_id: session.id,
         owner: Arc::downgrade(session),
         producer,
@@ -66,6 +68,7 @@ fn evaluation_failure(message: impl AsRef<str>) -> Arc<EvaluationFailure> {
 
 struct EvaluationWaitState {
     id: NonZeroU64,
+    runtime: EvaluationRuntimeId,
     owner_id: EvaluationSessionId,
     owner: Weak<EvaluationSession>,
     producer: EvaluationTaskId,
@@ -74,7 +77,7 @@ struct EvaluationWaitState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum EvaluationTaskTerminal {
-    Complete(Value),
+    Complete(RuntimeValueRoot),
     Failed(Arc<EvaluationFailure>),
     Cancelled,
 }
@@ -89,6 +92,10 @@ impl EvaluationWaitToken {
 
     pub(crate) fn owner_id(&self) -> EvaluationSessionId {
         self.0.owner_id
+    }
+
+    pub(crate) fn runtime_id(&self) -> EvaluationRuntimeId {
+        self.0.runtime
     }
 
     pub(crate) fn producer(&self) -> EvaluationTaskId {
@@ -109,6 +116,9 @@ impl EvaluationWaitToken {
     }
 
     fn publish_terminal(&self, terminal: EvaluationTaskTerminal) -> EvaluationTaskTerminal {
+        if let EvaluationTaskTerminal::Complete(value) = &terminal {
+            debug_assert_eq!(value.runtime_id(), self.runtime_id());
+        }
         if let Err(candidate) = self.0.terminal.set(terminal) {
             debug_assert_eq!(
                 self.0.terminal.get(),
@@ -124,7 +134,7 @@ impl EvaluationWaitToken {
     }
 
     pub(crate) fn publish_promise_assignment(&self, assignment: &PromiseAssignment) {
-        let terminal = promise_assignment_terminal(assignment);
+        let terminal = promise_assignment_terminal(self.runtime_id(), assignment);
         if let Some(owner) = self.owner() {
             owner.complete_promise_wait(self, terminal);
         } else {
@@ -136,7 +146,7 @@ impl EvaluationWaitToken {
 impl EvaluationTaskTerminal {
     fn to_poll(&self) -> EvaluationTaskPoll {
         match self {
-            Self::Complete(value) => EvaluationTaskPoll::Complete(value.clone()),
+            Self::Complete(value) => EvaluationTaskPoll::Complete(value.as_core().clone()),
             Self::Failed(error) => EvaluationTaskPoll::Failed(error.clone()),
             Self::Cancelled => EvaluationTaskPoll::Cancelled,
         }
@@ -330,7 +340,7 @@ impl ReflectionTaskProfile {
 pub(crate) enum EvaluationTaskStatus {
     Launched,
     Blocked,
-    Complete(Value),
+    Complete(RuntimeValueRoot),
     Failed(Arc<EvaluationFailure>),
     Cancelled,
 }
@@ -411,7 +421,7 @@ enum EvaluationTaskState {
     Queued,
     Running,
     Blocked(EvaluationTaskBlock),
-    Complete(Value),
+    Complete(RuntimeValueRoot),
     Failed(Arc<EvaluationFailure>),
     Cancelled,
 }
@@ -430,7 +440,7 @@ enum DeferredTaskState {
     Dormant,
     Running,
     Blocked(EvaluationTaskBlock),
-    Complete(Value),
+    Complete(RuntimeValueRoot),
     Failed(Arc<EvaluationFailure>),
 }
 
@@ -563,7 +573,7 @@ pub(crate) struct PendingReflectionTask {
 struct PendingReflectionTaskInner {
     context: EvalContext,
     handle: EvaluationTaskHandle,
-    effect: Value,
+    effect: RuntimeValueRoot,
     activated: AtomicBool,
 }
 
@@ -584,7 +594,7 @@ impl PendingReflectionTask {
             InitialTaskDisposition::Launch => {
                 self.inner.context.activate_reflection_task(
                     &self.inner.handle,
-                    self.inner.effect.clone(),
+                    self.inner.effect.as_core().clone(),
                     ReflectionTaskResultPolicy::ReturnValue,
                     self.inner.context.task_profile.clone(),
                     Some(status),
@@ -681,20 +691,31 @@ fn retire_reflection_task(
     record
 }
 
-fn promise_assignment_terminal(assignment: &PromiseAssignment) -> EvaluationTaskTerminal {
+fn promise_assignment_terminal(
+    runtime: EvaluationRuntimeId,
+    assignment: &PromiseAssignment,
+) -> EvaluationTaskTerminal {
     match assignment {
-        Ok(value) => EvaluationTaskTerminal::Complete(value.clone()),
+        Ok(value) => {
+            debug_assert_eq!(value.runtime_id(), runtime);
+            EvaluationTaskTerminal::Complete(value.clone())
+        }
         Err(error) => EvaluationTaskTerminal::Failed(error.clone()),
     }
 }
 
-fn promise_record_terminal(record: &PromiseRecord) -> Option<EvaluationTaskTerminal> {
+fn promise_record_terminal(
+    wait: &EvaluationWaitToken,
+    record: &PromiseRecord,
+) -> Option<EvaluationTaskTerminal> {
     let Some(result) = record.result.upgrade() else {
         return Some(EvaluationTaskTerminal::Failed(evaluation_failure(
             "promised value no longer exists",
         )));
     };
-    result.get().map(promise_assignment_terminal)
+    result
+        .get()
+        .map(|assignment| promise_assignment_terminal(wait.runtime_id(), assignment))
 }
 
 fn retire_promise_wait(
@@ -725,7 +746,7 @@ fn prune_terminal_promise_waits(tasks: &mut EvaluationTasks) {
         .promises
         .iter()
         .filter_map(|(wait, record)| {
-            promise_record_terminal(record).map(|terminal| (wait.clone(), terminal))
+            promise_record_terminal(wait, record).map(|terminal| (wait.clone(), terminal))
         })
         .collect::<Vec<_>>();
     for (wait, terminal) in terminal {
@@ -1220,6 +1241,7 @@ impl EvalContext {
             let terminal = if let Some(result) = promise.result.upgrade() {
                 let _ = result.set(Err(failure.clone()));
                 promise_assignment_terminal(
+                    wait.runtime_id(),
                     result
                         .get()
                         .expect("promise assignment must be set after producer failure"),
@@ -1430,7 +1452,7 @@ impl EvalContext {
             inner: Arc::new(PendingReflectionTaskInner {
                 context: self.clone(),
                 handle: self.reserve_task()?,
-                effect,
+                effect: RuntimeValueRoot::new(self.values(), effect),
                 activated: AtomicBool::new(false),
             }),
         })
@@ -1597,7 +1619,11 @@ impl EvalContext {
         if let Some(terminal) = wait.terminal_poll() {
             return terminal;
         }
-        if let Some(terminal) = tasks.promises.get(wait).and_then(promise_record_terminal) {
+        if let Some(terminal) = tasks
+            .promises
+            .get(wait)
+            .and_then(|record| promise_record_terminal(wait, record))
+        {
             let terminal = wait.publish_terminal(terminal);
             retire_promise_wait(&mut tasks, wait);
             owner.task_changed.notify_all();
@@ -1651,7 +1677,7 @@ impl EvalContext {
         let transition = transition_reflection_task(
             &mut tasks,
             &wait,
-            EvaluationTaskState::Complete(value),
+            EvaluationTaskState::Complete(RuntimeValueRoot::new(&self.session.values, value)),
             &prior,
         );
         self.session.task_changed.notify_all();
@@ -2146,9 +2172,11 @@ impl EvaluationSession {
                 );
                 (EvaluationTaskState::Blocked(block), !unchanged, true)
             }
-            EvaluationMachinePoll::Complete(value) => {
-                (EvaluationTaskState::Complete(value), true, false)
-            }
+            EvaluationMachinePoll::Complete(value) => (
+                EvaluationTaskState::Complete(RuntimeValueRoot::new(&self.values, value)),
+                true,
+                false,
+            ),
             EvaluationMachinePoll::Failed(error) => {
                 (EvaluationTaskState::Failed(error), true, false)
             }
@@ -2190,7 +2218,10 @@ impl EvaluationSession {
                 );
                 (DeferredTaskState::Blocked(block), !unchanged)
             }
-            EvaluationMachinePoll::Complete(value) => (DeferredTaskState::Complete(value), true),
+            EvaluationMachinePoll::Complete(value) => (
+                DeferredTaskState::Complete(RuntimeValueRoot::new(&self.values, value)),
+                true,
+            ),
             EvaluationMachinePoll::Failed(error) => (DeferredTaskState::Failed(error), true),
             EvaluationMachinePoll::Cancelled => (
                 DeferredTaskState::Failed(Arc::new(EvaluationFailure::message(
@@ -2383,7 +2414,7 @@ fn wait_is_terminal(tasks: &EvaluationTasks, wait: &EvaluationWaitToken) -> bool
         return true;
     }
     if let Some(promise) = tasks.promises.get(wait) {
-        return promise_record_terminal(promise).is_some();
+        return promise_record_terminal(wait, promise).is_some();
     }
     if tasks.reflection.contains_key(wait) || tasks.deferred_by_wait.contains_key(wait) {
         return false;
@@ -2488,7 +2519,10 @@ fn poison_lazy_cycle(
                     false,
                     "a successful concurrent lazy result contradicts a strict dependency cycle"
                 );
-                DeferredTaskState::Complete(value.into_value())
+                DeferredTaskState::Complete(RuntimeValueRoot::from_runtime(
+                    record.wait.runtime_id(),
+                    value.into_value(),
+                ))
             }
         };
         record.state = publish_deferred_state(&record.wait, state);
@@ -2922,6 +2956,26 @@ mod tests {
         fn cancel(&mut self) {
             self.cancelled.store(true, Ordering::Release);
         }
+    }
+
+    #[test]
+    fn terminal_waits_retain_runtime_root_provenance() {
+        let context = EvalContext::standalone();
+        let task = context
+            .schedule_task(|_| Ok(Box::new(Complete)))
+            .expect("task should schedule");
+        assert!(matches!(
+            context.pump_wait(&task.wait, 256),
+            EvaluationPumpOutcome::TargetReady
+        ));
+        let Some(EvaluationTaskTerminal::Complete(value)) = task.wait.0.terminal.get() else {
+            panic!("completed wait should retain a terminal value")
+        };
+        assert_eq!(value.runtime_id(), context.values().runtime_id());
+        assert!(matches!(
+            context.poll_reflection_task(&task),
+            EvaluationTaskPoll::Complete(_)
+        ));
     }
 
     #[test]

@@ -180,7 +180,10 @@ fn environment(
         .as_core()
         .clone();
     let value = get_value_path(context.eval_context(), &environment, &path)?;
-    Ok(RequestResult::Return(Value::from_core(value)))
+    Ok(RequestResult::Return(Value::from_core(
+        context.eval_context().values(),
+        value,
+    )))
 }
 
 fn log(
@@ -218,7 +221,7 @@ fn enter_case(
     journal.active_cases.push(explanation);
     Ok(RequestResult::Scoped {
         operation: parser,
-        close: case_exit_effect(),
+        close: hidden_effect(context, CASE_EXIT_TAG),
     })
 }
 
@@ -239,10 +242,6 @@ fn exit_case(
         .pop()
         .ok_or_else(|| TaskHalt::new("macro case stack became unbalanced"))?;
     Ok(RequestResult::ReturnUnit)
-}
-
-fn case_exit_effect() -> Value {
-    hidden_effect(CASE_EXIT_TAG)
 }
 
 fn read_text(
@@ -286,10 +285,7 @@ fn read_regex(
             "macro regex reader produced an invalid textual boundary",
         ));
     }
-    Ok(RequestResult::Return(Value::record([(
-        "span",
-        Value::text(matched),
-    )])))
+    Ok(RequestResult::Return(span_value(context, matched)))
 }
 
 fn read_text_span(
@@ -313,10 +309,7 @@ fn read_text_span(
             "macro text-span reader produced an invalid textual boundary",
         ));
     }
-    Ok(RequestResult::Return(Value::record([(
-        "span",
-        Value::text(span),
-    )])))
+    Ok(RequestResult::Return(span_value(context, span)))
 }
 
 fn read_data(
@@ -364,7 +357,7 @@ fn read_layout(
     }
     Ok(RequestResult::Scoped {
         operation: parser,
-        close: hidden_effect(READ_LAYOUT_EXIT_TAG),
+        close: hidden_effect(context, READ_LAYOUT_EXIT_TAG),
     })
 }
 
@@ -483,7 +476,7 @@ fn write_layout(
         .enter_output_layout();
     Ok(RequestResult::Scoped {
         operation: writer,
-        close: hidden_effect(WRITE_LAYOUT_EXIT_TAG),
+        close: hidden_effect(context, WRITE_LAYOUT_EXIT_TAG),
     })
 }
 
@@ -517,12 +510,25 @@ fn write_layout_exit(
     Ok(RequestResult::ReturnUnit)
 }
 
-fn hidden_effect(tag: [&str; 5]) -> Value {
+fn hidden_effect(context: &RequestContext<'_, MacroEffects>, tag: [&str; 5]) -> Value {
     let request = CoreValue::Dict(Dict::new_sync().insert(
         Key::abstract_global_path(tag),
         CoreValue::List(List::empty()),
     ));
-    Value::from_core(eval::constant_effect(request))
+    Value::from_core(
+        context.eval_context().values(),
+        eval::constant_effect(request),
+    )
+}
+
+fn span_value(context: &RequestContext<'_, MacroEffects>, span: String) -> Value {
+    Value::from_core(
+        context.eval_context().values(),
+        CoreValue::Dict(Dict::new_sync().insert(
+            Key::atom_from_text("span"),
+            CoreValue::binary_from_text(&span),
+        )),
+    )
 }
 
 fn macro_transaction<'context, 'request>(

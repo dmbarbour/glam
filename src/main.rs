@@ -24,8 +24,19 @@ use glam::{
     Error, EvaluationRuntime, FileSourceSystem, ModuleInput, PromiseResolver, ReasoningReport,
     ReasoningStatus, ReasoningTaskState, RuntimeDeliveryOutcome, RuntimeEventJournal,
     RuntimeInputReader, RuntimeLoggerSnapshot, RuntimeOutputDelivery, RuntimeOutputWriter,
-    Severity, Value, check_local_manifest, inspect_g_source,
+    Severity, Value, Values, check_local_manifest, inspect_g_source,
 };
+
+trait DiagnosticBusLocal {
+    fn publish_local(&self, diagnostic: Diagnostic) -> DiagnosticEvent;
+}
+
+impl DiagnosticBusLocal for DiagnosticBus {
+    fn publish_local(&self, diagnostic: Diagnostic) -> DiagnosticEvent {
+        self.publish(diagnostic)
+            .expect("diagnostic and bus must belong to the same evaluation runtime")
+    }
+}
 
 fn main() -> ExitCode {
     let command = match dispatch_bootstrap(env::args_os().skip(1)) {
@@ -90,12 +101,13 @@ fn configured_completion(request: glam::cli::CompletionRequest) -> ExitCode {
                     prepared
                         .assembler
                         .diagnostic_bus()
-                        .publish(diagnostic.clone());
+                        .publish_local(diagnostic.clone());
                 }
-                prepared
-                    .assembler
-                    .diagnostic_bus()
-                    .publish(error.diagnostic());
+                prepared.assembler.diagnostic_bus().publish_local(
+                    error
+                        .diagnostic(&prepared.assembler.values())
+                        .expect("configured CLI diagnostics belong to its assembler runtime"),
+                );
                 return finish_without_logger(prepared, None, true);
             }
         };
@@ -103,13 +115,17 @@ fn configured_completion(request: glam::cli::CompletionRequest) -> ExitCode {
         prepared
             .assembler
             .diagnostic_bus()
-            .publish(diagnostic.clone());
+            .publish_local(diagnostic.clone());
     }
     let failed = write_completion(&completion).is_err_and(|error| {
         prepared
             .assembler
             .diagnostic_bus()
-            .publish(Diagnostic::new(Severity::Error, error));
+            .publish_local(Diagnostic::new(
+                &prepared.assembler.values(),
+                Severity::Error,
+                error,
+            ));
         true
     });
     finish_without_logger(prepared, None, failed)
@@ -129,10 +145,7 @@ fn completion_script_command(name: &std::ffi::OsStr, cli_arguments: CliArguments
         eprintln!("error: completion script binding name must be nonempty UTF-8 without `.`");
         return ExitCode::from(2);
     };
-    let initial_environment = Some((
-        argument_values(cli_arguments.args()),
-        Value::list(std::iter::empty()),
-    ));
+    let initial_environment = Some((Arc::from(cli_arguments.args().to_vec()), Arc::from([])));
     let prepared = match prepare_assembly(cli_arguments, None, initial_environment) {
         Ok(prepared) => prepared,
         Err(exit) => return exit,
@@ -151,17 +164,25 @@ fn completion_script_command(name: &std::ffi::OsStr, cli_arguments: CliArguments
     };
     let failed = match output {
         Ok(output) => io::stdout().write_all(&output).is_err_and(|error| {
-            prepared.assembler.diagnostic_bus().publish(Diagnostic::new(
-                Severity::Error,
-                format!("could not write completion script to stdout: {error}"),
-            ));
+            prepared
+                .assembler
+                .diagnostic_bus()
+                .publish_local(Diagnostic::new(
+                    &prepared.assembler.values(),
+                    Severity::Error,
+                    format!("could not write completion script to stdout: {error}"),
+                ));
             true
         }),
         Err(error) => {
             prepared
                 .assembler
                 .diagnostic_bus()
-                .publish(Diagnostic::new(Severity::Error, error));
+                .publish_local(Diagnostic::new(
+                    &prepared.assembler.values(),
+                    Severity::Error,
+                    error,
+                ));
             true
         }
     };
@@ -173,14 +194,17 @@ fn configured_completion_script(
     function: &Value,
 ) -> Result<Vec<u8>, String> {
     let executable = env::args_os().next().unwrap_or_else(|| "glam".into());
-    let context = Value::record([
-        (
-            "executable",
-            Value::binary(executable.as_encoded_bytes().to_vec()),
-        ),
-        ("protocol", Value::text("v0")),
-        ("request", Value::text("--completions")),
-    ]);
+    let values = assembler.values();
+    let context = values
+        .record([
+            (
+                "executable",
+                values.binary(executable.as_encoded_bytes().to_vec()),
+            ),
+            ("protocol", values.text("v0")),
+            ("request", values.text("--completions")),
+        ])
+        .expect("completion-script context uses one runtime");
     assembler
         .apply(function, [context])
         .and_then(|value| assembler.to_binary(&value))
@@ -224,66 +248,90 @@ fn configured_worker_count(command_line: Option<usize>) -> Result<usize, ExitCod
 }
 
 fn process_reflection_environment(
+    values: &Values,
     reflection_arguments: Value,
     process_arguments: Value,
     cli_arguments: CliArguments,
 ) -> Value {
-    fn os_value(value: &std::ffi::OsStr) -> Value {
-        Value::binary(value.as_encoded_bytes().to_vec())
+    fn os_value(values: &Values, value: &std::ffi::OsStr) -> Value {
+        values.binary(value.as_encoded_bytes().to_vec())
     }
 
-    let variables = Value::dictionary(env::vars_os().map(|(name, value)| {
-        (
-            Value::binary(name.as_encoded_bytes().to_vec()),
-            os_value(&value),
+    let variables = values
+        .dictionary(env::vars_os().map(|(name, value)| {
+            (
+                values.binary(name.as_encoded_bytes().to_vec()),
+                os_value(values, &value),
+            )
+        }))
+        .expect("OS environment names must be keyable binary values");
+    let cli_arguments = values
+        .list(
+            cli_arguments
+                .args()
+                .iter()
+                .map(|argument| os_value(values, argument)),
         )
-    }))
-    .expect("OS environment names must be keyable binary values");
-    let cli_arguments = Value::list(
-        cli_arguments
-            .args()
-            .iter()
-            .map(|argument| os_value(argument)),
-    );
-    Value::record([(
-        "process",
-        Value::record([
-            ("args", process_arguments),
-            ("env", variables),
-            ("refl_args", reflection_arguments),
-            ("cli", Value::record([("args", cli_arguments)])),
-        ]),
-    )])
+        .expect("CLI argument values share one runtime");
+    values
+        .record([(
+            "process",
+            values
+                .record([
+                    ("args", process_arguments),
+                    ("env", variables),
+                    ("refl_args", reflection_arguments),
+                    (
+                        "cli",
+                        values
+                            .record([("args", cli_arguments)])
+                            .expect("CLI values share one runtime"),
+                    ),
+                ])
+                .expect("process values share one runtime"),
+        )])
+        .expect("process environment values share one runtime")
 }
 
-fn argument_values(arguments: &[std::ffi::OsString]) -> Value {
-    Value::list(
-        arguments
-            .iter()
-            .map(|argument| Value::binary(argument.as_encoded_bytes().to_vec())),
-    )
+fn argument_values(values: &Values, arguments: &[std::ffi::OsString]) -> Value {
+    values
+        .list(
+            arguments
+                .iter()
+                .map(|argument| values.binary(argument.as_encoded_bytes().to_vec())),
+        )
+        .expect("argument values share one runtime")
 }
 
 fn finish_local_files(
     files: &FileSourceSystem,
     manifest: Option<&Path>,
     diagnostics: &DiagnosticBus,
+    values: &Values,
 ) -> bool {
     let mut failed = false;
     if let Err(warning) = files.verify_unchanged() {
-        diagnostics.publish(Diagnostic::new(Severity::Warning, warning.to_string()));
+        diagnostics.publish_local(Diagnostic::new(
+            values,
+            Severity::Warning,
+            warning.to_string(),
+        ));
     }
     if let Some(path) = manifest
         && let Err(error) = files.write_manifest(path)
     {
         failed = true;
-        diagnostics.publish(Diagnostic::new(Severity::Error, error.to_string()));
+        diagnostics.publish_local(Diagnostic::new(values, Severity::Error, error.to_string()));
     }
     failed
 }
 
-fn publish_error(diagnostics: &DiagnosticBus, error: &Error) {
-    diagnostics.publish(error.diagnostic().clone());
+fn publish_error(diagnostics: &DiagnosticBus, values: &Values, error: &Error) {
+    diagnostics.publish_local(
+        error
+            .diagnostic(values)
+            .expect("errors published by main belong to its active runtime"),
+    );
 }
 
 struct PreparedAssembly {
@@ -299,10 +347,16 @@ struct PreparedAssembly {
 impl PreparedAssembly {
     fn resolve_environment(&mut self, command: &CommandPlanParts) -> Result<(), Error> {
         if let Some(resolver) = self.process_args.take() {
-            resolver.resolve(argument_values(&command.process_args))?;
+            resolver.resolve(argument_values(
+                &self.assembler.values(),
+                &command.process_args,
+            ))?;
         }
         if let Some(resolver) = self.reflection_args.take() {
-            resolver.resolve(argument_values(&command.reflection_args))?;
+            resolver.resolve(argument_values(
+                &self.assembler.values(),
+                &command.reflection_args,
+            ))?;
         }
         Ok(())
     }
@@ -317,10 +371,12 @@ impl PreparedAssembly {
     }
 }
 
+type InitialCliEnvironment = (Arc<[std::ffi::OsString]>, Arc<[std::ffi::OsString]>);
+
 fn prepare_assembly(
     cli_arguments: CliArguments,
     failure_manifest: Option<&Path>,
-    initial_environment: Option<(Value, Value)>,
+    initial_environment: Option<InitialCliEnvironment>,
 ) -> Result<PreparedAssembly, ExitCode> {
     let local_files = FileSourceSystem::default();
     let runtime = EvaluationRuntime::new(0).expect("a dormant evaluation runtime is valid");
@@ -340,6 +396,7 @@ fn prepare_assembly(
             process_args = Some(process_resolver);
             reflection_args = Some(reflection_resolver);
             Ok(process_reflection_environment(
+                &environment.values(),
                 reflection_value,
                 process_value,
                 cli_arguments,
@@ -348,24 +405,30 @@ fn prepare_assembly(
         .expect("main's reflection environment must be a dictionary")
         .build()
         .expect("main's assembler configuration must be valid");
-    if let Some((process_value, reflection_value)) = initial_environment {
+    if let Some((process_arguments, reflection_arguments)) = initial_environment {
+        let values = assembler.values();
         process_args
             .take()
             .expect("bootstrap process argument resolver should be present")
-            .resolve(process_value)
+            .resolve(argument_values(&values, &process_arguments))
             .expect("fresh bootstrap process argument promise should resolve");
         reflection_args
             .take()
             .expect("bootstrap reflection argument resolver should be present")
-            .resolve(reflection_value)
+            .resolve(argument_values(&values, &reflection_arguments))
             .expect("fresh bootstrap reflection argument promise should resolve");
     }
     let configuration = match load_configuration(&assembler) {
         Ok(configuration) => configuration,
         Err(error) => {
             let diagnostics = assembler.diagnostic_bus();
-            publish_error(&diagnostics, &error);
-            finish_local_files(&local_files, failure_manifest, &diagnostics);
+            publish_error(&diagnostics, &assembler.values(), &error);
+            finish_local_files(
+                &local_files,
+                failure_manifest,
+                &diagnostics,
+                &assembler.values(),
+            );
             log_host.close_input();
             log_host.drain_default(&DefaultLogger::new(assembler));
             return Err(ExitCode::from(1));
@@ -386,8 +449,8 @@ fn assemble_inputs(command: CommandPlan) -> ExitCode {
     let cli_arguments = command.cli_arguments().clone();
     let manifest = command.manifest().map(Path::to_owned);
     let initial_environment = Some((
-        argument_values(command.process_args()),
-        argument_values(command.reflection_args()),
+        Arc::from(command.process_args().to_vec()),
+        Arc::from(command.reflection_args().to_vec()),
     ));
     let prepared = match prepare_assembly(cli_arguments, manifest.as_deref(), initial_environment) {
         Ok(prepared) => prepared,
@@ -416,7 +479,11 @@ fn execute_assembly(mut prepared: PreparedAssembly, command: CommandPlan) -> Exi
         cli_arguments,
     };
     if let Err(error) = prepared.resolve_environment(&command_parts) {
-        publish_error(&prepared.assembler.diagnostic_bus(), &error);
+        publish_error(
+            &prepared.assembler.diagnostic_bus(),
+            &prepared.assembler.values(),
+            &error,
+        );
         return finish_without_logger(prepared, command_parts.manifest.as_deref(), true);
     }
     let worker_threads = match configured_worker_count(worker_count) {
@@ -427,7 +494,11 @@ fn execute_assembly(mut prepared: PreparedAssembly, command: CommandPlan) -> Exi
         }
     };
     if let Err(error) = prepared.runtime.activate_workers(worker_threads) {
-        publish_error(&prepared.assembler.diagnostic_bus(), &error);
+        publish_error(
+            &prepared.assembler.diagnostic_bus(),
+            &prepared.assembler.values(),
+            &error,
+        );
         return finish_without_logger(prepared, command_parts.manifest.as_deref(), true);
     }
     let CommandPlanParts {
@@ -451,7 +522,8 @@ fn execute_assembly(mut prepared: PreparedAssembly, command: CommandPlan) -> Exi
         Ok(bytes) => {
             if let Err(error) = io::stdout().write_all(&bytes) {
                 operation_failed = true;
-                assembler_diagnostics.publish(Diagnostic::new(
+                assembler_diagnostics.publish_local(Diagnostic::new(
+                    &assembler.values(),
                     Severity::Error,
                     format!("could not write stdout: {error}"),
                 ));
@@ -459,13 +531,21 @@ fn execute_assembly(mut prepared: PreparedAssembly, command: CommandPlan) -> Exi
         }
         Err(error) => {
             operation_failed = true;
-            publish_error(&assembler_diagnostics, &error);
+            publish_error(&assembler_diagnostics, &assembler.values(), &error);
         }
     }
 
-    report_reasoning(&assembler_diagnostics, &assembler.drain_reasoning());
-    operation_failed |=
-        finish_local_files(&local_files, manifest.as_deref(), &assembler_diagnostics);
+    report_reasoning(
+        &assembler_diagnostics,
+        &assembler.values(),
+        &assembler.drain_reasoning(),
+    );
+    operation_failed |= finish_local_files(
+        &local_files,
+        manifest.as_deref(),
+        &assembler_diagnostics,
+        &assembler.values(),
+    );
     log_host.close_input();
     let LoggerRun {
         thread: logger_thread,
@@ -490,8 +570,17 @@ fn finish_without_logger(
     operation_failed: bool,
 ) -> ExitCode {
     let diagnostics = prepared.assembler.diagnostic_bus();
-    report_reasoning(&diagnostics, &prepared.assembler.drain_reasoning());
-    let file_failure = finish_local_files(&prepared.local_files, manifest, &diagnostics);
+    report_reasoning(
+        &diagnostics,
+        &prepared.assembler.values(),
+        &prepared.assembler.drain_reasoning(),
+    );
+    let file_failure = finish_local_files(
+        &prepared.local_files,
+        manifest,
+        &diagnostics,
+        &prepared.assembler.values(),
+    );
     prepared.log_host.close_input();
     prepared
         .log_host
@@ -520,31 +609,43 @@ fn configured_cli(arguments: CliArguments, inspection: Option<bool>) -> ExitCode
                 prepared
                     .assembler
                     .diagnostic_bus()
-                    .publish(diagnostic.clone());
+                    .publish_local(diagnostic.clone());
             }
-            prepared
-                .assembler
-                .diagnostic_bus()
-                .publish(error.diagnostic());
+            prepared.assembler.diagnostic_bus().publish_local(
+                error
+                    .diagnostic(&prepared.assembler.values())
+                    .expect("configured CLI diagnostics belong to its assembler runtime"),
+            );
             return finish_without_logger(prepared, None, true);
         }
     };
     let (command, diagnostics) = expansion.into_parts();
     for diagnostic in diagnostics {
-        prepared.assembler.diagnostic_bus().publish(diagnostic);
+        prepared
+            .assembler
+            .diagnostic_bus()
+            .publish_local(diagnostic);
     }
     if let Some(nul_terminated) = inspection {
         let parts = command.into_parts();
         if let Err(error) = prepared.resolve_environment(&parts) {
-            publish_error(&prepared.assembler.diagnostic_bus(), &error);
+            publish_error(
+                &prepared.assembler.diagnostic_bus(),
+                &prepared.assembler.values(),
+                &error,
+            );
             return finish_without_logger(prepared, None, true);
         }
         let output = format_configured_arguments(&parts.process_args, nul_terminated);
         let failed = if let Err(error) = io::stdout().write_all(&output) {
-            prepared.assembler.diagnostic_bus().publish(Diagnostic::new(
-                Severity::Error,
-                format!("could not write configured CLI inspection to stdout: {error}"),
-            ));
+            prepared
+                .assembler
+                .diagnostic_bus()
+                .publish_local(Diagnostic::new(
+                    &prepared.assembler.values(),
+                    Severity::Error,
+                    format!("could not write configured CLI inspection to stdout: {error}"),
+                ));
             true
         } else {
             false
@@ -554,9 +655,10 @@ fn configured_cli(arguments: CliArguments, inspection: Option<bool>) -> ExitCode
     execute_assembly(prepared, command)
 }
 
-fn report_reasoning(diagnostics: &DiagnosticBus, report: &ReasoningReport) {
+fn report_reasoning(diagnostics: &DiagnosticBus, values: &Values, report: &ReasoningReport) {
     for failure in report.failures() {
-        diagnostics.publish(Diagnostic::new(
+        diagnostics.publish_local(Diagnostic::new(
+            values,
             Severity::Error,
             format!(
                 "reflection task {} failed: {}",
@@ -622,7 +724,7 @@ fn report_reasoning(diagnostics: &DiagnosticBus, report: &ReasoningReport) {
         }
         message.push_str(&format!("\ntask {} {detail}", task.task_id()));
     }
-    diagnostics.publish(Diagnostic::new(severity, message));
+    diagnostics.publish_local(Diagnostic::new(values, severity, message));
 }
 
 fn assemble(
@@ -631,29 +733,35 @@ fn assemble(
     cli_args: Vec<std::ffi::OsString>,
     environment: Value,
 ) -> Result<Bytes, Error> {
-    let arguments = Value::list(
+    let values = assembler.values();
+    let arguments = values.list(
         cli_args
             .iter()
-            .map(|argument| Value::binary(argument.as_encoded_bytes().to_vec())),
-    );
-    let initial_definitions = Value::record([
-        ("asm", Value::record([("args", arguments)])),
+            .map(|argument| values.binary(argument.as_encoded_bytes().to_vec())),
+    )?;
+    let initial_definitions = values.record([
+        ("asm", values.record([("args", arguments)])?),
         ("env", environment),
-    ]);
+    ])?;
     let module = assembler
         .module(["assembly"])
         .initial_definitions(initial_definitions)
         .inputs(inputs)
         .build()?;
+    let context = assembly_result_context(&values)?;
     assembler
         .binary_at(module.value(), "asm.result")
-        .map_err(|error| error.with_context(&assembler.values(), assembly_result_context()))
+        .map_err(|error| {
+            error
+                .with_context(&values, context)
+                .expect("assembly-result context belongs to the assembler runtime")
+        })
 }
 
-fn assembly_result_context() -> Value {
-    Value::record([(
+fn assembly_result_context(values: &Values) -> Result<Value, Error> {
+    values.record([(
         "asm",
-        Value::record([("result", Value::text("asm.result"))]),
+        values.record([("result", values.text("asm.result"))])?,
     )])
 }
 
@@ -664,7 +772,8 @@ struct LoadedConfiguration {
 
 fn load_configuration(assembler: &Assembler) -> Result<LoadedConfiguration, Error> {
     let default_environment = empty_environment_object(&assembler.values());
-    let initial_definitions = Value::record([("env", default_environment.clone())]);
+    let values = assembler.values();
+    let initial_definitions = values.record([("env", default_environment.clone())])?;
     let module = assembler
         .module(["configuration"])
         .initial_definitions(initial_definitions)
@@ -674,11 +783,23 @@ fn load_configuration(assembler: &Assembler) -> Result<LoadedConfiguration, Erro
     let environment = match assembler
         .get_optional(module.value(), "conf.env")
         .map_err(|error| {
-            error.with_context(&assembler.values(), configuration_entry_context("env"))
+            error
+                .with_context(
+                    &values,
+                    configuration_entry_context(&values, "env")
+                        .expect("configuration context is local"),
+                )
+                .expect("configuration context is local")
         })? {
         Some(environment) if !environment.is_undefined() => {
             assembler.evaluate(&environment).map_err(|error| {
-                error.with_context(&assembler.values(), configuration_entry_context("env"))
+                error
+                    .with_context(
+                        &values,
+                        configuration_entry_context(&values, "env")
+                            .expect("configuration context is local"),
+                    )
+                    .expect("configuration context is local")
             })?
         }
         Some(_) | None => default_environment,
@@ -704,59 +825,80 @@ fn start_logger(assembler: &Assembler, configuration: &Value, input: Arc<LogHost
         Ok(Some(logger)) if !logger.is_undefined() => Some(logger),
         Ok(Some(_)) | Ok(None) => None,
         Err(error) => {
-            diagnostics.publish(
-                error
-                    .with_context(&assembler.values(), configuration_entry_context("log"))
-                    .diagnostic()
-                    .clone(),
-            );
+            let values = assembler.values();
+            let diagnostic = error
+                .with_context(
+                    &values,
+                    configuration_entry_context(&values, "log")
+                        .expect("configuration context is local"),
+                )
+                .and_then(|error| error.diagnostic(&values))
+                .expect("configuration failure belongs to the assembler runtime");
+            diagnostics.publish_local(diagnostic);
             None
         }
     };
     let task_diagnostics = diagnostics.clone();
     let task_values = evaluation_runtime.values();
-    let thread = thread::spawn(move || {
-        let _subscription = subscription;
-        if let Some(custom) = custom {
-            match EffectRun::new(
-                &evaluation_runtime,
-                &custom,
-                MainEffects::new(effect_assembler),
-                host.clone(),
-            )
-            .asserting_unit_result("configured logger result")
-            .requiring_unit_result()
-            .run()
-            {
-                Ok(TaskOutcome::Complete(_)) => {}
-                Ok(TaskOutcome::Cancelled) => {
-                    task_diagnostics.publish(
-                        Diagnostic::new(
-                            Severity::Error,
-                            "configured logger remained blocked after the log stream closed",
-                        )
-                        .with_context(configuration_entry_context("log")),
-                    );
-                }
-                Err(error) => {
-                    task_diagnostics.publish(
-                        error
-                            .with_context(configuration_entry_context("log"))
-                            .diagnostic(&task_values),
-                    );
+    let thread = thread::Builder::new()
+        .name("glam-logger".to_owned())
+        // The logger evaluates ordinary Glam configuration and therefore
+        // needs the same practical stack headroom as the process main thread.
+        // Deep evaluator paths are being migrated to explicit machines, but
+        // the bootstrap must not make a configured logger depend on the
+        // platform's smaller default child-thread stack in the meantime.
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let _subscription = subscription;
+            if let Some(custom) = custom {
+                match EffectRun::new(
+                    &evaluation_runtime,
+                    &custom,
+                    MainEffects::new(effect_assembler),
+                    host.clone(),
+                )
+                .asserting_unit_result("configured logger result")
+                .requiring_unit_result()
+                .run()
+                {
+                    Ok(TaskOutcome::Complete(_)) => {}
+                    Ok(TaskOutcome::Cancelled) => {
+                        task_diagnostics.publish_local(
+                            Diagnostic::new(
+                                &task_values,
+                                Severity::Error,
+                                "configured logger remained blocked after the log stream closed",
+                            )
+                            .with_context(
+                                configuration_entry_context(&task_values, "log")
+                                    .expect("configuration context is local"),
+                            )
+                            .expect("configuration context is local"),
+                        );
+                    }
+                    Err(error) => {
+                        task_diagnostics.publish_local(
+                            error
+                                .with_context(
+                                    configuration_entry_context(&task_values, "log")
+                                        .expect("configuration context is local"),
+                                )
+                                .diagnostic(&task_values),
+                        );
+                    }
                 }
             }
-        }
-        input.drain_default(logger.as_ref());
-    });
+            input.drain_default(logger.as_ref());
+        })
+        .expect("logger thread should start");
     LoggerRun {
         thread,
         diagnostics,
     }
 }
 
-fn configuration_entry_context(entry: &str) -> Value {
-    Value::record([("conf", Value::record([("entry", Value::text(entry))]))])
+fn configuration_entry_context(values: &Values, entry: &str) -> Result<Value, Error> {
+    values.record([("conf", values.record([("entry", values.text(entry))])?)])
 }
 
 struct LoggerRun {
@@ -865,7 +1007,7 @@ impl TaskSpecialization for MainEffects {
                 let stderr_writer = context.host().stderr_writer.clone();
                 if let Some(mut transaction) = context.transaction() {
                     let (snapshot, journal) = transaction.parts();
-                    let value = Value::binary(bytes);
+                    let value = self.assembler.values().binary(bytes);
                     event_journal(snapshot, journal)
                         .write(&stderr_writer, value)
                         .map_err(glam::reflection::TaskHalt::from)?;
@@ -903,9 +1045,14 @@ fn log_status(
         (snapshot.generation(), snapshot.extra().input_closed())
     };
     context.observe_host_generation(generation);
-    Ok(RequestResult::Return(Value::atom_from_text(
-        if input_closed { "closed" } else { "open" },
-    )))
+    Ok(RequestResult::Return(
+        context
+            .host()
+            .input
+            .runtime
+            .values()
+            .atom_from_text(if input_closed { "closed" } else { "open" }),
+    ))
 }
 
 fn read_log(
@@ -1041,7 +1188,7 @@ impl LoggerTaskHost {
         let mut events = RuntimeEventJournal::new(snapshot.events().clone());
         events.write(
             &self.diagnostic_writer,
-            diagnostic.transport_value(&self.input.runtime.values()),
+            diagnostic.transport_value(&self.input.runtime.values())?,
         )?;
         match self.input.runtime.try_commit_logger_transaction(
             &glam::reflection::StoreJournal::new(store),
@@ -1063,7 +1210,10 @@ impl LoggerTaskHost {
     fn write_stderr(&self, bytes: Bytes) -> Result<(), Error> {
         let (_generation, store, snapshot) = self.input.runtime.logger_transaction_snapshot();
         let mut events = RuntimeEventJournal::new(snapshot.events().clone());
-        events.write(&self.stderr_writer, Value::binary(bytes))?;
+        events.write(
+            &self.stderr_writer,
+            self.input.runtime.values().binary(bytes),
+        )?;
         match self.input.runtime.try_commit_logger_transaction(
             &glam::reflection::StoreJournal::new(store),
             &snapshot,
@@ -1182,12 +1332,19 @@ impl TaskEnvironment for LoggerTaskHost {
 impl ReflectionServices for LoggerTaskHost {
     fn emit_diagnostic(&self, diagnostic: Diagnostic) {
         if let Err(error) = self.write_diagnostic(diagnostic) {
-            self.diagnostics.publish(error.diagnostic().clone());
+            self.diagnostics.publish_local(
+                error
+                    .diagnostic(&self.input.runtime.values())
+                    .expect("logger failures belong to the logger runtime"),
+            );
         }
     }
 
     fn update_query(&self, handle: &Arc<glam::reflection::EvaluationQueryHandle>, result: Value) {
-        self.input.runtime.update_query(handle, result);
+        self.input
+            .runtime
+            .update_query(handle, result)
+            .expect("logger query results belong to the logger runtime");
     }
 }
 
@@ -1205,9 +1362,28 @@ impl TaskHost<MainEffects> for LoggerTaskHost {
         for diagnostic in journal.reflection.diagnostics() {
             if let Err(error) = events.write(
                 &self.diagnostic_writer,
-                diagnostic.transport_value(&self.input.runtime.values()),
+                diagnostic
+                    .transport_value(&self.input.runtime.values())
+                    .map_err(|_| ())
+                    .unwrap_or_else(|()| {
+                        self.input
+                            .runtime
+                            .values()
+                            .record([(
+                                "emission",
+                                self.input
+                                    .runtime
+                                    .values()
+                                    .text("diagnostic transport failed"),
+                            )])
+                            .expect("fallback diagnostic is local")
+                    }),
             ) {
-                self.diagnostics.publish(error.diagnostic().clone());
+                self.diagnostics.publish_local(
+                    error
+                        .diagnostic(&self.input.runtime.values())
+                        .expect("logger failures belong to the logger runtime"),
+                );
                 return CommitResult::Closed;
             }
         }
@@ -1227,7 +1403,11 @@ impl TaskHost<MainEffects> for LoggerTaskHost {
         }
         journal.reflection.commit_updates();
         if let Err(error) = self.deliver_outputs() {
-            self.diagnostics.publish(error.diagnostic().clone());
+            self.diagnostics.publish_local(
+                error
+                    .diagnostic(&self.input.runtime.values())
+                    .expect("logger failures belong to the logger runtime"),
+            );
         }
         CommitResult::Committed
     }
@@ -1244,14 +1424,12 @@ impl TaskHost<MainEffects> for LoggerTaskHost {
         let (generation, _, snapshot) = self.input.runtime.logger_transaction_snapshot();
         !snapshot.cancelled() && (!snapshot.input_closed() || generation != observed_generation)
     }
-
-    fn evaluation_runtime_id(&self) -> Option<glam::EvaluationRuntimeId> {
-        Some(self.input.runtime.id())
-    }
 }
 
 fn empty_environment_object(values: &glam::Values) -> Value {
-    values.empty_object(values.abstract_global_path(["configuration", "env"]))
+    values
+        .empty_object(values.abstract_global_path(["configuration", "env"]))
+        .expect("empty environment components belong to one runtime")
 }
 
 fn configuration_paths() -> Vec<PathBuf> {
@@ -1350,11 +1528,8 @@ impl DefaultLogger {
         let values = self.evaluator.values();
         let message = diagnostic.enrich_with(&values, self.viewer_updates(diagnostic, terminal))?;
         let context_lines = self.context_lines(&message, terminal, 0);
-        let message = Diagnostic::apply_updates(
-            &values,
-            &message,
-            Self::context_lines_update(context_lines),
-        )?;
+        let message =
+            Diagnostic::apply_updates(&values, &message, self.context_lines_update(context_lines))?;
         self.format_message(message)
     }
 
@@ -1385,36 +1560,52 @@ impl DefaultLogger {
         location: String,
         source: Option<String>,
     ) -> Value {
+        let values = self.evaluator.values();
         let mut viewer = vec![
-            ("kind", Value::text("terminal")),
+            ("kind", values.text("terminal")),
             (
                 "columns",
-                Value::integer(i64::try_from(terminal.columns).unwrap_or(i64::MAX)),
+                values.integer(i64::try_from(terminal.columns).unwrap_or(i64::MAX)),
             ),
-            ("color", Value::text(terminal.color.name())),
-            ("header", Value::text(header)),
-            ("auto_indent", Value::integer(Self::AUTO_INDENT as i64)),
+            ("color", values.text(terminal.color.name())),
+            ("header", values.text(header)),
+            ("auto_indent", values.integer(Self::AUTO_INDENT as i64)),
             (
                 "indent",
-                Value::text(" ".repeat(base_indent + Self::AUTO_INDENT)),
+                values.text(" ".repeat(base_indent + Self::AUTO_INDENT)),
             ),
             (
                 "anchor_indent",
-                Value::text(" ".repeat(base_indent + Self::ANCHOR_INDENT)),
+                values.text(" ".repeat(base_indent + Self::ANCHOR_INDENT)),
             ),
-            ("location", Value::text(location)),
-            ("context_lines", Value::list(std::iter::empty())),
+            ("location", values.text(location)),
+            (
+                "context_lines",
+                values
+                    .list(std::iter::empty())
+                    .expect("empty list is local"),
+            ),
         ];
         if let Some(term) = &terminal.term {
-            viewer.push(("term", Value::text(term)));
+            viewer.push(("term", values.text(term)));
         }
         if let Some(language) = &terminal.language {
-            viewer.push(("lang", Value::text(language)));
+            viewer.push(("lang", values.text(language)));
         }
         if let Some(source) = source {
-            viewer.push(("source", Value::record([("file", Value::text(source))])));
+            viewer.push((
+                "source",
+                values
+                    .record([("file", values.text(source))])
+                    .expect("source viewer value is local"),
+            ));
         }
-        Value::record([("viewer", Value::record(viewer))])
+        values
+            .record([(
+                "viewer",
+                values.record(viewer).expect("viewer fields are local"),
+            )])
+            .expect("viewer update is local")
     }
 
     fn context_lines(
@@ -1477,7 +1668,7 @@ impl DefaultLogger {
                 );
             }
         };
-        let message_tag = Value::atom_from_text("msg");
+        let message_tag = self.evaluator.values().atom_from_text("msg");
         let is_message = self
             .evaluator
             .reflection()
@@ -1523,14 +1714,11 @@ impl DefaultLogger {
         let message = if header == default_header {
             message
         } else {
-            Diagnostic::apply_updates(&values, &message, Self::viewer_header_update(header))?
+            Diagnostic::apply_updates(&values, &message, self.viewer_header_update(header))?
         };
         let context_lines = self.context_lines(&message, terminal, frame_indent);
-        let message = Diagnostic::apply_updates(
-            &values,
-            &message,
-            Self::context_lines_update(context_lines),
-        )?;
+        let message =
+            Diagnostic::apply_updates(&values, &message, self.context_lines_update(context_lines))?;
         let rendered = self.format_message(message)?;
         let rendered = String::from_utf8_lossy(&rendered);
         let rendered = rendered.strip_suffix('\n').unwrap_or(&rendered);
@@ -1557,18 +1745,31 @@ impl DefaultLogger {
         }
     }
 
-    fn viewer_header_update(header: String) -> Value {
-        Value::record([("viewer", Value::record([("header", Value::text(header))]))])
+    fn viewer_header_update(&self, header: String) -> Value {
+        let values = self.evaluator.values();
+        values
+            .record([(
+                "viewer",
+                values
+                    .record([("header", values.text(header))])
+                    .expect("viewer header is local"),
+            )])
+            .expect("viewer update is local")
     }
 
-    fn context_lines_update(lines: Vec<String>) -> Value {
-        Value::record([(
-            "viewer",
-            Value::record([(
-                "context_lines",
-                Value::list(lines.into_iter().map(Value::text)),
-            )]),
-        )])
+    fn context_lines_update(&self, lines: Vec<String>) -> Value {
+        let values = self.evaluator.values();
+        let lines = values
+            .list(lines.into_iter().map(|line| values.text(line)))
+            .expect("context lines are local");
+        values
+            .record([(
+                "viewer",
+                values
+                    .record([("context_lines", lines)])
+                    .expect("context-line viewer field is local"),
+            )])
+            .expect("viewer update is local")
     }
 
     fn summarize_context_frame(&self, frame: &Value) -> String {
@@ -1580,22 +1781,23 @@ impl DefaultLogger {
             return diagnostic_value_kind(&self.evaluator.values(), frame).to_owned();
         };
 
-        if tag == &Value::atom_from_text("eval") {
+        let values = self.evaluator.values();
+        if tag == &values.atom_from_text("eval") {
             return self.eval_context_summary(payload);
         }
-        if tag == &Value::atom_from_text("g") {
+        if tag == &values.atom_from_text("g") {
             return self.g_context_summary(payload);
         }
-        if tag == &Value::atom_from_text("import") {
+        if tag == &values.atom_from_text("import") {
             return self.import_context_summary(payload);
         }
-        if tag == &Value::atom_from_text("asm") {
+        if tag == &values.atom_from_text("asm") {
             return self.asm_context_summary(payload);
         }
-        if tag == &Value::atom_from_text("conf") {
+        if tag == &values.atom_from_text("conf") {
             return self.conf_context_summary(payload);
         }
-        if tag == &Value::atom_from_text("task") {
+        if tag == &values.atom_from_text("task") {
             return self.task_context_summary(payload);
         }
         self.context_tag_text(tag)
@@ -1864,6 +2066,18 @@ mod tests {
     use super::*;
     use glam::SourceSystem;
 
+    fn record<I, S>(values: &glam::Values, entries: I) -> Value
+    where
+        I: IntoIterator<Item = (S, Value)>,
+        S: AsRef<str>,
+    {
+        values.record(entries).expect("test record should be local")
+    }
+
+    fn list(values: &glam::Values, items: impl IntoIterator<Item = Value>) -> Value {
+        values.list(items).expect("test list should be local")
+    }
+
     #[test]
     fn final_local_file_change_is_only_a_warning() {
         let directory =
@@ -1878,8 +2092,9 @@ mod tests {
         fs::write(&path, "later edit").expect("test input should be changed");
         let diagnostics = DiagnosticBus::new();
         let queue = Arc::new(LogHost::new(&diagnostics));
+        let values = queue.runtime.values();
 
-        assert!(!finish_local_files(&files, None, &diagnostics));
+        assert!(!finish_local_files(&files, None, &diagnostics, &values));
         let warning = queue
             .take_diagnostic()
             .expect("final file change should emit a diagnostic");
@@ -1891,12 +2106,13 @@ mod tests {
     #[test]
     fn glam_default_formatter_renders_location_severity_and_continuation_lines() {
         let evaluator = Assembler::default();
+        let values = evaluator.values();
         let logger = DefaultLogger {
             formatter: evaluator.default_diagnostic_formatter(),
             evaluator,
             working_directory: PathBuf::from("/work"),
         };
-        let diagnostic = Diagnostic::new(Severity::Warning, "first\nsecond\n\nfourth")
+        let diagnostic = Diagnostic::new(&values, Severity::Warning, "first\nsecond\n\nfourth")
             .with_source_location("/work/src/test.g", 4);
         let terminal = TerminalContext {
             columns: 80,
@@ -1917,6 +2133,7 @@ mod tests {
     #[test]
     fn glam_default_formatter_renders_recognized_context_frames() {
         let evaluator = Assembler::default();
+        let values = evaluator.values();
         let logger = DefaultLogger {
             formatter: evaluator.default_diagnostic_formatter(),
             evaluator,
@@ -1924,57 +2141,123 @@ mod tests {
         };
         let diagnostic = Diagnostic::from_emission(
             Severity::Error,
-            Value::record([(
-                "msg",
-                Value::record([
-                    ("text", Value::text("broken\nmore detail")),
-                    (
-                        "context",
-                        Value::list([
-                            Value::record([(
-                                "eval",
-                                Value::record([("op", Value::atom_from_text("binary_extraction"))]),
-                            )]),
-                            Value::record([(
-                                "g",
-                                Value::record([
-                                    ("definition", Value::text("result")),
-                                    ("line", Value::integer(7)),
-                                ]),
-                            )]),
-                            Value::record([(
-                                "import",
-                                Value::record([(
-                                    "request",
-                                    Value::record([("file", Value::text("child.g"))]),
-                                )]),
-                            )]),
-                            Value::record([(
-                                "asm",
-                                Value::record([("result", Value::text("asm.result"))]),
-                            )]),
-                            Value::record([(
-                                "eval",
-                                Value::record([
-                                    ("op", Value::atom_from_text("path_lookup")),
-                                    ("args", Value::record([("path", Value::text("conf.env"))])),
-                                ]),
-                            )]),
-                            Value::record([(
-                                "conf",
-                                Value::record([("entry", Value::text("log"))]),
-                            )]),
-                            Value::record([(
-                                "task",
-                                Value::record([
-                                    ("operation", Value::atom_from_text("join")),
-                                    ("id", Value::integer(12)),
-                                ]),
-                            )]),
-                        ]),
+            record(
+                &values,
+                [(
+                    "msg",
+                    record(
+                        &values,
+                        [
+                            ("text", values.text("broken\nmore detail")),
+                            (
+                                "context",
+                                list(
+                                    &values,
+                                    [
+                                        record(
+                                            &values,
+                                            [(
+                                                "eval",
+                                                record(
+                                                    &values,
+                                                    [(
+                                                        "op",
+                                                        values.atom_from_text("binary_extraction"),
+                                                    )],
+                                                ),
+                                            )],
+                                        ),
+                                        record(
+                                            &values,
+                                            [(
+                                                "g",
+                                                record(
+                                                    &values,
+                                                    [
+                                                        ("definition", values.text("result")),
+                                                        ("line", values.integer(7)),
+                                                    ],
+                                                ),
+                                            )],
+                                        ),
+                                        record(
+                                            &values,
+                                            [(
+                                                "import",
+                                                record(
+                                                    &values,
+                                                    [(
+                                                        "request",
+                                                        record(
+                                                            &values,
+                                                            [("file", values.text("child.g"))],
+                                                        ),
+                                                    )],
+                                                ),
+                                            )],
+                                        ),
+                                        record(
+                                            &values,
+                                            [(
+                                                "asm",
+                                                record(
+                                                    &values,
+                                                    [("result", values.text("asm.result"))],
+                                                ),
+                                            )],
+                                        ),
+                                        record(
+                                            &values,
+                                            [(
+                                                "eval",
+                                                record(
+                                                    &values,
+                                                    [
+                                                        (
+                                                            "op",
+                                                            values.atom_from_text("path_lookup"),
+                                                        ),
+                                                        (
+                                                            "args",
+                                                            record(
+                                                                &values,
+                                                                [("path", values.text("conf.env"))],
+                                                            ),
+                                                        ),
+                                                    ],
+                                                ),
+                                            )],
+                                        ),
+                                        record(
+                                            &values,
+                                            [(
+                                                "conf",
+                                                record(&values, [("entry", values.text("log"))]),
+                                            )],
+                                        ),
+                                        record(
+                                            &values,
+                                            [(
+                                                "task",
+                                                record(
+                                                    &values,
+                                                    [
+                                                        (
+                                                            "operation",
+                                                            values.atom_from_text("join"),
+                                                        ),
+                                                        ("id", values.integer(12)),
+                                                    ],
+                                                ),
+                                            )],
+                                        ),
+                                    ],
+                                ),
+                            ),
+                        ],
                     ),
-                ]),
-            )]),
+                )],
+            ),
         );
         let terminal = TerminalContext {
             columns: 80,
@@ -1997,6 +2280,7 @@ mod tests {
     #[test]
     fn glam_default_formatter_recursively_renders_context_messages() {
         let evaluator = Assembler::default();
+        let values = evaluator.values();
         let logger = DefaultLogger {
             formatter: evaluator.default_diagnostic_formatter(),
             evaluator,
@@ -2004,29 +2288,29 @@ mod tests {
         };
         let diagnostic = Diagnostic::from_emission(
             Severity::Error,
-            Value::record([(
+            record(&values, [(
                 "msg",
-                Value::record([
-                    ("text", Value::text("outer failure")),
+                record(&values, [
+                    ("text", values.text("outer failure")),
                     (
                         "context",
-                        Value::list([
-                            Value::record([(
+                        list(&values, [
+                            record(&values, [(
                                 "msg",
-                                Value::record([("text", Value::text("unclassified context"))]),
+                                record(&values, [("text", values.text("unclassified context"))]),
                             )]),
-                            Value::record([(
+                            record(&values, [(
                                 "msg",
-                                Value::record([
-                                    ("text", Value::text("nested context\nmore detail")),
-                                    ("severity", Value::atom_from_text("info")),
+                                record(&values, [
+                                    ("text", values.text("nested context\nmore detail")),
+                                    ("severity", values.atom_from_text("info")),
                                     (
                                         "context",
-                                        Value::list([Value::record([(
+                                        list(&values, [record(&values, [(
                                             "eval",
-                                            Value::record([(
+                                            record(&values, [(
                                                 "op",
-                                                Value::atom_from_text("list_index"),
+                                                values.atom_from_text("list_index"),
                                             )]),
                                         )])]),
                                     ),
@@ -2059,6 +2343,7 @@ mod tests {
     #[test]
     fn glam_default_formatter_recognizes_full_objects_as_context_messages() {
         let evaluator = Assembler::default();
+        let values = evaluator.values();
         let module = evaluator
             .module(["context_fixture"])
             .script(
@@ -2085,13 +2370,19 @@ mod tests {
         };
         let diagnostic = Diagnostic::from_emission(
             Severity::Error,
-            Value::record([(
-                "msg",
-                Value::record([
-                    ("text", Value::text("outer failure")),
-                    ("context", Value::list([frame])),
-                ]),
-            )]),
+            record(
+                &values,
+                [(
+                    "msg",
+                    record(
+                        &values,
+                        [
+                            ("text", values.text("outer failure")),
+                            ("context", list(&values, [frame])),
+                        ],
+                    ),
+                )],
+            ),
         );
         let terminal = TerminalContext {
             columns: 80,
@@ -2115,6 +2406,7 @@ mod tests {
     #[test]
     fn failed_context_message_rendering_does_not_hide_the_primary_diagnostic() {
         let evaluator = Assembler::default();
+        let values = evaluator.values();
         let logger = DefaultLogger {
             formatter: evaluator.default_diagnostic_formatter(),
             evaluator,
@@ -2122,19 +2414,28 @@ mod tests {
         };
         let diagnostic = Diagnostic::from_emission(
             Severity::Error,
-            Value::record([(
-                "msg",
-                Value::record([
-                    ("text", Value::text("outer failure")),
-                    (
-                        "context",
-                        Value::list([Value::record([(
-                            "msg",
-                            Value::record([("text", Value::integer(42))]),
-                        )])]),
+            record(
+                &values,
+                [(
+                    "msg",
+                    record(
+                        &values,
+                        [
+                            ("text", values.text("outer failure")),
+                            (
+                                "context",
+                                list(
+                                    &values,
+                                    [record(
+                                        &values,
+                                        [("msg", record(&values, [("text", values.integer(42))]))],
+                                    )],
+                                ),
+                            ),
+                        ],
                     ),
-                ]),
-            )]),
+                )],
+            ),
         );
         let terminal = TerminalContext {
             columns: 80,
@@ -2155,6 +2456,7 @@ mod tests {
     #[test]
     fn glam_default_formatter_summarizes_unrecognized_context_frames() {
         let evaluator = Assembler::default();
+        let values = evaluator.values();
         let logger = DefaultLogger {
             formatter: evaluator.default_diagnostic_formatter(),
             evaluator,
@@ -2162,23 +2464,35 @@ mod tests {
         };
         let diagnostic = Diagnostic::from_emission(
             Severity::Warning,
-            Value::record([(
-                "msg",
-                Value::record([
-                    ("text", Value::text("careful")),
-                    (
-                        "context",
-                        Value::list([
-                            Value::record([("custom", Value::integer(42))]),
-                            Value::record([
-                                ("left", Value::integer(1)),
-                                ("right", Value::integer(2)),
-                            ]),
-                            Value::integer(7),
-                        ]),
+            record(
+                &values,
+                [(
+                    "msg",
+                    record(
+                        &values,
+                        [
+                            ("text", values.text("careful")),
+                            (
+                                "context",
+                                list(
+                                    &values,
+                                    [
+                                        record(&values, [("custom", values.integer(42))]),
+                                        record(
+                                            &values,
+                                            [
+                                                ("left", values.integer(1)),
+                                                ("right", values.integer(2)),
+                                            ],
+                                        ),
+                                        values.integer(7),
+                                    ],
+                                ),
+                            ),
+                        ],
                     ),
-                ]),
-            )]),
+                )],
+            ),
         );
         let terminal = TerminalContext {
             columns: 80,
@@ -2199,12 +2513,13 @@ mod tests {
     #[test]
     fn glam_default_formatter_applies_terminal_color_policy() {
         let evaluator = Assembler::default();
+        let values = evaluator.values();
         let logger = DefaultLogger {
             formatter: evaluator.default_diagnostic_formatter(),
             evaluator,
             working_directory: PathBuf::from("/work"),
         };
-        let diagnostic = Diagnostic::new(Severity::Error, "broken");
+        let diagnostic = Diagnostic::new(&values, Severity::Error, "broken");
         let terminal = TerminalContext {
             columns: 80,
             color: TerminalColor::Ansi256,
@@ -2224,7 +2539,7 @@ mod tests {
     #[test]
     fn terminal_viewer_context_is_an_independent_diagnostic_mixin() {
         let logger = DefaultLogger::new(Assembler::default());
-        let diagnostic = Diagnostic::new(Severity::Info, "hello");
+        let diagnostic = Diagnostic::new(&logger.evaluator.values(), Severity::Info, "hello");
         let terminal = TerminalContext {
             columns: 100,
             color: TerminalColor::Ansi256,
@@ -2281,7 +2596,11 @@ mod tests {
         let assembler = Assembler::default();
         assert_eq!(
             assembler
-                .get(&assembly_result_context(), "asm.result")
+                .get(
+                    &assembly_result_context(&assembler.values())
+                        .expect("result context should be local"),
+                    "asm.result",
+                )
                 .expect("assembly result context should identify its output")
                 .as_binary(),
             Some(b"asm.result".as_slice())
@@ -2291,11 +2610,12 @@ mod tests {
     #[test]
     fn bus_error_count_survives_absent_subscribers_and_queue_reads() {
         let diagnostics = DiagnosticBus::new();
-        diagnostics.publish(Diagnostic::new(Severity::Error, "dropped"));
+        let retained = Arc::new(LogHost::new(&diagnostics));
+        let values = retained.runtime.values();
+        diagnostics.publish_local(Diagnostic::new(&values, Severity::Error, "dropped"));
         assert_eq!(diagnostics.counts().errors(), 1);
 
-        let retained = Arc::new(LogHost::new(&diagnostics));
-        diagnostics.publish(Diagnostic::new(Severity::Error, "retained"));
+        diagnostics.publish_local(Diagnostic::new(&values, Severity::Error, "retained"));
         assert!(retained.take_diagnostic().is_some());
         assert_eq!(diagnostics.counts().errors(), 2);
         retained.close_input();
@@ -2347,15 +2667,19 @@ mod tests {
         let diagnostics = DiagnosticBus::new();
         let output = Arc::new(std::sync::Mutex::new(Vec::new()));
         let _subscription = diagnostics.subscribe(Capture(output.clone()));
+        let assembler = Assembler::builder()
+            .evaluation_runtime(input.runtime.clone())
+            .build()
+            .expect("logger assembler should build");
         let host = LoggerTaskHost::new(
             input.clone(),
             diagnostics.clone(),
-            Assembler::default().reflection_environment_for_role("logger"),
+            assembler.reflection_environment_for_role("logger"),
         );
 
         <LoggerTaskHost as ReflectionServices>::emit_diagnostic(
             &host,
-            Diagnostic::new(Severity::Error, "session output"),
+            Diagnostic::new(&input.runtime.values(), Severity::Error, "session output"),
         );
 
         let (_generation, _store, snapshot) = input.runtime.logger_transaction_snapshot();

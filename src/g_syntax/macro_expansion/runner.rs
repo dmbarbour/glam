@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::api::{CompilationExecution, Diagnostic, Value as PublicValue};
+use crate::core::CoreValueFactory;
 use crate::core::Value;
 use crate::diagnostic::Severity;
 use crate::eval;
@@ -78,10 +79,11 @@ pub(in crate::g_syntax) fn run_macro_effect(
     environment: Value,
     input: MacroInput,
 ) -> Result<MacroRun, Box<MacroFailure>> {
-    let effect = PublicValue::from_core(effect);
+    let values = execution.macro_context().values();
+    let effect = PublicValue::from_core(values, effect);
     let host = Arc::new(MacroHost::new(
-        execution.macro_context().values().clone(),
-        PublicValue::from_core(environment),
+        values.clone(),
+        PublicValue::from_core(values, environment),
         input.clone(),
     ));
     let mut search = IsolatedEffectSearch::new_in_context(
@@ -91,9 +93,10 @@ pub(in crate::g_syntax) fn run_macro_effect(
         execution.macro_context().clone(),
     )
     .map_err(|error| {
-        macro_error(format!(
-            "selected macro value is not a runnable effect: {error}"
-        ))
+        macro_error(
+            values,
+            format!("selected macro value is not a runnable effect: {error}"),
+        )
     })?;
 
     let branches = loop {
@@ -105,7 +108,10 @@ pub(in crate::g_syntax) fn run_macro_effect(
                         || "without a lazy dependency".to_owned(),
                         |error| format!("after evaluation failed: {error}"),
                     );
-                    return Err(macro_error(format!("macro effect became blocked {detail}")));
+                    return Err(macro_error(
+                        values,
+                        format!("macro effect became blocked {detail}"),
+                    ));
                 };
                 match execution
                     .macro_context()
@@ -116,6 +122,7 @@ pub(in crate::g_syntax) fn run_macro_effect(
                     | EvaluationPumpOutcome::BudgetExhausted => {}
                     EvaluationPumpOutcome::NoProgress => {
                         return Err(macro_error(
+                            values,
                             "macro effect is waiting on a foreign or unavailable lazy producer",
                         ));
                     }
@@ -123,10 +130,10 @@ pub(in crate::g_syntax) fn run_macro_effect(
             }
             IsolatedSearchPoll::Complete(branches) => break branches,
             IsolatedSearchPoll::Failed(error) => {
-                return Err(macro_error(format!("macro effect failed: {error}")));
+                return Err(macro_error(values, format!("macro effect failed: {error}")));
             }
             IsolatedSearchPoll::Cancelled => {
-                return Err(macro_error("macro effect was cancelled"));
+                return Err(macro_error(values, "macro effect was cancelled"));
             }
         }
     };
@@ -146,13 +153,15 @@ pub(in crate::g_syntax) fn run_macro_effect(
             .iter()
             .filter(|branch| branch.journal().cursor.consumed_end(&input) == frontier)
             .flat_map(|branch| branch.journal().active_cases.iter().cloned());
-        return Err(
-            macro_error("macro input did not match any successful alternative")
-                .with_context(frontier, cases),
-        );
+        return Err(macro_error(
+            values,
+            "macro input did not match any successful alternative",
+        )
+        .with_context(frontier, cases));
     };
     if successful.next().is_some() {
         return Err(macro_error(
+            values,
             "macro effect produced multiple results; use `.cut` to select one",
         ));
     }
@@ -167,21 +176,29 @@ pub(in crate::g_syntax) fn run_macro_effect(
         )
     })?;
     if value != execution.macro_context().values().unit() {
-        return Err(macro_error(format!(
-            "macro effect terminated with {}, expected unit",
-            value.diagnostic_kind_name()
-        )));
+        return Err(macro_error(
+            values,
+            format!(
+                "macro effect terminated with {}, expected unit",
+                value.diagnostic_kind_name()
+            ),
+        ));
     }
     if !branch.journal().cursor.balanced() {
-        return Err(macro_error("macro reader left an input delimiter unclosed"));
+        return Err(macro_error(
+            values,
+            "macro reader left an input delimiter unclosed",
+        ));
     }
     if !branch.journal().output_is_complete() {
         return Err(macro_error(
+            values,
             "macro writer left an empty or unclosed layout item",
         ));
     }
     if branch.journal().is_anchor_expansion() && !branch.journal().cursor.at_end(&input) {
         return Err(macro_error(
+            values,
             "anchored macro output requires consuming the complete input item",
         ));
     }
@@ -204,9 +221,10 @@ fn force_result(
             Ok(value) => return Ok(value),
             Err(error) => {
                 let Some(wait) = error.blocked_on() else {
-                    return Err(macro_error(format!(
-                        "macro result evaluation failed: {error}"
-                    )));
+                    return Err(macro_error(
+                        execution.macro_context().values(),
+                        format!("macro result evaluation failed: {error}"),
+                    ));
                 };
                 match execution.macro_context().pump_wait(&wait.0, STEP_BUDGET) {
                     EvaluationPumpOutcome::TargetReady
@@ -214,6 +232,7 @@ fn force_result(
                     | EvaluationPumpOutcome::BudgetExhausted => {}
                     EvaluationPumpOutcome::NoProgress => {
                         return Err(macro_error(
+                            execution.macro_context().values(),
                             "macro result is waiting on a foreign or unavailable lazy producer",
                         ));
                     }
@@ -270,9 +289,12 @@ fn unique_values(values: impl IntoIterator<Item = PublicValue>) -> Vec<PublicVal
     unique
 }
 
-fn macro_error(message: impl Into<std::sync::Arc<str>>) -> Box<MacroFailure> {
+fn macro_error(
+    values: &CoreValueFactory,
+    message: impl Into<std::sync::Arc<str>>,
+) -> Box<MacroFailure> {
     Box::new(MacroFailure {
-        diagnostic: Diagnostic::new(Severity::Error, message),
+        diagnostic: Diagnostic::new_with_factory(values, Severity::Error, message),
         frontier: None,
         cases: Vec::new(),
     })

@@ -213,6 +213,10 @@ notes instead of appending history; put subsystem details in
 
 ### Values and execution
 
+- Public `Value`s are roots in exactly one `EvaluationRuntime`. Construct them
+  through that runtime or assembler's `Values` factory; composites and every
+  public consumer reject foreign roots before unwrapping core values. Retained
+  promise, task, wait, event, and spark records preserve the runtime root.
 - Production evaluation consumes closed `Value`s and always receives the
   caller's `EvalContext`. Deferred work must not capture the session that
   happened to construct it.

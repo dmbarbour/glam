@@ -519,7 +519,10 @@ fn explained_cli_cases_render_furthest_parse_context() {
     );
     assert!(
         !assembler
-            .get(error.diagnostic().emission(), "cli.cases")
+            .get(
+                error.diagnostic(&assembler.values()).unwrap().emission(),
+                "cli.cases",
+            )
             .expect("rich CLI diagnostic should retain case values")
             .is_undefined()
     );
@@ -824,17 +827,15 @@ fn configured_parse_errors_report_the_furthest_expectation() {
 #[test]
 fn configured_cli_reads_its_immutable_environment() {
     let assembler = Assembler::builder()
-        .reflection_environment(|_| {
-            Ok(crate::Value::record([(
+        .reflection_environment(|environment| {
+            let values = environment.values();
+            values.record([(
                 "process",
-                crate::Value::record([(
+                values.record([(
                     "cli",
-                    crate::Value::record([(
-                        "args",
-                        crate::Value::list([crate::Value::text("build")]),
-                    )]),
-                )]),
-            )]))
+                    values.record([("args", values.list([values.text("build")])?)])?,
+                )])?,
+            )])
         })
         .expect("CLI environment should build")
         .build()
@@ -862,10 +863,10 @@ fn configured_cli_cannot_observe_canonical_arguments_before_selection() {
         .reflection_environment(|environment| {
             let (process_args, process_resolver) = environment.promise("canonical arguments");
             resolver = Some(process_resolver);
-            Ok(crate::Value::record([(
+            environment.values().record([(
                 "process",
-                crate::Value::record([("args", process_args)]),
-            )]))
+                environment.values().record([("args", process_args)])?,
+            )])
         })
         .expect("CLI environment should build")
         .build()
@@ -887,7 +888,12 @@ fn configured_cli_cannot_observe_canonical_arguments_before_selection() {
     resolver
         .take()
         .expect("resolver should remain available")
-        .resolve(crate::Value::list([crate::Value::text("canonical")]))
+        .resolve(
+            assembler
+                .values()
+                .list([assembler.values().text("canonical")])
+                .unwrap(),
+        )
         .expect("canonical argument promise should resolve");
     if let Err(error) = expand_configured(&assembler, module.value(), arguments) {
         panic!("resolved canonical arguments should unblock a new search: {error}");
@@ -913,7 +919,7 @@ fn configured_cli_rejects_nonunit_unconsumed_and_ambiguous_results() {
         let error = expand_configured(&assembler, &configuration, configured_arguments(&["build"]))
             .expect_err("invalid configured command should fail");
         assert!(error.to_string().contains(expected), "{error}");
-        let diagnostic = error.diagnostic();
+        let diagnostic = error.diagnostic(&assembler.values()).unwrap();
         let contexts = assembler
             .get(diagnostic.emission(), "msg.context")
             .expect("configured CLI errors should carry entry-point context");

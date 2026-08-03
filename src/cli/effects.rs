@@ -174,7 +174,7 @@ fn enter_case(
     journal.visited_cases.push(explanation);
     Ok(RequestResult::Scoped {
         operation: parse,
-        close: case_exit_effect(),
+        close: case_exit_effect(context),
     })
 }
 
@@ -196,12 +196,15 @@ fn exit_case(
     Ok(RequestResult::ReturnUnit)
 }
 
-fn case_exit_effect() -> Value {
+fn case_exit_effect(context: &RequestContext<'_, CliEffects>) -> Value {
     let request = CoreValue::Dict(Dict::new_sync().insert(
         Key::abstract_global_path(CASE_EXIT_TAG),
         CoreValue::List(List::empty()),
     ));
-    Value::from_core(eval::constant_effect(request))
+    Value::from_core(
+        context.eval_context().values(),
+        eval::constant_effect(request),
+    )
 }
 
 fn read_keyword(
@@ -270,6 +273,7 @@ fn read_text(
         .try_into()
         .map_err(|_| TaskHalt::new("`.read.text` received the wrong number of arguments"))?;
     let expectation = text_value(context, expectation, "`.read.text` expectation")?;
+    let values = context.eval_context().values().clone();
     let mut transaction = context
         .transaction()
         .ok_or_else(|| TaskHalt::new("CLI reader escaped its isolated search transaction"))?;
@@ -297,7 +301,10 @@ fn read_text(
         return Ok(RequestResult::Fail);
     };
     journal.cursor += 1;
-    Ok(RequestResult::Return(Value::text(argument)))
+    Ok(RequestResult::Return(Value::from_core(
+        &values,
+        CoreValue::binary_from_text(argument),
+    )))
 }
 
 fn read_token(
@@ -447,6 +454,7 @@ fn read_path(
         "w" => PathAccess::Write,
         _ => unreachable!(),
     };
+    let values = context.eval_context().values().clone();
     let mut transaction = context
         .transaction()
         .ok_or_else(|| TaskHalt::new("CLI reader escaped its isolated search transaction"))?;
@@ -487,14 +495,15 @@ fn read_path(
         return Ok(RequestResult::Fail);
     }
     journal.cursor += 1;
-    Ok(RequestResult::Return(Value::from_core(CoreValue::Opaque(
-        OpaqueValue::new(Arc::new(PathHandle {
+    Ok(RequestResult::Return(Value::from_core(
+        &values,
+        CoreValue::Opaque(OpaqueValue::new(Arc::new(PathHandle {
             invocation: snapshot.invocation.id,
             argument: argument_index,
             kind,
             access,
-        })),
-    ))))
+        }))),
+    )))
 }
 
 enum PathWriter {

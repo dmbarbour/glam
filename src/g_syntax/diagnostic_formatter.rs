@@ -131,8 +131,14 @@ mod tests {
 
     #[test]
     fn formatter_cache_is_owned_by_one_runtime() {
-        let first = CoreValueFactory::new(crate::runtime::RuntimeIds::new());
-        let second = CoreValueFactory::new(crate::runtime::RuntimeIds::new());
+        let first = CoreValueFactory::new(
+            crate::runtime::allocate_evaluation_runtime_id(),
+            crate::runtime::RuntimeIds::new(),
+        );
+        let second = CoreValueFactory::new(
+            crate::runtime::allocate_evaluation_runtime_id(),
+            crate::runtime::RuntimeIds::new(),
+        );
         assert!(!Arc::ptr_eq(&cached(&first), &cached(&second)));
     }
 }

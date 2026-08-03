@@ -1,12 +1,76 @@
 //! Runtime-local identity allocation shared by evaluation subsystems.
 //!
-//! `EvaluationRuntimeId` remains process-global in the public facade. Every
-//! narrower identity is allocated from one of these runtime-owned counters and
-//! is therefore interpreted together with its runtime.
+//! `EvaluationRuntimeId` remains process-global. Every narrower identity is
+//! allocated from one of these runtime-owned counters and is therefore
+//! interpreted together with its runtime.
 
 use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+use crate::core::{CoreValueFactory, Value};
+
+static NEXT_EVALUATION_RUNTIME_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Process-unique identity of one evaluation runtime.
+///
+/// Numeric IDs are diagnostic provenance, not transferable authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct EvaluationRuntimeId(NonZeroU64);
+
+impl EvaluationRuntimeId {
+    pub fn get(self) -> u64 {
+        self.0.get()
+    }
+
+    pub(crate) fn from_u64(id: u64) -> Option<Self> {
+        NonZeroU64::new(id).map(Self)
+    }
+}
+
+pub(crate) fn allocate_evaluation_runtime_id() -> EvaluationRuntimeId {
+    let id = NEXT_EVALUATION_RUNTIME_ID
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+        .expect("evaluation runtime IDs exhausted");
+    EvaluationRuntimeId::from_u64(id).expect("evaluation runtime IDs start at one")
+}
+
+/// One runtime-owned root whose recursive evaluator representation remains
+/// private to already-validated internal evaluation.
+///
+/// Runtime-owned records retain this wrapper rather than a bare core value so
+/// provenance cannot be lost when a value crosses a wait, task, cache, or
+/// host-event storage boundary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RuntimeValueRoot {
+    runtime: EvaluationRuntimeId,
+    value: Value,
+}
+
+impl RuntimeValueRoot {
+    pub(crate) fn new(values: &CoreValueFactory, value: Value) -> Self {
+        Self {
+            runtime: values.runtime_id(),
+            value,
+        }
+    }
+
+    pub(crate) fn from_runtime(runtime: EvaluationRuntimeId, value: Value) -> Self {
+        Self { runtime, value }
+    }
+
+    pub(crate) fn runtime_id(&self) -> EvaluationRuntimeId {
+        self.runtime
+    }
+
+    pub(crate) fn as_core(&self) -> &Value {
+        &self.value
+    }
+
+    pub(crate) fn into_core(self) -> Value {
+        self.value
+    }
+}
 
 pub(crate) struct RuntimeIds {
     next_evaluation_session: AtomicU64,

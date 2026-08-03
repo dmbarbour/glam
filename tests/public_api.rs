@@ -10,6 +10,24 @@ use glam::{
     SourceSystem, Value, ValueKind,
 };
 
+fn record<I, S>(values: &glam::Values, entries: I) -> Value
+where
+    I: IntoIterator<Item = (S, Value)>,
+    S: AsRef<str>,
+{
+    values.record(entries).expect("test record should be local")
+}
+
+fn list(values: &glam::Values, items: impl IntoIterator<Item = Value>) -> Value {
+    values.list(items).expect("test list should be local")
+}
+
+fn dictionary(values: &glam::Values, entries: impl IntoIterator<Item = (Value, Value)>) -> Value {
+    values
+        .dictionary(entries)
+        .expect("test dictionary should be local and keyable")
+}
+
 type DiagnosticEvents = Arc<Mutex<Vec<DiagnosticEvent>>>;
 
 fn collecting_builder() -> (AssemblerBuilder, DiagnosticEvents) {
@@ -92,6 +110,7 @@ fn public_api_builds_a_script_module_and_extracts_binary_data() {
 #[test]
 fn public_evaluation_errors_preserve_their_structured_diagnostic() {
     let assembler = Assembler::default();
+    let values = assembler.values();
     let module = assembler
         .module(["structured_failure"])
         .script(
@@ -112,9 +131,11 @@ fn public_evaluation_errors_preserve_their_structured_diagnostic() {
 
     assert_eq!(error.to_string(), "structured failure");
     assert!(error.diagnostics().is_empty());
-    assert_eq!(error.diagnostic().message(), "structured failure");
-    let enriched = error
-        .diagnostic()
+    let diagnostic = error
+        .diagnostic(&values)
+        .expect("failure diagnostic should belong to the assembler runtime");
+    assert_eq!(diagnostic.message(), "structured failure");
+    let enriched = diagnostic
         .enrich(&assembler.values())
         .expect("the primary failure diagnostic should remain enrichable");
     assert_eq!(
@@ -145,6 +166,7 @@ fn public_api_reports_an_empty_reasoning_session_as_complete() {
 #[test]
 fn public_promise_resolver_completes_a_cloneable_consumer() {
     let assembler = Assembler::default();
+    let values = assembler.values();
     let (promise, resolver) = assembler.promise("public input");
     let cloned = promise.clone();
 
@@ -154,7 +176,7 @@ fn public_promise_resolver_completes_a_cloneable_consumer() {
     assert!(pending.to_string().contains("before initialization"));
 
     resolver
-        .resolve(Value::integer(42))
+        .resolve(values.integer(42))
         .expect("the unique resolver should complete its promise");
     assert_eq!(
         assembler
@@ -192,21 +214,31 @@ fn public_promise_resolver_can_fail_or_be_abandoned() {
 #[test]
 fn public_promise_resolver_preserves_structured_failures() {
     let assembler = Assembler::default();
+    let values = assembler.values();
     let (failed, resolver) = assembler.promise("structured failure");
-    let context = Value::record([(
-        "host",
-        Value::record([("operation", Value::atom_from_text("read"))]),
-    )]);
-    let failure = Value::record([
-        (
-            "msg",
-            Value::record([
-                ("text", Value::text("host operation failed structurally")),
-                ("context", Value::list([context.clone()])),
-            ]),
-        ),
-        ("detail", Value::integer(7)),
-    ]);
+    let context = record(
+        &values,
+        [(
+            "host",
+            record(&values, [("operation", values.atom_from_text("read"))]),
+        )],
+    );
+    let failure = record(
+        &values,
+        [
+            (
+                "msg",
+                record(
+                    &values,
+                    [
+                        ("text", values.text("host operation failed structurally")),
+                        ("context", list(&values, [context.clone()])),
+                    ],
+                ),
+            ),
+            ("detail", values.integer(7)),
+        ],
+    );
 
     resolver
         .fail(failure)
@@ -216,15 +248,18 @@ fn public_promise_resolver_preserves_structured_failures() {
         .expect_err("a failed promise should expose its structured producer error");
 
     assert_eq!(error.to_string(), "host operation failed structurally");
+    let diagnostic = error
+        .diagnostic(&values)
+        .expect("promise failure should belong to the assembler runtime");
     assert_eq!(
         assembler
-            .get(error.diagnostic().emission(), "detail")
+            .get(diagnostic.emission(), "detail")
             .expect("the structured diagnostic should retain its ad hoc field")
             .as_i64(),
         Some(7)
     );
     assert_eq!(
-        diagnostic_contexts(&assembler, error.diagnostic()),
+        diagnostic_contexts(&assembler, &diagnostic),
         [context],
         "the resolver must preserve existing structured diagnostic context"
     );
@@ -236,13 +271,18 @@ fn public_promise_completion_resumes_blocked_reasoning_in_its_session() {
     let (builder, diagnostics) = collecting_builder();
     let assembler = builder
         .reflection_environment(|environment| {
+            let values = environment.values();
             let (late, promise_resolver) = environment.promise("late reflection input");
             resolver = Some(promise_resolver);
-            Ok(Value::record([("client", Value::record([("late", late)]))]))
+            Ok(record(
+                &values,
+                [("client", record(&values, [("late", late)]))],
+            ))
         })
         .expect("promised reflection environment should build")
         .build()
         .expect("assembler should build");
+    let values = assembler.values();
     let module = assembler
         .module(["promise_wakeup"])
         .script(
@@ -270,7 +310,7 @@ fn public_promise_completion_resumes_blocked_reasoning_in_its_session() {
     resolver
         .take()
         .expect("resolver should escape environment construction")
-        .resolve(Value::text("ready"))
+        .resolve(values.text("ready"))
         .expect("host completion should succeed");
     let resumed = assembler.drain_reasoning();
     assert_eq!(resumed.status(), ReasoningStatus::Complete);
@@ -333,28 +373,31 @@ fn public_reasoning_report_exposes_retryable_blocked_errors() {
 }
 
 fn volume_write_annotation(assembler: &Assembler, effects: Value, value: Value) -> Value {
+    let values = assembler.values();
     let set = assembler
         .get(&effects, "set")
         .expect("volume capability should expose set");
     let effect = assembler
-        .apply(&set, [Value::list([]), value])
+        .apply(&set, [list(&values, []), value])
         .expect("volume set should construct an effect");
     reflection_annotation(assembler, effect)
 }
 
 fn reflection_annotation(assembler: &Assembler, effect: Value) -> Value {
-    assembler
-        .values()
-        .after_reflection(effect, Value::text("done"))
+    let values = assembler.values();
+    values
+        .after_reflection(effect, values.text("done"))
+        .expect("reflection annotation values should share one runtime")
 }
 
 #[test]
 fn protected_volume_capability_updates_and_returns_client_state() {
     let assembler = Assembler::default();
+    let values = assembler.values();
     let volume = assembler
-        .create_volume(Value::text("initial"))
+        .create_volume(values.text("initial"))
         .expect("protected volume should be created");
-    let annotated = volume_write_annotation(&assembler, volume.effects(), Value::text("updated"));
+    let annotated = volume_write_annotation(&assembler, volume.effects(), values.text("updated"));
     assert_eq!(
         assembler
             .to_binary(&annotated)
@@ -376,12 +419,13 @@ fn protected_volume_capability_updates_and_returns_client_state() {
 #[test]
 fn assembler_clones_share_protected_volume_capabilities() {
     let assembler = Assembler::default();
+    let values = assembler.values();
     let clone = assembler.clone();
     let volume = assembler
-        .create_volume(Value::text("initial"))
+        .create_volume(values.text("initial"))
         .expect("protected volume should be created");
     let annotated =
-        volume_write_annotation(&clone, volume.effects(), Value::text("shared session"));
+        volume_write_annotation(&clone, volume.effects(), values.text("shared session"));
     clone
         .to_binary(&annotated)
         .expect("assembler clone should accept the capability");
@@ -395,6 +439,7 @@ fn assembler_clones_share_protected_volume_capabilities() {
 #[test]
 fn protected_volume_rewrite_uses_the_commit_time_value() {
     let assembler = Assembler::default();
+    let values = assembler.values();
     let module = assembler
         .module(["volume_rewrite"])
         .script("g", "language g0\nincrement = \\value -> value + 1\n")
@@ -404,13 +449,13 @@ fn protected_volume_rewrite_uses_the_commit_time_value() {
         .get(module.value(), "increment")
         .expect("volume updater should be defined");
     let volume = assembler
-        .create_volume(Value::integer(1))
+        .create_volume(values.integer(1))
         .expect("protected volume should be created");
     let rewrite = assembler
         .get(&volume.effects(), "rewrite")
         .expect("volume capability should expose rewrite");
     let effect = assembler
-        .apply(&rewrite, [Value::list([]), increment])
+        .apply(&rewrite, [list(&values, []), increment])
         .expect("volume rewrite should construct an effect");
     assembler
         .to_binary(&reflection_annotation(&assembler, effect))
@@ -423,6 +468,7 @@ fn protected_volume_rewrite_uses_the_commit_time_value() {
 #[test]
 fn protected_volume_get_is_an_ordinary_effect_result() {
     let assembler = Assembler::default();
+    let values = assembler.values();
     let module = assembler
         .module(["volume_get"])
         .script(
@@ -435,13 +481,13 @@ fn protected_volume_get_is_an_ordinary_effect_result() {
         .get(module.value(), "discard")
         .expect("effect result discarder should be defined");
     let volume = assembler
-        .create_volume(Value::text("unforced"))
+        .create_volume(values.text("unforced"))
         .expect("protected volume should be created");
     let get = assembler
         .get(&volume.effects(), "get")
         .expect("volume capability should expose get");
     let get_effect = assembler
-        .apply(&get, [Value::list([])])
+        .apply(&get, [list(&values, [])])
         .expect("volume get should construct an effect");
     let discard_effect = assembler
         .apply(&discard, [get_effect])
@@ -462,6 +508,7 @@ fn protected_volume_get_is_an_ordinary_effect_result() {
 #[test]
 fn revoked_volume_get_exposes_a_lazy_error_through_reflection_eval() {
     let (assembler, diagnostics) = collecting_assembler();
+    let values = assembler.values();
     let module = assembler
         .module(["missing_volume_get"])
         .script(
@@ -474,7 +521,7 @@ fn revoked_volume_get_exposes_a_lazy_error_through_reflection_eval() {
         .get(module.value(), "inspect")
         .expect("missing-volume inspector should be defined");
     let volume = assembler
-        .create_volume(Value::text("initial"))
+        .create_volume(values.text("initial"))
         .expect("protected volume should be created");
     let effects = volume.effects();
     volume.revoke().unwrap();
@@ -482,7 +529,7 @@ fn revoked_volume_get_exposes_a_lazy_error_through_reflection_eval() {
         .get(&effects, "get")
         .expect("stale capability should still expose get");
     let get_effect = assembler
-        .apply(&get, [Value::list([])])
+        .apply(&get, [list(&values, [])])
         .expect("stale get should remain a lazy effect request");
     let inspect_effect = assembler
         .apply(&inspect, [get_effect])
@@ -503,15 +550,14 @@ fn revoked_volume_get_exposes_a_lazy_error_through_reflection_eval() {
 fn protected_volume_capabilities_reject_foreign_runtimes() {
     let owner = Assembler::default();
     let foreign = Assembler::default();
+    let values = owner.values();
     let volume = owner
-        .create_volume(Value::text("initial"))
+        .create_volume(values.text("initial"))
         .expect("protected volume should be created");
-    let annotated = volume_write_annotation(&foreign, volume.effects(), Value::text("forbidden"));
-
     let error = foreign
-        .to_binary(&annotated)
+        .get(&volume.effects(), "set")
         .expect_err("a foreign runtime must reject the capability");
-    assert!(error.to_string().contains("foreign reflection volume"));
+    assert!(error.to_string().contains("belongs to evaluation runtime"));
     assert_eq!(
         owner
             .to_binary(&volume.revoke().unwrap())
@@ -531,11 +577,12 @@ fn protected_volume_capabilities_cross_sessions_in_one_runtime() {
         .evaluation_runtime(runtime)
         .build()
         .expect("observer assembler should build");
+    let values = owner.values();
     let volume = owner
-        .create_volume(Value::text("initial"))
+        .create_volume(values.text("initial"))
         .expect("protected volume should be created");
     let annotated =
-        volume_write_annotation(&observer, volume.effects(), Value::text("shared runtime"));
+        volume_write_annotation(&observer, volume.effects(), values.text("shared runtime"));
 
     observer
         .to_binary(&annotated)
@@ -549,15 +596,16 @@ fn protected_volume_capabilities_cross_sessions_in_one_runtime() {
 #[test]
 fn revoked_volume_capability_cannot_recreate_its_volume() {
     let assembler = Assembler::default();
+    let values = assembler.values();
     let volume = assembler
-        .create_volume(Value::text("initial"))
+        .create_volume(values.text("initial"))
         .expect("protected volume should be created");
     let effects = volume.effects();
     assert_eq!(
         assembler.to_binary(&volume.revoke().unwrap()).unwrap(),
         b"initial".as_slice()
     );
-    let annotated = volume_write_annotation(&assembler, effects, Value::text("resurrected"));
+    let annotated = volume_write_annotation(&assembler, effects, values.text("resurrected"));
 
     let error = assembler
         .to_binary(&annotated)
@@ -592,11 +640,21 @@ fn public_api_exposes_the_default_diagnostic_formatter_as_a_function() {
 #[test]
 fn diagnostic_value_updates_preserve_the_source_and_add_no_authoritative_metadata() {
     let assembler = Assembler::default();
-    let message = Value::record([("msg", Value::record([("text", Value::text("nested"))]))]);
+    let values = assembler.values();
+    let message = record(
+        &values,
+        [("msg", record(&values, [("text", values.text("nested"))]))],
+    );
     let enriched = Diagnostic::apply_updates(
         &assembler.values(),
         &message,
-        Value::record([("viewer", Value::record([("kind", Value::text("terminal"))]))]),
+        record(
+            &values,
+            [(
+                "viewer",
+                record(&values, [("kind", values.text("terminal"))]),
+            )],
+        ),
     )
     .expect("an observer should be able to enrich a context message");
 
@@ -627,60 +685,83 @@ fn diagnostic_value_updates_preserve_the_source_and_add_no_authoritative_metadat
 #[test]
 fn diagnostic_value_updates_preserve_structured_evaluation_failures() {
     let assembler = Assembler::default();
+    let values = assembler.values();
     let (failed_update, resolver) = assembler.promise("diagnostic viewer update");
     resolver
-        .fail(Value::record([
-            (
-                "msg",
-                Value::record([
-                    ("text", Value::text("viewer update failed")),
-                    (
-                        "context",
-                        Value::list([Value::record([(
-                            "viewer",
-                            Value::record([("operation", Value::atom_from_text("update"))]),
-                        )])]),
+        .fail(record(
+            &values,
+            [
+                (
+                    "msg",
+                    record(
+                        &values,
+                        [
+                            ("text", values.text("viewer update failed")),
+                            (
+                                "context",
+                                list(
+                                    &values,
+                                    [record(
+                                        &values,
+                                        [(
+                                            "viewer",
+                                            record(
+                                                &values,
+                                                [("operation", values.atom_from_text("update"))],
+                                            ),
+                                        )],
+                                    )],
+                                ),
+                            ),
+                        ],
                     ),
-                ]),
-            ),
-            ("detail", Value::integer(9)),
-        ]))
+                ),
+                ("detail", values.integer(9)),
+            ],
+        ))
         .expect("host should install the structured update failure");
-    let message = Value::record([("msg", Value::record([("text", Value::text("nested"))]))]);
+    let message = record(
+        &values,
+        [("msg", record(&values, [("text", values.text("nested"))]))],
+    );
 
     let error = Diagnostic::apply_updates(&assembler.values(), &message, failed_update)
         .expect_err("demanding the viewer update should preserve its failure");
     assert_eq!(error.to_string(), "viewer update failed");
+    let diagnostic = error
+        .diagnostic(&values)
+        .expect("viewer failure should belong to the assembler runtime");
     assert_eq!(
         assembler
-            .get(error.diagnostic().emission(), "detail")
+            .get(diagnostic.emission(), "detail")
             .expect("diagnostic update failure should retain ad hoc fields")
             .as_i64(),
         Some(9)
     );
-    let contexts = diagnostic_contexts(&assembler, error.diagnostic());
+    let contexts = diagnostic_contexts(&assembler, &diagnostic);
     assert_eq!(contexts.len(), 1);
     assert_eq!(
         assembler
             .get(&contexts[0], "viewer.operation")
             .expect("diagnostic update failure should retain its context"),
-        Value::atom_from_text("update")
+        values.atom_from_text("update")
     );
 }
 
 #[test]
 fn public_reflection_inspects_container_structure_and_atom_identity() {
     let assembler = Assembler::default();
+    let values = assembler.values();
     let reflection = assembler.reflection();
 
     let items = reflection
-        .list_items(&Value::list([Value::integer(1), Value::text("two")]))
+        .list_items(&list(&values, [values.integer(1), values.text("two")]))
         .expect("reflection should enumerate list values");
     assert_eq!(items[0].as_i64(), Some(1));
     assert_eq!(items[1].as_binary(), Some(b"two".as_slice()));
 
     let entries = reflection
-        .dictionary_items(&Value::record([("field", Value::integer(7))]))
+        .dictionary_items(&record(&values, [("field", values.integer(7))]))
         .expect("reflection should enumerate dictionary entries");
     let [(key, value)] = entries.as_slice() else {
         panic!("the singleton record should have one reflected entry");
@@ -765,7 +846,8 @@ fn public_reflection_recognizes_sealed_metadata_without_forcing_it() {
 #[test]
 fn optional_path_lookup_distinguishes_absence_from_failure() {
     let assembler = Assembler::default();
-    let value = Value::record([("present", Value::integer(1))]);
+    let values = assembler.values();
+    let value = record(&values, [("present", values.integer(1))]);
 
     assert_eq!(
         assembler
@@ -787,21 +869,32 @@ fn optional_path_lookup_distinguishes_absence_from_failure() {
 fn assembler_owns_an_authoritative_reflection_environment() {
     let (builder, diagnostics) = collecting_builder();
     let assembler = builder
-        .reflection_environment(|_| {
-            Ok(Value::record([
-                (
-                    "glam",
-                    Value::record([
-                        ("version", Value::text("spoofed")),
-                        ("client_field", Value::text("must disappear")),
-                    ]),
-                ),
-                ("client", Value::record([("name", Value::text("embedded"))])),
-            ]))
+        .reflection_environment(|environment| {
+            let values = environment.values();
+            Ok(record(
+                &values,
+                [
+                    (
+                        "glam",
+                        record(
+                            &values,
+                            [
+                                ("version", values.text("spoofed")),
+                                ("client_field", values.text("must disappear")),
+                            ],
+                        ),
+                    ),
+                    (
+                        "client",
+                        record(&values, [("name", values.text("embedded"))]),
+                    ),
+                ],
+            ))
         })
         .expect("reflection environment should accept a dictionary")
         .build()
         .expect("test assembler should build");
+    let values = assembler.values();
     let environment = assembler.reflection_environment();
 
     assert_eq!(
@@ -826,7 +919,7 @@ fn assembler_owns_an_authoritative_reflection_environment() {
         assembler
             .get(&environment, "glam.reasoning.role")
             .expect("assembler should identify its reasoning role"),
-        Value::atom_from_text("assembler")
+        values.atom_from_text("assembler")
     );
     assert_eq!(
         assembler
@@ -841,7 +934,7 @@ fn assembler_owns_an_authoritative_reflection_environment() {
     assert!(diagnostics[0].message().contains("reserved"));
     assert!(
         Assembler::builder()
-            .reflection_environment(|_| Ok(Value::integer(1)))
+            .reflection_environment(|environment| Ok(environment.values().integer(1)))
             .is_err()
     );
 }
@@ -849,19 +942,20 @@ fn assembler_owns_an_authoritative_reflection_environment() {
 #[test]
 fn service_reflection_environments_have_independent_roles() {
     let assembler = Assembler::default();
+    let values = assembler.values();
     let logger = assembler.reflection_environment_for_role("logger");
 
     assert_eq!(
         assembler
             .get(&logger, "glam.reasoning.role")
             .expect("service environment should contain its role"),
-        Value::atom_from_text("logger")
+        values.atom_from_text("logger")
     );
     assert_eq!(
         assembler
             .get(&assembler.reflection_environment(), "glam.reasoning.role")
             .expect("deriving a service environment must not change the assembler role"),
-        Value::atom_from_text("assembler")
+        values.atom_from_text("assembler")
     );
 }
 
@@ -897,18 +991,20 @@ fn reflection_environment_can_retain_a_builder_created_volume_handle() {
     let mut retained_volume = None;
     let assembler = Assembler::builder()
         .reflection_environment(|environment| {
-            let volume = environment.create_volume(Value::text("initial"))?;
+            let values = environment.values();
+            let volume = environment.create_volume(values.text("initial"))?;
             let effects = volume.effects();
             retained_volume = Some(volume);
-            Ok(Value::record([("client_state", effects)]))
+            Ok(record(&values, [("client_state", effects)]))
         })
         .expect("reflection environment should be constructed")
         .build()
         .expect("assembler should build");
+    let values = assembler.values();
     let effects = assembler
         .get(&assembler.reflection_environment(), "client_state")
         .expect("environment should contain the protected capability");
-    let annotated = volume_write_annotation(&assembler, effects, Value::text("updated"));
+    let annotated = volume_write_annotation(&assembler, effects, values.text("updated"));
     assert_eq!(assembler.to_binary(&annotated).unwrap(), b"done".as_slice());
 
     let final_value = retained_volume
@@ -1015,25 +1111,38 @@ fn public_api_can_load_from_an_artifact_source_system() {
 
 #[test]
 fn client_reflection_environment_is_visible_to_reflection_annotations() {
-    let process_environment = Value::dictionary([(
-        Value::text("GLAM_PUBLIC_API_TEST"),
-        Value::text("HOST VALUE"),
-    )])
-    .expect("test environment key should be keyable");
-    let reflection_environment = Value::record([(
-        "process",
-        Value::record([
-            (
-                "args",
-                Value::list(["embedded-glam", "inspect"].map(Value::text)),
-            ),
-            ("env", process_environment),
-        ]),
-    )]);
     let (builder, diagnostics) = collecting_builder();
     let assembler = builder
         .host(MemoryHost::new([]))
-        .reflection_environment(|_| Ok(reflection_environment))
+        .reflection_environment(|environment| {
+            let values = environment.values();
+            let process_environment = dictionary(
+                &values,
+                [(
+                    values.text("GLAM_PUBLIC_API_TEST"),
+                    values.text("HOST VALUE"),
+                )],
+            );
+            Ok(record(
+                &values,
+                [(
+                    "process",
+                    record(
+                        &values,
+                        [
+                            (
+                                "args",
+                                list(
+                                    &values,
+                                    ["embedded-glam", "inspect"].map(|text| values.text(text)),
+                                ),
+                            ),
+                            ("env", process_environment),
+                        ],
+                    ),
+                )],
+            ))
+        })
         .expect("test reflection environment should be a dictionary")
         .build()
         .expect("test assembler should build");
@@ -1210,7 +1319,10 @@ fn imported_source_diagnostics_include_the_import_chain() {
     let error = assembler
         .binary_at(module.value(), "asm.result")
         .expect_err("observing the imported definition should compile and reject child.g");
-    let primary_contexts = diagnostic_contexts(&assembler, error.diagnostic());
+    let diagnostic = error
+        .diagnostic(&assembler.values())
+        .expect("import failure should belong to the assembler runtime");
+    let primary_contexts = diagnostic_contexts(&assembler, &diagnostic);
     let primary_import = import_context(&assembler, &primary_contexts, "child.g");
     let child_origin = assembler
         .get(primary_import, "import.origin")
@@ -1280,7 +1392,10 @@ fn missing_module_and_binary_imports_retain_requesting_origin() {
         let error = assembler
             .binary_at(module.value(), "asm.result")
             .expect_err("observing the missing import should fail");
-        let contexts = diagnostic_contexts(&assembler, error.diagnostic());
+        let diagnostic = error
+            .diagnostic(&assembler.values())
+            .expect("import failure should belong to the assembler runtime");
+        let contexts = diagnostic_contexts(&assembler, &diagnostic);
         let context = import_context(&assembler, &contexts, request);
         assert_eq!(
             assembler
@@ -1313,28 +1428,33 @@ fn caller_selected_module_path_scopes_abstract_global_paths() {
 
 #[test]
 fn public_values_convert_numbers_without_exposing_big_number_types() {
-    let integer = Value::integer(-42);
+    let runtime = EvaluationRuntime::new(0).expect("value runtime should build");
+    let values = runtime.values();
+    let integer = values.integer(-42);
     assert_eq!(integer.as_i64(), Some(-42));
     assert_eq!(integer.as_rational_i64(), Some((-42, 1)));
     assert_eq!(integer.as_f64(), Some(-42.0));
     assert_eq!(integer.as_number_text().as_deref(), Some("-42"));
 
-    let ratio = Value::number_from_text("-6/4").expect("exact rational should parse");
+    let ratio = values
+        .number_from_text("-6/4")
+        .expect("exact rational should parse");
     assert_eq!(ratio.as_number_text().as_deref(), Some("-3/2"));
     assert_eq!(ratio.as_rational_i64(), Some((-3, 2)));
     assert_eq!(ratio.as_i64(), None);
     assert_eq!(ratio.as_f64(), Some(-1.5));
-    assert_eq!(Value::rational(1, 0), None);
+    assert_eq!(values.rational(1, 0), None);
 
-    assert_eq!(Value::number_from_f64(1.5), Value::rational(3, 2));
-    assert_eq!(Value::number_from_f64(f64::NAN), None);
-    assert_eq!(Value::number_from_f64(f64::INFINITY), None);
-    assert!(Value::number_from_text("1/0").is_err());
+    assert_eq!(values.number_from_f64(1.5), values.rational(3, 2));
+    assert_eq!(values.number_from_f64(f64::NAN), None);
+    assert_eq!(values.number_from_f64(f64::INFINITY), None);
+    assert!(values.number_from_text("1/0").is_err());
 }
 
 #[test]
 fn assembler_applies_and_evaluates_functions() {
     let assembler = Assembler::default();
+    let values = assembler.values();
     let module = assembler
         .module(["application"])
         .script("g", "language g0\nadd = \\x y -> x + y\n")
@@ -1344,7 +1464,7 @@ fn assembler_applies_and_evaluates_functions() {
         .get(module.value(), "add")
         .expect("module should define add");
     let sum = assembler
-        .apply(&add, [Value::integer(20), Value::integer(22)])
+        .apply(&add, [values.integer(20), values.integer(22)])
         .expect("application should be accepted lazily");
 
     assert_eq!(sum.kind(), glam::ValueKind::Lazy);
@@ -1360,7 +1480,8 @@ fn assembler_applies_and_evaluates_functions() {
 #[test]
 fn assembler_extracts_ranges_from_compact_and_list_binary_data() {
     let assembler = Assembler::default();
-    let compact = Value::binary(Bytes::from_static(b"abcdef"));
+    let values = assembler.values();
+    let compact = values.binary(Bytes::from_static(b"abcdef"));
     assert_eq!(
         assembler
             .binary_slice(&compact, 1..5)
@@ -1368,12 +1489,15 @@ fn assembler_extracts_ranges_from_compact_and_list_binary_data() {
         b"bcde".as_slice()
     );
 
-    let listed = Value::list([
-        Value::integer(b'a'.into()),
-        Value::integer(b'b'.into()),
-        Value::integer(b'c'.into()),
-        Value::integer(b'd'.into()),
-    ]);
+    let listed = list(
+        &values,
+        [
+            values.integer(b'a'.into()),
+            values.integer(b'b'.into()),
+            values.integer(b'c'.into()),
+            values.integer(b'd'.into()),
+        ],
+    );
     assert_eq!(
         assembler
             .binary_slice(&listed, 1..3)
@@ -1386,6 +1510,7 @@ fn assembler_extracts_ranges_from_compact_and_list_binary_data() {
 #[test]
 fn checked_net_builder_constructs_an_opaque_identity_net() {
     let assembler = Assembler::default();
+    let values = assembler.values();
     let identity = assembler
         .net(|net| {
             let bind = net.bind();
@@ -1394,7 +1519,7 @@ fn checked_net_builder_constructs_an_opaque_identity_net() {
         })
         .expect("identity net should be closed");
     let error = assembler
-        .apply(&identity, [Value::integer(42)])
+        .apply(&identity, [values.integer(42)])
         .expect_err("raw nets require an explicit lambda-style arity bridge");
     assert_eq!(
         error.to_string(),
@@ -1405,9 +1530,10 @@ fn checked_net_builder_constructs_an_opaque_identity_net() {
 #[test]
 fn checked_net_builder_keeps_data_exposing_nets_opaque() {
     let assembler = Assembler::default();
+    let values = assembler.values();
     let net = assembler
         .net(|net| {
-            let data = net.data(Value::text("copied"));
+            let data = net.data(values.text("copied"))?;
             let copy = net.copy(1);
             net.wire(data, copy.input)?;
             Ok(copy.outputs[0])
@@ -1425,6 +1551,7 @@ fn checked_net_builder_keeps_data_exposing_nets_opaque() {
 #[test]
 fn checked_net_builder_reports_wiring_and_finalization_errors() {
     let assembler = Assembler::default();
+    let values = assembler.values();
     let unwired = assembler
         .net(|net| {
             let bind = net.bind();
@@ -1435,9 +1562,9 @@ fn checked_net_builder_reports_wiring_and_finalization_errors() {
 
     let duplicate = assembler
         .net(|net| {
-            let left = net.data(Value::integer(1));
-            let right = net.data(Value::integer(2));
-            let other = net.data(Value::integer(3));
+            let left = net.data(values.integer(1))?;
+            let right = net.data(values.integer(2))?;
+            let other = net.data(values.integer(3))?;
             net.wire(left, right)?;
             net.wire(left, other)?;
             Ok(other)
@@ -1499,7 +1626,8 @@ impl MemorySourceSystem {
             bytes,
             SourceIdentity::new(
                 format!("memory:{}", path.display()),
-                Value::record([("memory", Value::text(path.display().to_string()))]),
+                "memory",
+                Bytes::copy_from_slice(path.display().to_string().as_bytes()),
             ),
         )
         .with_import_resolver(MemoryImportResolver {

@@ -732,8 +732,14 @@ mod tests {
 
     #[test]
     fn compiler_bundle_is_runtime_local_and_resolved_once_per_compilation_scope() {
-        let first_runtime = CoreValueFactory::new(crate::runtime::RuntimeIds::new());
-        let second_runtime = CoreValueFactory::new(crate::runtime::RuntimeIds::new());
+        let first_runtime = CoreValueFactory::new(
+            crate::runtime::allocate_evaluation_runtime_id(),
+            crate::runtime::RuntimeIds::new(),
+        );
+        let second_runtime = CoreValueFactory::new(
+            crate::runtime::allocate_evaluation_runtime_id(),
+            crate::runtime::RuntimeIds::new(),
+        );
         assert!(!Arc::ptr_eq(
             &cache(&first_runtime),
             &cache(&second_runtime)

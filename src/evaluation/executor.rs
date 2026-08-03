@@ -7,13 +7,14 @@ use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::thread;
 
 use crate::core::Value;
+use crate::runtime::RuntimeValueRoot;
 
 use super::{EvalContext, EvaluationSession};
 
 struct SparkJob {
     session_id: u64,
     session: Weak<EvaluationSession>,
-    value: Value,
+    value: RuntimeValueRoot,
     observed_generation: u64,
 }
 
@@ -189,7 +190,7 @@ impl EvaluationExecutor {
         queue.sparks.push_back(SparkJob {
             session_id,
             session: Arc::downgrade(session),
-            value,
+            value: RuntimeValueRoot::new(&session.values, value),
             observed_generation,
         });
         self.inner.work_available.notify_one();
@@ -303,7 +304,8 @@ fn evaluation_worker(inner: Arc<EvaluationExecutorInner>) {
                     continue;
                 };
                 let context = EvalContext::new(session);
-                let result = crate::eval::demand_strategy_value(&context, &job.value);
+                debug_assert_eq!(job.value.runtime_id(), context.values().runtime_id());
+                let result = crate::eval::demand_strategy_value(&context, job.value.as_core());
                 if result.as_ref().is_err_and(|halt| {
                     halt.blocked_on().is_some() || halt.unassigned_promise().is_some()
                 }) {
@@ -361,7 +363,7 @@ mod tests {
         let job = SparkJob {
             session_id,
             session: Arc::downgrade(&session),
-            value: crate::core::keys::unit_value(),
+            value: RuntimeValueRoot::new(&session.values, crate::core::keys::unit_value()),
             observed_generation: 0,
         };
 

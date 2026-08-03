@@ -245,7 +245,7 @@ impl<'source> StagedSourceParser<'source> {
         let invocations = work.invocations().to_vec();
         let mut macro_diagnostics = Vec::new();
         for original in invocations {
-            let invocation = match work.current_invocation(&original) {
+            let invocation = match work.current_invocation(context.values(), &original) {
                 Ok(invocation) => invocation,
                 Err(mut diagnostics) => {
                     self.diagnostics.append(&mut diagnostics);

@@ -34,10 +34,7 @@ use std::sync::Arc;
 
 use search::SearchPolicy;
 
-use crate::api::{
-    Diagnostic, Error as ApiError, EvaluationRuntime, EvaluationRuntimeId, Value as PublicValue,
-    Values,
-};
+use crate::api::{Diagnostic, Error as ApiError, EvaluationRuntime, Value as PublicValue, Values};
 use crate::core::{
     Atom, Builtin, CoreValueFactory, Dict, EvaluationFailure, EvaluationHalt, FunctionValue, Key,
     LazyValue, List, NetValue, PromisedValue, Value, keys,
@@ -309,9 +306,7 @@ pub enum CommitResult {
 /// Supplies the immutable environment owned by a task's reasoning host.
 /// Reflection code can read it through `.env`, but cannot replace it.
 pub trait TaskEnvironment: Send + Sync {
-    fn reflection_environment(&self) -> PublicValue {
-        PublicValue::empty_record()
-    }
+    fn reflection_environment(&self) -> PublicValue;
 }
 
 pub trait TaskHost<S: TaskSpecialization>: TaskEnvironment + Send + Sync {
@@ -321,12 +316,6 @@ pub trait TaskHost<S: TaskSpecialization>: TaskEnvironment + Send + Sync {
     /// Identifies the reasoning scope accepted by private volume capability
     /// requests. Hosts without protected volumes retain the default.
     fn reasoning_session_id(&self) -> Option<ReasoningSessionId> {
-        None
-    }
-
-    /// Identifies the runtime accepted by transitional protected-volume
-    /// capability tags. Phase 1C moves this check to the value boundary.
-    fn evaluation_runtime_id(&self) -> Option<EvaluationRuntimeId> {
         None
     }
 
@@ -382,7 +371,10 @@ impl TaskHalt {
             .expect("a blocked task halt has no failure diagnostic");
         Diagnostic::from_emission(
             Severity::Error,
-            PublicValue::from_core(eval::failure_diagnostic_value_with(values.core(), failure)),
+            PublicValue::from_core(
+                values.core(),
+                eval::failure_diagnostic_value_with(values.core(), failure),
+            ),
         )
     }
 
@@ -447,7 +439,10 @@ impl From<EvaluationHalt> for TaskHalt {
 impl From<ApiError> for TaskHalt {
     fn from(error: ApiError) -> Self {
         Self::failure(Arc::new(EvaluationFailure::emission(
-            error.diagnostic().emission().as_core().clone(),
+            error
+                .structured_diagnostic()
+                .map(|diagnostic| diagnostic.emission().as_core().clone())
+                .unwrap_or_else(|| Value::binary_from_text(&error.to_string())),
         )))
     }
 }
@@ -717,8 +712,18 @@ struct EffectTask<S: TaskSpecialization> {
 
 impl<S: TaskSpecialization> EffectTask<S> {
     #[cfg(test)]
-    fn new(effect: Value, specialization: S, host: Arc<S::Host>) -> Result<Self, TaskHalt> {
-        Self::new_in_context(effect, specialization, host, EvalContext::standalone())
+    fn new(
+        values: &CoreValueFactory,
+        effect: Value,
+        specialization: S,
+        host: Arc<S::Host>,
+    ) -> Result<Self, TaskHalt> {
+        Self::new_in_context(
+            effect,
+            specialization,
+            host,
+            EvalContext::isolated(values.clone()),
+        )
     }
 
     fn new_in_context(
@@ -1202,7 +1207,10 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 let path =
                     eval::eval_key_path_list(&self.eval_context, &path).map_err(task_eval_error)?;
                 if let Some(transaction) = branch.transaction.as_mut() {
-                    transaction.store.write(path, PublicValue::from_core(value));
+                    transaction.store.write(
+                        path,
+                        PublicValue::from_core(self.eval_context.values(), value),
+                    );
                     MachineWork::Deliver {
                         value: self.eval_context.values().unit(),
                         branch,
@@ -1211,7 +1219,10 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 } else {
                     let snapshot = self.host.snapshot();
                     let mut store = StoreJournal::new(snapshot.store().clone());
-                    store.write(path, PublicValue::from_core(value));
+                    store.write(
+                        path,
+                        PublicValue::from_core(self.eval_context.values(), value),
+                    );
                     let commit =
                         TaskCommit::new(store, snapshot.extra().clone(), S::Journal::default());
                     match self.host.commit(commit) {
@@ -1241,9 +1252,10 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 let path =
                     eval::eval_key_path_list(&self.eval_context, &path).map_err(task_eval_error)?;
                 if let Some(transaction) = branch.transaction.as_mut() {
-                    transaction
-                        .store
-                        .rewrite(path, PublicValue::from_core(updater));
+                    transaction.store.rewrite(
+                        path,
+                        PublicValue::from_core(self.eval_context.values(), updater),
+                    );
                     MachineWork::Deliver {
                         value: self.eval_context.values().unit(),
                         branch,
@@ -1252,7 +1264,10 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 } else {
                     let snapshot = self.host.snapshot();
                     let mut store = StoreJournal::new(snapshot.store().clone());
-                    store.rewrite(path, PublicValue::from_core(updater));
+                    store.rewrite(
+                        path,
+                        PublicValue::from_core(self.eval_context.values(), updater),
+                    );
                     let commit =
                         TaskCommit::new(store, snapshot.extra().clone(), S::Journal::default());
                     match self.host.commit(commit) {
@@ -1309,9 +1324,11 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 let path =
                     eval::eval_key_path_list(&self.eval_context, &path).map_err(task_eval_error)?;
                 if let Some(transaction) = branch.transaction.as_mut() {
-                    transaction
-                        .store
-                        .write_volume(volume, path, PublicValue::from_core(value));
+                    transaction.store.write_volume(
+                        volume,
+                        path,
+                        PublicValue::from_core(self.eval_context.values(), value),
+                    );
                     MachineWork::Deliver {
                         value: self.eval_context.values().unit(),
                         branch,
@@ -1320,7 +1337,11 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 } else {
                     let snapshot = self.host.snapshot();
                     let mut store = StoreJournal::new(snapshot.store().clone());
-                    store.write_volume(volume, path, PublicValue::from_core(value));
+                    store.write_volume(
+                        volume,
+                        path,
+                        PublicValue::from_core(self.eval_context.values(), value),
+                    );
                     let commit =
                         TaskCommit::new(store, snapshot.extra().clone(), S::Journal::default());
                     match self.host.commit(commit) {
@@ -1350,9 +1371,11 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 let path =
                     eval::eval_key_path_list(&self.eval_context, &path).map_err(task_eval_error)?;
                 if let Some(transaction) = branch.transaction.as_mut() {
-                    transaction
-                        .store
-                        .rewrite_volume(volume, path, PublicValue::from_core(updater));
+                    transaction.store.rewrite_volume(
+                        volume,
+                        path,
+                        PublicValue::from_core(self.eval_context.values(), updater),
+                    );
                     MachineWork::Deliver {
                         value: self.eval_context.values().unit(),
                         branch,
@@ -1361,7 +1384,11 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 } else {
                     let snapshot = self.host.snapshot();
                     let mut store = StoreJournal::new(snapshot.store().clone());
-                    store.rewrite_volume(volume, path, PublicValue::from_core(updater));
+                    store.rewrite_volume(
+                        volume,
+                        path,
+                        PublicValue::from_core(self.eval_context.values(), updater),
+                    );
                     let commit =
                         TaskCommit::new(store, snapshot.extra().clone(), S::Journal::default());
                     match self.host.commit(commit) {
@@ -1960,7 +1987,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         }
         match outcome {
             BranchOutcome::Complete(value, _) => Ok(MachineStep::Terminal(TaskTerminal::Complete(
-                PublicValue::from_core(value),
+                PublicValue::from_core(self.eval_context.values(), value),
             ))),
             BranchOutcome::Fail(_) => Ok(MachineStep::Terminal(TaskTerminal::Failed(
                 TaskHalt::new("reflection task failed permanently"),
@@ -2003,7 +2030,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 let restarted = self.restart_fixpoint_at_scope(&mut completed, scope_depth)?;
                 let transaction = Self::isolated_transaction(&mut completed);
                 self.search.retain(IsolatedSearchBranch::complete(
-                    PublicValue::from_core(value),
+                    PublicValue::from_core(self.eval_context.values(), value),
                     transaction,
                 ));
                 Ok(restarted
@@ -2067,6 +2094,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         } else {
             self.search.finish();
             MachineStep::Terminal(TaskTerminal::Complete(PublicValue::from_core(
+                self.eval_context.values(),
                 self.eval_context.values().unit(),
             )))
         }
@@ -2268,7 +2296,6 @@ impl<S: TaskSpecialization> EffectTask<S> {
             request,
             &self.tags,
             &self.specialized_requests,
-            self.host.evaluation_runtime_id(),
         )
     }
 }
@@ -2888,27 +2915,8 @@ enum VolumeOperation {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct VolumeRequestIdentity {
-    runtime: EvaluationRuntimeId,
     volume: VolumeId,
     operation: VolumeOperation,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum VolumeRequestError {
-    ForeignVolume(EvaluationRuntimeId, VolumeId),
-}
-
-impl fmt::Display for VolumeRequestError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ForeignVolume(runtime, volume) => write!(
-                formatter,
-                "foreign reflection volume {} from evaluation runtime {}",
-                volume.get(),
-                runtime.get()
-            ),
-        }
-    }
 }
 
 fn parse_request<R: Clone>(
@@ -2916,7 +2924,6 @@ fn parse_request<R: Clone>(
     value: Value,
     tags: &Tags,
     specialized: &[SpecializedRequest<R>],
-    runtime: Option<EvaluationRuntimeId>,
 ) -> Result<Request<R>, TaskHalt> {
     let Value::Dict(dict) = value else {
         return Err(TaskHalt::new("effect API returned a non-request value"));
@@ -2998,7 +3005,10 @@ fn parse_request<R: Clone>(
             }
             return Ok(Request::Specialized(
                 specialized.request.clone(),
-                arguments.into_iter().map(PublicValue::from_core).collect(),
+                arguments
+                    .into_iter()
+                    .map(|value| PublicValue::from_core(context.values(), value))
+                    .collect(),
             ));
         }
     }
@@ -3006,11 +3016,6 @@ fn parse_request<R: Clone>(
         let Some(identity) = parse_volume_request_tag(tag)? else {
             continue;
         };
-        if runtime != Some(identity.runtime) {
-            return Err(TaskHalt::new(
-                VolumeRequestError::ForeignVolume(identity.runtime, identity.volume).to_string(),
-            ));
-        }
         let arguments = parse(tag)?.expect("the request tag came from this dictionary");
         return match (identity.operation, arguments.as_slice()) {
             (VolumeOperation::Get, [path]) => Ok(Request::VolumeGet(identity.volume, path.clone())),
@@ -3034,11 +3039,7 @@ fn parse_request<R: Clone>(
 
 const VOLUME_REQUEST_PREFIX: [&str; 3] = ["reflection_runtime", "v0", "volume"];
 
-fn volume_request_tag(
-    runtime: EvaluationRuntimeId,
-    volume: VolumeId,
-    operation: VolumeOperation,
-) -> Key {
+fn volume_request_tag(volume: VolumeId, operation: VolumeOperation) -> Key {
     let operation = match operation {
         VolumeOperation::Get => "get",
         VolumeOperation::Set => "set",
@@ -3048,7 +3049,6 @@ fn volume_request_tag(
         VOLUME_REQUEST_PREFIX[0].to_owned(),
         VOLUME_REQUEST_PREFIX[1].to_owned(),
         VOLUME_REQUEST_PREFIX[2].to_owned(),
-        runtime.get().to_string(),
         volume.get().to_string(),
         operation.to_owned(),
     ])
@@ -3066,14 +3066,9 @@ fn parse_volume_request_tag(tag: &Key) -> Result<Option<VolumeRequestIdentity>, 
     {
         return Ok(None);
     }
-    let [_, _, _, runtime, volume, operation] = parts.as_ref() else {
+    let [_, _, _, volume, operation] = parts.as_ref() else {
         return Err(TaskHalt::new("malformed private volume capability request"));
     };
-    let runtime = runtime
-        .parse::<u64>()
-        .ok()
-        .and_then(EvaluationRuntimeId::from_u64)
-        .ok_or_else(|| TaskHalt::new("volume capability has an invalid evaluation runtime"))?;
     let volume = volume
         .parse::<u64>()
         .ok()
@@ -3085,36 +3080,35 @@ fn parse_volume_request_tag(tag: &Key) -> Result<Option<VolumeRequestIdentity>, 
         "rewrite" => VolumeOperation::Rewrite,
         _ => return Err(TaskHalt::new("volume capability has an invalid operation")),
     };
-    Ok(Some(VolumeRequestIdentity {
-        runtime,
-        volume,
-        operation,
-    }))
+    Ok(Some(VolumeRequestIdentity { volume, operation }))
 }
 
-pub(crate) fn volume_effects(runtime: EvaluationRuntimeId, volume: VolumeId) -> PublicValue {
+pub(crate) fn volume_effects(values: &CoreValueFactory, volume: VolumeId) -> PublicValue {
     let entry = |name: &str, operation, arity| {
         (
             Key::atom_from_text(name),
             request_function(
-                volume_request_tag(runtime, volume, operation),
+                volume_request_tag(volume, operation),
                 arity,
                 Vec::new(),
                 true,
             ),
         )
     };
-    PublicValue::from_core(Value::Dict(
-        [
-            entry("get", VolumeOperation::Get, 1),
-            entry("set", VolumeOperation::Set, 2),
-            entry("rewrite", VolumeOperation::Rewrite, 2),
-        ]
-        .into_iter()
-        .fold(Dict::new_sync(), |dict, (key, value)| {
-            dict.insert(key, value)
-        }),
-    ))
+    PublicValue::from_core(
+        values,
+        Value::Dict(
+            [
+                entry("get", VolumeOperation::Get, 1),
+                entry("set", VolumeOperation::Set, 2),
+                entry("rewrite", VolumeOperation::Rewrite, 2),
+            ]
+            .into_iter()
+            .fold(Dict::new_sync(), |dict, (key, value)| {
+                dict.insert(key, value)
+            }),
+        ),
+    )
 }
 
 fn request_id(context: &EvalContext, value: Value, kind: &str) -> Result<u64, TaskHalt> {
@@ -3554,6 +3548,27 @@ mod tests {
     use crate::api::{Assembler, Diagnostic};
     use crate::evaluation::{EvaluationExecutor, EvaluationTaskHandle};
 
+    fn public_record<I, S>(assembler: &Assembler, entries: I) -> PublicValue
+    where
+        I: IntoIterator<Item = (S, PublicValue)>,
+        S: AsRef<str>,
+    {
+        assembler
+            .values()
+            .record(entries)
+            .expect("test record should belong to one runtime")
+    }
+
+    fn public_list(
+        assembler: &Assembler,
+        items: impl IntoIterator<Item = PublicValue>,
+    ) -> PublicValue {
+        assembler
+            .values()
+            .list(items)
+            .expect("test list should belong to one runtime")
+    }
+
     #[derive(Clone)]
     struct TestEffects;
 
@@ -3659,8 +3674,14 @@ mod tests {
                     Ok(RequestResult::ReturnUnit)
                 }
                 TestRequest::Alternatives => Ok(RequestResult::Alternatives(vec![
-                    PublicValue::text("first"),
-                    PublicValue::text("second"),
+                    PublicValue::from_core(
+                        context.eval_context().values(),
+                        Value::binary_from_text("first"),
+                    ),
+                    PublicValue::from_core(
+                        context.eval_context().values(),
+                        Value::binary_from_text("second"),
+                    ),
                 ])),
             }
         }
@@ -3721,7 +3742,6 @@ mod tests {
     #[derive(Default)]
     struct TestHost {
         reasoning_session: Option<ReasoningSessionId>,
-        runtime: Option<EvaluationRuntimeId>,
         state: Mutex<TestHostState>,
     }
 
@@ -3757,44 +3777,46 @@ mod tests {
     }
 
     impl TestHost {
-        fn with_diagnostics(diagnostics: Vec<Diagnostic>) -> Self {
+        fn with_diagnostics(values: CoreValueFactory, diagnostics: Vec<Diagnostic>) -> Self {
             Self {
                 reasoning_session: None,
-                runtime: None,
                 state: Mutex::new(TestHostState {
+                    store: ReflectionStore::new(values, Arc::new(ExactConflictAnalysis)),
                     diagnostics,
                     ..TestHostState::default()
                 }),
             }
         }
 
-        fn with_wake_diagnostic(diagnostic: Diagnostic) -> Self {
+        fn with_wake_diagnostic(values: CoreValueFactory, diagnostic: Diagnostic) -> Self {
             Self {
                 reasoning_session: None,
-                runtime: None,
                 state: Mutex::new(TestHostState {
+                    store: ReflectionStore::new(values, Arc::new(ExactConflictAnalysis)),
                     wake_diagnostic: Some(diagnostic),
                     ..TestHostState::default()
                 }),
             }
         }
 
-        fn with_wake_heap(heap: PublicValue) -> Self {
+        fn with_wake_heap(values: CoreValueFactory, heap: PublicValue) -> Self {
             Self {
                 reasoning_session: None,
-                runtime: None,
                 state: Mutex::new(TestHostState {
+                    store: ReflectionStore::new(values, Arc::new(ExactConflictAnalysis)),
                     wake_heap: Some(heap),
                     ..TestHostState::default()
                 }),
             }
         }
 
-        fn with_runtime(runtime: EvaluationRuntimeId) -> Self {
+        fn with_values(values: CoreValueFactory) -> Self {
             Self {
                 reasoning_session: None,
-                runtime: Some(runtime),
-                state: Mutex::new(TestHostState::default()),
+                state: Mutex::new(TestHostState {
+                    store: ReflectionStore::new(values, Arc::new(ExactConflictAnalysis)),
+                    ..TestHostState::default()
+                }),
             }
         }
 
@@ -3848,32 +3870,45 @@ mod tests {
 
     impl TaskEnvironment for TestHost {
         fn reflection_environment(&self) -> PublicValue {
-            let process_environment = PublicValue::dictionary([(
-                PublicValue::text("GLAM_TEST_ENV"),
-                PublicValue::text("present"),
-            )])
-            .expect("test process environment must be keyable");
-            PublicValue::record([
-                (
-                    "glam",
-                    PublicValue::record([(
-                        "version",
-                        PublicValue::text(env!("CARGO_PKG_VERSION")),
-                    )]),
-                ),
-                (
-                    "process",
-                    PublicValue::record([
-                        (
-                            "args",
-                            PublicValue::list(
-                                ["glam", "--test"].into_iter().map(PublicValue::text),
+            let state = self.state.lock().unwrap();
+            let values = state.store.values();
+            let process_environment = PublicValue::from_core(
+                values,
+                Value::Dict(Dict::new_sync().insert(
+                    Key::binary_from_text("GLAM_TEST_ENV"),
+                    Value::binary_from_text("present"),
+                )),
+            );
+            PublicValue::from_core(
+                values,
+                Value::Dict(
+                    Dict::new_sync()
+                        .insert(
+                            Key::atom_from_text("glam"),
+                            Value::Dict(Dict::new_sync().insert(
+                                Key::atom_from_text("version"),
+                                Value::binary_from_text(env!("CARGO_PKG_VERSION")),
+                            )),
+                        )
+                        .insert(
+                            Key::atom_from_text("process"),
+                            Value::Dict(
+                                Dict::new_sync()
+                                    .insert(
+                                        Key::atom_from_text("args"),
+                                        Value::List(List::from_values(vec![
+                                            Value::binary_from_text("glam"),
+                                            Value::binary_from_text("--test"),
+                                        ])),
+                                    )
+                                    .insert(
+                                        Key::atom_from_text("env"),
+                                        process_environment.as_core().clone(),
+                                    ),
                             ),
                         ),
-                        ("env", process_environment),
-                    ]),
                 ),
-            ])
+            )
         }
     }
 
@@ -4006,10 +4041,6 @@ mod tests {
             self.reasoning_session
         }
 
-        fn evaluation_runtime_id(&self) -> Option<EvaluationRuntimeId> {
-            self.runtime
-        }
-
         fn wait_for_change(&self, observed_generation: u64) -> bool {
             TestHost::wait_for_change(self, observed_generation)
         }
@@ -4026,44 +4057,71 @@ mod tests {
         }
     }
 
-    fn run_log_test(effect: &PublicValue, host: Arc<TestHost>) -> Result<TaskOutcome, TaskHalt> {
-        run_composed_effect_task(EffectTask::new(
+    fn run_log_test(
+        assembler: &Assembler,
+        effect: &PublicValue,
+        host: Arc<TestHost>,
+    ) -> Result<TaskOutcome, TaskHalt> {
+        run_composed_effect_task(EffectTask::new_in_context(
             effect.as_core().clone(),
             TestEffects,
             host,
+            EvalContext::isolated(assembler.core_values()),
         )?)
     }
 
     fn run_reflection_test(
+        assembler: &Assembler,
         effect: &PublicValue,
         host: Arc<TestHost>,
     ) -> Result<TaskOutcome, TaskHalt> {
         let host: Arc<dyn ReflectionHost<ReflectionEffects>> = host;
-        run_composed_effect_task(EffectTask::new(
+        run_composed_effect_task(EffectTask::new_in_context(
             effect.as_core().clone(),
             ReflectionEffects,
             host,
+            EvalContext::isolated(assembler.core_values()),
         )?)
     }
 
-    fn run_standard_test(effect: &PublicValue) -> Result<TaskOutcome, TaskHalt> {
-        run_composed_effect_task(EffectTask::new(
+    fn run_standard_test(
+        assembler: &Assembler,
+        effect: &PublicValue,
+    ) -> Result<TaskOutcome, TaskHalt> {
+        run_composed_effect_task(EffectTask::new_in_context(
             effect.as_core().clone(),
             StandardEffects,
-            Arc::new(TestHost::default()),
+            Arc::new(TestHost::with_values(assembler.core_values())),
+            EvalContext::isolated(assembler.core_values()),
         )?)
     }
 
-    fn run_standard_on(effect: &PublicValue, host: Arc<TestHost>) -> Result<TaskOutcome, TaskHalt> {
-        run_composed_effect_task(EffectTask::new(
+    fn run_standard_on(
+        assembler: &Assembler,
+        effect: &PublicValue,
+        host: Arc<TestHost>,
+    ) -> Result<TaskOutcome, TaskHalt> {
+        run_composed_effect_task(EffectTask::new_in_context(
             effect.as_core().clone(),
             StandardEffects,
             host,
+            EvalContext::isolated(assembler.core_values()),
         )?)
     }
 
     fn compile_effect(source: &str) -> (Assembler, PublicValue) {
-        let assembler = Assembler::default();
+        let runtime = crate::api::EvaluationRuntime::new(0).expect("test runtime should build");
+        compile_effect_with_runtime(&runtime, source)
+    }
+
+    fn compile_effect_with_runtime(
+        runtime: &crate::api::EvaluationRuntime,
+        source: &str,
+    ) -> (Assembler, PublicValue) {
+        let assembler = Assembler::builder()
+            .evaluation_runtime(runtime.clone())
+            .build()
+            .expect("test assembler should build");
         let module = assembler
             .module(["reflection_test"])
             .script(
@@ -4126,7 +4184,7 @@ mod tests {
 
     fn completed(source: &str) -> (Assembler, PublicValue) {
         let (assembler, effect) = compile_effect(source);
-        let TaskOutcome::Complete(value) = run_standard_test(&effect).unwrap() else {
+        let TaskOutcome::Complete(value) = run_standard_test(&assembler, &effect).unwrap() else {
             panic!("finite effect should complete")
         };
         (assembler, value)
@@ -4155,7 +4213,8 @@ mod tests {
 
     fn isolated_standard_results(source: &str) -> (Assembler, Vec<PublicValue>) {
         let (assembler, effect) = compile_effect(source);
-        let host: Arc<dyn TaskHost<StandardEffects>> = Arc::new(TestHost::default());
+        let host: Arc<dyn TaskHost<StandardEffects>> =
+            Arc::new(TestHost::with_values(assembler.core_values()));
         let mut search = IsolatedEffectSearch::new(
             &assembler.evaluation_runtime(),
             &effect,
@@ -4211,7 +4270,7 @@ mod tests {
     fn specialized_requests_can_resume_each_ordered_alternative() {
         let (assembler, effect) =
             compile_effect(".alternatives >>= (\\value -> .r (value ++ \" result\"))");
-        let host = Arc::new(TestHost::default());
+        let host = Arc::new(TestHost::with_values(assembler.core_values()));
         let mut search =
             IsolatedEffectSearch::new(&assembler.evaluation_runtime(), &effect, TestEffects, host)
                 .expect("isolated effect should initialize");
@@ -4229,7 +4288,7 @@ mod tests {
         let (assembler, effect) = compile_effect(
             ".alt ((.write_stderr \"left journal\") =>> .heap.set ['choice] \"left\" =>> .heap.get ['choice]) ((.write_stderr \"right journal\") =>> .heap.set ['choice] \"right\" =>> .heap.get ['choice])",
         );
-        let host = Arc::new(TestHost::default());
+        let host = Arc::new(TestHost::with_values(assembler.core_values()));
         let mut search = IsolatedEffectSearch::new(
             &assembler.evaluation_runtime(),
             &effect,
@@ -4261,14 +4320,14 @@ mod tests {
             [Bytes::from_static(b"right journal")]
         );
         assert!(host.stderr().is_empty());
-        assert_eq!(host.heap(), PublicValue::empty_record());
+        assert_eq!(host.heap(), assembler.values().empty_record());
     }
 
     #[test]
     fn isolated_search_retains_failed_branch_journals_as_parse_evidence() {
         let (assembler, effect) =
             compile_effect(".alt ((.write_stderr \"failed evidence\") =>> .fail) (.r \"success\")");
-        let host = Arc::new(TestHost::default());
+        let host = Arc::new(TestHost::with_values(assembler.core_values()));
         let mut search = IsolatedEffectSearch::new(
             &assembler.evaluation_runtime(),
             &effect,
@@ -4293,10 +4352,10 @@ mod tests {
         let (assembler, effect) = compile_effect(
             ".heap.get ['answer] >>= (\\answer -> (answer == \"ready\") =>> .r answer)",
         );
-        let host = Arc::new(TestHost::with_wake_heap(PublicValue::record([(
-            "answer",
-            PublicValue::text("ready"),
-        )])));
+        let host = Arc::new(TestHost::with_wake_heap(
+            assembler.core_values(),
+            public_record(&assembler, [("answer", assembler.values().text("ready"))]),
+        ));
         let mut search = IsolatedEffectSearch::new(
             &assembler.evaluation_runtime(),
             &effect,
@@ -4338,10 +4397,12 @@ mod tests {
     fn isolated_search_retries_observed_errors_without_advancing_choice() {
         let (assembler, effect) =
             compile_effect(".heap.get ['handler] >>= (\\handler -> handler ())");
-        let (_, handler) = compile_effect("\\_ -> .r \"recovered\"");
-        let host = Arc::new(TestHost::with_wake_heap(PublicValue::record([(
-            "handler", handler,
-        )])));
+        let (_, handler) =
+            compile_effect_with_runtime(&assembler.evaluation_runtime(), "\\_ -> .r \"recovered\"");
+        let host = Arc::new(TestHost::with_wake_heap(
+            assembler.core_values(),
+            public_record(&assembler, [("handler", handler)]),
+        ));
         let mut search = IsolatedEffectSearch::new(
             &assembler.evaluation_runtime(),
             &effect,
@@ -4384,7 +4445,8 @@ mod tests {
     #[test]
     fn isolated_search_keeps_unobserved_errors_terminal() {
         let (assembler, effect) = compile_effect(".alt (1 2) (.r \"not reached\")");
-        let host: Arc<dyn TaskHost<StandardEffects>> = Arc::new(TestHost::default());
+        let host: Arc<dyn TaskHost<StandardEffects>> =
+            Arc::new(TestHost::with_values(assembler.core_values()));
         let mut search = IsolatedEffectSearch::new(
             &assembler.evaluation_runtime(),
             &effect,
@@ -4412,7 +4474,8 @@ mod tests {
     #[test]
     fn isolated_search_can_be_cancelled_between_polls() {
         let (assembler, effect) = compile_effect(".r \"unused\"");
-        let host: Arc<dyn TaskHost<StandardEffects>> = Arc::new(TestHost::default());
+        let host: Arc<dyn TaskHost<StandardEffects>> =
+            Arc::new(TestHost::with_values(assembler.core_values()));
         let mut search = IsolatedEffectSearch::new(
             &assembler.evaluation_runtime(),
             &effect,
@@ -4428,7 +4491,7 @@ mod tests {
     fn isolated_search_reports_and_resumes_lazy_dependencies() {
         let (assembler, function) =
             compile_effect("\\value -> .eval value >>= (\\result -> .r result.ok)");
-        let session = EvalContext::standalone();
+        let session = EvalContext::isolated(assembler.core_values());
         let owner = session.with_new_task().unwrap();
         let observer = session.with_new_task().unwrap();
         let promised = PromisedValue::fixpoint(&owner, "isolated search dependency").unwrap();
@@ -4438,9 +4501,9 @@ mod tests {
             vec![Value::Promised(promised.clone())],
         )
         .unwrap();
-        let host = Arc::new(TestHost::default());
+        let host = Arc::new(TestHost::with_values(assembler.core_values()));
         let mut search = IsolatedEffectSearch::new_in_context(
-            &PublicValue::from_core(effect),
+            &PublicValue::from_core(&assembler.core_values(), effect),
             TestEffects,
             host,
             observer,
@@ -4480,8 +4543,14 @@ mod tests {
     fn effect_task_poll_yields_and_resumes_with_bounded_fuel() {
         let (assembler, effect) =
             compile_effect(".r \"A\" >>= (\\a -> .r \"B\" >>= (\\b -> .r (a ++ b)))");
-        let host = Arc::new(TestHost::default());
-        let mut task = EffectTask::new(effect.as_core().clone(), TestEffects, host).unwrap();
+        let host = Arc::new(TestHost::with_values(assembler.core_values()));
+        let mut task = EffectTask::new(
+            &assembler.core_values(),
+            effect.as_core().clone(),
+            TestEffects,
+            host,
+        )
+        .unwrap();
 
         assert!(matches!(task.poll(1), EffectTaskPoll::Yielded));
         let value = loop {
@@ -4498,9 +4567,9 @@ mod tests {
 
     #[test]
     fn evaluation_session_pumps_a_type_erased_effect_task() {
-        let (_, effect) = compile_effect("(.write_stderr \"scheduled\") =>> .r ()");
+        let (assembler, effect) = compile_effect("(.write_stderr \"scheduled\") =>> .r ()");
         let context = EvalContext::standalone();
-        let host = Arc::new(TestHost::default());
+        let host = Arc::new(TestHost::with_values(assembler.core_values()));
         let launcher = task_launcher(TestEffects, host.clone());
         let task = context
             .schedule_task(|task_context| {
@@ -4535,9 +4604,12 @@ mod tests {
 
     #[test]
     fn reflection_task_launcher_returns_arbitrary_effect_result_when_requested() {
-        let (_, effect) = compile_effect(".r 42");
+        let (assembler, effect) = compile_effect(".r 42");
         let context = EvalContext::standalone();
-        let launcher = task_launcher(TestEffects, Arc::new(TestHost::default()));
+        let launcher = task_launcher(
+            TestEffects,
+            Arc::new(TestHost::with_values(assembler.core_values())),
+        );
         let task = context
             .schedule_task(|task_context| {
                 launcher
@@ -4562,9 +4634,12 @@ mod tests {
 
     #[test]
     fn reflection_task_launcher_requires_unit_when_requested() {
-        let (_, effect) = compile_effect(".r 42");
+        let (assembler, effect) = compile_effect(".r 42");
         let context = EvalContext::standalone();
-        let launcher = task_launcher(TestEffects, Arc::new(TestHost::default()));
+        let launcher = task_launcher(
+            TestEffects,
+            Arc::new(TestHost::with_values(assembler.core_values())),
+        );
         let task = context
             .schedule_task(|task_context| {
                 launcher
@@ -4591,10 +4666,11 @@ mod tests {
     }
 
     fn schedule_composed_test_task(
+        assembler: &Assembler,
         effect: &PublicValue,
         host: Arc<TestHost>,
     ) -> (EvalContext, EvaluationTaskHandle) {
-        let context = EvalContext::standalone();
+        let context = EvalContext::isolated(assembler.core_values());
         context
             .install_reflection_launcher(task_launcher(TestEffects, host.clone()))
             .expect("fresh test session should accept a reflection launcher");
@@ -4625,7 +4701,7 @@ mod tests {
         let (assembler, effect) = compile_effect(
             ".task.new (.log 'warn { msg:{ text:\"child\" } }) >>= (\\_task -> .r ())",
         );
-        let host = Arc::new(TestHost::default());
+        let host = Arc::new(TestHost::with_values(assembler.core_values()));
 
         assert!(matches!(
             EffectRun::new(
@@ -4666,7 +4742,7 @@ mod tests {
             let effect = assembler
                 .get(module.value(), name)
                 .expect("fixture should define both effects");
-            let claim_host = Arc::new(TestHost::default());
+            let claim_host = Arc::new(TestHost::with_values(assembler.core_values()));
             assert!(matches!(
                 EffectRun::new(
                     &assembler.evaluation_runtime(),
@@ -4699,7 +4775,7 @@ mod tests {
             &assembler.evaluation_runtime(),
             &effect,
             TestEffects,
-            Arc::new(TestHost::default()),
+            Arc::new(TestHost::with_values(assembler.core_values())),
         )
         .requiring_unit_result()
         .run()
@@ -4713,7 +4789,7 @@ mod tests {
             &assembler.evaluation_runtime(),
             &effect,
             TestEffects,
-            Arc::new(TestHost::default()),
+            Arc::new(TestHost::with_values(assembler.core_values())),
         )
         .asserting_unit_result("test task result")
         .requiring_unit_result()
@@ -4729,13 +4805,15 @@ mod tests {
     fn reflection_task_returns_a_joinable_result() {
         let (assembler, effect) =
             compile_effect(".task.new (.r \"child\") >>= (\\task -> .task.join task)");
-        let host = Arc::new(TestHost::default());
-        let (context, task) = schedule_composed_test_task(&effect, host);
+        let host = Arc::new(TestHost::with_values(assembler.core_values()));
+        let (context, task) = schedule_composed_test_task(&assembler, &effect, host);
         let EvaluationTaskPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
             panic!("joined task should complete")
         };
         assert_eq!(
-            assembler.to_binary(&PublicValue::from_core(value)).unwrap(),
+            assembler
+                .to_binary(&PublicValue::from_core(&assembler.core_values(), value))
+                .unwrap(),
             b"child".as_slice()
         );
     }
@@ -4743,7 +4821,11 @@ mod tests {
     #[test]
     fn dictionary_items_are_available_to_reflection_in_key_order() {
         let (assembler, effect) = compile_effect(".dict_items { b:2, a:1 }");
-        let (context, task) = schedule_composed_test_task(&effect, Arc::new(TestHost::default()));
+        let (context, task) = schedule_composed_test_task(
+            &assembler,
+            &effect,
+            Arc::new(TestHost::with_values(assembler.core_values())),
+        );
         let EvaluationTaskPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
             panic!("dict_items task should complete");
         };
@@ -4774,8 +4856,12 @@ mod tests {
 
     #[test]
     fn metadata_inspection_returns_hidden_values_without_forcing_them() {
-        let (_, initial) = compile_effect(".meta.inspect (anno 'meta_init ())");
-        let (context, task) = schedule_composed_test_task(&initial, Arc::new(TestHost::default()));
+        let (assembler, initial) = compile_effect(".meta.inspect (anno 'meta_init ())");
+        let (context, task) = schedule_composed_test_task(
+            &assembler,
+            &initial,
+            Arc::new(TestHost::with_values(assembler.core_values())),
+        );
         let EvaluationTaskPoll::Complete(Value::Dict(metadata)) =
             pump_composed_test_task(&context, &task)
         else {
@@ -4784,21 +4870,28 @@ mod tests {
         assert!(metadata.is_empty());
 
         let (assembler, inspect) = compile_effect("\\value -> .meta.inspect value");
-        let carrier = PublicValue::from_core(Value::metadata_carrier(Value::error(
-            &crate::core::test_value_factory(),
-            "latent metadata failure",
-        )));
+        let carrier = PublicValue::from_core(
+            &assembler.core_values(),
+            Value::metadata_carrier(Value::error(
+                &crate::core::test_value_factory(),
+                "latent metadata failure",
+            )),
+        );
         let effect = assembler
             .apply(&inspect, [carrier])
             .expect("metadata inspection function should accept its carrier");
-        let (context, task) = schedule_composed_test_task(&effect, Arc::new(TestHost::default()));
+        let (context, task) = schedule_composed_test_task(
+            &assembler,
+            &effect,
+            Arc::new(TestHost::with_values(assembler.core_values())),
+        );
         let EvaluationTaskPoll::Complete(metadata @ Value::Lazy(_)) =
             pump_composed_test_task(&context, &task)
         else {
             panic!("metadata inspection must not demand its hidden value");
         };
         let error = assembler
-            .evaluate(&PublicValue::from_core(metadata))
+            .evaluate(&PublicValue::from_core(&assembler.core_values(), metadata))
             .expect_err("the returned hidden failure should remain demandable");
         assert_eq!(error.to_string(), "latent metadata failure");
     }
@@ -4809,15 +4902,15 @@ mod tests {
             ".meta.inspect (list.at 0 (anno meta_refl:(\\_priors -> .env ['glam,'version] >>= (\\version -> .log 'info {{msg:{{text:\"metadata update ran\"}}}} =>> .r [version])) [anno 'meta_init ()])) >>= (\\metadata -> (metadata == \"{}\") =>> .r metadata)",
             env!("CARGO_PKG_VERSION")
         ));
-        let host = Arc::new(TestHost::default());
-        let (context, task) = schedule_composed_test_task(&effect, host.clone());
+        let host = Arc::new(TestHost::with_values(assembler.core_values()));
+        let (context, task) = schedule_composed_test_task(&assembler, &effect, host.clone());
         let EvaluationTaskPoll::Complete(metadata) = pump_composed_test_task(&context, &task)
         else {
             panic!("demanded effectful metadata should complete");
         };
         assert_eq!(
             assembler
-                .to_binary(&PublicValue::from_core(metadata))
+                .to_binary(&PublicValue::from_core(&assembler.core_values(), metadata))
                 .unwrap(),
             env!("CARGO_PKG_VERSION").as_bytes()
         );
@@ -4833,11 +4926,14 @@ mod tests {
         let (assembler, effect) = compile_effect(
             ".meta.inspect (list.at 0 (anno meta_refl:(\\_priors -> .heap.get ['ready] >>= (\\ready -> (ready == \"arrived for metadata\") =>> .r [ready])) [anno 'meta_init ()])) >>= (\\metadata -> (metadata == \"arrived for metadata\") =>> .r metadata)",
         );
-        let host = Arc::new(TestHost::with_wake_heap(PublicValue::record([(
-            "ready",
-            PublicValue::text("arrived for metadata"),
-        )])));
-        let (context, task) = schedule_composed_test_task(&effect, host.clone());
+        let host = Arc::new(TestHost::with_wake_heap(
+            assembler.core_values(),
+            public_record(
+                &assembler,
+                [("ready", assembler.values().text("arrived for metadata"))],
+            ),
+        ));
+        let (context, task) = schedule_composed_test_task(&assembler, &effect, host.clone());
         assert_eq!(
             context.pump_wait(task.wait(), 16_384),
             crate::evaluation::EvaluationPumpOutcome::NoProgress,
@@ -4850,7 +4946,7 @@ mod tests {
         };
         assert_eq!(
             assembler
-                .to_binary(&PublicValue::from_core(metadata))
+                .to_binary(&PublicValue::from_core(&assembler.core_values(), metadata))
                 .unwrap(),
             b"arrived for metadata".as_slice()
         );
@@ -4863,20 +4959,29 @@ mod tests {
             let (assembler, effect) = compile_effect(&format!(
                 ".cut (.alt (.meta.inspect {ordinary}) (.r \"fallback\"))"
             ));
-            let (context, task) =
-                schedule_composed_test_task(&effect, Arc::new(TestHost::default()));
+            let (context, task) = schedule_composed_test_task(
+                &assembler,
+                &effect,
+                Arc::new(TestHost::with_values(assembler.core_values())),
+            );
             let EvaluationTaskPoll::Complete(value) = pump_composed_test_task(&context, &task)
             else {
                 panic!("metadata mismatch should permit an ordinary fallback");
             };
             assert_eq!(
-                assembler.to_binary(&PublicValue::from_core(value)).unwrap(),
+                assembler
+                    .to_binary(&PublicValue::from_core(&assembler.core_values(), value))
+                    .unwrap(),
                 b"fallback".as_slice()
             );
         }
 
-        let (_, effect) = compile_effect(".cut (.alt (.meta.inspect 42) (1 2))");
-        let (context, task) = schedule_composed_test_task(&effect, Arc::new(TestHost::default()));
+        let (assembler, effect) = compile_effect(".cut (.alt (.meta.inspect 42) (1 2))");
+        let (context, task) = schedule_composed_test_task(
+            &assembler,
+            &effect,
+            Arc::new(TestHost::with_values(assembler.core_values())),
+        );
         let EvaluationTaskPoll::Failed(error) = pump_composed_test_task(&context, &task) else {
             panic!("metadata mismatch must not make a later evaluator error retryable");
         };
@@ -4885,8 +4990,12 @@ mod tests {
 
     #[test]
     fn reflection_eval_returns_a_tagged_whnf_result() {
-        let (_, effect) = compile_effect(".eval (1 + 2)");
-        let (context, task) = schedule_composed_test_task(&effect, Arc::new(TestHost::default()));
+        let (assembler, effect) = compile_effect(".eval (1 + 2)");
+        let (context, task) = schedule_composed_test_task(
+            &assembler,
+            &effect,
+            Arc::new(TestHost::with_values(assembler.core_values())),
+        );
         let EvaluationTaskPoll::Complete(Value::Dict(result)) =
             pump_composed_test_task(&context, &task)
         else {
@@ -4898,7 +5007,11 @@ mod tests {
         );
 
         let (_, nested) = compile_effect(".eval { bad:1 / 0 }");
-        let (context, task) = schedule_composed_test_task(&nested, Arc::new(TestHost::default()));
+        let (context, task) = schedule_composed_test_task(
+            &assembler,
+            &nested,
+            Arc::new(TestHost::with_values(assembler.core_values())),
+        );
         let EvaluationTaskPoll::Complete(Value::Dict(result)) =
             pump_composed_test_task(&context, &task)
         else {
@@ -4916,11 +5029,15 @@ mod tests {
     #[test]
     fn reflection_eval_returns_evaluator_errors_as_data() {
         let (assembler, effect) = compile_effect(".eval (1 / 0) >>= (\\result -> .r result.err)");
-        let (context, task) = schedule_composed_test_task(&effect, Arc::new(TestHost::default()));
+        let (context, task) = schedule_composed_test_task(
+            &assembler,
+            &effect,
+            Arc::new(TestHost::with_values(assembler.core_values())),
+        );
         let EvaluationTaskPoll::Complete(error) = pump_composed_test_task(&context, &task) else {
             panic!("eval should contain an evaluator error instead of failing its task");
         };
-        let error = PublicValue::from_core(error);
+        let error = PublicValue::from_core(&assembler.core_values(), error);
         let error = assembler
             .to_binary(
                 &assembler
@@ -4936,24 +5053,26 @@ mod tests {
         let (assembler, success) = compile_effect(
             ".eval (anno { refl:(.r ()) } \"ready\") >>= (\\result -> .r result.ok)",
         );
-        let host = Arc::new(TestHost::default());
-        let (context, task) = schedule_composed_test_task(&success, host.clone());
+        let host = Arc::new(TestHost::with_values(assembler.core_values()));
+        let (context, task) = schedule_composed_test_task(&assembler, &success, host.clone());
         let EvaluationTaskPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
             panic!("eval should resume after a successful lazy dependency");
         };
         assert_eq!(
-            assembler.to_binary(&PublicValue::from_core(value)).unwrap(),
+            assembler
+                .to_binary(&PublicValue::from_core(&assembler.core_values(), value))
+                .unwrap(),
             b"ready".as_slice()
         );
 
         let (_, failure) = compile_effect(
             ".eval (anno { refl:.fail } \"unreachable\") >>= (\\result -> .r result.err)",
         );
-        let (context, task) = schedule_composed_test_task(&failure, host);
+        let (context, task) = schedule_composed_test_task(&assembler, &failure, host);
         let EvaluationTaskPoll::Complete(error) = pump_composed_test_task(&context, &task) else {
             panic!("eval should convert a failed lazy dependency to err");
         };
-        let error = PublicValue::from_core(error);
+        let error = PublicValue::from_core(&assembler.core_values(), error);
         let error = assembler
             .to_binary(
                 &assembler
@@ -4980,7 +5099,7 @@ mod tests {
         let mut task = EffectTask::new_in_context(
             effect,
             TestEffects,
-            Arc::new(TestHost::default()),
+            Arc::new(TestHost::with_values(assembler.core_values())),
             observer,
         )
         .unwrap();
@@ -5003,7 +5122,7 @@ mod tests {
         let Some(error) = result.get(&*keys::ERR) else {
             panic!("eval should return the dependency failure under err");
         };
-        let error = PublicValue::from_core(error.clone());
+        let error = PublicValue::from_core(&assembler.core_values(), error.clone());
         assert_eq!(
             assembler
                 .to_binary(&assembler.get(&error, "msg.text").unwrap())
@@ -5014,9 +5133,12 @@ mod tests {
 
     #[test]
     fn effect_map_runs_left_to_right_and_preserves_result_order() {
-        let (_assembler, effect) =
-            compile_effect("eff.map (\\item -> .r item) [\"A\",\"B\",\"C\"]");
-        let (context, task) = schedule_composed_test_task(&effect, Arc::new(TestHost::default()));
+        let (assembler, effect) = compile_effect("eff.map (\\item -> .r item) [\"A\",\"B\",\"C\"]");
+        let (context, task) = schedule_composed_test_task(
+            &assembler,
+            &effect,
+            Arc::new(TestHost::with_values(assembler.core_values())),
+        );
         let EvaluationTaskPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
             panic!("effect map task should complete");
         };
@@ -5048,14 +5170,14 @@ mod tests {
     #[test]
     fn reflection_environment_is_available_as_plain_data() {
         let (assembler, version) = compile_effect(".env ['glam,'version]");
-        let host = Arc::new(TestHost::default());
-        let (context, task) = schedule_composed_test_task(&version, host.clone());
+        let host = Arc::new(TestHost::with_values(assembler.core_values()));
+        let (context, task) = schedule_composed_test_task(&assembler, &version, host.clone());
         let EvaluationTaskPoll::Complete(version) = pump_composed_test_task(&context, &task) else {
             panic!("environment version should complete")
         };
         assert_eq!(
             assembler
-                .to_binary(&PublicValue::from_core(version))
+                .to_binary(&PublicValue::from_core(&assembler.core_values(), version))
                 .unwrap(),
             env!("CARGO_PKG_VERSION").as_bytes()
         );
@@ -5063,7 +5185,7 @@ mod tests {
         let (_, environment) = compile_effect(
             ".env ['process,'env] >>= (\\environment -> (environment.[\"GLAM_TEST_ENV\"] == \"present\") =>> .r \"environment\")",
         );
-        let (context, task) = schedule_composed_test_task(&environment, host.clone());
+        let (context, task) = schedule_composed_test_task(&assembler, &environment, host.clone());
         let environment_poll = pump_composed_test_task(&context, &task);
         assert!(
             matches!(environment_poll, EvaluationTaskPoll::Complete(_)),
@@ -5071,7 +5193,7 @@ mod tests {
         );
 
         let (_, arguments) = compile_effect(".env ['process,'args]");
-        let (context, task) = schedule_composed_test_task(&arguments, host.clone());
+        let (context, task) = schedule_composed_test_task(&assembler, &arguments, host.clone());
         let poll = pump_composed_test_task(&context, &task);
         let EvaluationTaskPoll::Complete(Value::List(arguments)) = poll else {
             panic!("process arguments should return a list, got {poll:?}")
@@ -5086,7 +5208,8 @@ mod tests {
 
         let (_, child_environment) =
             compile_effect(".task.new (.env ['process,'args]) >>= (\\task -> .task.join task)");
-        let (context, task) = schedule_composed_test_task(&child_environment, host.clone());
+        let (context, task) =
+            schedule_composed_test_task(&assembler, &child_environment, host.clone());
         let EvaluationTaskPoll::Complete(Value::List(arguments)) =
             pump_composed_test_task(&context, &task)
         else {
@@ -5103,7 +5226,7 @@ mod tests {
         let (_, missing) = compile_effect(
             ".env ['process,'env] >>= (\\environment -> (environment.[\"GLAM_TEST_MISSING\"] == {}) =>> .r \"missing\")",
         );
-        let (context, task) = schedule_composed_test_task(&missing, host);
+        let (context, task) = schedule_composed_test_task(&assembler, &missing, host);
         assert!(matches!(
             pump_composed_test_task(&context, &task),
             EvaluationTaskPoll::Complete(_)
@@ -5115,13 +5238,15 @@ mod tests {
         let (assembler, effect) = compile_effect(
             ".task.new (.r \"result\") >>= (\\task -> .task.join task >>= (\\_value -> .task.value task))",
         );
-        let host = Arc::new(TestHost::default());
-        let (context, task) = schedule_composed_test_task(&effect, host);
+        let host = Arc::new(TestHost::with_values(assembler.core_values()));
+        let (context, task) = schedule_composed_test_task(&assembler, &effect, host);
         let EvaluationTaskPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
             panic!("task.value should return a completed task result")
         };
         assert_eq!(
-            assembler.to_binary(&PublicValue::from_core(value)).unwrap(),
+            assembler
+                .to_binary(&PublicValue::from_core(&assembler.core_values(), value))
+                .unwrap(),
             b"result".as_slice()
         );
     }
@@ -5131,20 +5256,21 @@ mod tests {
         let (assembler, effect) = compile_effect(
             ".task.new (.r \"result\") >>= (\\task -> .task.join task >>= (\\_ -> .task.join task))",
         );
-        let host = Arc::new(TestHost::default());
-        let (context, task) = schedule_composed_test_task(&effect, host);
+        let host = Arc::new(TestHost::with_values(assembler.core_values()));
+        let (context, task) = schedule_composed_test_task(&assembler, &effect, host);
         let EvaluationTaskPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
             panic!("a late join should retain the completed child result")
         };
         assert_eq!(
-            assembler.to_binary(&PublicValue::from_core(value)).unwrap(),
+            assembler
+                .to_binary(&PublicValue::from_core(&assembler.core_values(), value))
+                .unwrap(),
             b"result".as_slice()
         );
     }
 
     #[test]
     fn task_status_reports_launched_and_terminal_states() {
-        let host = Arc::new(TestHost::default());
         for source in [
             ".task.new (.r ()) >>= (\\task -> .task.status task >>= (\\status -> (status == 'launched) =>> .r ()))",
             ".task.new (.r ()) >>= (\\task -> .task.join task >>= (\\_ -> .task.status task >>= (\\status -> .r status.ok)))",
@@ -5153,8 +5279,9 @@ mod tests {
             ".task.new (.r ()) >>= (\\task -> .task.join task >>= (\\_ -> .task.ack_error task =>> .task.status task >>= (\\status -> .r status.ok)))",
             ".task.new (.r ()) >>= (\\task -> .task.cancel task =>> .task.ack_error task =>> .task.ack_error task =>> .task.status task >>= (\\status -> (status == 'canceled) =>> .r ()))",
         ] {
-            let (_, effect) = compile_effect(source);
-            let (context, task) = schedule_composed_test_task(&effect, host.clone());
+            let (assembler, effect) = compile_effect(source);
+            let host = Arc::new(TestHost::with_values(assembler.core_values()));
+            let (context, task) = schedule_composed_test_task(&assembler, &effect, host.clone());
             let poll = pump_composed_test_task(&context, &task);
             assert!(
                 matches!(poll, EvaluationTaskPoll::Complete(_)),
@@ -5166,8 +5293,9 @@ mod tests {
     #[test]
     fn task_observers_reject_a_handle_from_another_session() {
         let (assembler, spawn) = compile_effect(".task.new (.r ())");
-        let host = Arc::new(TestHost::default());
-        let (first_context, first_task) = schedule_composed_test_task(&spawn, host.clone());
+        let host = Arc::new(TestHost::with_values(assembler.core_values()));
+        let (first_context, first_task) =
+            schedule_composed_test_task(&assembler, &spawn, host.clone());
         let EvaluationTaskPoll::Complete(handle) =
             pump_composed_test_task(&first_context, &first_task)
         else {
@@ -5175,11 +5303,21 @@ mod tests {
         };
 
         for operation in ["status", "value", "error", "join", "ack_error"] {
-            let (_, inspect) = compile_effect(&format!("\\task -> .task.{operation} task"));
+            let (_, inspect) = compile_effect_with_runtime(
+                &assembler.evaluation_runtime(),
+                &format!("\\task -> .task.{operation} task"),
+            );
             let inspect = assembler
-                .apply(&inspect, [PublicValue::from_core(handle.clone())])
+                .apply(
+                    &inspect,
+                    [PublicValue::from_core(
+                        &assembler.core_values(),
+                        handle.clone(),
+                    )],
+                )
                 .expect("foreign task inspection should apply");
-            let (second_context, second_task) = schedule_composed_test_task(&inspect, host.clone());
+            let (second_context, second_task) =
+                schedule_composed_test_task(&assembler, &inspect, host.clone());
             assert!(
                 matches!(
                     pump_composed_test_task(&second_context, &second_task),
@@ -5194,11 +5332,11 @@ mod tests {
 
     #[test]
     fn join_does_not_advance_an_alternative_while_the_child_is_nonterminal() {
-        let (_, effect) = compile_effect(
+        let (assembler, effect) = compile_effect(
             ".task.new (.cut (.heap.get ['never] >>= (\\_ -> .fail))) >>= (\\task -> .cut (.alt (.task.join task) (.r \"fallback\")))",
         );
-        let host = Arc::new(TestHost::default());
-        let (context, task) = schedule_composed_test_task(&effect, host);
+        let host = Arc::new(TestHost::with_values(assembler.core_values()));
+        let (context, task) = schedule_composed_test_task(&assembler, &effect, host);
         assert_eq!(
             context.pump_wait(task.wait(), 16_384),
             crate::evaluation::EvaluationPumpOutcome::NoProgress
@@ -5214,20 +5352,23 @@ mod tests {
         let (assembler, rolled_back) = compile_effect(
             ".task.new (.r \"alive\") >>= (\\task -> (.cut (.alt ((.task.cancel task) =>> .fail) (.r ()))) =>> .task.join task)",
         );
-        let host = Arc::new(TestHost::default());
-        let (context, task) = schedule_composed_test_task(&rolled_back, host.clone());
+        let host = Arc::new(TestHost::with_values(assembler.core_values()));
+        let (context, task) = schedule_composed_test_task(&assembler, &rolled_back, host.clone());
         let EvaluationTaskPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
             panic!("rolled-back cancellation should not cancel the child")
         };
         assert_eq!(
-            assembler.to_binary(&PublicValue::from_core(value)).unwrap(),
+            assembler
+                .to_binary(&PublicValue::from_core(&assembler.core_values(), value))
+                .unwrap(),
             b"alive".as_slice()
         );
 
-        let (_, committed) = compile_effect(
+        let (_, committed) = compile_effect_with_runtime(
+            &assembler.evaluation_runtime(),
             ".cut (.task.new (.log 'error { msg:{ text:\"cancelled task ran\" } }) >>= (\\task -> (.task.cancel task) =>> .r task)) >>= (\\task -> .task.status task >>= (\\status -> (status == 'canceled) =>> .r ()))",
         );
-        let (context, task) = schedule_composed_test_task(&committed, host.clone());
+        let (context, task) = schedule_composed_test_task(&assembler, &committed, host.clone());
         assert!(matches!(
             pump_composed_test_task(&context, &task),
             EvaluationTaskPoll::Complete(_)
@@ -5237,29 +5378,40 @@ mod tests {
             "serial commit should cancel a same-transaction task before polling it"
         );
 
-        let (_, spawn_foreign) = compile_effect(".task.new (.r ())");
+        let (_, spawn_foreign) =
+            compile_effect_with_runtime(&assembler.evaluation_runtime(), ".task.new (.r ())");
         let (source_context, source_task) =
-            schedule_composed_test_task(&spawn_foreign, host.clone());
+            schedule_composed_test_task(&assembler, &spawn_foreign, host.clone());
         let EvaluationTaskPoll::Complete(foreign_handle) =
             pump_composed_test_task(&source_context, &source_task)
         else {
             panic!("source session should produce a foreign task handle")
         };
-        let (_, cancel_foreign) = compile_effect("\\task -> .task.cancel task");
+        let (_, cancel_foreign) = compile_effect_with_runtime(
+            &assembler.evaluation_runtime(),
+            "\\task -> .task.cancel task",
+        );
         let cancel_foreign = assembler
-            .apply(&cancel_foreign, [PublicValue::from_core(foreign_handle)])
+            .apply(
+                &cancel_foreign,
+                [PublicValue::from_core(
+                    &assembler.core_values(),
+                    foreign_handle,
+                )],
+            )
             .expect("foreign cancellation should apply");
         let (foreign_context, foreign_task) =
-            schedule_composed_test_task(&cancel_foreign, host.clone());
+            schedule_composed_test_task(&assembler, &cancel_foreign, host.clone());
         assert!(matches!(
             pump_composed_test_task(&foreign_context, &foreign_task),
             EvaluationTaskPoll::Complete(_)
         ));
 
-        let (_, late) = compile_effect(
+        let (_, late) = compile_effect_with_runtime(
+            &assembler.evaluation_runtime(),
             ".task.new (.r \"done\") >>= (\\task -> .task.join task >>= (\\value -> (.task.cancel task) =>> .r value))",
         );
-        let (context, task) = schedule_composed_test_task(&late, host);
+        let (context, task) = schedule_composed_test_task(&assembler, &late, host);
         assert!(matches!(
             pump_composed_test_task(&context, &task),
             EvaluationTaskPoll::Complete(_)
@@ -5268,10 +5420,10 @@ mod tests {
 
     #[test]
     fn same_transaction_cancellation_prevents_worker_launch_and_machine_construction() {
-        let (_, effect) = compile_effect(
+        let (assembler, effect) = compile_effect(
             ".cut (.task.new (.log 'error { msg:{ text:\"cancelled task ran\" } }) >>= (\\task -> (.task.cancel task) =>> .r task)) >>= (\\task -> .task.status task >>= (\\status -> (status == 'canceled) =>> .r ()))",
         );
-        let host = Arc::new(TestHost::default());
+        let host = Arc::new(TestHost::with_values(assembler.core_values()));
         let executor = EvaluationExecutor::new(2).expect("test executor should start");
         let context = EvalContext::new(EvaluationSession::shared(&executor));
         let builds = Arc::new(AtomicUsize::new(0));
@@ -5310,24 +5462,26 @@ mod tests {
     fn reflection_task_launch_is_buffered_until_cut_commit() {
         let (assembler, effect) =
             compile_effect(".cut (.task.new (.r \"committed\")) >>= (\\task -> .task.join task)");
-        let host = Arc::new(TestHost::default());
-        let (context, task) = schedule_composed_test_task(&effect, host);
+        let host = Arc::new(TestHost::with_values(assembler.core_values()));
+        let (context, task) = schedule_composed_test_task(&assembler, &effect, host);
         let EvaluationTaskPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
             panic!("committed child task should complete")
         };
         assert_eq!(
-            assembler.to_binary(&PublicValue::from_core(value)).unwrap(),
+            assembler
+                .to_binary(&PublicValue::from_core(&assembler.core_values(), value))
+                .unwrap(),
             b"committed".as_slice()
         );
     }
 
     #[test]
     fn failed_transaction_discards_its_reflection_task_launch_and_cancellation() {
-        let (_, effect) = compile_effect(
+        let (assembler, effect) = compile_effect(
             ".cut (.alt (.task.new (.log 'error { msg:{ text:\"discarded\" } }) >>= (\\task -> (.task.cancel task) =>> .fail)) (.r \"kept\"))",
         );
-        let host = Arc::new(TestHost::default());
-        let (context, task) = schedule_composed_test_task(&effect, host.clone());
+        let host = Arc::new(TestHost::with_values(assembler.core_values()));
+        let (context, task) = schedule_composed_test_task(&assembler, &effect, host.clone());
         let poll = pump_composed_test_task(&context, &task);
         assert!(
             matches!(poll, EvaluationTaskPoll::Complete(_)),
@@ -5339,9 +5493,9 @@ mod tests {
 
     #[test]
     fn join_propagates_task_error_and_task_error_extracts_it() {
-        let (_, join) = compile_effect(".task.new (.fail) >>= (\\task -> .task.join task)");
-        let host = Arc::new(TestHost::default());
-        let (context, task) = schedule_composed_test_task(&join, host.clone());
+        let (assembler, join) = compile_effect(".task.new (.fail) >>= (\\task -> .task.join task)");
+        let host = Arc::new(TestHost::with_values(assembler.core_values()));
+        let (context, task) = schedule_composed_test_task(&assembler, &join, host.clone());
         let EvaluationTaskPoll::Failed(error) = pump_composed_test_task(&context, &task) else {
             panic!("join should propagate its child task error")
         };
@@ -5369,12 +5523,12 @@ mod tests {
 
         let (assembler, extract) =
             compile_effect(".task.new (.fail) >>= (\\task -> .task.error task)");
-        let (context, task) = schedule_composed_test_task(&extract, host);
+        let (context, task) = schedule_composed_test_task(&assembler, &extract, host);
         let poll = pump_composed_test_task(&context, &task);
         let EvaluationTaskPoll::Complete(value) = poll else {
             panic!("task_error should return the child task error, got {poll:?}")
         };
-        let value = PublicValue::from_core(value);
+        let value = PublicValue::from_core(&assembler.core_values(), value);
         let text = assembler
             .to_binary(
                 &assembler
@@ -5390,13 +5544,13 @@ mod tests {
         let (assembler, inspect) = compile_effect(
             ".cut (.task.new (.fail) >>= (\\task -> .task.ack_error task =>> .r task)) >>= (\\task -> .task.error task >>= (\\error -> .task.status task >>= (\\status -> .r {error:error, status:status})))",
         );
-        let host = Arc::new(TestHost::default());
-        let (context, parent) = schedule_composed_test_task(&inspect, host.clone());
+        let host = Arc::new(TestHost::with_values(assembler.core_values()));
+        let (context, parent) = schedule_composed_test_task(&assembler, &inspect, host.clone());
         let EvaluationTaskPoll::Complete(observation) = pump_composed_test_task(&context, &parent)
         else {
             panic!("acknowledged failure should remain observable as data")
         };
-        let observation = PublicValue::from_core(observation);
+        let observation = PublicValue::from_core(&assembler.core_values(), observation);
         let error = assembler
             .evaluate(
                 &assembler
@@ -5420,7 +5574,7 @@ mod tests {
         let (_, join) = compile_effect(
             ".cut (.task.new (.fail) >>= (\\task -> .task.ack_error task =>> .r task)) >>= (\\task -> .task.join task)",
         );
-        let (context, parent) = schedule_composed_test_task(&join, host);
+        let (context, parent) = schedule_composed_test_task(&assembler, &join, host);
         assert!(matches!(
             pump_composed_test_task(&context, &parent),
             EvaluationTaskPoll::Failed(_)
@@ -5441,11 +5595,11 @@ mod tests {
 
     #[test]
     fn abandoned_task_error_acknowledgement_does_not_suppress_reporting() {
-        let (_, effect) = compile_effect(
+        let (assembler, effect) = compile_effect(
             ".task.new (.fail) >>= (\\task -> (.cut (.alt ((.task.ack_error task) =>> .fail) (.r ()))) =>> .task.error task)",
         );
-        let host = Arc::new(TestHost::default());
-        let (context, parent) = schedule_composed_test_task(&effect, host);
+        let host = Arc::new(TestHost::with_values(assembler.core_values()));
+        let (context, parent) = schedule_composed_test_task(&assembler, &effect, host);
         assert!(matches!(
             pump_composed_test_task(&context, &parent),
             EvaluationTaskPoll::Complete(_)
@@ -5466,11 +5620,15 @@ mod tests {
         let (assembler, effect) = compile_effect(
             ".task.new (anno context:\"child dispatch\" (anno 'error { msg:{ text:\"handler failed\" }, operation:'emit })) >>= (\\task -> .task.error task)",
         );
-        let (context, task) = schedule_composed_test_task(&effect, Arc::new(TestHost::default()));
+        let (context, task) = schedule_composed_test_task(
+            &assembler,
+            &effect,
+            Arc::new(TestHost::with_values(assembler.core_values())),
+        );
         let EvaluationTaskPoll::Complete(error) = pump_composed_test_task(&context, &task) else {
             panic!("task.error should return the child's structured failure");
         };
-        let error = PublicValue::from_core(error);
+        let error = PublicValue::from_core(&assembler.core_values(), error);
         assert_eq!(
             assembler
                 .to_binary(&assembler.get(&error, "msg.text").unwrap())
@@ -5479,7 +5637,7 @@ mod tests {
         );
         assert_eq!(
             assembler.get(&error, "operation").unwrap(),
-            PublicValue::atom_from_text("emit")
+            assembler.values().atom_from_text("emit")
         );
         let contexts = assembler.get(&error, "msg.context").unwrap();
         let Value::List(contexts) = contexts.as_core() else {
@@ -5554,7 +5712,8 @@ mod tests {
             "{eff:anno context:\"effect function\" (anno 'error {msg:{text:\"dispatch failed\"}, detail:7})}",
         );
 
-        let halt = run_standard_test(&effect).expect_err("the effect function should fail");
+        let halt =
+            run_standard_test(&assembler, &effect).expect_err("the effect function should fail");
         let diagnostic = halt.diagnostic(&assembler.values());
         assert_eq!(diagnostic.message(), "dispatch failed");
         assert_eq!(
@@ -5579,7 +5738,6 @@ mod tests {
 
     #[test]
     fn failed_and_cancelled_joins_retain_retryable_errors() {
-        let host = Arc::new(TestHost::default());
         for (source, expected) in [
             (
                 ".task.new (.fail) >>= (\\task -> .cut (.heap.get ['observed] >>= (\\_ -> .task.join task)))",
@@ -5590,8 +5748,9 @@ mod tests {
                 "was cancelled",
             ),
         ] {
-            let (_, effect) = compile_effect(source);
-            let (context, parent) = schedule_composed_test_task(&effect, host.clone());
+            let (assembler, effect) = compile_effect(source);
+            let host = Arc::new(TestHost::with_values(assembler.core_values()));
+            let (context, parent) = schedule_composed_test_task(&assembler, &effect, host.clone());
             let EvaluationSessionRun::Deadlocked(report) = context.run_until_quiescent() else {
                 panic!("retryable joined task error should remain unfinished for {source}")
             };
@@ -5616,9 +5775,14 @@ mod tests {
     #[test]
     fn observed_evaluation_error_restarts_without_advancing_alternatives() {
         let (assembler, effect) = compile_effect(".cut (.alt (.read_log) (1 2))");
-        let host = Arc::new(TestHost::default());
-        let mut task =
-            EffectTask::new(effect.as_core().clone(), TestEffects, host.clone()).unwrap();
+        let host = Arc::new(TestHost::with_values(assembler.core_values()));
+        let mut task = EffectTask::new(
+            &assembler.core_values(),
+            effect.as_core().clone(),
+            TestEffects,
+            host.clone(),
+        )
+        .unwrap();
 
         let EffectTaskPoll::Blocked(blocked) = task.poll(512) else {
             panic!("error after an observed alternative should remain retryable")
@@ -5635,6 +5799,7 @@ mod tests {
         );
 
         host.emit_diagnostic(Diagnostic::new(
+            &assembler.values(),
             crate::diagnostic::Severity::Info,
             "available after retry",
         ));
@@ -5649,7 +5814,7 @@ mod tests {
         };
         assert_eq!(
             assembler.get(&value, "msg.text").unwrap(),
-            PublicValue::text("available after retry")
+            assembler.values().text("available after retry")
         );
     }
 
@@ -5657,12 +5822,19 @@ mod tests {
     fn synchronous_error_recovery_waits_for_observed_state_change() {
         let (assembler, effect) =
             compile_effect(".cut (.heap.get ['handler] >>= (\\handler -> handler ()))");
-        let (_, handler) = compile_effect("\\_ -> .r \"recovered\"");
-        let host = Arc::new(TestHost::with_wake_heap(PublicValue::record([(
-            "handler", handler,
-        )])));
-        let mut task =
-            EffectTask::new(effect.as_core().clone(), TestEffects, host.clone()).unwrap();
+        let (_, handler) =
+            compile_effect_with_runtime(&assembler.evaluation_runtime(), "\\_ -> .r \"recovered\"");
+        let host = Arc::new(TestHost::with_wake_heap(
+            assembler.core_values(),
+            public_record(&assembler, [("handler", handler)]),
+        ));
+        let mut task = EffectTask::new(
+            &assembler.core_values(),
+            effect.as_core().clone(),
+            TestEffects,
+            host.clone(),
+        )
+        .unwrap();
 
         let TaskOutcome::Complete(value) = task.run().unwrap() else {
             panic!("state change should recover the evaluation error")
@@ -5676,16 +5848,18 @@ mod tests {
 
     #[test]
     fn unobserved_evaluation_error_remains_terminal_inside_cut() {
-        let (_, effect) = compile_effect(".cut (.alt (1 2) (.r \"fallback\"))");
-        let error = run_standard_test(&effect).expect_err("unobserved error should be terminal");
+        let (assembler, effect) = compile_effect(".cut (.alt (1 2) (.r \"fallback\"))");
+        let error = run_standard_test(&assembler, &effect)
+            .expect_err("unobserved error should be terminal");
         assert!(error.to_string().contains("requires a function value"));
     }
 
     #[test]
     fn task_error_fails_for_a_successful_task() {
-        let (_, effect) = compile_effect(".task.new (.r ()) >>= (\\task -> .task.error task)");
-        let host = Arc::new(TestHost::default());
-        let (context, task) = schedule_composed_test_task(&effect, host);
+        let (assembler, effect) =
+            compile_effect(".task.new (.r ()) >>= (\\task -> .task.error task)");
+        let host = Arc::new(TestHost::with_values(assembler.core_values()));
+        let (context, task) = schedule_composed_test_task(&assembler, &effect, host);
         let EvaluationTaskPoll::Failed(error) = pump_composed_test_task(&context, &task) else {
             panic!("task_error should fail for a successful task")
         };
@@ -5697,13 +5871,15 @@ mod tests {
         let (assembler, effect) = compile_effect(
             ".task.new (.r \"child\") >>= (\\task -> .cut (.alt (.task.error task) (.r \"fallback\")))",
         );
-        let host = Arc::new(TestHost::default());
-        let (context, task) = schedule_composed_test_task(&effect, host);
+        let host = Arc::new(TestHost::with_values(assembler.core_values()));
+        let (context, task) = schedule_composed_test_task(&assembler, &effect, host);
         let EvaluationTaskPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
             panic!("task_error alternative should fall through")
         };
         assert_eq!(
-            assembler.to_binary(&PublicValue::from_core(value)).unwrap(),
+            assembler
+                .to_binary(&PublicValue::from_core(&assembler.core_values(), value))
+                .unwrap(),
             b"fallback".as_slice()
         );
     }
@@ -5713,13 +5889,15 @@ mod tests {
         let (assembler, effect) = compile_effect(
             ".task.new ((.write_stderr \"child\") =>> .r \"done\") >>= (\\task -> .task.join task)",
         );
-        let host = Arc::new(TestHost::default());
-        let (context, task) = schedule_composed_test_task(&effect, host.clone());
+        let host = Arc::new(TestHost::with_values(assembler.core_values()));
+        let (context, task) = schedule_composed_test_task(&assembler, &effect, host.clone());
         let EvaluationTaskPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
             panic!("child should inherit the parent's extended effect vocabulary")
         };
         assert_eq!(
-            assembler.to_binary(&PublicValue::from_core(value)).unwrap(),
+            assembler
+                .to_binary(&PublicValue::from_core(&assembler.core_values(), value))
+                .unwrap(),
             b"done".as_slice()
         );
         assert_eq!(host.stderr(), [Bytes::from_static(b"child")]);
@@ -5727,10 +5905,15 @@ mod tests {
 
     #[test]
     fn polling_reports_state_block_without_waiting_in_the_machine() {
-        let (_, effect) = compile_effect(".read_log");
-        let host = Arc::new(TestHost::default());
-        let mut task =
-            EffectTask::new(effect.as_core().clone(), TestEffects, host.clone()).unwrap();
+        let (assembler, effect) = compile_effect(".read_log");
+        let host = Arc::new(TestHost::with_values(assembler.core_values()));
+        let mut task = EffectTask::new(
+            &assembler.core_values(),
+            effect.as_core().clone(),
+            TestEffects,
+            host.clone(),
+        )
+        .unwrap();
 
         let EffectTaskPoll::Blocked(blocked) = task.poll(256) else {
             panic!("empty queue should suspend the task")
@@ -5740,6 +5923,7 @@ mod tests {
         assert_eq!(host.wait_count(), 0);
 
         host.emit_diagnostic(Diagnostic::new(
+            &assembler.values(),
             crate::diagnostic::Severity::Info,
             "available now",
         ));
@@ -5752,15 +5936,23 @@ mod tests {
         let (assembler, build_effect) = compile_effect(
             "\\x -> (.write_stderr \"once\") =>> .cut (.alt (.r x >>= (\\value -> (value == \"done\") =>> .r value)) ((.write_stderr \"wrong\") =>> .r \"wrong\"))",
         );
-        let gate = PublicValue::from_core(Value::Lazy(LazyValue::from_reflection_gate(
-            &crate::core::test_value_factory(),
-            Value::Number(Number::from_u64(0)),
-            Value::binary_from_text("done"),
-        )));
+        let gate = PublicValue::from_core(
+            &assembler.core_values(),
+            Value::Lazy(LazyValue::from_reflection_gate(
+                &crate::core::test_value_factory(),
+                Value::Number(Number::from_u64(0)),
+                Value::binary_from_text("done"),
+            )),
+        );
         let effect = assembler.apply(&build_effect, [gate]).unwrap();
-        let host = Arc::new(TestHost::default());
-        let mut task =
-            EffectTask::new(effect.as_core().clone(), TestEffects, host.clone()).unwrap();
+        let host = Arc::new(TestHost::with_values(assembler.core_values()));
+        let mut task = EffectTask::new(
+            &assembler.core_values(),
+            effect.as_core().clone(),
+            TestEffects,
+            host.clone(),
+        )
+        .unwrap();
 
         let blocked = match task.poll(512) {
             EffectTaskPoll::Blocked(blocked) => blocked,
@@ -5796,15 +5988,23 @@ mod tests {
         let (assembler, build_effect) = compile_effect(
             "\\x -> .cut (.alt (.read_log >>= (\\message -> .r message.msg.text)) (.r x >>= (\\value -> (value == \"unused\") =>> .r value)))",
         );
-        let gate = PublicValue::from_core(Value::Lazy(LazyValue::from_reflection_gate(
-            &crate::core::test_value_factory(),
-            Value::Number(Number::from_u64(0)),
-            Value::binary_from_text("unused"),
-        )));
+        let gate = PublicValue::from_core(
+            &assembler.core_values(),
+            Value::Lazy(LazyValue::from_reflection_gate(
+                &crate::core::test_value_factory(),
+                Value::Number(Number::from_u64(0)),
+                Value::binary_from_text("unused"),
+            )),
+        );
         let effect = assembler.apply(&build_effect, [gate]).unwrap();
-        let host = Arc::new(TestHost::default());
-        let mut task =
-            EffectTask::new(effect.as_core().clone(), TestEffects, host.clone()).unwrap();
+        let host = Arc::new(TestHost::with_values(assembler.core_values()));
+        let mut task = EffectTask::new(
+            &assembler.core_values(),
+            effect.as_core().clone(),
+            TestEffects,
+            host.clone(),
+        )
+        .unwrap();
 
         let EffectTaskPoll::Blocked(blocked) = task.poll(512) else {
             panic!("right alternative should retain the failed queue observation")
@@ -5813,6 +6013,7 @@ mod tests {
         assert!(blocked.observed_generation.is_some());
 
         host.emit_diagnostic(Diagnostic::new(
+            &assembler.values(),
             crate::diagnostic::Severity::Info,
             "state won",
         ));
@@ -5841,10 +6042,10 @@ mod tests {
     #[test]
     fn unobserved_failure_is_permanent_with_or_without_cut() {
         for source in [".fail", ".cut (.fail)"] {
-            let (_, effect) = compile_effect(source);
-            let host = Arc::new(TestHost::default());
+            let (assembler, effect) = compile_effect(source);
+            let host = Arc::new(TestHost::with_values(assembler.core_values()));
             assert!(
-                run_log_test(&effect, host.clone())
+                run_log_test(&assembler, &effect, host.clone())
                     .unwrap_err()
                     .to_string()
                     .contains("failed permanently")
@@ -5857,11 +6058,16 @@ mod tests {
     fn empty_log_read_outside_cut_retries_after_its_observation_changes() {
         let (assembler, effect) =
             compile_effect(".read_log >>= (\\message -> .r message.msg.text)");
-        let host = Arc::new(TestHost::with_wake_diagnostic(Diagnostic::new(
-            crate::diagnostic::Severity::Warning,
-            "arrived later",
-        )));
-        let TaskOutcome::Complete(value) = run_log_test(&effect, host.clone()).unwrap() else {
+        let host = Arc::new(TestHost::with_wake_diagnostic(
+            assembler.core_values(),
+            Diagnostic::new(
+                &assembler.values(),
+                crate::diagnostic::Severity::Warning,
+                "arrived later",
+            ),
+        ));
+        let TaskOutcome::Complete(value) = run_log_test(&assembler, &effect, host.clone()).unwrap()
+        else {
             panic!("observed queue change should resume the log read")
         };
         assert_eq!(
@@ -5874,13 +6080,17 @@ mod tests {
 
     #[test]
     fn committed_log_read_clears_its_retry_checkpoint() {
-        let (_, effect) = compile_effect(".read_log >>= (\\_message -> .fail)");
-        let host = Arc::new(TestHost::with_diagnostics(vec![Diagnostic::new(
-            crate::diagnostic::Severity::Warning,
-            "consumed once",
-        )]));
+        let (assembler, effect) = compile_effect(".read_log >>= (\\_message -> .fail)");
+        let host = Arc::new(TestHost::with_diagnostics(
+            assembler.core_values(),
+            vec![Diagnostic::new(
+                &assembler.values(),
+                crate::diagnostic::Severity::Warning,
+                "consumed once",
+            )],
+        ));
         assert!(
-            run_log_test(&effect, host.clone())
+            run_log_test(&assembler, &effect, host.clone())
                 .unwrap_err()
                 .to_string()
                 .contains("failed permanently")
@@ -5894,11 +6104,16 @@ mod tests {
         let (assembler, effect) = compile_effect(
             ".cut (.alt (.read_log >>= (\\message -> .r message.msg.text)) (.fail))",
         );
-        let host = Arc::new(TestHost::with_wake_diagnostic(Diagnostic::new(
-            crate::diagnostic::Severity::Warning,
-            "cut resumed",
-        )));
-        let TaskOutcome::Complete(value) = run_log_test(&effect, host.clone()).unwrap() else {
+        let host = Arc::new(TestHost::with_wake_diagnostic(
+            assembler.core_values(),
+            Diagnostic::new(
+                &assembler.values(),
+                crate::diagnostic::Severity::Warning,
+                "cut resumed",
+            ),
+        ));
+        let TaskOutcome::Complete(value) = run_log_test(&assembler, &effect, host.clone()).unwrap()
+        else {
             panic!("observed queue change should restart the exhausted cut")
         };
         assert_eq!(
@@ -5910,26 +6125,33 @@ mod tests {
 
     #[test]
     fn standard_task_does_not_expose_specialized_requests() {
-        let (_, effect) = compile_effect(".read_log");
-        assert!(run_standard_test(&effect).is_err());
+        let (assembler, effect) = compile_effect(".read_log");
+        assert!(run_standard_test(&assembler, &effect).is_err());
 
-        let (_, effect) = compile_effect(".log 'info { msg:{ text:\"hidden\" } }");
-        assert!(run_standard_test(&effect).is_err());
+        let (assembler, effect) = compile_effect(".log 'info { msg:{ text:\"hidden\" } }");
+        assert!(run_standard_test(&assembler, &effect).is_err());
     }
 
     #[test]
     fn reusable_reflection_api_does_not_expose_internal_queries() {
-        let (_, effect) = compile_effect(".query.result {}");
-        assert!(run_reflection_test(&effect, Arc::new(TestHost::default())).is_err());
+        let (assembler, effect) = compile_effect(".query.result {}");
+        assert!(
+            run_reflection_test(
+                &assembler,
+                &effect,
+                Arc::new(TestHost::with_values(assembler.core_values()))
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn reusable_reflection_log_emits_raw_diagnostics_transactionally() {
         let (assembler, effect) =
             compile_effect(".cut ((.log 'warn { msg:{ text:\"reflection warning\" } }) =>> .r ())");
-        let host = Arc::new(TestHost::default());
+        let host = Arc::new(TestHost::with_values(assembler.core_values()));
         assert!(matches!(
-            run_reflection_test(&effect, host.clone()).unwrap(),
+            run_reflection_test(&assembler, &effect, host.clone()).unwrap(),
             TaskOutcome::Complete(_)
         ));
         let diagnostics = host.diagnostics();
@@ -5947,7 +6169,7 @@ mod tests {
 
         let (_, invalid) = compile_effect(".log 'verbose { msg:{ text:\"wrong\" } }");
         assert!(
-            run_reflection_test(&invalid, host)
+            run_reflection_test(&assembler, &invalid, host)
                 .unwrap_err()
                 .to_string()
                 .contains("severity must be")
@@ -5958,8 +6180,12 @@ mod tests {
     fn reflection_log_contextualizes_nested_message_and_severity_failures() {
         let (message_assembler, message_effect) =
             compile_effect(".log 'info (anno 'error \"message construction failed\")");
-        let message_error =
-            run_reflection_test(&message_effect, Arc::new(TestHost::default())).unwrap_err();
+        let message_error = run_reflection_test(
+            &message_assembler,
+            &message_effect,
+            Arc::new(TestHost::with_values(message_assembler.core_values())),
+        )
+        .unwrap_err();
         assert_eq!(
             task_halt_contexts(&message_assembler, &message_error),
             [
@@ -5971,8 +6197,12 @@ mod tests {
         let (severity_assembler, severity_effect) = compile_effect(
             ".log (anno 'error \"severity construction failed\") { msg:{ text:\"unused\" } }",
         );
-        let severity_error =
-            run_reflection_test(&severity_effect, Arc::new(TestHost::default())).unwrap_err();
+        let severity_error = run_reflection_test(
+            &severity_assembler,
+            &severity_effect,
+            Arc::new(TestHost::with_values(severity_assembler.core_values())),
+        )
+        .unwrap_err();
         assert_eq!(
             task_halt_contexts(&severity_assembler, &severity_error),
             [
@@ -6007,8 +6237,8 @@ mod tests {
 
     #[test]
     fn reflection_fixpoint_reports_recursive_self_observation() {
-        let (_, effect) = compile_effect(".fix (\\recur -> recur)");
-        let error = run_standard_test(&effect).unwrap_err();
+        let (assembler, effect) = compile_effect(".fix (\\recur -> recur)");
+        let error = run_standard_test(&assembler, &effect).unwrap_err();
         assert!(
             error.to_string().contains("recursively observed itself"),
             "{error}"
@@ -6017,11 +6247,12 @@ mod tests {
 
     #[test]
     fn task_failure_propagates_one_structured_failure_to_owned_promises() {
-        let (_, effect) = compile_effect(".r ()");
+        let (assembler, effect) = compile_effect(".r ()");
         let mut task = EffectTask::new(
+            &assembler.core_values(),
             effect.as_core().clone(),
             TestEffects,
-            Arc::new(TestHost::default()),
+            Arc::new(TestHost::with_values(assembler.core_values())),
         )
         .unwrap();
         let promises = [
@@ -6094,10 +6325,13 @@ mod tests {
 
     #[test]
     fn task_completion_and_cancellation_fail_unresolved_owned_promises() {
-        let (_, effect) = compile_effect(".r ()");
+        let (assembler, effect) = compile_effect(".r ()");
         let cases = [
             (
-                TaskTerminal::Complete(PublicValue::from_core(keys::unit_value())),
+                TaskTerminal::Complete(PublicValue::from_core(
+                    &assembler.core_values(),
+                    keys::unit_value(),
+                )),
                 "reflection task completed without fulfilling its fixpoint",
             ),
             (
@@ -6108,9 +6342,10 @@ mod tests {
 
         for (terminal, expected) in cases {
             let mut task = EffectTask::new(
+                &assembler.core_values(),
                 effect.as_core().clone(),
                 TestEffects,
-                Arc::new(TestHost::default()),
+                Arc::new(TestHost::with_values(assembler.core_values())),
             )
             .unwrap();
             let promise =
@@ -6141,11 +6376,11 @@ mod tests {
 
     #[test]
     fn fixpoint_hides_then_restores_the_reset_stack() {
-        let (_, hidden) = compile_effect(
+        let (assembler, hidden) = compile_effect(
             ".reset \"prompt\" (.fix (\\_loop -> .shift \"prompt\" (\\continuation -> continuation \"wrong\")))",
         );
         assert!(
-            run_standard_test(&hidden)
+            run_standard_test(&assembler, &hidden)
                 .unwrap_err()
                 .to_string()
                 .contains("not in reset scope")
@@ -6186,15 +6421,16 @@ mod tests {
         let (assembler, effect) = compile_effect(
             ".reset \"prompt\" (.shift \"prompt\" (\\continuation -> .r continuation))",
         );
-        let TaskOutcome::Complete(continuation) = run_standard_test(&effect).unwrap() else {
+        let TaskOutcome::Complete(continuation) = run_standard_test(&assembler, &effect).unwrap()
+        else {
             panic!("continuation capture should complete")
         };
         let foreign_invocation = assembler
-            .apply(&continuation, [PublicValue::text("foreign")])
+            .apply(&continuation, [assembler.values().text("foreign")])
             .expect("continuation should remain an applicable value");
 
         assert!(
-            run_standard_test(&foreign_invocation)
+            run_standard_test(&assembler, &foreign_invocation)
                 .unwrap_err()
                 .to_string()
                 .contains("belongs to another reflection task")
@@ -6203,11 +6439,11 @@ mod tests {
 
     #[test]
     fn replacing_root_state_replaces_the_active_reset_stack() {
-        let (_, effect) = compile_effect(
+        let (assembler, effect) = compile_effect(
             ".reset \"prompt\" ((.set [] {}) =>> .shift \"prompt\" (\\continuation -> continuation \"wrong\"))",
         );
         assert!(
-            run_standard_test(&effect)
+            run_standard_test(&assembler, &effect)
                 .unwrap_err()
                 .to_string()
                 .contains("not in reset scope")
@@ -6224,27 +6460,31 @@ mod tests {
 
     #[test]
     fn reading_all_local_state_does_not_observe_shared_heap() {
-        let (_, effect) = compile_effect(".get [] >>= (\\_state -> .fail)");
-        let host = Arc::new(TestHost::with_wake_heap(PublicValue::record([(
-            "changed",
-            PublicValue::text("later"),
-        )])));
-        let error = run_standard_on(&effect, host.clone()).unwrap_err();
+        let (assembler, effect) = compile_effect(".get [] >>= (\\_state -> .fail)");
+        let host = Arc::new(TestHost::with_wake_heap(
+            assembler.core_values(),
+            public_record(&assembler, [("changed", assembler.values().text("later"))]),
+        ));
+        let error = run_standard_on(&assembler, &effect, host.clone()).unwrap_err();
         assert!(error.to_string().contains("failed permanently"));
         assert_eq!(host.wait_count(), 0);
     }
 
     #[test]
     fn cut_rolls_back_log_reads_and_stderr_writes_before_trying_an_alternative() {
-        let (_, effect) = compile_effect(
+        let (assembler, effect) = compile_effect(
             ".cut (.alt (.read_log >>= (\\message -> (.write_stderr \"bad\") =>> .fail)) (.read_log >>= (\\message -> (.write_stderr message.msg.text) =>> .r ())))",
         );
-        let host = Arc::new(TestHost::with_diagnostics(vec![Diagnostic::new(
-            crate::diagnostic::Severity::Warning,
-            "good",
-        )]));
+        let host = Arc::new(TestHost::with_diagnostics(
+            assembler.core_values(),
+            vec![Diagnostic::new(
+                &assembler.values(),
+                crate::diagnostic::Severity::Warning,
+                "good",
+            )],
+        ));
         assert!(matches!(
-            run_log_test(&effect, host.clone()).unwrap(),
+            run_log_test(&assembler, &effect, host.clone()).unwrap(),
             TaskOutcome::Complete(_)
         ));
         assert_eq!(host.stderr(), [Bytes::from_static(b"good")]);
@@ -6261,9 +6501,9 @@ mod tests {
         let (assembler, effect) = compile_effect(
             ".cut (.alt ((.log 'error { msg:{ text:\"bad\" } }) =>> (.read_log >>= (\\message -> (.write_stderr message.msg.text) =>> .r ()))) ((.log 'warn { msg:{ text:\"good\" } }) =>> .r ()))",
         );
-        let host = Arc::new(TestHost::default());
+        let host = Arc::new(TestHost::with_values(assembler.core_values()));
         assert!(matches!(
-            run_log_test(&effect, host.clone()).unwrap(),
+            run_log_test(&assembler, &effect, host.clone()).unwrap(),
             TaskOutcome::Complete(_)
         ));
         assert!(host.stderr().is_empty());
@@ -6287,12 +6527,14 @@ mod tests {
         let (assembler, effect) = compile_effect(
             "(.set [] { heap:{ answer:\"local\" }, local:\"owned\" }) =>> .heap.get []",
         );
-        let host = Arc::new(TestHost::default());
-        let TaskOutcome::Complete(value) = run_standard_on(&effect, host.clone()).unwrap() else {
+        let host = Arc::new(TestHost::with_values(assembler.core_values()));
+        let TaskOutcome::Complete(value) =
+            run_standard_on(&assembler, &effect, host.clone()).unwrap()
+        else {
             panic!("state effect should complete")
         };
-        assert_eq!(value, PublicValue::empty_record());
-        assert_eq!(host.heap(), PublicValue::empty_record());
+        assert_eq!(value, assembler.values().empty_record());
+        assert_eq!(host.heap(), assembler.values().empty_record());
         assert!(assembler.get(&value, "answer").is_err());
     }
 
@@ -6301,17 +6543,17 @@ mod tests {
         let (assembler, effect) = compile_effect(
             ".heap.set ['shared] \"visible\" =>> .set ['local] \"private\" =>> .task.new (.get ['local] >>= (\\local -> .heap.get ['shared] >>= (\\shared -> .r { local:local, shared:shared }))) >>= (\\task -> .task.join task)",
         );
-        let host = Arc::new(TestHost::default());
-        let (context, task) = schedule_composed_test_task(&effect, host);
+        let host = Arc::new(TestHost::with_values(assembler.core_values()));
+        let (context, task) = schedule_composed_test_task(&assembler, &effect, host);
         let EvaluationTaskPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
             panic!("child task should complete")
         };
-        let value = PublicValue::from_core(value);
+        let value = PublicValue::from_core(&assembler.core_values(), value);
         assert_eq!(
             assembler
                 .evaluate(&assembler.get(&value, "local").unwrap())
                 .unwrap(),
-            PublicValue::empty_record()
+            assembler.values().empty_record()
         );
         assert_eq!(
             assembler
@@ -6323,16 +6565,15 @@ mod tests {
 
     #[test]
     fn child_tasks_inherit_same_session_volume_capabilities() {
-        let runtime = EvaluationRuntimeId::from_u64(41).unwrap();
-        let host = Arc::new(TestHost::with_runtime(runtime));
+        let assembler = Assembler::default();
+        let host = Arc::new(TestHost::with_values(assembler.core_values()));
         let volume = host
             .state
             .lock()
             .unwrap()
             .store
-            .create_volume(PublicValue::text("initial"))
+            .create_volume(assembler.values().text("initial"))
             .unwrap();
-        let assembler = Assembler::default();
         let module = assembler
             .module(["reflection_volume_child"])
             .script(
@@ -6345,7 +6586,7 @@ mod tests {
             .get(module.value(), "launch")
             .expect("volume child fixture should define launch");
         let effect = assembler
-            .apply(&launch, [volume_effects(runtime, volume)])
+            .apply(&launch, [volume_effects(&assembler.core_values(), volume)])
             .expect("volume capability should apply to the child launcher");
         let reflection_host: Arc<dyn ReflectionHost<ReflectionEffects>> = host.clone();
 
@@ -6380,49 +6621,52 @@ mod tests {
         let (assembler, effect) = compile_effect(
             ".cut (.alt ((.set ['local] \"bad\") =>> .heap.set ['shared] \"bad\" =>> .fail) (.get ['local] >>= (\\local -> .heap.get ['shared] >>= (\\shared -> .r { local:local, shared:shared }))))",
         );
-        let host = Arc::new(TestHost::default());
-        let TaskOutcome::Complete(value) = run_standard_on(&effect, host.clone()).unwrap() else {
+        let host = Arc::new(TestHost::with_values(assembler.core_values()));
+        let TaskOutcome::Complete(value) =
+            run_standard_on(&assembler, &effect, host.clone()).unwrap()
+        else {
             panic!("clean alternative should complete")
         };
         assert_eq!(
             assembler
                 .evaluate(&assembler.get(&value, "local").unwrap())
                 .unwrap(),
-            PublicValue::empty_record()
+            assembler.values().empty_record()
         );
         assert_eq!(
             assembler
                 .evaluate(&assembler.get(&value, "shared").unwrap())
                 .unwrap(),
-            PublicValue::empty_record()
+            assembler.values().empty_record()
         );
-        assert_eq!(host.heap(), PublicValue::empty_record());
+        assert_eq!(host.heap(), assembler.values().empty_record());
     }
 
     #[test]
     fn blind_heap_write_does_not_make_failure_retryable() {
-        let (_, effect) = compile_effect(".cut ((.heap.set ['discarded] \"value\") =>> .fail)");
-        let host = Arc::new(TestHost::default());
-        let error = run_standard_on(&effect, host.clone()).unwrap_err();
+        let (assembler, effect) =
+            compile_effect(".cut ((.heap.set ['discarded] \"value\") =>> .fail)");
+        let host = Arc::new(TestHost::with_values(assembler.core_values()));
+        let error = run_standard_on(&assembler, &effect, host.clone()).unwrap_err();
         assert!(error.to_string().contains("failed permanently"));
         assert_eq!(host.wait_count(), 0);
-        assert_eq!(host.heap(), PublicValue::empty_record());
+        assert_eq!(host.heap(), assembler.values().empty_record());
     }
 
     #[test]
     fn reading_a_covering_own_write_does_not_make_failure_retryable() {
-        let (_, effect) = compile_effect(
+        let (assembler, effect) = compile_effect(
             ".cut ((.heap.set ['owned] \"value\") =>> .heap.get ['owned] >>= (\\_value -> .fail))",
         );
-        let host = Arc::new(TestHost::with_wake_heap(PublicValue::record([(
-            "changed",
-            PublicValue::text("later"),
-        )])));
-        let error = run_standard_on(&effect, host.clone()).unwrap_err();
+        let host = Arc::new(TestHost::with_wake_heap(
+            assembler.core_values(),
+            public_record(&assembler, [("changed", assembler.values().text("later"))]),
+        ));
+        let error = run_standard_on(&assembler, &effect, host.clone()).unwrap_err();
 
         assert!(error.to_string().contains("failed permanently"));
         assert_eq!(host.wait_count(), 0);
-        assert_eq!(host.heap(), PublicValue::empty_record());
+        assert_eq!(host.heap(), assembler.values().empty_record());
     }
 
     #[test]
@@ -6430,11 +6674,19 @@ mod tests {
         let (assembler, effect) = compile_effect(
             ".heap.set ['items] [\"base\"] =>> .heap.rewrite ['items] (\\items -> items ++ [\"next\"]) =>> .heap.get ['items]",
         );
-        let host = Arc::new(TestHost::default());
-        let TaskOutcome::Complete(value) = run_standard_on(&effect, host.clone()).unwrap() else {
+        let host = Arc::new(TestHost::with_values(assembler.core_values()));
+        let TaskOutcome::Complete(value) =
+            run_standard_on(&assembler, &effect, host.clone()).unwrap()
+        else {
             panic!("heap rewrite should complete")
         };
-        let expected = PublicValue::list([PublicValue::text("base"), PublicValue::text("next")]);
+        let expected = public_list(
+            &assembler,
+            [
+                assembler.values().text("base"),
+                assembler.values().text("next"),
+            ],
+        );
 
         assert_list_values(&assembler, &value, &expected);
         let heap_items = assembler.get(&host.heap(), "items").unwrap();
@@ -6443,22 +6695,24 @@ mod tests {
 
     #[test]
     fn blind_heap_rewrite_does_not_make_failure_retryable() {
-        let (_, effect) =
+        let (assembler, effect) =
             compile_effect(".cut (.heap.rewrite ['counter] (\\value -> value + 1) =>> .fail)");
-        let host = Arc::new(TestHost::default());
-        let error = run_standard_on(&effect, host.clone()).unwrap_err();
+        let host = Arc::new(TestHost::with_values(assembler.core_values()));
+        let error = run_standard_on(&assembler, &effect, host.clone()).unwrap_err();
 
         assert!(error.to_string().contains("failed permanently"));
         assert_eq!(host.wait_count(), 0);
-        assert_eq!(host.heap(), PublicValue::empty_record());
+        assert_eq!(host.heap(), assembler.values().empty_record());
     }
 
     #[test]
     fn heap_root_get_and_set_are_explicit_whole_heap_operations() {
         let (assembler, effect) =
             compile_effect(".heap.set [] { answer:\"shared\" } =>> .heap.get []");
-        let host = Arc::new(TestHost::default());
-        let TaskOutcome::Complete(value) = run_standard_on(&effect, host.clone()).unwrap() else {
+        let host = Arc::new(TestHost::with_values(assembler.core_values()));
+        let TaskOutcome::Complete(value) =
+            run_standard_on(&assembler, &effect, host.clone()).unwrap()
+        else {
             panic!("whole-heap operations should complete")
         };
         assert_eq!(
@@ -6473,12 +6727,14 @@ mod tests {
     #[test]
     fn heap_root_replacement_and_path_errors_remain_lazy() {
         let (assembler, effect) = compile_effect(".cut ((.heap.set [] 42) =>> .heap.get ['x])");
-        let host = Arc::new(TestHost::default());
-        let TaskOutcome::Complete(value) = run_standard_on(&effect, host.clone()).unwrap() else {
+        let host = Arc::new(TestHost::with_values(assembler.core_values()));
+        let TaskOutcome::Complete(value) =
+            run_standard_on(&assembler, &effect, host.clone()).unwrap()
+        else {
             panic!("heap access should return its latent error value")
         };
         assert!(matches!(value.as_core(), Value::Lazy(_)));
-        assert_eq!(host.heap(), PublicValue::integer(42));
+        assert_eq!(host.heap(), assembler.values().integer(42));
         assert!(
             assembler
                 .evaluate(&value)
@@ -6490,9 +6746,12 @@ mod tests {
         let (_, caught) = compile_effect(
             ".cut ((.heap.set [] 42) =>> .heap.get ['x] >>= (\\value -> .eval value >>= (\\result -> .r result.err)))",
         );
-        let TaskOutcome::Complete(error) =
-            run_reflection_test(&caught, Arc::new(TestHost::default())).unwrap()
-        else {
+        let TaskOutcome::Complete(error) = run_reflection_test(
+            &assembler,
+            &caught,
+            Arc::new(TestHost::with_values(assembler.core_values())),
+        )
+        .unwrap() else {
             panic!("reflection eval should catch a latent heap access error")
         };
         let error_text = assembler.get(&error, "msg.text").unwrap();
@@ -6507,22 +6766,25 @@ mod tests {
         let (assembler, update) = compile_effect(
             ".cut ((.heap.set [] { safe:\"ok\", x:3 }) =>> (.heap.set ['x, 'b] 7) =>> .r ())",
         );
-        let host = Arc::new(TestHost::default());
+        let host = Arc::new(TestHost::with_values(assembler.core_values()));
         assert!(matches!(
-            run_standard_on(&update, host.clone()).unwrap(),
+            run_standard_on(&assembler, &update, host.clone()).unwrap(),
             TaskOutcome::Complete(_)
         ));
 
         let (_, safe) = compile_effect(".heap.get ['safe]");
-        let TaskOutcome::Complete(safe) = run_standard_on(&safe, host.clone()).unwrap() else {
+        let TaskOutcome::Complete(safe) = run_standard_on(&assembler, &safe, host.clone()).unwrap()
+        else {
             panic!("unrelated heap access should complete")
         };
         assert_eq!(assembler.to_binary(&safe).unwrap(), b"ok".as_slice());
 
-        let (_, bad) = compile_effect(
+        let (_, bad) = compile_effect_with_runtime(
+            &assembler.evaluation_runtime(),
             ".heap.get ['x, 'b] >>= (\\value -> .eval value >>= (\\result -> .r result.err))",
         );
-        let TaskOutcome::Complete(error) = run_reflection_test(&bad, host).unwrap() else {
+        let TaskOutcome::Complete(error) = run_reflection_test(&assembler, &bad, host).unwrap()
+        else {
             panic!("reflection eval should catch the nested update error")
         };
         let error_text = assembler.get(&error, "msg.text").unwrap();
@@ -6534,51 +6796,60 @@ mod tests {
 
     #[test]
     fn only_heap_reads_make_later_failure_retryable() {
-        let ready_heap = PublicValue::record([("answer", PublicValue::text("ready"))]);
         let (assembler, heap_effect) = compile_effect(
             ".heap.get ['answer] >>= (\\answer -> (answer == \"ready\") =>> .r answer)",
         );
-        let heap_host = Arc::new(TestHost::with_wake_heap(ready_heap));
+        let ready_heap = public_record(&assembler, [("answer", assembler.values().text("ready"))]);
+        let heap_host = Arc::new(TestHost::with_wake_heap(
+            assembler.core_values(),
+            ready_heap,
+        ));
         let TaskOutcome::Complete(value) =
-            run_standard_on(&heap_effect, heap_host.clone()).unwrap()
+            run_standard_on(&assembler, &heap_effect, heap_host.clone()).unwrap()
         else {
             panic!("heap observation should retry after the heap changes")
         };
         assert_eq!(assembler.to_binary(&value).unwrap(), b"ready".as_slice());
         assert_eq!(heap_host.wait_count(), 1);
 
-        let (_, local_effect) =
+        let (local_assembler, local_effect) =
             compile_effect(".get ['answer] >>= (\\answer -> (answer == \"ready\") =>> .r answer)");
-        let local_host = Arc::new(TestHost::with_wake_heap(PublicValue::record([(
-            "answer",
-            PublicValue::text("ready"),
-        )])));
-        let error = run_standard_on(&local_effect, local_host.clone()).unwrap_err();
+        let local_host = Arc::new(TestHost::with_wake_heap(
+            local_assembler.core_values(),
+            public_record(
+                &local_assembler,
+                [("answer", local_assembler.values().text("ready"))],
+            ),
+        ));
+        let error =
+            run_standard_on(&local_assembler, &local_effect, local_host.clone()).unwrap_err();
         assert!(error.to_string().contains("failed permanently"));
         assert_eq!(local_host.wait_count(), 0);
     }
 
     #[test]
     fn top_level_alternative_and_unmatched_shift_are_rejected() {
-        let (_, alternative) = compile_effect(".alt (.r 1) (.r 2)");
+        let (alternative_assembler, alternative) = compile_effect(".alt (.r 1) (.r 2)");
         assert!(
-            run_standard_test(&alternative)
+            run_standard_test(&alternative_assembler, &alternative)
                 .unwrap_err()
                 .to_string()
                 .contains("requires an enclosing `.cut`")
         );
 
-        let (_, fixpoint_alternative) = compile_effect(".fix (\\_loop -> .alt (.r 1) (.r 2))");
+        let (fixpoint_assembler, fixpoint_alternative) =
+            compile_effect(".fix (\\_loop -> .alt (.r 1) (.r 2))");
         assert!(
-            run_standard_test(&fixpoint_alternative)
+            run_standard_test(&fixpoint_assembler, &fixpoint_alternative)
                 .unwrap_err()
                 .to_string()
                 .contains("requires an enclosing `.cut`")
         );
 
-        let (_, shift) = compile_effect(".shift \"missing\" (\\continuation -> .r continuation)");
+        let (shift_assembler, shift) =
+            compile_effect(".shift \"missing\" (\\continuation -> .r continuation)");
         assert!(
-            run_standard_test(&shift)
+            run_standard_test(&shift_assembler, &shift)
                 .unwrap_err()
                 .to_string()
                 .contains("not in reset scope")

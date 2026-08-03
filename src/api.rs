@@ -42,37 +42,15 @@ use crate::reflection::{
     ReflectionStore, RuntimeInputEndpointId, RuntimeInputSequence, TaskCommit, TaskEnvironment,
     TaskHost, VolumeId, task_launcher, volume_effects,
 };
-use crate::runtime::RuntimeIds;
+use crate::runtime::{
+    EvaluationRuntimeId, RuntimeIds, RuntimeValueRoot, allocate_evaluation_runtime_id,
+};
 use crate::source::{
     FileSourceSystem, Host, HostSourceSystem, SourceArtifact, SourceIdentity, SourceSystem,
 };
 
 const GLAM_COMPATIBILITY_VERSION: &str = "0.1.0";
 const IMPLEMENTATION_NAME: &str = "rust-bootstrap";
-static NEXT_EVALUATION_RUNTIME_ID: AtomicU64 = AtomicU64::new(1);
-
-fn allocate_evaluation_runtime_id() -> EvaluationRuntimeId {
-    let id = NEXT_EVALUATION_RUNTIME_ID
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
-        .expect("evaluation runtime IDs exhausted");
-    EvaluationRuntimeId::from_u64(id).expect("evaluation runtime IDs start at one")
-}
-
-/// Process-unique identity of one evaluation runtime.
-///
-/// Numeric IDs are diagnostic provenance, not transferable authority.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct EvaluationRuntimeId(NonZeroU64);
-
-impl EvaluationRuntimeId {
-    pub fn get(self) -> u64 {
-        self.0.get()
-    }
-
-    pub(crate) fn from_u64(id: u64) -> Option<Self> {
-        NonZeroU64::new(id).map(Self)
-    }
-}
 
 /// Runtime-local identity of one buffered-output endpoint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -102,15 +80,18 @@ impl RuntimeDeliveryId {
     }
 }
 
-/// An assembly-time value whose concrete evaluator representation is private.
+/// An assembly-time value rooted in exactly one [`EvaluationRuntime`].
+///
+/// Values cannot be transferred between runtimes. Construct them through
+/// [`Values`], obtained from the target runtime or assembler.
 #[derive(Clone, PartialEq, Eq)]
-pub struct Value(CoreValue);
+pub struct Value(RuntimeValueRoot);
 
 /// Runtime-selected construction service for Glam values.
 ///
-/// Phase 1C will make the runtime provenance carried here part of every public
-/// [`Value`]. Selecting the runtime at construction time now prevents the
-/// embedding API from growing an implicit adoption path in the meantime.
+/// Every value produced here carries this factory's runtime provenance.
+/// Composite constructors reject members from another runtime instead of
+/// implicitly adopting them.
 #[derive(Clone)]
 pub struct Values {
     runtime: EvaluationRuntimeId,
@@ -126,55 +107,69 @@ impl Values {
         &self.core
     }
 
+    fn wrap(&self, value: CoreValue) -> Value {
+        debug_assert_eq!(self.runtime, self.core.runtime_id());
+        Value(RuntimeValueRoot::new(&self.core, value))
+    }
+
+    fn require(&self, value: &Value) -> Result<(), Error> {
+        value.require_runtime(self.runtime)
+    }
+
     pub fn binary(&self, bytes: impl Into<Bytes>) -> Value {
-        Value(CoreValue::Binary(bytes.into()))
+        self.wrap(CoreValue::Binary(bytes.into()))
     }
 
     pub fn text(&self, text: impl AsRef<str>) -> Value {
-        Value(CoreValue::binary_from_text(text.as_ref()))
+        self.wrap(CoreValue::binary_from_text(text.as_ref()))
     }
 
     pub fn atom_from_text(&self, text: impl AsRef<str>) -> Value {
         let key = Key::binary_from_text(text.as_ref());
-        Value(CoreValue::Atom(crate::core::Atom::from_key(&key)))
+        self.wrap(CoreValue::Atom(crate::core::Atom::from_key(&key)))
     }
 
     pub fn integer(&self, value: i64) -> Value {
-        Value(CoreValue::Number(Number::integer(value)))
+        self.wrap(CoreValue::Number(Number::integer(value)))
     }
 
     pub fn rational(&self, numerator: i64, denominator: i64) -> Option<Value> {
         Number::from_ratio_i64(numerator, denominator)
-            .map(|number| Value(CoreValue::Number(number)))
+            .map(|number| self.wrap(CoreValue::Number(number)))
     }
 
     pub fn number_from_f64(&self, value: f64) -> Option<Value> {
-        Number::from_f64(value).map(|number| Value(CoreValue::Number(number)))
+        Number::from_f64(value).map(|number| self.wrap(CoreValue::Number(number)))
     }
 
     pub fn number_from_text(&self, text: impl AsRef<str>) -> Result<Value, Error> {
         Number::parse(text.as_ref())
-            .map(|number| Value(CoreValue::Number(number)))
+            .map(|number| self.wrap(CoreValue::Number(number)))
             .map_err(Error::new)
     }
 
-    pub fn list(&self, values: impl IntoIterator<Item = Value>) -> Value {
-        Value(CoreValue::List(List::from_values(
-            values.into_iter().map(Value::into_core).collect(),
-        )))
+    pub fn list(&self, values: impl IntoIterator<Item = Value>) -> Result<Value, Error> {
+        let values = values
+            .into_iter()
+            .map(|value| {
+                self.require(&value)?;
+                Ok(value.into_core())
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        Ok(self.wrap(CoreValue::List(List::from_values(values))))
     }
 
-    pub fn record<I, S>(&self, entries: I) -> Value
+    pub fn record<I, S>(&self, entries: I) -> Result<Value, Error>
     where
         I: IntoIterator<Item = (S, Value)>,
         S: AsRef<str>,
     {
-        let dict = entries
-            .into_iter()
-            .fold(Dict::new_sync(), |dict, (name, value)| {
-                dict.insert(Key::atom_from_text(name), value.into_core())
-            });
-        Value(CoreValue::Dict(dict))
+        let mut dict = Dict::new_sync();
+        for (name, value) in entries {
+            self.require(&value)?;
+            dict = dict.insert(Key::atom_from_text(name), value.into_core());
+        }
+        Ok(self.wrap(CoreValue::Dict(dict)))
     }
 
     pub fn dictionary(
@@ -183,28 +178,33 @@ impl Values {
     ) -> Result<Value, Error> {
         let mut dict = Dict::new_sync();
         for (key, value) in entries {
+            self.require(&key)?;
+            self.require(&value)?;
             let key = Key::from_value(key.as_core())
                 .ok_or_else(|| Error::new("dictionary key is not immediately keyable"))?;
             dict = dict.insert(key, value.into_core());
         }
-        Ok(Value(CoreValue::Dict(dict)))
+        Ok(self.wrap(CoreValue::Dict(dict)))
     }
 
     pub fn empty_record(&self) -> Value {
-        Value(CoreValue::Dict(Dict::new_sync()))
+        self.wrap(CoreValue::Dict(Dict::new_sync()))
     }
 
-    pub fn empty_object(&self, name: Value) -> Value {
+    pub fn empty_object(&self, name: Value) -> Result<Value, Error> {
         let spec = self.record([
             ("name", name),
-            ("deps", self.list(std::iter::empty())),
-            ("defs", Value::builtin(Builtin::ObjectDefaultDefs)),
-        ]);
+            ("deps", self.list(std::iter::empty())?),
+            (
+                "defs",
+                self.wrap(CoreValue::Builtin(Builtin::ObjectDefaultDefs)),
+            ),
+        ])?;
         self.builtin_call(Builtin::ObjectInstance, [spec])
     }
 
-    pub fn after_reflection(&self, effect: Value, target: Value) -> Value {
-        self.builtin_call(Builtin::Anno, [self.record([("refl", effect)]), target])
+    pub fn after_reflection(&self, effect: Value, target: Value) -> Result<Value, Error> {
+        self.builtin_call(Builtin::Anno, [self.record([("refl", effect)])?, target])
     }
 
     pub fn abstract_global_path<I, S>(&self, parts: I) -> Value
@@ -212,7 +212,7 @@ impl Values {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        Value(CoreValue::Atom(crate::core::Atom::from_key(
+        self.wrap(CoreValue::Atom(crate::core::Atom::from_key(
             &Key::abstract_global_path(parts),
         )))
     }
@@ -221,97 +221,41 @@ impl Values {
         &self,
         builtin: Builtin,
         arguments: impl IntoIterator<Item = Value>,
-    ) -> Value {
-        Value(CoreValue::builtin_call(
-            &self.core,
-            builtin,
-            arguments.into_iter().map(Value::into_core).collect(),
-        ))
+    ) -> Result<Value, Error> {
+        let arguments = arguments
+            .into_iter()
+            .map(|value| {
+                self.require(&value)?;
+                Ok(value.into_core())
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        Ok(self.wrap(CoreValue::builtin_call(&self.core, builtin, arguments)))
     }
 }
 
 impl Value {
-    pub fn binary(bytes: impl Into<Bytes>) -> Self {
-        Self(CoreValue::Binary(bytes.into()))
+    pub fn runtime_id(&self) -> EvaluationRuntimeId {
+        self.0.runtime_id()
     }
 
-    pub fn text(text: impl AsRef<str>) -> Self {
-        Self(CoreValue::binary_from_text(text.as_ref()))
-    }
-
-    pub fn atom_from_text(text: impl AsRef<str>) -> Self {
-        let key = Key::binary_from_text(text.as_ref());
-        Self(CoreValue::Atom(crate::core::Atom::from_key(&key)))
-    }
-
-    pub fn integer(value: i64) -> Self {
-        Self(CoreValue::Number(Number::integer(value)))
-    }
-
-    /// Constructs a small exact rational, normalized to lowest terms.
-    /// Returns `None` when `denominator` is zero.
-    pub fn rational(numerator: i64, denominator: i64) -> Option<Self> {
-        Number::from_ratio_i64(numerator, denominator).map(|number| Self(CoreValue::Number(number)))
-    }
-
-    /// Constructs the exact rational represented by a finite `f64`.
-    /// NaN and either infinity return `None`.
-    pub fn number_from_f64(value: f64) -> Option<Self> {
-        Number::from_f64(value).map(|number| Self(CoreValue::Number(number)))
-    }
-
-    /// Parses an exact number without exposing the backing big-number types.
-    /// Both `-3/2` and glam's `_3/2` spelling are accepted.
-    pub fn number_from_text(text: impl AsRef<str>) -> Result<Self, Error> {
-        Number::parse(text.as_ref())
-            .map(|number| Self(CoreValue::Number(number)))
-            .map_err(Error::new)
-    }
-
-    pub fn list(values: impl IntoIterator<Item = Value>) -> Self {
-        Self(CoreValue::List(List::from_values(
-            values.into_iter().map(Value::into_core).collect(),
-        )))
-    }
-
-    pub fn record<I, S>(entries: I) -> Self
-    where
-        I: IntoIterator<Item = (S, Value)>,
-        S: AsRef<str>,
-    {
-        let dict = entries
-            .into_iter()
-            .fold(Dict::new_sync(), |dict, (name, value)| {
-                dict.insert(Key::atom_from_text(name), value.into_core())
-            });
-        Self(CoreValue::Dict(dict))
-    }
-
-    /// Constructs a dictionary from arbitrary keyable values.
-    pub fn dictionary(entries: impl IntoIterator<Item = (Value, Value)>) -> Result<Self, Error> {
-        let mut dict = Dict::new_sync();
-        for (key, value) in entries {
-            let key = Key::from_value(key.as_core())
-                .ok_or_else(|| Error::new("dictionary key is not immediately keyable"))?;
-            dict = dict.insert(key, value.into_core());
+    fn require_runtime(&self, runtime: EvaluationRuntimeId) -> Result<(), Error> {
+        if self.runtime_id() == runtime {
+            Ok(())
+        } else {
+            Err(Error::new(format!(
+                "value belongs to evaluation runtime {}, expected evaluation runtime {}",
+                self.runtime_id().get(),
+                runtime.get()
+            )))
         }
-        Ok(Self(CoreValue::Dict(dict)))
-    }
-
-    pub fn empty_record() -> Self {
-        Self(CoreValue::Dict(Dict::new_sync()))
-    }
-
-    pub(crate) fn builtin(builtin: Builtin) -> Self {
-        Self(CoreValue::Builtin(builtin))
     }
 
     pub fn is_undefined(&self) -> bool {
-        matches!(&self.0, CoreValue::Dict(dict) if dict.is_empty())
+        matches!(self.0.as_core(), CoreValue::Dict(dict) if dict.is_empty())
     }
 
     pub fn kind(&self) -> ValueKind {
-        match &self.0 {
+        match self.0.as_core() {
             CoreValue::Atom(_) => ValueKind::Atom,
             CoreValue::Number(_) => ValueKind::Number,
             CoreValue::Binary(_) => ValueKind::Binary,
@@ -328,21 +272,21 @@ impl Value {
     }
 
     pub fn as_binary(&self) -> Option<&[u8]> {
-        match &self.0 {
+        match self.0.as_core() {
             CoreValue::Binary(bytes) => Some(bytes.as_ref()),
             _ => None,
         }
     }
 
     pub fn as_i64(&self) -> Option<i64> {
-        match &self.0 {
+        match self.0.as_core() {
             CoreValue::Number(number) => number.to_i64_if_integer(),
             _ => None,
         }
     }
 
     pub fn as_rational_i64(&self) -> Option<(i64, i64)> {
-        match &self.0 {
+        match self.0.as_core() {
             CoreValue::Number(number) => number.to_ratio_i64(),
             _ => None,
         }
@@ -350,7 +294,7 @@ impl Value {
 
     /// Converts a number lossily to a finite `f64`.
     pub fn as_f64(&self) -> Option<f64> {
-        match &self.0 {
+        match self.0.as_core() {
             CoreValue::Number(number) => number.to_f64(),
             _ => None,
         }
@@ -358,22 +302,26 @@ impl Value {
 
     /// Returns the canonical exact integer or `numerator/denominator` text.
     pub fn as_number_text(&self) -> Option<String> {
-        match &self.0 {
+        match self.0.as_core() {
             CoreValue::Number(number) => Some(number.to_string()),
             _ => None,
         }
     }
 
-    pub(crate) fn from_core(value: CoreValue) -> Self {
-        Self(value)
+    pub(crate) fn from_core(values: &CoreValueFactory, value: CoreValue) -> Self {
+        Self::from_runtime(values.runtime_id(), value)
+    }
+
+    fn from_runtime(runtime: EvaluationRuntimeId, value: CoreValue) -> Self {
+        Self(RuntimeValueRoot::from_runtime(runtime, value))
     }
 
     pub(crate) fn as_core(&self) -> &CoreValue {
-        &self.0
+        self.0.as_core()
     }
 
     pub(crate) fn into_core(self) -> CoreValue {
-        self.0
+        self.0.into_core()
     }
 }
 
@@ -394,11 +342,12 @@ impl Value {
 /// ```compile_fail
 /// let assembler = glam::Assembler::default();
 /// let (_, resolver) = assembler.promise("host input");
-/// resolver.resolve(glam::Value::integer(1)).unwrap();
+/// resolver.resolve(assembler.values().integer(1)).unwrap();
 /// resolver.fail_message("too late").unwrap();
 /// ```
 #[must_use = "dropping an unresolved promise resolver fails its value"]
 pub struct PromiseResolver {
+    runtime: EvaluationRuntimeId,
     promise: Option<PromisedValue>,
     wake: PromiseWake,
 }
@@ -424,6 +373,7 @@ impl PromiseWake {
 impl PromiseResolver {
     /// Completes the promise successfully with `value`.
     pub fn resolve(mut self, value: Value) -> Result<(), Error> {
+        value.require_runtime(self.runtime)?;
         let promise = self
             .promise
             .take()
@@ -439,6 +389,7 @@ impl PromiseResolver {
     /// Completes the promise with an arbitrary Glam value as its permanent
     /// producer error.
     pub fn fail(self, failure: Value) -> Result<(), Error> {
+        failure.require_runtime(self.runtime)?;
         self.fail_with(Arc::new(EvaluationFailure::emission(failure.into_core())))
     }
 
@@ -536,6 +487,7 @@ pub struct NetCopy<'net> {
 /// `interaction_net` effect replay. Returning a port from the callback selects
 /// the net's sole exposed port; every other port must be wired exactly once.
 pub struct NetBuilder<'net> {
+    values: Values,
     builder: CoreNetBuilder<CoreSpecialization>,
     brand: PhantomData<fn(&'net mut ()) -> &'net mut ()>,
 }
@@ -562,9 +514,10 @@ impl<'net> NetBuilder<'net> {
         }
     }
 
-    pub fn data(&mut self, value: Value) -> NetPort<'net> {
+    pub fn data(&mut self, value: Value) -> Result<NetPort<'net>, Error> {
+        self.values.require(&value)?;
         let port = self.builder.data(value.into_core());
-        self.port(port)
+        Ok(self.port(port))
     }
 
     pub fn wire(&mut self, left: NetPort<'net>, right: NetPort<'net>) -> Result<(), Error> {
@@ -573,8 +526,9 @@ impl<'net> NetBuilder<'net> {
             .map_err(net_build_error)
     }
 
-    fn new() -> Self {
+    fn new(values: Values) -> Self {
         Self {
+            values,
             builder: CoreNetBuilder::new(),
             brand: PhantomData,
         }
@@ -606,9 +560,18 @@ pub struct Diagnostic {
 }
 
 impl Diagnostic {
-    pub fn new(severity: Severity, message: impl Into<Arc<str>>) -> Self {
+    pub fn new(values: &Values, severity: Severity, message: impl Into<Arc<str>>) -> Self {
+        Self::new_with_factory(values.core(), severity, message)
+    }
+
+    pub(crate) fn new_with_factory(
+        values: &CoreValueFactory,
+        severity: Severity,
+        message: impl Into<Arc<str>>,
+    ) -> Self {
         let message = message.into();
         Self::from_parts(
+            values.runtime_id(),
             None,
             severity,
             crate::diagnostic::text_message(None, &message),
@@ -619,17 +582,18 @@ impl Diagnostic {
     /// Wraps an arbitrary diagnostic value with separately supplied severity.
     /// Assembler and viewer metadata remain unapplied until enrichment.
     pub fn from_emission(severity: Severity, emission: Value) -> Self {
-        Self::from_parts(None, severity, emission.into_core(), None)
+        let runtime = emission.runtime_id();
+        Self::from_parts(runtime, None, severity, emission.into_core(), None)
     }
 
     pub fn with_source_location(self, source: impl Into<Arc<str>>, line: usize) -> Self {
         let source = source.into();
         let identity = SourceIdentity::file(Path::new(source.as_ref()));
-        let origin = CoreValue::Dict(Dict::new_sync().insert(
-            (*crate::core::keys::SOURCE).clone(),
-            identity.value().as_core().clone(),
-        ));
+        let origin = CoreValue::Dict(
+            Dict::new_sync().insert((*crate::core::keys::SOURCE).clone(), identity.value()),
+        );
         Self::from_parts(
+            self.emission.runtime_id(),
             Some(source.clone()),
             self.severity,
             crate::diagnostic::text_message(Some(line), &self.message),
@@ -649,6 +613,7 @@ impl Diagnostic {
 
     /// Applies authoritative assembler metadata to a fresh diagnostic object.
     pub fn enrich(&self, values: &Values) -> Result<Value, Error> {
+        self.emission.require_runtime(values.runtime)?;
         self.enrich_with_factory(&values.core)
     }
 
@@ -659,16 +624,17 @@ impl Diagnostic {
             self.severity,
             self.origin.as_ref().map(|origin| origin.as_core().clone()),
         )
-        .map(Value::from_core)
+        .map(|value| Value::from_core(values, value))
         .map_err(|error| Error::from_eval(values, error))
     }
 
     /// Applies assembler metadata followed by observer-specific object updates.
     /// The raw emission and other enriched views remain unchanged.
     pub fn enrich_with(&self, values: &Values, updates: Value) -> Result<Value, Error> {
+        updates.require_runtime(values.runtime)?;
         let enriched = self.enrich(values)?;
         crate::diagnostic::apply_updates(&values.core, enriched.into_core(), updates.into_core())
-            .map(Value::from_core)
+            .map(|value| Value::from_core(&values.core, value))
             .map_err(|error| Error::from_eval(&values.core, error))
     }
 
@@ -678,58 +644,67 @@ impl Diagnostic {
     /// assembler severity or origin metadata. This supports recursive context
     /// messages whose enrichment policy belongs entirely to the observer.
     pub fn apply_updates(values: &Values, message: &Value, updates: Value) -> Result<Value, Error> {
+        message.require_runtime(values.runtime)?;
+        updates.require_runtime(values.runtime)?;
         crate::diagnostic::apply_emission_updates(
             &values.core,
             message.as_core().clone(),
             updates.into_core(),
         )
-        .map(Value::from_core)
+        .map(|value| Value::from_core(&values.core, value))
         .map_err(|error| Error::from_eval(&values.core, error))
     }
 
     /// Prepends one structured frame describing why this diagnostic was
     /// produced or propagated. The original emission remains otherwise
     /// unchanged.
-    pub fn with_context(self, context: Value) -> Self {
+    pub fn with_context(self, context: Value) -> Result<Self, Error> {
+        context.require_runtime(self.emission.runtime_id())?;
         let emission = crate::diagnostic::prepend_context(
             self.emission.as_core().clone(),
             context.into_core(),
         )
         .unwrap_or_else(|_| self.emission.as_core().clone());
-        Self::from_parts(
+        Ok(Self::from_parts(
+            self.emission.runtime_id(),
             self.source,
             self.severity,
             emission,
             self.origin.map(Value::into_core),
-        )
+        ))
     }
 
     /// Encodes this Rust envelope as one runtime-local value for buffered
     /// transport. The configured logger decodes the envelope before applying
     /// its own enrichment and viewing policy.
     #[doc(hidden)]
-    pub fn transport_value(&self, values: &Values) -> Value {
+    pub fn transport_value(&self, values: &Values) -> Result<Value, Error> {
+        self.emission.require_runtime(values.runtime)?;
+        if let Some(origin) = &self.origin {
+            origin.require_runtime(values.runtime)?;
+        }
         let mut fields = vec![
             ("emission", self.emission.clone()),
             (
                 "severity",
-                Value::from_core(self.severity.value(values.core())),
+                Value::from_core(values.core(), self.severity.value(values.core())),
             ),
         ];
         if let Some(origin) = &self.origin {
             fields.push(("origin", origin.clone()));
         }
         if let Some(source) = &self.source {
-            fields.push(("source", Value::text(source.as_ref())));
+            fields.push(("source", values.text(source.as_ref())));
         }
         if let Some(line) = self.line {
-            fields.push(("line", Value::integer(line as i64)));
+            fields.push(("line", values.integer(line as i64)));
         }
-        Value::record(fields)
+        values.record(fields)
     }
 
     #[doc(hidden)]
     pub fn from_transport_value(value: &Value) -> Result<Self, Error> {
+        let runtime = value.runtime_id();
         let ValueKind::Dict = value.kind() else {
             return Err(Error::new("diagnostic transport requires a dictionary"));
         };
@@ -740,7 +715,7 @@ impl Diagnostic {
             fields
                 .get(&Key::atom_from_text(name))
                 .cloned()
-                .map(Value::from_core)
+                .map(|field| Value::from_runtime(runtime, field))
         };
         let emission = field("emission")
             .ok_or_else(|| Error::new("diagnostic transport is missing `emission`"))?;
@@ -795,8 +770,14 @@ impl Diagnostic {
         &self.message
     }
 
-    fn from_compile(trace: &CompilationTrace, severity: Severity, message: CoreValue) -> Self {
+    fn from_compile(
+        values: &CoreValueFactory,
+        trace: &CompilationTrace,
+        severity: Severity,
+        message: CoreValue,
+    ) -> Self {
         Self::from_parts(
+            values.runtime_id(),
             Some(Arc::from(trace.source_label())),
             severity,
             message,
@@ -805,6 +786,7 @@ impl Diagnostic {
     }
 
     fn from_parts(
+        runtime: EvaluationRuntimeId,
         source: Option<Arc<str>>,
         severity: Severity,
         message: CoreValue,
@@ -812,8 +794,8 @@ impl Diagnostic {
     ) -> Self {
         let (line, text) = crate::diagnostic::conventional_summary(&message);
         Self {
-            emission: Value::from_core(message),
-            origin: origin.map(Value::from_core),
+            emission: Value::from_runtime(runtime, message),
+            origin: origin.map(|origin| Value::from_runtime(runtime, origin)),
             source,
             severity,
             line,
@@ -1035,44 +1017,56 @@ impl DiagnosticBus {
     /// subscribers present at publication time. Subscriber calls occur outside
     /// the bus lock; sequence numbers, rather than callback completion order,
     /// define the order of concurrent publications.
-    pub fn publish(&self, diagnostic: Diagnostic) -> DiagnosticEvent {
-        self.publish_validated(diagnostic)
+    pub fn publish(&self, diagnostic: Diagnostic) -> Result<DiagnosticEvent, Error> {
+        let runtime = diagnostic.emission.runtime_id();
+        self.publish_validated(runtime, diagnostic)
+    }
+
+    fn publish_local(&self, diagnostic: Diagnostic) -> DiagnosticEvent {
+        self.publish(diagnostic)
+            .expect("diagnostic and bus must belong to the same evaluation runtime")
     }
 
     /// Publishes a diagnostic produced by runtime-owned work after checking
-    /// that its explicit transitional provenance matches this bus. Phase 1C
-    /// moves the same invariant into every runtime value.
+    /// both the stated runtime and the diagnostic value's provenance against
+    /// this bus.
     pub fn publish_from_runtime(
         &self,
         runtime: EvaluationRuntimeId,
         diagnostic: Diagnostic,
     ) -> Result<DiagnosticEvent, Error> {
-        let owner = self
-            .inner
-            .state
-            .lock()
-            .expect("diagnostic bus mutex should not be poisoned")
-            .runtime;
-        if owner != Some(runtime) {
-            return Err(Error::new(match owner {
-                Some(owner) => format!(
-                    "diagnostic bus belongs to evaluation runtime {}, not {}",
-                    owner.get(),
-                    runtime.get()
-                ),
-                None => "diagnostic bus is not bound to an evaluation runtime".to_owned(),
-            }));
+        if diagnostic.emission.runtime_id() != runtime {
+            return Err(Error::new(format!(
+                "diagnostic belongs to evaluation runtime {}, not {}",
+                diagnostic.emission.runtime_id().get(),
+                runtime.get()
+            )));
         }
-        Ok(self.publish_validated(diagnostic))
+        self.publish_validated(runtime, diagnostic)
     }
 
-    fn publish_validated(&self, diagnostic: Diagnostic) -> DiagnosticEvent {
+    fn publish_validated(
+        &self,
+        runtime: EvaluationRuntimeId,
+        diagnostic: Diagnostic,
+    ) -> Result<DiagnosticEvent, Error> {
         let (event, ingress, subscribers) = {
             let mut state = self
                 .inner
                 .state
                 .lock()
                 .expect("diagnostic bus mutex should not be poisoned");
+            match state.runtime {
+                Some(owner) if owner != runtime => {
+                    return Err(Error::new(format!(
+                        "diagnostic bus belongs to evaluation runtime {}, not {}",
+                        owner.get(),
+                        runtime.get()
+                    )));
+                }
+                Some(_) => {}
+                None => state.runtime = Some(runtime),
+            }
             let sequence = state.counts.next_sequence;
             state.counts.next_sequence = sequence
                 .checked_add(1)
@@ -1097,7 +1091,7 @@ impl DiagnosticBus {
         for subscriber in subscribers {
             subscriber.receive(event.clone());
         }
-        event
+        Ok(event)
     }
 
     pub fn counts(&self) -> DiagnosticCounts {
@@ -1156,7 +1150,16 @@ struct DiagnosticIngressInner {
 impl DiagnosticIngressInner {
     fn receive(&self, event: DiagnosticEvent) {
         let sequence = event.sequence();
-        let value = event.diagnostic().transport_value(&self.values);
+        let value = match event.diagnostic().transport_value(&self.values) {
+            Ok(value) => value,
+            Err(error) => {
+                self.state
+                    .lock()
+                    .expect("diagnostic ingress mutex should not be poisoned")
+                    .failure = Some(error);
+                return;
+            }
+        };
         let prepared = match self.sender.prepare(value) {
             Ok(prepared) => prepared,
             Err(error) => {
@@ -1304,7 +1307,7 @@ impl CompilationExecution {
                 .lock()
                 .expect("build diagnostic mutex should not be poisoned")
                 .push(diagnostic.clone());
-            assembler_diagnostics.publish(diagnostic);
+            assembler_diagnostics.publish_local(diagnostic);
         }));
 
         Ok(Self {
@@ -1336,6 +1339,7 @@ impl CompilationExecution {
     }
 
     fn drain(&self) -> bool {
+        let values = self.macros.values();
         let run = self.macros.run_until_quiescent();
         let (kind, report) = match run {
             EvaluationSessionRun::Complete(report) => (None, report),
@@ -1343,10 +1347,12 @@ impl CompilationExecution {
             EvaluationSessionRun::Deadlocked(report) => (Some("deadlocked"), report),
         };
         for (task, error) in report.failures.iter() {
-            self.macro_diagnostics.publish(Diagnostic::new(
-                Severity::Error,
-                format!("macro reflection task {} failed: {}", task.get(), error),
-            ));
+            self.macro_diagnostics
+                .publish_local(Diagnostic::new_with_factory(
+                    values,
+                    Severity::Error,
+                    format!("macro reflection task {} failed: {}", task.get(), error),
+                ));
         }
         if let Some(kind) = kind {
             let mut details = Vec::new();
@@ -1361,19 +1367,21 @@ impl CompilationExecution {
                     task.state
                 ));
             }
-            self.macro_diagnostics.publish(Diagnostic::new(
-                Severity::Error,
-                format!(
-                    "macro reflection scheduler {kind} with {} unfinished task{}{}",
-                    details.len(),
-                    if details.len() == 1 { "" } else { "s" },
-                    if details.is_empty() {
-                        String::new()
-                    } else {
-                        format!(": {}", details.join("; "))
-                    }
-                ),
-            ));
+            self.macro_diagnostics
+                .publish_local(Diagnostic::new_with_factory(
+                    values,
+                    Severity::Error,
+                    format!(
+                        "macro reflection scheduler {kind} with {} unfinished task{}{}",
+                        details.len(),
+                        if details.len() == 1 { "" } else { "s" },
+                        if details.is_empty() {
+                            String::new()
+                        } else {
+                            format!(": {}", details.join("; "))
+                        }
+                    ),
+                ));
         }
         self.macro_diagnostics.counts().errors() != 0
     }
@@ -1387,11 +1395,12 @@ impl CompilationExecution {
 fn macro_reflection_diagnostic(diagnostic: &Diagnostic) -> Diagnostic {
     let reasoning = CoreValue::Dict(Dict::new_sync().insert(
         Key::atom_from_text("role"),
-        Value::atom_from_text("macro").into_core(),
+        CoreValue::Atom(crate::core::Atom::from_key(&Key::binary_from_text("macro"))),
     ));
     let origin =
         CoreValue::Dict(Dict::new_sync().insert(Key::atom_from_text("reasoning"), reasoning));
     Diagnostic::from_parts(
+        diagnostic.emission.runtime_id(),
         diagnostic.source.clone(),
         diagnostic.severity,
         diagnostic.emission.as_core().clone(),
@@ -1423,14 +1432,14 @@ impl AssemblerReflectionHost {
 
     fn seal_environment(&self, environment: Value) -> Result<(), Error> {
         self.reflection_environment
-            .set(self.runtime().root_value(environment))
+            .set(self.runtime().root_value(environment)?)
             .map_err(|_| Error::new("reflection environment was already configured"))
     }
 
     fn create_volume(&self, initial: Value) -> Result<(VolumeId, Value), Error> {
         let runtime = self.runtime();
         let volume = runtime.create_volume(initial)?;
-        Ok((volume, volume_effects(self.runtime_id, volume)))
+        Ok((volume, volume_effects(runtime.values().core(), volume)))
     }
 }
 
@@ -1445,11 +1454,13 @@ impl TaskEnvironment for AssemblerReflectionHost {
 
 impl ReflectionServices for AssemblerReflectionHost {
     fn emit_diagnostic(&self, diagnostic: Diagnostic) {
-        self.diagnostics.publish(diagnostic);
+        self.diagnostics.publish_local(diagnostic);
     }
 
     fn update_query(&self, handle: &Arc<crate::reflection::EvaluationQueryHandle>, result: Value) {
-        self.runtime().update_query(handle, result);
+        self.runtime()
+            .update_query(handle, result)
+            .expect("reflection query results belong to the host runtime");
     }
 }
 
@@ -1472,7 +1483,7 @@ impl TaskHost<ReflectionEffects> for AssemblerReflectionHost {
         }
         let diagnostics = extra.diagnostics().to_vec();
         for diagnostic in diagnostics {
-            self.diagnostics.publish(diagnostic);
+            self.diagnostics.publish_local(diagnostic);
         }
         extra.commit_updates();
         CommitResult::Committed
@@ -1480,10 +1491,6 @@ impl TaskHost<ReflectionEffects> for AssemblerReflectionHost {
 
     fn reasoning_session_id(&self) -> Option<ReasoningSessionId> {
         Some(self.reasoning_session)
-    }
-
-    fn evaluation_runtime_id(&self) -> Option<EvaluationRuntimeId> {
-        Some(self.runtime_id)
     }
 
     fn wait_for_change(&self, observed_generation: u64) -> bool {
@@ -1868,7 +1875,7 @@ impl RuntimeEventJournal {
         self.outputs.push(RuntimeOutputIntent {
             delivery,
             endpoint: output.endpoint,
-            payload: owner.values.root(value),
+            payload: owner.values.root(value)?,
         });
         Ok(delivery)
     }
@@ -1957,7 +1964,7 @@ impl<T> RuntimeInputSender<T> {
             runtime: self.runtime,
             owner: Arc::downgrade(&owner),
             endpoint: self.endpoint,
-            payload: owner.values.root(value),
+            payload: owner.values.root(value)?,
         })
     }
 }
@@ -2227,18 +2234,10 @@ struct RuntimeValueFactory {
     core: CoreValueFactory,
 }
 
-#[derive(Clone)]
-struct RuntimeValueRoot {
-    runtime: EvaluationRuntimeId,
-    value: Value,
-}
-
 impl RuntimeValueFactory {
-    fn root(&self, value: Value) -> RuntimeValueRoot {
-        RuntimeValueRoot {
-            runtime: self.runtime,
-            value,
-        }
+    fn root(&self, value: Value) -> Result<RuntimeValueRoot, Error> {
+        value.require_runtime(self.runtime)?;
+        Ok(value.0)
     }
 
     fn core(&self) -> &CoreValueFactory {
@@ -2248,8 +2247,8 @@ impl RuntimeValueFactory {
 
 impl RuntimeValueRoot {
     fn value(&self, runtime: EvaluationRuntimeId) -> Value {
-        debug_assert_eq!(self.runtime, runtime);
-        self.value.clone()
+        debug_assert_eq!(self.runtime_id(), runtime);
+        Value(self.clone())
     }
 }
 
@@ -2258,7 +2257,7 @@ fn admit_runtime_input(
     endpoint: RuntimeInputEndpointId,
     payload: RuntimeValueRoot,
 ) -> Result<RuntimeInputSequence, Error> {
-    debug_assert_eq!(payload.runtime, runtime.id);
+    debug_assert_eq!(payload.runtime_id(), runtime.id);
     let mutation = RuntimeMutationGuard {
         _guard: runtime
             .settlement_gate
@@ -2481,7 +2480,7 @@ impl EvaluationRuntime {
         let ids = RuntimeIds::new();
         let values = RuntimeValueFactory {
             runtime: id,
-            core: CoreValueFactory::new(ids.clone()),
+            core: CoreValueFactory::new(id, ids.clone()),
         };
         let event_conflict_analysis = conflict_analysis.clone();
         Ok(Self {
@@ -2688,7 +2687,7 @@ impl EvaluationRuntime {
         self.default_reflection_profile.is_sealed()
     }
 
-    fn root_value(&self, value: Value) -> RuntimeValueRoot {
+    fn root_value(&self, value: Value) -> Result<RuntimeValueRoot, Error> {
         self.state.values.root(value)
     }
 
@@ -2837,6 +2836,7 @@ impl EvaluationRuntime {
     }
 
     fn create_volume(&self, initial: Value) -> Result<VolumeId, Error> {
+        initial.require_runtime(self.id())?;
         let _mutation = self.mutation_guard();
         self.state
             .transactions
@@ -2874,7 +2874,8 @@ impl EvaluationRuntime {
         &self,
         handle: &Arc<crate::reflection::EvaluationQueryHandle>,
         result: Value,
-    ) {
+    ) -> Result<(), Error> {
+        result.require_runtime(self.id())?;
         let mutation = self.mutation_guard();
         let updated = {
             self.state
@@ -2888,6 +2889,7 @@ impl EvaluationRuntime {
         if updated {
             self.publish_observation(mutation);
         }
+        Ok(())
     }
 
     fn publish_observation(&self, mutation: RuntimeMutationGuard<'_>) {
@@ -3149,7 +3151,7 @@ impl BuiltModule {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error {
     message: Arc<str>,
-    diagnostic: Arc<Diagnostic>,
+    diagnostic: Option<Arc<Diagnostic>>,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -3158,8 +3160,8 @@ impl Error {
     pub fn new(message: impl Into<Arc<str>>) -> Self {
         let message = message.into();
         Self {
-            diagnostic: Arc::new(Diagnostic::new(Severity::Error, message.clone())),
             message,
+            diagnostic: None,
             diagnostics: Vec::new(),
         }
     }
@@ -3185,14 +3187,17 @@ impl Error {
                     .unwrap_or(message);
                 (
                     message,
-                    Diagnostic::from_emission(Severity::Error, Value::from_core(emission)),
+                    Diagnostic::from_emission(Severity::Error, Value::from_core(values, emission)),
                 )
             }
-            None => (message.clone(), Diagnostic::new(Severity::Error, message)),
+            None => (
+                message.clone(),
+                Diagnostic::new_with_factory(values, Severity::Error, message),
+            ),
         };
         Self {
             message,
-            diagnostic: Arc::new(diagnostic),
+            diagnostic: Some(Arc::new(diagnostic)),
             diagnostics: Vec::new(),
         }
     }
@@ -3204,26 +3209,50 @@ impl Error {
 
     /// Prepends one structured frame describing why this failed value was
     /// demanded. The primary diagnostic text and ad hoc fields remain intact.
-    pub fn with_context(mut self, values: &Values, context: Value) -> Self {
+    pub fn with_context(mut self, values: &Values, context: Value) -> Result<Self, Error> {
+        context.require_runtime(values.runtime)?;
+        let Some(diagnostic) = &self.diagnostic else {
+            self.diagnostic = Some(Arc::new(Diagnostic::new(
+                values,
+                Severity::Error,
+                self.message.clone(),
+            )));
+            return self.with_context(values, context);
+        };
+        diagnostic.emission.require_runtime(values.runtime)?;
         let emission = crate::diagnostic::prepend_contexts_with(
             &values.core,
-            self.diagnostic.emission.as_core().clone(),
+            diagnostic.emission.as_core().clone(),
             &[context.into_core()],
         )
-        .unwrap_or_else(|_| self.diagnostic.emission.as_core().clone());
-        self.diagnostic = Arc::new(Diagnostic::from_emission(
-            self.diagnostic.severity,
-            Value::from_core(emission),
-        ));
-        self
+        .unwrap_or_else(|_| diagnostic.emission.as_core().clone());
+        self.diagnostic = Some(Arc::new(Diagnostic::from_emission(
+            diagnostic.severity,
+            Value::from_core(&values.core, emission),
+        )));
+        Ok(self)
     }
 
     /// Returns the primary failure as a structured diagnostic.
     ///
     /// Permanent evaluator failures retain their original Glam emission and
     /// `msg.context`; ordinary host failures use a conventional text message.
-    pub fn diagnostic(&self) -> &Diagnostic {
-        &self.diagnostic
+    pub fn diagnostic(&self, values: &Values) -> Result<Diagnostic, Error> {
+        match &self.diagnostic {
+            Some(diagnostic) => {
+                diagnostic.emission.require_runtime(values.runtime)?;
+                Ok(diagnostic.as_ref().clone())
+            }
+            None => Ok(Diagnostic::new(
+                values,
+                Severity::Error,
+                self.message.clone(),
+            )),
+        }
+    }
+
+    pub(crate) fn structured_diagnostic(&self) -> Option<&Diagnostic> {
+        self.diagnostic.as_deref()
     }
 
     /// Returns additional diagnostics emitted while attempting the operation.
@@ -3380,15 +3409,17 @@ fn authoritative_reflection_environment(
     environment: Value,
     role: &str,
 ) -> Result<(Value, bool), Error> {
+    let runtime = environment.runtime_id();
     let CoreValue::Dict(root) = environment.into_core() else {
         return Err(Error::new("reflection environment must be a dictionary"));
     };
     let glam_key = Key::atom_from_text("glam");
     let replaced_glam = root.get(&glam_key).is_some();
     Ok((
-        Value(CoreValue::Dict(
-            root.insert(glam_key, authoritative_glam_environment(role)),
-        )),
+        Value::from_runtime(
+            runtime,
+            CoreValue::Dict(root.insert(glam_key, authoritative_glam_environment(role))),
+        ),
         replaced_glam,
     ))
 }
@@ -3416,7 +3447,7 @@ fn authoritative_glam_environment(role: &str) -> CoreValue {
             Key::atom_from_text("reasoning"),
             CoreValue::Dict(Dict::new_sync().insert(
                 Key::atom_from_text("role"),
-                Value::atom_from_text(role).into_core(),
+                CoreValue::Atom(crate::core::Atom::from_key(&Key::binary_from_text(role))),
             )),
         )
         .insert(
@@ -3433,10 +3464,13 @@ fn reflection_environment_for_role(environment: &Value, role: &str) -> Value {
     let CoreValue::Dict(root) = environment.as_core() else {
         unreachable!("authoritative reflection environment must be a dictionary")
     };
-    Value(CoreValue::Dict(root.insert(
-        Key::atom_from_text("glam"),
-        authoritative_glam_environment(role),
-    )))
+    Value::from_runtime(
+        environment.runtime_id(),
+        CoreValue::Dict(root.insert(
+            Key::atom_from_text("glam"),
+            authoritative_glam_environment(role),
+        )),
+    )
 }
 
 /// Owner handle for one protected volume in an evaluation runtime.
@@ -3446,6 +3480,7 @@ fn reflection_environment_for_role(environment: &Value, role: &str) -> Value {
 /// revoke the volume.
 pub struct ReasoningVolume {
     runtime: EvaluationRuntime,
+    runtime_id: EvaluationRuntimeId,
     volume: VolumeId,
     effects: Value,
 }
@@ -3453,6 +3488,7 @@ pub struct ReasoningVolume {
 impl ReasoningVolume {
     /// Returns the closed `{get, set, rewrite}` effect capability value.
     pub fn effects(&self) -> Value {
+        debug_assert_eq!(self.effects.runtime_id(), self.runtime_id);
         self.effects.clone()
     }
 
@@ -3460,6 +3496,7 @@ impl ReasoningVolume {
     /// Further uses of any capability for this volume produce
     /// use-after-revoke errors.
     pub fn revoke(self) -> Result<Value, Error> {
+        debug_assert_eq!(self.runtime.id(), self.runtime_id);
         self.runtime.revoke_volume(self.volume)
     }
 }
@@ -3488,9 +3525,13 @@ impl ReflectionInspector<'_> {
     /// kind. Ordinary values return `None`; a failure while reaching that kind
     /// remains an evaluation error rather than a metadata mismatch.
     pub fn associated_metadata(&self, value: &Value) -> Result<Option<Value>, Error> {
+        value.require_runtime(self.assembler.reasoning.runtime.id())?;
+        let values = self.assembler.core_values();
         let value = eval::eval_value(&self.assembler.eval_context(), value.as_core())
             .map_err(|error| self.assembler.evaluation_error(error))?;
-        Ok(value.associated_metadata().map(Value::from_core))
+        Ok(value
+            .associated_metadata()
+            .map(|value| Value::from_core(&values, value)))
     }
 
     /// Returns the elements of a list without evaluating the elements.
@@ -3498,6 +3539,8 @@ impl ReflectionInspector<'_> {
     /// The list spine and any deferred concatenation segments are evaluated
     /// far enough to enumerate the elements.
     pub fn list_items(&self, value: &Value) -> Result<Vec<Value>, Error> {
+        value.require_runtime(self.assembler.reasoning.runtime.id())?;
+        let values = self.assembler.core_values();
         let value = eval::eval_value(&self.assembler.eval_context(), value.as_core())
             .map_err(|error| self.assembler.evaluation_error(error))?;
         let CoreValue::List(list) = value else {
@@ -3507,13 +3550,20 @@ impl ReflectionInspector<'_> {
             )));
         };
         eval::list_to_value_items(&self.assembler.eval_context(), &list)
-            .map(|items| items.into_iter().map(Value::from_core).collect())
+            .map(|items| {
+                items
+                    .into_iter()
+                    .map(|value| Value::from_core(&values, value))
+                    .collect()
+            })
             .map_err(|error| self.assembler.evaluation_error(error))
     }
 
     /// Returns dictionary entries in canonical key order without evaluating
     /// their values. Keys are reified as ordinary keyable [`Value`]s.
     pub fn dictionary_items(&self, value: &Value) -> Result<Vec<(Value, Value)>, Error> {
+        value.require_runtime(self.assembler.reasoning.runtime.id())?;
+        let values = self.assembler.core_values();
         let value = eval::eval_value(&self.assembler.eval_context(), value.as_core())
             .map_err(|error| self.assembler.evaluation_error(error))?;
         let CoreValue::Dict(dict) = value else {
@@ -3526,8 +3576,8 @@ impl ReflectionInspector<'_> {
             .iter()
             .map(|(key, value)| {
                 (
-                    Value::from_core(key.to_value_with(&self.assembler.core_values())),
-                    Value::from_core(value.clone()),
+                    Value::from_core(&values, key.to_value_with(&values)),
+                    Value::from_core(&values, value.clone()),
                 )
             })
             .collect())
@@ -3535,6 +3585,8 @@ impl ReflectionInspector<'_> {
 
     /// Returns the key value that gives an atom its identity.
     pub fn atom_key(&self, value: &Value) -> Result<Value, Error> {
+        value.require_runtime(self.assembler.reasoning.runtime.id())?;
+        let values = self.assembler.core_values();
         let value = eval::eval_value(&self.assembler.eval_context(), value.as_core())
             .map_err(|error| self.assembler.evaluation_error(error))?;
         let CoreValue::Atom(atom) = value else {
@@ -3544,6 +3596,7 @@ impl ReflectionInspector<'_> {
             )));
         };
         Ok(Value::from_core(
+            &values,
             atom.key().to_value_with(&self.assembler.core_values()),
         ))
     }
@@ -3596,10 +3649,7 @@ pub struct ReflectionEnvironmentBuilder<'a> {
 impl ReflectionEnvironmentBuilder<'_> {
     /// Returns the selected runtime's value-construction service.
     pub fn values(&self) -> Values {
-        Values {
-            runtime: self.host.runtime_id,
-            core: self.host.runtime().values().core,
-        }
+        self.host.runtime().values()
     }
 
     /// Creates a protected volume belonging to the selected evaluation runtime.
@@ -3616,8 +3666,9 @@ impl ReflectionEnvironmentBuilder<'_> {
         let wake = Arc::new(OnceLock::new());
         self.environment_promises.push(wake.clone());
         (
-            Value::from_core(CoreValue::Promised(promise.clone())),
+            Value::from_core(&values.core, CoreValue::Promised(promise.clone())),
             PromiseResolver {
+                runtime: self.host.runtime_id,
                 promise: Some(promise),
                 wake: PromiseWake::Deferred(wake),
             },
@@ -3779,11 +3830,13 @@ impl AssemblerBuilder {
             host: &self.host,
             environment_promises: &mut self.environment_promises,
         })?;
+        environment.require_runtime(self.runtime.id())?;
         let (environment, replaced_glam) =
             authoritative_reflection_environment(environment, "assembler")?;
         self.reflection_environment = Some(environment);
         if replaced_glam {
             self.pending_diagnostics.push(Diagnostic::new(
+                &self.runtime.values(),
                 Severity::Warning,
                 "reflection environment namespace `glam` is reserved; supplied value was ignored",
             ));
@@ -3798,7 +3851,13 @@ impl AssemblerBuilder {
         self.diagnostics.bind_runtime(&self.runtime)?;
         let environment = match self.reflection_environment.take() {
             Some(environment) => environment,
-            None => authoritative_reflection_environment(Value::empty_record(), "assembler")?.0,
+            None => {
+                authoritative_reflection_environment(
+                    self.runtime.values().empty_record(),
+                    "assembler",
+                )?
+                .0
+            }
         };
         self.host.seal_environment(environment)?;
         if !self.runtime.has_default_reflection_profile() {
@@ -3823,7 +3882,7 @@ impl AssemblerBuilder {
                 .expect("environment promise wake context must be armed once");
         }
         for diagnostic in self.pending_diagnostics {
-            self.diagnostics.publish(diagnostic);
+            self.diagnostics.publish_local(diagnostic);
         }
         Ok(Assembler {
             source_system: self.source_system,
@@ -3841,6 +3900,7 @@ fn create_reasoning_volume(
     let (volume, effects) = host.create_volume(initial)?;
     Ok(ReasoningVolume {
         runtime: host.runtime(),
+        runtime_id: host.runtime_id,
         volume,
         effects,
     })
@@ -3894,8 +3954,9 @@ impl Assembler {
     pub fn promise(&self, label: impl Into<Arc<str>>) -> (Value, PromiseResolver) {
         let promise = PromisedValue::new(self.eval_context().values(), label);
         (
-            Value::from_core(CoreValue::Promised(promise.clone())),
+            Value::from_core(&self.core_values(), CoreValue::Promised(promise.clone())),
             PromiseResolver {
+                runtime: self.reasoning.runtime.id(),
                 promise: Some(promise),
                 wake: PromiseWake::Ready(self.eval_context()),
             },
@@ -3915,9 +3976,11 @@ impl Assembler {
     /// the conventional `msg` and `viewer` fields, including the observer's
     /// complete textual `viewer.header`, and returns bytes.
     pub fn default_diagnostic_formatter(&self) -> Value {
-        Value::from_core(crate::g_syntax::default_diagnostic_formatter(
-            &self.core_values(),
-        ))
+        let values = self.core_values();
+        Value::from_core(
+            &values,
+            crate::g_syntax::default_diagnostic_formatter(&values),
+        )
     }
 
     /// Returns the read-only environment shared by reflection tasks in this
@@ -4071,12 +4134,12 @@ impl Assembler {
                     .into_boxed_slice(),
             ),
             inputs: Vec::new(),
-            initial_definitions: Value::empty_record(),
+            initial_definitions: self.values().empty_record(),
         }
     }
 
     pub(crate) fn record_diagnostic(&self, diagnostic: Diagnostic) {
-        self.reasoning.diagnostics().publish(diagnostic);
+        self.reasoning.diagnostics().publish_local(diagnostic);
     }
 
     fn next_compilation_invocation(&self) -> CompilationInvocationId {
@@ -4093,8 +4156,10 @@ impl Assembler {
 
     /// Evaluates a value far enough to expose its outer semantic value.
     pub fn evaluate(&self, value: &Value) -> Result<Value, Error> {
+        value.require_runtime(self.reasoning.runtime.id())?;
+        let values = self.core_values();
         eval::eval_value(&self.eval_context(), value.as_core())
-            .map(Value::from_core)
+            .map(|value| Value::from_core(&values, value))
             .map_err(|error| self.evaluation_error(error))
     }
 
@@ -4105,12 +4170,19 @@ impl Assembler {
         function: &Value,
         arguments: impl IntoIterator<Item = Value>,
     ) -> Result<Value, Error> {
+        function.require_runtime(self.reasoning.runtime.id())?;
+        let mut core_arguments = Vec::new();
+        for argument in arguments {
+            argument.require_runtime(self.reasoning.runtime.id())?;
+            core_arguments.push(argument.into_core());
+        }
+        let values = self.core_values();
         eval::apply_values(
             &self.eval_context(),
             function.as_core().clone(),
-            arguments.into_iter().map(Value::into_core).collect(),
+            core_arguments,
         )
-        .map(Value::from_core)
+        .map(|value| Value::from_core(&values, value))
         .map_err(|error| self.evaluation_error(error))
     }
 
@@ -4120,43 +4192,51 @@ impl Assembler {
         &self,
         build: impl for<'net> FnOnce(&mut NetBuilder<'net>) -> Result<NetPort<'net>, Error>,
     ) -> Result<Value, Error> {
-        let mut builder = NetBuilder::new();
+        let mut builder = NetBuilder::new(self.values());
         let exposed = build(&mut builder)?.port;
         let template = builder
             .builder
             .try_finish(exposed)
             .map_err(net_build_error)?;
-        Ok(Value::from_core(CoreValue::Net(NetValue::new(
-            template.instantiate_shared(),
-        ))))
+        Ok(Value::from_core(
+            &self.core_values(),
+            CoreValue::Net(NetValue::new(template.instantiate_shared())),
+        ))
     }
 
     // TODO: add reflection snapshots and event subscriptions here. Reflection
     // producers should feed the same bounded history rather than print.
 
     pub fn get(&self, root: &Value, path: &str) -> Result<Value, Error> {
+        root.require_runtime(self.reasoning.runtime.id())?;
+        let values = self.core_values();
         self.core_value_at_path(root.as_core(), path)
-            .map(Value::from_core)
+            .map(|value| Value::from_core(&values, value))
     }
 
     /// Returns a value at an atom path, distinguishing an absent path from a
     /// failure while demanding an intermediate value.
     pub fn get_optional(&self, root: &Value, path: &str) -> Result<Option<Value>, Error> {
+        root.require_runtime(self.reasoning.runtime.id())?;
+        let values = self.core_values();
         self.core_value_at_path_optional(root.as_core(), path)
-            .map(|value| value.map(Value::from_core))
+            .map(|value| value.map(|value| Value::from_core(&values, value)))
     }
 
     pub fn to_binary(&self, value: &Value) -> Result<Bytes, Error> {
+        value.require_runtime(self.reasoning.runtime.id())?;
         self.core_value_bytes(value.as_core(), "value")
     }
 
     /// Extracts a byte range from compact binary data or a byte-valued list.
     /// Lazy list chunks are evaluated as required to locate the range.
     pub fn binary_slice(&self, value: &Value, range: Range<usize>) -> Result<Bytes, Error> {
+        value.require_runtime(self.reasoning.runtime.id())?;
         self.core_value_binary_slice(value.as_core(), range, "value")
     }
 
     pub fn binary_at(&self, root: &Value, path: &str) -> Result<Bytes, Error> {
+        root.require_runtime(self.reasoning.runtime.id())?;
         self.core_value_at_path(root.as_core(), path)
             .and_then(|value| self.core_value_bytes(&value, path))
     }
@@ -4167,6 +4247,7 @@ impl Assembler {
         inputs: Vec<ModuleInput>,
         initial_definitions: Value,
     ) -> Result<BuiltModule, Error> {
+        initial_definitions.require_runtime(self.reasoning.runtime.id())?;
         let session = Arc::new(Mutex::new(Vec::new()));
         let execution = Arc::new(CompilationExecution::new(&self.reasoning, session.clone())?);
         let result = self.build_module_inner(
@@ -4187,7 +4268,7 @@ impl Assembler {
                 Err(Error::new("module macro reasoning failed").with_diagnostics(diagnostics))
             }
             (Ok(value), false) => Ok(BuiltModule {
-                value: Value::from_core(value),
+                value: Value::from_core(self.reasoning.runtime.values().core(), value),
                 diagnostics,
             }),
             (Err(error), _) => Err(error.with_diagnostics(diagnostics)),
@@ -4575,7 +4656,8 @@ impl Assembler {
             if severity == Severity::Error {
                 had_errors.store(true, Ordering::Relaxed);
             }
-            let diagnostic = Diagnostic::from_compile(&trace, severity, message);
+            let diagnostic =
+                Diagnostic::from_compile(assembler.values().core(), &trace, severity, message);
             session
                 .lock()
                 .expect("build diagnostic mutex should not be poisoned")
@@ -4588,7 +4670,7 @@ impl Assembler {
 fn reasoning_diagnostic(values: &CoreValueFactory, failure: &EvaluationFailure) -> Diagnostic {
     Diagnostic::from_emission(
         Severity::Error,
-        Value::from_core(eval::failure_diagnostic_value_with(values, failure)),
+        Value::from_core(values, eval::failure_diagnostic_value_with(values, failure)),
     )
 }
 
@@ -4739,18 +4821,107 @@ mod tests {
     }
 
     #[test]
+    fn public_value_factories_reject_foreign_composite_members() {
+        let owner = EvaluationRuntime::new(0).expect("owner runtime should build");
+        let foreign = EvaluationRuntime::new(0).expect("foreign runtime should build");
+        let values = owner.values();
+        let foreign_value = foreign.values().integer(7);
+
+        assert!(values.list([foreign_value.clone()]).is_err());
+        assert!(values.record([("value", foreign_value.clone())]).is_err());
+        assert!(
+            values
+                .dictionary([(values.atom_from_text("key"), foreign_value.clone())])
+                .is_err()
+        );
+        assert!(values.empty_object(foreign_value.clone()).is_err());
+        assert!(
+            values
+                .after_reflection(foreign_value, values.text("target"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn assembler_boundaries_reject_foreign_values_before_evaluation_or_storage() {
+        let runtime = EvaluationRuntime::new(0).expect("owner runtime should build");
+        let foreign = EvaluationRuntime::new(0).expect("foreign runtime should build");
+        let assembler = Assembler::builder()
+            .evaluation_runtime(runtime.clone())
+            .build()
+            .expect("owner assembler should build");
+        let foreign_value = foreign.values().text("foreign");
+
+        assert!(assembler.evaluate(&foreign_value).is_err());
+        assert!(
+            assembler
+                .apply(&assembler.values().integer(0), [foreign_value.clone()])
+                .is_err()
+        );
+        assert!(assembler.get(&foreign_value, "member").is_err());
+        assert!(assembler.get_optional(&foreign_value, "member").is_err());
+        assert!(assembler.to_binary(&foreign_value).is_err());
+        assert!(assembler.binary_slice(&foreign_value, 0..1).is_err());
+        assert!(assembler.binary_at(&foreign_value, "member").is_err());
+        assert!(assembler.create_volume(foreign_value.clone()).is_err());
+        assert!(
+            assembler
+                .net(|builder| builder.data(foreign_value.clone()))
+                .is_err()
+        );
+        assert!(
+            assembler
+                .module(["foreign_initial_definitions"])
+                .initial_definitions(foreign.values().empty_record())
+                .build()
+                .is_err()
+        );
+
+        let (promise, resolver) = assembler.promise("foreign assignment");
+        assert!(resolver.resolve(foreign_value.clone()).is_err());
+        assert!(assembler.evaluate(&promise).is_err());
+        let (_, resolver) = assembler.promise("foreign failure");
+        assert!(resolver.fail(foreign_value).is_err());
+    }
+
+    #[test]
+    fn runtime_event_boundaries_reject_foreign_converted_and_output_values() {
+        let runtime = EvaluationRuntime::new(0).expect("owner runtime should build");
+        let foreign = EvaluationRuntime::new(0).expect("foreign runtime should build");
+        let foreign_values = foreign.values();
+        let input = runtime
+            .input_endpoint(move |_: ()| Ok(foreign_values.integer(1)))
+            .expect("input endpoint should register");
+        assert!(input.sender().admit(()).is_err());
+
+        let output = runtime
+            .output_endpoint(decode_test_integer, |_: i64| Ok(()))
+            .expect("output endpoint should register");
+        let (_, mut events) = input_transaction(&runtime);
+        assert!(
+            events
+                .write(&output.writer(), foreign.values().integer(2))
+                .is_err()
+        );
+        assert!(!runtime.has_delivery_activity());
+    }
+
+    #[test]
     fn public_error_contexts_prepend_without_rewriting_the_message() {
         let assembler = Assembler::new();
-        let inner = Value::record([("inner", Value::text("first"))]);
-        let outer = Value::record([("outer", Value::text("second"))]);
+        let values = assembler.values();
+        let inner = values.record([("inner", values.text("first"))]).unwrap();
+        let outer = values.record([("outer", values.text("second"))]).unwrap();
 
         let error = Error::new("original")
             .with_context(&assembler.values(), inner.clone())
-            .with_context(&assembler.values(), outer.clone());
+            .unwrap()
+            .with_context(&assembler.values(), outer.clone())
+            .unwrap();
 
         assert_eq!(error.to_string(), "original");
         assert_eq!(
-            diagnostic_contexts(&assembler, error.diagnostic()),
+            diagnostic_contexts(&assembler, &error.diagnostic(&values).unwrap()),
             [outer.into_core(), inner.into_core()]
         );
     }
@@ -4777,14 +4948,17 @@ mod tests {
 
         assert_eq!(error.to_string(), "original");
         assert_eq!(
-            diagnostic_contexts(&assembler, error.diagnostic())
+            diagnostic_contexts(&assembler, &error.diagnostic(&assembler.values()).unwrap())
                 .first()
                 .expect("binary observation should add an outer context"),
             &eval::evaluation_context_frame("binary_extraction")
         );
         assert_eq!(
             assembler
-                .get(error.diagnostic().emission(), "detail")
+                .get(
+                    error.diagnostic(&assembler.values()).unwrap().emission(),
+                    "detail",
+                )
                 .expect("ad hoc diagnostic fields should survive contextualization")
                 .as_binary(),
             Some(b"kept".as_slice())
@@ -4794,17 +4968,20 @@ mod tests {
     #[test]
     fn path_lookup_contextualizes_only_demand_failures() {
         let assembler = Assembler::new();
-        let root = Value::from_core(CoreValue::Dict(Dict::new_sync().insert(
-            Key::atom_from_text("broken"),
-            CoreValue::error(&assembler.core_values(), "path target failed"),
-        )));
+        let root = Value::from_core(
+            &assembler.core_values(),
+            CoreValue::Dict(Dict::new_sync().insert(
+                Key::atom_from_text("broken"),
+                CoreValue::error(&assembler.core_values(), "path target failed"),
+            )),
+        );
 
         let error = assembler
             .get(&root, "broken.member")
             .expect_err("forcing an intermediate path value should fail");
         assert_eq!(error.to_string(), "path target failed");
         assert_eq!(
-            diagnostic_contexts(&assembler, error.diagnostic()),
+            diagnostic_contexts(&assembler, &error.diagnostic(&assembler.values()).unwrap()),
             [path_lookup_context("broken.member")]
         );
 
@@ -4821,13 +4998,19 @@ mod tests {
         let assembler = Assembler::new();
         let trace = test_compilation_trace("/workspace/source.g");
         let origin = crate::diagnostic::opaque_compilation_origin(&trace);
-        assert_eq!(Value::from_core(origin.clone()).kind(), ValueKind::Opaque);
+        assert_eq!(
+            Value::from_core(&assembler.core_values(), origin.clone()).kind(),
+            ValueKind::Opaque
+        );
 
         let inspect = assembler
             .get(&assembler.reflection_environment(), "glam.origin.inspect")
             .expect("the reflection environment should expose origin inspection");
         let projected = assembler
-            .apply(&inspect, [Value::from_core(origin)])
+            .apply(
+                &inspect,
+                [Value::from_core(&assembler.core_values(), origin)],
+            )
             .and_then(|value| assembler.evaluate(&value))
             .expect("the origin capability should inspect compilation origins");
 
@@ -4836,9 +5019,11 @@ mod tests {
 
     #[test]
     fn public_values_describe_metadata_carriers_only_as_sealed() {
-        let value = Value::from_core(CoreValue::metadata_carrier(CoreValue::binary_from_text(
-            "private trace",
-        )));
+        let assembler = Assembler::new();
+        let value = Value::from_core(
+            &assembler.core_values(),
+            CoreValue::metadata_carrier(CoreValue::binary_from_text("private trace")),
+        );
 
         assert_eq!(value.kind(), ValueKind::Sealed);
         assert_eq!(format!("{value:?}"), "Value { kind: Sealed, .. }");
@@ -4850,7 +5035,10 @@ mod tests {
         let inspect = assembler
             .get(&assembler.reflection_environment(), "glam.origin.inspect")
             .expect("the reflection environment should expose origin inspection");
-        let unrelated = Value::from_core(CoreValue::Opaque(OpaqueValue::new(Arc::new(42_u64))));
+        let unrelated = Value::from_core(
+            &assembler.core_values(),
+            CoreValue::Opaque(OpaqueValue::new(Arc::new(42_u64))),
+        );
 
         let error = assembler
             .apply(&inspect, [unrelated])
@@ -4916,7 +5104,7 @@ mod tests {
             .get(module.value(), "later")
             .expect("fixture should define later");
         let call = assembler
-            .apply(&later, [Value::integer(1)])
+            .apply(&later, [assembler.values().integer(1)])
             .expect("calling a source function should remain lazy");
         let error = eval::eval_value(&assembler.eval_context(), call.as_core())
             .expect_err("the function body should fail when called");
@@ -4990,8 +5178,9 @@ mod tests {
     #[test]
     fn builder_seals_the_environment_into_one_reasoning_session() {
         let assembler = Assembler::builder()
-            .reflection_environment(|_| {
-                Ok(Value::record([("client", Value::text("new environment"))]))
+            .reflection_environment(|environment| {
+                let values = environment.values();
+                values.record([("client", values.text("new environment"))])
             })
             .expect("configured environment should be valid");
         let assembler = assembler.build().expect("assembler should build");
@@ -5012,7 +5201,7 @@ mod tests {
             .reflection_environment(|environment| {
                 let (value, promise_resolver) = environment.promise("late environment value");
                 resolver = Some(promise_resolver);
-                Ok(Value::record([("late", value)]))
+                environment.values().record([("late", value)])
             })
             .expect("environment should build")
             .build()
@@ -5025,7 +5214,7 @@ mod tests {
         resolver
             .take()
             .expect("resolver should escape the builder")
-            .resolve(Value::text("ready"))
+            .resolve(assembler.values().text("ready"))
             .expect("promise should resolve once");
         assert_eq!(
             assembler
@@ -5042,7 +5231,7 @@ mod tests {
             .reflection_environment(|environment| {
                 let (value, resolver) = environment.promise("abandoned environment value");
                 drop(resolver);
-                Ok(Value::record([("abandoned", value)]))
+                environment.values().record([("abandoned", value)])
             })
             .expect("environment should build")
             .build()
@@ -5067,7 +5256,7 @@ mod tests {
             .reflection_environment(|environment| {
                 let (value, promise_resolver) = environment.promise("self-dependent value");
                 resolver = Some(promise_resolver);
-                Ok(Value::record([("self", value)]))
+                environment.values().record([("self", value)])
             })
             .expect("environment should build")
             .build()
@@ -5119,15 +5308,22 @@ mod tests {
         )
     }
 
+    fn integer_converter(
+        runtime: &EvaluationRuntime,
+    ) -> impl Fn(i64) -> Result<Value, Error> + Send + Sync + 'static {
+        let values = runtime.values();
+        move |value| Ok(values.integer(value))
+    }
+
     #[test]
     fn runtime_input_endpoints_are_local_monotonic_capabilities() {
         let owner = EvaluationRuntime::new(0).expect("owner runtime should build");
         let foreign = EvaluationRuntime::new(0).expect("foreign runtime should build");
         let first = owner
-            .input_endpoint(|value: i64| Ok(Value::integer(value)))
+            .input_endpoint(integer_converter(&owner))
             .expect("first endpoint should register");
         let second = owner
-            .input_endpoint(|value: i64| Ok(Value::integer(value)))
+            .input_endpoint(integer_converter(&owner))
             .expect("second endpoint should register");
 
         assert_eq!(second.reader().id().get(), first.reader().id().get() + 1);
@@ -5147,12 +5343,13 @@ mod tests {
 
         let runtime = EvaluationRuntime::new(0).expect("runtime should build");
         let converter_runtime = runtime.clone();
+        let values = runtime.values();
         let endpoint = runtime
             .input_endpoint(move |payload: HostPayload| {
                 assert!(converter_runtime.exclusive_admission_available());
                 let HostPayload(lease) = payload;
                 drop(lease);
-                Ok(Value::text("rooted"))
+                Ok(values.text("rooted"))
             })
             .expect("endpoint should register");
         let host_payload = Arc::new(());
@@ -5179,7 +5376,7 @@ mod tests {
             .admitted
             .front()
             .expect("the converted root should be buffered");
-        assert_eq!(record.payload.runtime, runtime.id());
+        assert_eq!(record.payload.runtime_id(), runtime.id());
         assert_eq!(
             record.payload.value(runtime.id()).as_binary(),
             Some(b"rooted".as_slice())
@@ -5212,7 +5409,7 @@ mod tests {
     fn runtime_input_identity_exhaustion_changes_no_state() {
         let runtime = EvaluationRuntime::new(0).expect("runtime should build");
         let endpoint = runtime
-            .input_endpoint(|value: i64| Ok(Value::integer(value)))
+            .input_endpoint(integer_converter(&runtime))
             .expect("endpoint should register");
         {
             let mut state = runtime
@@ -5249,11 +5446,7 @@ mod tests {
 
         let endpoint_count = after.inputs.len();
         runtime.state.ids.exhaust_input_endpoints();
-        assert!(
-            runtime
-                .input_endpoint(|value: i64| Ok(Value::integer(value)))
-                .is_err()
-        );
+        assert!(runtime.input_endpoint(integer_converter(&runtime)).is_err());
         let (_, _, after_id_failure) = runtime.transaction_snapshot();
         assert_eq!(after_id_failure.inputs.len(), endpoint_count);
     }
@@ -5262,7 +5455,7 @@ mod tests {
     fn runtime_input_reads_and_commits_a_fifo_prefix() {
         let runtime = EvaluationRuntime::new(0).expect("runtime should build");
         let endpoint = runtime
-            .input_endpoint(|value: i64| Ok(Value::integer(value)))
+            .input_endpoint(integer_converter(&runtime))
             .expect("endpoint should register");
         assert_eq!(endpoint.sender().admit(10).unwrap().get(), 0);
         assert_eq!(endpoint.sender().admit(20).unwrap().get(), 1);
@@ -5296,10 +5489,10 @@ mod tests {
     fn empty_runtime_input_observation_is_stable_and_precise() {
         let runtime = EvaluationRuntime::new(0).expect("runtime should build");
         let left = runtime
-            .input_endpoint(|value: i64| Ok(Value::integer(value)))
+            .input_endpoint(integer_converter(&runtime))
             .expect("left endpoint should register");
         let right = runtime
-            .input_endpoint(|value: i64| Ok(Value::integer(value)))
+            .input_endpoint(integer_converter(&runtime))
             .expect("right endpoint should register");
         let (unrelated_store, mut unrelated_events) = input_transaction(&runtime);
         assert_eq!(unrelated_events.read(&left.reader()).unwrap(), None);
@@ -5331,7 +5524,7 @@ mod tests {
             let runtime = EvaluationRuntime::with_conflict_analysis(0, strategy)
                 .expect("runtime should build");
             let endpoint = runtime
-                .input_endpoint(|value: i64| Ok(Value::integer(value)))
+                .input_endpoint(integer_converter(&runtime))
                 .expect("endpoint should register");
             let (store, mut events) = input_transaction(&runtime);
             assert_eq!(events.read(&endpoint.reader()).unwrap(), None);
@@ -5347,10 +5540,10 @@ mod tests {
     fn competing_runtime_input_consumers_conflict_but_independent_ones_commit() {
         let runtime = EvaluationRuntime::new(0).expect("runtime should build");
         let left = runtime
-            .input_endpoint(|value: i64| Ok(Value::integer(value)))
+            .input_endpoint(integer_converter(&runtime))
             .expect("left endpoint should register");
         let right = runtime
-            .input_endpoint(|value: i64| Ok(Value::integer(value)))
+            .input_endpoint(integer_converter(&runtime))
             .expect("right endpoint should register");
         left.sender().admit(1).unwrap();
         right.sender().admit(2).unwrap();
@@ -5383,7 +5576,7 @@ mod tests {
     fn abandoned_runtime_input_claim_does_not_consume() {
         let runtime = EvaluationRuntime::new(0).expect("runtime should build");
         let endpoint = runtime
-            .input_endpoint(|value: i64| Ok(Value::integer(value)))
+            .input_endpoint(integer_converter(&runtime))
             .expect("endpoint should register");
         endpoint.sender().admit(7).unwrap();
         {
@@ -5408,18 +5601,24 @@ mod tests {
     fn combined_heap_conflict_rolls_back_runtime_input_consumption() {
         let runtime = EvaluationRuntime::new(0).expect("runtime should build");
         let endpoint = runtime
-            .input_endpoint(|value: i64| Ok(Value::integer(value)))
+            .input_endpoint(integer_converter(&runtime))
             .expect("endpoint should register");
         endpoint.sender().admit(9).unwrap();
         let (_, store_snapshot, event_snapshot) = runtime.transaction_snapshot();
         let mut combined_store = crate::reflection::StoreJournal::new(store_snapshot.clone());
         combined_store.observe_read(&[Key::atom_from_text("combined")]);
-        combined_store.write(vec![Key::atom_from_text("combined")], Value::text("stale"));
+        combined_store.write(
+            vec![Key::atom_from_text("combined")],
+            runtime.values().text("stale"),
+        );
         let mut combined_events = RuntimeEventJournal::new(event_snapshot);
         assert!(combined_events.read(&endpoint.reader()).unwrap().is_some());
 
         let mut winner = crate::reflection::StoreJournal::new(store_snapshot);
-        winner.write(vec![Key::atom_from_text("combined")], Value::text("winner"));
+        winner.write(
+            vec![Key::atom_from_text("combined")],
+            runtime.values().text("winner"),
+        );
         assert_eq!(
             runtime.commit_reflection(&winner),
             crate::reflection::StoreCommitResult::Committed
@@ -5443,7 +5642,7 @@ mod tests {
     fn runtime_input_admission_wakes_after_releasing_mutation_admission() {
         let runtime = EvaluationRuntime::new(0).expect("runtime should build");
         let endpoint = runtime
-            .input_endpoint(|value: i64| Ok(Value::integer(value)))
+            .input_endpoint(integer_converter(&runtime))
             .expect("endpoint should register");
         let (generation, _, _) = runtime.transaction_snapshot();
         let waiting_runtime = runtime.clone();
@@ -5477,7 +5676,7 @@ mod tests {
 
         let (_, mut abandoned) = input_transaction(&runtime);
         let burned = abandoned
-            .write(&endpoint.writer(), Value::integer(1))
+            .write(&endpoint.writer(), runtime.values().integer(1))
             .expect("intent should reserve an ID");
         drop(abandoned);
         assert!(!runtime.has_delivery_activity());
@@ -5487,13 +5686,13 @@ mod tests {
         let mut foreign_events = RuntimeEventJournal::new(foreign_snapshot);
         assert!(
             foreign_events
-                .write(&endpoint.writer(), Value::integer(2))
+                .write(&endpoint.writer(), foreign.values().integer(2))
                 .is_err()
         );
 
         let (store, mut events) = input_transaction(&runtime);
         let committed = events
-            .write(&endpoint.writer(), Value::integer(3))
+            .write(&endpoint.writer(), runtime.values().integer(3))
             .expect("second intent should reserve an ID");
         assert!(committed.get() > burned.get());
         assert_eq!(
@@ -5511,7 +5710,11 @@ mod tests {
             .expect("output endpoint should register");
         runtime.state.ids.exhaust_deliveries();
         let (_, mut events) = input_transaction(&runtime);
-        assert!(events.write(&endpoint.writer(), Value::integer(1)).is_err());
+        assert!(
+            events
+                .write(&endpoint.writer(), runtime.values().integer(1))
+                .is_err()
+        );
         assert!(!runtime.has_delivery_activity());
 
         let endpoint_count = runtime
@@ -5556,17 +5759,17 @@ mod tests {
         combined_store.observe_read(&[Key::atom_from_text("output_atomic")]);
         combined_store.write(
             vec![Key::atom_from_text("output_atomic")],
-            Value::text("stale"),
+            runtime.values().text("stale"),
         );
         let mut combined_events = RuntimeEventJournal::new(event_snapshot);
         combined_events
-            .write(&endpoint.writer(), Value::integer(1))
+            .write(&endpoint.writer(), runtime.values().integer(1))
             .unwrap();
 
         let mut winner = crate::reflection::StoreJournal::new(store_snapshot);
         winner.write(
             vec![Key::atom_from_text("output_atomic")],
-            Value::text("winner"),
+            runtime.values().text("winner"),
         );
         assert_eq!(
             runtime.commit_reflection(&winner),
@@ -5603,7 +5806,9 @@ mod tests {
             )
             .expect("output endpoint should register");
         let (store, mut events) = input_transaction(&runtime);
-        let delivery = events.write(&endpoint.writer(), Value::integer(1)).unwrap();
+        let delivery = events
+            .write(&endpoint.writer(), runtime.values().integer(1))
+            .unwrap();
         assert_eq!(
             runtime.try_commit_transaction(&store, &events),
             crate::reflection::StoreCommitResult::Committed
@@ -5635,10 +5840,10 @@ mod tests {
             .expect("sequential endpoint should register");
         let (store, mut events) = input_transaction(&runtime);
         events
-            .write(&sequential.writer(), Value::integer(1))
+            .write(&sequential.writer(), runtime.values().integer(1))
             .unwrap();
         events
-            .write(&sequential.writer(), Value::integer(2))
+            .write(&sequential.writer(), runtime.values().integer(2))
             .unwrap();
         assert_eq!(
             runtime.try_commit_transaction(&store, &events),
@@ -5664,8 +5869,12 @@ mod tests {
             })
             .expect("right endpoint should register");
         let (store, mut events) = input_transaction(&runtime);
-        events.write(&left.writer(), Value::integer(3)).unwrap();
-        events.write(&right.writer(), Value::integer(4)).unwrap();
+        events
+            .write(&left.writer(), runtime.values().integer(3))
+            .unwrap();
+        events
+            .write(&right.writer(), runtime.values().integer(4))
+            .unwrap();
         assert_eq!(
             runtime.try_commit_transaction(&store, &events),
             crate::reflection::StoreCommitResult::Committed
@@ -5697,10 +5906,10 @@ mod tests {
         let mut first_events = RuntimeEventJournal::new(event_snapshot.clone());
         let mut second_events = RuntimeEventJournal::new(event_snapshot);
         first_events
-            .write(&endpoint.writer(), Value::integer(1))
+            .write(&endpoint.writer(), runtime.values().integer(1))
             .unwrap();
         second_events
-            .write(&endpoint.writer(), Value::integer(2))
+            .write(&endpoint.writer(), runtime.values().integer(2))
             .unwrap();
 
         assert_eq!(
@@ -5727,7 +5936,7 @@ mod tests {
         let replay_store = crate::reflection::StoreJournal::new(store_snapshot);
         let mut first_events = RuntimeEventJournal::new(event_snapshot);
         first_events
-            .write(&endpoint.writer(), Value::integer(1))
+            .write(&endpoint.writer(), runtime.values().integer(1))
             .unwrap();
         let replay_events = first_events.clone();
 
@@ -5763,9 +5972,15 @@ mod tests {
             })
             .expect("panic endpoint should register");
         let (store, mut events) = input_transaction(&runtime);
-        let decode_id = events.write(&decode.writer(), Value::integer(1)).unwrap();
-        let adapter_id = events.write(&adapter.writer(), Value::integer(2)).unwrap();
-        let panic_id = events.write(&panic.writer(), Value::integer(3)).unwrap();
+        let decode_id = events
+            .write(&decode.writer(), runtime.values().integer(1))
+            .unwrap();
+        let adapter_id = events
+            .write(&adapter.writer(), runtime.values().integer(2))
+            .unwrap();
+        let panic_id = events
+            .write(&panic.writer(), runtime.values().integer(3))
+            .unwrap();
         assert_eq!(
             runtime.try_commit_transaction(&store, &events),
             crate::reflection::StoreCommitResult::Committed
@@ -5822,7 +6037,7 @@ mod tests {
     fn output_callback_response_reenters_as_later_admitted_input() {
         let runtime = EvaluationRuntime::new(0).expect("runtime should build");
         let input = runtime
-            .input_endpoint(|value: i64| Ok(Value::integer(value)))
+            .input_endpoint(integer_converter(&runtime))
             .expect("input endpoint should register");
         let response = input.sender();
         let output = runtime
@@ -5834,7 +6049,7 @@ mod tests {
         let (producing_store, mut producing_events) = input_transaction(&runtime);
         assert_eq!(producing_events.read(&input.reader()).unwrap(), None);
         producing_events
-            .write(&output.writer(), Value::integer(42))
+            .write(&output.writer(), runtime.values().integer(42))
             .unwrap();
         assert_eq!(
             runtime.try_commit_transaction(&producing_store, &producing_events),
@@ -5898,7 +6113,10 @@ mod tests {
         events
             .write(
                 &endpoint.writer(),
-                Value::from_core(CoreValue::Opaque(OpaqueValue::new(lease))),
+                Value::from_core(
+                    runtime.values().core(),
+                    CoreValue::Opaque(OpaqueValue::new(lease)),
+                ),
             )
             .unwrap();
         assert_eq!(
@@ -5928,7 +6146,9 @@ mod tests {
             })
             .expect("output endpoint should register");
         let (store, mut events) = input_transaction(&runtime);
-        events.write(&endpoint.writer(), Value::integer(1)).unwrap();
+        events
+            .write(&endpoint.writer(), runtime.values().integer(1))
+            .unwrap();
         assert_eq!(
             runtime.try_commit_transaction(&store, &events),
             crate::reflection::StoreCommitResult::Committed
@@ -5987,11 +6207,14 @@ mod tests {
             .build()
             .expect("assembler should build");
         let input = runtime
-            .input_endpoint(|value: i64| Ok(Value::integer(value)))
+            .input_endpoint(integer_converter(&runtime))
             .expect("input endpoint should register");
         let (initial_generation, store, snapshot) = runtime.logger_transaction_snapshot();
         let mut stale = crate::reflection::StoreJournal::new(store);
-        stale.write(vec![Key::atom_from_text("atomic")], Value::text("stale"));
+        stale.write(
+            vec![Key::atom_from_text("atomic")],
+            runtime.values().text("stale"),
+        );
         let mut stale_events = RuntimeEventJournal::new(snapshot.events().clone());
         assert_eq!(stale_events.read(&input.reader()).unwrap(), None);
         input.sender().admit(7).expect("input should be admitted");
@@ -6008,7 +6231,7 @@ mod tests {
         let mut committed = crate::reflection::StoreJournal::new(store);
         committed.write(
             vec![Key::atom_from_text("atomic")],
-            Value::text("committed"),
+            runtime.values().text("committed"),
         );
         let mut events = RuntimeEventJournal::new(snapshot.events().clone());
         assert_eq!(
@@ -6057,7 +6280,10 @@ mod tests {
                 .expect("test should still receive the wake result");
         });
         let mut journal = crate::reflection::StoreJournal::new(store);
-        journal.write(vec![Key::atom_from_text("wake")], Value::empty_record());
+        journal.write(
+            vec![Key::atom_from_text("wake")],
+            runtime.values().empty_record(),
+        );
 
         assert_eq!(
             runtime.commit_reflection(&journal),
@@ -6183,7 +6409,7 @@ mod tests {
                 Ok(CoreValue::Number(42.into()))
             },
         );
-        let value = Value::from_core(CoreValue::Lazy(lazy));
+        let value = Value::from_core(&assembler.core_values(), CoreValue::Lazy(lazy));
         assembler.eval_context().spark(value.as_core().clone());
         started_receiver
             .recv_timeout(std::time::Duration::from_secs(2))
@@ -6213,7 +6439,7 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(2))
             .expect("worker completion should wake synchronous evaluation")
             .expect("worker-computed value should succeed");
-        assert_eq!(result, Value::number_from_text("42").unwrap());
+        assert_eq!(result, assembler.values().number_from_text("42").unwrap());
         evaluator.join().expect("evaluator thread should finish");
     }
 
@@ -6259,9 +6485,12 @@ mod tests {
         ));
         replacement
             .seal_environment(
-                authoritative_reflection_environment(Value::empty_record(), "replacement")
-                    .unwrap()
-                    .0,
+                authoritative_reflection_environment(
+                    runtime.values().empty_record(),
+                    "replacement",
+                )
+                .unwrap()
+                .0,
             )
             .unwrap();
 
@@ -6305,8 +6534,9 @@ mod tests {
     #[test]
     fn builder_selects_runtime_before_exposing_runtime_bound_state() {
         let mut builder = Assembler::builder();
+        let initial = builder.runtime.values().empty_record();
         let _volume = builder
-            .create_volume(Value::empty_record())
+            .create_volume(initial)
             .expect("the initial runtime should create the volume");
         let replacement = EvaluationRuntime::new(0).expect("replacement runtime should build");
         let result = builder.evaluation_runtime(replacement).build();
@@ -6423,6 +6653,8 @@ mod tests {
 
     #[test]
     fn diagnostic_bus_sequences_counts_and_delivers_only_to_current_subscribers() {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let values = runtime.values();
         let bus = DiagnosticBus::new();
         assert_eq!(bus.counts().latest_sequence(), 0);
         let early = Arc::new(Mutex::new(Vec::new()));
@@ -6434,7 +6666,7 @@ mod tests {
                 .push(event);
         }));
 
-        let first = bus.publish(Diagnostic::new(Severity::Info, "first"));
+        let first = bus.publish_local(Diagnostic::new(&values, Severity::Info, "first"));
         let late = Arc::new(Mutex::new(Vec::new()));
         let late_events = late.clone();
         let _late_subscription = bus.subscribe(DiagnosticCallback(move |event| {
@@ -6443,9 +6675,9 @@ mod tests {
                 .expect("late diagnostic collector should not be poisoned")
                 .push(event);
         }));
-        let second = bus.publish(Diagnostic::new(Severity::Warning, "second"));
+        let second = bus.publish_local(Diagnostic::new(&values, Severity::Warning, "second"));
         drop(early_subscription);
-        let third = bus.publish(Diagnostic::new(Severity::Error, "third"));
+        let third = bus.publish_local(Diagnostic::new(&values, Severity::Error, "third"));
 
         assert_eq!(first.sequence(), 1);
         assert_eq!(second.sequence(), 2);
@@ -6489,13 +6721,45 @@ mod tests {
         assert!(bus.diagnostic_ingress(&owner).is_err());
         assert!(bus.bind_runtime(&foreign).is_err());
         assert!(
+            bus.publish(Diagnostic::new(
+                &foreign.values(),
+                Severity::Error,
+                "foreign diagnostic",
+            ))
+            .is_err()
+        );
+        assert!(
             bus.publish_from_runtime(
                 foreign.id(),
-                Diagnostic::new(Severity::Error, "foreign diagnostic"),
+                Diagnostic::new(&foreign.values(), Severity::Error, "foreign diagnostic"),
             )
             .is_err()
         );
         assert_eq!(bus.counts().total(), 0);
+    }
+
+    #[test]
+    fn diagnostic_value_operations_reject_foreign_runtime_views() {
+        let owner = EvaluationRuntime::new(0).expect("owner runtime should build");
+        let foreign = EvaluationRuntime::new(0).expect("foreign runtime should build");
+        let diagnostic = Diagnostic::new(&owner.values(), Severity::Error, "owner");
+
+        assert!(diagnostic.enrich(&foreign.values()).is_err());
+        assert!(
+            diagnostic
+                .clone()
+                .with_context(foreign.values().text("foreign context"))
+                .is_err()
+        );
+        assert!(diagnostic.transport_value(&foreign.values()).is_err());
+        assert!(
+            Diagnostic::apply_updates(
+                &owner.values(),
+                diagnostic.emission(),
+                foreign.values().empty_record(),
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -6506,12 +6770,18 @@ mod tests {
             .diagnostic_ingress(&runtime)
             .expect("ingress should attach");
         let before = runtime.transaction_snapshot().0;
+        let values = runtime.values();
         let published = (0..24)
             .map(|index| {
                 let bus = bus.clone();
+                let values = values.clone();
                 std::thread::spawn(move || {
                     let message = format!("message {index}");
-                    let event = bus.publish(Diagnostic::new(Severity::Info, message.clone()));
+                    let event = bus.publish_local(Diagnostic::new(
+                        &values,
+                        Severity::Info,
+                        message.clone(),
+                    ));
                     (event.sequence(), message)
                 })
             })
@@ -6550,7 +6820,11 @@ mod tests {
             .expect("ingress should attach");
         drop(ingress);
 
-        bus.publish(Diagnostic::new(Severity::Info, "still routed"));
+        bus.publish_local(Diagnostic::new(
+            &runtime.values(),
+            Severity::Info,
+            "still routed",
+        ));
         let (_, _, snapshot) = runtime.transaction_snapshot();
         let mut journal = RuntimeEventJournal::new(snapshot);
         let value = journal
@@ -6580,7 +6854,11 @@ mod tests {
             );
         }));
 
-        bus.publish(Diagnostic::new(Severity::Info, "ordered"));
+        bus.publish_local(Diagnostic::new(
+            &runtime.values(),
+            Severity::Info,
+            "ordered",
+        ));
     }
 
     #[test]
@@ -6592,9 +6870,10 @@ mod tests {
             .diagnostic_ingress(&runtime)
             .expect("ingress should attach");
 
+        let diagnostic = Diagnostic::new(&runtime.values(), Severity::Info, "after runtime");
         drop(runtime);
         assert!(retained.upgrade().is_none());
-        bus.publish(Diagnostic::new(Severity::Info, "after runtime"));
+        bus.publish_local(diagnostic);
         assert!(ingress.failure().is_some());
     }
 
@@ -6609,7 +6888,11 @@ mod tests {
                 .push(diagnostic);
         });
 
-        assembler.record_diagnostic(Diagnostic::new(Severity::Info, "hello"));
+        assembler.record_diagnostic(Diagnostic::new(
+            &assembler.values(),
+            Severity::Info,
+            "hello",
+        ));
 
         assert_eq!(
             received
@@ -6648,8 +6931,10 @@ mod tests {
             CoreValue::Dict(interface),
         ));
 
+        let values = EvaluationRuntime::new(0).unwrap().values();
         let trace = test_compilation_trace("test.g");
-        let diagnostic = Diagnostic::from_compile(&trace, Severity::Warning, message);
+        let diagnostic =
+            Diagnostic::from_compile(values.core(), &trace, Severity::Warning, message);
         assert_eq!(diagnostic.severity(), Severity::Warning);
 
         let CoreValue::Dict(emission) = diagnostic.emission().as_core() else {
@@ -6665,7 +6950,6 @@ mod tests {
         assert!(interface.get(&*crate::core::keys::ORIGIN).is_none());
         assert!(emission.get(&*crate::core::keys::SPEC).is_none());
 
-        let values = EvaluationRuntime::new(0).unwrap().values();
         let enriched = diagnostic
             .enrich(&values)
             .expect("diagnostic should enrich");
@@ -6706,16 +6990,22 @@ mod tests {
     #[test]
     fn viewers_can_inherit_one_diagnostic_independently() {
         let trace = test_compilation_trace("test.g");
+        let values = EvaluationRuntime::new(0).unwrap().values();
         let diagnostic = Diagnostic::from_compile(
+            values.core(),
             &trace,
             Severity::Info,
             crate::diagnostic::text_message(Some(3), "hello"),
         );
         let viewer_key = Key::atom_from_text("viewer");
-        let values = EvaluationRuntime::new(0).unwrap().values();
         let inherit = |name: &str| {
             diagnostic
-                .enrich_with(&values, Value::record([("viewer", Value::text(name))]))
+                .enrich_with(
+                    &values,
+                    values
+                        .record([("viewer", values.text(name))])
+                        .expect("viewer value is local"),
+                )
                 .expect("viewer mixin should apply")
         };
 

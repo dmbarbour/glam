@@ -129,11 +129,8 @@ impl CompilationTrace {
         Value::Dict(
             Dict::new_sync()
                 .insert((*keys::INVOCATION).clone(), self.invocation.value())
-                .insert(
-                    (*keys::SOURCE).clone(),
-                    self.source.value().as_core().clone(),
-                )
-                .insert((*keys::DIGEST).clone(), self.digest.value().into_core())
+                .insert((*keys::SOURCE).clone(), self.source.value())
+                .insert((*keys::DIGEST).clone(), self.digest.value())
                 .insert((*keys::NAMESPACE).clone(), namespace_value(&self.namespace)),
         )
     }
@@ -485,7 +482,7 @@ mod tests {
         );
         assert_eq!(
             origin.get(&*keys::DIGEST),
-            Some(ContentDigest::of(b"source").value().as_core())
+            Some(&ContentDigest::of(b"source").value())
         );
         let Some(Value::List(namespace)) = origin.get(&*keys::NAMESPACE) else {
             panic!("origin should contain its global namespace");

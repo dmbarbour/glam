@@ -18,7 +18,7 @@ use crate::evaluation::{
     ReflectionTaskResultPolicy,
 };
 use crate::number::Number;
-use crate::runtime::RuntimeIds;
+use crate::runtime::{EvaluationRuntimeId, RuntimeIds, RuntimeValueRoot};
 
 mod evaluation_halt;
 pub(crate) mod keys;
@@ -250,11 +250,12 @@ struct LazyCell {
 /// Successful assignments may still name deferred values, which observers
 /// follow normally. The failure arm is permanent: retryable demand halts never
 /// enter this cell.
-pub(crate) type PromiseAssignment = Result<Value, Arc<EvaluationFailure>>;
+pub(crate) type PromiseAssignment = Result<RuntimeValueRoot, Arc<EvaluationFailure>>;
 
 #[derive(Clone)]
 pub(crate) struct PromisedValue {
     id: PromiseId,
+    runtime: EvaluationRuntimeId,
     label: Arc<str>,
     assignment: Arc<OnceLock<PromiseAssignment>>,
     task: Option<Arc<TaskPromise>>,
@@ -269,6 +270,7 @@ pub(crate) struct TaskPromise {
 /// evaluator identities.
 #[derive(Clone)]
 pub(crate) struct CoreValueFactory {
+    runtime: EvaluationRuntimeId,
     ids: Arc<RuntimeIds>,
     cache: Arc<RuntimeValueCache>,
     local_extensions: Option<SharedExtensionMap>,
@@ -318,8 +320,9 @@ struct RuntimeValueCache {
 }
 
 impl CoreValueFactory {
-    pub(crate) fn new(ids: Arc<RuntimeIds>) -> Self {
+    pub(crate) fn new(runtime: EvaluationRuntimeId, ids: Arc<RuntimeIds>) -> Self {
         Self {
+            runtime,
             ids,
             cache: Arc::new(RuntimeValueCache {
                 core: CoreValues::new(),
@@ -335,6 +338,7 @@ impl CoreValueFactory {
     /// attachments without duplicating the runtime-owned values themselves.
     pub(crate) fn scoped(&self) -> Self {
         Self {
+            runtime: self.runtime,
             ids: self.ids.clone(),
             cache: self.cache.clone(),
             local_extensions: Some(Arc::new(Mutex::new(HashMap::new()))),
@@ -343,6 +347,10 @@ impl CoreValueFactory {
 
     pub(crate) fn ids(&self) -> &Arc<RuntimeIds> {
         &self.ids
+    }
+
+    pub(crate) fn runtime_id(&self) -> EvaluationRuntimeId {
+        self.runtime
     }
 
     fn deferred_value_id(&self) -> NonZeroU64 {
@@ -470,8 +478,12 @@ impl CoreValueFactory {
 
 #[cfg(test)]
 pub(crate) fn test_value_factory() -> CoreValueFactory {
-    static FACTORY: LazyLock<CoreValueFactory> =
-        LazyLock::new(|| CoreValueFactory::new(RuntimeIds::compiler_test_values()));
+    static FACTORY: LazyLock<CoreValueFactory> = LazyLock::new(|| {
+        CoreValueFactory::new(
+            crate::runtime::allocate_evaluation_runtime_id(),
+            RuntimeIds::compiler_test_values(),
+        )
+    });
     FACTORY.clone()
 }
 
@@ -574,6 +586,7 @@ impl PromisedValue {
     pub(crate) fn new(values: &CoreValueFactory, label: impl Into<Arc<str>>) -> Self {
         Self {
             id: PromiseId(values.deferred_value_id()),
+            runtime: values.runtime_id(),
             label: label.into(),
             assignment: Arc::new(OnceLock::new()),
             task: None,
@@ -589,6 +602,7 @@ impl PromisedValue {
         let (owner, wait) = context.register_promise(&assignment)?;
         Ok(Self {
             id,
+            runtime: context.values().runtime_id(),
             label: label.into(),
             assignment,
             task: Some(Arc::new(TaskPromise { owner, wait })),
@@ -608,10 +622,13 @@ impl PromisedValue {
     }
 
     pub(crate) fn set(&self, value: Value) -> Result<(), Value> {
-        if let Err(assignment) = self.assignment.set(Ok(value)) {
-            return Err(
-                assignment.expect("setting a promised value always supplies a successful value")
-            );
+        if let Err(assignment) = self
+            .assignment
+            .set(Ok(RuntimeValueRoot::from_runtime(self.runtime, value)))
+        {
+            return Err(assignment
+                .expect("setting a promised value always supplies a successful value")
+                .into_core());
         }
         self.publish_task_assignment();
         Ok(())
@@ -635,8 +652,11 @@ impl PromisedValue {
         self.fail(Arc::new(EvaluationFailure::message(message.into())))
     }
 
-    pub(crate) fn assignment(&self) -> Option<PromiseAssignment> {
-        self.assignment.get().cloned()
+    pub(crate) fn assignment(&self) -> Option<Result<Value, Arc<EvaluationFailure>>> {
+        self.assignment
+            .get()
+            .cloned()
+            .map(|assignment| assignment.map(RuntimeValueRoot::into_core))
     }
 
     fn publish_task_assignment(&self) {
@@ -1551,7 +1571,10 @@ mod tests {
 
     #[test]
     fn runtime_cache_installs_one_complete_winner_after_racing_construction() {
-        let factory = CoreValueFactory::new(RuntimeIds::new());
+        let factory = CoreValueFactory::new(
+            crate::runtime::allocate_evaluation_runtime_id(),
+            RuntimeIds::new(),
+        );
         let barrier = Arc::new(Barrier::new(2));
         let builds = Arc::new(AtomicUsize::new(0));
         let handles = (0..2)
@@ -1579,8 +1602,16 @@ mod tests {
 
     #[test]
     fn distinct_runtime_caches_do_not_share_constructed_extensions() {
-        let first = CoreValueFactory::new(RuntimeIds::new()).cached(|| CachedProbe);
-        let second = CoreValueFactory::new(RuntimeIds::new()).cached(|| CachedProbe);
+        let first = CoreValueFactory::new(
+            crate::runtime::allocate_evaluation_runtime_id(),
+            RuntimeIds::new(),
+        )
+        .cached(|| CachedProbe);
+        let second = CoreValueFactory::new(
+            crate::runtime::allocate_evaluation_runtime_id(),
+            RuntimeIds::new(),
+        )
+        .cached(|| CachedProbe);
         assert!(!Arc::ptr_eq(&first, &second));
     }
 

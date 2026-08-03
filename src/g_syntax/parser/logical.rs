@@ -289,6 +289,7 @@ impl DeclarationMacroWork {
 
     pub(super) fn current_invocation(
         &self,
+        values: &crate::core::CoreValueFactory,
         original: &OriginalMacroInvocation,
     ) -> Result<MacroInvocation, Vec<Diagnostic>> {
         let lexical = self.lexical()?;
@@ -301,8 +302,8 @@ impl DeclarationMacroWork {
                 ),
             )]);
         };
-        let invocation =
-            macro_invocation_at(&lexical, declaration, original.start).map_err(|diagnostic| {
+        let invocation = macro_invocation_at(&lexical, declaration, original.start, values)
+            .map_err(|diagnostic| {
                 vec![Diagnostic::error(
                     original.line,
                     format!(
@@ -409,6 +410,7 @@ fn macro_invocation_at(
     source: &LexedSource<'_>,
     declaration: &DeclarationSection,
     start: usize,
+    values: &crate::core::CoreValueFactory,
 ) -> Result<MacroInvocation, Diagnostic> {
     let tokens = source.tokens();
     let range = declaration.tokens();
@@ -466,7 +468,13 @@ fn macro_invocation_at(
         start,
         anchor_position: item.anchor_position,
         indentation: item.indentation,
-        input: macro_input(source, index..input_token_end, input_start, input_end)?,
+        input: macro_input(
+            values,
+            source,
+            index..input_token_end,
+            input_start,
+            input_end,
+        )?,
     })
 }
 
@@ -641,6 +649,7 @@ fn marker_count(text: &str) -> usize {
 }
 
 fn macro_input(
+    values: &crate::core::CoreValueFactory,
     source: &LexedSource<'_>,
     range: Range<usize>,
     start: usize,
@@ -664,23 +673,26 @@ fn macro_input(
                     delimiter: None,
                 }
             }
-            TokenKind::Number(id) => {
-                MacroInputKind::Data(crate::api::Value::from_core(Value::Number(
+            TokenKind::Number(id) => MacroInputKind::Data(crate::api::Value::from_core(
+                values,
+                Value::Number(
                     source
                         .number(*id)
                         .expect("logical number token should reference its arena")
                         .clone(),
-                )))
-            }
-            TokenKind::Text(id) => {
-                MacroInputKind::Data(crate::api::Value::from_core(Value::binary_from_text(
+                ),
+            )),
+            TokenKind::Text(id) => MacroInputKind::Data(crate::api::Value::from_core(
+                values,
+                Value::binary_from_text(
                     source
                         .text(*id)
                         .expect("logical text token should reference its arena")
                         .value(),
-                )))
-            }
+                ),
+            )),
             TokenKind::Embedded(id) => MacroInputKind::Data(crate::api::Value::from_core(
+                values,
                 source
                     .embedded_value(*id)
                     .expect("embedded token should reference its arena")

@@ -442,16 +442,15 @@ impl StoreSnapshot {
         }
         let Some(root) = self.volume(self.runtime_volume) else {
             return EvaluationQueryPoll::State {
-                value: PublicValue::empty_record(),
+                value: PublicValue::from_core(&self.values, Value::Dict(Dict::new_sync())),
                 observed: true,
             };
         };
         EvaluationQueryPoll::State {
-            value: PublicValue::from_core(lazy_core_value_path(
+            value: PublicValue::from_core(
                 &self.values,
-                root.as_core().clone(),
-                &query_path(handle.id),
-            )),
+                lazy_core_value_path(&self.values, root.as_core().clone(), &query_path(handle.id)),
+            ),
             observed: true,
         }
     }
@@ -599,16 +598,19 @@ impl StoreJournal {
         }
         let Some(root) = self.volume_view(self.snapshot.runtime_volume) else {
             return EvaluationQueryPoll::State {
-                value: PublicValue::empty_record(),
+                value: PublicValue::from_core(&self.snapshot.values, Value::Dict(Dict::new_sync())),
                 observed,
             };
         };
         EvaluationQueryPoll::State {
-            value: PublicValue::from_core(lazy_core_value_path(
+            value: PublicValue::from_core(
                 &self.snapshot.values,
-                root.into_core(),
-                &query_path(handle.id),
-            )),
+                lazy_core_value_path(
+                    &self.snapshot.values,
+                    root.into_core(),
+                    &query_path(handle.id),
+                ),
+            ),
             observed,
         }
     }
@@ -618,6 +620,7 @@ impl StoreJournal {
     }
 
     pub(crate) fn write_volume(&mut self, volume: VolumeId, path: Vec<Key>, value: PublicValue) {
+        debug_assert_eq!(value.runtime_id(), self.snapshot.values.runtime_id());
         let edit = StoreEdit::Set {
             address: ConflictAddress::reflection(volume, ConflictPath::from_keys(path)),
             value,
@@ -639,6 +642,7 @@ impl StoreJournal {
         path: Vec<Key>,
         updater: PublicValue,
     ) {
+        debug_assert_eq!(updater.runtime_id(), self.snapshot.values.runtime_id());
         let edit = StoreEdit::Rewrite {
             address: ConflictAddress::reflection(volume, ConflictPath::from_keys(path)),
             updater,
@@ -690,8 +694,14 @@ impl ReflectionStore {
             query_retirements,
             next_volume: 3,
             roots: RedBlackTreeMapSync::new_sync()
-                .insert(heap_volume, PublicValue::empty_record())
-                .insert(runtime_volume, PublicValue::empty_record()),
+                .insert(
+                    heap_volume,
+                    PublicValue::from_core(&values, Value::Dict(Dict::new_sync())),
+                )
+                .insert(
+                    runtime_volume,
+                    PublicValue::from_core(&values, Value::Dict(Dict::new_sync())),
+                ),
             revision: 0,
             latest_changes: BTreeMap::new(),
             strategy,
@@ -721,6 +731,11 @@ impl ReflectionStore {
     }
 
     #[cfg(test)]
+    pub(crate) fn values(&self) -> &CoreValueFactory {
+        &self.values
+    }
+
+    #[cfg(test)]
     fn volume_root(&self, volume: VolumeId) -> Option<&PublicValue> {
         self.roots.get(&volume)
     }
@@ -732,6 +747,7 @@ impl ReflectionStore {
 
     #[doc(hidden)]
     pub fn replace_root(&mut self, root: PublicValue) {
+        debug_assert_eq!(root.runtime_id(), self.values.runtime_id());
         self.roots.insert_mut(self.heap_volume, root);
         self.revision = self.revision.wrapping_add(1);
         self.latest_changes.insert(
@@ -741,6 +757,7 @@ impl ReflectionStore {
     }
 
     pub(crate) fn create_volume(&mut self, initial: PublicValue) -> Result<VolumeId, Arc<str>> {
+        debug_assert_eq!(initial.runtime_id(), self.values.runtime_id());
         let volume = VolumeId::from_u64(self.next_volume)
             .ok_or_else(|| Arc::from("reflection volume IDs exhausted"))?;
         self.next_volume = self
@@ -943,9 +960,10 @@ fn query_path(id: EvaluationQueryId) -> Vec<Key> {
 
 #[cfg(test)]
 fn pending_query_value(values: &CoreValueFactory) -> PublicValue {
-    PublicValue::from_core(Value::Dict(
-        Dict::new_sync().insert(QUERY_PENDING.clone(), values.unit()),
-    ))
+    PublicValue::from_core(
+        values,
+        Value::Dict(Dict::new_sync().insert(QUERY_PENDING.clone(), values.unit())),
+    )
 }
 
 fn complete_query_value(values: &CoreValueFactory, result: PublicValue) -> PublicValue {
@@ -954,12 +972,16 @@ fn complete_query_value(values: &CoreValueFactory, result: PublicValue) -> Publi
             .insert(QUERY_PRESENT.clone(), values.unit())
             .insert(QUERY_RESULT.clone(), result.into_core()),
     );
-    PublicValue::from_core(Value::Dict(
-        Dict::new_sync().insert(QUERY_COMPLETE.clone(), payload),
-    ))
+    PublicValue::from_core(
+        values,
+        Value::Dict(Dict::new_sync().insert(QUERY_COMPLETE.clone(), payload)),
+    )
 }
 
-pub(crate) fn decode_query_state(value: &Value) -> Option<EvaluationQueryState> {
+pub(crate) fn decode_query_state(
+    values: &CoreValueFactory,
+    value: &Value,
+) -> Option<EvaluationQueryState> {
     let Value::Dict(state) = value else {
         return None;
     };
@@ -974,6 +996,7 @@ pub(crate) fn decode_query_state(value: &Value) -> Option<EvaluationQueryState> 
     };
     complete.get(&QUERY_PRESENT)?;
     Some(EvaluationQueryState::Complete(PublicValue::from_core(
+        values,
         complete
             .get(&QUERY_RESULT)
             .cloned()
@@ -1011,7 +1034,7 @@ fn apply_value_at_path(
     value: Value,
 ) -> PublicValue {
     if path.depth() == 0 {
-        return PublicValue::from_core(value);
+        return PublicValue::from_core(values, value);
     }
     let path = Value::List(List::from_values(
         path.keys()
@@ -1019,11 +1042,14 @@ fn apply_value_at_path(
             .map(|key| key.to_value_with(values))
             .collect(),
     ));
-    PublicValue::from_core(Value::builtin_call(
+    PublicValue::from_core(
         values,
-        Builtin::DictUpdate,
-        vec![path, value, root.into_core()],
-    ))
+        Value::builtin_call(
+            values,
+            Builtin::DictUpdate,
+            vec![path, value, root.into_core()],
+        ),
+    )
 }
 
 fn lazy_core_value_path(values: &CoreValueFactory, value: Value, path: &[Key]) -> Value {
@@ -1062,6 +1088,26 @@ mod tests {
         )
     }
 
+    fn store_with(values: CoreValueFactory) -> ReflectionStore {
+        ReflectionStore::new(values, Arc::new(ExactConflictAnalysis))
+    }
+
+    fn text(store: &ReflectionStore, value: &str) -> PublicValue {
+        PublicValue::from_core(&store.values, Value::binary_from_text(value))
+    }
+
+    fn integer(store: &ReflectionStore, value: i64) -> PublicValue {
+        PublicValue::from_core(&store.values, Value::Number(value.into()))
+    }
+
+    fn empty(store: &ReflectionStore) -> PublicValue {
+        PublicValue::from_core(&store.values, Value::Dict(Dict::new_sync()))
+    }
+
+    fn builtin(store: &ReflectionStore, value: Builtin) -> PublicValue {
+        PublicValue::from_core(&store.values, Value::Builtin(value))
+    }
+
     fn assert_list_values(assembler: &Assembler, actual: &PublicValue, expected: &PublicValue) {
         let actual = assembler.evaluate(actual).unwrap();
         let Value::List(actual) = actual.as_core() else {
@@ -1081,13 +1127,13 @@ mod tests {
         value: PublicValue,
     ) -> Option<EvaluationQueryState> {
         let value = assembler.evaluate(&value).unwrap();
-        decode_query_state(value.as_core())
+        decode_query_state(&assembler.core_values(), value.as_core())
     }
 
     #[test]
     fn query_state_is_transactional_and_retired_after_the_last_handle() {
         let assembler = Assembler::default();
-        let mut store = store();
+        let mut store = store_with(assembler.core_values());
         let mut reservation = StoreJournal::new(store.snapshot());
         let handle = reservation.reserve_query().unwrap();
         assert!(matches!(
@@ -1109,7 +1155,7 @@ mod tests {
             Some(EvaluationQueryState::Pending)
         ));
 
-        assert!(store.update_query(&handle, PublicValue::text("snapshot")));
+        assert!(store.update_query(&handle, text(&store, "snapshot")));
         let EvaluationQueryPoll::State { value, .. } = store.snapshot().poll_query(&handle) else {
             panic!("completed query should remain available")
         };
@@ -1119,7 +1165,7 @@ mod tests {
                 if value.as_binary() == Some(b"snapshot".as_slice())
         ));
 
-        assert!(store.update_query(&handle, PublicValue::text("updated")));
+        assert!(store.update_query(&handle, text(&store, "updated")));
         let EvaluationQueryPoll::State { value, .. } = store.snapshot().poll_query(&handle) else {
             panic!("updated query should remain available")
         };
@@ -1134,11 +1180,10 @@ mod tests {
         let maintenance = StoreJournal::new(store.snapshot());
         assert_eq!(store.try_commit(&maintenance), StoreCommitResult::Committed);
         let root = store.roots.get(&store.runtime_volume).unwrap();
-        let retired = PublicValue::from_core(lazy_core_value_path(
+        let retired = PublicValue::from_core(
             &store.values,
-            root.as_core().clone(),
-            &query_path(id),
-        ));
+            lazy_core_value_path(&store.values, root.as_core().clone(), &query_path(id)),
+        );
         assert!(assembler.evaluate(&retired).unwrap().is_undefined());
     }
 
@@ -1198,7 +1243,7 @@ mod tests {
     fn journal_caches_its_view_and_uncontended_commit_installs_it() {
         let mut store = store();
         let mut journal = StoreJournal::new(store.snapshot());
-        journal.write(path(&["value"]), PublicValue::integer(1));
+        journal.write(path(&["value"]), integer(&store, 1));
 
         let cached_view = journal.view();
         assert_eq!(journal.view(), cached_view);
@@ -1211,9 +1256,9 @@ mod tests {
         let mut store = store();
         let snapshot = store.snapshot();
         let mut first = StoreJournal::new(snapshot.clone());
-        first.write(path(&["first"]), PublicValue::integer(1));
+        first.write(path(&["first"]), integer(&store, 1));
         let mut second = StoreJournal::new(snapshot);
-        second.write(path(&["second"]), PublicValue::integer(2));
+        second.write(path(&["second"]), integer(&store, 2));
         let stale_cached_view = second.view();
 
         assert_eq!(store.try_commit(&first), StoreCommitResult::Committed);
@@ -1224,11 +1269,12 @@ mod tests {
     #[test]
     fn one_journal_updates_multiple_volumes_atomically() {
         let mut store = store();
-        let first = store.create_volume(PublicValue::empty_record()).unwrap();
-        let second = store.create_volume(PublicValue::empty_record()).unwrap();
+        let initial = empty(&store);
+        let first = store.create_volume(initial.clone()).unwrap();
+        let second = store.create_volume(initial).unwrap();
         let mut journal = StoreJournal::new(store.snapshot());
-        journal.write_volume(first, path(&["value"]), PublicValue::integer(1));
-        journal.write_volume(second, path(&["value"]), PublicValue::integer(2));
+        journal.write_volume(first, path(&["value"]), integer(&store, 1));
+        journal.write_volume(second, path(&["value"]), integer(&store, 2));
 
         assert_eq!(store.try_commit(&journal), StoreCommitResult::Committed);
         assert_eq!(
@@ -1244,12 +1290,13 @@ mod tests {
     #[test]
     fn revoked_volume_rejects_staged_blind_edits_without_partial_commit() {
         let mut store = store();
-        let revoked = store.create_volume(PublicValue::empty_record()).unwrap();
-        let surviving = store.create_volume(PublicValue::empty_record()).unwrap();
+        let initial = empty(&store);
+        let revoked = store.create_volume(initial.clone()).unwrap();
+        let surviving = store.create_volume(initial).unwrap();
         let original_surviving = store.volume_root(surviving).cloned().unwrap();
         let mut journal = StoreJournal::new(store.snapshot());
-        journal.write_volume(revoked, Vec::new(), PublicValue::integer(1));
-        journal.write_volume(surviving, Vec::new(), PublicValue::integer(2));
+        journal.write_volume(revoked, Vec::new(), integer(&store, 1));
+        journal.write_volume(surviving, Vec::new(), integer(&store, 2));
         assert!(store.revoke_volume(revoked).is_some());
 
         assert_eq!(
@@ -1263,7 +1310,8 @@ mod tests {
     #[test]
     fn revoked_volume_conflicts_with_an_earlier_read() {
         let mut store = store();
-        let volume = store.create_volume(PublicValue::empty_record()).unwrap();
+        let initial = empty(&store);
+        let volume = store.create_volume(initial).unwrap();
         let mut journal = StoreJournal::new(store.snapshot());
         assert!(journal.observe_volume_read(volume, &[]));
         assert!(store.revoke_volume(volume).is_some());
@@ -1274,10 +1322,11 @@ mod tests {
     #[test]
     fn writes_never_materialize_a_missing_volume() {
         let mut store = store();
-        let volume = store.create_volume(PublicValue::empty_record()).unwrap();
+        let initial = empty(&store);
+        let volume = store.create_volume(initial).unwrap();
         assert!(store.revoke_volume(volume).is_some());
         let mut journal = StoreJournal::new(store.snapshot());
-        journal.write_volume(volume, Vec::new(), PublicValue::integer(1));
+        journal.write_volume(volume, Vec::new(), integer(&store, 1));
 
         assert!(journal.volume_view(volume).is_none());
         assert_eq!(
@@ -1290,9 +1339,10 @@ mod tests {
     #[test]
     fn revoked_volume_ids_are_not_reused() {
         let mut store = store();
-        let first = store.create_volume(PublicValue::empty_record()).unwrap();
+        let initial = empty(&store);
+        let first = store.create_volume(initial.clone()).unwrap();
         assert!(store.revoke_volume(first).is_some());
-        let second = store.create_volume(PublicValue::empty_record()).unwrap();
+        let second = store.create_volume(initial).unwrap();
 
         assert_ne!(first, second);
     }
@@ -1302,12 +1352,12 @@ mod tests {
         let mut store = store();
         let snapshot = store.snapshot();
         let mut local = StoreJournal::new(snapshot.clone());
-        local.write(path(&["x"]), PublicValue::empty_record());
-        local.rewrite(path(&["x", "y"]), PublicValue::builtin(Builtin::Seq));
+        local.write(path(&["x"]), empty(&store));
+        local.rewrite(path(&["x", "y"]), builtin(&store, Builtin::Seq));
         assert!(!local.observe_read(&path(&["x", "y", "z"])));
 
         let mut concurrent = StoreJournal::new(snapshot);
-        concurrent.write(path(&["x", "other"]), PublicValue::integer(1));
+        concurrent.write(path(&["x", "other"]), integer(&store, 1));
         assert_eq!(store.try_commit(&concurrent), StoreCommitResult::Committed);
         assert_eq!(store.try_commit(&local), StoreCommitResult::Committed);
     }
@@ -1317,11 +1367,11 @@ mod tests {
         let mut store = store();
         let snapshot = store.snapshot();
         let mut local = StoreJournal::new(snapshot.clone());
-        local.rewrite(path(&["x", "y"]), PublicValue::builtin(Builtin::Seq));
+        local.rewrite(path(&["x", "y"]), builtin(&store, Builtin::Seq));
         assert!(local.observe_read(&path(&["x", "y", "z"])));
 
         let mut concurrent = StoreJournal::new(snapshot);
-        concurrent.write(path(&["x", "y", "sibling"]), PublicValue::integer(1));
+        concurrent.write(path(&["x", "y", "sibling"]), integer(&store, 1));
         assert_eq!(store.try_commit(&concurrent), StoreCommitResult::Committed);
         assert_eq!(store.try_commit(&local), StoreCommitResult::Conflict);
     }
@@ -1345,8 +1395,13 @@ mod tests {
             .unwrap();
 
         let apply_in_order = |first: PublicValue, second: PublicValue| {
-            let mut store = store();
-            store.replace_root(PublicValue::list([PublicValue::text("base")]));
+            let mut store = store_with(assembler.core_values());
+            store.replace_root(
+                assembler
+                    .values()
+                    .list([assembler.values().text("base")])
+                    .unwrap(),
+            );
             let snapshot = store.snapshot();
             let mut first_edit = StoreJournal::new(snapshot.clone());
             first_edit.rewrite(Vec::new(), first);
@@ -1360,20 +1415,26 @@ mod tests {
         assert_list_values(
             &assembler,
             &apply_in_order(append_a.clone(), append_b.clone()),
-            &PublicValue::list([
-                PublicValue::text("base"),
-                PublicValue::text("A"),
-                PublicValue::text("B"),
-            ]),
+            &assembler
+                .values()
+                .list([
+                    assembler.values().text("base"),
+                    assembler.values().text("A"),
+                    assembler.values().text("B"),
+                ])
+                .unwrap(),
         );
         assert_list_values(
             &assembler,
             &apply_in_order(append_b, append_a),
-            &PublicValue::list([
-                PublicValue::text("base"),
-                PublicValue::text("B"),
-                PublicValue::text("A"),
-            ]),
+            &assembler
+                .values()
+                .list([
+                    assembler.values().text("base"),
+                    assembler.values().text("B"),
+                    assembler.values().text("A"),
+                ])
+                .unwrap(),
         );
     }
 
@@ -1382,11 +1443,11 @@ mod tests {
         let mut store = store();
         let snapshot = store.snapshot();
         let mut left = StoreJournal::new(snapshot.clone());
-        left.write(path(&["left"]), PublicValue::integer(1));
+        left.write(path(&["left"]), integer(&store, 1));
         let mut right = StoreJournal::new(snapshot.clone());
-        right.write(path(&["right"]), PublicValue::integer(2));
+        right.write(path(&["right"]), integer(&store, 2));
         let mut later_left = StoreJournal::new(snapshot);
-        later_left.write(path(&["left"]), PublicValue::integer(3));
+        later_left.write(path(&["left"]), integer(&store, 3));
 
         assert_eq!(store.try_commit(&left), StoreCommitResult::Committed);
         assert_eq!(store.try_commit(&right), StoreCommitResult::Committed);
@@ -1397,7 +1458,7 @@ mod tests {
     fn disjoint_nested_siblings_rebase() {
         let mut store = store();
         let mut establish_parent = StoreJournal::new(store.snapshot());
-        establish_parent.write(path(&["tree"]), PublicValue::empty_record());
+        establish_parent.write(path(&["tree"]), empty(&store));
         assert_eq!(
             store.try_commit(&establish_parent),
             StoreCommitResult::Committed
@@ -1405,9 +1466,9 @@ mod tests {
 
         let snapshot = store.snapshot();
         let mut left = StoreJournal::new(snapshot.clone());
-        left.write(path(&["tree", "left"]), PublicValue::integer(1));
+        left.write(path(&["tree", "left"]), integer(&store, 1));
         let mut right = StoreJournal::new(snapshot);
-        right.write(path(&["tree", "right"]), PublicValue::integer(2));
+        right.write(path(&["tree", "right"]), integer(&store, 2));
 
         assert_eq!(store.try_commit(&left), StoreCommitResult::Committed);
         assert_eq!(store.try_commit(&right), StoreCommitResult::Committed);
@@ -1420,7 +1481,7 @@ mod tests {
         let mut reader = StoreJournal::new(snapshot.clone());
         reader.observe_read(&[]);
         let mut writer = StoreJournal::new(snapshot);
-        writer.write(path(&["anywhere"]), PublicValue::integer(1));
+        writer.write(path(&["anywhere"]), integer(&store, 1));
 
         assert_eq!(store.try_commit(&writer), StoreCommitResult::Committed);
         assert_eq!(store.try_commit(&reader), StoreCommitResult::Conflict);
@@ -1433,11 +1494,11 @@ mod tests {
         let mut reader = StoreJournal::new(snapshot.clone());
         reader.observe_read(&path(&["missing", "child"]));
         let mut nested_writer = StoreJournal::new(snapshot.clone());
-        nested_writer.write(path(&["tree", "child"]), PublicValue::integer(1));
+        nested_writer.write(path(&["tree", "child"]), integer(&store, 1));
         let mut parent_writer = StoreJournal::new(snapshot.clone());
-        parent_writer.write(path(&["tree"]), PublicValue::empty_record());
+        parent_writer.write(path(&["tree"]), empty(&store));
         let mut missing_writer = StoreJournal::new(snapshot);
-        missing_writer.write(path(&["missing"]), PublicValue::empty_record());
+        missing_writer.write(path(&["missing"]), empty(&store));
 
         assert_eq!(
             store.try_commit(&nested_writer),
@@ -1459,9 +1520,9 @@ mod tests {
         let mut store = store();
         let snapshot = store.snapshot();
         let mut child = StoreJournal::new(snapshot.clone());
-        child.write(path(&["tree", "child"]), PublicValue::integer(1));
+        child.write(path(&["tree", "child"]), integer(&store, 1));
         let mut parent = StoreJournal::new(snapshot);
-        parent.write(path(&["tree"]), PublicValue::integer(2));
+        parent.write(path(&["tree"]), integer(&store, 2));
 
         assert_eq!(store.try_commit(&child), StoreCommitResult::Committed);
         assert_eq!(store.try_commit(&parent), StoreCommitResult::Committed);
@@ -1472,11 +1533,11 @@ mod tests {
         let mut store = store();
         let snapshot = store.snapshot();
         let mut local = StoreJournal::new(snapshot.clone());
-        local.write(path(&["value"]), PublicValue::integer(1));
+        local.write(path(&["value"]), integer(&store, 1));
         assert!(!local.observe_read(&path(&["value"])));
 
         let mut concurrent = StoreJournal::new(snapshot);
-        concurrent.write(path(&["value"]), PublicValue::integer(2));
+        concurrent.write(path(&["value"]), integer(&store, 2));
         assert_eq!(store.try_commit(&concurrent), StoreCommitResult::Committed);
         assert_eq!(store.try_commit(&local), StoreCommitResult::Committed);
     }
@@ -1487,10 +1548,10 @@ mod tests {
         let snapshot = store.snapshot();
         let mut local = StoreJournal::new(snapshot.clone());
         assert!(local.observe_read(&path(&["value"])));
-        local.write(path(&["value"]), PublicValue::integer(1));
+        local.write(path(&["value"]), integer(&store, 1));
 
         let mut concurrent = StoreJournal::new(snapshot);
-        concurrent.write(path(&["value"]), PublicValue::integer(2));
+        concurrent.write(path(&["value"]), integer(&store, 2));
         assert_eq!(store.try_commit(&concurrent), StoreCommitResult::Committed);
         assert_eq!(store.try_commit(&local), StoreCommitResult::Conflict);
     }

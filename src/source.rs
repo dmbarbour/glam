@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use bytes::Bytes;
 use sha2::{Digest, Sha256};
 
-use crate::api::Value;
+use crate::core::{Dict, Key, Value};
 
 pub const CONTENT_DIGEST_ALGORITHM: &str = "sha256";
 const LOCAL_MANIFEST_HEADER: &str = "# glam local-file manifest v2";
@@ -39,10 +39,10 @@ impl ContentDigest {
     }
 
     pub(crate) fn value(self) -> Value {
-        Value::record([(
-            self.algorithm(),
-            Value::binary(Bytes::copy_from_slice(&self.0)),
-        )])
+        Value::Dict(Dict::new_sync().insert(
+            Key::atom_from_text(self.algorithm()),
+            Value::Binary(Bytes::copy_from_slice(&self.0)),
+        ))
     }
 }
 
@@ -53,32 +53,49 @@ impl ContentDigest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceIdentity {
     label: Arc<str>,
-    value: Value,
+    kind: Arc<str>,
+    data: Bytes,
 }
 
 impl SourceIdentity {
-    pub fn new(label: impl Into<Arc<str>>, value: Value) -> Self {
+    /// Constructs a host source identity from runtime-independent data.
+    ///
+    /// `kind` becomes the tagged provenance field and `data` its binary
+    /// payload once an assembler materializes the identity in its runtime.
+    pub fn new(
+        label: impl Into<Arc<str>>,
+        kind: impl Into<Arc<str>>,
+        data: impl Into<Bytes>,
+    ) -> Self {
         Self {
             label: label.into(),
-            value,
+            kind: kind.into(),
+            data: data.into(),
         }
     }
 
     pub fn file(path: impl AsRef<Path>) -> Self {
         let label: Arc<str> = Arc::from(path.as_ref().display().to_string());
-        Self::new(label.clone(), Value::record([("file", Value::text(label))]))
+        Self::new(
+            label.clone(),
+            "file",
+            Bytes::copy_from_slice(label.as_bytes()),
+        )
     }
 
     pub fn script(label: impl Into<Arc<str>>, bytes: Bytes) -> Self {
-        Self::new(label, Value::record([("script", Value::binary(bytes))]))
+        Self::new(label, "script", bytes)
     }
 
     pub fn label(&self) -> &str {
         &self.label
     }
 
-    pub fn value(&self) -> &Value {
-        &self.value
+    pub(crate) fn value(&self) -> Value {
+        Value::Dict(Dict::new_sync().insert(
+            Key::atom_from_text(&self.kind),
+            Value::Binary(self.data.clone()),
+        ))
     }
 }
 
@@ -694,7 +711,7 @@ mod tests {
     fn artifact_digest_matches_exact_bytes() {
         let artifact = SourceArtifact::new(
             Bytes::from_static(b"source bytes"),
-            SourceIdentity::new("memory", Value::record([("memory", Value::text("source"))])),
+            SourceIdentity::new("memory", "memory", Bytes::from_static(b"source")),
         );
 
         assert_eq!(

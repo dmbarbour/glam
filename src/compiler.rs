@@ -319,10 +319,7 @@ pub(crate) fn import_failure(
     if let Some(trace) = trace {
         details = details.insert((*keys::ORIGIN).clone(), trace.origin_value());
     } else if let Some(source) = importer_source {
-        details = details.insert(
-            (*keys::SOURCE).clone(),
-            source.identity().value().as_core().clone(),
-        );
+        details = details.insert((*keys::SOURCE).clone(), source.identity().value());
     }
     let context =
         Value::Dict(Dict::new_sync().insert((*keys::IMPORT).clone(), Value::Dict(details)));

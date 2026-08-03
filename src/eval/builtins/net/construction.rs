@@ -4,7 +4,7 @@ use std::num::NonZeroU64;
 use std::sync::Arc;
 
 use crate::api::Value as PublicValue;
-use crate::core::{CoreValueFactory, List, NetValue, OpaqueValue, Value};
+use crate::core::{CoreValueFactory, Dict, List, NetValue, OpaqueValue, Value};
 use crate::core_net::{CoreSpecialization, CoreWaitToken};
 use crate::evaluation::EvalContext;
 use crate::interaction_net::{NetBuilder, Port};
@@ -183,18 +183,25 @@ impl TaskSpecialization for InteractionNetEffects {
 }
 
 struct ConstructionHost {
+    environment: PublicValue,
     store: StoreSnapshot,
 }
 
 impl ConstructionHost {
     fn new(values: CoreValueFactory) -> Self {
+        let environment = PublicValue::from_core(&values, Value::Dict(Dict::new_sync()));
         Self {
+            environment,
             store: ReflectionStore::new(values, Arc::new(ExactConflictAnalysis)).snapshot(),
         }
     }
 }
 
-impl TaskEnvironment for ConstructionHost {}
+impl TaskEnvironment for ConstructionHost {
+    fn reflection_environment(&self) -> PublicValue {
+        self.environment.clone()
+    }
+}
 
 impl TaskHost<InteractionNetEffects> for ConstructionHost {
     fn snapshot(&self) -> HostSnapshot<InteractionNetEffects> {
@@ -224,7 +231,7 @@ impl NetConstructionMachine {
         let specialization = InteractionNetEffects {
             brand: brand.clone(),
         };
-        let effect = PublicValue::from_core(effect);
+        let effect = PublicValue::from_core(context.values(), effect);
         let search = IsolatedEffectSearch::new_in_context(
             &effect,
             specialization,
@@ -252,7 +259,10 @@ impl NetConstructionMachine {
                 match blocked.error() {
                     Some(halt) => Err(halt
                         .clone()
-                        .with_context(PublicValue::from_core(net_construction_context()))
+                        .with_context(PublicValue::from_core(
+                            context.values(),
+                            net_construction_context(),
+                        ))
                         .into_evaluation_halt()),
                     None => Err(EvaluationHalt::new(
                         "interaction-net construction became blocked without a dependency or mutable host observation",
@@ -282,7 +292,10 @@ impl NetConstructionMachine {
                 replay(branch.journal(), exposed).map(Some)
             }
             IsolatedSearchPoll::Failed(halt) => Err(halt
-                .with_context(PublicValue::from_core(net_construction_context()))
+                .with_context(PublicValue::from_core(
+                    context.values(),
+                    net_construction_context(),
+                ))
                 .into_evaluation_halt()),
             IsolatedSearchPoll::Cancelled => Err(EvaluationHalt::new(
                 "interaction-net construction was cancelled",
@@ -308,7 +321,11 @@ fn construct_bind(
         .try_into()
         .expect("three allocated ports must form a triple");
     journal.append(ConstructionOp::Bind { ports });
-    Ok(RequestResult::Return(port_list(brand, ports)))
+    Ok(RequestResult::Return(port_list(
+        context.eval_context().values(),
+        brand,
+        ports,
+    )))
 }
 
 fn construct_copy(
@@ -333,7 +350,11 @@ fn construct_copy(
     journal.append(ConstructionOp::Copy {
         ports: Arc::from(ports.clone()),
     });
-    Ok(RequestResult::Return(port_list(brand, ports)))
+    Ok(RequestResult::Return(port_list(
+        context.eval_context().values(),
+        brand,
+        ports,
+    )))
 }
 
 fn construct_data(
@@ -352,7 +373,11 @@ fn construct_data(
         port,
         value: value.into_core(),
     });
-    Ok(RequestResult::Return(port_list(brand, [port])))
+    Ok(RequestResult::Return(port_list(
+        context.eval_context().values(),
+        brand,
+        [port],
+    )))
 }
 
 fn construct_wire(
@@ -391,20 +416,24 @@ fn exact<const N: usize>(
 }
 
 fn port_list(
+    values: &CoreValueFactory,
     brand: &Arc<ConstructionBrand>,
     ports: impl IntoIterator<Item = ConstructionPortId>,
 ) -> PublicValue {
-    PublicValue::from_core(Value::List(List::from_values(
-        ports
-            .into_iter()
-            .map(|id| {
-                Value::Opaque(OpaqueValue::new(Arc::new(ConstructionPort {
-                    brand: brand.clone(),
-                    id,
-                })))
-            })
-            .collect(),
-    )))
+    PublicValue::from_core(
+        values,
+        Value::List(List::from_values(
+            ports
+                .into_iter()
+                .map(|id| {
+                    Value::Opaque(OpaqueValue::new(Arc::new(ConstructionPort {
+                        brand: brand.clone(),
+                        id,
+                    })))
+                })
+                .collect(),
+        )),
+    )
 }
 
 fn construction_port(

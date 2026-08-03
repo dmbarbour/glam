@@ -3,14 +3,14 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::{Diagnostic, Error, ModuleInput, Severity, Value};
+use crate::{Diagnostic, Error, ModuleInput, Severity, Value, Values};
 
 use super::completion::{CliCaseExplanation, CompletionRequest};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CliError {
     message: String,
-    cause: Option<Box<Diagnostic>>,
+    cause: Option<Box<Error>>,
     diagnostics: Vec<Diagnostic>,
     explanations: Vec<CliCaseExplanation>,
 }
@@ -26,10 +26,11 @@ impl CliError {
     }
 
     pub(super) fn from_error(error: Error) -> Self {
+        let diagnostics = error.diagnostics().to_vec();
         Self {
             message: error.to_string(),
-            cause: Some(Box::new(error.diagnostic().clone())),
-            diagnostics: error.diagnostics().to_vec(),
+            cause: Some(Box::new(error)),
+            diagnostics,
             explanations: Vec::new(),
         }
     }
@@ -60,31 +61,36 @@ impl CliError {
 
     /// Projects this CLI failure into a rich diagnostic while retaining the
     /// original `.case` values for configured loggers and IDE clients.
-    pub fn diagnostic(&self) -> Diagnostic {
+    pub fn diagnostic(&self, values: &Values) -> Result<Diagnostic, Error> {
         if let Some(cause) = &self.cause {
-            return cause.clone().with_context(Value::record([(
-                "conf",
-                Value::record([("entry", Value::text("cli"))]),
-            )]));
+            return cause
+                .diagnostic(values)?
+                .with_context(configuration_entry_context(values)?);
         }
-        let mut entries = vec![("msg", Value::record([("text", Value::text(&self.message))]))];
+        let mut entries = vec![(
+            "msg",
+            values.record([("text", values.text(&self.message))])?,
+        )];
         if !self.explanations.is_empty() {
             entries.push((
                 "cli",
-                Value::record([(
+                values.record([(
                     "cases",
-                    Value::list(
+                    values.list(
                         self.explanations
                             .iter()
                             .map(|explanation| explanation.value().clone()),
-                    ),
-                )]),
+                    )?,
+                )])?,
             ));
         }
-        Diagnostic::from_emission(Severity::Error, Value::record(entries)).with_context(
-            Value::record([("conf", Value::record([("entry", Value::text("cli"))]))]),
-        )
+        Diagnostic::from_emission(Severity::Error, values.record(entries)?)
+            .with_context(configuration_entry_context(values)?)
     }
+}
+
+fn configuration_entry_context(values: &Values) -> Result<Value, Error> {
+    values.record([("conf", values.record([("entry", values.text("cli"))])?)])
 }
 
 impl fmt::Display for CliError {

@@ -49,13 +49,19 @@ pub(super) struct TokenRun {
 }
 
 pub(super) struct TokenHost {
+    environment: Value,
     snapshot: TokenSnapshot,
     store: StoreSnapshot,
 }
 
 impl TokenHost {
     fn new(values: CoreValueFactory, input: Arc<str>, completion_offset: Option<usize>) -> Self {
+        let environment = Value::from_core(
+            &values,
+            crate::core::Value::Dict(crate::core::Dict::new_sync()),
+        );
         Self {
+            environment,
             snapshot: TokenSnapshot {
                 input,
                 completion_offset,
@@ -67,7 +73,7 @@ impl TokenHost {
 
 impl TaskEnvironment for TokenHost {
     fn reflection_environment(&self) -> Value {
-        Value::empty_record()
+        self.environment.clone()
     }
 }
 

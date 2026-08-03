@@ -92,9 +92,13 @@ The runtime also owns every evaluator identity allocator except the global
 sessions, CLI invocations, endpoints, and deliveries therefore use IDs that
 are unique only within their runtime. Runtime and assembler construction expose
 a `Values` factory so identity-bearing values are never created in an
-unscoped domain. Production evaluation likewise has no standalone session or
-context constructor; isolated work still receives the selected runtime's core
-factory. The runtime cache owns canonical protocol values, the initial
+unscoped domain. Public `Value`s are runtime-tagged roots and cannot cross this
+boundary: composite construction and every consuming facade validate the tag
+before exposing the recursive core representation. Runtime-owned promise
+assignments, task and wait terminals, pending reflection work, and queued or
+blocked sparks retain the same internal root wrapper. Production evaluation
+likewise has no standalone session or context constructor; isolated work still
+receives the selected runtime's core factory. The runtime cache owns canonical protocol values, the initial
 metadata carrier, and complete type-indexed compiler bundles. Attachments are
 built outside synchronization and publish one completed winner; each
 `CompileContext` keeps a compilation-local lookup view without duplicating the

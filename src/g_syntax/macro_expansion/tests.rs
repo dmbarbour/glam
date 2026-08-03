@@ -134,7 +134,7 @@ fn macro_runner_distinguishes_a_non_effect_value() {
     let assembler = Assembler::default();
     let error = run_macro_effect(
         &assembler.test_compilation_execution(),
-        PublicValue::integer(42).as_core().clone(),
+        assembler.values().integer(42).as_core().clone(),
         Value::Dict(Dict::new_sync()),
         MacroInput::empty(),
     )
@@ -178,7 +178,7 @@ fn macro_failure_keeps_only_furthest_active_cases() {
     assert_eq!(error.cases().len(), 1);
     assert_eq!(
         error.cases()[0],
-        PublicValue::text("furthest case"),
+        assembler.values().text("furthest case"),
         "an earlier failed cursor must not contribute its active case",
     );
 }
@@ -198,12 +198,8 @@ fn unstarted_reflection_gate_runs_inside_the_macro_session() {
     let assembler = Assembler::default();
     let execution = assembler.test_compilation_execution();
     let reflection = return_effect(keys::unit_value());
-    let gate = Value::reflection_gate(
-        &crate::core::test_value_factory(),
-        reflection,
-        keys::unit_value(),
-    );
-    let macro_effect = PublicValue::from_core(return_effect(gate));
+    let gate = Value::reflection_gate(&assembler.core_values(), reflection, keys::unit_value());
+    let macro_effect = PublicValue::from_core(&assembler.core_values(), return_effect(gate));
 
     run(&execution, &macro_effect, Value::Dict(Dict::new_sync()))
         .expect("macro session should launch and complete its reflection gate");
@@ -214,14 +210,14 @@ fn assembler_owned_reflection_gate_is_foreign_to_macro_execution() {
     let (assembler, reflection) = compile_effects(".cut (.heap.get '.missing >>= (\\_ -> .fail))");
     let execution = assembler.test_compilation_execution();
     let gate = Value::reflection_gate(
-        &crate::core::test_value_factory(),
+        &assembler.core_values(),
         reflection.as_core().clone(),
         keys::unit_value(),
     );
     let error = eval::eval_value(&assembler.eval_context(), &gate)
         .expect_err("assembler observation should start and block the gate");
     assert!(error.blocked_on().is_some());
-    let macro_effect = PublicValue::from_core(return_effect(gate));
+    let macro_effect = PublicValue::from_core(&assembler.core_values(), return_effect(gate));
 
     let error = run(&execution, &macro_effect, Value::Dict(Dict::new_sync()))
         .expect_err("macro execution must not migrate a foreign gate");
@@ -247,7 +243,11 @@ fn committed_reflection_heap_and_children_outlive_macro_alternatives() {
     let (assembler, effects) = compile_effects(
         "{ write:(.alt ((anno refl:(.heap.set '.saved \"yes\") (.r ())) =>> .fail) (.r ())), read:(anno refl:(.heap.get '.saved >>= (\\saved -> .log 'info { msg:{ text:saved } })) (.r ())), child:(.alt ((anno refl:(.task.new (.log 'warn { msg:{ text:\"child survived\" } }) >>= (\\_ -> .r ())) (.r ())) =>> .fail) (.r ())) }",
     );
-    assembler.record_diagnostic(Diagnostic::new(Severity::Info, "assembler-only diagnostic"));
+    assembler.record_diagnostic(Diagnostic::new(
+        &assembler.values(),
+        Severity::Info,
+        "assembler-only diagnostic",
+    ));
     let execution = assembler.test_compilation_execution();
     let empty = Value::Dict(Dict::new_sync());
 
@@ -339,7 +339,7 @@ fn inline_macro_readers_and_writers_are_transactional() {
                 end: 16,
             },
             MacroInputElement {
-                kind: MacroInputKind::Data(PublicValue::integer(42)),
+                kind: MacroInputKind::Data(assembler.values().integer(42)),
                 separated: true,
                 start: 17,
                 end: 19,
@@ -375,13 +375,13 @@ fn layout_readers_require_scoped_anchors_and_leave_root_anchor_as_failure() {
     let input = MacroInput::new(
         vec![
             MacroInputElement {
-                kind: MacroInputKind::Data(PublicValue::integer(1)),
+                kind: MacroInputKind::Data(assembler.values().integer(1)),
                 separated: true,
                 start: 2,
                 end: 3,
             },
             MacroInputElement {
-                kind: MacroInputKind::Data(PublicValue::integer(2)),
+                kind: MacroInputKind::Data(assembler.values().integer(2)),
                 separated: true,
                 start: 6,
                 end: 7,
@@ -465,7 +465,7 @@ fn source_macro_embeds_data_through_the_ordinary_parser() {
         .expect("macro output should define answer");
     assert_eq!(
         assembler.evaluate(&answer).expect("answer should evaluate"),
-        PublicValue::integer(42)
+        assembler.values().integer(42)
     );
     let grouped = assembler
         .get(module.value(), "grouped")
@@ -474,7 +474,7 @@ fn source_macro_embeds_data_through_the_ordinary_parser() {
         assembler
             .evaluate(&grouped)
             .expect("grouped output should evaluate"),
-        PublicValue::integer(42)
+        assembler.values().integer(42)
     );
 }
 
@@ -505,10 +505,10 @@ after_delete = 43
         .expect("inline source macro IO fixture should compile");
 
     for (name, expected) in [
-        ("consumed", PublicValue::integer(41)),
-        ("rolled_back", PublicValue::integer(42)),
-        ("suffix", PublicValue::integer(42)),
-        ("after_delete", PublicValue::integer(43)),
+        ("consumed", assembler.values().integer(41)),
+        ("rolled_back", assembler.values().integer(42)),
+        ("suffix", assembler.values().integer(42)),
+        ("after_delete", assembler.values().integer(43)),
     ] {
         let value = assembler
             .get(module.value(), name)
@@ -527,7 +527,7 @@ after_delete = 43
         assembler
             .evaluate(&language)
             .expect("language should evaluate"),
-        PublicValue::atom_from_text("g0")
+        assembler.values().atom_from_text("g0")
     );
 }
 
@@ -564,7 +564,7 @@ fn text_span_and_end_cover_the_current_nonstructural_run() {
         assembler
             .evaluate(span)
             .expect("emitted span should evaluate"),
-        PublicValue::text("remaining")
+        assembler.values().text("remaining")
     );
 }
 
@@ -606,7 +606,7 @@ object bounded with
             assembler
                 .evaluate(&value)
                 .unwrap_or_else(|error| panic!("`{name}` should evaluate: {error}")),
-            PublicValue::integer(expected),
+            assembler.values().integer(expected),
             "unexpected value for `{name}`",
         );
     }
@@ -618,7 +618,7 @@ object bounded with
         .expect("macro-generated member should exist");
     assert_eq!(
         assembler.evaluate(&own).expect("own should evaluate"),
-        PublicValue::integer(42),
+        assembler.values().integer(42),
         "the root macro cursor must not cross into its peer layout item",
     );
 }
@@ -674,7 +674,7 @@ tuple_effects = ((do @meta.steps), do .r 3)
             assembler
                 .evaluate(&value)
                 .unwrap_or_else(|error| panic!("`{name}` should evaluate: {error}")),
-            PublicValue::integer(expected),
+            assembler.values().integer(expected),
             "unexpected value for `{name}`",
         );
     }
@@ -692,7 +692,7 @@ tuple_effects = ((do @meta.steps), do .r 3)
                 assembler.evaluate(&value).unwrap_or_else(|error| {
                     panic!("object member `{object_name}.{name}` should evaluate: {error}")
                 }),
-                PublicValue::integer(expected),
+                assembler.values().integer(expected),
             );
         }
     }
@@ -735,7 +735,7 @@ list_second = list.head (list.pure (list.at 1 list_effects))
             assembler
                 .evaluate(&value)
                 .unwrap_or_else(|error| panic!("`{name}` should evaluate: {error}")),
-            PublicValue::integer(expected),
+            assembler.values().integer(expected),
             "unexpected value for `{name}`",
         );
     }
@@ -1056,7 +1056,7 @@ layout = list.at 1 [
             assembler
                 .evaluate(&value)
                 .unwrap_or_else(|error| panic!("`{name}` should evaluate: {error}")),
-            PublicValue::integer(expected),
+            assembler.values().integer(expected),
         );
     }
 
@@ -1191,7 +1191,7 @@ second = list.at 1 [@meta.left, @meta.delete @meta.wide]
             assembler
                 .evaluate(&value)
                 .unwrap_or_else(|error| panic!("`{name}` should evaluate: {error}")),
-            PublicValue::integer(expected),
+            assembler.values().integer(expected),
         );
     }
 }
