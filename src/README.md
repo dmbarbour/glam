@@ -242,6 +242,12 @@ Permanent failures carry Glam diagnostic values and ordered context frames
 through lazy memoization and task status queries; blocking and unassigned
 promises remain scheduler control states rather than errors.
 
+Each coordinator-owned blocked spark publishes a checked subscription epoch
+beside its retained dependency. Broad and eventual exact wake batches queue it
+only when work ID, blocked state, epoch, and runtime-local dependency key still
+match. Late notifications after reblocking, demand-session closure, executor
+shutdown, or runtime teardown therefore retain no scheduling authority.
+
 `CompileContext` constructs one opaque provenance handle for each traced source
 input. The `.g` front end places it in shallow, static definition-initialization
 frames alongside its own line and definition fields. It does not capture

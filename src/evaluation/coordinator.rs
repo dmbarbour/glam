@@ -6,7 +6,10 @@ use std::num::NonZeroU64;
 use std::sync::{Arc, Condvar, Mutex, Weak};
 
 use crate::core::{PromisedValue, Value};
-use crate::runtime::{EvaluationRuntimeId, RuntimeIds, RuntimeMutationAdmission, RuntimeValueRoot};
+use crate::runtime::{
+    EvaluationRuntimeId, RuntimeIds, RuntimeMutationAdmission, RuntimeMutationGuard,
+    RuntimeValueRoot,
+};
 
 use super::{EvaluationSession, EvaluationSessionId, EvaluationWaitToken};
 
@@ -18,6 +21,26 @@ impl EvaluationWorkId {
     pub(crate) fn get(self) -> u64 {
         self.0.get()
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) struct WakeRegistration {
+    work: EvaluationWorkId,
+    subscription_epoch: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) enum WorkDependencyKey {
+    Wait(u64),
+    Promise(u64),
+    #[cfg(test)]
+    Test(u64),
+}
+
+pub(super) struct DependencyWakeBatch {
+    source: WorkDependencyKey,
+    registrations: Vec<WakeRegistration>,
+    observed_generation: Option<u64>,
 }
 
 #[derive(Default)]
@@ -47,6 +70,8 @@ enum WorkState {
 pub(super) enum WorkDependency {
     Wait(EvaluationWaitToken),
     Promise(PromisedValue),
+    #[cfg(test)]
+    Test(TestWorkDependency),
 }
 
 impl WorkDependency {
@@ -54,24 +79,43 @@ impl WorkDependency {
         match self {
             Self::Wait(wait) => wait.runtime_id(),
             Self::Promise(promise) => promise.runtime_id(),
+            #[cfg(test)]
+            Self::Test(dependency) => dependency.runtime,
+        }
+    }
+
+    fn key(&self) -> WorkDependencyKey {
+        match self {
+            Self::Wait(wait) => WorkDependencyKey::Wait(wait.get()),
+            Self::Promise(promise) => WorkDependencyKey::Promise(promise.id().get()),
+            #[cfg(test)]
+            Self::Test(dependency) => WorkDependencyKey::Test(dependency.id.get()),
         }
     }
 
     fn same_source(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Wait(left), Self::Wait(right)) => left == right,
-            (Self::Promise(left), Self::Promise(right)) => left == right,
-            _ => false,
-        }
+        self.runtime_id() == other.runtime_id() && self.key() == other.key()
     }
 
     fn abandon(self) {
-        if let Self::Wait(wait) = self
-            && let Some(owner) = wait.owner()
-        {
-            owner.abandon_spark_wait(&wait);
+        match self {
+            Self::Wait(wait) => {
+                if let Some(owner) = wait.owner() {
+                    owner.abandon_spark_wait(&wait);
+                }
+            }
+            Self::Promise(_) => {}
+            #[cfg(test)]
+            Self::Test(_) => {}
         }
     }
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+pub(super) struct TestWorkDependency {
+    runtime: EvaluationRuntimeId,
+    id: NonZeroU64,
 }
 
 struct SparkDemand {
@@ -83,6 +127,7 @@ struct WorkRecord {
     id: EvaluationWorkId,
     demand_session: EvaluationSessionId,
     observed_generation: u64,
+    subscription_epoch: u64,
     control: WorkControl,
     obligations: SettlementObligations,
     state: WorkState,
@@ -137,7 +182,7 @@ struct WorkCoordinatorState {
     work_by_session: HashMap<EvaluationSessionId, HashSet<EvaluationWorkId>>,
     ready_sparks: VecDeque<EvaluationWorkId>,
     ready_spark_set: HashSet<EvaluationWorkId>,
-    blocked_sparks: HashMap<EvaluationSessionId, HashSet<EvaluationWorkId>>,
+    blocked_sparks: HashMap<EvaluationSessionId, HashSet<WakeRegistration>>,
     spark_generations: HashMap<EvaluationSessionId, u64>,
     spark_workers: usize,
     prefer_spark: bool,
@@ -300,6 +345,7 @@ impl EvaluationWorkCoordinator {
                     id,
                     demand_session: session_id,
                     observed_generation,
+                    subscription_epoch: 0,
                     control: WorkControl::default(),
                     obligations: SettlementObligations,
                     state: WorkState::Queued,
@@ -324,16 +370,17 @@ impl EvaluationWorkCoordinator {
     }
 
     /// Broadly retries sparks whose demand session observed task or promise
-    /// progress. Precise dependency subscriptions replace this in Phase 4.
+    /// progress. Precise promise and wait subscriptions refine this in later
+    /// work-boundary phases.
     pub(super) fn notify_spark_disturbance(&self, session: EvaluationSessionId) {
         let mutation = self.admission.mutation_guard();
-        let changed = {
+        let batches = {
             let mut state = self
                 .state
                 .lock()
                 .expect("evaluation work coordinator was poisoned");
             if !state.sessions.contains_key(&session) {
-                false
+                None
             } else {
                 let generation = state
                     .spark_generations
@@ -342,23 +389,39 @@ impl EvaluationWorkCoordinator {
                     .or_insert(1);
                 let generation = *generation;
                 let blocked = state.blocked_sparks.remove(&session).unwrap_or_default();
-                for id in blocked {
-                    if let Some(record) = state.work.get_mut(&id)
+                let mut batches: HashMap<WorkDependencyKey, Vec<WakeRegistration>> = HashMap::new();
+                for registration in blocked {
+                    if let Some(record) = state.work.get(&registration.work)
                         && matches!(record.state, WorkState::Blocked)
+                        && record.subscription_epoch == registration.subscription_epoch
+                        && let Some(dependency) = record.dependency.as_ref()
                     {
-                        record.state = WorkState::Queued;
-                        record.observed_generation = generation;
-                        queue_spark(&mut state, id);
+                        batches
+                            .entry(dependency.key())
+                            .or_default()
+                            .push(registration);
                     }
                 }
                 state.work_generation = state.work_generation.wrapping_add(1);
-                true
+                Some((generation, batches))
             }
         };
-        drop(mutation);
-        if changed {
-            self.work_available.notify_all();
+        let disturbed = batches.is_some();
+        let mut woke = false;
+        if let Some((generation, batches)) = batches {
+            for (source, registrations) in batches {
+                woke |= self.wake_dependency_batch_guarded(
+                    &mutation,
+                    DependencyWakeBatch {
+                        source,
+                        registrations,
+                        observed_generation: Some(generation),
+                    },
+                );
+            }
         }
+        drop(mutation);
+        self.notify_dependency_wake(disturbed || woke);
     }
 
     pub(super) fn executor_started(&self, worker_count: usize) {
@@ -527,12 +590,20 @@ impl EvaluationWorkCoordinator {
                     record.state = WorkState::Queued;
                     queue_spark(&mut state, claimed.id);
                 } else {
+                    record.subscription_epoch = record
+                        .subscription_epoch
+                        .checked_add(1)
+                        .expect("evaluation work subscription epochs exhausted");
+                    let registration = WakeRegistration {
+                        work: claimed.id,
+                        subscription_epoch: record.subscription_epoch,
+                    };
                     record.state = WorkState::Blocked;
                     state
                         .blocked_sparks
                         .entry(claimed.demand_session)
                         .or_default()
-                        .insert(claimed.id);
+                        .insert(registration);
                 }
                 None
             } else {
@@ -570,6 +641,40 @@ impl EvaluationWorkCoordinator {
                 .work_available
                 .wait(state)
                 .expect("evaluation work coordinator was poisoned");
+        }
+    }
+
+    /// Queues registrations which still describe the work's current blocked
+    /// dependency. The caller already owns this runtime's mutation admission;
+    /// dependency publication and the scheduler transition therefore form one
+    /// settlement-visible update without nesting component mutexes.
+    pub(super) fn wake_dependency_batch_guarded(
+        &self,
+        _mutation: &RuntimeMutationGuard<'_>,
+        batch: DependencyWakeBatch,
+    ) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .expect("evaluation work coordinator was poisoned");
+        let mut changed = false;
+        for registration in batch.registrations {
+            changed |= queue_current_registration(
+                &mut state,
+                registration,
+                Some(batch.source),
+                batch.observed_generation,
+            );
+        }
+        if changed {
+            state.work_generation = state.work_generation.wrapping_add(1);
+        }
+        changed
+    }
+
+    pub(super) fn notify_dependency_wake(&self, changed: bool) {
+        if changed {
+            self.work_available.notify_all();
         }
     }
 
@@ -641,6 +746,44 @@ fn queue_spark(state: &mut WorkCoordinatorState, id: EvaluationWorkId) {
     }
 }
 
+fn queue_current_registration(
+    state: &mut WorkCoordinatorState,
+    registration: WakeRegistration,
+    source: Option<WorkDependencyKey>,
+    observed_generation: Option<u64>,
+) -> bool {
+    let demand_session = {
+        let Some(record) = state.work.get_mut(&registration.work) else {
+            return false;
+        };
+        if !matches!(record.state, WorkState::Blocked)
+            || record.subscription_epoch != registration.subscription_epoch
+            || source.is_some_and(|source| {
+                record
+                    .dependency
+                    .as_ref()
+                    .is_none_or(|dependency| dependency.key() != source)
+            })
+        {
+            return false;
+        }
+        if let Some(generation) = observed_generation {
+            record.observed_generation = generation;
+        }
+        record.state = WorkState::Queued;
+        record.demand_session
+    };
+
+    if let Some(blocked) = state.blocked_sparks.get_mut(&demand_session) {
+        blocked.remove(&registration);
+        if blocked.is_empty() {
+            state.blocked_sparks.remove(&demand_session);
+        }
+    }
+    queue_spark(state, registration.work);
+    true
+}
+
 fn claim_ready_spark(state: &mut WorkCoordinatorState) -> Option<ClaimedSparkWork> {
     while let Some(id) = state.ready_sparks.pop_front() {
         state.ready_spark_set.remove(&id);
@@ -681,7 +824,10 @@ fn detach_spark(state: &mut WorkCoordinatorState, id: EvaluationWorkId) -> Optio
     state.ready_spark_set.remove(&id);
     state.ready_sparks.retain(|candidate| *candidate != id);
     if let Some(blocked) = state.blocked_sparks.get_mut(&record.demand_session) {
-        blocked.remove(&id);
+        blocked.remove(&WakeRegistration {
+            work: id,
+            subscription_epoch: record.subscription_epoch,
+        });
         if blocked.is_empty() {
             state.blocked_sparks.remove(&record.demand_session);
         }
@@ -716,7 +862,483 @@ fn pop_ready_session(state: &mut WorkCoordinatorState) -> Option<Arc<EvaluationS
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Barrier, OnceLock};
+    use std::thread;
+
     use super::*;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum CompletionSubscriptionOutcome {
+        Pending,
+        AlreadyTerminal,
+    }
+
+    struct CompletionSubscriptions {
+        runtime: EvaluationRuntimeId,
+        source: WorkDependencyKey,
+        coordinator: Weak<EvaluationWorkCoordinator>,
+        registrations: Mutex<Vec<WakeRegistration>>,
+    }
+
+    impl CompletionSubscriptions {
+        fn new(coordinator: &Arc<EvaluationWorkCoordinator>, source: WorkDependencyKey) -> Self {
+            Self {
+                runtime: coordinator.runtime,
+                source,
+                coordinator: Arc::downgrade(coordinator),
+                registrations: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn subscribe(
+            &self,
+            registration: WakeRegistration,
+            terminal: impl FnOnce() -> bool,
+            before_insert: impl FnOnce(),
+        ) -> CompletionSubscriptionOutcome {
+            let mut registrations = self
+                .registrations
+                .lock()
+                .expect("test completion subscriber set was poisoned");
+            if terminal() {
+                return CompletionSubscriptionOutcome::AlreadyTerminal;
+            }
+            before_insert();
+            registrations.push(registration);
+            CompletionSubscriptionOutcome::Pending
+        }
+
+        fn publish(&self, publish_terminal: impl FnOnce()) {
+            let Some(coordinator) = self.coordinator.upgrade() else {
+                publish_terminal();
+                self.registrations
+                    .lock()
+                    .expect("test completion subscriber set was poisoned")
+                    .clear();
+                return;
+            };
+            assert_eq!(coordinator.runtime, self.runtime);
+            let mutation = coordinator.admission.mutation_guard();
+            publish_terminal();
+            let registrations = std::mem::take(
+                &mut *self
+                    .registrations
+                    .lock()
+                    .expect("test completion subscriber set was poisoned"),
+            );
+            let changed = coordinator.wake_dependency_batch_guarded(
+                &mutation,
+                DependencyWakeBatch {
+                    source: self.source,
+                    registrations,
+                    observed_generation: None,
+                },
+            );
+            drop(mutation);
+            coordinator.notify_dependency_wake(changed);
+        }
+
+        fn len(&self) -> usize {
+            self.registrations
+                .lock()
+                .expect("test completion subscriber set was poisoned")
+                .len()
+        }
+    }
+
+    struct TestCompletionSource {
+        id: NonZeroU64,
+        terminal: OnceLock<()>,
+        subscriptions: CompletionSubscriptions,
+    }
+
+    impl TestCompletionSource {
+        fn new(coordinator: &Arc<EvaluationWorkCoordinator>) -> Arc<Self> {
+            let id = coordinator
+                .ids
+                .evaluation_wait()
+                .expect("test completion identity should be available");
+            Arc::new(Self {
+                id,
+                terminal: OnceLock::new(),
+                subscriptions: CompletionSubscriptions::new(
+                    coordinator,
+                    WorkDependencyKey::Test(id.get()),
+                ),
+            })
+        }
+
+        fn runtime_id(&self) -> EvaluationRuntimeId {
+            self.subscriptions.runtime
+        }
+
+        fn dependency(&self) -> WorkDependency {
+            WorkDependency::Test(TestWorkDependency {
+                runtime: self.runtime_id(),
+                id: self.id,
+            })
+        }
+
+        fn key(&self) -> WorkDependencyKey {
+            self.subscriptions.source
+        }
+
+        fn complete(&self) {
+            self.subscriptions.publish(|| {
+                let _ = self.terminal.set(());
+            });
+        }
+
+        fn is_terminal(&self) -> bool {
+            self.terminal.get().is_some()
+        }
+
+        fn subscriber_count(&self) -> usize {
+            self.subscriptions.len()
+        }
+
+        fn coordinator_is_live(&self) -> bool {
+            self.subscriptions.coordinator.upgrade().is_some()
+        }
+    }
+
+    impl EvaluationWorkCoordinator {
+        fn park_claimed_test_spark(
+            &self,
+            claimed: ClaimedSparkWork,
+            source: &TestCompletionSource,
+            before_insert: impl FnOnce(),
+        ) -> Result<WakeRegistration, Box<ClaimedSparkWork>> {
+            if source.runtime_id() != self.runtime {
+                return Err(Box::new(claimed));
+            }
+
+            let mutation = self.admission.mutation_guard();
+            let (registration, obsolete_dependency) = {
+                let mut state = self
+                    .state
+                    .lock()
+                    .expect("evaluation work coordinator was poisoned");
+                let record = state
+                    .work
+                    .get(&claimed.id)
+                    .expect("claimed test spark work must remain registered");
+                assert_eq!(record.id, claimed.id);
+                assert_eq!(record.demand_session, claimed.demand_session);
+                assert!(matches!(record.state, WorkState::Running));
+                assert!(!record.control.cancel_requested);
+                assert!(record.control.close_reason.is_none());
+
+                let current_generation = *state
+                    .spark_generations
+                    .entry(claimed.demand_session)
+                    .or_insert(0);
+                assert_eq!(current_generation, claimed.observed_generation);
+
+                let current_dependency = source.dependency();
+                let (dependency, obsolete_dependency) = if claimed
+                    .prior_dependency
+                    .as_ref()
+                    .is_some_and(|prior| prior.same_source(&current_dependency))
+                {
+                    drop(current_dependency);
+                    (claimed.prior_dependency, None)
+                } else {
+                    (Some(current_dependency), claimed.prior_dependency)
+                };
+                let record = state
+                    .work
+                    .get_mut(&claimed.id)
+                    .expect("claimed test spark work must remain registered");
+                record.demand = Some(claimed.demand);
+                record.dependency = dependency;
+                record.observed_generation = current_generation;
+                record.subscription_epoch = record
+                    .subscription_epoch
+                    .checked_add(1)
+                    .expect("evaluation work subscription epochs exhausted");
+                record.state = WorkState::Blocked;
+                let registration = WakeRegistration {
+                    work: claimed.id,
+                    subscription_epoch: record.subscription_epoch,
+                };
+                state
+                    .blocked_sparks
+                    .entry(claimed.demand_session)
+                    .or_default()
+                    .insert(registration);
+                state.work_generation = state.work_generation.wrapping_add(1);
+                (registration, obsolete_dependency)
+            };
+
+            let outcome = source.subscriptions.subscribe(
+                registration,
+                || source.is_terminal(),
+                before_insert,
+            );
+            let woke = if outcome == CompletionSubscriptionOutcome::AlreadyTerminal {
+                self.wake_dependency_batch_guarded(
+                    &mutation,
+                    DependencyWakeBatch {
+                        source: source.key(),
+                        registrations: vec![registration],
+                        observed_generation: None,
+                    },
+                )
+            } else {
+                false
+            };
+            drop(mutation);
+            self.work_available.notify_all();
+            self.notify_dependency_wake(woke);
+            obsolete_dependency
+                .into_iter()
+                .for_each(WorkDependency::abandon);
+            Ok(registration)
+        }
+
+        fn redeliver_test_registration(
+            &self,
+            source: WorkDependencyKey,
+            registration: WakeRegistration,
+        ) -> bool {
+            let mutation = self.admission.mutation_guard();
+            let changed = self.wake_dependency_batch_guarded(
+                &mutation,
+                DependencyWakeBatch {
+                    source,
+                    registrations: vec![registration],
+                    observed_generation: None,
+                },
+            );
+            drop(mutation);
+            self.notify_dependency_wake(changed);
+            changed
+        }
+    }
+
+    fn claimed_test_spark() -> (
+        Arc<EvaluationWorkCoordinator>,
+        Arc<super::super::EvaluationExecutor>,
+        Arc<EvaluationSession>,
+        ClaimedSparkWork,
+    ) {
+        let (coordinator, executor) = super::super::test_execution_resources(0)
+            .expect("test execution resources should build");
+        let session = EvaluationSession::shared(&coordinator);
+        coordinator.executor_started(1);
+        coordinator.submit_spark(&session, crate::core::keys::unit_value());
+        let CoordinatorSelection::Spark(claimed) = coordinator.select() else {
+            panic!("test spark should be claimable")
+        };
+        (coordinator, executor, session, claimed)
+    }
+
+    fn finish_queued_test_spark(coordinator: &EvaluationWorkCoordinator) {
+        let CoordinatorSelection::Spark(claimed) = coordinator.select() else {
+            panic!("woken test spark should be claimable")
+        };
+        coordinator.release_spark(claimed, SparkWorkPoll::Complete);
+    }
+
+    #[test]
+    fn completion_before_subscription_requeues_immediately() {
+        let (coordinator, _executor, _session, claimed) = claimed_test_spark();
+        let source = TestCompletionSource::new(&coordinator);
+        source.complete();
+
+        let Ok(_registration) = coordinator.park_claimed_test_spark(claimed, &source, || {}) else {
+            panic!("same-runtime completion source should accept the subscription")
+        };
+
+        assert_eq!(source.subscriber_count(), 0);
+        assert_eq!(coordinator.spark_work_counts(), (1, 0, 0));
+        finish_queued_test_spark(&coordinator);
+    }
+
+    #[test]
+    fn completion_during_subscription_cannot_lose_the_wake() {
+        let (coordinator, _executor, _session, claimed) = claimed_test_spark();
+        let source = TestCompletionSource::new(&coordinator);
+        let started = Arc::new(Barrier::new(2));
+        let completer = Arc::new(Mutex::new(None));
+
+        let Ok(_registration) = coordinator.park_claimed_test_spark(claimed, &source, {
+            let source = source.clone();
+            let started = started.clone();
+            let completer = completer.clone();
+            move || {
+                let completion_source = source.clone();
+                let completion_started = started.clone();
+                *completer
+                    .lock()
+                    .expect("completion thread slot was poisoned") =
+                    Some(thread::spawn(move || {
+                        completion_started.wait();
+                        completion_source.complete();
+                    }));
+                started.wait();
+                while !source.is_terminal() {
+                    thread::yield_now();
+                }
+            }
+        }) else {
+            panic!("same-runtime completion source should accept the subscription")
+        };
+        completer
+            .lock()
+            .expect("completion thread slot was poisoned")
+            .take()
+            .expect("the subscription hook should start a completer")
+            .join()
+            .expect("test completion thread should not panic");
+
+        assert_eq!(source.subscriber_count(), 0);
+        assert_eq!(coordinator.spark_work_counts(), (1, 0, 0));
+        finish_queued_test_spark(&coordinator);
+    }
+
+    #[test]
+    fn completion_after_subscription_requeues_once() {
+        let (coordinator, _executor, _session, claimed) = claimed_test_spark();
+        let source = TestCompletionSource::new(&coordinator);
+        let Ok(registration) = coordinator.park_claimed_test_spark(claimed, &source, || {}) else {
+            panic!("same-runtime completion source should accept the subscription")
+        };
+        assert_eq!(coordinator.spark_work_counts(), (0, 0, 1));
+        assert_eq!(source.subscriber_count(), 1);
+
+        source.complete();
+        assert_eq!(coordinator.spark_work_counts(), (1, 0, 0));
+        let generation = coordinator.work_generation();
+        assert!(!coordinator.redeliver_test_registration(source.key(), registration));
+        assert_eq!(coordinator.work_generation(), generation);
+        finish_queued_test_spark(&coordinator);
+    }
+
+    #[test]
+    fn stale_dependency_wake_does_not_requeue_work_blocked_elsewhere() {
+        let (coordinator, _executor, session, claimed) = claimed_test_spark();
+        let source_a = TestCompletionSource::new(&coordinator);
+        let source_b = TestCompletionSource::new(&coordinator);
+        let Ok(registration_a) = coordinator.park_claimed_test_spark(claimed, &source_a, || {})
+        else {
+            panic!("same-runtime completion source should accept the subscription")
+        };
+
+        coordinator.notify_spark_disturbance(session.id);
+        let CoordinatorSelection::Spark(claimed) = coordinator.select() else {
+            panic!("broad disturbance should requeue the test spark")
+        };
+        let Ok(registration_b) = coordinator.park_claimed_test_spark(claimed, &source_b, || {})
+        else {
+            panic!("same-runtime completion source should accept the subscription")
+        };
+        assert!(registration_b.subscription_epoch > registration_a.subscription_epoch);
+
+        let generation = coordinator.work_generation();
+        source_a.complete();
+        assert_eq!(coordinator.work_generation(), generation);
+        assert_eq!(coordinator.spark_work_counts(), (0, 0, 1));
+
+        source_b.complete();
+        assert_eq!(coordinator.spark_work_counts(), (1, 0, 0));
+        finish_queued_test_spark(&coordinator);
+    }
+
+    #[test]
+    fn repeated_dependency_uses_a_new_epoch_and_queues_only_once() {
+        let (coordinator, _executor, session, claimed) = claimed_test_spark();
+        let source = TestCompletionSource::new(&coordinator);
+        let Ok(first) = coordinator.park_claimed_test_spark(claimed, &source, || {}) else {
+            panic!("same-runtime completion source should accept the subscription")
+        };
+
+        coordinator.notify_spark_disturbance(session.id);
+        let CoordinatorSelection::Spark(claimed) = coordinator.select() else {
+            panic!("broad disturbance should requeue the test spark")
+        };
+        let Ok(second) = coordinator.park_claimed_test_spark(claimed, &source, || {}) else {
+            panic!("same-runtime completion source should accept the subscription")
+        };
+        assert!(second.subscription_epoch > first.subscription_epoch);
+        assert_eq!(source.subscriber_count(), 2);
+
+        let generation = coordinator.work_generation();
+        source.complete();
+        assert_eq!(coordinator.work_generation(), generation.wrapping_add(1));
+        assert_eq!(coordinator.spark_work_counts(), (1, 0, 0));
+        assert!(!coordinator.redeliver_test_registration(source.key(), second));
+        assert_eq!(coordinator.work_generation(), generation.wrapping_add(1));
+        finish_queued_test_spark(&coordinator);
+    }
+
+    #[test]
+    fn retired_work_makes_late_completion_registrations_harmless() {
+        let (coordinator, executor, session, claimed) = claimed_test_spark();
+        let source = TestCompletionSource::new(&coordinator);
+        let Ok(_registration) = coordinator.park_claimed_test_spark(claimed, &source, || {}) else {
+            panic!("same-runtime completion source should accept the subscription")
+        };
+
+        drop(session);
+        assert_eq!(coordinator.retained_spark_count(), 0);
+        source.complete();
+        assert_eq!(coordinator.retained_spark_count(), 0);
+        drop(executor);
+
+        let (coordinator, executor, session, claimed) = claimed_test_spark();
+        let source = TestCompletionSource::new(&coordinator);
+        let Ok(_registration) = coordinator.park_claimed_test_spark(claimed, &source, || {}) else {
+            panic!("same-runtime completion source should accept the subscription")
+        };
+
+        drop(executor);
+        assert_eq!(coordinator.retained_spark_count(), 0);
+        source.complete();
+        assert_eq!(coordinator.retained_spark_count(), 0);
+        drop(session);
+    }
+
+    #[test]
+    fn completion_source_does_not_retain_its_runtime_coordinator() {
+        let source = {
+            let (coordinator, executor, session, claimed) = claimed_test_spark();
+            let source = TestCompletionSource::new(&coordinator);
+            let Ok(_registration) = coordinator.park_claimed_test_spark(claimed, &source, || {})
+            else {
+                panic!("same-runtime completion source should accept the subscription")
+            };
+            drop(session);
+            drop(executor);
+            drop(coordinator);
+            source
+        };
+
+        assert!(!source.coordinator_is_live());
+        source.complete();
+        assert!(source.is_terminal());
+        assert_eq!(source.subscriber_count(), 0);
+    }
+
+    #[test]
+    fn foreign_runtime_is_rejected_before_subscription_or_parking() {
+        let (coordinator, _executor, _session, claimed) = claimed_test_spark();
+        let other_coordinator = EvaluationWorkCoordinator::new(
+            crate::runtime::allocate_evaluation_runtime_id(),
+            RuntimeIds::new(),
+            RuntimeMutationAdmission::new(),
+        );
+        let source = TestCompletionSource::new(&other_coordinator);
+
+        let Err(claimed) = coordinator.park_claimed_test_spark(claimed, &source, || {}) else {
+            panic!("foreign-runtime completion source must be rejected")
+        };
+        assert_eq!(source.subscriber_count(), 0);
+        assert_eq!(coordinator.spark_work_counts(), (0, 1, 0));
+        coordinator.release_spark(*claimed, SparkWorkPoll::Complete);
+        assert_eq!(coordinator.retained_spark_count(), 0);
+    }
 
     #[test]
     fn coordinator_owns_session_registration_and_ready_selection() {

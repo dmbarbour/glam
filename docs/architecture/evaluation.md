@@ -31,8 +31,12 @@ profile, and a persistent ledger of unacknowledged reflection failures.
 The runtime-owned `EvaluationWorkCoordinator` owns session registration, the
 ready-session queue and de-duplication index, worker fairness, its work
 generation, the condition variable used to await work, and stable runtime-local
-spark records. Each spark record retains its demand value, broad dependency,
-demand-session index, and a close request while worker-owned. The attached
+spark records. Each spark record retains its demand value, dependency,
+demand-session index, checked subscription epoch, and a close request while
+worker-owned. Parked indexes contain `(work ID, subscription epoch)` rather
+than bare IDs. A wake batch is accepted only while the record remains blocked
+on both that epoch and the same runtime-local dependency key; stale completion,
+session teardown, and reblocking notifications are harmless. The attached
 `EvaluationExecutor` owns only worker activation, shutdown, and thread handles.
 Workers retain a weak coordinator attachment and claim either a ready session
 or spark record from it. Sessions retain only a weak coordinator link. The
@@ -313,7 +317,9 @@ divergent spark can occupy a worker forever; the bootstrap currently provides
 neither evaluator fuel nor cooperative cancellation. A retryably blocked spark
 is parked without occupying a worker and re-advertised after its evaluation
 session changes. A session generation check prevents promise resolution racing
-with parking from losing the wakeup. This is deliberately conservative until
-fine-grained wait indexes are introduced: one relevant change may retry other
-blocked sparks in the same session. Dropping the session discards its parked
-sparks.
+with parking from losing the wakeup. Broad disturbance now routes through the
+same epoch-and-dependency validator intended for one-shot completion sources,
+but promise and wait cells do not register exact subscribers yet. One relevant
+change may therefore still retry other blocked sparks in the same session.
+Dropping the session discards its parked sparks; any later registration is
+stale and retains neither that session nor its work.

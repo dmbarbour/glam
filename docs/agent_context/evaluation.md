@@ -223,10 +223,18 @@ control-flow overview.
   or promise IDs; do not enlarge every value with mutable scheduler state.
 - One runtime-owned `EvaluationWorkCoordinator` registers related assembler,
   logger, and future IDE sessions and owns ready-session selection, fairness,
-  its work generation, and worker waiting. `EvaluationExecutor` owns worker
-  activation and shutdown; workers retain only a weak coordinator attachment.
-  Active reflection/deferred records remain session-owned during the current
-  transition, while spark queues remain temporarily executor-owned.
+  its work generation, worker waiting, and stable spark records.
+  `EvaluationExecutor` owns worker activation and shutdown; workers retain only
+  a weak coordinator attachment. Active reflection/deferred records remain
+  session-owned during the current transition.
+- Every published spark blockage advances a checked, non-wrapping subscription
+  epoch. Parked indexes and one-shot subscriber cells retain only the work ID
+  and that epoch. A coordinator wake must still match `Blocked`, the epoch, and
+  the retained runtime-local dependency key before queueing; a stale wake does
+  not advance work generation. Subscriber and coordinator mutexes are never
+  nested, and notification occurs after shared runtime mutation admission is
+  released. Promise and wait cells have not yet adopted the exact subscriber
+  side, so broad session disturbance remains active for both.
 - Coordinator transitions take shared runtime mutation admission and publish
   their own work generation before waking workers. They must not advance the
   semantic `RuntimeObservationEpoch`; otherwise ordinary scheduler churn can
