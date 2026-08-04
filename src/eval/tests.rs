@@ -5246,7 +5246,6 @@ fn spark_resumes_after_a_resolver_owned_promise_completes() {
     promise
         .set(Value::Lazy(assigned.clone()))
         .expect("promise should accept its one assignment");
-    context.notify_promise_changed();
 
     forced_receiver
         .recv_timeout(std::time::Duration::from_secs(2))

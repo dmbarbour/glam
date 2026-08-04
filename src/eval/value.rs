@@ -260,6 +260,9 @@ impl EvaluationTaskMachine for PromiseFollower {
             PromiseFollowerState::AwaitAssignment => match self.promise.assignment() {
                 Some(result) => result.map_err(EvaluationHalt::failure),
                 None => {
+                    if !self.promise.subscribe_follower(self.context.promise_wake()) {
+                        return EvaluationMachinePoll::Yielded;
+                    }
                     let Some(task) = self.promise.task() else {
                         return EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
                             lazy: None,
@@ -529,6 +532,9 @@ fn eval_promised(context: &EvalContext, promise: &PromisedValue) -> Result<Value
             if let Some(value) = await_deferred_task(context, wait, "promised value")? {
                 return Ok(value);
             }
+            continue;
+        }
+        if !promise.subscribe_follower(context.promise_wake()) {
             continue;
         }
         return Err(EvaluationHalt::unassigned(promise.clone()));

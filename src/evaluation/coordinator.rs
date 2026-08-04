@@ -5,7 +5,7 @@ use std::fmt;
 use std::num::NonZeroU64;
 use std::sync::{Arc, Condvar, Mutex, Weak};
 
-use crate::core::{PromisedValue, Value};
+use crate::core::{PromiseId, PromisedValue, Value};
 use crate::runtime::{
     EvaluationRuntimeId, RuntimeIds, RuntimeMutationAdmission, RuntimeMutationGuard,
     RuntimeValueRoot,
@@ -24,23 +24,139 @@ impl EvaluationWorkId {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(super) struct WakeRegistration {
+pub(crate) struct WakeRegistration {
     work: EvaluationWorkId,
     subscription_epoch: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(super) enum WorkDependencyKey {
+pub(crate) enum WorkDependencyKey {
     Wait(u64),
     Promise(u64),
     #[cfg(test)]
     Test(u64),
 }
 
-pub(super) struct DependencyWakeBatch {
+pub(crate) struct DependencyWakeBatch {
     source: WorkDependencyKey,
     registrations: Vec<WakeRegistration>,
     observed_generation: Option<u64>,
+}
+
+/// Weak, epoch-tagged registrations retained by a one-shot completion source.
+///
+/// The terminal state remains owned by the source. This component only pairs
+/// subscribe-and-recheck with detached coordinator delivery, and therefore
+/// cannot retain the runtime or any work record.
+pub(crate) struct CompletionSubscriptions {
+    runtime: EvaluationRuntimeId,
+    source: WorkDependencyKey,
+    coordinator: Arc<std::sync::OnceLock<Weak<EvaluationWorkCoordinator>>>,
+    registrations: Mutex<Vec<WakeRegistration>>,
+}
+
+impl CompletionSubscriptions {
+    pub(crate) fn for_promise(
+        runtime: EvaluationRuntimeId,
+        promise: PromiseId,
+        coordinator: Arc<std::sync::OnceLock<Weak<EvaluationWorkCoordinator>>>,
+    ) -> Self {
+        Self {
+            runtime,
+            source: WorkDependencyKey::Promise(promise.get()),
+            coordinator,
+            registrations: Mutex::new(Vec::new()),
+        }
+    }
+
+    #[cfg(test)]
+    fn for_test(coordinator: &Arc<EvaluationWorkCoordinator>, source: WorkDependencyKey) -> Self {
+        let binding = Arc::new(std::sync::OnceLock::new());
+        binding
+            .set(Arc::downgrade(coordinator))
+            .expect("test completion coordinator should bind once");
+        Self {
+            runtime: coordinator.runtime,
+            source,
+            coordinator: binding,
+            registrations: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Publishes a source terminal while holding shared runtime mutation
+    /// admission, then detaches and delivers every exact wake registration.
+    /// External/session wakes returned by `publish_terminal` remain the
+    /// caller's responsibility and must run after this method returns.
+    pub(crate) fn publish<T, E>(
+        &self,
+        publish_terminal: impl FnOnce() -> Result<T, E>,
+    ) -> Result<T, E> {
+        let coordinator = self
+            .coordinator
+            .get()
+            .and_then(Weak::upgrade)
+            .filter(|coordinator| coordinator.runtime == self.runtime);
+        let mutation = coordinator
+            .as_ref()
+            .map(|coordinator| coordinator.admission.mutation_guard());
+        let result = publish_terminal()?;
+        let registrations = std::mem::take(
+            &mut *self
+                .registrations
+                .lock()
+                .expect("completion subscriber set was poisoned"),
+        );
+        let changed = match (&coordinator, &mutation) {
+            (Some(coordinator), Some(mutation)) => coordinator.wake_dependency_batch_guarded(
+                mutation,
+                DependencyWakeBatch {
+                    source: self.source,
+                    registrations,
+                    observed_generation: None,
+                },
+            ),
+            _ => false,
+        };
+        drop(mutation);
+        if let Some(coordinator) = coordinator {
+            coordinator.notify_dependency_wake(changed);
+        }
+        Ok(result)
+    }
+
+    #[cfg(test)]
+    fn subscribe(
+        &self,
+        registration: WakeRegistration,
+        terminal: impl FnOnce() -> bool,
+        before_insert: impl FnOnce(),
+    ) -> CompletionSubscriptionOutcome {
+        let mut registrations = self
+            .registrations
+            .lock()
+            .expect("completion subscriber set was poisoned");
+        if terminal() {
+            return CompletionSubscriptionOutcome::AlreadyTerminal;
+        }
+        before_insert();
+        registrations.push(registration);
+        CompletionSubscriptionOutcome::Pending
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.registrations
+            .lock()
+            .expect("completion subscriber set was poisoned")
+            .len()
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompletionSubscriptionOutcome {
+    Pending,
+    AlreadyTerminal,
 }
 
 #[derive(Default)]
@@ -237,6 +353,10 @@ impl EvaluationWorkCoordinator {
             state: Mutex::new(WorkCoordinatorState::default()),
             work_available: Condvar::new(),
         })
+    }
+
+    pub(crate) fn runtime_id(&self) -> EvaluationRuntimeId {
+        self.runtime
     }
 
     pub(super) fn register_session(&self, session: &Arc<EvaluationSession>) {
@@ -867,85 +987,6 @@ mod tests {
 
     use super::*;
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum CompletionSubscriptionOutcome {
-        Pending,
-        AlreadyTerminal,
-    }
-
-    struct CompletionSubscriptions {
-        runtime: EvaluationRuntimeId,
-        source: WorkDependencyKey,
-        coordinator: Weak<EvaluationWorkCoordinator>,
-        registrations: Mutex<Vec<WakeRegistration>>,
-    }
-
-    impl CompletionSubscriptions {
-        fn new(coordinator: &Arc<EvaluationWorkCoordinator>, source: WorkDependencyKey) -> Self {
-            Self {
-                runtime: coordinator.runtime,
-                source,
-                coordinator: Arc::downgrade(coordinator),
-                registrations: Mutex::new(Vec::new()),
-            }
-        }
-
-        fn subscribe(
-            &self,
-            registration: WakeRegistration,
-            terminal: impl FnOnce() -> bool,
-            before_insert: impl FnOnce(),
-        ) -> CompletionSubscriptionOutcome {
-            let mut registrations = self
-                .registrations
-                .lock()
-                .expect("test completion subscriber set was poisoned");
-            if terminal() {
-                return CompletionSubscriptionOutcome::AlreadyTerminal;
-            }
-            before_insert();
-            registrations.push(registration);
-            CompletionSubscriptionOutcome::Pending
-        }
-
-        fn publish(&self, publish_terminal: impl FnOnce()) {
-            let Some(coordinator) = self.coordinator.upgrade() else {
-                publish_terminal();
-                self.registrations
-                    .lock()
-                    .expect("test completion subscriber set was poisoned")
-                    .clear();
-                return;
-            };
-            assert_eq!(coordinator.runtime, self.runtime);
-            let mutation = coordinator.admission.mutation_guard();
-            publish_terminal();
-            let registrations = std::mem::take(
-                &mut *self
-                    .registrations
-                    .lock()
-                    .expect("test completion subscriber set was poisoned"),
-            );
-            let changed = coordinator.wake_dependency_batch_guarded(
-                &mutation,
-                DependencyWakeBatch {
-                    source: self.source,
-                    registrations,
-                    observed_generation: None,
-                },
-            );
-            drop(mutation);
-            coordinator.notify_dependency_wake(changed);
-        }
-
-        fn len(&self) -> usize {
-            self.registrations
-                .lock()
-                .expect("test completion subscriber set was poisoned")
-                .len()
-        }
-    }
-
     struct TestCompletionSource {
         id: NonZeroU64,
         terminal: OnceLock<()>,
@@ -961,7 +1002,7 @@ mod tests {
             Arc::new(Self {
                 id,
                 terminal: OnceLock::new(),
-                subscriptions: CompletionSubscriptions::new(
+                subscriptions: CompletionSubscriptions::for_test(
                     coordinator,
                     WorkDependencyKey::Test(id.get()),
                 ),
@@ -984,9 +1025,12 @@ mod tests {
         }
 
         fn complete(&self) {
-            self.subscriptions.publish(|| {
-                let _ = self.terminal.set(());
-            });
+            self.subscriptions
+                .publish(|| {
+                    let _ = self.terminal.set(());
+                    Ok::<_, std::convert::Infallible>(())
+                })
+                .expect("infallible test completion should publish");
         }
 
         fn is_terminal(&self) -> bool {
@@ -998,7 +1042,11 @@ mod tests {
         }
 
         fn coordinator_is_live(&self) -> bool {
-            self.subscriptions.coordinator.upgrade().is_some()
+            self.subscriptions
+                .coordinator
+                .get()
+                .and_then(Weak::upgrade)
+                .is_some()
         }
     }
 

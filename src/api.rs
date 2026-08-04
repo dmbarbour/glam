@@ -336,9 +336,9 @@ impl Value {
 /// [`fail_message`](Self::fail_message). Dropping it unresolved permanently
 /// fails the promised value.
 ///
-/// Completion wakes only the evaluation session belonging to the
-/// [`Assembler`] that created the promise. If the value is shared with other
-/// assemblers, the client is responsible for pumping those sessions.
+/// Completion wakes every same-runtime evaluation session which has observed
+/// the unresolved promise. Sharing the value does not keep any observer
+/// session alive.
 ///
 /// The resolver is consumed by every terminal operation, so attempting to
 /// complete the same public promise twice is a compile-time error:
@@ -353,31 +353,15 @@ impl Value {
 pub struct PromiseResolver {
     runtime: EvaluationRuntimeId,
     promise: Option<PromisedValue>,
-    wake: PromiseWake,
-}
-
-enum PromiseWake {
-    Ready(EvalContext),
-    Deferred(Arc<OnceLock<EvalContext>>),
-}
-
-impl PromiseWake {
-    fn notify(&self) {
-        match self {
-            Self::Ready(context) => context.notify_promise_changed(),
-            Self::Deferred(context) => {
-                if let Some(context) = context.get() {
-                    context.notify_promise_changed();
-                }
-            }
-        }
-    }
 }
 
 impl PromiseResolver {
     /// Completes the promise successfully with `value`.
     pub fn resolve(mut self, value: Value) -> Result<(), Error> {
-        value.require_runtime(self.runtime)?;
+        if let Err(error) = value.require_runtime(self.runtime) {
+            self.promise.take();
+            return Err(error);
+        }
         let promise = self
             .promise
             .take()
@@ -386,15 +370,18 @@ impl PromiseResolver {
         promise
             .set(value.into_core())
             .map_err(|_| Error::new(format!("promise `{label}` was already completed")))?;
-        self.wake.notify();
         Ok(())
     }
 
     /// Completes the promise with an arbitrary Glam value as its permanent
     /// producer error.
     pub fn fail(self, failure: Value) -> Result<(), Error> {
-        failure.require_runtime(self.runtime)?;
-        self.fail_with(Arc::new(EvaluationFailure::emission(failure.into_core())))
+        let mut resolver = self;
+        if let Err(error) = failure.require_runtime(resolver.runtime) {
+            resolver.promise.take();
+            return Err(error);
+        }
+        resolver.fail_with(Arc::new(EvaluationFailure::emission(failure.into_core())))
     }
 
     /// Completes the promise with a conventional textual producer error.
@@ -411,7 +398,6 @@ impl PromiseResolver {
         promise
             .fail(failure)
             .map_err(|_| Error::new(format!("promise `{label}` was already completed")))?;
-        self.wake.notify();
         Ok(())
     }
 }
@@ -425,9 +411,7 @@ impl Drop for PromiseResolver {
             "promise resolver for `{}` was dropped before completion",
             promise.label()
         );
-        if promise.fail_message(message).is_ok() {
-            self.wake.notify();
-        }
+        let _ = promise.fail_message(message);
     }
 }
 
@@ -2475,6 +2459,7 @@ impl EvaluationRuntime {
         let event_conflict_analysis = conflict_analysis.clone();
         let mutation_admission = RuntimeMutationAdmission::new();
         let work = EvaluationWorkCoordinator::new(id, ids.clone(), mutation_admission.clone());
+        values.core().attach_work_coordinator(&work);
         let executor = EvaluationExecutor::new(worker_threads, &work)
             .map_err(|error| Error::new(error.as_ref()))?;
         Ok(Self {
@@ -3612,7 +3597,6 @@ pub struct AssemblerBuilder {
     reflection_environment: Option<Value>,
     diagnostic_attachments: Vec<DiagnosticAttachment>,
     pending_diagnostics: Vec<Diagnostic>,
-    environment_promises: Vec<Arc<OnceLock<EvalContext>>>,
     runtime_locked: bool,
     runtime_supplied: bool,
     conflict_analysis_requested: bool,
@@ -3623,7 +3607,6 @@ pub struct AssemblerBuilder {
 /// environment. The borrow cannot escape the construction closure.
 pub struct ReflectionEnvironmentBuilder<'a> {
     host: &'a Arc<AssemblerReflectionHost>,
-    environment_promises: &'a mut Vec<Arc<OnceLock<EvalContext>>>,
 }
 
 impl ReflectionEnvironmentBuilder<'_> {
@@ -3637,20 +3620,17 @@ impl ReflectionEnvironmentBuilder<'_> {
         create_reasoning_volume(self.host, initial)
     }
 
-    /// Creates a promised environment value resolved by the host after the
-    /// assembler has been built. Its resolver is affine and is armed with the
-    /// new reasoning session during [`AssemblerBuilder::build`].
+    /// Creates a promised environment value and its affine host resolver.
+    /// Same-runtime sessions subscribe when they first observe the value, so
+    /// the resolver needs no later assembler-specific arming step.
     pub fn promise(&mut self, label: impl Into<Arc<str>>) -> (Value, PromiseResolver) {
         let values = self.host.runtime().values();
         let promise = PromisedValue::new(&values.core, label);
-        let wake = Arc::new(OnceLock::new());
-        self.environment_promises.push(wake.clone());
         (
             Value::from_core(&values.core, CoreValue::Promised(promise.clone())),
             PromiseResolver {
                 runtime: self.host.runtime_id,
                 promise: Some(promise),
-                wake: PromiseWake::Deferred(wake),
             },
         )
     }
@@ -3673,7 +3653,6 @@ impl Default for AssemblerBuilder {
             reflection_environment: None,
             diagnostic_attachments: Vec::new(),
             pending_diagnostics: Vec::new(),
-            environment_promises: Vec::new(),
             runtime_locked: false,
             runtime_supplied: false,
             conflict_analysis_requested: false,
@@ -3806,10 +3785,7 @@ impl AssemblerBuilder {
             return Err(Error::new("reflection environment was already configured"));
         }
         self.runtime_locked = true;
-        let environment = build(&mut ReflectionEnvironmentBuilder {
-            host: &self.host,
-            environment_promises: &mut self.environment_promises,
-        })?;
+        let environment = build(&mut ReflectionEnvironmentBuilder { host: &self.host })?;
         environment.require_runtime(self.runtime.id())?;
         let (environment, replaced_glam) =
             authoritative_reflection_environment(environment, "assembler")?;
@@ -3856,11 +3832,6 @@ impl AssemblerBuilder {
         }
         let reasoning =
             ReasoningSession::from_host(self.host, self.diagnostics.clone(), self.runtime)?;
-        let context = reasoning.eval_context();
-        for wake in self.environment_promises {
-            wake.set(context.clone())
-                .expect("environment promise wake context must be armed once");
-        }
         for diagnostic in self.pending_diagnostics {
             self.diagnostics.publish_local(diagnostic);
         }
@@ -3928,9 +3899,8 @@ impl Assembler {
 
     /// Creates a host-resolved promised value and its unique resolver.
     ///
-    /// Resolving, failing, or dropping the resolver wakes this assembler's
-    /// evaluation session only. If `value` is shared with another assembler,
-    /// the client must explicitly pump or evaluate through that other session.
+    /// Resolving, failing, or dropping the resolver wakes every same-runtime
+    /// session which has observed the unresolved value.
     pub fn promise(&self, label: impl Into<Arc<str>>) -> (Value, PromiseResolver) {
         let promise = PromisedValue::new(self.eval_context().values(), label);
         (
@@ -3938,7 +3908,6 @@ impl Assembler {
             PromiseResolver {
                 runtime: self.reasoning.runtime.id(),
                 promise: Some(promise),
-                wake: PromiseWake::Ready(self.eval_context()),
             },
         )
     }
@@ -4864,9 +4833,29 @@ mod tests {
 
         let (promise, resolver) = assembler.promise("foreign assignment");
         assert!(resolver.resolve(foreign_value.clone()).is_err());
-        assert!(assembler.evaluate(&promise).is_err());
-        let (_, resolver) = assembler.promise("foreign failure");
+        let CoreValue::Promised(unassigned) = promise.as_core() else {
+            panic!("public promise should retain its core promise cell")
+        };
+        assert!(
+            unassigned.assignment().is_none(),
+            "rejecting a foreign value must not terminalize the promise"
+        );
+        assert!(
+            assembler
+                .evaluate(&promise)
+                .expect_err("a rejected foreign resolution must leave the promise pending")
+                .to_string()
+                .contains("before initialization")
+        );
+        let (failed, resolver) = assembler.promise("foreign failure");
         assert!(resolver.fail(foreign_value).is_err());
+        let CoreValue::Promised(unassigned) = failed.as_core() else {
+            panic!("public promise should retain its core promise cell")
+        };
+        assert!(
+            unassigned.assignment().is_none(),
+            "rejecting a foreign failure must not terminalize the promise"
+        );
     }
 
     #[test]

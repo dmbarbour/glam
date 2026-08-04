@@ -17,13 +17,13 @@ use rpds::RedBlackTreeMapSync;
 
 use crate::core::{
     CoreValueFactory, DeferredValueId, EvaluationFailure, LazyCycle, LazyCycleMember, LazyValue,
-    PromiseAssignment, PromisedValue, Value,
+    PromiseAssignment, PromiseCell, PromisedValue, Value,
 };
 use crate::runtime::{EvaluationRuntimeId, RuntimeValueRoot};
 
 mod coordinator;
 mod executor;
-pub(crate) use coordinator::EvaluationWorkCoordinator;
+pub(crate) use coordinator::{CompletionSubscriptions, EvaluationWorkCoordinator};
 pub(crate) use executor::EvaluationExecutor;
 
 #[cfg(test)]
@@ -149,14 +149,62 @@ impl EvaluationWaitToken {
             .expect("terminal publication must initialize the wait cell")
             .clone()
     }
+}
 
-    pub(crate) fn publish_promise_assignment(&self, assignment: &PromiseAssignment) {
-        let terminal = promise_assignment_terminal(self.runtime_id(), assignment);
-        if let Some(owner) = self.owner() {
-            owner.complete_promise_wait(self, terminal);
-        } else {
-            self.publish_terminal(terminal);
+/// Temporary broad wake bridge for a session whose deferred follower observed
+/// one pending promise. Promise completion retains this weakly and notifies it
+/// only after terminal publication and runtime mutation admission complete.
+#[derive(Clone)]
+pub(crate) struct PromiseSessionWake {
+    runtime: EvaluationRuntimeId,
+    session_id: EvaluationSessionId,
+    session: Weak<EvaluationSession>,
+}
+
+impl PromiseSessionWake {
+    pub(crate) fn is_live(&self) -> bool {
+        self.session.strong_count() != 0
+    }
+
+    pub(crate) fn same_session(&self, other: &Self) -> bool {
+        self.runtime == other.runtime && self.session_id == other.session_id
+    }
+
+    pub(crate) fn notify(self) {
+        if let Some(session) = self.session.upgrade() {
+            session.notify_promise_changed();
         }
+    }
+}
+
+/// The task-owned terminal obligation attached to one reflection fixpoint
+/// promise. It publishes the promise's shared wait before the session retires
+/// the active owner index, but retains that session only weakly.
+pub(crate) struct PromiseProducerObligation {
+    owner: EvaluationTaskId,
+    wait: EvaluationWaitToken,
+}
+
+impl PromiseProducerObligation {
+    pub(crate) fn owner(&self) -> EvaluationTaskId {
+        self.owner
+    }
+
+    pub(crate) fn wait(&self) -> &EvaluationWaitToken {
+        &self.wait
+    }
+
+    pub(crate) fn publish_assignment(
+        &self,
+        assignment: &PromiseAssignment,
+    ) -> Option<PromiseSessionWake> {
+        let terminal = promise_assignment_terminal(self.wait.runtime_id(), assignment);
+        let Some(owner) = self.wait.owner() else {
+            self.wait.publish_terminal(terminal);
+            return None;
+        };
+        owner.complete_promise_wait(&self.wait, terminal);
+        Some(owner.promise_wake())
     }
 }
 
@@ -648,7 +696,7 @@ impl Drop for PendingReflectionTaskInner {
 #[derive(Debug)]
 struct PromiseRecord {
     producer: EvaluationTaskId,
-    result: Weak<OnceLock<PromiseAssignment>>,
+    promise: Weak<PromiseCell>,
 }
 
 #[derive(Default)]
@@ -737,13 +785,13 @@ fn promise_record_terminal(
     wait: &EvaluationWaitToken,
     record: &PromiseRecord,
 ) -> Option<EvaluationWaitTerminal> {
-    let Some(result) = record.result.upgrade() else {
+    let Some(promise) = record.promise.upgrade() else {
         return Some(EvaluationWaitTerminal::Failed(evaluation_failure(
             "promised value no longer exists",
         )));
     };
-    result
-        .get()
+    promise
+        .assignment()
         .map(|assignment| promise_assignment_terminal(wait.runtime_id(), assignment))
 }
 
@@ -826,40 +874,20 @@ impl fmt::Debug for EvaluationSession {
 
 impl Drop for EvaluationSession {
     fn drop(&mut self) {
-        let (mut reflection, deferred, statuses) = {
+        let (promises, mut reflection, deferred, statuses) = {
             let tasks = self
                 .tasks
                 .get_mut()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-            // A task-owned promise is a producer obligation, unlike a
-            // reusable lazy or host-promise follower. Publish its permanent
-            // failure before waking any task waits which may depend on it.
             let promise_waits = tasks.promises.keys().cloned().collect::<Vec<_>>();
+            let mut promises = Vec::with_capacity(promise_waits.len());
             for wait in promise_waits {
-                let record = tasks
-                    .promises
-                    .get(&wait)
-                    .expect("collected promise wait must remain registered");
-                let terminal = if let Some(result) = record.result.upgrade() {
-                    let _ = result.set(Err(evaluation_failure(format!(
-                        "promised value's producer task {} was abandoned when its evaluation session closed",
-                        record.producer.get()
-                    ))));
-                    promise_assignment_terminal(
-                        wait.runtime_id(),
-                        result
-                            .get()
-                            .expect("abandoned producer must leave a terminal promise assignment"),
-                    )
-                } else {
-                    EvaluationWaitTerminal::Failed(evaluation_failure(
-                        "promised value no longer exists",
-                    ))
-                };
-                wait.publish_terminal(terminal);
                 let retired = retire_promise_wait(tasks, &wait);
-                debug_assert!(retired.is_some());
+                promises.push((
+                    wait,
+                    retired.expect("collected promise wait must remain registered"),
+                ));
             }
 
             let reflection_waits = tasks.reflection.keys().cloned().collect::<Vec<_>>();
@@ -897,8 +925,25 @@ impl Drop for EvaluationSession {
                 deferred.push(retire_deferred_task(tasks, deferred_id));
             }
             tasks.ready.clear();
-            (reflection, deferred, statuses)
+            (promises, reflection, deferred, statuses)
         };
+
+        // A task-owned promise is a producer obligation, unlike a reusable
+        // lazy or host-promise follower. The records are detached first so
+        // central promise publication never reacquires this session registry.
+        for (wait, record) in promises {
+            let failure = evaluation_failure(format!(
+                "promised value's producer task {} was abandoned when its evaluation session closed",
+                record.producer.get()
+            ));
+            if let Some(promise) = record.promise.upgrade() {
+                let _ = promise.fail(failure);
+            } else {
+                wait.publish_terminal(EvaluationWaitTerminal::Failed(evaluation_failure(
+                    "promised value no longer exists",
+                )));
+            }
+        }
 
         for status in statuses {
             publish_task_status(Some(status));
@@ -1051,7 +1096,29 @@ impl EvaluationSession {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         wait.publish_terminal(terminal);
         retire_promise_wait(&mut tasks, wait);
+    }
+
+    fn promise_wake(self: &Arc<Self>) -> PromiseSessionWake {
+        PromiseSessionWake {
+            runtime: self.values.runtime_id(),
+            session_id: self.id,
+            session: Arc::downgrade(self),
+        }
+    }
+
+    fn notify_promise_changed(&self) {
+        // Pair the notification with scheduler waits and collect any
+        // task-owned promise records whose terminal cell won a publication
+        // race. The broad spark disturbance is temporary until every promise
+        // follower has a coordinator work ID.
+        let mut tasks = self
+            .tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        prune_terminal_promise_waits(&mut tasks);
         self.task_changed.notify_all();
+        drop(tasks);
+        self.notify_spark_disturbance();
     }
 
     pub(crate) fn submit_spark(self: &Arc<Self>, value: Value) {
@@ -1175,26 +1242,6 @@ impl EvalContext {
         ) {
             self.session.submit_spark(value);
         }
-    }
-
-    /// Signals completion of a host-owned promise to pumps of this context's
-    /// session. Promise values may be shared across sessions, but completion
-    /// deliberately does not discover or wake observers in other sessions.
-    pub(crate) fn notify_promise_changed(&self) {
-        // Taking the scheduler lock pairs this notification with condvar waits
-        // and prevents a completion between their final check and sleep from
-        // being lost. Public resolvers are never stored inside task records;
-        // pruning here only collects task-owned waits whose terminal state is
-        // already visible.
-        let mut tasks = self
-            .session
-            .tasks
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        prune_terminal_promise_waits(&mut tasks);
-        self.session.task_changed.notify_all();
-        drop(tasks);
-        self.session.notify_spark_disturbance();
     }
 
     pub(crate) fn runs_scheduled_task(&self) -> bool {
@@ -1356,10 +1403,19 @@ impl EvalContext {
         self.session.id
     }
 
+    pub(crate) fn promise_wake(&self) -> PromiseSessionWake {
+        self.session.promise_wake()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn notify_promise_changed(&self) {
+        self.session.notify_promise_changed();
+    }
+
     pub(crate) fn register_promise(
         &self,
-        result: &Arc<OnceLock<PromiseAssignment>>,
-    ) -> Result<(EvaluationTaskId, EvaluationWaitToken), Arc<str>> {
+        promise: &Arc<crate::core::PromiseCell>,
+    ) -> Result<PromiseProducerObligation, Arc<str>> {
         let owner = self.task_id()?;
         let wait = allocate_wait_token(&self.session, owner)?;
         let mut tasks = self
@@ -1371,7 +1427,7 @@ impl EvalContext {
             wait.clone(),
             PromiseRecord {
                 producer: owner,
-                result: Arc::downgrade(result),
+                promise: Arc::downgrade(promise),
             },
         );
         assert!(replaced.is_none(), "evaluation wait tokens must be unique");
@@ -1380,7 +1436,7 @@ impl EvalContext {
             .entry(owner)
             .or_default()
             .push(wait.clone());
-        Ok((owner, wait))
+        Ok(PromiseProducerObligation { owner, wait })
     }
 
     pub(crate) fn fail_unresolved_promises(&self, failure: Arc<EvaluationFailure>) {
@@ -1388,32 +1444,27 @@ impl EvalContext {
             return;
         };
         let owner = *owner;
-        let mut tasks = self
-            .session
-            .tasks
-            .lock()
-            .expect("evaluation task registry was poisoned");
-        let waits = tasks.owned_promises.remove(&owner).unwrap_or_default();
-        for wait in waits {
-            let Some(promise) = tasks.promises.remove(&wait) else {
-                continue;
-            };
-            let terminal = if let Some(result) = promise.result.upgrade() {
-                let _ = result.set(Err(failure.clone()));
-                promise_assignment_terminal(
-                    wait.runtime_id(),
-                    result
-                        .get()
-                        .expect("promise assignment must be set after producer failure"),
-                )
+        let promises = {
+            let mut tasks = self
+                .session
+                .tasks
+                .lock()
+                .expect("evaluation task registry was poisoned");
+            let waits = tasks.owned_promises.remove(&owner).unwrap_or_default();
+            waits
+                .into_iter()
+                .filter_map(|wait| tasks.promises.remove(&wait).map(|promise| (wait, promise)))
+                .collect::<Vec<_>>()
+        };
+        for (wait, promise) in promises {
+            if let Some(promise) = promise.promise.upgrade() {
+                let _ = promise.fail(failure.clone());
             } else {
-                EvaluationWaitTerminal::Failed(evaluation_failure(
+                wait.publish_terminal(EvaluationWaitTerminal::Failed(evaluation_failure(
                     "promised value no longer exists",
-                ))
-            };
-            wait.publish_terminal(terminal);
+                )));
+            }
         }
-        self.session.task_changed.notify_all();
     }
 
     /// Registers an executable task whose concrete specialization remains
@@ -1913,9 +1964,9 @@ impl EvalContext {
             .values()
             .filter(|promise| {
                 promise
-                    .result
+                    .promise
                     .upgrade()
-                    .is_none_or(|result| result.get().is_some())
+                    .is_none_or(|promise| promise.assignment().is_some())
             })
             .count();
         EvaluationTaskRegistryCounts {
@@ -4494,6 +4545,54 @@ mod tests {
             std::thread::yield_now();
         }
         assert_eq!(coordinator.spark_work_counts(), expected, "{message}");
+    }
+
+    #[test]
+    fn one_promise_completion_wakes_followers_in_multiple_sessions() {
+        let (coordinator, _executor) = test_execution_resources(0).unwrap();
+        coordinator.executor_started(2);
+        let left = EvalContext::new(EvaluationSession::shared(&coordinator));
+        let right = EvalContext::new(EvaluationSession::shared(&coordinator));
+        let promise = PromisedValue::new(left.values(), "shared host promise");
+
+        for context in [&left, &right] {
+            context.spark(Value::Promised(promise.clone()));
+            let coordinator::CoordinatorSelection::Spark(claimed) = coordinator.select() else {
+                panic!("each same-runtime session should expose its spark")
+            };
+            let session = claimed
+                .session()
+                .expect("the manually claimed spark should retain its demand session");
+            let halt =
+                crate::eval::eval_value(&EvalContext::new(session), claimed.value().as_core())
+                    .expect_err("the unresolved promise should park its spark follower");
+            let dependency = if let Some(wait) = halt.blocked_on() {
+                coordinator::WorkDependency::Wait(wait.0)
+            } else if let Some(promise) = halt.unassigned_promise() {
+                coordinator::WorkDependency::Promise(promise.clone())
+            } else {
+                panic!("an unresolved promise should expose a retryable dependency")
+            };
+            coordinator.release_spark(claimed, coordinator::SparkWorkPoll::Blocked(dependency));
+        }
+
+        assert_eq!(promise.follower_count(), 2);
+        assert_eq!(coordinator.spark_work_counts(), (0, 0, 2));
+        promise
+            .set(left.values().unit())
+            .expect("the shared host promise should resolve once");
+        assert_eq!(
+            coordinator.spark_work_counts(),
+            (2, 0, 0),
+            "one publication must disturb every session which followed the promise"
+        );
+
+        for _ in 0..2 {
+            let coordinator::CoordinatorSelection::Spark(claimed) = coordinator.select() else {
+                panic!("both disturbed promise sparks should become runnable")
+            };
+            coordinator.release_spark(claimed, coordinator::SparkWorkPoll::Complete);
+        }
     }
 
     #[test]

@@ -163,9 +163,13 @@ control-flow overview.
   diagnose them as deadlocks, while retry or producer progress may first
   remove their temporary dependency edges.
 - The public `Assembler::promise` pair gives clients one affine Rust
-  `PromiseResolver`. Resolving, failing, or dropping it wakes only the creating
-  assembler's evaluation session. A client that shares the consumer value with
-  another session is responsible for pumping that session.
+  `PromiseResolver`. Its `PromisedValue` is a thin `Arc<PromiseCell>` whose
+  terminal assignment is published once under shared runtime mutation
+  admission. Resolving, failing, or dropping the resolver wakes every live
+  same-runtime session which actually observed the unresolved promise; those
+  follower targets are weak and deduplicated, so sharing a promise retains no
+  session. A rejected foreign-runtime resolution consumes the resolver but
+  leaves the promise unassigned and sends no wake.
 - `PromiseResolver::fail` accepts a complete diagnostic-style Glam value.
   Projection preserves its ad hoc fields and existing `msg.context`, prepending
   later evaluator-owned demand frames rather than replacing client context.
@@ -233,8 +237,11 @@ control-flow overview.
   the retained runtime-local dependency key before queueing; a stale wake does
   not advance work generation. Subscriber and coordinator mutexes are never
   nested, and notification occurs after shared runtime mutation admission is
-  released. Promise and wait cells have not yet adopted the exact subscriber
-  side, so broad session disturbance remains active for both.
+  released. Promise cells now own that exact subscriber component, but only
+  temporary weak session followers use their publication path; coordinator
+  spark registration arrives in the next slice. Wait cells have not yet
+  adopted the exact subscriber side, so broad session disturbance remains
+  active for both dependency kinds.
 - Coordinator transitions take shared runtime mutation admission and publish
   their own work generation before waking workers. They must not advance the
   semantic `RuntimeObservationEpoch`; otherwise ordinary scheduler churn can

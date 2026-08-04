@@ -6,7 +6,7 @@ use std::num::NonZeroU64;
 use std::sync::LazyLock;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use bytes::Bytes;
 use internment::Intern;
@@ -14,8 +14,8 @@ use rpds::RedBlackTreeMapSync;
 
 use crate::core_net::{CoreDataKey, CoreRuntimeNet};
 use crate::evaluation::{
-    EvalContext, EvaluationTaskHandle, EvaluationTaskId, EvaluationWaitToken,
-    ReflectionTaskResultPolicy,
+    CompletionSubscriptions, EvalContext, EvaluationTaskHandle, EvaluationWorkCoordinator,
+    PromiseProducerObligation, PromiseSessionWake, ReflectionTaskResultPolicy,
 };
 use crate::number::Number;
 use crate::runtime::{EvaluationRuntimeId, RuntimeIds, RuntimeValueRoot};
@@ -253,17 +253,16 @@ struct LazyCell {
 pub(crate) type PromiseAssignment = Result<RuntimeValueRoot, Arc<EvaluationFailure>>;
 
 #[derive(Clone)]
-pub(crate) struct PromisedValue {
+pub(crate) struct PromisedValue(Arc<PromiseCell>);
+
+pub(crate) struct PromiseCell {
     id: PromiseId,
     runtime: EvaluationRuntimeId,
     label: Arc<str>,
-    assignment: Arc<OnceLock<PromiseAssignment>>,
-    task: Option<Arc<TaskPromise>>,
-}
-
-pub(crate) struct TaskPromise {
-    owner: EvaluationTaskId,
-    wait: EvaluationWaitToken,
+    assignment: OnceLock<PromiseAssignment>,
+    completion: CompletionSubscriptions,
+    followers: Mutex<Vec<PromiseSessionWake>>,
+    producer: OnceLock<Arc<PromiseProducerObligation>>,
 }
 
 /// Runtime-selected construction authority for values which allocate stable
@@ -273,6 +272,7 @@ pub(crate) struct CoreValueFactory {
     runtime: EvaluationRuntimeId,
     ids: Arc<RuntimeIds>,
     cache: Arc<RuntimeValueCache>,
+    work_coordinator: Arc<OnceLock<Weak<EvaluationWorkCoordinator>>>,
     local_extensions: Option<SharedExtensionMap>,
 }
 
@@ -330,6 +330,7 @@ impl CoreValueFactory {
                 #[cfg(test)]
                 extension_lookups: AtomicUsize::new(0),
             }),
+            work_coordinator: Arc::new(OnceLock::new()),
             local_extensions: None,
         }
     }
@@ -341,7 +342,19 @@ impl CoreValueFactory {
             runtime: self.runtime,
             ids: self.ids.clone(),
             cache: self.cache.clone(),
+            work_coordinator: self.work_coordinator.clone(),
             local_extensions: Some(Arc::new(Mutex::new(HashMap::new()))),
+        }
+    }
+
+    pub(crate) fn attach_work_coordinator(&self, coordinator: &Arc<EvaluationWorkCoordinator>) {
+        debug_assert_eq!(coordinator.runtime_id(), self.runtime);
+        if let Err(candidate) = self.work_coordinator.set(Arc::downgrade(coordinator)) {
+            let installed = self
+                .work_coordinator
+                .get()
+                .expect("a rejected coordinator binding must already be initialized");
+            debug_assert!(installed.ptr_eq(&candidate));
         }
     }
 
@@ -584,69 +597,72 @@ impl LazyValue {
 
 impl PromisedValue {
     pub(crate) fn new(values: &CoreValueFactory, label: impl Into<Arc<str>>) -> Self {
-        Self {
-            id: PromiseId(values.deferred_value_id()),
-            runtime: values.runtime_id(),
-            label: label.into(),
-            assignment: Arc::new(OnceLock::new()),
-            task: None,
-        }
+        Self::with_cell(values, label)
     }
 
     pub(crate) fn fixpoint(
         context: &EvalContext,
         label: impl Into<Arc<str>>,
     ) -> Result<Self, Arc<str>> {
-        let id = PromiseId(context.values().deferred_value_id());
-        let assignment = Arc::new(OnceLock::new());
-        let (owner, wait) = context.register_promise(&assignment)?;
-        Ok(Self {
+        let promise = Self::with_cell(context.values(), label);
+        let producer = Arc::new(context.register_promise(&promise.0)?);
+        promise
+            .0
+            .producer
+            .set(producer)
+            .map_err(|_| Arc::<str>::from("promise producer was installed twice"))?;
+        Ok(promise)
+    }
+
+    fn with_cell(values: &CoreValueFactory, label: impl Into<Arc<str>>) -> Self {
+        let id = PromiseId(values.deferred_value_id());
+        Self(Arc::new(PromiseCell {
             id,
-            runtime: context.values().runtime_id(),
+            runtime: values.runtime_id(),
             label: label.into(),
-            assignment,
-            task: Some(Arc::new(TaskPromise { owner, wait })),
-        })
+            assignment: OnceLock::new(),
+            completion: CompletionSubscriptions::for_promise(
+                values.runtime_id(),
+                id,
+                values.work_coordinator.clone(),
+            ),
+            followers: Mutex::new(Vec::new()),
+            producer: OnceLock::new(),
+        }))
     }
 
     pub(crate) fn id(&self) -> PromiseId {
-        self.id
+        self.0.id
     }
 
     pub(crate) fn runtime_id(&self) -> EvaluationRuntimeId {
-        self.runtime
+        self.0.runtime
     }
 
     pub(crate) fn label(&self) -> &Arc<str> {
-        &self.label
+        &self.0.label
     }
 
-    pub(crate) fn task(&self) -> Option<&TaskPromise> {
-        self.task.as_deref()
+    pub(crate) fn task(&self) -> Option<&PromiseProducerObligation> {
+        self.0.producer.get().map(Arc::as_ref)
     }
 
     pub(crate) fn set(&self, value: Value) -> Result<(), Value> {
-        if let Err(assignment) = self
-            .assignment
-            .set(Ok(RuntimeValueRoot::from_runtime(self.runtime, value)))
-        {
-            return Err(assignment
-                .expect("setting a promised value always supplies a successful value")
-                .into_core());
-        }
-        self.publish_task_assignment();
-        Ok(())
+        self.publish(Ok(RuntimeValueRoot::from_runtime(self.runtime_id(), value)))
+            .map_err(|assignment| {
+                assignment
+                    .expect("setting a promised value always supplies a successful value")
+                    .into_core()
+            })
     }
 
     pub(crate) fn fail(
         &self,
         failure: Arc<EvaluationFailure>,
     ) -> Result<(), Arc<EvaluationFailure>> {
-        if let Err(assignment) = self.assignment.set(Err(failure)) {
-            return Err(assignment.expect_err("failing a promised value always supplies an error"));
-        }
-        self.publish_task_assignment();
-        Ok(())
+        self.publish(Err(failure)).map_err(|assignment| {
+            assignment.expect_err("failing a promised value always supplies an error")
+        })
     }
 
     pub(crate) fn fail_message(
@@ -657,21 +673,104 @@ impl PromisedValue {
     }
 
     pub(crate) fn assignment(&self) -> Option<Result<Value, Arc<EvaluationFailure>>> {
-        self.assignment
+        self.0
+            .assignment
             .get()
             .cloned()
             .map(|assignment| assignment.map(RuntimeValueRoot::into_core))
     }
 
-    fn publish_task_assignment(&self) {
-        let Some(task) = &self.task else {
-            return;
-        };
-        task.wait().publish_promise_assignment(
-            self.assignment
-                .get()
-                .expect("a completed task promise must retain its assignment"),
-        );
+    pub(crate) fn subscribe_follower(&self, wake: PromiseSessionWake) -> bool {
+        let mut followers = self
+            .0
+            .followers
+            .lock()
+            .expect("promise follower set was poisoned");
+        if self.0.assignment.get().is_some() {
+            return false;
+        }
+        followers.retain(PromiseSessionWake::is_live);
+        if !followers
+            .iter()
+            .any(|candidate| candidate.same_session(&wake))
+        {
+            followers.push(wake);
+        }
+        true
+    }
+
+    #[cfg(test)]
+    pub(crate) fn follower_count(&self) -> usize {
+        self.0
+            .followers
+            .lock()
+            .expect("promise follower set was poisoned")
+            .len()
+    }
+
+    fn publish(&self, assignment: PromiseAssignment) -> Result<(), PromiseAssignment> {
+        self.0.publish(assignment)
+    }
+}
+
+impl PromiseCell {
+    pub(crate) fn assignment(&self) -> Option<&PromiseAssignment> {
+        self.assignment.get()
+    }
+
+    pub(crate) fn fail(
+        &self,
+        failure: Arc<EvaluationFailure>,
+    ) -> Result<(), Arc<EvaluationFailure>> {
+        self.publish(Err(failure)).map_err(|assignment| {
+            assignment.expect_err("failing a promised value always supplies an error")
+        })
+    }
+
+    fn publish(&self, assignment: PromiseAssignment) -> Result<(), PromiseAssignment> {
+        let wakes = self.completion.publish(|| {
+            self.assignment.set(assignment)?;
+            let followers = std::mem::take(
+                &mut *self
+                    .followers
+                    .lock()
+                    .expect("promise follower set was poisoned"),
+            );
+            let producer = self.producer.get().and_then(|producer| {
+                producer.publish_assignment(
+                    self.assignment
+                        .get()
+                        .expect("promise publication must initialize its assignment"),
+                )
+            });
+            Ok(PromisePublicationWakes {
+                followers,
+                producer,
+            })
+        })?;
+        wakes.notify();
+        Ok(())
+    }
+}
+
+struct PromisePublicationWakes {
+    followers: Vec<PromiseSessionWake>,
+    producer: Option<PromiseSessionWake>,
+}
+
+impl PromisePublicationWakes {
+    fn notify(self) {
+        let mut notified = Vec::new();
+        for wake in self.producer.into_iter().chain(self.followers) {
+            if notified
+                .iter()
+                .any(|prior: &PromiseSessionWake| prior.same_session(&wake))
+            {
+                continue;
+            }
+            notified.push(wake.clone());
+            wake.notify();
+        }
     }
 }
 
@@ -694,7 +793,7 @@ impl fmt::Debug for LazyValue {
 
 impl PartialEq for PromisedValue {
     fn eq(&self, other: &Self) -> bool {
-        self.id == other.id
+        self.id() == other.id()
     }
 }
 
@@ -704,8 +803,8 @@ impl fmt::Debug for PromisedValue {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("PromisedValue")
-            .field("id", &self.id)
-            .field("label", &self.label)
+            .field("id", &self.id())
+            .field("label", self.label())
             .finish_non_exhaustive()
     }
 }
@@ -1083,16 +1182,6 @@ impl LazyApplication {
 pub(crate) enum FixpointComputation {
     Function(Value),
     ObjectInstance(Value),
-}
-
-impl TaskPromise {
-    pub(crate) fn owner(&self) -> EvaluationTaskId {
-        self.owner
-    }
-
-    pub(crate) fn wait(&self) -> &EvaluationWaitToken {
-        &self.wait
-    }
 }
 
 pub(crate) type DeferredComputation =

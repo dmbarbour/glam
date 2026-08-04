@@ -221,13 +221,22 @@ follow lazy or promised payloads through the common deferred dependency graph.
 Promise-only and mixed promise/lazy cycles remain retryable scheduler waits;
 only pure lazy cycles permanently poison computed results.
 
+A `PromisedValue` is a thin shared `PromiseCell`. Successful assignment,
+explicit failure, resolver drop, and task-producer termination all publish its
+one authoritative assignment under shared runtime mutation admission. The
+cell then fulfills an attached task producer obligation, detaches completion
+registrations, and releases notifications only after admission ends.
+
 A task-owned promise has an active wait record only while its assignment is
-unresolved. Successful assignment, explicit failure, and producer termination
-publish the authoritative `OnceLock` result into the shared wait cell before
-removing both the promise record and its owner index. Outstanding wait handles
-therefore retain late terminal observation without keeping session scheduler
-state. Host-owned `PromiseResolver` values have no task-owned wait record and
-retain their existing session-local wake behavior.
+unresolved. Its producer obligation publishes the same terminal assignment
+into the shared wait cell while the owner record and index are retired.
+Outstanding wait handles therefore retain late terminal observation without
+keeping session scheduler state. Host promises have no task-owned wait record.
+Instead, every session which observes an unresolved promise registers one
+deduplicated weak follower target; one resolver publication wakes all such
+same-runtime sessions without retaining them. The cell already contains the
+common exact-subscriber component, but coordinator-owned sparks continue to
+use broad session disturbance until the next integration slice.
 
 Reflection annotations are also lazy producers. Constructing a gate demands
 neither its effect nor its target. Demand on the gate registers or resumes the
@@ -318,8 +327,9 @@ neither evaluator fuel nor cooperative cancellation. A retryably blocked spark
 is parked without occupying a worker and re-advertised after its evaluation
 session changes. A session generation check prevents promise resolution racing
 with parking from losing the wakeup. Broad disturbance now routes through the
-same epoch-and-dependency validator intended for one-shot completion sources,
-but promise and wait cells do not register exact subscribers yet. One relevant
-change may therefore still retry other blocked sparks in the same session.
+same epoch-and-dependency validator intended for one-shot completion sources.
+Promise cells own the source-side exact subscriber set, but sparks do not join
+it yet; wait cells likewise remain broad. One relevant change may therefore
+still retry other blocked sparks in the same session.
 Dropping the session discards its parked sparks; any later registration is
 stale and retains neither that session nor its work.
