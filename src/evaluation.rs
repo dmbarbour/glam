@@ -30,8 +30,10 @@ pub(crate) use executor::EvaluationExecutor;
 pub(crate) fn test_execution_resources(
     worker_count: usize,
 ) -> Result<(Arc<EvaluationWorkCoordinator>, Arc<EvaluationExecutor>), Arc<str>> {
+    let values = crate::core::test_value_factory();
     let admission = crate::runtime::RuntimeMutationAdmission::new();
-    let coordinator = EvaluationWorkCoordinator::new(admission);
+    let coordinator =
+        EvaluationWorkCoordinator::new(values.runtime_id(), values.ids().clone(), admission);
     let executor = EvaluationExecutor::new(worker_count, &coordinator)?;
     Ok((coordinator, executor))
 }
@@ -812,8 +814,6 @@ pub(crate) struct EvaluationSession {
     default_reflection_profile: Arc<ReflectionTaskProfile>,
     require_default_reflection_profile: bool,
     coordinator: Weak<EvaluationWorkCoordinator>,
-    // Transitional until Phase 3B moves spark records into the coordinator.
-    executor: Weak<EvaluationExecutor>,
 }
 
 impl fmt::Debug for EvaluationSession {
@@ -914,10 +914,7 @@ impl Drop for EvaluationSession {
         drop(deferred);
 
         if let Some(coordinator) = self.coordinator.upgrade() {
-            coordinator.unregister_session(self.id.get());
-        }
-        if let Some(executor) = self.executor.upgrade() {
-            executor.unregister_session_sparks(self.id.get());
+            coordinator.unregister_session(self.id);
         }
     }
 }
@@ -937,7 +934,6 @@ impl EvaluationSession {
 
     fn with_execution_resources(
         coordinator: Weak<EvaluationWorkCoordinator>,
-        executor: Weak<EvaluationExecutor>,
         values: CoreValueFactory,
     ) -> Self {
         Self {
@@ -948,21 +944,15 @@ impl EvaluationSession {
             default_reflection_profile: Arc::new(ReflectionTaskProfile::unsealed()),
             require_default_reflection_profile: false,
             coordinator,
-            executor,
         }
     }
 
     fn isolated(values: CoreValueFactory) -> Arc<Self> {
-        Arc::new(Self::with_execution_resources(
-            Weak::new(),
-            Weak::new(),
-            values,
-        ))
+        Arc::new(Self::with_execution_resources(Weak::new(), values))
     }
 
     fn with_execution_resources_and_default_profile(
         coordinator: Weak<EvaluationWorkCoordinator>,
-        executor: Weak<EvaluationExecutor>,
         values: CoreValueFactory,
         default_reflection_profile: Arc<ReflectionTaskProfile>,
     ) -> Self {
@@ -974,18 +964,13 @@ impl EvaluationSession {
             default_reflection_profile,
             require_default_reflection_profile: true,
             coordinator,
-            executor,
         }
     }
 
     #[cfg(test)]
-    pub(crate) fn shared(
-        coordinator: &Arc<EvaluationWorkCoordinator>,
-        executor: &Arc<EvaluationExecutor>,
-    ) -> Arc<Self> {
+    pub(crate) fn shared(coordinator: &Arc<EvaluationWorkCoordinator>) -> Arc<Self> {
         let session = Arc::new(Self::with_execution_resources(
             Arc::downgrade(coordinator),
-            Arc::downgrade(executor),
             crate::core::test_value_factory(),
         ));
         coordinator.register_session(&session);
@@ -994,13 +979,11 @@ impl EvaluationSession {
 
     pub(crate) fn shared_with_default_profile(
         coordinator: &Arc<EvaluationWorkCoordinator>,
-        executor: &Arc<EvaluationExecutor>,
         values: CoreValueFactory,
         default_reflection_profile: Arc<ReflectionTaskProfile>,
     ) -> Arc<Self> {
         let session = Arc::new(Self::with_execution_resources_and_default_profile(
             Arc::downgrade(coordinator),
-            Arc::downgrade(executor),
             values,
             default_reflection_profile,
         ));
@@ -1010,13 +993,54 @@ impl EvaluationSession {
 
     fn notify_executor_ready(&self) {
         if let Some(coordinator) = self.coordinator.upgrade() {
-            coordinator.notify_session_ready(self.id.get());
+            coordinator.notify_session_ready(self.id);
         }
     }
 
     fn notify_spark_disturbance(&self) {
-        if let Some(executor) = self.executor.upgrade() {
-            executor.notify_spark_disturbance(self.id.get());
+        if let Some(coordinator) = self.coordinator.upgrade() {
+            coordinator.notify_spark_disturbance(self.id);
+        }
+    }
+
+    /// Releases a reusable deferred producer claimed only to satisfy an
+    /// abandoned spark. Running producers remain task-owned in Phase 3B and
+    /// complete through the existing session path.
+    fn abandon_spark_wait(&self, wait: &EvaluationWaitToken) {
+        let mut wait = wait.clone();
+        loop {
+            if wait.owner_id() != self.id || wait.terminal_poll().is_some() {
+                return;
+            }
+            let (retired, dependency) = {
+                let mut tasks = self
+                    .tasks
+                    .lock()
+                    .expect("evaluation task registry was poisoned");
+                let Some(deferred) = tasks.deferred_by_wait.get(&wait).copied() else {
+                    return;
+                };
+                let Some(record) = tasks.deferred.get_mut(&deferred) else {
+                    return;
+                };
+                if matches!(record.state, DeferredTaskState::Running) {
+                    return;
+                }
+                let dependency = match &record.state {
+                    DeferredTaskState::Blocked(block) => block.lazy.clone(),
+                    _ => None,
+                };
+                record.state = publish_deferred_state(&wait, DeferredTaskState::Abandoned);
+                record.dependency = None;
+                let retired = retire_deferred_task(&mut tasks, deferred);
+                self.task_changed.notify_all();
+                (retired, dependency)
+            };
+            drop(retired);
+            let Some(dependency) = dependency else {
+                return;
+            };
+            wait = dependency;
         }
     }
 
@@ -1031,8 +1055,8 @@ impl EvaluationSession {
     }
 
     pub(crate) fn submit_spark(self: &Arc<Self>, value: Value) {
-        if let Some(executor) = self.executor.upgrade() {
-            executor.submit_spark(self, value);
+        if let Some(coordinator) = self.coordinator.upgrade() {
+            coordinator.submit_spark(self, value);
         }
     }
 }
@@ -3766,9 +3790,9 @@ mod tests {
 
     #[test]
     fn concurrent_waiters_observe_terminal_publication() {
-        let (coordinator, executor) =
+        let (coordinator, _executor) =
             test_execution_resources(1).expect("test executor should start");
-        let session = EvaluationSession::shared(&coordinator, &executor);
+        let session = EvaluationSession::shared(&coordinator);
         let context = EvalContext::new(session);
         let (started_sender, started_receiver) = mpsc::channel();
         let (release_sender, release_receiver) = mpsc::channel();
@@ -4441,8 +4465,8 @@ mod tests {
 
     #[test]
     fn zero_worker_executor_drops_sparks_without_forcing_them() {
-        let (coordinator, executor) = test_execution_resources(0).unwrap();
-        let session = EvaluationSession::shared(&coordinator, &executor);
+        let (coordinator, _executor) = test_execution_resources(0).unwrap();
+        let session = EvaluationSession::shared(&coordinator);
         let context = EvalContext::new(session);
         let lazy = crate::core::LazyValue::deferred(
             &crate::core::test_value_factory(),
@@ -4454,16 +4478,141 @@ mod tests {
 
         assert!(lazy.cached().is_none());
         assert_eq!(
-            executor.retained_spark_count(),
+            coordinator.retained_spark_count(),
             0,
             "a zero-worker executor must discard sparks before retaining work"
         );
     }
 
+    fn wait_for_spark_work_counts(
+        coordinator: &EvaluationWorkCoordinator,
+        expected: (usize, usize, usize),
+        message: &str,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while coordinator.spark_work_counts() != expected && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert_eq!(coordinator.spark_work_counts(), expected, "{message}");
+    }
+
+    #[test]
+    fn closing_a_session_abandons_a_blocked_spark_and_releases_its_lazy_claim() {
+        let (coordinator, _executor) = test_execution_resources(1).unwrap();
+        let session = EvaluationSession::shared(&coordinator);
+        let context = EvalContext::new(session.clone());
+        let promise = PromisedValue::new(context.values(), "blocked spark assignment");
+        let followed_promise = promise.clone();
+        let lazy = LazyValue::deferred(context.values(), "reusable spark claim", move |context| {
+            crate::eval::eval_value(context, &Value::Promised(followed_promise.clone()))
+        });
+        context.spark(Value::Lazy(lazy.clone()));
+        wait_for_spark_work_counts(
+            &coordinator,
+            (0, 0, 1),
+            "the unresolved lazy demand should park its stable spark record",
+        );
+        assert!(context.task_registry_counts().deferred_active > 0);
+
+        coordinator.unregister_session(session.id);
+
+        wait_for_spark_work_counts(
+            &coordinator,
+            (0, 0, 0),
+            "closing the demand session should immediately abandon blocked sparks",
+        );
+        assert_eq!(
+            context.task_registry_counts().deferred_active,
+            0,
+            "spark abandonment must release the reusable deferred claim"
+        );
+        assert!(lazy.cached().is_none());
+
+        promise
+            .set(context.values().unit())
+            .expect("host promise should accept its assignment");
+        let observer = EvalContext::new(EvaluationSession::shared(&coordinator));
+        assert_eq!(
+            crate::eval::eval_value(&observer, &Value::Lazy(lazy)),
+            Ok(context.values().unit()),
+            "a later demand must be able to reclaim the abandoned lazy"
+        );
+    }
+
+    #[test]
+    fn closing_a_session_keeps_worker_owned_spark_work_busy_until_release() {
+        let (coordinator, _executor) = test_execution_resources(1).unwrap();
+        let session = EvaluationSession::shared(&coordinator);
+        let context = EvalContext::new(session.clone());
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let producer_release = release.clone();
+        let (started_sender, started_receiver) = mpsc::channel();
+        let lazy = LazyValue::deferred(context.values(), "worker-owned spark", move |context| {
+            started_sender
+                .send(())
+                .expect("test should still await the worker-owned spark");
+            let (lock, changed) = &*producer_release;
+            let mut released = lock.lock().expect("spark release lock was poisoned");
+            while !*released {
+                released = changed
+                    .wait(released)
+                    .expect("spark release lock was poisoned");
+            }
+            Ok(context.values().unit())
+        });
+        context.spark(Value::Lazy(lazy));
+        started_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("worker should own the spark before session closure");
+        assert_eq!(coordinator.spark_work_counts(), (0, 1, 0));
+
+        coordinator.unregister_session(session.id);
+        coordinator.unregister_session(session.id);
+
+        assert_eq!(
+            coordinator.spark_work_counts(),
+            (0, 1, 0),
+            "a close request must retain worker-owned work and its session index"
+        );
+        let (lock, changed) = &*release;
+        *lock.lock().expect("spark release lock was poisoned") = true;
+        changed.notify_all();
+        wait_for_spark_work_counts(
+            &coordinator,
+            (0, 0, 0),
+            "the returning worker should apply the saved close request exactly once",
+        );
+    }
+
+    #[test]
+    fn executor_shutdown_explicitly_abandons_dependency_blocked_sparks() {
+        let (coordinator, executor) = test_execution_resources(1).unwrap();
+        let session = EvaluationSession::shared(&coordinator);
+        let context = EvalContext::new(session);
+        context.spark(Value::Promised(PromisedValue::new(
+            context.values(),
+            "executor shutdown spark",
+        )));
+        wait_for_spark_work_counts(
+            &coordinator,
+            (0, 0, 1),
+            "the promise spark should park before executor shutdown",
+        );
+
+        drop(executor);
+
+        wait_for_spark_work_counts(
+            &coordinator,
+            (0, 0, 0),
+            "executor shutdown must explicitly abandon parked spark records",
+        );
+        assert_eq!(context.task_registry_counts().deferred_active, 0);
+    }
+
     #[test]
     fn workers_force_sparks_and_poll_ready_reflection_tasks() {
-        let (coordinator, executor) = test_execution_resources(1).unwrap();
-        let session = EvaluationSession::shared(&coordinator, &executor);
+        let (coordinator, _executor) = test_execution_resources(1).unwrap();
+        let session = EvaluationSession::shared(&coordinator);
         let context = EvalContext::new(session);
         let (spark_sender, spark_receiver) = mpsc::channel();
         let lazy = crate::core::LazyValue::deferred(

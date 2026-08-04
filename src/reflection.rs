@@ -5425,9 +5425,9 @@ mod tests {
             ".cut (.task.new (.log 'error { msg:{ text:\"cancelled task ran\" } }) >>= (\\task -> (.task.cancel task) =>> .r task)) >>= (\\task -> .task.status task >>= (\\status -> (status == 'canceled) =>> .r ()))",
         );
         let host = Arc::new(TestHost::with_values(assembler.core_values()));
-        let (coordinator, executor) =
+        let (coordinator, _executor) =
             crate::evaluation::test_execution_resources(2).expect("test executor should start");
-        let context = EvalContext::new(EvaluationSession::shared(&coordinator, &executor));
+        let context = EvalContext::new(EvaluationSession::shared(&coordinator));
         let builds = Arc::new(AtomicUsize::new(0));
         let launcher: Arc<dyn ReflectionTaskLauncher> = Arc::new(CountingLauncher {
             inner: task_launcher(TestEffects, host.clone()),

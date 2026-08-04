@@ -4410,9 +4410,9 @@ fn metadata_reflection_update_is_demanded_by_seq_and_worker_spark() {
     );
     assert_eq!(seq_builds.load(Ordering::SeqCst), 1);
 
-    let (coordinator, executor) =
+    let (coordinator, _executor) =
         crate::evaluation::test_execution_resources(1).expect("test worker should start");
-    let session = crate::evaluation::EvaluationSession::shared(&coordinator, &executor);
+    let session = crate::evaluation::EvaluationSession::shared(&coordinator);
     let spark_context = EvalContext::new(session);
     let spark_builds = Arc::new(AtomicUsize::new(0));
     spark_context
@@ -5006,22 +5006,22 @@ fn wait_for_no_deferred_tasks(context: &EvalContext, message: &str) {
 }
 
 fn wait_for_blocked_sparks(
-    executor: &crate::evaluation::EvaluationExecutor,
+    coordinator: &crate::evaluation::EvaluationWorkCoordinator,
     expected: usize,
     message: &str,
 ) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    while executor.blocked_spark_count() != expected && std::time::Instant::now() < deadline {
+    while coordinator.spark_work_counts().2 != expected && std::time::Instant::now() < deadline {
         std::thread::yield_now();
     }
-    assert_eq!(executor.blocked_spark_count(), expected, "{message}");
+    assert_eq!(coordinator.spark_work_counts().2, expected, "{message}");
 }
 
 #[test]
 fn worker_spark_demands_metadata_behind_a_lazy_carrier_shell() {
-    let (coordinator, executor) =
+    let (coordinator, _executor) =
         crate::evaluation::test_execution_resources(1).expect("test worker should start");
-    let session = crate::evaluation::EvaluationSession::shared(&coordinator, &executor);
+    let session = crate::evaluation::EvaluationSession::shared(&coordinator);
     let context = EvalContext::new(session);
     let (shell_sender, shell_receiver) = std::sync::mpsc::channel();
     let (metadata_sender, metadata_receiver) = std::sync::mpsc::channel();
@@ -5064,9 +5064,9 @@ fn worker_spark_demands_metadata_behind_a_lazy_carrier_shell() {
 
 #[test]
 fn metadata_strategy_failures_are_cached_and_seq_propagates_them() {
-    let (coordinator, executor) =
+    let (coordinator, _executor) =
         crate::evaluation::test_execution_resources(1).expect("test worker should start");
-    let session = crate::evaluation::EvaluationSession::shared(&coordinator, &executor);
+    let session = crate::evaluation::EvaluationSession::shared(&coordinator);
     let context = EvalContext::new(session);
     let attempts = Arc::new(AtomicUsize::new(0));
     let counted_attempts = attempts.clone();
@@ -5107,9 +5107,9 @@ fn metadata_strategy_failures_are_cached_and_seq_propagates_them() {
 
 #[test]
 fn strategies_stop_at_nested_metadata_carriers() {
-    let (coordinator, executor) =
+    let (coordinator, _executor) =
         crate::evaluation::test_execution_resources(1).expect("test worker should start");
-    let session = crate::evaluation::EvaluationSession::shared(&coordinator, &executor);
+    let session = crate::evaluation::EvaluationSession::shared(&coordinator);
     let context = EvalContext::new(session);
     let hidden_forces = Arc::new(AtomicUsize::new(0));
     let counted_hidden_forces = hidden_forces.clone();
@@ -5160,9 +5160,9 @@ fn strategies_stop_at_nested_metadata_carriers() {
 
 #[test]
 fn spark_admission_drops_whnf_and_follows_completed_promises() {
-    let (coordinator, executor) =
+    let (coordinator, _executor) =
         crate::evaluation::test_execution_resources(1).expect("test worker should start");
-    let session = crate::evaluation::EvaluationSession::shared(&coordinator, &executor);
+    let session = crate::evaluation::EvaluationSession::shared(&coordinator);
     let context = EvalContext::new(session);
     let net = closed_net(|builder| builder.data(n(1)));
     context.spark(Value::Net(net));
@@ -5220,14 +5220,14 @@ fn spark_admission_drops_whnf_and_follows_completed_promises() {
 
 #[test]
 fn spark_resumes_after_a_resolver_owned_promise_completes() {
-    let (coordinator, executor) =
+    let (coordinator, _executor) =
         crate::evaluation::test_execution_resources(1).expect("test worker should start");
-    let session = crate::evaluation::EvaluationSession::shared(&coordinator, &executor);
+    let session = crate::evaluation::EvaluationSession::shared(&coordinator);
     let context = EvalContext::new(session);
     let promise = PromisedValue::new(&crate::core::test_value_factory(), "later spark input");
     context.spark(Value::Promised(promise.clone()));
     wait_for_blocked_sparks(
-        &executor,
+        &coordinator,
         1,
         "an unassigned promise should retain its spark demand",
     );
@@ -5253,7 +5253,7 @@ fn spark_resumes_after_a_resolver_owned_promise_completes() {
         .expect("promise completion should resume and finish its spark");
     wait_for_lazy_cache(&assigned, "resumed spark work must be cached");
     wait_for_blocked_sparks(
-        &executor,
+        &coordinator,
         0,
         "a completed spark must leave no parked executor job",
     );
@@ -5265,23 +5265,23 @@ fn spark_resumes_after_a_resolver_owned_promise_completes() {
 
 #[test]
 fn dropping_a_session_discards_its_blocked_sparks() {
-    let (coordinator, executor) =
+    let (coordinator, _executor) =
         crate::evaluation::test_execution_resources(1).expect("test worker should start");
     {
-        let session = crate::evaluation::EvaluationSession::shared(&coordinator, &executor);
+        let session = crate::evaluation::EvaluationSession::shared(&coordinator);
         let context = EvalContext::new(session);
         context.spark(Value::Promised(PromisedValue::new(
             &crate::core::test_value_factory(),
             "discarded blocked spark",
         )));
         wait_for_blocked_sparks(
-            &executor,
+            &coordinator,
             1,
             "unassigned promise should park before its session is dropped",
         );
     }
     wait_for_blocked_sparks(
-        &executor,
+        &coordinator,
         0,
         "parked spark values must not outlive their evaluation session",
     );

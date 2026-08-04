@@ -48,7 +48,7 @@ not define future language semantics or collect subsystem invariants.
 | `core_net.rs` | Core data/operator specialization of generic interaction nets |
 | `interaction_net/model.rs`, `builder.rs` | Generic identities, agents, specialization protocol, and checked construction |
 | `interaction_net/runtime/` | Mutable graph, active-pair rewrites, cursors, and runtime tests |
-| `evaluation.rs`, `evaluation/coordinator.rs`, `evaluation/executor.rs` | Sessions and task records, runtime work coordination, workers, and transitional spark queues |
+| `evaluation.rs`, `evaluation/coordinator.rs`, `evaluation/executor.rs` | Session task records, runtime-owned spark work, coordination, and worker lifecycle |
 | `eval/value.rs`, `application.rs`, `operator.rs`, `net.rs` | Value forcing, application, operator staging, and net driving |
 | `eval/builtins/` | Builtin implementations split by semantic family |
 | `eval/builtins/net/construction.rs` | Lazy `interaction_net` effect search, branch-local construction journals, opaque port capabilities, and checked replay |
@@ -96,11 +96,12 @@ a `Values` factory so identity-bearing values are never created in an
 unscoped domain. Public `Value`s are runtime-tagged roots and cannot cross this
 boundary: composite construction and every consuming facade validate the tag
 before exposing the recursive core representation. Runtime-owned promise
-assignments, task and wait terminals, pending reflection work, and queued or
-blocked sparks retain the same internal root wrapper. Production evaluation
-likewise has no standalone session or context constructor; isolated work still
-receives the selected runtime's core factory. The runtime cache owns canonical protocol values, the initial
-metadata carrier, and complete type-indexed compiler bundles. Attachments are
+assignments, task and wait terminals, pending reflection work, and stable
+queued or blocked spark records retain the same internal root wrapper.
+Production evaluation likewise has no standalone session or context
+constructor; isolated work still receives the selected runtime's core factory.
+The runtime cache owns canonical protocol values, the initial metadata carrier,
+and complete type-indexed compiler bundles. Attachments are
 built outside synchronization and publish one completed winner; each
 `CompileContext` keeps a compilation-local lookup view without duplicating the
 runtime bundle. Process-global protocol keys remain immutable descriptions,
@@ -229,7 +230,7 @@ Assembler -> EvalContext -> Value
 EvaluationSession -> EvaluationWorkCoordinator <- EvaluationExecutor
   -> demanded reflection producers via the serial pump
   -> coordinator-selected reflection work via shared workers
-  -> optional executor-queued spark work via shared workers
+  -> coordinator-owned stable spark work via shared workers
 ```
 
 Evaluation receives closed values and an explicit session context. Reflection

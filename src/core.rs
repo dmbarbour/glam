@@ -613,6 +613,10 @@ impl PromisedValue {
         self.id
     }
 
+    pub(crate) fn runtime_id(&self) -> EvaluationRuntimeId {
+        self.runtime
+    }
+
     pub(crate) fn label(&self) -> &Arc<str> {
         &self.label
     }

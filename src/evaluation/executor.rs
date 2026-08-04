@@ -1,46 +1,23 @@
 //! Worker ownership and fair selection across related evaluation sessions.
 
-use std::collections::{HashMap, VecDeque};
 use std::fmt;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::thread;
 
-use crate::core::Value;
-use crate::runtime::RuntimeValueRoot;
-
-use super::coordinator::CoordinatorSelection;
-use super::{EvalContext, EvaluationSession, EvaluationWorkCoordinator};
-
-struct SparkJob {
-    session_id: u64,
-    session: Weak<EvaluationSession>,
-    value: RuntimeValueRoot,
-    observed_generation: u64,
-}
-
-#[derive(Default)]
-struct ExecutorQueue {
-    stopping: bool,
-    sparks: VecDeque<SparkJob>,
-    blocked_sparks: HashMap<u64, Vec<SparkJob>>,
-    spark_generations: HashMap<u64, u64>,
-}
+use super::coordinator::{CoordinatorSelection, SparkWorkPoll, WorkDependency};
+use super::{EvalContext, EvaluationWorkCoordinator};
 
 struct EvaluationExecutorInner {
-    queue: Mutex<ExecutorQueue>,
     coordinator: Weak<EvaluationWorkCoordinator>,
+    stopping: AtomicBool,
     worker_count: AtomicUsize,
 }
 
-/// Background execution resources attached to one evaluation runtime.
+/// Background worker resources attached to one evaluation runtime.
 ///
-/// The runtime's coordinator owns ready-session selection and fairness.
-/// Workers retain only a weak coordinator attachment; this executor owns their
-/// handles, activation, shutdown, and the transitional spark queues which move
-/// to coordinator work records in Phase 3B. Sessions retain a weak executor
-/// link only for that spark bridge. Running divergent sparks are intentionally
-/// not forcibly cancelled.
+/// Stable work records and spark payloads belong to the runtime coordinator.
+/// The executor owns only worker activation, shutdown, and thread handles.
 pub(crate) struct EvaluationExecutor {
     inner: Arc<EvaluationExecutorInner>,
     workers: Mutex<Vec<thread::JoinHandle<()>>>,
@@ -70,8 +47,8 @@ impl EvaluationExecutor {
         }
         let executor = Arc::new(Self {
             inner: Arc::new(EvaluationExecutorInner {
-                queue: Mutex::new(ExecutorQueue::default()),
                 coordinator: Arc::downgrade(coordinator),
+                stopping: AtomicBool::new(false),
                 worker_count: AtomicUsize::new(0),
             }),
             workers: Mutex::new(Vec::with_capacity(worker_count)),
@@ -121,6 +98,9 @@ impl EvaluationExecutor {
         self.inner
             .worker_count
             .store(worker_count, Ordering::Release);
+        if let Some(coordinator) = self.inner.coordinator.upgrade() {
+            coordinator.executor_started(worker_count);
+        }
         drop(workers);
         Ok(())
     }
@@ -128,125 +108,19 @@ impl EvaluationExecutor {
     pub(crate) fn worker_count(&self) -> usize {
         self.inner.worker_count.load(Ordering::Acquire)
     }
-
-    pub(super) fn unregister_session_sparks(&self, session: u64) {
-        let mut queue = self
-            .inner
-            .queue
-            .lock()
-            .expect("evaluation executor queue was poisoned");
-        queue.sparks.retain(|job| job.session_id != session);
-        queue.blocked_sparks.remove(&session);
-        queue.spark_generations.remove(&session);
-        drop(queue);
-        self.notify_coordinator();
-    }
-
-    pub(super) fn submit_spark(&self, session: &Arc<EvaluationSession>, value: Value) {
-        if self.worker_count() == 0 {
-            return;
-        }
-        let session_id = session.id.get();
-        if !self
-            .inner
-            .coordinator
-            .upgrade()
-            .is_some_and(|coordinator| coordinator.contains_session(session_id))
-        {
-            return;
-        }
-        let mut queue = self
-            .inner
-            .queue
-            .lock()
-            .expect("evaluation executor queue was poisoned");
-        if queue.stopping {
-            return;
-        }
-        let observed_generation = *queue.spark_generations.entry(session_id).or_insert(0);
-        queue.sparks.push_back(SparkJob {
-            session_id,
-            session: Arc::downgrade(session),
-            value: RuntimeValueRoot::new(&session.values, value),
-            observed_generation,
-        });
-        drop(queue);
-        self.notify_coordinator();
-    }
-
-    pub(super) fn notify_spark_disturbance(&self, session: u64) {
-        let mut queue = self
-            .inner
-            .queue
-            .lock()
-            .expect("evaluation executor queue was poisoned");
-        if queue.stopping {
-            return;
-        }
-        let generation = queue
-            .spark_generations
-            .entry(session)
-            .and_modify(|generation| *generation = generation.wrapping_add(1))
-            .or_insert(1);
-        let generation = *generation;
-        let Some(blocked) = queue.blocked_sparks.remove(&session) else {
-            drop(queue);
-            self.notify_coordinator();
-            return;
-        };
-        for mut job in blocked {
-            job.observed_generation = generation;
-            queue.sparks.push_back(job);
-        }
-        drop(queue);
-        self.notify_coordinator();
-    }
-
-    #[cfg(test)]
-    pub(crate) fn blocked_spark_count(&self) -> usize {
-        self.inner
-            .queue
-            .lock()
-            .expect("evaluation executor queue was poisoned")
-            .blocked_sparks
-            .values()
-            .map(Vec::len)
-            .sum()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn retained_spark_count(&self) -> usize {
-        let queue = self
-            .inner
-            .queue
-            .lock()
-            .expect("evaluation executor queue was poisoned");
-        queue.sparks.len() + queue.blocked_sparks.values().map(Vec::len).sum::<usize>()
-    }
-
-    fn notify_coordinator(&self) {
-        if let Some(coordinator) = self.inner.coordinator.upgrade() {
-            coordinator.notify_external_work_changed();
-        }
-    }
 }
 
 impl Drop for EvaluationExecutor {
     fn drop(&mut self) {
-        let mut queue = self
-            .inner
-            .queue
-            .lock()
-            .expect("evaluation executor queue was poisoned");
-        queue.stopping = true;
-        queue.sparks.clear();
-        queue.blocked_sparks.clear();
-        drop(queue);
-        self.notify_coordinator();
+        self.inner.stopping.store(true, Ordering::Release);
+        self.inner.worker_count.store(0, Ordering::Release);
+        if let Some(coordinator) = self.inner.coordinator.upgrade() {
+            coordinator.executor_stopped();
+        }
 
         // Dropping a JoinHandle detaches its thread. Idle workers observe the
-        // stop flag and exit promptly; an actively divergent spark retains
-        // only executor internals until the process terminates or it returns.
+        // coordinator wake and exit promptly. A divergent worker retains its
+        // claimed record until it returns, preserving truthful busy state.
         self.workers
             .get_mut()
             .expect("evaluation worker registry was poisoned")
@@ -254,109 +128,61 @@ impl Drop for EvaluationExecutor {
     }
 }
 
-enum ExecutorWork {
-    Reflection(Arc<EvaluationSession>),
-    Spark(SparkJob),
-    Stop,
-}
-
 fn evaluation_worker(inner: Arc<EvaluationExecutorInner>) {
     loop {
+        if inner.stopping.load(Ordering::Acquire) {
+            return;
+        }
         let Some(coordinator) = inner.coordinator.upgrade() else {
             return;
         };
         let observed_generation = coordinator.work_generation();
-        let work = match coordinator.select(spark_is_ready(&inner)) {
-            CoordinatorSelection::Reflection(session) => ExecutorWork::Reflection(session),
-            CoordinatorSelection::Spark => match pop_spark(&inner) {
-                Some(spark) => ExecutorWork::Spark(spark),
-                None => continue,
-            },
-            CoordinatorSelection::None if executor_is_stopping(&inner) => ExecutorWork::Stop,
-            CoordinatorSelection::None => {
-                coordinator.wait_for_change(observed_generation);
-                continue;
-            }
-        };
+        let work = coordinator.select();
 
         match work {
-            ExecutorWork::Reflection(session) => {
+            CoordinatorSelection::Reflection(session) => {
+                if inner.stopping.load(Ordering::Acquire) {
+                    coordinator.notify_session_ready(session.id);
+                    return;
+                }
                 session.poll_one_ready_task();
             }
-            ExecutorWork::Spark(job) => {
-                let Some(session) = job.session.upgrade() else {
+            CoordinatorSelection::Spark(claimed) => {
+                if inner.stopping.load(Ordering::Acquire) {
+                    coordinator.release_spark(claimed, SparkWorkPoll::Complete);
+                    return;
+                }
+                let Some(session) = claimed.session() else {
+                    coordinator.release_spark(claimed, SparkWorkPoll::Complete);
                     continue;
                 };
                 let context = EvalContext::new(session);
-                debug_assert_eq!(job.value.runtime_id(), context.values().runtime_id());
-                let result = crate::eval::demand_strategy_value(&context, job.value.as_core());
-                if result.as_ref().is_err_and(|halt| {
-                    halt.blocked_on().is_some() || halt.unassigned_promise().is_some()
-                }) {
-                    park_spark(&inner, job);
-                }
+                debug_assert_eq!(claimed.value().runtime_id(), context.values().runtime_id());
+                let result =
+                    crate::eval::demand_strategy_value(&context, claimed.value().as_core());
+                let poll = match result {
+                    Ok(()) => SparkWorkPoll::Complete,
+                    Err(halt) => {
+                        if let Some(wait) = halt.blocked_on() {
+                            SparkWorkPoll::Blocked(WorkDependency::Wait(wait.0))
+                        } else if let Some(promise) = halt.unassigned_promise() {
+                            SparkWorkPoll::Blocked(WorkDependency::Promise(promise.clone()))
+                        } else {
+                            SparkWorkPoll::Complete
+                        }
+                    }
+                };
+                drop(context);
+                coordinator.release_spark(claimed, poll);
             }
-            ExecutorWork::Stop => return,
+            CoordinatorSelection::None => {
+                if inner.stopping.load(Ordering::Acquire) {
+                    return;
+                }
+                coordinator.wait_for_change(observed_generation);
+            }
         }
     }
-}
-
-fn park_spark(inner: &EvaluationExecutorInner, mut job: SparkJob) {
-    if !inner
-        .coordinator
-        .upgrade()
-        .is_some_and(|coordinator| coordinator.contains_session(job.session_id))
-    {
-        return;
-    }
-    let mut queue = inner
-        .queue
-        .lock()
-        .expect("evaluation executor queue was poisoned");
-    if queue.stopping {
-        return;
-    }
-    let generation = *queue.spark_generations.entry(job.session_id).or_insert(0);
-    if generation != job.observed_generation {
-        job.observed_generation = generation;
-        queue.sparks.push_back(job);
-    } else {
-        queue
-            .blocked_sparks
-            .entry(job.session_id)
-            .or_default()
-            .push(job);
-    }
-    drop(queue);
-    if let Some(coordinator) = inner.coordinator.upgrade() {
-        coordinator.notify_external_work_changed();
-    }
-}
-
-fn spark_is_ready(inner: &EvaluationExecutorInner) -> bool {
-    !inner
-        .queue
-        .lock()
-        .expect("evaluation executor queue was poisoned")
-        .sparks
-        .is_empty()
-}
-
-fn pop_spark(inner: &EvaluationExecutorInner) -> Option<SparkJob> {
-    inner
-        .queue
-        .lock()
-        .expect("evaluation executor queue was poisoned")
-        .sparks
-        .pop_front()
-}
-
-fn executor_is_stopping(inner: &EvaluationExecutorInner) -> bool {
-    inner
-        .queue
-        .lock()
-        .expect("evaluation executor queue was poisoned")
-        .stopping
 }
 
 #[cfg(test)]
@@ -384,31 +210,5 @@ mod tests {
             1,
             "executor workers must retain only a weak coordinator attachment"
         );
-    }
-
-    #[test]
-    fn a_disturbance_racing_with_spark_parking_is_not_lost() {
-        let (coordinator, executor) =
-            super::super::test_execution_resources(0).expect("test executor should build");
-        let session = EvaluationSession::shared(&coordinator, &executor);
-        let session_id = session.id.get();
-        let job = SparkJob {
-            session_id,
-            session: Arc::downgrade(&session),
-            value: RuntimeValueRoot::new(&session.values, crate::core::keys::unit_value()),
-            observed_generation: 0,
-        };
-
-        executor.notify_spark_disturbance(session_id);
-        park_spark(&executor.inner, job);
-
-        let queue = executor
-            .inner
-            .queue
-            .lock()
-            .expect("evaluation executor queue was poisoned");
-        assert_eq!(queue.sparks.len(), 1);
-        assert!(queue.blocked_sparks.is_empty());
-        assert_eq!(queue.sparks[0].observed_generation, 1);
     }
 }

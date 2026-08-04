@@ -116,6 +116,7 @@ impl RuntimeValueRoot {
 
 pub(crate) struct RuntimeIds {
     next_evaluation_session: AtomicU64,
+    next_evaluation_work: AtomicU64,
     next_evaluation_task: AtomicU64,
     next_evaluation_wait: AtomicU64,
     next_deferred_value: AtomicU64,
@@ -130,6 +131,7 @@ impl RuntimeIds {
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
             next_evaluation_session: AtomicU64::new(1),
+            next_evaluation_work: AtomicU64::new(1),
             next_evaluation_task: AtomicU64::new(1),
             next_evaluation_wait: AtomicU64::new(1),
             next_deferred_value: AtomicU64::new(1),
@@ -153,6 +155,13 @@ impl RuntimeIds {
         self.allocate_or_panic(
             &self.next_evaluation_session,
             "evaluation session IDs exhausted for this evaluation runtime",
+        )
+    }
+
+    pub(crate) fn evaluation_work(&self) -> NonZeroU64 {
+        self.allocate_or_panic(
+            &self.next_evaluation_work,
+            "evaluation work IDs exhausted for this evaluation runtime",
         )
     }
 

@@ -1520,8 +1520,8 @@ pub struct EvaluationRuntime {
 
 struct RuntimeState {
     id: EvaluationRuntimeId,
-    work: Arc<EvaluationWorkCoordinator>,
     executor: Arc<EvaluationExecutor>,
+    work: Arc<EvaluationWorkCoordinator>,
     values: RuntimeValueFactory,
     transactions: RuntimeTransactionState,
     observations: RuntimeObservationState,
@@ -2474,14 +2474,14 @@ impl EvaluationRuntime {
         };
         let event_conflict_analysis = conflict_analysis.clone();
         let mutation_admission = RuntimeMutationAdmission::new();
-        let work = EvaluationWorkCoordinator::new(mutation_admission.clone());
+        let work = EvaluationWorkCoordinator::new(id, ids.clone(), mutation_admission.clone());
         let executor = EvaluationExecutor::new(worker_threads, &work)
             .map_err(|error| Error::new(error.as_ref()))?;
         Ok(Self {
             state: Arc::new(RuntimeState {
                 id,
-                work,
                 executor,
+                work,
                 values: values.clone(),
                 transactions: RuntimeTransactionState {
                     state: Mutex::new(RuntimeTransactionData {
@@ -2651,10 +2651,6 @@ impl EvaluationRuntime {
             .map_err(|error| Error::new(error.as_ref()))
     }
 
-    pub(crate) fn executor(&self) -> &Arc<EvaluationExecutor> {
-        &self.state.executor
-    }
-
     pub(crate) fn new_evaluation_session(&self) -> Result<Arc<EvaluationSession>, Error> {
         if !self.has_default_reflection_profile() {
             return Err(Error::new(
@@ -2663,7 +2659,6 @@ impl EvaluationRuntime {
         }
         Ok(EvaluationSession::shared_with_default_profile(
             &self.state.work,
-            self.executor(),
             self.state.values.core().clone(),
             self.default_reflection_profile.clone(),
         ))
@@ -6293,7 +6288,6 @@ mod tests {
         let (before, _) = runtime.reflection_snapshot();
         let session = EvaluationSession::shared_with_default_profile(
             &runtime.state.work,
-            &runtime.state.executor,
             runtime.state.values.core().clone(),
             Arc::new(ReflectionTaskProfile::unsealed()),
         );

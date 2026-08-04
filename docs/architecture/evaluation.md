@@ -30,13 +30,14 @@ profile, and a persistent ledger of unacknowledged reflection failures.
 
 The runtime-owned `EvaluationWorkCoordinator` owns session registration, the
 ready-session queue and de-duplication index, worker fairness, its work
-generation, and the condition variable used to await work. The attached
-`EvaluationExecutor` owns only worker activation, shutdown, and—temporarily—
-spark payload queues. Workers retain a weak coordinator attachment and ask it
-which ready session to poll. Sessions retain weak links to both components
-until Phase 3B moves sparks into coordinator work records. The immutable
-reflection environment belongs to the active task host rather than either
-scheduling component.
+generation, the condition variable used to await work, and stable runtime-local
+spark records. Each spark record retains its demand value, broad dependency,
+demand-session index, and a close request while worker-owned. The attached
+`EvaluationExecutor` owns only worker activation, shutdown, and thread handles.
+Workers retain a weak coordinator attachment and claim either a ready session
+or spark record from it. Sessions retain only a weak coordinator link. The
+immutable reflection environment belongs to the active task host rather than
+either scheduling component.
 
 Coordinator mutations participate in the runtime settlement-admission gate
 and advance the coordinator's work generation before external wakes. They do
@@ -123,6 +124,7 @@ The session owns only live scheduling state:
 | State | Owner |
 | --- | --- |
 | runnable, running, blocked, or unresolved producer | active session registry |
+| queued, worker-owned, or dependency-blocked spark | runtime work coordinator |
 | completed, failed, cancelled, or abandoned outcome | shared `EvaluationWaitToken` cell |
 | unacknowledged reflection failure | persistent session reporting ledger |
 | transactional `.task.status`, `.task.value`, or `.task.error` view | reasoning-store query |
