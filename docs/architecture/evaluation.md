@@ -26,10 +26,23 @@ Every production evaluator entry receives an `EvalContext` borrowed from an
 `ReasoningSession`, which owns that evaluation session and the assembler's
 reflection host. `EvaluationSession` owns active reflection and deferred-value
 task records, wait lookup, a reference to the runtime-default annotation
-profile, a persistent ledger of
-unacknowledged reflection failures, and its connection to a shared
-`EvaluationExecutor`. The immutable reflection environment belongs to the
-active task host rather than the scheduler.
+profile, and a persistent ledger of unacknowledged reflection failures.
+
+The runtime-owned `EvaluationWorkCoordinator` owns session registration, the
+ready-session queue and de-duplication index, worker fairness, its work
+generation, and the condition variable used to await work. The attached
+`EvaluationExecutor` owns only worker activation, shutdown, and—temporarily—
+spark payload queues. Workers retain a weak coordinator attachment and ask it
+which ready session to poll. Sessions retain weak links to both components
+until Phase 3B moves sparks into coordinator work records. The immutable
+reflection environment belongs to the active task host rather than either
+scheduling component.
+
+Coordinator mutations participate in the runtime settlement-admission gate
+and advance the coordinator's work generation before external wakes. They do
+not advance `RuntimeObservationEpoch`: ready-queue churn is not a semantic
+heap/input disturbance and must not cause a task to invalidate its own prior
+observations.
 
 `EvalContext` separately carries the complete profile inherited by
 `.task.new`. A type-erased launcher closes over the specialization, immutable

@@ -4410,8 +4410,9 @@ fn metadata_reflection_update_is_demanded_by_seq_and_worker_spark() {
     );
     assert_eq!(seq_builds.load(Ordering::SeqCst), 1);
 
-    let executor = crate::evaluation::EvaluationExecutor::new(1).expect("test worker should start");
-    let session = crate::evaluation::EvaluationSession::shared(&executor);
+    let (coordinator, executor) =
+        crate::evaluation::test_execution_resources(1).expect("test worker should start");
+    let session = crate::evaluation::EvaluationSession::shared(&coordinator, &executor);
     let spark_context = EvalContext::new(session);
     let spark_builds = Arc::new(AtomicUsize::new(0));
     spark_context
@@ -5018,8 +5019,9 @@ fn wait_for_blocked_sparks(
 
 #[test]
 fn worker_spark_demands_metadata_behind_a_lazy_carrier_shell() {
-    let executor = crate::evaluation::EvaluationExecutor::new(1).expect("test worker should start");
-    let session = crate::evaluation::EvaluationSession::shared(&executor);
+    let (coordinator, executor) =
+        crate::evaluation::test_execution_resources(1).expect("test worker should start");
+    let session = crate::evaluation::EvaluationSession::shared(&coordinator, &executor);
     let context = EvalContext::new(session);
     let (shell_sender, shell_receiver) = std::sync::mpsc::channel();
     let (metadata_sender, metadata_receiver) = std::sync::mpsc::channel();
@@ -5062,8 +5064,9 @@ fn worker_spark_demands_metadata_behind_a_lazy_carrier_shell() {
 
 #[test]
 fn metadata_strategy_failures_are_cached_and_seq_propagates_them() {
-    let executor = crate::evaluation::EvaluationExecutor::new(1).expect("test worker should start");
-    let session = crate::evaluation::EvaluationSession::shared(&executor);
+    let (coordinator, executor) =
+        crate::evaluation::test_execution_resources(1).expect("test worker should start");
+    let session = crate::evaluation::EvaluationSession::shared(&coordinator, &executor);
     let context = EvalContext::new(session);
     let attempts = Arc::new(AtomicUsize::new(0));
     let counted_attempts = attempts.clone();
@@ -5104,8 +5107,9 @@ fn metadata_strategy_failures_are_cached_and_seq_propagates_them() {
 
 #[test]
 fn strategies_stop_at_nested_metadata_carriers() {
-    let executor = crate::evaluation::EvaluationExecutor::new(1).expect("test worker should start");
-    let session = crate::evaluation::EvaluationSession::shared(&executor);
+    let (coordinator, executor) =
+        crate::evaluation::test_execution_resources(1).expect("test worker should start");
+    let session = crate::evaluation::EvaluationSession::shared(&coordinator, &executor);
     let context = EvalContext::new(session);
     let hidden_forces = Arc::new(AtomicUsize::new(0));
     let counted_hidden_forces = hidden_forces.clone();
@@ -5156,8 +5160,9 @@ fn strategies_stop_at_nested_metadata_carriers() {
 
 #[test]
 fn spark_admission_drops_whnf_and_follows_completed_promises() {
-    let executor = crate::evaluation::EvaluationExecutor::new(1).expect("test worker should start");
-    let session = crate::evaluation::EvaluationSession::shared(&executor);
+    let (coordinator, executor) =
+        crate::evaluation::test_execution_resources(1).expect("test worker should start");
+    let session = crate::evaluation::EvaluationSession::shared(&coordinator, &executor);
     let context = EvalContext::new(session);
     let net = closed_net(|builder| builder.data(n(1)));
     context.spark(Value::Net(net));
@@ -5215,8 +5220,9 @@ fn spark_admission_drops_whnf_and_follows_completed_promises() {
 
 #[test]
 fn spark_resumes_after_a_resolver_owned_promise_completes() {
-    let executor = crate::evaluation::EvaluationExecutor::new(1).expect("test worker should start");
-    let session = crate::evaluation::EvaluationSession::shared(&executor);
+    let (coordinator, executor) =
+        crate::evaluation::test_execution_resources(1).expect("test worker should start");
+    let session = crate::evaluation::EvaluationSession::shared(&coordinator, &executor);
     let context = EvalContext::new(session);
     let promise = PromisedValue::new(&crate::core::test_value_factory(), "later spark input");
     context.spark(Value::Promised(promise.clone()));
@@ -5259,9 +5265,10 @@ fn spark_resumes_after_a_resolver_owned_promise_completes() {
 
 #[test]
 fn dropping_a_session_discards_its_blocked_sparks() {
-    let executor = crate::evaluation::EvaluationExecutor::new(1).expect("test worker should start");
+    let (coordinator, executor) =
+        crate::evaluation::test_execution_resources(1).expect("test worker should start");
     {
-        let session = crate::evaluation::EvaluationSession::shared(&executor);
+        let session = crate::evaluation::EvaluationSession::shared(&coordinator, &executor);
         let context = EvalContext::new(session);
         context.spark(Value::Promised(PromisedValue::new(
             &crate::core::test_value_factory(),

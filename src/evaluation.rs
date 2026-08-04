@@ -21,8 +21,20 @@ use crate::core::{
 };
 use crate::runtime::{EvaluationRuntimeId, RuntimeValueRoot};
 
+mod coordinator;
 mod executor;
+pub(crate) use coordinator::EvaluationWorkCoordinator;
 pub(crate) use executor::EvaluationExecutor;
+
+#[cfg(test)]
+pub(crate) fn test_execution_resources(
+    worker_count: usize,
+) -> Result<(Arc<EvaluationWorkCoordinator>, Arc<EvaluationExecutor>), Arc<str>> {
+    let admission = crate::runtime::RuntimeMutationAdmission::new();
+    let coordinator = EvaluationWorkCoordinator::new(admission);
+    let executor = EvaluationExecutor::new(worker_count, &coordinator)?;
+    Ok((coordinator, executor))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct EvaluationTaskId(NonZeroU64);
@@ -799,6 +811,8 @@ pub(crate) struct EvaluationSession {
     task_changed: Condvar,
     default_reflection_profile: Arc<ReflectionTaskProfile>,
     require_default_reflection_profile: bool,
+    coordinator: Weak<EvaluationWorkCoordinator>,
+    // Transitional until Phase 3B moves spark records into the coordinator.
     executor: Weak<EvaluationExecutor>,
 }
 
@@ -899,8 +913,11 @@ impl Drop for EvaluationSession {
         drop(reflection);
         drop(deferred);
 
+        if let Some(coordinator) = self.coordinator.upgrade() {
+            coordinator.unregister_session(self.id.get());
+        }
         if let Some(executor) = self.executor.upgrade() {
-            executor.unregister_session(self.id.get());
+            executor.unregister_session_sparks(self.id.get());
         }
     }
 }
@@ -918,7 +935,11 @@ impl EvaluationSession {
         }
     }
 
-    fn with_executor(executor: Weak<EvaluationExecutor>, values: CoreValueFactory) -> Self {
+    fn with_execution_resources(
+        coordinator: Weak<EvaluationWorkCoordinator>,
+        executor: Weak<EvaluationExecutor>,
+        values: CoreValueFactory,
+    ) -> Self {
         Self {
             id: EvaluationSessionId(values.ids().evaluation_session()),
             values,
@@ -926,15 +947,21 @@ impl EvaluationSession {
             task_changed: Condvar::new(),
             default_reflection_profile: Arc::new(ReflectionTaskProfile::unsealed()),
             require_default_reflection_profile: false,
+            coordinator,
             executor,
         }
     }
 
     fn isolated(values: CoreValueFactory) -> Arc<Self> {
-        Arc::new(Self::with_executor(Weak::new(), values))
+        Arc::new(Self::with_execution_resources(
+            Weak::new(),
+            Weak::new(),
+            values,
+        ))
     }
 
-    fn with_executor_and_default_profile(
+    fn with_execution_resources_and_default_profile(
+        coordinator: Weak<EvaluationWorkCoordinator>,
         executor: Weak<EvaluationExecutor>,
         values: CoreValueFactory,
         default_reflection_profile: Arc<ReflectionTaskProfile>,
@@ -946,37 +973,44 @@ impl EvaluationSession {
             task_changed: Condvar::new(),
             default_reflection_profile,
             require_default_reflection_profile: true,
+            coordinator,
             executor,
         }
     }
 
     #[cfg(test)]
-    pub(crate) fn shared(executor: &Arc<EvaluationExecutor>) -> Arc<Self> {
-        let session = Arc::new(Self::with_executor(
+    pub(crate) fn shared(
+        coordinator: &Arc<EvaluationWorkCoordinator>,
+        executor: &Arc<EvaluationExecutor>,
+    ) -> Arc<Self> {
+        let session = Arc::new(Self::with_execution_resources(
+            Arc::downgrade(coordinator),
             Arc::downgrade(executor),
             crate::core::test_value_factory(),
         ));
-        executor.register_session(&session);
+        coordinator.register_session(&session);
         session
     }
 
     pub(crate) fn shared_with_default_profile(
+        coordinator: &Arc<EvaluationWorkCoordinator>,
         executor: &Arc<EvaluationExecutor>,
         values: CoreValueFactory,
         default_reflection_profile: Arc<ReflectionTaskProfile>,
     ) -> Arc<Self> {
-        let session = Arc::new(Self::with_executor_and_default_profile(
+        let session = Arc::new(Self::with_execution_resources_and_default_profile(
+            Arc::downgrade(coordinator),
             Arc::downgrade(executor),
             values,
             default_reflection_profile,
         ));
-        executor.register_session(&session);
+        coordinator.register_session(&session);
         session
     }
 
     fn notify_executor_ready(&self) {
-        if let Some(executor) = self.executor.upgrade() {
-            executor.notify_session_ready(self.id.get());
+        if let Some(coordinator) = self.coordinator.upgrade() {
+            coordinator.notify_session_ready(self.id.get());
         }
     }
 
@@ -3732,8 +3766,9 @@ mod tests {
 
     #[test]
     fn concurrent_waiters_observe_terminal_publication() {
-        let executor = EvaluationExecutor::new(1).expect("test executor should start");
-        let session = EvaluationSession::shared(&executor);
+        let (coordinator, executor) =
+            test_execution_resources(1).expect("test executor should start");
+        let session = EvaluationSession::shared(&coordinator, &executor);
         let context = EvalContext::new(session);
         let (started_sender, started_receiver) = mpsc::channel();
         let (release_sender, release_receiver) = mpsc::channel();
@@ -4406,8 +4441,8 @@ mod tests {
 
     #[test]
     fn zero_worker_executor_drops_sparks_without_forcing_them() {
-        let executor = EvaluationExecutor::new(0).unwrap();
-        let session = EvaluationSession::shared(&executor);
+        let (coordinator, executor) = test_execution_resources(0).unwrap();
+        let session = EvaluationSession::shared(&coordinator, &executor);
         let context = EvalContext::new(session);
         let lazy = crate::core::LazyValue::deferred(
             &crate::core::test_value_factory(),
@@ -4427,8 +4462,8 @@ mod tests {
 
     #[test]
     fn workers_force_sparks_and_poll_ready_reflection_tasks() {
-        let executor = EvaluationExecutor::new(1).unwrap();
-        let session = EvaluationSession::shared(&executor);
+        let (coordinator, executor) = test_execution_resources(1).unwrap();
+        let session = EvaluationSession::shared(&coordinator, &executor);
         let context = EvalContext::new(session);
         let (spark_sender, spark_receiver) = mpsc::channel();
         let lazy = crate::core::LazyValue::deferred(

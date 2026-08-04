@@ -12,7 +12,7 @@ use std::ops::{Deref, Range};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard, Weak};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 
 use bytes::Bytes;
 use rpds::RedBlackTreeMapSync;
@@ -31,7 +31,7 @@ use crate::diagnostic::{CompilationInvocationId, CompilationTrace, Severity};
 use crate::eval;
 use crate::evaluation::{
     EvalContext, EvaluationExecutor, EvaluationSession, EvaluationSessionId, EvaluationSessionRun,
-    EvaluationTaskId, EvaluationUnfinishedState, ReflectionTaskProfile,
+    EvaluationTaskId, EvaluationUnfinishedState, EvaluationWorkCoordinator, ReflectionTaskProfile,
 };
 use crate::g_syntax::compile_source;
 use crate::interaction_net::{NetBuildError, NetBuilder as CoreNetBuilder, Port as CorePort};
@@ -43,7 +43,8 @@ use crate::reflection::{
     TaskHost, VolumeId, task_launcher, volume_effects,
 };
 use crate::runtime::{
-    EvaluationRuntimeId, RuntimeIds, RuntimeValueRoot, allocate_evaluation_runtime_id,
+    EvaluationRuntimeId, RuntimeIds, RuntimeMutationAdmission, RuntimeMutationGuard,
+    RuntimeSettlementGuard, RuntimeValueRoot, allocate_evaluation_runtime_id,
 };
 use crate::source::{
     FileSourceSystem, Host, HostSourceSystem, SourceArtifact, SourceIdentity, SourceSystem,
@@ -1519,13 +1520,14 @@ pub struct EvaluationRuntime {
 
 struct RuntimeState {
     id: EvaluationRuntimeId,
+    work: Arc<EvaluationWorkCoordinator>,
     executor: Arc<EvaluationExecutor>,
     values: RuntimeValueFactory,
     transactions: RuntimeTransactionState,
     observations: RuntimeObservationState,
     ids: Arc<RuntimeIds>,
     diagnostic_ingresses: Mutex<Vec<Arc<DiagnosticIngressInner>>>,
-    settlement_gate: RwLock<()>,
+    mutation_admission: Arc<RuntimeMutationAdmission>,
 }
 
 struct RuntimeTransactionState {
@@ -2231,14 +2233,6 @@ impl RuntimeLoggerSnapshot {
     }
 }
 
-struct RuntimeMutationGuard<'a> {
-    _guard: RwLockReadGuard<'a, ()>,
-}
-
-struct RuntimeSettlementGuard<'a> {
-    _guard: RwLockWriteGuard<'a, ()>,
-}
-
 #[derive(Clone)]
 struct RuntimeValueFactory {
     runtime: EvaluationRuntimeId,
@@ -2269,12 +2263,7 @@ fn admit_runtime_input(
     payload: RuntimeValueRoot,
 ) -> Result<RuntimeInputSequence, Error> {
     debug_assert_eq!(payload.runtime_id(), runtime.id);
-    let mutation = RuntimeMutationGuard {
-        _guard: runtime
-            .settlement_gate
-            .read()
-            .expect("runtime settlement gate should not be poisoned"),
-    };
+    let mutation = runtime.mutation_admission.mutation_guard();
     let sequence = {
         let mut state = runtime
             .transactions
@@ -2317,12 +2306,7 @@ fn claim_runtime_delivery<T>(
     decode: Arc<RuntimeOutputDecoder<T>>,
     adapter: Arc<RuntimeOutputAdapter<T>>,
 ) -> Result<Option<RuntimeDeliveryTicket<T>>, Error> {
-    let mutation = RuntimeMutationGuard {
-        _guard: runtime
-            .settlement_gate
-            .read()
-            .expect("runtime settlement gate should not be poisoned"),
-    };
+    let mutation = runtime.mutation_admission.mutation_guard();
     let claimed = {
         let mut state = runtime
             .transactions
@@ -2384,12 +2368,7 @@ fn terminalize_runtime_delivery(
             error,
         })
     });
-    let mutation = RuntimeMutationGuard {
-        _guard: runtime
-            .settlement_gate
-            .read()
-            .expect("runtime settlement gate should not be poisoned"),
-    };
+    let mutation = runtime.mutation_admission.mutation_guard();
     let retired =
         {
             let mut state = runtime
@@ -2494,11 +2473,15 @@ impl EvaluationRuntime {
             core: CoreValueFactory::new(id, ids.clone()),
         };
         let event_conflict_analysis = conflict_analysis.clone();
+        let mutation_admission = RuntimeMutationAdmission::new();
+        let work = EvaluationWorkCoordinator::new(mutation_admission.clone());
+        let executor = EvaluationExecutor::new(worker_threads, &work)
+            .map_err(|error| Error::new(error.as_ref()))?;
         Ok(Self {
             state: Arc::new(RuntimeState {
                 id,
-                executor: EvaluationExecutor::new(worker_threads)
-                    .map_err(|error| Error::new(error.as_ref()))?,
+                work,
+                executor,
                 values: values.clone(),
                 transactions: RuntimeTransactionState {
                     state: Mutex::new(RuntimeTransactionData {
@@ -2513,7 +2496,7 @@ impl EvaluationRuntime {
                 },
                 ids,
                 diagnostic_ingresses: Mutex::new(Vec::new()),
-                settlement_gate: RwLock::new(()),
+                mutation_admission,
             }),
             default_reflection_profile: Arc::new(ReflectionTaskProfile::unsealed()),
         })
@@ -2679,6 +2662,7 @@ impl EvaluationRuntime {
             ));
         }
         Ok(EvaluationSession::shared_with_default_profile(
+            &self.state.work,
             self.executor(),
             self.state.values.core().clone(),
             self.default_reflection_profile.clone(),
@@ -2712,21 +2696,11 @@ impl EvaluationRuntime {
     }
 
     fn mutation_guard(&self) -> RuntimeMutationGuard<'_> {
-        RuntimeMutationGuard {
-            _guard: self
-                .state
-                .settlement_gate
-                .read()
-                .expect("runtime settlement gate should not be poisoned"),
-        }
+        self.state.mutation_admission.mutation_guard()
     }
 
     fn try_settlement_guard(&self) -> Option<RuntimeSettlementGuard<'_>> {
-        self.state
-            .settlement_gate
-            .try_write()
-            .ok()
-            .map(|guard| RuntimeSettlementGuard { _guard: guard })
+        self.state.mutation_admission.try_settlement_guard()
     }
 
     /// Reports whether exclusive runtime mutation admission can be acquired
@@ -6099,7 +6073,7 @@ mod tests {
         impl Drop for DeliveryLease {
             fn drop(&mut self) {
                 if let Some(runtime) = self.runtime.upgrade() {
-                    assert!(runtime.settlement_gate.try_write().is_ok());
+                    assert!(runtime.mutation_admission.try_settlement_guard().is_some());
                 }
                 self.dropped.store(true, Ordering::Release);
             }
@@ -6311,6 +6285,29 @@ mod tests {
                 .expect("store publication should wake the observer")
         );
         waiter.join().expect("observer thread should finish");
+    }
+
+    #[test]
+    fn coordinator_transitions_do_not_advance_the_semantic_observation_epoch() {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let (before, _) = runtime.reflection_snapshot();
+        let session = EvaluationSession::shared_with_default_profile(
+            &runtime.state.work,
+            &runtime.state.executor,
+            runtime.state.values.core().clone(),
+            Arc::new(ReflectionTaskProfile::unsealed()),
+        );
+        let context = EvalContext::new(session.clone());
+        let _task = context
+            .schedule_task(|_| Ok(Box::new(FailedReasoningTask)))
+            .expect("test task should enter the coordinator ready queue");
+        let (after_ready, _) = runtime.reflection_snapshot();
+        assert_eq!(after_ready, before);
+
+        drop(context);
+        drop(session);
+        let (after_close, _) = runtime.reflection_snapshot();
+        assert_eq!(after_close, before);
     }
 
     #[test]

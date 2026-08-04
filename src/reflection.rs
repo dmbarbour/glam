@@ -3547,7 +3547,7 @@ mod tests {
 
     use super::*;
     use crate::api::{Assembler, Diagnostic};
-    use crate::evaluation::{EvaluationExecutor, EvaluationTaskHandle};
+    use crate::evaluation::EvaluationTaskHandle;
 
     fn public_record<I, S>(assembler: &Assembler, entries: I) -> PublicValue
     where
@@ -5425,8 +5425,9 @@ mod tests {
             ".cut (.task.new (.log 'error { msg:{ text:\"cancelled task ran\" } }) >>= (\\task -> (.task.cancel task) =>> .r task)) >>= (\\task -> .task.status task >>= (\\status -> (status == 'canceled) =>> .r ()))",
         );
         let host = Arc::new(TestHost::with_values(assembler.core_values()));
-        let executor = EvaluationExecutor::new(2).expect("test executor should start");
-        let context = EvalContext::new(EvaluationSession::shared(&executor));
+        let (coordinator, executor) =
+            crate::evaluation::test_execution_resources(2).expect("test executor should start");
+        let context = EvalContext::new(EvaluationSession::shared(&coordinator, &executor));
         let builds = Arc::new(AtomicUsize::new(0));
         let launcher: Arc<dyn ReflectionTaskLauncher> = Arc::new(CountingLauncher {
             inner: task_launcher(TestEffects, host.clone()),

@@ -221,9 +221,19 @@ control-flow overview.
   new configuration.
 - Demand-driven deferred tasks are stored per session and keyed by stable lazy
   or promise IDs; do not enlarge every value with mutable scheduler state.
-- One `EvaluationExecutor` is shared by related assembler, logger, and future
-  IDE sessions. Workers opportunistically poll reflection tasks and are the
-  only consumers of sparks.
+- One runtime-owned `EvaluationWorkCoordinator` registers related assembler,
+  logger, and future IDE sessions and owns ready-session selection, fairness,
+  its work generation, and worker waiting. `EvaluationExecutor` owns worker
+  activation and shutdown; workers retain only a weak coordinator attachment.
+  Active reflection/deferred records remain session-owned during the current
+  transition, while spark queues remain temporarily executor-owned.
+- Coordinator transitions take shared runtime mutation admission and publish
+  their own work generation before waking workers. They must not advance the
+  semantic `RuntimeObservationEpoch`; otherwise ordinary scheduler churn can
+  spuriously invalidate the state observations of the task being scheduled.
+- Workers opportunistically poll reflection tasks and are the only consumers
+  of sparks. A serial pump continues to select task records directly within
+  its chosen session.
 - Zero workers discard sparks without queueing. Sparks are nontransactional
   hints: rollback does not retract them, their errors are not independently
   reported, and queued work does not keep a session alive.

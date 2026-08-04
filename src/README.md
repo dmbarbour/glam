@@ -48,7 +48,7 @@ not define future language semantics or collect subsystem invariants.
 | `core_net.rs` | Core data/operator specialization of generic interaction nets |
 | `interaction_net/model.rs`, `builder.rs` | Generic identities, agents, specialization protocol, and checked construction |
 | `interaction_net/runtime/` | Mutable graph, active-pair rewrites, cursors, and runtime tests |
-| `evaluation.rs`, `evaluation/executor.rs` | Sessions, contexts, task scheduling, workers, and sparks |
+| `evaluation.rs`, `evaluation/coordinator.rs`, `evaluation/executor.rs` | Sessions and task records, runtime work coordination, workers, and transitional spark queues |
 | `eval/value.rs`, `application.rs`, `operator.rs`, `net.rs` | Value forcing, application, operator staging, and net driving |
 | `eval/builtins/` | Builtin implementations split by semantic family |
 | `eval/builtins/net/construction.rs` | Lazy `interaction_net` effect search, branch-local construction journals, opaque port capabilities, and checked replay |
@@ -80,9 +80,10 @@ Imports re-enter the same assembler session and compilation execution through
 artifact-installed relative resolvers. The compilation execution owns a
 separate macro demand session whose tasks and diagnostic counts do not alias
 assembler reasoning. Both sessions belong to one `EvaluationRuntime`, and
-therefore share its executor, reflection heap, protected-volume namespace,
-query domain, fixed conflict-analysis strategy, and immutable default
-reflection-task profile. `refl` and `meta_refl` annotations always use that
+therefore share its work coordinator, executor, reflection heap,
+protected-volume namespace, query domain, fixed conflict-analysis strategy,
+and immutable default reflection-task profile. `refl` and `meta_refl`
+annotations always use that
 runtime default, independent of the demand session which first observes them.
 By contrast, `.task.new` inherits its parent's complete role profile, including
 the effect specialization, environment, diagnostic destination, and host
@@ -225,10 +226,10 @@ Assembler -> EvalContext -> Value
   -> apply a builtin/function/net
   -> drive a net until its interface exposes data
 
-EvaluationSession <-> EvaluationExecutor
+EvaluationSession -> EvaluationWorkCoordinator <- EvaluationExecutor
   -> demanded reflection producers via the serial pump
-  -> ready reflection work via shared workers
-  -> optional spark work via shared workers
+  -> coordinator-selected reflection work via shared workers
+  -> optional executor-queued spark work via shared workers
 ```
 
 Evaluation receives closed values and an explicit session context. Reflection

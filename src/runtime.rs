@@ -5,8 +5,8 @@
 //! interpreted together with its runtime.
 
 use std::num::NonZeroU64;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::core::{CoreValueFactory, Value};
 
@@ -33,6 +33,48 @@ pub(crate) fn allocate_evaluation_runtime_id() -> EvaluationRuntimeId {
         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
         .expect("evaluation runtime IDs exhausted");
     EvaluationRuntimeId::from_u64(id).expect("evaluation runtime IDs start at one")
+}
+
+/// Shared admission boundary for runtime-owned state publication.
+///
+/// Ordinary component transitions hold a shared guard through their complete
+/// authoritative publication sequence. A future readiness snapshot or
+/// settlement takes the exclusive guard, so it cannot observe only part of a
+/// transition. Component locks are still acquired and released separately.
+pub(crate) struct RuntimeMutationAdmission {
+    gate: RwLock<()>,
+}
+
+impl RuntimeMutationAdmission {
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self {
+            gate: RwLock::new(()),
+        })
+    }
+
+    pub(crate) fn mutation_guard(&self) -> RuntimeMutationGuard<'_> {
+        RuntimeMutationGuard {
+            _guard: self
+                .gate
+                .read()
+                .expect("runtime settlement gate should not be poisoned"),
+        }
+    }
+
+    pub(crate) fn try_settlement_guard(&self) -> Option<RuntimeSettlementGuard<'_>> {
+        self.gate
+            .try_write()
+            .ok()
+            .map(|guard| RuntimeSettlementGuard { _guard: guard })
+    }
+}
+
+pub(crate) struct RuntimeMutationGuard<'a> {
+    _guard: RwLockReadGuard<'a, ()>,
+}
+
+pub(crate) struct RuntimeSettlementGuard<'a> {
+    _guard: RwLockWriteGuard<'a, ()>,
 }
 
 /// One runtime-owned root whose recursive evaluator representation remains
