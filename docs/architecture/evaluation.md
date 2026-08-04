@@ -90,8 +90,10 @@ and cancellation publish that result while holding the active task-registry
 mutex. Polling checks the cell before and after taking the mutex, so a waiter
 racing publication sees either active state or the terminal result. A terminal
 token remains observable after its owner session is dropped; a pending token
-does not keep the session alive and reports a dead producer. Active registries
-retain only unresolved deferred producers and nonterminal reflection tasks.
+does not keep the session alive and reports `Abandoned`, not evaluation
+failure, if its owner disappears without publishing a more specific terminal
+result. Active registries retain only unresolved deferred producers and
+nonterminal reflection tasks.
 Reflection task handles own their shared terminal wait cells, so completion,
 failure, and cancellation remain observable after the active record and
 task-ID index are retired. An unacknowledged failure also leaves one minimal
@@ -108,7 +110,7 @@ The session owns only live scheduling state:
 | State | Owner |
 | --- | --- |
 | runnable, running, blocked, or unresolved producer | active session registry |
-| completed, failed, or cancelled outcome | shared `EvaluationWaitToken` cell |
+| completed, failed, cancelled, or abandoned outcome | shared `EvaluationWaitToken` cell |
 | unacknowledged reflection failure | persistent session reporting ledger |
 | transactional `.task.status`, `.task.value`, or `.task.error` view | reasoning-store query |
 
@@ -119,6 +121,15 @@ that the producer is pending. It does not reinterpret terminal state from a
 retained record. A promise assignment observed in the narrow interval before
 its publisher acquires the mutex is canonicalized into the same wait cell and
 retired by the polling path.
+
+Abandonment describes loss of a session-local producer, not a universal
+failure of the value being awaited. Reflection-task handles retain it as a
+terminal task outcome. Ordinary lazy demand and host-promise followers may
+discard the abandoned producer and install fresh same-runtime work instead.
+An unresolved task-owned promise is different: the closing producer session
+fulfills it with a structured producer-abandoned failure because that promise
+has lost its sole responsible producer. Host promises remain controlled only
+by their resolver.
 
 When a lazy or assigned-promise task blocks on another deferred producer, the
 session records one strict dependency edge. The graph has at most one outgoing

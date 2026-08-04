@@ -248,10 +248,11 @@ pub(super) fn progress_exact_core_pair(
     }
     if let Some(blocked) = runtime.with(|net| net.blocked_call(pair)) {
         return match context.poll_wait(&blocked.wait.0) {
-            crate::evaluation::EvaluationTaskPoll::Pending(_) => Ok(false),
-            crate::evaluation::EvaluationTaskPoll::Complete(_)
-            | crate::evaluation::EvaluationTaskPoll::Failed(_)
-            | crate::evaluation::EvaluationTaskPoll::Cancelled => {
+            crate::evaluation::EvaluationWaitPoll::Pending(_) => Ok(false),
+            crate::evaluation::EvaluationWaitPoll::Complete(_)
+            | crate::evaluation::EvaluationWaitPoll::Failed(_)
+            | crate::evaluation::EvaluationWaitPoll::Cancelled
+            | crate::evaluation::EvaluationWaitPoll::Abandoned => {
                 let call = runtime
                     .with(|net| net.call(pair))
                     .expect("blocked core call must remain a Bind >< Data pair");

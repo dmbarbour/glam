@@ -105,7 +105,9 @@ and control flow.
 - `.task.new` reserves an opaque handle and a private transactional status
   query, but journals launch inside a transaction. Losing branches discard
   both. The query stores atoms `'launched` or `'blocked`, terminal tagged values
-  `ok:Value` or `err:Error`, or the atom `'canceled`; the handle keeps it alive.
+  `ok:Value` or `err:Error`, or the atom `'canceled` or `'abandoned`; the handle
+  keeps the terminal observation alive. Abandonment is owner-session loss, not
+  a failed task, and therefore creates no failure-ledger entry.
 - `.task.join` waits directly on every nonterminal child state and propagates
   terminal errors. A joined dependency becoming terminal reruns the join
   operation; it does not select another `.alt` branch. An error with prior
@@ -115,8 +117,8 @@ and control flow.
   status value unchanged.
   `.task.value` and `.task.error` project its matching terminal payload, fail
   transactionally while it is nonterminal, and fail permanently for the other
-  terminal outcome; observation through those operations never adds the join
-  frame.
+  terminal outcome; an abandoned task has neither payload. Observation through
+  those operations never adds the join frame.
 - `.task.cancel` is an unconditional best-effort, commit-ordered request; late
   and non-owner-session cancellation are harmless no-ops. Losing branches
   discard cancellation requests.

@@ -74,14 +74,15 @@ struct EvaluationWaitState {
     owner_id: EvaluationSessionId,
     owner: Weak<EvaluationSession>,
     producer: EvaluationTaskId,
-    terminal: OnceLock<EvaluationTaskTerminal>,
+    terminal: OnceLock<EvaluationWaitTerminal>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum EvaluationTaskTerminal {
+enum EvaluationWaitTerminal {
     Complete(RuntimeValueRoot),
     Failed(Arc<EvaluationFailure>),
     Cancelled,
+    Abandoned,
 }
 
 #[derive(Clone)]
@@ -113,12 +114,12 @@ impl EvaluationWaitToken {
             .is_some_and(|owner| Arc::ptr_eq(session, &owner))
     }
 
-    fn terminal_poll(&self) -> Option<EvaluationTaskPoll> {
-        self.0.terminal.get().map(EvaluationTaskTerminal::to_poll)
+    fn terminal_poll(&self) -> Option<EvaluationWaitPoll> {
+        self.0.terminal.get().map(EvaluationWaitTerminal::to_poll)
     }
 
-    fn publish_terminal(&self, terminal: EvaluationTaskTerminal) -> EvaluationTaskTerminal {
-        if let EvaluationTaskTerminal::Complete(value) = &terminal {
+    fn publish_terminal(&self, terminal: EvaluationWaitTerminal) -> EvaluationWaitTerminal {
+        if let EvaluationWaitTerminal::Complete(value) = &terminal {
             debug_assert_eq!(value.runtime_id(), self.runtime_id());
         }
         if let Err(candidate) = self.0.terminal.set(terminal) {
@@ -145,12 +146,13 @@ impl EvaluationWaitToken {
     }
 }
 
-impl EvaluationTaskTerminal {
-    fn to_poll(&self) -> EvaluationTaskPoll {
+impl EvaluationWaitTerminal {
+    fn to_poll(&self) -> EvaluationWaitPoll {
         match self {
-            Self::Complete(value) => EvaluationTaskPoll::Complete(value.as_core().clone()),
-            Self::Failed(error) => EvaluationTaskPoll::Failed(error.clone()),
-            Self::Cancelled => EvaluationTaskPoll::Cancelled,
+            Self::Complete(value) => EvaluationWaitPoll::Complete(value.as_core().clone()),
+            Self::Failed(error) => EvaluationWaitPoll::Failed(error.clone()),
+            Self::Cancelled => EvaluationWaitPoll::Cancelled,
+            Self::Abandoned => EvaluationWaitPoll::Abandoned,
         }
     }
 }
@@ -222,11 +224,12 @@ impl fmt::Debug for EvaluationTaskHandle {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum EvaluationTaskPoll {
+pub(crate) enum EvaluationWaitPoll {
     Pending(EvaluationWaitToken),
     Complete(Value),
     Failed(Arc<EvaluationFailure>),
     Cancelled,
+    Abandoned,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -345,6 +348,7 @@ pub(crate) enum EvaluationTaskStatus {
     Complete(RuntimeValueRoot),
     Failed(Arc<EvaluationFailure>),
     Cancelled,
+    Abandoned,
 }
 
 pub(crate) trait EvaluationTaskStatusSink: Send + Sync {
@@ -426,6 +430,7 @@ enum EvaluationTaskState {
     Complete(RuntimeValueRoot),
     Failed(Arc<EvaluationFailure>),
     Cancelled,
+    Abandoned,
 }
 
 struct ReflectionTaskRecord {
@@ -444,6 +449,7 @@ enum DeferredTaskState {
     Blocked(EvaluationTaskBlock),
     Complete(RuntimeValueRoot),
     Failed(Arc<EvaluationFailure>),
+    Abandoned,
 }
 
 fn publish_reflection_state(
@@ -451,15 +457,17 @@ fn publish_reflection_state(
     state: EvaluationTaskState,
 ) -> EvaluationTaskState {
     let terminal = match state {
-        EvaluationTaskState::Complete(value) => EvaluationTaskTerminal::Complete(value),
-        EvaluationTaskState::Failed(error) => EvaluationTaskTerminal::Failed(error),
-        EvaluationTaskState::Cancelled => EvaluationTaskTerminal::Cancelled,
+        EvaluationTaskState::Complete(value) => EvaluationWaitTerminal::Complete(value),
+        EvaluationTaskState::Failed(error) => EvaluationWaitTerminal::Failed(error),
+        EvaluationTaskState::Cancelled => EvaluationWaitTerminal::Cancelled,
+        EvaluationTaskState::Abandoned => EvaluationWaitTerminal::Abandoned,
         state => return state,
     };
     match wait.publish_terminal(terminal) {
-        EvaluationTaskTerminal::Complete(value) => EvaluationTaskState::Complete(value),
-        EvaluationTaskTerminal::Failed(error) => EvaluationTaskState::Failed(error),
-        EvaluationTaskTerminal::Cancelled => EvaluationTaskState::Cancelled,
+        EvaluationWaitTerminal::Complete(value) => EvaluationTaskState::Complete(value),
+        EvaluationWaitTerminal::Failed(error) => EvaluationTaskState::Failed(error),
+        EvaluationWaitTerminal::Cancelled => EvaluationTaskState::Cancelled,
+        EvaluationWaitTerminal::Abandoned => EvaluationTaskState::Abandoned,
     }
 }
 
@@ -468,16 +476,18 @@ fn publish_deferred_state(
     state: DeferredTaskState,
 ) -> DeferredTaskState {
     let terminal = match state {
-        DeferredTaskState::Complete(value) => EvaluationTaskTerminal::Complete(value),
-        DeferredTaskState::Failed(error) => EvaluationTaskTerminal::Failed(error),
+        DeferredTaskState::Complete(value) => EvaluationWaitTerminal::Complete(value),
+        DeferredTaskState::Failed(error) => EvaluationWaitTerminal::Failed(error),
+        DeferredTaskState::Abandoned => EvaluationWaitTerminal::Abandoned,
         state => return state,
     };
     match wait.publish_terminal(terminal) {
-        EvaluationTaskTerminal::Complete(value) => DeferredTaskState::Complete(value),
-        EvaluationTaskTerminal::Failed(error) => DeferredTaskState::Failed(error),
-        EvaluationTaskTerminal::Cancelled => {
+        EvaluationWaitTerminal::Complete(value) => DeferredTaskState::Complete(value),
+        EvaluationWaitTerminal::Failed(error) => DeferredTaskState::Failed(error),
+        EvaluationWaitTerminal::Cancelled => {
             unreachable!("a deferred wait cannot publish cancellation")
         }
+        EvaluationWaitTerminal::Abandoned => DeferredTaskState::Abandoned,
     }
 }
 
@@ -530,6 +540,7 @@ fn task_status(state: &EvaluationTaskState) -> EvaluationTaskStatus {
         EvaluationTaskState::Complete(value) => EvaluationTaskStatus::Complete(value.clone()),
         EvaluationTaskState::Failed(error) => EvaluationTaskStatus::Failed(error.clone()),
         EvaluationTaskState::Cancelled => EvaluationTaskStatus::Cancelled,
+        EvaluationTaskState::Abandoned => EvaluationTaskStatus::Abandoned,
     }
 }
 
@@ -549,6 +560,7 @@ fn task_status_update(
         EvaluationTaskStatus::Complete(_)
             | EvaluationTaskStatus::Failed(_)
             | EvaluationTaskStatus::Cancelled
+            | EvaluationTaskStatus::Abandoned
     );
     let sinks = if terminal {
         std::mem::take(&mut record.status_sinks)
@@ -654,6 +666,7 @@ fn transition_reflection_task(
         EvaluationTaskState::Complete(_)
             | EvaluationTaskState::Failed(_)
             | EvaluationTaskState::Cancelled
+            | EvaluationTaskState::Abandoned
     );
     let (unacknowledged_failure, status) = {
         let record = tasks
@@ -696,22 +709,22 @@ fn retire_reflection_task(
 fn promise_assignment_terminal(
     runtime: EvaluationRuntimeId,
     assignment: &PromiseAssignment,
-) -> EvaluationTaskTerminal {
+) -> EvaluationWaitTerminal {
     match assignment {
         Ok(value) => {
             debug_assert_eq!(value.runtime_id(), runtime);
-            EvaluationTaskTerminal::Complete(value.clone())
+            EvaluationWaitTerminal::Complete(value.clone())
         }
-        Err(error) => EvaluationTaskTerminal::Failed(error.clone()),
+        Err(error) => EvaluationWaitTerminal::Failed(error.clone()),
     }
 }
 
 fn promise_record_terminal(
     wait: &EvaluationWaitToken,
     record: &PromiseRecord,
-) -> Option<EvaluationTaskTerminal> {
+) -> Option<EvaluationWaitTerminal> {
     let Some(result) = record.result.upgrade() else {
-        return Some(EvaluationTaskTerminal::Failed(evaluation_failure(
+        return Some(EvaluationWaitTerminal::Failed(evaluation_failure(
             "promised value no longer exists",
         )));
     };
@@ -799,6 +812,93 @@ impl fmt::Debug for EvaluationSession {
 
 impl Drop for EvaluationSession {
     fn drop(&mut self) {
+        let (mut reflection, deferred, statuses) = {
+            let tasks = self
+                .tasks
+                .get_mut()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+            // A task-owned promise is a producer obligation, unlike a
+            // reusable lazy or host-promise follower. Publish its permanent
+            // failure before waking any task waits which may depend on it.
+            let promise_waits = tasks.promises.keys().cloned().collect::<Vec<_>>();
+            for wait in promise_waits {
+                let record = tasks
+                    .promises
+                    .get(&wait)
+                    .expect("collected promise wait must remain registered");
+                let terminal = if let Some(result) = record.result.upgrade() {
+                    let _ = result.set(Err(evaluation_failure(format!(
+                        "promised value's producer task {} was abandoned when its evaluation session closed",
+                        record.producer.get()
+                    ))));
+                    promise_assignment_terminal(
+                        wait.runtime_id(),
+                        result
+                            .get()
+                            .expect("abandoned producer must leave a terminal promise assignment"),
+                    )
+                } else {
+                    EvaluationWaitTerminal::Failed(evaluation_failure(
+                        "promised value no longer exists",
+                    ))
+                };
+                wait.publish_terminal(terminal);
+                let retired = retire_promise_wait(tasks, &wait);
+                debug_assert!(retired.is_some());
+            }
+
+            let reflection_waits = tasks.reflection.keys().cloned().collect::<Vec<_>>();
+            let mut reflection = Vec::with_capacity(reflection_waits.len());
+            let mut statuses = Vec::new();
+            for wait in reflection_waits {
+                let record = tasks
+                    .reflection
+                    .get(&wait)
+                    .expect("collected reflection wait must remain registered");
+                let prior = record.state.clone();
+                let state = if record.cancel_requested {
+                    EvaluationTaskState::Cancelled
+                } else {
+                    EvaluationTaskState::Abandoned
+                };
+                let transition = transition_reflection_task(tasks, &wait, state, &prior);
+                reflection.push(
+                    transition
+                        .retired
+                        .expect("session shutdown must retire a reflection task"),
+                );
+                statuses.extend(transition.status);
+            }
+
+            let deferred_ids = tasks.deferred.keys().copied().collect::<Vec<_>>();
+            let mut deferred = Vec::with_capacity(deferred_ids.len());
+            for deferred_id in deferred_ids {
+                let record = tasks
+                    .deferred
+                    .get_mut(&deferred_id)
+                    .expect("collected deferred task must remain registered");
+                record.state = publish_deferred_state(&record.wait, DeferredTaskState::Abandoned);
+                record.dependency = None;
+                deferred.push(retire_deferred_task(tasks, deferred_id));
+            }
+            tasks.ready.clear();
+            (reflection, deferred, statuses)
+        };
+
+        for status in statuses {
+            publish_task_status(Some(status));
+        }
+        for record in &mut reflection {
+            if matches!(record.state, EvaluationTaskState::Cancelled)
+                && let Some(machine) = &mut record.machine
+            {
+                machine.cancel();
+            }
+        }
+        drop(reflection);
+        drop(deferred);
+
         if let Some(executor) = self.executor.upgrade() {
             executor.unregister_session(self.id.get());
         }
@@ -886,7 +986,7 @@ impl EvaluationSession {
         }
     }
 
-    fn complete_promise_wait(&self, wait: &EvaluationWaitToken, terminal: EvaluationTaskTerminal) {
+    fn complete_promise_wait(&self, wait: &EvaluationWaitToken, terminal: EvaluationWaitTerminal) {
         let mut tasks = self
             .tasks
             .lock()
@@ -1249,7 +1349,7 @@ impl EvalContext {
                         .expect("promise assignment must be set after producer failure"),
                 )
             } else {
-                EvaluationTaskTerminal::Failed(evaluation_failure(
+                EvaluationWaitTerminal::Failed(evaluation_failure(
                     "promised value no longer exists",
                 ))
             };
@@ -1514,7 +1614,7 @@ impl EvalContext {
         Ok(EvaluationTaskHandle { id, wait })
     }
 
-    pub(crate) fn poll_reflection_task(&self, task: &EvaluationTaskHandle) -> EvaluationTaskPoll {
+    pub(crate) fn poll_reflection_task(&self, task: &EvaluationTaskHandle) -> EvaluationWaitPoll {
         self.poll_wait(&task.wait)
     }
 
@@ -1547,7 +1647,8 @@ impl EvalContext {
             match record.state {
                 EvaluationTaskState::Complete(_)
                 | EvaluationTaskState::Failed(_)
-                | EvaluationTaskState::Cancelled => {
+                | EvaluationTaskState::Cancelled
+                | EvaluationTaskState::Abandoned => {
                     unreachable!("terminal reflection records must be retired")
                 }
                 EvaluationTaskState::Running => {
@@ -1600,18 +1701,16 @@ impl EvalContext {
             .remove_mut(&task);
     }
 
-    pub(crate) fn poll_wait(&self, wait: &EvaluationWaitToken) -> EvaluationTaskPoll {
+    pub(crate) fn poll_wait(&self, wait: &EvaluationWaitToken) -> EvaluationWaitPoll {
         if let Some(terminal) = wait.terminal_poll() {
             return terminal;
         }
         let owner = match wait.owner() {
             Some(owner) => owner,
             None => {
-                return wait.terminal_poll().unwrap_or_else(|| {
-                    EvaluationTaskPoll::Failed(evaluation_failure(
-                        "reflection task's evaluation session no longer exists",
-                    ))
-                });
+                return wait
+                    .terminal_poll()
+                    .unwrap_or(EvaluationWaitPoll::Abandoned);
             }
         };
         let mut tasks = owner
@@ -1635,9 +1734,9 @@ impl EvalContext {
             || tasks.deferred_by_wait.contains_key(wait)
             || tasks.promises.contains_key(wait)
         {
-            return EvaluationTaskPoll::Pending(wait.clone());
+            return EvaluationWaitPoll::Pending(wait.clone());
         }
-        EvaluationTaskPoll::Failed(evaluation_failure(
+        EvaluationWaitPoll::Failed(evaluation_failure(
             "evaluation wait token is no longer registered",
         ))
     }
@@ -1794,7 +1893,7 @@ impl EvalContext {
         wait: &EvaluationWaitToken,
     ) -> Option<Arc<EvaluationFailure>> {
         match wait.terminal_poll() {
-            Some(EvaluationTaskPoll::Failed(failure)) => Some(failure),
+            Some(EvaluationWaitPoll::Failed(failure)) => Some(failure),
             _ => None,
         }
     }
@@ -1968,7 +2067,8 @@ impl EvaluationSession {
                 }
                 EvaluationTaskState::Complete(_)
                 | EvaluationTaskState::Failed(_)
-                | EvaluationTaskState::Cancelled => {
+                | EvaluationTaskState::Cancelled
+                | EvaluationTaskState::Abandoned => {
                     unreachable!("terminal reflection records must be retired")
                 }
             };
@@ -2044,7 +2144,7 @@ impl EvaluationSession {
 
         let mut attempted_blocked = HashSet::new();
         loop {
-            if !matches!(context.poll_wait(target), EvaluationTaskPoll::Pending(_)) {
+            if !matches!(context.poll_wait(target), EvaluationWaitPoll::Pending(_)) {
                 return EvaluationPumpOutcome::TargetReady;
             }
             if step_budget == 0 {
@@ -2074,7 +2174,7 @@ impl EvaluationSession {
                     return EvaluationPumpOutcome::Busy;
                 }
                 drop(tasks);
-                if !matches!(context.poll_wait(target), EvaluationTaskPoll::Pending(_)) {
+                if !matches!(context.poll_wait(target), EvaluationWaitPoll::Pending(_)) {
                     return EvaluationPumpOutcome::TargetReady;
                 }
                 return EvaluationPumpOutcome::NoProgress;
@@ -2407,7 +2507,8 @@ fn task_is_claimable(
             }
             DeferredTaskState::Running
             | DeferredTaskState::Complete(_)
-            | DeferredTaskState::Failed(_) => false,
+            | DeferredTaskState::Failed(_)
+            | DeferredTaskState::Abandoned => false,
         })
 }
 
@@ -2714,6 +2815,18 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct RecordedStatuses(Mutex<Vec<EvaluationTaskStatus>>);
+
+    impl EvaluationTaskStatusSink for RecordedStatuses {
+        fn update(&self, status: EvaluationTaskStatus) {
+            self.0
+                .lock()
+                .expect("recorded task statuses were poisoned")
+                .push(status);
+        }
+    }
+
     struct Await {
         context: EvalContext,
         dependency: EvaluationWaitToken,
@@ -2722,20 +2835,23 @@ mod tests {
     impl EvaluationTaskMachine for Await {
         fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
             match self.context.poll_wait(&self.dependency) {
-                EvaluationTaskPoll::Pending(wait) => {
+                EvaluationWaitPoll::Pending(wait) => {
                     EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
                         lazy: Some(wait),
                         observed_generation: None,
                         error: None,
                     })
                 }
-                EvaluationTaskPoll::Complete(value) => EvaluationMachinePoll::Complete(value),
-                EvaluationTaskPoll::Failed(error) => self
+                EvaluationWaitPoll::Complete(value) => EvaluationMachinePoll::Complete(value),
+                EvaluationWaitPoll::Failed(error) => self
                     .context
                     .lazy_failure_for_wait(&self.dependency)
                     .map(EvaluationMachinePoll::Failed)
                     .unwrap_or(EvaluationMachinePoll::Failed(error)),
-                EvaluationTaskPoll::Cancelled => EvaluationMachinePoll::Cancelled,
+                EvaluationWaitPoll::Cancelled => EvaluationMachinePoll::Cancelled,
+                EvaluationWaitPoll::Abandoned => EvaluationMachinePoll::Failed(evaluation_failure(
+                    "waited-on task was abandoned",
+                )),
             }
         }
     }
@@ -2752,20 +2868,23 @@ mod tests {
                 .get()
                 .expect("test dependency must be installed before polling");
             match self.context.poll_wait(dependency) {
-                EvaluationTaskPoll::Pending(wait) => {
+                EvaluationWaitPoll::Pending(wait) => {
                     EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
                         lazy: Some(wait),
                         observed_generation: None,
                         error: None,
                     })
                 }
-                EvaluationTaskPoll::Complete(value) => EvaluationMachinePoll::Complete(value),
-                EvaluationTaskPoll::Failed(error) => self
+                EvaluationWaitPoll::Complete(value) => EvaluationMachinePoll::Complete(value),
+                EvaluationWaitPoll::Failed(error) => self
                     .context
                     .lazy_failure_for_wait(dependency)
                     .map(EvaluationMachinePoll::Failed)
                     .unwrap_or(EvaluationMachinePoll::Failed(error)),
-                EvaluationTaskPoll::Cancelled => EvaluationMachinePoll::Cancelled,
+                EvaluationWaitPoll::Cancelled => EvaluationMachinePoll::Cancelled,
+                EvaluationWaitPoll::Abandoned => EvaluationMachinePoll::Failed(evaluation_failure(
+                    "waited-on task was abandoned",
+                )),
             }
         }
     }
@@ -3024,13 +3143,13 @@ mod tests {
             context.pump_wait(&task.wait, 256),
             EvaluationPumpOutcome::TargetReady
         ));
-        let Some(EvaluationTaskTerminal::Complete(value)) = task.wait.0.terminal.get() else {
+        let Some(EvaluationWaitTerminal::Complete(value)) = task.wait.0.terminal.get() else {
             panic!("completed wait should retain a terminal value")
         };
         assert_eq!(value.runtime_id(), context.values().runtime_id());
         assert!(matches!(
             context.poll_reflection_task(&task),
-            EvaluationTaskPoll::Complete(_)
+            EvaluationWaitPoll::Complete(_)
         ));
     }
 
@@ -3056,11 +3175,11 @@ mod tests {
         );
         assert!(matches!(
             context.poll_reflection_task(&dependency),
-            EvaluationTaskPoll::Complete(_)
+            EvaluationWaitPoll::Complete(_)
         ));
         assert!(matches!(
             context.poll_reflection_task(&target),
-            EvaluationTaskPoll::Complete(_)
+            EvaluationWaitPoll::Complete(_)
         ));
     }
 
@@ -3172,11 +3291,11 @@ mod tests {
         );
         assert_deferred_task_retired(&context, &lazy);
 
-        let EvaluationTaskPoll::Failed(canonical_failure) = context.poll_wait(&canonical_wait)
+        let EvaluationWaitPoll::Failed(canonical_failure) = context.poll_wait(&canonical_wait)
         else {
             panic!("canonical wait should retain the lazy failure");
         };
-        let EvaluationTaskPoll::Failed(redundant_failure) = context.poll_wait(&redundant_wait)
+        let EvaluationWaitPoll::Failed(redundant_failure) = context.poll_wait(&redundant_wait)
         else {
             panic!("redundant wait should retain the lazy failure");
         };
@@ -3210,16 +3329,16 @@ mod tests {
         for _ in 0..2 {
             assert!(matches!(
                 context.poll_reflection_task(&complete),
-                EvaluationTaskPoll::Complete(_)
+                EvaluationWaitPoll::Complete(_)
             ));
             assert!(matches!(
                 context.poll_reflection_task(&failed),
-                EvaluationTaskPoll::Failed(error)
+                EvaluationWaitPoll::Failed(error)
                     if error.to_string() == "reasoning failed"
             ));
             assert_eq!(
                 context.poll_reflection_task(&cancelled),
-                EvaluationTaskPoll::Cancelled
+                EvaluationWaitPoll::Cancelled
             );
         }
 
@@ -3339,28 +3458,145 @@ mod tests {
 
         assert!(matches!(
             observer.poll_wait(&completed_wait),
-            EvaluationTaskPoll::Complete(_)
+            EvaluationWaitPoll::Complete(_)
         ));
         assert!(matches!(
             observer.poll_wait(&deferred_wait),
-            EvaluationTaskPoll::Complete(_)
+            EvaluationWaitPoll::Complete(_)
         ));
         assert!(matches!(
             observer.poll_wait(&failed_wait),
-            EvaluationTaskPoll::Failed(error) if error.to_string() == "reasoning failed"
+            EvaluationWaitPoll::Failed(error) if error.to_string() == "reasoning failed"
         ));
         assert_eq!(
             observer.poll_wait(&cancelled_wait),
-            EvaluationTaskPoll::Cancelled
+            EvaluationWaitPoll::Cancelled
         );
         assert_eq!(
             observer.pump_wait(&completed_wait, 1),
             EvaluationPumpOutcome::TargetReady
         );
-        assert!(matches!(
+        assert_eq!(
             observer.poll_wait(&pending_wait),
-            EvaluationTaskPoll::Failed(_)
+            EvaluationWaitPoll::Abandoned
+        );
+    }
+
+    #[test]
+    fn owner_session_drop_publishes_task_abandonment_and_status() {
+        let fixture = SameRuntimeFixture::new();
+        let statuses = Arc::new(RecordedStatuses::default());
+        let task = {
+            let owner = fixture.context();
+            let task = owner
+                .schedule_task(|_| Ok(Box::new(AlwaysBlocked)))
+                .expect("abandoned task should schedule");
+            owner
+                .session
+                .tasks
+                .lock()
+                .expect("evaluation task registry was poisoned")
+                .reflection
+                .get_mut(task.wait())
+                .expect("scheduled task must remain registered")
+                .status_sinks
+                .push(statuses.clone());
+            task
+        };
+        let observer = fixture.context();
+
+        assert_eq!(
+            observer.poll_reflection_task(&task),
+            EvaluationWaitPoll::Abandoned
+        );
+        assert_eq!(
+            statuses
+                .0
+                .lock()
+                .expect("recorded task statuses were poisoned")
+                .as_slice(),
+            [EvaluationTaskStatus::Abandoned]
+        );
+    }
+
+    #[test]
+    fn abandoned_lazy_claim_can_be_reclaimed_without_poisoning_the_lazy() {
+        let fixture = SameRuntimeFixture::new();
+        let forced = Arc::new(AtomicBool::new(false));
+        let (lazy, abandoned_wait, expected) = {
+            let owner = fixture.context();
+            let expected = owner.values().unit();
+            let lazy = LazyValue::deferred(owner.values(), "reclaimable lazy", {
+                let forced = forced.clone();
+                let expected = expected.clone();
+                move |_| {
+                    forced.store(true, Ordering::Release);
+                    Ok(expected.clone())
+                }
+            });
+            let wait = owner
+                .lazy_task(&lazy, |_| Box::new(AlwaysBlocked))
+                .expect("first lazy claim should register");
+            (lazy, wait, expected)
+        };
+        let observer = fixture.context();
+
+        assert_eq!(
+            observer.poll_wait(&abandoned_wait),
+            EvaluationWaitPoll::Abandoned
+        );
+        assert_eq!(
+            crate::eval::eval_value(&observer, &Value::Lazy(lazy.clone()))
+                .expect("another session should reclaim the lazy"),
+            expected
+        );
+        assert!(forced.load(Ordering::Acquire));
+        assert!(lazy.cached().is_some_and(|result| result.is_ok()));
+    }
+
+    #[test]
+    fn owner_session_drop_fails_task_promises_but_not_host_promises() {
+        let fixture = SameRuntimeFixture::new();
+        let task_promise = {
+            let owner = fixture
+                .context()
+                .with_new_task()
+                .expect("promise owner should allocate a task identity");
+            PromisedValue::fixpoint(&owner, "abandoned task promise")
+                .expect("task promise should register")
+        };
+        let observer = fixture.context();
+        let error = task_promise
+            .assignment()
+            .expect("session closure must assign the task promise")
+            .expect_err("an abandoned task promise must fail");
+        assert!(error.to_string().contains("was abandoned"));
+        assert!(matches!(
+            observer.poll_wait(
+                task_promise
+                    .task()
+                    .expect("task promise should retain producer provenance")
+                    .wait()
+            ),
+            EvaluationWaitPoll::Failed(wait_error) if Arc::ptr_eq(&error, &wait_error)
         ));
+
+        let host_promise = {
+            let transient_observer = fixture.context();
+            PromisedValue::new(transient_observer.values(), "host promise")
+        };
+        assert!(
+            host_promise.assignment().is_none(),
+            "dropping an unrelated observer session must not poison a host promise"
+        );
+        host_promise
+            .set(observer.values().unit())
+            .expect("the host promise should remain assignable");
+        assert!(
+            host_promise
+                .assignment()
+                .is_some_and(|assignment| assignment.is_ok())
+        );
     }
 
     #[test]
@@ -3465,23 +3701,23 @@ mod tests {
 
         assert!(matches!(
             context.poll_reflection_task(&completed[0]),
-            EvaluationTaskPoll::Complete(_)
+            EvaluationWaitPoll::Complete(_)
         ));
         assert!(matches!(
             context.poll_reflection_task(&failed[0]),
-            EvaluationTaskPoll::Failed(_)
+            EvaluationWaitPoll::Failed(_)
         ));
         assert_eq!(
             context.poll_reflection_task(&cancelled[0]),
-            EvaluationTaskPoll::Cancelled
+            EvaluationWaitPoll::Cancelled
         );
         assert!(matches!(
             context.poll_wait(&promises[0]),
-            EvaluationTaskPoll::Complete(_)
+            EvaluationWaitPoll::Complete(_)
         ));
         assert!(matches!(
             context.poll_wait(&promises[1]),
-            EvaluationTaskPoll::Failed(_)
+            EvaluationWaitPoll::Failed(_)
         ));
 
         for task in &failed {
@@ -3524,13 +3760,13 @@ mod tests {
                     let deadline = Instant::now() + Duration::from_secs(2);
                     loop {
                         match context.poll_wait(&wait) {
-                            EvaluationTaskPoll::Pending(_) if Instant::now() < deadline => {
+                            EvaluationWaitPoll::Pending(_) if Instant::now() < deadline => {
                                 std::thread::yield_now();
                             }
-                            EvaluationTaskPoll::Pending(_) => {
+                            EvaluationWaitPoll::Pending(_) => {
                                 panic!("waiter timed out before terminal publication")
                             }
-                            EvaluationTaskPoll::Complete(_) => break,
+                            EvaluationWaitPoll::Complete(_) => break,
                             poll => panic!("waiter observed unexpected task state: {poll:?}"),
                         }
                     }
@@ -3546,7 +3782,7 @@ mod tests {
         }
         assert!(matches!(
             context.poll_reflection_task(&task),
-            EvaluationTaskPoll::Complete(_)
+            EvaluationWaitPoll::Complete(_)
         ));
     }
 
@@ -3570,7 +3806,7 @@ mod tests {
         assert_eq!(cycle.members[0].label.as_ref(), "self cycle");
         assert!(matches!(
             context.poll_wait(&wait),
-            EvaluationTaskPoll::Failed(error)
+            EvaluationWaitPoll::Failed(error)
                 if error.to_string().contains("lazy dependency cycle")
         ));
         assert!(
@@ -3632,11 +3868,11 @@ mod tests {
         ));
         assert!(matches!(
             context.poll_wait(&left_wait),
-            EvaluationTaskPoll::Failed(_)
+            EvaluationWaitPoll::Failed(_)
         ));
         assert!(matches!(
             context.poll_wait(&right_wait),
-            EvaluationTaskPoll::Failed(_)
+            EvaluationWaitPoll::Failed(_)
         ));
 
         let left_failure = context.lazy_failure(&left).unwrap();
@@ -3691,7 +3927,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![first.id(), second.id(), third.id()]
         );
-        let EvaluationTaskPoll::Failed(upstream_failure) = context.poll_wait(&upstream_wait) else {
+        let EvaluationWaitPoll::Failed(upstream_failure) = context.poll_wait(&upstream_wait) else {
             panic!("upstream dependent should receive the cycle failure");
         };
         let cycle_failure = context
@@ -3737,11 +3973,11 @@ mod tests {
         );
         assert!(matches!(
             context.poll_wait(&lazy_wait),
-            EvaluationTaskPoll::Pending(_)
+            EvaluationWaitPoll::Pending(_)
         ));
         assert!(matches!(
             context.poll_reflection_task(&reflection),
-            EvaluationTaskPoll::Pending(_)
+            EvaluationWaitPoll::Pending(_)
         ));
     }
 
@@ -3758,7 +3994,7 @@ mod tests {
         );
         assert!(matches!(
             context.poll_reflection_task(&target),
-            EvaluationTaskPoll::Pending(_)
+            EvaluationWaitPoll::Pending(_)
         ));
     }
 
@@ -3795,7 +4031,7 @@ mod tests {
         assert!(cancelled.load(Ordering::Acquire));
         assert_eq!(
             context.poll_reflection_task(&task),
-            EvaluationTaskPoll::Cancelled
+            EvaluationWaitPoll::Cancelled
         );
         assert_eq!(
             context.cancel_reflection_task(&task),
@@ -3843,7 +4079,7 @@ mod tests {
         );
         assert!(matches!(
             context.poll_reflection_task(&task),
-            EvaluationTaskPoll::Pending(_)
+            EvaluationWaitPoll::Pending(_)
         ));
         assert!(
             !cancelled.load(Ordering::Acquire),
@@ -3861,7 +4097,7 @@ mod tests {
         for _ in 0..2 {
             assert_eq!(
                 context.poll_reflection_task(&task),
-                EvaluationTaskPoll::Cancelled,
+                EvaluationWaitPoll::Cancelled,
                 "the cancellation result must remain readable after record retirement"
             );
         }
@@ -3951,7 +4187,7 @@ mod tests {
         );
         assert!(matches!(
             context.poll_reflection_task(&running),
-            EvaluationTaskPoll::Failed(error)
+            EvaluationWaitPoll::Failed(error)
                 if error.to_string() == "acknowledged task failure"
         ));
         let EvaluationSessionRun::Complete(report) = context.run_until_quiescent() else {
@@ -3980,7 +4216,7 @@ mod tests {
         }
         assert!(matches!(
             context.poll_reflection_task(&failed),
-            EvaluationTaskPoll::Failed(error) if error.to_string() == "reasoning failed"
+            EvaluationWaitPoll::Failed(error) if error.to_string() == "reasoning failed"
         ));
 
         let successful = context
@@ -3993,7 +4229,7 @@ mod tests {
         assert!(context.acknowledge_reflection_task_error(&successful));
         assert!(matches!(
             context.poll_reflection_task(&successful),
-            EvaluationTaskPoll::Complete(_)
+            EvaluationWaitPoll::Complete(_)
         ));
 
         let cancelled = context
@@ -4006,7 +4242,7 @@ mod tests {
         assert!(context.acknowledge_reflection_task_error(&cancelled));
         assert_eq!(
             context.poll_reflection_task(&cancelled),
-            EvaluationTaskPoll::Cancelled
+            EvaluationWaitPoll::Cancelled
         );
         let counts = context.task_registry_counts();
         assert_eq!(counts.reflection_active, 0);
@@ -4130,7 +4366,7 @@ mod tests {
     }
 
     #[test]
-    fn a_dropped_owner_session_turns_its_cross_session_follower_into_a_failure() {
+    fn a_strict_follower_turns_task_abandonment_into_a_failure() {
         let fixture = SameRuntimeFixture::new();
         let dependency_wait = {
             let owner = fixture.context();
@@ -4141,6 +4377,10 @@ mod tests {
                 .clone()
         };
         let observer = fixture.context();
+        assert_eq!(
+            observer.poll_wait(&dependency_wait),
+            EvaluationWaitPoll::Abandoned
+        );
         let follower = observer
             .schedule_task(move |task_context| {
                 Ok(Box::new(Await {
@@ -4158,8 +4398,8 @@ mod tests {
             .get(&follower.id())
             .expect("the cross-session follower should fail");
         assert!(
-            !failure.to_string().is_empty(),
-            "owner closure should retain a reportable permanent failure"
+            failure.to_string().contains("was abandoned"),
+            "strict waiting should turn abandonment into its own reportable failure"
         );
         assert!(report.unfinished.is_empty());
     }

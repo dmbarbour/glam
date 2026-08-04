@@ -7,7 +7,7 @@ use crate::core::{
 use crate::core_net::CoreWaitToken;
 use crate::evaluation::{
     EvalContext, EvaluationMachinePoll, EvaluationPumpOutcome, EvaluationTaskBlock,
-    EvaluationTaskMachine, EvaluationTaskPoll,
+    EvaluationTaskMachine, EvaluationWaitPoll,
 };
 use crate::list::ListItem;
 use crate::number::Number;
@@ -268,14 +268,14 @@ impl EvaluationTaskMachine for PromiseFollower {
                         });
                     };
                     return match self.context.poll_wait(task.wait()) {
-                        EvaluationTaskPoll::Pending(wait) => {
+                        EvaluationWaitPoll::Pending(wait) => {
                             EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
                                 lazy: Some(wait),
                                 observed_generation: None,
                                 error: None,
                             })
                         }
-                        EvaluationTaskPoll::Complete(_) => match self.promise.assignment() {
+                        EvaluationWaitPoll::Complete(_) => match self.promise.assignment() {
                             Some(result) => match result {
                                 Ok(value) => {
                                     self.state = PromiseFollowerState::FollowAssignment(value);
@@ -289,10 +289,22 @@ impl EvaluationTaskMachine for PromiseFollower {
                                 )))
                             }
                         },
-                        EvaluationTaskPoll::Failed(error) => EvaluationMachinePoll::Failed(error),
-                        EvaluationTaskPoll::Cancelled => EvaluationMachinePoll::Failed(Arc::new(
+                        EvaluationWaitPoll::Failed(error) => EvaluationMachinePoll::Failed(error),
+                        EvaluationWaitPoll::Cancelled => EvaluationMachinePoll::Failed(Arc::new(
                             EvaluationFailure::message("promised value's producer was cancelled"),
                         )),
+                        EvaluationWaitPoll::Abandoned => match self.promise.assignment() {
+                            Some(Ok(value)) => {
+                                self.state = PromiseFollowerState::FollowAssignment(value);
+                                EvaluationMachinePoll::Yielded
+                            }
+                            Some(Err(error)) => EvaluationMachinePoll::Failed(error),
+                            None => {
+                                EvaluationMachinePoll::Failed(Arc::new(EvaluationFailure::message(
+                                    "promised value's producer was abandoned",
+                                )))
+                            }
+                        },
                     };
                 }
             },
@@ -351,53 +363,59 @@ fn block_or_fail(context: &EvalContext, error: EvaluationHalt) -> EvaluationMach
 }
 
 pub(super) fn eval_lazy(context: &EvalContext, lazy: &LazyValue) -> Result<Value, EvaluationHalt> {
-    if let Some(result) = lazy.cached() {
-        return result
-            .map(EvaluatedValue::into_value)
-            .map_err(EvaluationHalt::failure);
-    }
-    let wait = context
-        .lazy_task(lazy, |task_context| {
-            Box::new(LazyTaskMachine {
-                context: task_context,
-                lazy: lazy.clone(),
-                work: LazyTaskWork::Produce,
+    loop {
+        if let Some(result) = lazy.cached() {
+            return result
+                .map(EvaluatedValue::into_value)
+                .map_err(EvaluationHalt::failure);
+        }
+        let wait = context
+            .lazy_task(lazy, |task_context| {
+                Box::new(LazyTaskMachine {
+                    context: task_context,
+                    lazy: lazy.clone(),
+                    work: LazyTaskWork::Produce,
+                })
             })
-        })
-        .map_err(|error| EvaluationHalt::new(error.as_ref()))?;
-    await_deferred_task(context, wait, "lazy value")
+            .map_err(|error| EvaluationHalt::new(error.as_ref()))?;
+        if let Some(value) = await_deferred_task(context, wait, "lazy value")? {
+            return Ok(value);
+        }
+    }
 }
 
 fn await_deferred_task(
     context: &EvalContext,
     wait: crate::evaluation::EvaluationWaitToken,
     kind: &str,
-) -> Result<Value, EvaluationHalt> {
+) -> Result<Option<Value>, EvaluationHalt> {
     match context.poll_wait(&wait) {
-        EvaluationTaskPoll::Complete(value) => return Ok(value),
-        EvaluationTaskPoll::Failed(error) => {
+        EvaluationWaitPoll::Complete(value) => return Ok(Some(value)),
+        EvaluationWaitPoll::Failed(error) => {
             return Err(deferred_task_failure(context, &wait, error));
         }
-        EvaluationTaskPoll::Cancelled => {
+        EvaluationWaitPoll::Cancelled => {
             return Err(EvaluationHalt::new(format!(
                 "{kind} evaluation was cancelled"
             )));
         }
-        EvaluationTaskPoll::Pending(_) => {}
+        EvaluationWaitPoll::Abandoned => return Ok(None),
+        EvaluationWaitPoll::Pending(_) => {}
     }
     if context.runs_scheduled_task() {
         return match context.pump_wait(&wait, 256) {
             EvaluationPumpOutcome::TargetReady => match context.poll_wait(&wait) {
-                EvaluationTaskPoll::Complete(value) => Ok(value),
-                EvaluationTaskPoll::Failed(error) => {
+                EvaluationWaitPoll::Complete(value) => Ok(Some(value)),
+                EvaluationWaitPoll::Failed(error) => {
                     Err(deferred_task_failure(context, &wait, error))
                 }
-                EvaluationTaskPoll::Pending(wait) => {
+                EvaluationWaitPoll::Pending(wait) => {
                     Err(EvaluationHalt::blocked(CoreWaitToken(wait)))
                 }
-                EvaluationTaskPoll::Cancelled => Err(EvaluationHalt::new(format!(
+                EvaluationWaitPoll::Cancelled => Err(EvaluationHalt::new(format!(
                     "{kind} evaluation was cancelled"
                 ))),
+                EvaluationWaitPoll::Abandoned => Ok(None),
             },
             EvaluationPumpOutcome::Busy
             | EvaluationPumpOutcome::NoProgress
@@ -422,12 +440,13 @@ fn await_deferred_task(
         }
     }
     match context.poll_wait(&wait) {
-        EvaluationTaskPoll::Complete(value) => Ok(value),
-        EvaluationTaskPoll::Failed(error) => Err(deferred_task_failure(context, &wait, error)),
-        EvaluationTaskPoll::Pending(wait) => Err(EvaluationHalt::blocked(CoreWaitToken(wait))),
-        EvaluationTaskPoll::Cancelled => Err(EvaluationHalt::new(format!(
+        EvaluationWaitPoll::Complete(value) => Ok(Some(value)),
+        EvaluationWaitPoll::Failed(error) => Err(deferred_task_failure(context, &wait, error)),
+        EvaluationWaitPoll::Pending(wait) => Err(EvaluationHalt::blocked(CoreWaitToken(wait))),
+        EvaluationWaitPoll::Cancelled => Err(EvaluationHalt::new(format!(
             "{kind} evaluation was cancelled"
         ))),
+        EvaluationWaitPoll::Abandoned => Ok(None),
     }
 }
 
@@ -484,28 +503,36 @@ fn produce_lazy_source(
 }
 
 fn eval_promised(context: &EvalContext, promise: &PromisedValue) -> Result<Value, EvaluationHalt> {
-    if let Some(assignment) = promise.assignment() {
-        let value = assignment.map_err(EvaluationHalt::failure)?;
-        if !is_deferred(&value) {
-            return Ok(value);
+    loop {
+        if let Some(assignment) = promise.assignment() {
+            let value = assignment.map_err(EvaluationHalt::failure)?;
+            if !is_deferred(&value) {
+                return Ok(value);
+            }
+            let wait = promise_wait(context, promise)
+                .map_err(|error| EvaluationHalt::new(error.as_ref()))?;
+            if let Some(value) = await_deferred_task(context, wait, "promised value")? {
+                return Ok(value);
+            }
+            continue;
         }
-        let wait =
-            promise_wait(context, promise).map_err(|error| EvaluationHalt::new(error.as_ref()))?;
-        return await_deferred_task(context, wait, "promised value");
-    }
-    if let Some(task) = promise.task() {
-        if context.observes_as_task(task.owner()) {
-            return Err(EvaluationHalt::new(format!(
-                "reflection promise {} recursively observed itself in task {}",
-                promise.id().get(),
-                task.owner().get()
-            )));
+        if let Some(task) = promise.task() {
+            if context.observes_as_task(task.owner()) {
+                return Err(EvaluationHalt::new(format!(
+                    "reflection promise {} recursively observed itself in task {}",
+                    promise.id().get(),
+                    task.owner().get()
+                )));
+            }
+            let wait = promise_wait(context, promise)
+                .map_err(|error| EvaluationHalt::new(error.as_ref()))?;
+            if let Some(value) = await_deferred_task(context, wait, "promised value")? {
+                return Ok(value);
+            }
+            continue;
         }
-        let wait =
-            promise_wait(context, promise).map_err(|error| EvaluationHalt::new(error.as_ref()))?;
-        return await_deferred_task(context, wait, "promised value");
+        return Err(EvaluationHalt::unassigned(promise.clone()));
     }
-    Err(EvaluationHalt::unassigned(promise.clone()))
 }
 
 fn eval_reflection_task_source(
@@ -526,16 +553,20 @@ fn eval_reflection_task_source(
             .with_context(evaluation_context_frame(context_name))
     })?;
     match context.poll_reflection_task(task) {
-        EvaluationTaskPoll::Pending(wait) => Err(EvaluationHalt::blocked(CoreWaitToken(wait))),
-        EvaluationTaskPoll::Complete(value) => match computation.completion() {
+        EvaluationWaitPoll::Pending(wait) => Err(EvaluationHalt::blocked(CoreWaitToken(wait))),
+        EvaluationWaitPoll::Complete(value) => match computation.completion() {
             crate::core::ReflectionCompletion::Gate { target } => Ok(target.clone()),
             crate::core::ReflectionCompletion::ReturnValue => Ok(value),
         },
-        EvaluationTaskPoll::Failed(error) => {
+        EvaluationWaitPoll::Failed(error) => {
             task.acknowledge_propagated_failure();
             Err(EvaluationHalt::failure(error).with_context(evaluation_context_frame(context_name)))
         }
-        EvaluationTaskPoll::Cancelled => Err(EvaluationHalt::new(cancellation_message)),
+        EvaluationWaitPoll::Cancelled => Err(EvaluationHalt::new(cancellation_message)),
+        EvaluationWaitPoll::Abandoned => Err(EvaluationHalt::new(
+            "reflection task was abandoned when its evaluation session closed",
+        )
+        .with_context(evaluation_context_frame(context_name))),
     }
 }
 

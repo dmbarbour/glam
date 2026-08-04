@@ -7,7 +7,7 @@ use crate::core::{
     Dict, EvaluatedValue, EvaluationFailure, FixpointComputation, Key, LazyValue, Value, keys,
 };
 use crate::evaluation::{
-    EvaluationMachinePoll, EvaluationTaskMachine, EvaluationTaskPoll, ReflectionTaskLauncher,
+    EvaluationMachinePoll, EvaluationTaskMachine, EvaluationWaitPoll, ReflectionTaskLauncher,
     ReflectionTaskResultPolicy,
 };
 use crate::number::Number;
@@ -854,7 +854,7 @@ fn promised_failure_preserves_structured_diagnostic_and_identity() {
     assert_eq!(observed.emission_value(), Some(&emission));
     assert_eq!(observed.contexts(), [frame]);
 
-    let EvaluationTaskPoll::Failed(wait_failure) = session.poll_wait(&wait) else {
+    let EvaluationWaitPoll::Failed(wait_failure) = session.poll_wait(&wait) else {
         panic!("the promise wait should publish the same permanent failure")
     };
     assert!(Arc::ptr_eq(&failure, &wait_failure));
@@ -937,7 +937,7 @@ fn task_owned_fixpoint_rejects_recursive_demand_and_blocks_other_tasks() {
     assert_eq!(eval_value(&observer, &value).unwrap(), n(42));
     assert_eq!(
         session.poll_wait(&wait),
-        EvaluationTaskPoll::Complete(n(42)),
+        EvaluationWaitPoll::Complete(n(42)),
         "the retired promise wait must preserve late terminal observation"
     );
     let counts = session.task_registry_counts();
@@ -974,7 +974,7 @@ fn failed_task_fails_its_unresolved_fixpoint_promises() {
     );
     assert!(matches!(
         session.poll_wait(&wait),
-        EvaluationTaskPoll::Failed(error)
+        EvaluationWaitPoll::Failed(error)
             if error.to_string() == "producer failed deliberately"
     ));
     let counts = session.task_registry_counts();
@@ -1000,7 +1000,7 @@ fn explicitly_failed_task_promise_retires_its_wait_record() {
 
     assert!(matches!(
         session.poll_wait(&wait),
-        EvaluationTaskPoll::Failed(error)
+        EvaluationWaitPoll::Failed(error)
             if error.to_string() == "fixpoint failed deliberately"
     ));
     let counts = session.task_registry_counts();
@@ -1032,7 +1032,7 @@ fn producer_failure_retires_every_owned_promise_wait() {
     for wait in waits {
         assert!(matches!(
             session.poll_wait(&wait),
-            EvaluationTaskPoll::Failed(error)
+            EvaluationWaitPoll::Failed(error)
                 if error.to_string() == "producer failed all fixpoints"
         ));
     }
@@ -1062,7 +1062,7 @@ fn promise_change_notification_retires_an_abandoned_task_promise() {
 
     assert!(matches!(
         session.poll_wait(&wait),
-        EvaluationTaskPoll::Failed(error)
+        EvaluationWaitPoll::Failed(error)
             if error.to_string() == "promised value no longer exists"
     ));
     let counts = session.task_registry_counts();

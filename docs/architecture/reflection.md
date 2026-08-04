@@ -162,13 +162,17 @@ not revoke it.
   query; launch is commit-ordered inside a transaction. The status query is
   updated only when the projected state changes between atoms `'launched` and
   `'blocked`, terminal tagged values `ok:Value` and `err:Error`, and the atom
-  `'canceled`.
+  `'canceled` or `'abandoned`. Abandonment means the task's owning demand
+  session closed before it published another terminal result; it is not an
+  ordinary task failure and creates no failure-ledger entry.
 - `.task.join` waits directly and propagates non-success terminal states,
   adding `{task:{operation:'join, id:TaskId}}` when it forwards a child
   failure.
   `.task.status` returns that stored status value unchanged, while
   `.task.value` and `.task.error` project and transactionally wait for their
-  matching terminal payload. `.task.ack_error` transactionally acknowledges
+  matching terminal payload. An abandoned task has neither payload;
+  `.task.join` propagates a structured task-abandoned halt. `.task.ack_error`
+  transactionally acknowledges
   present or future failure reporting without changing any of those
   observations; it is valid before launch, while running, and after
   termination. A terminal failure otherwise remains in the session's

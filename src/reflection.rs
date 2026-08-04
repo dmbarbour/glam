@@ -46,7 +46,7 @@ use crate::eval;
 use crate::evaluation::EvaluationSession;
 use crate::evaluation::{
     EvalContext, EvaluationMachinePoll, EvaluationPumpOutcome, EvaluationSessionRun,
-    EvaluationTaskBlock, EvaluationTaskId, EvaluationTaskMachine, EvaluationTaskPoll,
+    EvaluationTaskBlock, EvaluationTaskId, EvaluationTaskMachine, EvaluationWaitPoll,
     EvaluationWaitToken, ReflectionTaskLauncher, ReflectionTaskProfile, ReflectionTaskResultPolicy,
 };
 use crate::interaction_net::NetBuilder;
@@ -2188,7 +2188,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             return Some(self.blocked_poll());
         };
         match self.eval_context.poll_wait(wait) {
-            EvaluationTaskPoll::Pending(_) => {
+            EvaluationWaitPoll::Pending(_) => {
                 if matches!(
                     self.eval_context.pump_wait(wait, 256),
                     EvaluationPumpOutcome::TargetReady
@@ -2199,9 +2199,10 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     Some(self.blocked_poll())
                 }
             }
-            EvaluationTaskPoll::Complete(_)
-            | EvaluationTaskPoll::Failed(_)
-            | EvaluationTaskPoll::Cancelled => {
+            EvaluationWaitPoll::Complete(_)
+            | EvaluationWaitPoll::Failed(_)
+            | EvaluationWaitPoll::Cancelled
+            | EvaluationWaitPoll::Abandoned => {
                 self.blocked = None;
                 None
             }
@@ -4585,7 +4586,7 @@ mod tests {
 
         assert!(matches!(
             context.poll_reflection_task(&task),
-            EvaluationTaskPoll::Pending(_)
+            EvaluationWaitPoll::Pending(_)
         ));
         assert_eq!(
             context.pump_wait(task.wait(), 1),
@@ -4597,7 +4598,7 @@ mod tests {
         );
         assert!(matches!(
             context.poll_reflection_task(&task),
-            EvaluationTaskPoll::Complete(_)
+            EvaluationWaitPoll::Complete(_)
         ));
         assert_eq!(host.stderr(), [Bytes::from_static(b"scheduled")]);
     }
@@ -4626,7 +4627,7 @@ mod tests {
             context.pump_wait(task.wait(), 4096),
             crate::evaluation::EvaluationPumpOutcome::TargetReady
         );
-        let EvaluationTaskPoll::Complete(value) = context.poll_reflection_task(&task) else {
+        let EvaluationWaitPoll::Complete(value) = context.poll_reflection_task(&task) else {
             panic!("the result-returning task should complete")
         };
         assert_eq!(value, Value::Number(Number::from(42)));
@@ -4656,7 +4657,7 @@ mod tests {
             context.pump_wait(task.wait(), 4096),
             crate::evaluation::EvaluationPumpOutcome::TargetReady
         );
-        let EvaluationTaskPoll::Failed(error) = context.poll_reflection_task(&task) else {
+        let EvaluationWaitPoll::Failed(error) = context.poll_reflection_task(&task) else {
             panic!("the unit-requiring task should fail")
         };
         assert_eq!(
@@ -4688,7 +4689,7 @@ mod tests {
     fn pump_composed_test_task(
         context: &EvalContext,
         task: &EvaluationTaskHandle,
-    ) -> EvaluationTaskPoll {
+    ) -> EvaluationWaitPoll {
         assert_eq!(
             context.pump_wait(task.wait(), 16_384),
             crate::evaluation::EvaluationPumpOutcome::TargetReady
@@ -4807,7 +4808,7 @@ mod tests {
             compile_effect(".task.new (.r \"child\") >>= (\\task -> .task.join task)");
         let host = Arc::new(TestHost::with_values(assembler.core_values()));
         let (context, task) = schedule_composed_test_task(&assembler, &effect, host);
-        let EvaluationTaskPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
+        let EvaluationWaitPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
             panic!("joined task should complete")
         };
         assert_eq!(
@@ -4826,7 +4827,7 @@ mod tests {
             &effect,
             Arc::new(TestHost::with_values(assembler.core_values())),
         );
-        let EvaluationTaskPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
+        let EvaluationWaitPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
             panic!("dict_items task should complete");
         };
         let Value::List(items) = value else {
@@ -4862,7 +4863,7 @@ mod tests {
             &initial,
             Arc::new(TestHost::with_values(assembler.core_values())),
         );
-        let EvaluationTaskPoll::Complete(Value::Dict(metadata)) =
+        let EvaluationWaitPoll::Complete(Value::Dict(metadata)) =
             pump_composed_test_task(&context, &task)
         else {
             panic!("metadata inspection should return the initial hidden dictionary");
@@ -4885,7 +4886,7 @@ mod tests {
             &effect,
             Arc::new(TestHost::with_values(assembler.core_values())),
         );
-        let EvaluationTaskPoll::Complete(metadata @ Value::Lazy(_)) =
+        let EvaluationWaitPoll::Complete(metadata @ Value::Lazy(_)) =
             pump_composed_test_task(&context, &task)
         else {
             panic!("metadata inspection must not demand its hidden value");
@@ -4904,7 +4905,7 @@ mod tests {
         ));
         let host = Arc::new(TestHost::with_values(assembler.core_values()));
         let (context, task) = schedule_composed_test_task(&assembler, &effect, host.clone());
-        let EvaluationTaskPoll::Complete(metadata) = pump_composed_test_task(&context, &task)
+        let EvaluationWaitPoll::Complete(metadata) = pump_composed_test_task(&context, &task)
         else {
             panic!("demanded effectful metadata should complete");
         };
@@ -4940,7 +4941,7 @@ mod tests {
             "the metadata task should first block on its observed heap state"
         );
         assert!(host.wait_for_change(1));
-        let EvaluationTaskPoll::Complete(metadata) = pump_composed_test_task(&context, &task)
+        let EvaluationWaitPoll::Complete(metadata) = pump_composed_test_task(&context, &task)
         else {
             panic!("the resumed metadata task should complete");
         };
@@ -4964,7 +4965,7 @@ mod tests {
                 &effect,
                 Arc::new(TestHost::with_values(assembler.core_values())),
             );
-            let EvaluationTaskPoll::Complete(value) = pump_composed_test_task(&context, &task)
+            let EvaluationWaitPoll::Complete(value) = pump_composed_test_task(&context, &task)
             else {
                 panic!("metadata mismatch should permit an ordinary fallback");
             };
@@ -4982,7 +4983,7 @@ mod tests {
             &effect,
             Arc::new(TestHost::with_values(assembler.core_values())),
         );
-        let EvaluationTaskPoll::Failed(error) = pump_composed_test_task(&context, &task) else {
+        let EvaluationWaitPoll::Failed(error) = pump_composed_test_task(&context, &task) else {
             panic!("metadata mismatch must not make a later evaluator error retryable");
         };
         assert!(error.to_string().contains("requires a function value"));
@@ -4996,7 +4997,7 @@ mod tests {
             &effect,
             Arc::new(TestHost::with_values(assembler.core_values())),
         );
-        let EvaluationTaskPoll::Complete(Value::Dict(result)) =
+        let EvaluationWaitPoll::Complete(Value::Dict(result)) =
             pump_composed_test_task(&context, &task)
         else {
             panic!("eval should return an ok result");
@@ -5012,7 +5013,7 @@ mod tests {
             &nested,
             Arc::new(TestHost::with_values(assembler.core_values())),
         );
-        let EvaluationTaskPoll::Complete(Value::Dict(result)) =
+        let EvaluationWaitPoll::Complete(Value::Dict(result)) =
             pump_composed_test_task(&context, &task)
         else {
             panic!("eval should return a tagged dictionary");
@@ -5034,7 +5035,7 @@ mod tests {
             &effect,
             Arc::new(TestHost::with_values(assembler.core_values())),
         );
-        let EvaluationTaskPoll::Complete(error) = pump_composed_test_task(&context, &task) else {
+        let EvaluationWaitPoll::Complete(error) = pump_composed_test_task(&context, &task) else {
             panic!("eval should contain an evaluator error instead of failing its task");
         };
         let error = PublicValue::from_core(&assembler.core_values(), error);
@@ -5055,7 +5056,7 @@ mod tests {
         );
         let host = Arc::new(TestHost::with_values(assembler.core_values()));
         let (context, task) = schedule_composed_test_task(&assembler, &success, host.clone());
-        let EvaluationTaskPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
+        let EvaluationWaitPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
             panic!("eval should resume after a successful lazy dependency");
         };
         assert_eq!(
@@ -5069,7 +5070,7 @@ mod tests {
             ".eval (anno { refl:.fail } \"unreachable\") >>= (\\result -> .r result.err)",
         );
         let (context, task) = schedule_composed_test_task(&assembler, &failure, host);
-        let EvaluationTaskPoll::Complete(error) = pump_composed_test_task(&context, &task) else {
+        let EvaluationWaitPoll::Complete(error) = pump_composed_test_task(&context, &task) else {
             panic!("eval should convert a failed lazy dependency to err");
         };
         let error = PublicValue::from_core(&assembler.core_values(), error);
@@ -5139,7 +5140,7 @@ mod tests {
             &effect,
             Arc::new(TestHost::with_values(assembler.core_values())),
         );
-        let EvaluationTaskPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
+        let EvaluationWaitPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
             panic!("effect map task should complete");
         };
         let Value::List(items) = value else {
@@ -5172,7 +5173,7 @@ mod tests {
         let (assembler, version) = compile_effect(".env ['glam,'version]");
         let host = Arc::new(TestHost::with_values(assembler.core_values()));
         let (context, task) = schedule_composed_test_task(&assembler, &version, host.clone());
-        let EvaluationTaskPoll::Complete(version) = pump_composed_test_task(&context, &task) else {
+        let EvaluationWaitPoll::Complete(version) = pump_composed_test_task(&context, &task) else {
             panic!("environment version should complete")
         };
         assert_eq!(
@@ -5188,14 +5189,14 @@ mod tests {
         let (context, task) = schedule_composed_test_task(&assembler, &environment, host.clone());
         let environment_poll = pump_composed_test_task(&context, &task);
         assert!(
-            matches!(environment_poll, EvaluationTaskPoll::Complete(_)),
+            matches!(environment_poll, EvaluationWaitPoll::Complete(_)),
             "process environment lookup should complete, got {environment_poll:?}"
         );
 
         let (_, arguments) = compile_effect(".env ['process,'args]");
         let (context, task) = schedule_composed_test_task(&assembler, &arguments, host.clone());
         let poll = pump_composed_test_task(&context, &task);
-        let EvaluationTaskPoll::Complete(Value::List(arguments)) = poll else {
+        let EvaluationWaitPoll::Complete(Value::List(arguments)) = poll else {
             panic!("process arguments should return a list, got {poll:?}")
         };
         assert_eq!(
@@ -5210,7 +5211,7 @@ mod tests {
             compile_effect(".task.new (.env ['process,'args]) >>= (\\task -> .task.join task)");
         let (context, task) =
             schedule_composed_test_task(&assembler, &child_environment, host.clone());
-        let EvaluationTaskPoll::Complete(Value::List(arguments)) =
+        let EvaluationWaitPoll::Complete(Value::List(arguments)) =
             pump_composed_test_task(&context, &task)
         else {
             panic!("child reflection task should inherit its parent profile environment")
@@ -5229,7 +5230,7 @@ mod tests {
         let (context, task) = schedule_composed_test_task(&assembler, &missing, host);
         assert!(matches!(
             pump_composed_test_task(&context, &task),
-            EvaluationTaskPoll::Complete(_)
+            EvaluationWaitPoll::Complete(_)
         ));
     }
 
@@ -5240,7 +5241,7 @@ mod tests {
         );
         let host = Arc::new(TestHost::with_values(assembler.core_values()));
         let (context, task) = schedule_composed_test_task(&assembler, &effect, host);
-        let EvaluationTaskPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
+        let EvaluationWaitPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
             panic!("task.value should return a completed task result")
         };
         assert_eq!(
@@ -5258,7 +5259,7 @@ mod tests {
         );
         let host = Arc::new(TestHost::with_values(assembler.core_values()));
         let (context, task) = schedule_composed_test_task(&assembler, &effect, host);
-        let EvaluationTaskPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
+        let EvaluationWaitPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
             panic!("a late join should retain the completed child result")
         };
         assert_eq!(
@@ -5284,7 +5285,7 @@ mod tests {
             let (context, task) = schedule_composed_test_task(&assembler, &effect, host.clone());
             let poll = pump_composed_test_task(&context, &task);
             assert!(
-                matches!(poll, EvaluationTaskPoll::Complete(_)),
+                matches!(poll, EvaluationWaitPoll::Complete(_)),
                 "task status should match for {source}, got {poll:?}"
             );
         }
@@ -5296,7 +5297,7 @@ mod tests {
         let host = Arc::new(TestHost::with_values(assembler.core_values()));
         let (first_context, first_task) =
             schedule_composed_test_task(&assembler, &spawn, host.clone());
-        let EvaluationTaskPoll::Complete(handle) =
+        let EvaluationWaitPoll::Complete(handle) =
             pump_composed_test_task(&first_context, &first_task)
         else {
             panic!("first session should return a task handle")
@@ -5321,7 +5322,7 @@ mod tests {
             assert!(
                 matches!(
                     pump_composed_test_task(&second_context, &second_task),
-                    EvaluationTaskPoll::Failed(error)
+                    EvaluationWaitPoll::Failed(error)
                         if error.to_string()
                             == "task handle does not belong to this evaluation session"
                 ),
@@ -5343,7 +5344,7 @@ mod tests {
         );
         assert!(matches!(
             context.poll_reflection_task(&task),
-            EvaluationTaskPoll::Pending(_)
+            EvaluationWaitPoll::Pending(_)
         ));
     }
 
@@ -5354,7 +5355,7 @@ mod tests {
         );
         let host = Arc::new(TestHost::with_values(assembler.core_values()));
         let (context, task) = schedule_composed_test_task(&assembler, &rolled_back, host.clone());
-        let EvaluationTaskPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
+        let EvaluationWaitPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
             panic!("rolled-back cancellation should not cancel the child")
         };
         assert_eq!(
@@ -5371,7 +5372,7 @@ mod tests {
         let (context, task) = schedule_composed_test_task(&assembler, &committed, host.clone());
         assert!(matches!(
             pump_composed_test_task(&context, &task),
-            EvaluationTaskPoll::Complete(_)
+            EvaluationWaitPoll::Complete(_)
         ));
         assert!(
             host.diagnostics().is_empty(),
@@ -5382,7 +5383,7 @@ mod tests {
             compile_effect_with_runtime(&assembler.evaluation_runtime(), ".task.new (.r ())");
         let (source_context, source_task) =
             schedule_composed_test_task(&assembler, &spawn_non_owner, host.clone());
-        let EvaluationTaskPoll::Complete(non_owner_handle) =
+        let EvaluationWaitPoll::Complete(non_owner_handle) =
             pump_composed_test_task(&source_context, &source_task)
         else {
             panic!("source session should produce a task handle for the non-owner test")
@@ -5404,7 +5405,7 @@ mod tests {
             schedule_composed_test_task(&assembler, &cancel_non_owner, host.clone());
         assert!(matches!(
             pump_composed_test_task(&non_owner_context, &non_owner_task),
-            EvaluationTaskPoll::Complete(_)
+            EvaluationWaitPoll::Complete(_)
         ));
 
         let (_, late) = compile_effect_with_runtime(
@@ -5414,7 +5415,7 @@ mod tests {
         let (context, task) = schedule_composed_test_task(&assembler, &late, host);
         assert!(matches!(
             pump_composed_test_task(&context, &task),
-            EvaluationTaskPoll::Complete(_)
+            EvaluationWaitPoll::Complete(_)
         ));
     }
 
@@ -5449,7 +5450,7 @@ mod tests {
         assert!(report.failures.is_empty());
         assert!(matches!(
             context.poll_reflection_task(&task),
-            EvaluationTaskPoll::Complete(_)
+            EvaluationWaitPoll::Complete(_)
         ));
         assert_eq!(
             builds.load(Ordering::Acquire),
@@ -5464,7 +5465,7 @@ mod tests {
             compile_effect(".cut (.task.new (.r \"committed\")) >>= (\\task -> .task.join task)");
         let host = Arc::new(TestHost::with_values(assembler.core_values()));
         let (context, task) = schedule_composed_test_task(&assembler, &effect, host);
-        let EvaluationTaskPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
+        let EvaluationWaitPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
             panic!("committed child task should complete")
         };
         assert_eq!(
@@ -5484,7 +5485,7 @@ mod tests {
         let (context, task) = schedule_composed_test_task(&assembler, &effect, host.clone());
         let poll = pump_composed_test_task(&context, &task);
         assert!(
-            matches!(poll, EvaluationTaskPoll::Complete(_)),
+            matches!(poll, EvaluationWaitPoll::Complete(_)),
             "winning alternative should complete, got {poll:?}"
         );
         assert!(host.diagnostics().is_empty());
@@ -5496,7 +5497,7 @@ mod tests {
         let (assembler, join) = compile_effect(".task.new (.fail) >>= (\\task -> .task.join task)");
         let host = Arc::new(TestHost::with_values(assembler.core_values()));
         let (context, task) = schedule_composed_test_task(&assembler, &join, host.clone());
-        let EvaluationTaskPoll::Failed(error) = pump_composed_test_task(&context, &task) else {
+        let EvaluationWaitPoll::Failed(error) = pump_composed_test_task(&context, &task) else {
             panic!("join should propagate its child task error")
         };
         assert!(error.to_string().contains("failed permanently"));
@@ -5525,7 +5526,7 @@ mod tests {
             compile_effect(".task.new (.fail) >>= (\\task -> .task.error task)");
         let (context, task) = schedule_composed_test_task(&assembler, &extract, host);
         let poll = pump_composed_test_task(&context, &task);
-        let EvaluationTaskPoll::Complete(value) = poll else {
+        let EvaluationWaitPoll::Complete(value) = poll else {
             panic!("task_error should return the child task error, got {poll:?}")
         };
         let value = PublicValue::from_core(&assembler.core_values(), value);
@@ -5546,7 +5547,7 @@ mod tests {
         );
         let host = Arc::new(TestHost::with_values(assembler.core_values()));
         let (context, parent) = schedule_composed_test_task(&assembler, &inspect, host.clone());
-        let EvaluationTaskPoll::Complete(observation) = pump_composed_test_task(&context, &parent)
+        let EvaluationWaitPoll::Complete(observation) = pump_composed_test_task(&context, &parent)
         else {
             panic!("acknowledged failure should remain observable as data")
         };
@@ -5577,7 +5578,7 @@ mod tests {
         let (context, parent) = schedule_composed_test_task(&assembler, &join, host);
         assert!(matches!(
             pump_composed_test_task(&context, &parent),
-            EvaluationTaskPoll::Failed(_)
+            EvaluationWaitPoll::Failed(_)
         ));
         let EvaluationSessionRun::Complete(report) = context.run_until_quiescent() else {
             panic!("failed join should be terminal")
@@ -5602,7 +5603,7 @@ mod tests {
         let (context, parent) = schedule_composed_test_task(&assembler, &effect, host);
         assert!(matches!(
             pump_composed_test_task(&context, &parent),
-            EvaluationTaskPoll::Complete(_)
+            EvaluationWaitPoll::Complete(_)
         ));
         let EvaluationSessionRun::Complete(report) = context.run_until_quiescent() else {
             panic!("child failure should be terminal")
@@ -5625,7 +5626,7 @@ mod tests {
             &effect,
             Arc::new(TestHost::with_values(assembler.core_values())),
         );
-        let EvaluationTaskPoll::Complete(error) = pump_composed_test_task(&context, &task) else {
+        let EvaluationWaitPoll::Complete(error) = pump_composed_test_task(&context, &task) else {
             panic!("task.error should return the child's structured failure");
         };
         let error = PublicValue::from_core(&assembler.core_values(), error);
@@ -5860,7 +5861,7 @@ mod tests {
             compile_effect(".task.new (.r ()) >>= (\\task -> .task.error task)");
         let host = Arc::new(TestHost::with_values(assembler.core_values()));
         let (context, task) = schedule_composed_test_task(&assembler, &effect, host);
-        let EvaluationTaskPoll::Failed(error) = pump_composed_test_task(&context, &task) else {
+        let EvaluationWaitPoll::Failed(error) = pump_composed_test_task(&context, &task) else {
             panic!("task_error should fail for a successful task")
         };
         assert!(error.to_string().contains("failed permanently"));
@@ -5873,7 +5874,7 @@ mod tests {
         );
         let host = Arc::new(TestHost::with_values(assembler.core_values()));
         let (context, task) = schedule_composed_test_task(&assembler, &effect, host);
-        let EvaluationTaskPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
+        let EvaluationWaitPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
             panic!("task_error alternative should fall through")
         };
         assert_eq!(
@@ -5891,7 +5892,7 @@ mod tests {
         );
         let host = Arc::new(TestHost::with_values(assembler.core_values()));
         let (context, task) = schedule_composed_test_task(&assembler, &effect, host.clone());
-        let EvaluationTaskPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
+        let EvaluationWaitPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
             panic!("child should inherit the parent's extended effect vocabulary")
         };
         assert_eq!(
@@ -6301,7 +6302,7 @@ mod tests {
             assert!(Arc::ptr_eq(&failure, &observed));
             assert_eq!(observed.emission_value(), Some(&emission));
             assert_eq!(observed.contexts(), std::slice::from_ref(&frame));
-            let EvaluationTaskPoll::Failed(wait_failure) = task.eval_context.poll_wait(&wait)
+            let EvaluationWaitPoll::Failed(wait_failure) = task.eval_context.poll_wait(&wait)
             else {
                 panic!("owned promise wait should publish the producer failure")
             };
@@ -6315,7 +6316,7 @@ mod tests {
         );
         assert_eq!(
             task.eval_context.poll_wait(&resolved_wait),
-            EvaluationTaskPoll::Complete(Value::Number(Number::integer(42)))
+            EvaluationWaitPoll::Complete(Value::Number(Number::integer(42)))
         );
         let counts = task.eval_context.task_registry_counts();
         assert_eq!(counts.promises_active, 0);
@@ -6362,7 +6363,7 @@ mod tests {
                 .expect_err("terminal task should fail its unfinished promise")
                 .into_permanent_failure();
             assert_eq!(observed.to_string(), expected);
-            let EvaluationTaskPoll::Failed(wait_failure) = task.eval_context.poll_wait(&wait)
+            let EvaluationWaitPoll::Failed(wait_failure) = task.eval_context.poll_wait(&wait)
             else {
                 panic!("unfinished promise wait should publish its synthesized failure")
             };
@@ -6545,7 +6546,7 @@ mod tests {
         );
         let host = Arc::new(TestHost::with_values(assembler.core_values()));
         let (context, task) = schedule_composed_test_task(&assembler, &effect, host);
-        let EvaluationTaskPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
+        let EvaluationWaitPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
             panic!("child task should complete")
         };
         let value = PublicValue::from_core(&assembler.core_values(), value);

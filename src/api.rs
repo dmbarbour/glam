@@ -4726,7 +4726,7 @@ impl ModuleBuilder<'_> {
 mod tests {
     use super::*;
     use crate::core::{LazyValue, OpaqueValue, keys};
-    use crate::evaluation::{EvaluationMachinePoll, EvaluationTaskMachine, EvaluationTaskPoll};
+    use crate::evaluation::{EvaluationMachinePoll, EvaluationTaskMachine, EvaluationWaitPoll};
 
     struct FailedReasoningTask;
 
@@ -6393,7 +6393,7 @@ mod tests {
         assert!(assembler.drain_reasoning().failures().is_empty());
         assert!(matches!(
             assembler.eval_context().poll_reflection_task(&task),
-            EvaluationTaskPoll::Failed(error)
+            EvaluationWaitPoll::Failed(error)
                 if error.to_string() == "public reasoning failure"
         ));
     }

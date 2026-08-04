@@ -90,6 +90,13 @@ control-flow overview.
   terminal observation. Task-owned promise waits follow the same ownership
   boundary: terminal assignment is copied into the shared wait cell before the
   promise record and owner index are retired.
+- A weak wait owner disappearing is `Abandoned`, never an inferred evaluation
+  failure. Interpret abandonment according to the producer obligation:
+  reflection task handles retain a terminal abandoned status; reusable lazy
+  claims and host-promise followers may be replaced without poisoning their
+  value; unresolved task-owned promises fail because their sole responsible
+  producer is gone. Explicit cancellation wins only when it was committed
+  before closure.
 - Treat any terminal state found in an active reflection or deferred registry
   as an internal scheduler bug. `poll_wait` obtains terminal outcomes only from
   the shared wait cell; after checking that cell under the registry mutex, any

@@ -7,7 +7,7 @@ use crate::diagnostic::Severity;
 use crate::eval;
 use crate::evaluation::{
     EvalContext, EvaluationTaskCancellation, EvaluationTaskHandle, EvaluationTaskId,
-    EvaluationTaskPoll, EvaluationTaskStatus, EvaluationTaskStatusSink, PendingReflectionTask,
+    EvaluationTaskStatus, EvaluationTaskStatusSink, EvaluationWaitPoll, PendingReflectionTask,
     PendingTaskPolicy,
 };
 use crate::number::Number;
@@ -434,18 +434,22 @@ where
                 ));
             }
             match context.eval_context().poll_reflection_task(&handle.task) {
-                EvaluationTaskPoll::Pending(wait) => Err(TaskHalt::blocked(wait)),
-                EvaluationTaskPoll::Complete(value) => Ok(RequestResult::Return(Value::from_core(
+                EvaluationWaitPoll::Pending(wait) => Err(TaskHalt::blocked(wait)),
+                EvaluationWaitPoll::Complete(value) => Ok(RequestResult::Return(Value::from_core(
                     context.eval_context().values(),
                     value,
                 ))),
-                EvaluationTaskPoll::Failed(error) => {
+                EvaluationWaitPoll::Failed(error) => {
                     Err(TaskHalt::failure(error)
                         .with_core_context(task_join_context(handle.task.id())))
                 }
-                EvaluationTaskPoll::Cancelled => {
+                EvaluationWaitPoll::Cancelled => {
                     Err(TaskHalt::new("joined reflection task was cancelled"))
                 }
+                EvaluationWaitPoll::Abandoned => Err(TaskHalt::new(
+                    "joined reflection task was abandoned when its evaluation session closed",
+                )
+                .with_core_context(task_join_context(handle.task.id()))),
             }
         }
         ReflectionRequest::TaskStatus => {
@@ -468,7 +472,9 @@ where
                     observe_query_change(context, &handle.status, query.generation);
                     Ok(RequestResult::Fail)
                 }
-                TaggedTaskState::Failed(_) | TaggedTaskState::Cancelled => Ok(RequestResult::Fail),
+                TaggedTaskState::Failed(_)
+                | TaggedTaskState::Cancelled
+                | TaggedTaskState::Abandoned => Ok(RequestResult::Fail),
             }
         }
         ReflectionRequest::TaskHalt => {
@@ -487,7 +493,9 @@ where
                     observe_query_change(context, &handle.status, query.generation);
                     Ok(RequestResult::Fail)
                 }
-                TaggedTaskState::Complete(_) => Ok(RequestResult::Fail),
+                TaggedTaskState::Complete(_) | TaggedTaskState::Abandoned => {
+                    Ok(RequestResult::Fail)
+                }
             }
         }
         ReflectionRequest::TaskAcknowledgeError => {
@@ -606,6 +614,7 @@ fn task_status_query_value(values: &CoreValueFactory, status: EvaluationTaskStat
             eval::failure_diagnostic_value_with(values, &error),
         )),
         EvaluationTaskStatus::Cancelled => values.key_value(&keys::CANCELED),
+        EvaluationTaskStatus::Abandoned => values.key_value(&keys::ABANDONED),
     }
 }
 
@@ -615,6 +624,7 @@ enum TaggedTaskState {
     Complete(Value),
     Failed(Value),
     Cancelled,
+    Abandoned,
 }
 
 fn tagged_task_state(
@@ -629,6 +639,9 @@ fn tagged_task_state(
     }
     if value.as_core() == &values.key_value(&keys::CANCELED) {
         return Ok(TaggedTaskState::Cancelled);
+    }
+    if value.as_core() == &values.key_value(&keys::ABANDONED) {
+        return Ok(TaggedTaskState::Abandoned);
     }
     let CoreValue::Dict(state) = value.as_core() else {
         return Err(TaskHalt::new("reflection task status is malformed"));
@@ -779,4 +792,24 @@ pub(crate) fn parse_severity(context: &EvalContext, value: Value) -> Result<Seve
 fn severity_matches(value: &CoreValue, name: &str, canonical: &Key) -> bool {
     Key::from_value(value).as_ref() == Some(canonical)
         || value == &CoreValue::Atom(Atom::from_key(&Key::binary_from_text(name)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn abandoned_task_status_has_a_distinct_round_trip() {
+        let values = crate::core::test_value_factory();
+        let encoded = Value::from_core(
+            &values,
+            task_status_query_value(&values, EvaluationTaskStatus::Abandoned),
+        );
+
+        assert_eq!(encoded.as_core(), &values.key_value(&keys::ABANDONED));
+        assert!(matches!(
+            tagged_task_state(&values, &encoded).expect("abandoned status should decode"),
+            TaggedTaskState::Abandoned
+        ));
+    }
 }
