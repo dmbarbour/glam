@@ -86,9 +86,9 @@ control-flow overview.
   the coordinator only after unlocking. Polling checks the cell around
   registry lookup, so a terminal result outlives the weakly held owner session
   while a pending wait does not keep that session alive. Terminal reflection
-  records and their task-ID indexes are retired immediately. Production sparks
-  continue using the broad wait disturbance fallback until Phase 6B connects
-  their stable work registrations to this source.
+  records and their task-ID indexes are retired immediately. A wait-blocked
+  spark subscribes its stable work ID and epoch directly to this source;
+  unrelated task progress must not wake it.
   Unacknowledged reflection failures remain only in the persistent reporting
   ledger; `.task.ack_error` removes that entry without changing the handle's
   terminal observation. Task-owned promise waits follow the same ownership

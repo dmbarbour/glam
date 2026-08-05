@@ -171,7 +171,6 @@ impl EvaluationWaitToken {
         self.0.completion.notify_published();
     }
 
-    #[cfg(test)]
     pub(crate) fn subscribe_spark(
         &self,
         runtime: EvaluationRuntimeId,
@@ -1118,12 +1117,6 @@ impl EvaluationSession {
         }
     }
 
-    fn notify_spark_disturbance(&self) {
-        if let Some(coordinator) = self.coordinator.upgrade() {
-            coordinator.notify_spark_disturbance(self.id);
-        }
-    }
-
     /// Releases a reusable deferred producer claimed only to satisfy an
     /// abandoned spark. Running producers remain task-owned in Phase 3B and
     /// complete through the existing session path.
@@ -1186,9 +1179,8 @@ impl EvaluationSession {
     fn notify_promise_changed(&self) {
         // Pair the notification with scheduler waits and collect any
         // task-owned promise records whose terminal cell won a publication
-        // race. Coordinator-owned promise sparks subscribe directly; this
-        // broad disturbance remains for sparks parked on session-owned wait
-        // followers until wait tokens gain exact subscriptions.
+        // race. Coordinator-owned sparks subscribe directly to promise and
+        // wait completion sources.
         let mut tasks = self
             .tasks
             .lock()
@@ -1199,7 +1191,6 @@ impl EvaluationSession {
         for wait in completed {
             wait.notify_terminal();
         }
-        self.notify_spark_disturbance();
     }
 
     pub(crate) fn submit_spark(self: &Arc<Self>, value: Value) {
@@ -2420,14 +2411,10 @@ impl EvaluationSession {
         Option<ReleasedTaskMachine>,
         Option<TaskStatusUpdate>,
     ) {
-        let result = match claimed {
+        match claimed {
             ClaimedTask::Reflection(claimed) => self.release_reflection_task(claimed, poll),
             ClaimedTask::Deferred(claimed) => self.release_deferred_task(claimed, poll),
-        };
-        if result.0 {
-            self.notify_spark_disturbance();
         }
-        result
     }
 
     fn release_reflection_task(
@@ -4715,9 +4702,7 @@ mod tests {
     }
 
     fn park_next_spark(coordinator: &EvaluationWorkCoordinator) {
-        let coordinator::CoordinatorSelection::Spark(claimed) = coordinator.select() else {
-            panic!("the submitted promise spark should be claimable")
-        };
+        let claimed = claim_next_spark(coordinator);
         let session = claimed
             .session()
             .expect("the manually claimed spark should retain its demand session");
@@ -4731,6 +4716,18 @@ mod tests {
             panic!("an unresolved promise should expose a retryable dependency")
         };
         coordinator.release_spark(claimed, coordinator::SparkWorkPoll::Blocked(dependency));
+    }
+
+    fn claim_next_spark(coordinator: &EvaluationWorkCoordinator) -> coordinator::ClaimedSparkWork {
+        loop {
+            match coordinator.select() {
+                coordinator::CoordinatorSelection::Spark(claimed) => return claimed,
+                coordinator::CoordinatorSelection::Reflection(_) => {}
+                coordinator::CoordinatorSelection::None => {
+                    panic!("the submitted spark should be claimable")
+                }
+            }
+        }
     }
 
     #[test]
@@ -4849,6 +4846,96 @@ mod tests {
             panic!("terminal recheck should requeue the spark")
         };
         coordinator.release_spark(claimed, coordinator::SparkWorkPoll::Complete);
+    }
+
+    #[test]
+    fn wait_completion_wakes_only_its_exact_spark_after_unrelated_task_progress() {
+        let (coordinator, _executor) = test_execution_resources(0).unwrap();
+        let session = EvaluationSession::shared(&coordinator);
+        let context = EvalContext::new(session);
+        coordinator.executor_started(1);
+
+        let unrelated = context
+            .schedule_task(|_| Ok(Box::new(Complete)))
+            .expect("unrelated task should schedule");
+        let wait_a = context
+            .schedule_task(|_| Ok(Box::new(Complete)))
+            .expect("wait A producer should schedule");
+        let wait_b = context
+            .schedule_task(|_| Ok(Box::new(Complete)))
+            .expect("wait B producer should schedule");
+
+        assert!(matches!(
+            coordinator.select(),
+            coordinator::CoordinatorSelection::Reflection(_)
+        ));
+        for wait in [wait_a.wait(), wait_b.wait()] {
+            context.spark(Value::Lazy(LazyValue::deferred(
+                context.values(),
+                "manually parked wait spark",
+                |_| panic!("the coordinator test parks this demand before evaluation"),
+            )));
+            let claimed = claim_next_spark(&coordinator);
+            coordinator.release_spark(
+                claimed,
+                coordinator::SparkWorkPoll::Blocked(coordinator::WorkDependency::Wait(
+                    wait.clone(),
+                )),
+            );
+        }
+        assert_eq!(wait_a.wait().spark_subscription_count(), 1);
+        assert_eq!(wait_b.wait().spark_subscription_count(), 1);
+        assert_eq!(coordinator.spark_work_counts(), (0, 0, 2));
+
+        assert_eq!(
+            context.pump_wait(unrelated.wait(), 256),
+            EvaluationPumpOutcome::TargetReady
+        );
+        assert_eq!(
+            coordinator.spark_work_counts(),
+            (0, 0, 2),
+            "unrelated task progress must not retry wait-blocked sparks"
+        );
+
+        assert_eq!(
+            context.pump_wait(wait_a.wait(), 256),
+            EvaluationPumpOutcome::TargetReady
+        );
+        assert_eq!(wait_a.wait().spark_subscription_count(), 0);
+        assert_eq!(wait_b.wait().spark_subscription_count(), 1);
+        assert_eq!(coordinator.spark_work_counts(), (1, 0, 1));
+        let claimed = claim_next_spark(&coordinator);
+        coordinator.release_spark(claimed, coordinator::SparkWorkPoll::Complete);
+
+        assert_eq!(
+            context.pump_wait(wait_b.wait(), 256),
+            EvaluationPumpOutcome::TargetReady
+        );
+        assert_eq!(wait_b.wait().spark_subscription_count(), 0);
+        assert_eq!(coordinator.spark_work_counts(), (1, 0, 0));
+        let claimed = claim_next_spark(&coordinator);
+        coordinator.release_spark(claimed, coordinator::SparkWorkPoll::Complete);
+    }
+
+    #[test]
+    fn permanent_spark_failure_retires_without_a_dependency_subscription() {
+        let (coordinator, _executor) = test_execution_resources(0).unwrap();
+        let session = EvaluationSession::shared(&coordinator);
+        let context = EvalContext::new(session);
+        coordinator.executor_started(1);
+        context.spark(Value::error(context.values(), "spark failure"));
+
+        let coordinator::CoordinatorSelection::Spark(claimed) = coordinator.select() else {
+            panic!("the failing spark should be claimable")
+        };
+        let halt = crate::eval::demand_strategy_value(&context, claimed.value().as_core())
+            .expect_err("the spark fixture should fail permanently");
+        assert!(halt.permanent_failure().is_some());
+        assert!(halt.blocked_on().is_none());
+        assert!(halt.unassigned_promise().is_none());
+        coordinator.release_spark(claimed, coordinator::SparkWorkPoll::Complete);
+
+        assert_eq!(coordinator.retained_spark_count(), 0);
     }
 
     #[test]

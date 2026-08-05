@@ -113,10 +113,10 @@ the terminal result. A terminal token remains observable after its owner
 session is dropped; a pending token does not keep the session alive and reports
 `Abandoned`, not evaluation failure, if its owner disappears without
 publishing a more specific terminal result. Active registries retain only
-unresolved deferred producers and nonterminal reflection tasks. During the
-work-boundary transition, real wait-blocked sparks still use the broad session
-disturbance index; the token-side exact registration path is installed for the
-next coordinator parking step.
+unresolved deferred producers and nonterminal reflection tasks. A blocked
+spark registers its stable work ID and subscription epoch directly with this
+cell. Only terminal publication of that exact wait can requeue it; unrelated
+session task progress does not.
 Reflection task handles own their shared terminal wait cells, so completion,
 failure, and cancellation remain observable after the active record and
 task-ID index are retired. An unacknowledged failure also leaves one minimal
