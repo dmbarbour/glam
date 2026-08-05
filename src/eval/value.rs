@@ -534,9 +534,6 @@ fn eval_promised(context: &EvalContext, promise: &PromisedValue) -> Result<Value
             }
             continue;
         }
-        if !promise.subscribe_follower(context.promise_wake()) {
-            continue;
-        }
         return Err(EvaluationHalt::unassigned(promise.clone()));
     }
 }

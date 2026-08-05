@@ -5,6 +5,8 @@ use std::fmt;
 use std::num::NonZeroU64;
 use std::sync::{Arc, Condvar, Mutex, Weak};
 
+#[cfg(test)]
+use crate::core::CoreValueFactory;
 use crate::core::{PromiseId, PromisedValue, Value};
 use crate::runtime::{
     EvaluationRuntimeId, RuntimeIds, RuntimeMutationAdmission, RuntimeMutationGuard,
@@ -124,13 +126,25 @@ impl CompletionSubscriptions {
         Ok(result)
     }
 
-    #[cfg(test)]
-    fn subscribe(
+    pub(crate) fn subscribe(
         &self,
+        runtime: EvaluationRuntimeId,
+        registration: WakeRegistration,
+        terminal: impl FnOnce() -> bool,
+    ) -> CompletionSubscriptionOutcome {
+        self.subscribe_with(runtime, registration, terminal, || {})
+    }
+
+    fn subscribe_with(
+        &self,
+        runtime: EvaluationRuntimeId,
         registration: WakeRegistration,
         terminal: impl FnOnce() -> bool,
         before_insert: impl FnOnce(),
     ) -> CompletionSubscriptionOutcome {
+        if runtime != self.runtime {
+            return CompletionSubscriptionOutcome::ForeignRuntime;
+        }
         let mut registrations = self
             .registrations
             .lock()
@@ -144,7 +158,7 @@ impl CompletionSubscriptions {
     }
 
     #[cfg(test)]
-    fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.registrations
             .lock()
             .expect("completion subscriber set was poisoned")
@@ -152,11 +166,11 @@ impl CompletionSubscriptions {
     }
 }
 
-#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CompletionSubscriptionOutcome {
+pub(crate) enum CompletionSubscriptionOutcome {
     Pending,
     AlreadyTerminal,
+    ForeignRuntime,
 }
 
 #[derive(Default)]
@@ -315,6 +329,8 @@ pub(crate) struct EvaluationWorkCoordinator {
     admission: Arc<RuntimeMutationAdmission>,
     state: Mutex<WorkCoordinatorState>,
     work_available: Condvar,
+    #[cfg(test)]
+    test_values: Option<CoreValueFactory>,
 }
 
 pub(super) enum CoordinatorSelection {
@@ -352,7 +368,34 @@ impl EvaluationWorkCoordinator {
             admission,
             state: Mutex::new(WorkCoordinatorState::default()),
             work_available: Condvar::new(),
+            #[cfg(test)]
+            test_values: None,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_test(
+        values: CoreValueFactory,
+        admission: Arc<RuntimeMutationAdmission>,
+    ) -> Arc<Self> {
+        let coordinator = Arc::new(Self {
+            runtime: values.runtime_id(),
+            ids: values.ids().clone(),
+            admission,
+            state: Mutex::new(WorkCoordinatorState::default()),
+            work_available: Condvar::new(),
+            test_values: Some(values.clone()),
+        });
+        values.attach_work_coordinator(&coordinator);
+        coordinator
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_values(&self) -> CoreValueFactory {
+        self.test_values
+            .as_ref()
+            .expect("synthetic execution resources must install test values")
+            .clone()
     }
 
     pub(crate) fn runtime_id(&self) -> EvaluationRuntimeId {
@@ -489,9 +532,9 @@ impl EvaluationWorkCoordinator {
         }
     }
 
-    /// Broadly retries sparks whose demand session observed task or promise
-    /// progress. Precise promise and wait subscriptions refine this in later
-    /// work-boundary phases.
+    /// Broadly retries wait-token sparks whose demand session observed task
+    /// progress. Promise dependencies subscribe to their source directly;
+    /// precise wait subscriptions replace this fallback in Phase 6.
     pub(super) fn notify_spark_disturbance(&self, session: EvaluationSessionId) {
         let mutation = self.admission.mutation_guard();
         let batches = {
@@ -636,7 +679,7 @@ impl EvaluationWorkCoordinator {
 
     pub(super) fn release_spark(&self, claimed: ClaimedSparkWork, poll: SparkWorkPoll) {
         let mutation = self.admission.mutation_guard();
-        let (retired, obsolete_dependency, changed) = {
+        let (retired, obsolete_dependency, exact_subscription, changed) = {
             let mut state = self
                 .state
                 .lock()
@@ -658,6 +701,7 @@ impl EvaluationWorkCoordinator {
                 record.control.cancel_requested || record.control.close_reason.is_some();
 
             let mut obsolete_dependency = None;
+            let mut exact_subscription = None;
             let dependency = match poll {
                 SparkWorkPoll::Complete => None,
                 SparkWorkPoll::Blocked(dependency) => Some(dependency),
@@ -683,49 +727,68 @@ impl EvaluationWorkCoordinator {
                 record.state = WorkState::Terminalizing;
                 detach_spark(&mut state, claimed.id)
             } else if let Some(dependency) = dependency {
-                debug_assert_eq!(dependency.runtime_id(), self.runtime);
-                let dependency = if claimed
-                    .prior_dependency
-                    .as_ref()
-                    .is_some_and(|prior| prior.same_source(&dependency))
-                {
-                    drop(dependency);
-                    claimed.prior_dependency
-                } else {
+                if dependency.runtime_id() != self.runtime {
                     obsolete_dependency = claimed.prior_dependency;
-                    Some(dependency)
-                };
-                let current_generation = *state
-                    .spark_generations
-                    .entry(claimed.demand_session)
-                    .or_insert(0);
-                let record = state
-                    .work
-                    .get_mut(&claimed.id)
-                    .expect("running spark work must remain registered");
-                record.demand = Some(claimed.demand);
-                record.dependency = dependency;
-                record.observed_generation = current_generation;
-                if current_generation != claimed.observed_generation {
-                    record.state = WorkState::Queued;
-                    queue_spark(&mut state, claimed.id);
+                    let record = state
+                        .work
+                        .get_mut(&claimed.id)
+                        .expect("running spark work must remain registered");
+                    record.demand = Some(claimed.demand);
+                    record.dependency = Some(dependency);
+                    record.state = WorkState::Terminalizing;
+                    detach_spark(&mut state, claimed.id)
                 } else {
-                    record.subscription_epoch = record
-                        .subscription_epoch
-                        .checked_add(1)
-                        .expect("evaluation work subscription epochs exhausted");
-                    let registration = WakeRegistration {
-                        work: claimed.id,
-                        subscription_epoch: record.subscription_epoch,
+                    let dependency = if claimed
+                        .prior_dependency
+                        .as_ref()
+                        .is_some_and(|prior| prior.same_source(&dependency))
+                    {
+                        drop(dependency);
+                        claimed.prior_dependency
+                    } else {
+                        obsolete_dependency = claimed.prior_dependency;
+                        Some(dependency)
                     };
-                    record.state = WorkState::Blocked;
-                    state
-                        .blocked_sparks
+                    let current_generation = *state
+                        .spark_generations
                         .entry(claimed.demand_session)
-                        .or_default()
-                        .insert(registration);
+                        .or_insert(0);
+                    let record = state
+                        .work
+                        .get_mut(&claimed.id)
+                        .expect("running spark work must remain registered");
+                    record.demand = Some(claimed.demand);
+                    record.dependency = dependency;
+                    record.observed_generation = current_generation;
+                    if current_generation != claimed.observed_generation {
+                        record.state = WorkState::Queued;
+                        queue_spark(&mut state, claimed.id);
+                    } else {
+                        record.subscription_epoch = record
+                            .subscription_epoch
+                            .checked_add(1)
+                            .expect("evaluation work subscription epochs exhausted");
+                        let registration = WakeRegistration {
+                            work: claimed.id,
+                            subscription_epoch: record.subscription_epoch,
+                        };
+                        record.state = WorkState::Blocked;
+                        match record.dependency.as_ref() {
+                            Some(WorkDependency::Promise(promise)) => {
+                                exact_subscription = Some((promise.clone(), registration));
+                            }
+                            Some(_) => {
+                                state
+                                    .blocked_sparks
+                                    .entry(claimed.demand_session)
+                                    .or_default()
+                                    .insert(registration);
+                            }
+                            None => unreachable!("blocked spark work must retain its dependency"),
+                        }
+                    }
+                    None
                 }
-                None
             } else {
                 let record = state
                     .work
@@ -737,10 +800,28 @@ impl EvaluationWorkCoordinator {
                 detach_spark(&mut state, claimed.id)
             };
             state.work_generation = state.work_generation.wrapping_add(1);
-            (retired, obsolete_dependency, true)
+            (retired, obsolete_dependency, exact_subscription, true)
         };
+
+        let exact_woke = exact_subscription.is_some_and(|(promise, registration)| {
+            match promise.subscribe_spark(self.runtime, registration) {
+                CompletionSubscriptionOutcome::Pending => false,
+                CompletionSubscriptionOutcome::AlreadyTerminal => self
+                    .wake_dependency_batch_guarded(
+                        &mutation,
+                        DependencyWakeBatch {
+                            source: WorkDependencyKey::Promise(promise.id().get()),
+                            registrations: vec![registration],
+                            observed_generation: None,
+                        },
+                    ),
+                CompletionSubscriptionOutcome::ForeignRuntime => {
+                    unreachable!("foreign promise dependencies must be rejected before parking")
+                }
+            }
+        });
         drop(mutation);
-        if changed {
+        if changed || exact_woke {
             self.work_available.notify_all();
         }
         if let Some(dependency) = obsolete_dependency {
@@ -1119,7 +1200,8 @@ mod tests {
                 (registration, obsolete_dependency)
             };
 
-            let outcome = source.subscriptions.subscribe(
+            let outcome = source.subscriptions.subscribe_with(
+                self.runtime,
                 registration,
                 || source.is_terminal(),
                 before_insert,
@@ -1385,6 +1467,24 @@ mod tests {
         assert_eq!(source.subscriber_count(), 0);
         assert_eq!(coordinator.spark_work_counts(), (0, 1, 0));
         coordinator.release_spark(*claimed, SparkWorkPoll::Complete);
+        assert_eq!(coordinator.retained_spark_count(), 0);
+    }
+
+    #[test]
+    fn foreign_promise_dependency_retires_work_without_subscribing() {
+        let (coordinator, _executor, _session, claimed) = claimed_test_spark();
+        let foreign_values = crate::core::CoreValueFactory::new(
+            crate::runtime::allocate_evaluation_runtime_id(),
+            RuntimeIds::new(),
+        );
+        let promise = PromisedValue::new(&foreign_values, "foreign spark promise");
+
+        coordinator.release_spark(
+            claimed,
+            SparkWorkPoll::Blocked(WorkDependency::Promise(promise.clone())),
+        );
+
+        assert_eq!(promise.spark_subscription_count(), 0);
         assert_eq!(coordinator.retained_spark_count(), 0);
     }
 

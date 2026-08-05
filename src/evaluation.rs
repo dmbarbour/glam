@@ -23,17 +23,22 @@ use crate::runtime::{EvaluationRuntimeId, RuntimeValueRoot};
 
 mod coordinator;
 mod executor;
-pub(crate) use coordinator::{CompletionSubscriptions, EvaluationWorkCoordinator};
+pub(crate) use coordinator::{
+    CompletionSubscriptionOutcome, CompletionSubscriptions, EvaluationWorkCoordinator,
+    WakeRegistration,
+};
 pub(crate) use executor::EvaluationExecutor;
 
 #[cfg(test)]
 pub(crate) fn test_execution_resources(
     worker_count: usize,
 ) -> Result<(Arc<EvaluationWorkCoordinator>, Arc<EvaluationExecutor>), Arc<str>> {
-    let values = crate::core::test_value_factory();
+    let values = CoreValueFactory::new(
+        crate::runtime::allocate_evaluation_runtime_id(),
+        crate::runtime::RuntimeIds::new(),
+    );
     let admission = crate::runtime::RuntimeMutationAdmission::new();
-    let coordinator =
-        EvaluationWorkCoordinator::new(values.runtime_id(), values.ids().clone(), admission);
+    let coordinator = EvaluationWorkCoordinator::new_for_test(values, admission);
     let executor = EvaluationExecutor::new(worker_count, &coordinator)?;
     Ok((coordinator, executor))
 }
@@ -1016,7 +1021,7 @@ impl EvaluationSession {
     pub(crate) fn shared(coordinator: &Arc<EvaluationWorkCoordinator>) -> Arc<Self> {
         let session = Arc::new(Self::with_execution_resources(
             Arc::downgrade(coordinator),
-            crate::core::test_value_factory(),
+            coordinator.test_values(),
         ));
         coordinator.register_session(&session);
         session
@@ -1109,8 +1114,9 @@ impl EvaluationSession {
     fn notify_promise_changed(&self) {
         // Pair the notification with scheduler waits and collect any
         // task-owned promise records whose terminal cell won a publication
-        // race. The broad spark disturbance is temporary until every promise
-        // follower has a coordinator work ID.
+        // race. Coordinator-owned promise sparks subscribe directly; this
+        // broad disturbance remains for sparks parked on session-owned wait
+        // followers until wait tokens gain exact subscriptions.
         let mut tasks = self
             .tasks
             .lock()
@@ -4547,36 +4553,45 @@ mod tests {
         assert_eq!(coordinator.spark_work_counts(), expected, "{message}");
     }
 
+    fn park_next_spark(coordinator: &EvaluationWorkCoordinator) {
+        let coordinator::CoordinatorSelection::Spark(claimed) = coordinator.select() else {
+            panic!("the submitted promise spark should be claimable")
+        };
+        let session = claimed
+            .session()
+            .expect("the manually claimed spark should retain its demand session");
+        let halt = crate::eval::eval_value(&EvalContext::new(session), claimed.value().as_core())
+            .expect_err("the unresolved promise should park its spark follower");
+        let dependency = if let Some(wait) = halt.blocked_on() {
+            coordinator::WorkDependency::Wait(wait.0)
+        } else if let Some(promise) = halt.unassigned_promise() {
+            coordinator::WorkDependency::Promise(promise.clone())
+        } else {
+            panic!("an unresolved promise should expose a retryable dependency")
+        };
+        coordinator.release_spark(claimed, coordinator::SparkWorkPoll::Blocked(dependency));
+    }
+
     #[test]
-    fn one_promise_completion_wakes_followers_in_multiple_sessions() {
-        let (coordinator, _executor) = test_execution_resources(0).unwrap();
+    fn one_promise_completion_wakes_exact_sparks_in_multiple_sessions() {
+        let fixture = SameRuntimeFixture::new();
+        let left = fixture.context();
+        let right = fixture.context();
+        let coordinator = left
+            .session
+            .coordinator
+            .upgrade()
+            .expect("the fixture runtime should retain its coordinator");
         coordinator.executor_started(2);
-        let left = EvalContext::new(EvaluationSession::shared(&coordinator));
-        let right = EvalContext::new(EvaluationSession::shared(&coordinator));
         let promise = PromisedValue::new(left.values(), "shared host promise");
 
         for context in [&left, &right] {
             context.spark(Value::Promised(promise.clone()));
-            let coordinator::CoordinatorSelection::Spark(claimed) = coordinator.select() else {
-                panic!("each same-runtime session should expose its spark")
-            };
-            let session = claimed
-                .session()
-                .expect("the manually claimed spark should retain its demand session");
-            let halt =
-                crate::eval::eval_value(&EvalContext::new(session), claimed.value().as_core())
-                    .expect_err("the unresolved promise should park its spark follower");
-            let dependency = if let Some(wait) = halt.blocked_on() {
-                coordinator::WorkDependency::Wait(wait.0)
-            } else if let Some(promise) = halt.unassigned_promise() {
-                coordinator::WorkDependency::Promise(promise.clone())
-            } else {
-                panic!("an unresolved promise should expose a retryable dependency")
-            };
-            coordinator.release_spark(claimed, coordinator::SparkWorkPoll::Blocked(dependency));
+            park_next_spark(&coordinator);
         }
 
-        assert_eq!(promise.follower_count(), 2);
+        assert_eq!(promise.follower_count(), 0);
+        assert_eq!(promise.spark_subscription_count(), 2);
         assert_eq!(coordinator.spark_work_counts(), (0, 0, 2));
         promise
             .set(left.values().unit())
@@ -4593,6 +4608,86 @@ mod tests {
             };
             coordinator.release_spark(claimed, coordinator::SparkWorkPoll::Complete);
         }
+    }
+
+    #[test]
+    fn promise_completion_wakes_only_sparks_parked_on_that_promise() {
+        let fixture = SameRuntimeFixture::new();
+        let context = fixture.context();
+        let coordinator = context
+            .session
+            .coordinator
+            .upgrade()
+            .expect("the fixture runtime should retain its coordinator");
+        coordinator.executor_started(2);
+        let promise_a = PromisedValue::new(context.values(), "promise A");
+        let promise_b = PromisedValue::new(context.values(), "promise B");
+
+        context.spark(Value::Promised(promise_a.clone()));
+        park_next_spark(&coordinator);
+        context.spark(Value::Promised(promise_b.clone()));
+        park_next_spark(&coordinator);
+        assert_eq!(coordinator.spark_work_counts(), (0, 0, 2));
+
+        promise_a
+            .set(context.values().unit())
+            .expect("promise A should resolve once");
+        assert_eq!(coordinator.spark_work_counts(), (1, 0, 1));
+        assert_eq!(promise_b.spark_subscription_count(), 1);
+
+        let coordinator::CoordinatorSelection::Spark(claimed) = coordinator.select() else {
+            panic!("promise A should wake its own spark")
+        };
+        coordinator.release_spark(claimed, coordinator::SparkWorkPoll::Complete);
+        assert_eq!(coordinator.spark_work_counts(), (0, 0, 1));
+
+        promise_b
+            .set(context.values().unit())
+            .expect("promise B should resolve once");
+        assert_eq!(coordinator.spark_work_counts(), (1, 0, 0));
+        let coordinator::CoordinatorSelection::Spark(claimed) = coordinator.select() else {
+            panic!("promise B should wake its own spark")
+        };
+        coordinator.release_spark(claimed, coordinator::SparkWorkPoll::Complete);
+    }
+
+    #[test]
+    fn promise_completion_between_demand_and_subscription_requeues_the_spark() {
+        let fixture = SameRuntimeFixture::new();
+        let context = fixture.context();
+        let coordinator = context
+            .session
+            .coordinator
+            .upgrade()
+            .expect("the fixture runtime should retain its coordinator");
+        coordinator.executor_started(1);
+        let promise = PromisedValue::new(context.values(), "racing promise");
+        context.spark(Value::Promised(promise.clone()));
+
+        let coordinator::CoordinatorSelection::Spark(claimed) = coordinator.select() else {
+            panic!("the promise spark should be claimable")
+        };
+        let session = claimed
+            .session()
+            .expect("the manually claimed spark should retain its demand session");
+        let halt = crate::eval::eval_value(&EvalContext::new(session), claimed.value().as_core())
+            .expect_err("the unresolved promise should halt the spark");
+        let dependency = coordinator::WorkDependency::Promise(
+            halt.unassigned_promise()
+                .expect("the halt should preserve the promise")
+                .clone(),
+        );
+        promise
+            .set(context.values().unit())
+            .expect("the promise should resolve before subscription");
+
+        coordinator.release_spark(claimed, coordinator::SparkWorkPoll::Blocked(dependency));
+        assert_eq!(promise.spark_subscription_count(), 0);
+        assert_eq!(coordinator.spark_work_counts(), (1, 0, 0));
+        let coordinator::CoordinatorSelection::Spark(claimed) = coordinator.select() else {
+            panic!("terminal recheck should requeue the spark")
+        };
+        coordinator.release_spark(claimed, coordinator::SparkWorkPoll::Complete);
     }
 
     #[test]

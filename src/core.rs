@@ -14,8 +14,9 @@ use rpds::RedBlackTreeMapSync;
 
 use crate::core_net::{CoreDataKey, CoreRuntimeNet};
 use crate::evaluation::{
-    CompletionSubscriptions, EvalContext, EvaluationTaskHandle, EvaluationWorkCoordinator,
-    PromiseProducerObligation, PromiseSessionWake, ReflectionTaskResultPolicy,
+    CompletionSubscriptionOutcome, CompletionSubscriptions, EvalContext, EvaluationTaskHandle,
+    EvaluationWorkCoordinator, PromiseProducerObligation, PromiseSessionWake,
+    ReflectionTaskResultPolicy, WakeRegistration,
 };
 use crate::number::Number;
 use crate::runtime::{EvaluationRuntimeId, RuntimeIds, RuntimeValueRoot};
@@ -699,6 +700,16 @@ impl PromisedValue {
         true
     }
 
+    pub(crate) fn subscribe_spark(
+        &self,
+        runtime: EvaluationRuntimeId,
+        registration: WakeRegistration,
+    ) -> CompletionSubscriptionOutcome {
+        self.0
+            .completion
+            .subscribe(runtime, registration, || self.0.assignment.get().is_some())
+    }
+
     #[cfg(test)]
     pub(crate) fn follower_count(&self) -> usize {
         self.0
@@ -706,6 +717,11 @@ impl PromisedValue {
             .lock()
             .expect("promise follower set was poisoned")
             .len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn spark_subscription_count(&self) -> usize {
+        self.0.completion.len()
     }
 
     fn publish(&self, assignment: PromiseAssignment) -> Result<(), PromiseAssignment> {

@@ -5167,7 +5167,7 @@ fn spark_admission_drops_whnf_and_follows_completed_promises() {
     let net = closed_net(|builder| builder.data(n(1)));
     context.spark(Value::Net(net));
     context.spark(Value::Promised(PromisedValue::new(
-        &crate::core::test_value_factory(),
+        context.values(),
         "unassigned spark input",
     )));
     let promised_forces = Arc::new(AtomicUsize::new(0));
@@ -5180,7 +5180,7 @@ fn spark_admission_drops_whnf_and_follows_completed_promises() {
             Ok(n(7))
         },
     );
-    let promise = PromisedValue::new(&crate::core::test_value_factory(), "resolved spark input");
+    let promise = PromisedValue::new(context.values(), "resolved spark input");
     promise
         .set(Value::Lazy(promised_work.clone()))
         .expect("test promise should accept its one assignment");
@@ -5224,7 +5224,7 @@ fn spark_resumes_after_a_resolver_owned_promise_completes() {
         crate::evaluation::test_execution_resources(1).expect("test worker should start");
     let session = crate::evaluation::EvaluationSession::shared(&coordinator);
     let context = EvalContext::new(session);
-    let promise = PromisedValue::new(&crate::core::test_value_factory(), "later spark input");
+    let promise = PromisedValue::new(context.values(), "later spark input");
     context.spark(Value::Promised(promise.clone()));
     wait_for_blocked_sparks(
         &coordinator,
@@ -5270,7 +5270,7 @@ fn dropping_a_session_discards_its_blocked_sparks() {
         let session = crate::evaluation::EvaluationSession::shared(&coordinator);
         let context = EvalContext::new(session);
         context.spark(Value::Promised(PromisedValue::new(
-            &crate::core::test_value_factory(),
+            context.values(),
             "discarded blocked spark",
         )));
         wait_for_blocked_sparks(

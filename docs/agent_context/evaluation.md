@@ -166,10 +166,11 @@ control-flow overview.
   `PromiseResolver`. Its `PromisedValue` is a thin `Arc<PromiseCell>` whose
   terminal assignment is published once under shared runtime mutation
   admission. Resolving, failing, or dropping the resolver wakes every live
-  same-runtime session which actually observed the unresolved promise; those
-  follower targets are weak and deduplicated, so sharing a promise retains no
-  session. A rejected foreign-runtime resolution consumes the resolver but
-  leaves the promise unassigned and sends no wake.
+  same-runtime session whose task work actually observed the unresolved
+  promise; those follower targets are weak and deduplicated, so sharing a
+  promise retains no session. Parked spark work instead subscribes by its
+  stable work ID and subscription epoch. A rejected foreign-runtime resolution
+  consumes the resolver but leaves the promise unassigned and sends no wake.
 - `PromiseResolver::fail` accepts a complete diagnostic-style Glam value.
   Projection preserves its ad hoc fields and existing `msg.context`, prepending
   later evaluator-owned demand frames rather than replacing client context.
@@ -237,11 +238,12 @@ control-flow overview.
   the retained runtime-local dependency key before queueing; a stale wake does
   not advance work generation. Subscriber and coordinator mutexes are never
   nested, and notification occurs after shared runtime mutation admission is
-  released. Promise cells now own that exact subscriber component, but only
-  temporary weak session followers use their publication path; coordinator
-  spark registration arrives in the next slice. Wait cells have not yet
-  adopted the exact subscriber side, so broad session disturbance remains
-  active for both dependency kinds.
+  released. Promise cells own that exact subscriber component, and unresolved
+  spark demand registers with it directly. Spark contexts do not also install
+  the temporary weak session wake, so one promise cannot broadly wake work
+  parked on another. Wait cells have not yet adopted the exact subscriber side;
+  task followers still wake their session, and wait-token sparks retain broad
+  session disturbance until the next slice.
 - Coordinator transitions take shared runtime mutation admission and publish
   their own work generation before waking workers. They must not advance the
   semantic `RuntimeObservationEpoch`; otherwise ordinary scheduler churn can
@@ -255,9 +257,11 @@ control-flow overview.
 - A spark is best-effort background `seq` demand, not just execution of work
   directly owned by its outer value. Admit lazy values, promises, and sealed
   metadata, but not already-WHNF nets. Retryably blocked sparks park without
-  occupying workers and resume conservatively after their session changes;
-  session generation closes the completion-before-parking race. Session
-  teardown discards parked sparks.
+  occupying workers. Promise dependencies use exact source subscriptions;
+  wait-token dependencies still resume conservatively after their session
+  changes. Subscribe-and-recheck or the session generation, respectively,
+  closes the completion-before-parking race. Session teardown discards parked
+  sparks.
 - A divergent spark may occupy a worker indefinitely. Cooperative cancellation,
   evaluator fuel, and fine-grained wake indexes remain deliberate future work.
 - Claimed interaction-net pairs are live work, not quiescence. An observer must
