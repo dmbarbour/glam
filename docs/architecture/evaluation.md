@@ -24,14 +24,18 @@ it in runtime-owned state.
 Every production evaluator entry receives an `EvalContext` borrowed from an
 `EvaluationSession`. An `Assembler` and its clones share one internal
 `ReasoningSession`, which owns that evaluation session and the assembler's
-reflection host. `EvaluationSession` owns active reflection and deferred-value
-task records, wait lookup, a reference to the runtime-default annotation
-profile, and a persistent ledger of unacknowledged reflection failures.
+reflection host. `EvaluationSession` retains opaque reflection machine slots,
+deferred-value task records, wait lookup, a reference to the runtime-default
+annotation profile, and a persistent ledger of unacknowledged reflection
+failures. The session has no second reflection lifecycle state.
 
 The runtime-owned `EvaluationWorkCoordinator` owns session registration, the
 ready-session queue and de-duplication index, worker fairness, its work
 generation, the condition variable used to await work, and stable runtime-local
-spark records. Each spark record retains its demand value, dependency,
+reflection and spark records. Reflection records own reservation, queued,
+running, blocked, cancellation, and terminalization state; the session machine
+store can detach or restore a machine only with a coordinator claim. Each
+spark record retains its demand value, dependency,
 demand-session index, checked subscription epoch, and a close request while
 worker-owned. Parked indexes contain `(work ID, subscription epoch)` rather
 than bare IDs. A wake batch is accepted only while the record remains blocked
@@ -39,7 +43,10 @@ on both that epoch and the same runtime-local dependency key; stale completion,
 session teardown, and reblocking notifications are harmless. The attached
 `EvaluationExecutor` owns only worker activation, shutdown, and thread handles.
 Workers retain a weak coordinator attachment and claim either a ready session
-or spark record from it. Sessions retain only a weak coordinator link. The
+or spark record from it. During the work-boundary transition, a selected
+session then claims one exact coordinator-owned reflection work ID. Sessions
+retain their coordinator while their machine slots remain live; the
+coordinator retains sessions only weakly, so this does not form a cycle. The
 immutable reflection environment belongs to the active task host rather than
 either scheduling component.
 

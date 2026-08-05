@@ -13,13 +13,22 @@ use crate::runtime::{
     RuntimeValueRoot,
 };
 
-use super::{EvaluationSession, EvaluationSessionId, EvaluationWaitToken};
+use super::{
+    EvaluationFailure, EvaluationSession, EvaluationSessionId, EvaluationTaskId,
+    EvaluationWaitToken,
+};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EvaluationTaskBlock {
+    pub(crate) lazy: Option<EvaluationWaitToken>,
+    pub(crate) observed_generation: Option<u64>,
+    pub(crate) error: Option<Arc<EvaluationFailure>>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct EvaluationWorkId(NonZeroU64);
 
 impl EvaluationWorkId {
-    #[cfg(test)]
     pub(crate) fn get(self) -> u64 {
         self.0.get()
     }
@@ -206,12 +215,12 @@ pub(crate) enum CompletionSubscriptionOutcome {
 
 #[derive(Default)]
 struct WorkControl {
-    cancel_requested: bool,
     close_reason: Option<WorkCloseReason>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WorkCloseReason {
+    ExplicitCancellation,
     DemandSessionClosed,
     ExecutorShutdown,
 }
@@ -221,7 +230,10 @@ enum WorkCloseReason {
 #[derive(Default)]
 struct SettlementObligations;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WorkState {
+    Dormant,
+    Reserved,
     Queued,
     Running,
     Blocked,
@@ -300,6 +312,21 @@ struct SparkDemand {
     value: RuntimeValueRoot,
 }
 
+struct SparkWork {
+    demand: Option<SparkDemand>,
+    dependency: Option<WorkDependency>,
+}
+
+struct ReflectionWork {
+    task: EvaluationTaskId,
+    block: Option<EvaluationTaskBlock>,
+}
+
+enum WorkKind {
+    Spark(SparkWork),
+    Reflection(ReflectionWork),
+}
+
 struct WorkRecord {
     id: EvaluationWorkId,
     demand_session: EvaluationSessionId,
@@ -307,8 +334,7 @@ struct WorkRecord {
     control: WorkControl,
     obligations: SettlementObligations,
     state: WorkState,
-    demand: Option<SparkDemand>,
-    dependency: Option<WorkDependency>,
+    kind: WorkKind,
 }
 
 pub(super) struct ClaimedSparkWork {
@@ -316,6 +342,65 @@ pub(super) struct ClaimedSparkWork {
     demand_session: EvaluationSessionId,
     demand: SparkDemand,
     prior_dependency: Option<WorkDependency>,
+}
+
+pub(super) struct ClaimedReflectionWork {
+    id: EvaluationWorkId,
+    task: EvaluationTaskId,
+    demand_session: EvaluationSessionId,
+    prior_block: Option<EvaluationTaskBlock>,
+}
+
+impl ClaimedReflectionWork {
+    pub(super) fn id(&self) -> EvaluationWorkId {
+        self.id
+    }
+
+    pub(super) fn task(&self) -> EvaluationTaskId {
+        self.task
+    }
+}
+
+pub(super) enum ReflectionWorkPoll {
+    Yielded,
+    Blocked(EvaluationTaskBlock),
+    Terminal,
+}
+
+pub(super) struct ReflectionWorkRelease {
+    pub(super) made_progress: bool,
+    pub(super) remains_blocked: bool,
+    pub(super) terminal: bool,
+    pub(super) cancel: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ReflectionWorkState {
+    Dormant,
+    Reserved,
+    Queued,
+    Running,
+    Blocked(EvaluationTaskBlock),
+    Terminalizing,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ReflectionWorkSnapshot {
+    pub(super) task: EvaluationTaskId,
+    pub(super) state: ReflectionWorkState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ReflectionCancellation {
+    Requested,
+    Terminalize,
+    Late,
+}
+
+pub(super) struct AbandonedReflectionWork {
+    pub(super) id: EvaluationWorkId,
+    pub(super) task: EvaluationTaskId,
+    pub(super) cancel: bool,
 }
 
 impl ClaimedSparkWork {
@@ -357,6 +442,9 @@ struct WorkCoordinatorState {
     work_by_session: HashMap<EvaluationSessionId, HashSet<EvaluationWorkId>>,
     ready_sparks: VecDeque<EvaluationWorkId>,
     ready_spark_set: HashSet<EvaluationWorkId>,
+    ready_reflection: HashMap<EvaluationSessionId, VecDeque<EvaluationWorkId>>,
+    ready_reflection_set: HashSet<EvaluationWorkId>,
+    reflection_by_task: std::collections::BTreeMap<EvaluationTaskId, EvaluationWorkId>,
     spark_workers: usize,
     prefer_spark: bool,
     work_generation: u64,
@@ -470,6 +558,19 @@ impl EvaluationWorkCoordinator {
                 .ready_sessions
                 .retain(|candidate| *candidate != session);
 
+            debug_assert!(
+                state
+                    .work_by_session
+                    .get(&session)
+                    .into_iter()
+                    .flatten()
+                    .all(|id| state
+                        .work
+                        .get(id)
+                        .is_none_or(|record| !matches!(record.kind, WorkKind::Reflection(_)))),
+                "reflection work must be retired before its machine session unregisters"
+            );
+
             let work = state
                 .work_by_session
                 .get(&session)
@@ -479,6 +580,13 @@ impl EvaluationWorkCoordinator {
                 .collect::<Vec<_>>();
             let mut retired = Vec::new();
             for id in work {
+                if !state
+                    .work
+                    .get(&id)
+                    .is_some_and(|record| matches!(record.kind, WorkKind::Spark(_)))
+                {
+                    continue;
+                }
                 let is_running = state
                     .work
                     .get(&id)
@@ -488,9 +596,13 @@ impl EvaluationWorkCoordinator {
                         .work
                         .get_mut(&id)
                         .expect("indexed running spark work must remain registered");
-                    record.control.cancel_requested = true;
                     record.control.close_reason = Some(WorkCloseReason::DemandSessionClosed);
-                } else if let Some(record) = detach_spark(&mut state, id) {
+                } else if state
+                    .work
+                    .get(&id)
+                    .is_some_and(|record| matches!(record.kind, WorkKind::Spark(_)))
+                    && let Some(record) = detach_spark(&mut state, id)
+                {
                     retired.push(record);
                 }
             }
@@ -513,10 +625,11 @@ impl EvaluationWorkCoordinator {
                 .state
                 .lock()
                 .expect("evaluation work coordinator was poisoned");
-            if !state.sessions.contains_key(&session) || !state.ready_session_set.insert(session) {
+            if !state.sessions.contains_key(&session) || state.ready_session_set.contains(&session)
+            {
                 false
             } else {
-                state.ready_sessions.push_back(session);
+                queue_session(&mut state, session);
                 state.work_generation = state.work_generation.wrapping_add(1);
                 true
             }
@@ -551,8 +664,10 @@ impl EvaluationWorkCoordinator {
                     control: WorkControl::default(),
                     obligations: SettlementObligations,
                     state: WorkState::Queued,
-                    demand: Some(demand),
-                    dependency: None,
+                    kind: WorkKind::Spark(SparkWork {
+                        demand: Some(demand),
+                        dependency: None,
+                    }),
                 };
                 assert!(state.work.insert(id, record).is_none());
                 state
@@ -588,6 +703,13 @@ impl EvaluationWorkCoordinator {
             let ids = state.work.keys().copied().collect::<Vec<_>>();
             let mut retired = Vec::new();
             for id in ids {
+                if !state
+                    .work
+                    .get(&id)
+                    .is_some_and(|record| matches!(record.kind, WorkKind::Spark(_)))
+                {
+                    continue;
+                }
                 let is_running = state
                     .work
                     .get(&id)
@@ -597,9 +719,13 @@ impl EvaluationWorkCoordinator {
                         .work
                         .get_mut(&id)
                         .expect("running spark work must remain registered");
-                    record.control.cancel_requested = true;
                     record.control.close_reason = Some(WorkCloseReason::ExecutorShutdown);
-                } else if let Some(record) = detach_spark(&mut state, id) {
+                } else if state
+                    .work
+                    .get(&id)
+                    .is_some_and(|record| matches!(record.kind, WorkKind::Spark(_)))
+                    && let Some(record) = detach_spark(&mut state, id)
+                {
                     retired.push(record);
                 }
             }
@@ -681,8 +807,7 @@ impl EvaluationWorkCoordinator {
             assert_eq!(record.id, claimed.id);
             assert_eq!(record.demand_session, claimed.demand_session);
             assert!(matches!(record.state, WorkState::Running));
-            let close_requested =
-                record.control.cancel_requested || record.control.close_reason.is_some();
+            let close_requested = record.control.close_reason.is_some();
 
             let mut obsolete_dependency = None;
             let mut exact_subscription = None;
@@ -706,8 +831,9 @@ impl EvaluationWorkCoordinator {
                     .work
                     .get_mut(&claimed.id)
                     .expect("running spark work must remain registered");
-                record.demand = Some(claimed.demand);
-                record.dependency = dependency;
+                let spark = spark_work_mut(record);
+                spark.demand = Some(claimed.demand);
+                spark.dependency = dependency;
                 record.state = WorkState::Terminalizing;
                 detach_spark(&mut state, claimed.id)
             } else if let Some(dependency) = dependency {
@@ -717,8 +843,9 @@ impl EvaluationWorkCoordinator {
                         .work
                         .get_mut(&claimed.id)
                         .expect("running spark work must remain registered");
-                    record.demand = Some(claimed.demand);
-                    record.dependency = Some(dependency);
+                    let spark = spark_work_mut(record);
+                    spark.demand = Some(claimed.demand);
+                    spark.dependency = Some(dependency);
                     record.state = WorkState::Terminalizing;
                     detach_spark(&mut state, claimed.id)
                 } else {
@@ -737,8 +864,9 @@ impl EvaluationWorkCoordinator {
                         .work
                         .get_mut(&claimed.id)
                         .expect("running spark work must remain registered");
-                    record.demand = Some(claimed.demand);
-                    record.dependency = dependency;
+                    let spark = spark_work_mut(record);
+                    spark.demand = Some(claimed.demand);
+                    spark.dependency = dependency;
                     record.subscription_epoch = record
                         .subscription_epoch
                         .checked_add(1)
@@ -749,7 +877,7 @@ impl EvaluationWorkCoordinator {
                     };
                     record.state = WorkState::Blocked;
                     exact_subscription = Some((
-                        record
+                        spark_work(record)
                             .dependency
                             .as_ref()
                             .expect("blocked spark work must retain its dependency")
@@ -763,8 +891,9 @@ impl EvaluationWorkCoordinator {
                     .work
                     .get_mut(&claimed.id)
                     .expect("running spark work must remain registered");
-                record.demand = Some(claimed.demand);
-                record.dependency = claimed.prior_dependency;
+                let spark = spark_work_mut(record);
+                spark.demand = Some(claimed.demand);
+                spark.dependency = claimed.prior_dependency;
                 record.state = WorkState::Terminalizing;
                 detach_spark(&mut state, claimed.id)
             };
@@ -798,6 +927,497 @@ impl EvaluationWorkCoordinator {
         if let Some(record) = retired {
             record.abandon();
         }
+    }
+
+    pub(super) fn reserve_reflection(
+        &self,
+        session: &Arc<EvaluationSession>,
+        task: EvaluationTaskId,
+    ) -> EvaluationWorkId {
+        self.insert_reflection(session, task, WorkState::Reserved)
+    }
+
+    pub(super) fn register_dormant_reflection(
+        &self,
+        session: &Arc<EvaluationSession>,
+        task: EvaluationTaskId,
+    ) -> EvaluationWorkId {
+        self.insert_reflection(session, task, WorkState::Dormant)
+    }
+
+    fn insert_reflection(
+        &self,
+        session: &Arc<EvaluationSession>,
+        task: EvaluationTaskId,
+        initial: WorkState,
+    ) -> EvaluationWorkId {
+        debug_assert_eq!(session.values.runtime_id(), self.runtime);
+        debug_assert!(matches!(initial, WorkState::Dormant | WorkState::Reserved));
+        let id = EvaluationWorkId(self.ids.evaluation_work());
+        let mutation = self.admission.mutation_guard();
+        {
+            let mut state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            assert!(
+                state.sessions.contains_key(&session.id),
+                "reflection work requires a registered demand session"
+            );
+            let record = WorkRecord {
+                id,
+                demand_session: session.id,
+                subscription_epoch: 0,
+                control: WorkControl::default(),
+                obligations: SettlementObligations,
+                state: initial,
+                kind: WorkKind::Reflection(ReflectionWork { task, block: None }),
+            };
+            assert!(state.work.insert(id, record).is_none());
+            assert!(state.reflection_by_task.insert(task, id).is_none());
+            state
+                .work_by_session
+                .entry(session.id)
+                .or_default()
+                .insert(id);
+            state.work_generation = state.work_generation.wrapping_add(1);
+        }
+        drop(mutation);
+        self.work_available.notify_all();
+        id
+    }
+
+    pub(super) fn activate_reflection(&self, id: EvaluationWorkId) -> bool {
+        let mutation = self.admission.mutation_guard();
+        let activated = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            let Some(record) = state.work.get_mut(&id) else {
+                return false;
+            };
+            if !matches!(record.kind, WorkKind::Reflection(_))
+                || !matches!(record.state, WorkState::Reserved)
+            {
+                return false;
+            }
+            record.state = WorkState::Queued;
+            queue_reflection(&mut state, id);
+            state.work_generation = state.work_generation.wrapping_add(1);
+            true
+        };
+        drop(mutation);
+        if activated {
+            self.work_available.notify_all();
+        }
+        activated
+    }
+
+    pub(super) fn terminalize_reserved_reflection(&self, id: EvaluationWorkId) -> bool {
+        self.begin_reflection_terminalization(id, Some(WorkState::Reserved))
+    }
+
+    #[cfg(test)]
+    pub(super) fn terminalize_reflection(&self, id: EvaluationWorkId) -> bool {
+        self.begin_reflection_terminalization(id, None)
+    }
+
+    pub(super) fn discard_reserved_reflection(&self, id: EvaluationWorkId) -> bool {
+        let mutation = self.admission.mutation_guard();
+        let discarded = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            let reserved = state.work.get(&id).is_some_and(|record| {
+                matches!(record.kind, WorkKind::Reflection(_))
+                    && matches!(record.state, WorkState::Reserved)
+            });
+            if !reserved {
+                false
+            } else {
+                detach_reflection(&mut state, id);
+                state.work_generation = state.work_generation.wrapping_add(1);
+                true
+            }
+        };
+        drop(mutation);
+        if discarded {
+            self.work_available.notify_all();
+        }
+        discarded
+    }
+
+    fn begin_reflection_terminalization(
+        &self,
+        id: EvaluationWorkId,
+        required: Option<WorkState>,
+    ) -> bool {
+        let mutation = self.admission.mutation_guard();
+        let terminalizing = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            let Some(record) = state.work.get_mut(&id) else {
+                return false;
+            };
+            if !matches!(record.kind, WorkKind::Reflection(_))
+                || required
+                    .as_ref()
+                    .is_some_and(|required| record.state != *required)
+            {
+                return false;
+            }
+            assert!(
+                !matches!(record.state, WorkState::Running),
+                "running reflection work requires a release transition"
+            );
+            record.state = WorkState::Terminalizing;
+            remove_ready_reflection(&mut state, id);
+            state.work_generation = state.work_generation.wrapping_add(1);
+            true
+        };
+        drop(mutation);
+        if terminalizing {
+            self.work_available.notify_all();
+        }
+        terminalizing
+    }
+
+    pub(super) fn request_reflection_cancellation(
+        &self,
+        id: EvaluationWorkId,
+    ) -> ReflectionCancellation {
+        let mutation = self.admission.mutation_guard();
+        let outcome = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            let Some(record) = state.work.get_mut(&id) else {
+                return ReflectionCancellation::Late;
+            };
+            if !matches!(record.kind, WorkKind::Reflection(_)) {
+                return ReflectionCancellation::Late;
+            }
+            match record.state {
+                WorkState::Running => {
+                    record
+                        .control
+                        .close_reason
+                        .get_or_insert(WorkCloseReason::ExplicitCancellation);
+                    ReflectionCancellation::Requested
+                }
+                WorkState::Dormant
+                | WorkState::Reserved
+                | WorkState::Queued
+                | WorkState::Blocked => {
+                    record
+                        .control
+                        .close_reason
+                        .get_or_insert(WorkCloseReason::ExplicitCancellation);
+                    record.state = WorkState::Terminalizing;
+                    remove_ready_reflection(&mut state, id);
+                    ReflectionCancellation::Terminalize
+                }
+                WorkState::Terminalizing => ReflectionCancellation::Late,
+            }
+        };
+        drop(mutation);
+        if !matches!(outcome, ReflectionCancellation::Late) {
+            self.work_available.notify_all();
+        }
+        outcome
+    }
+
+    /// Moves every non-running reflection task owned by `session` into the
+    /// terminalization handshake. A running task retains the session through
+    /// its detached machine context, so observing one here would violate the
+    /// session lifetime invariant.
+    pub(super) fn abandon_reflection_session(
+        &self,
+        session: EvaluationSessionId,
+    ) -> Vec<AbandonedReflectionWork> {
+        let mutation = self.admission.mutation_guard();
+        let abandoned = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            let ids = state
+                .work_by_session
+                .get(&session)
+                .into_iter()
+                .flatten()
+                .copied()
+                .collect::<Vec<_>>();
+            let mut abandoned = Vec::new();
+            for id in ids {
+                let Some(record) = state.work.get(&id) else {
+                    continue;
+                };
+                if !matches!(record.kind, WorkKind::Reflection(_)) {
+                    continue;
+                }
+                assert!(
+                    !matches!(record.state, WorkState::Running),
+                    "a detached reflection machine must retain its evaluation session"
+                );
+                let task = reflection_work(record).task;
+                let cancel = matches!(
+                    record.control.close_reason,
+                    Some(WorkCloseReason::ExplicitCancellation)
+                );
+                let record = state
+                    .work
+                    .get_mut(&id)
+                    .expect("indexed reflection work must remain registered");
+                record.control.close_reason.get_or_insert(if cancel {
+                    WorkCloseReason::ExplicitCancellation
+                } else {
+                    WorkCloseReason::DemandSessionClosed
+                });
+                record.state = WorkState::Terminalizing;
+                remove_ready_reflection(&mut state, id);
+                abandoned.push(AbandonedReflectionWork { id, task, cancel });
+            }
+            if !abandoned.is_empty() {
+                state.work_generation = state.work_generation.wrapping_add(1);
+            }
+            abandoned
+        };
+        drop(mutation);
+        if !abandoned.is_empty() {
+            self.work_available.notify_all();
+        }
+        abandoned
+    }
+
+    pub(super) fn claim_ready_reflection(
+        &self,
+        session: EvaluationSessionId,
+    ) -> Option<ClaimedReflectionWork> {
+        let mutation = self.admission.mutation_guard();
+        let claimed = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            let claimed = claim_ready_reflection(&mut state, session);
+            if claimed.is_some() {
+                state.work_generation = state.work_generation.wrapping_add(1);
+            }
+            claimed
+        };
+        drop(mutation);
+        if claimed.is_some() {
+            self.work_available.notify_all();
+        }
+        claimed
+    }
+
+    pub(super) fn claim_reflection(&self, id: EvaluationWorkId) -> Option<ClaimedReflectionWork> {
+        let mutation = self.admission.mutation_guard();
+        let claimed = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            let claimed = claim_reflection(&mut state, id);
+            if claimed.is_some() {
+                state.work_generation = state.work_generation.wrapping_add(1);
+            }
+            claimed
+        };
+        drop(mutation);
+        if claimed.is_some() {
+            self.work_available.notify_all();
+        }
+        claimed
+    }
+
+    pub(super) fn claim_blocked_reflection(
+        &self,
+        session: EvaluationSessionId,
+        attempted: &HashSet<EvaluationTaskId>,
+    ) -> Option<ClaimedReflectionWork> {
+        let id = {
+            let state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            state.reflection_by_task.iter().find_map(|(task, id)| {
+                let record = state.work.get(id)?;
+                (record.demand_session == session
+                    && matches!(record.state, WorkState::Blocked)
+                    && !attempted.contains(task))
+                .then_some(*id)
+            })
+        }?;
+        self.claim_reflection(id)
+    }
+
+    pub(super) fn release_reflection(
+        &self,
+        claimed: ClaimedReflectionWork,
+        poll: ReflectionWorkPoll,
+    ) -> ReflectionWorkRelease {
+        let mutation = self.admission.mutation_guard();
+        let release = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            let cancel = {
+                let record = state
+                    .work
+                    .get(&claimed.id)
+                    .expect("claimed reflection work must remain registered");
+                assert_eq!(record.demand_session, claimed.demand_session);
+                assert_eq!(reflection_work(record).task, claimed.task);
+                assert!(matches!(record.state, WorkState::Running));
+                matches!(
+                    record.control.close_reason,
+                    Some(WorkCloseReason::ExplicitCancellation)
+                )
+            };
+            let (state_after, block, made_progress, remains_blocked, terminal) = if cancel {
+                (WorkState::Terminalizing, None, true, false, true)
+            } else {
+                match poll {
+                    ReflectionWorkPoll::Yielded => (WorkState::Queued, None, true, false, false),
+                    ReflectionWorkPoll::Blocked(block) => {
+                        let unchanged = claimed.prior_block.as_ref() == Some(&block);
+                        (WorkState::Blocked, Some(block), !unchanged, true, false)
+                    }
+                    ReflectionWorkPoll::Terminal => {
+                        (WorkState::Terminalizing, None, true, false, true)
+                    }
+                }
+            };
+            {
+                let record = state
+                    .work
+                    .get_mut(&claimed.id)
+                    .expect("claimed reflection work must remain registered");
+                reflection_work_mut(record).block = block;
+                record.state = state_after;
+            }
+            if matches!(state_after, WorkState::Queued) {
+                queue_reflection(&mut state, claimed.id);
+            }
+            state.work_generation = state.work_generation.wrapping_add(1);
+            ReflectionWorkRelease {
+                made_progress,
+                remains_blocked,
+                terminal,
+                cancel,
+            }
+        };
+        drop(mutation);
+        self.work_available.notify_all();
+        release
+    }
+
+    pub(super) fn retire_reflection(&self, id: EvaluationWorkId) {
+        let mutation = self.admission.mutation_guard();
+        {
+            let mut state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            let record = state
+                .work
+                .get(&id)
+                .expect("terminal reflection work must remain registered");
+            assert!(matches!(record.state, WorkState::Terminalizing));
+            detach_reflection(&mut state, id);
+            state.work_generation = state.work_generation.wrapping_add(1);
+        }
+        drop(mutation);
+        self.work_available.notify_all();
+    }
+
+    pub(super) fn reflection_work_id(&self, task: EvaluationTaskId) -> Option<EvaluationWorkId> {
+        self.state
+            .lock()
+            .expect("evaluation work coordinator was poisoned")
+            .reflection_by_task
+            .get(&task)
+            .copied()
+    }
+
+    pub(super) fn reflection_dependency(
+        &self,
+        task: EvaluationTaskId,
+    ) -> Option<EvaluationWaitToken> {
+        let state = self
+            .state
+            .lock()
+            .expect("evaluation work coordinator was poisoned");
+        let id = state.reflection_by_task.get(&task)?;
+        let record = state.work.get(id)?;
+        reflection_work(record)
+            .block
+            .as_ref()
+            .and_then(|block| block.lazy.clone())
+    }
+
+    pub(super) fn reflection_is_claimable(
+        &self,
+        task: EvaluationTaskId,
+        attempted: &HashSet<EvaluationTaskId>,
+    ) -> bool {
+        if attempted.contains(&task) {
+            return false;
+        }
+        let state = self
+            .state
+            .lock()
+            .expect("evaluation work coordinator was poisoned");
+        let Some(id) = state.reflection_by_task.get(&task) else {
+            return false;
+        };
+        state
+            .work
+            .get(id)
+            .is_some_and(|record| matches!(record.state, WorkState::Queued | WorkState::Blocked))
+    }
+
+    pub(super) fn reflection_is_busy(&self, task: EvaluationTaskId) -> bool {
+        let state = self
+            .state
+            .lock()
+            .expect("evaluation work coordinator was poisoned");
+        let Some(id) = state.reflection_by_task.get(&task) else {
+            return false;
+        };
+        state.work.get(id).is_some_and(|record| {
+            matches!(record.state, WorkState::Running | WorkState::Terminalizing)
+        })
+    }
+
+    pub(super) fn reflection_snapshots(
+        &self,
+        session: EvaluationSessionId,
+    ) -> Vec<ReflectionWorkSnapshot> {
+        let state = self
+            .state
+            .lock()
+            .expect("evaluation work coordinator was poisoned");
+        state
+            .reflection_by_task
+            .iter()
+            .filter_map(|(task, id)| {
+                let record = state.work.get(id)?;
+                (record.demand_session == session).then(|| ReflectionWorkSnapshot {
+                    task: *task,
+                    state: reflection_state(record),
+                })
+            })
+            .collect()
     }
 
     pub(super) fn wait_for_change(&self, observed_generation: u64) {
@@ -884,11 +1504,14 @@ impl EvaluationWorkCoordinator {
         let mut running = 0;
         let mut blocked = 0;
         for record in state.work.values() {
+            if !matches!(record.kind, WorkKind::Spark(_)) {
+                continue;
+            }
             match record.state {
                 WorkState::Queued => queued += 1,
                 WorkState::Running => running += 1,
                 WorkState::Blocked => blocked += 1,
-                WorkState::Terminalizing => {}
+                WorkState::Dormant | WorkState::Reserved | WorkState::Terminalizing => {}
             }
         }
         (queued, running, blocked)
@@ -900,7 +1523,169 @@ impl EvaluationWorkCoordinator {
             .lock()
             .expect("evaluation work coordinator was poisoned")
             .work
-            .len()
+            .values()
+            .filter(|record| matches!(record.kind, WorkKind::Spark(_)))
+            .count()
+    }
+}
+
+fn spark_work(record: &WorkRecord) -> &SparkWork {
+    match &record.kind {
+        WorkKind::Spark(work) => work,
+        WorkKind::Reflection(_) => panic!("reflection work cannot be used as a spark"),
+    }
+}
+
+fn spark_work_mut(record: &mut WorkRecord) -> &mut SparkWork {
+    match &mut record.kind {
+        WorkKind::Spark(work) => work,
+        WorkKind::Reflection(_) => panic!("reflection work cannot be used as a spark"),
+    }
+}
+
+fn reflection_work(record: &WorkRecord) -> &ReflectionWork {
+    match &record.kind {
+        WorkKind::Reflection(work) => work,
+        WorkKind::Spark(_) => panic!("spark work cannot be used as a reflection task"),
+    }
+}
+
+fn reflection_work_mut(record: &mut WorkRecord) -> &mut ReflectionWork {
+    match &mut record.kind {
+        WorkKind::Reflection(work) => work,
+        WorkKind::Spark(_) => panic!("spark work cannot be used as a reflection task"),
+    }
+}
+
+fn queue_session(state: &mut WorkCoordinatorState, session: EvaluationSessionId) {
+    if state.sessions.contains_key(&session) && state.ready_session_set.insert(session) {
+        state.ready_sessions.push_back(session);
+    }
+}
+
+fn queue_reflection(state: &mut WorkCoordinatorState, id: EvaluationWorkId) {
+    let session = state
+        .work
+        .get(&id)
+        .expect("queued reflection work must remain registered")
+        .demand_session;
+    if state.ready_reflection_set.insert(id) {
+        state
+            .ready_reflection
+            .entry(session)
+            .or_default()
+            .push_back(id);
+    }
+    queue_session(state, session);
+}
+
+fn remove_ready_reflection(state: &mut WorkCoordinatorState, id: EvaluationWorkId) {
+    state.ready_reflection_set.remove(&id);
+    let Some(session) = state.work.get(&id).map(|record| record.demand_session) else {
+        return;
+    };
+    if let Some(ready) = state.ready_reflection.get_mut(&session) {
+        ready.retain(|candidate| *candidate != id);
+        if ready.is_empty() {
+            state.ready_reflection.remove(&session);
+            state.ready_session_set.remove(&session);
+            state
+                .ready_sessions
+                .retain(|candidate| *candidate != session);
+        }
+    }
+}
+
+fn claim_ready_reflection(
+    state: &mut WorkCoordinatorState,
+    session: EvaluationSessionId,
+) -> Option<ClaimedReflectionWork> {
+    loop {
+        let id = state
+            .ready_reflection
+            .get_mut(&session)
+            .and_then(VecDeque::pop_front)?;
+        state.ready_reflection_set.remove(&id);
+        if state
+            .ready_reflection
+            .get(&session)
+            .is_some_and(VecDeque::is_empty)
+        {
+            state.ready_reflection.remove(&session);
+        }
+        if let Some(claimed) = claim_reflection(state, id) {
+            if state
+                .ready_reflection
+                .get(&session)
+                .is_some_and(|ready| !ready.is_empty())
+            {
+                queue_session(state, session);
+            }
+            return Some(claimed);
+        }
+    }
+}
+
+fn claim_reflection(
+    state: &mut WorkCoordinatorState,
+    id: EvaluationWorkId,
+) -> Option<ClaimedReflectionWork> {
+    let (task, demand_session, prior_block) = {
+        let record = state.work.get_mut(&id)?;
+        if !matches!(record.kind, WorkKind::Reflection(_))
+            || !matches!(record.state, WorkState::Queued | WorkState::Blocked)
+        {
+            return None;
+        }
+        record.state = WorkState::Running;
+        let demand_session = record.demand_session;
+        let reflection = reflection_work_mut(record);
+        (reflection.task, demand_session, reflection.block.take())
+    };
+    remove_ready_reflection(state, id);
+    Some(ClaimedReflectionWork {
+        id,
+        task,
+        demand_session,
+        prior_block,
+    })
+}
+
+fn reflection_state(record: &WorkRecord) -> ReflectionWorkState {
+    match record.state {
+        WorkState::Dormant => ReflectionWorkState::Dormant,
+        WorkState::Reserved => ReflectionWorkState::Reserved,
+        WorkState::Queued => ReflectionWorkState::Queued,
+        WorkState::Running => ReflectionWorkState::Running,
+        WorkState::Blocked => ReflectionWorkState::Blocked(
+            reflection_work(record)
+                .block
+                .clone()
+                .expect("blocked reflection work must retain its block"),
+        ),
+        WorkState::Terminalizing => ReflectionWorkState::Terminalizing,
+    }
+}
+
+fn detach_reflection(state: &mut WorkCoordinatorState, id: EvaluationWorkId) {
+    remove_ready_reflection(state, id);
+    let record = state
+        .work
+        .remove(&id)
+        .expect("retired reflection work must remain registered");
+    let WorkKind::Reflection(reflection) = record.kind else {
+        panic!("reflection retirement must contain reflection work")
+    };
+    assert_eq!(
+        state.reflection_by_task.remove(&reflection.task),
+        Some(id),
+        "reflection task index must agree with its work record"
+    );
+    if let Some(session_work) = state.work_by_session.get_mut(&record.demand_session) {
+        session_work.remove(&id);
+        if session_work.is_empty() {
+            state.work_by_session.remove(&record.demand_session);
+        }
     }
 }
 
@@ -922,7 +1707,7 @@ fn queue_current_registration(
         if !matches!(record.state, WorkState::Blocked)
             || record.subscription_epoch != registration.subscription_epoch
             || source.is_some_and(|source| {
-                record
+                spark_work(record)
                     .dependency
                     .as_ref()
                     .is_none_or(|dependency| dependency.key() != source)
@@ -946,11 +1731,12 @@ fn claim_ready_spark(state: &mut WorkCoordinatorState) -> Option<ClaimedSparkWor
             continue;
         }
         record.state = WorkState::Running;
-        let demand = record
+        let spark = spark_work_mut(record);
+        let demand = spark
             .demand
             .take()
             .expect("queued spark work must retain its demand");
-        let prior_dependency = record.dependency.take();
+        let prior_dependency = spark.dependency.take();
         return Some(ClaimedSparkWork {
             id,
             demand_session: record.demand_session,
@@ -968,7 +1754,7 @@ fn detach_spark(state: &mut WorkCoordinatorState, id: EvaluationWorkId) -> Optio
         "worker-owned spark work cannot be detached"
     );
     record.state = WorkState::Terminalizing;
-    let mut record = state
+    let record = state
         .work
         .remove(&id)
         .expect("terminalizing spark work must remain registered");
@@ -980,12 +1766,15 @@ fn detach_spark(state: &mut WorkCoordinatorState, id: EvaluationWorkId) -> Optio
             state.work_by_session.remove(&record.demand_session);
         }
     }
+    let WorkKind::Spark(mut spark) = record.kind else {
+        unreachable!("spark retirement must contain spark work")
+    };
     Some(SparkRetirement {
-        demand: record
+        demand: spark
             .demand
             .take()
             .expect("non-running spark work must retain its demand"),
-        dependencies: record.dependency.take().into_iter().collect(),
+        dependencies: spark.dependency.take().into_iter().collect(),
         _obligations: record.obligations,
     })
 }
@@ -1096,7 +1885,6 @@ mod tests {
                 assert_eq!(record.id, claimed.id);
                 assert_eq!(record.demand_session, claimed.demand_session);
                 assert!(matches!(record.state, WorkState::Running));
-                assert!(!record.control.cancel_requested);
                 assert!(record.control.close_reason.is_none());
 
                 let current_dependency = source.dependency();
@@ -1114,8 +1902,9 @@ mod tests {
                     .work
                     .get_mut(&claimed.id)
                     .expect("claimed test spark work must remain registered");
-                record.demand = Some(claimed.demand);
-                record.dependency = dependency;
+                let spark = spark_work_mut(record);
+                spark.demand = Some(claimed.demand);
+                spark.dependency = dependency;
                 record.subscription_epoch = record
                     .subscription_epoch
                     .checked_add(1)
@@ -1455,6 +2244,104 @@ mod tests {
         drop(selected);
         drop(session);
         assert_eq!(coordinator.registered_session_count(), 0);
+    }
+
+    #[test]
+    fn coordinator_owns_the_reflection_lifecycle() {
+        let (coordinator, _executor) = super::super::test_execution_resources(0)
+            .expect("test execution resources should build");
+        let session = EvaluationSession::shared(&coordinator);
+        let task = super::super::allocate_task_id(&session.values)
+            .expect("reflection task identity should allocate");
+        let work = coordinator.reserve_reflection(&session, task);
+        assert_eq!(
+            coordinator.reflection_snapshots(session.id),
+            vec![ReflectionWorkSnapshot {
+                task,
+                state: ReflectionWorkState::Reserved,
+            }]
+        );
+
+        assert!(coordinator.activate_reflection(work));
+        assert!(matches!(
+            coordinator.reflection_snapshots(session.id).as_slice(),
+            [ReflectionWorkSnapshot {
+                state: ReflectionWorkState::Queued,
+                ..
+            }]
+        ));
+
+        let claimed = coordinator
+            .claim_ready_reflection(session.id)
+            .expect("queued reflection work should be claimable");
+        assert_eq!(claimed.id(), work);
+        assert!(matches!(
+            coordinator.reflection_snapshots(session.id).as_slice(),
+            [ReflectionWorkSnapshot {
+                state: ReflectionWorkState::Running,
+                ..
+            }]
+        ));
+
+        let block = EvaluationTaskBlock {
+            lazy: None,
+            observed_generation: Some(7),
+            error: None,
+        };
+        let release =
+            coordinator.release_reflection(claimed, ReflectionWorkPoll::Blocked(block.clone()));
+        assert!(release.made_progress);
+        assert!(release.remains_blocked);
+        assert!(!release.terminal);
+        assert_eq!(
+            coordinator.reflection_snapshots(session.id),
+            vec![ReflectionWorkSnapshot {
+                task,
+                state: ReflectionWorkState::Blocked(block),
+            }]
+        );
+
+        let claimed = coordinator
+            .claim_blocked_reflection(session.id, &HashSet::new())
+            .expect("blocked reflection work should be retryable");
+        let release = coordinator.release_reflection(claimed, ReflectionWorkPoll::Terminal);
+        assert!(release.terminal);
+        assert!(matches!(
+            coordinator.reflection_snapshots(session.id).as_slice(),
+            [ReflectionWorkSnapshot {
+                state: ReflectionWorkState::Terminalizing,
+                ..
+            }]
+        ));
+        coordinator.retire_reflection(work);
+        assert!(coordinator.reflection_snapshots(session.id).is_empty());
+    }
+
+    #[test]
+    fn coordinator_cancels_reflection_reservations_without_polling() {
+        let (coordinator, _executor) = super::super::test_execution_resources(0)
+            .expect("test execution resources should build");
+        let session = EvaluationSession::shared(&coordinator);
+        let task = super::super::allocate_task_id(&session.values)
+            .expect("reflection task identity should allocate");
+        let work = coordinator.reserve_reflection(&session, task);
+
+        assert_eq!(
+            coordinator.request_reflection_cancellation(work),
+            ReflectionCancellation::Terminalize
+        );
+        assert!(matches!(
+            coordinator.reflection_snapshots(session.id).as_slice(),
+            [ReflectionWorkSnapshot {
+                state: ReflectionWorkState::Terminalizing,
+                ..
+            }]
+        ));
+        coordinator.retire_reflection(work);
+        assert_eq!(
+            coordinator.request_reflection_cancellation(work),
+            ReflectionCancellation::Late
+        );
     }
 
     #[test]

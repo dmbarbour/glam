@@ -192,12 +192,15 @@ reflection API.
 
 ## Session Scheduling
 
-`EvaluationSession` stores type-erased machines and a FIFO ready queue. A pump
-claims a machine under the session mutex, polls it without the mutex, then
-records its queued, blocked, or terminal state. Exact lazy wait tokens allow it
-to prioritize a known producer chain. Coarse host generations currently wake
-state observations; path journals decide whether an optimistic heap commit
-must retry.
+`EvaluationSession` stores type-erased reflection machine slots and the still-
+transitional deferred producer records. The runtime coordinator owns each
+reflection task's reservation, queued, running, blocked, cancellation, and
+terminalization state. It marks work running before the session detaches the
+corresponding machine; release restores a retained machine before the
+coordinator makes it claimable again. Neither mutex is held while acquiring
+the other. Exact lazy wait tokens still let the serial pump prioritize a known
+producer chain. Coarse host generations currently wake state observations;
+path journals decide whether an optimistic heap commit must retry.
 
 Foreground evaluation pumps only tasks needed by the lazy value it is trying
 to observe. Shared workers may opportunistically poll any ready task. Explicit

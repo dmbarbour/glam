@@ -48,7 +48,7 @@ not define future language semantics or collect subsystem invariants.
 | `core_net.rs` | Core data/operator specialization of generic interaction nets |
 | `interaction_net/model.rs`, `builder.rs` | Generic identities, agents, specialization protocol, and checked construction |
 | `interaction_net/runtime/` | Mutable graph, active-pair rewrites, cursors, and runtime tests |
-| `evaluation.rs`, `evaluation/coordinator.rs`, `evaluation/executor.rs` | Session task records, runtime-owned spark work, coordination, and worker lifecycle |
+| `evaluation.rs`, `evaluation/coordinator.rs`, `evaluation/executor.rs` | Session machine/deferred records, runtime-owned reflection and spark work, coordination, and worker lifecycle |
 | `eval/value.rs`, `application.rs`, `operator.rs`, `net.rs` | Value forcing, application, operator staging, and net driving |
 | `eval/builtins/` | Builtin implementations split by semantic family |
 | `eval/builtins/net/construction.rs` | Lazy `interaction_net` effect search, branch-local construction journals, opaque port capabilities, and checked replay |
