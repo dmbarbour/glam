@@ -140,6 +140,24 @@ pub(crate) struct CompletionSubscriptions {
     registrations: Mutex<Vec<WakeRegistration>>,
 }
 
+/// Scheduler notification detached from an authoritative completion
+/// publication.
+///
+/// The coordinator transition has already happened while runtime mutation
+/// admission was held. Keeping the notification separate lets callers release
+/// that admission before waking scheduler threads.
+#[must_use = "scheduler wakes must be delivered after mutation admission is released"]
+pub(crate) struct CompletionWake {
+    coordinator: Arc<EvaluationWorkCoordinator>,
+    changed: bool,
+}
+
+impl CompletionWake {
+    pub(crate) fn notify(self) {
+        self.coordinator.notify_dependency_wake(self.changed);
+    }
+}
+
 impl CompletionSubscriptions {
     pub(crate) fn for_promise(
         runtime: EvaluationRuntimeId,
@@ -194,9 +212,42 @@ impl CompletionSubscriptions {
             .get()
             .and_then(Weak::upgrade)
             .filter(|coordinator| coordinator.runtime == self.runtime);
-        let mutation = coordinator
-            .as_ref()
-            .map(|coordinator| coordinator.admission.mutation_guard());
+        let Some(coordinator) = coordinator else {
+            let result = publish_terminal()?;
+            self.registrations
+                .lock()
+                .expect("completion subscriber set was poisoned")
+                .clear();
+            return Ok(result);
+        };
+
+        let mutation = coordinator.admission.mutation_guard();
+        let (result, wake) = self.publish_guarded(&coordinator, &mutation, publish_terminal)?;
+        drop(mutation);
+        wake.notify();
+        Ok(result)
+    }
+
+    /// Publishes a terminal using mutation admission already held by the
+    /// caller.
+    ///
+    /// The terminal closure and every resulting coordinator transition become
+    /// authoritative before this returns. The returned wake must be delivered
+    /// only after the caller releases component locks and mutation admission.
+    pub(crate) fn publish_guarded<T, E>(
+        &self,
+        coordinator: &Arc<EvaluationWorkCoordinator>,
+        mutation: &RuntimeMutationGuard<'_>,
+        publish_terminal: impl FnOnce() -> Result<T, E>,
+    ) -> Result<(T, CompletionWake), E> {
+        debug_assert_eq!(coordinator.runtime, self.runtime);
+        debug_assert!(
+            self.coordinator
+                .get()
+                .and_then(Weak::upgrade)
+                .is_some_and(|bound| Arc::ptr_eq(&bound, coordinator))
+        );
+
         let result = publish_terminal()?;
         let registrations = std::mem::take(
             &mut *self
@@ -204,21 +255,20 @@ impl CompletionSubscriptions {
                 .lock()
                 .expect("completion subscriber set was poisoned"),
         );
-        let changed = match (&coordinator, &mutation) {
-            (Some(coordinator), Some(mutation)) => coordinator.wake_dependency_batch_guarded(
-                mutation,
-                DependencyWakeBatch {
-                    source: self.source,
-                    registrations,
-                },
-            ),
-            _ => false,
-        };
-        drop(mutation);
-        if let Some(coordinator) = coordinator {
-            coordinator.notify_dependency_wake(changed);
-        }
-        Ok(result)
+        let changed = coordinator.wake_dependency_batch_guarded(
+            mutation,
+            DependencyWakeBatch {
+                source: self.source,
+                registrations,
+            },
+        );
+        Ok((
+            result,
+            CompletionWake {
+                coordinator: coordinator.clone(),
+                changed,
+            },
+        ))
     }
 
     /// Detaches and delivers registrations for a terminal which was already
@@ -292,10 +342,49 @@ enum WorkCloseReason {
     ExecutorShutdown,
 }
 
-/// Reserved now so later task migration does not need another work-record
-/// shape. Sparks acquire no settlement obligations in this phase.
+enum ProducerSettlementObligation {
+    ReflectionTask {
+        wait: EvaluationWaitToken,
+    },
+    DeferredClaim {
+        wait: EvaluationWaitToken,
+        producer: DeferredProducer,
+    },
+}
+
+/// Static producer state which must eventually be disposed before a work
+/// record retires.
+///
+/// This inventory is deliberately passive in Phase 7B.1a. Existing session
+/// terminal paths still publish waits and dispose claims; retirement merely
+/// takes the matching inventory entry exactly once. Later checkpoints move
+/// that disposition itself behind this boundary.
 #[derive(Default)]
-struct SettlementObligations;
+struct SettlementObligations {
+    producer: Option<ProducerSettlementObligation>,
+}
+
+impl SettlementObligations {
+    fn reflection_task(wait: EvaluationWaitToken) -> Self {
+        Self {
+            producer: Some(ProducerSettlementObligation::ReflectionTask { wait }),
+        }
+    }
+
+    fn deferred_claim(wait: EvaluationWaitToken, producer: DeferredProducer) -> Self {
+        Self {
+            producer: Some(ProducerSettlementObligation::DeferredClaim { wait, producer }),
+        }
+    }
+
+    fn take_producer(&mut self) -> Option<ProducerSettlementObligation> {
+        self.producer.take()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.producer.is_none()
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WorkState {
@@ -835,7 +924,7 @@ impl EvaluationWorkCoordinator {
                     demand_session: session_id,
                     subscription_epoch: 0,
                     control: WorkControl::default(),
-                    obligations: SettlementObligations,
+                    obligations: SettlementObligations::default(),
                     state: WorkState::Queued,
                     kind: WorkKind::Spark(SparkWork {
                         demand: Some(demand),
@@ -1198,7 +1287,7 @@ impl EvaluationWorkCoordinator {
                 demand_session: session.id,
                 subscription_epoch: 0,
                 control: WorkControl::default(),
-                obligations: SettlementObligations,
+                obligations: SettlementObligations::reflection_task(wait.clone()),
                 state: initial,
                 kind: WorkKind::Reflection(ReflectionWork {
                     task,
@@ -1695,7 +1784,10 @@ impl EvaluationWorkCoordinator {
                     demand_session: session.id,
                     subscription_epoch: 0,
                     control: WorkControl::default(),
-                    obligations: SettlementObligations,
+                    obligations: SettlementObligations::deferred_claim(
+                        wait.clone(),
+                        producer.clone(),
+                    ),
                     state: WorkState::Reserved,
                     kind: WorkKind::Deferred(DeferredWork {
                         task,
@@ -2726,13 +2818,25 @@ fn reflection_state(record: &WorkRecord) -> ReflectionWorkState {
 fn detach_reflection(state: &mut WorkCoordinatorState, id: EvaluationWorkId) {
     state.observation_waiters.remove(&id);
     remove_ready_reflection(state, id);
-    let record = state
+    let mut record = state
         .work
         .remove(&id)
         .expect("retired reflection work must remain registered");
+    let obligation = record
+        .obligations
+        .take_producer()
+        .expect("reflection work must retain its task-wait obligation until retirement");
+    assert!(
+        record.obligations.take_producer().is_none(),
+        "reflection producer obligations must be taken exactly once"
+    );
     let WorkKind::Reflection(reflection) = record.kind else {
         panic!("reflection retirement must contain reflection work")
     };
+    let ProducerSettlementObligation::ReflectionTask { wait } = obligation else {
+        panic!("reflection work must retain a reflection task-wait obligation")
+    };
+    assert_eq!(wait, reflection.wait);
     assert_eq!(
         state.reflection_by_task.remove(&reflection.task),
         Some(id),
@@ -2886,13 +2990,26 @@ fn begin_deferred_abandonment(
 fn detach_deferred(state: &mut WorkCoordinatorState, id: EvaluationWorkId) {
     state.observation_waiters.remove(&id);
     remove_ready_deferred(state, id);
-    let record = state
+    let mut record = state
         .work
         .remove(&id)
         .expect("retired deferred work must remain registered");
+    let obligation = record
+        .obligations
+        .take_producer()
+        .expect("deferred work must retain its wait/claim obligation until retirement");
+    assert!(
+        record.obligations.take_producer().is_none(),
+        "deferred producer obligations must be taken exactly once"
+    );
     let WorkKind::Deferred(deferred) = record.kind else {
         panic!("deferred retirement must contain deferred work")
     };
+    let ProducerSettlementObligation::DeferredClaim { wait, producer } = obligation else {
+        panic!("deferred work must retain a deferred wait/claim obligation")
+    };
+    assert_eq!(wait, deferred.wait);
+    assert_eq!(producer.id(), deferred.producer.id());
     assert_eq!(state.deferred_by_task.remove(&deferred.task), Some(id));
     assert_eq!(state.deferred_by_wait.remove(&deferred.wait), Some(id));
     assert_eq!(
@@ -2987,6 +3104,10 @@ fn detach_spark(state: &mut WorkCoordinatorState, id: EvaluationWorkId) -> Optio
     let WorkKind::Spark(mut spark) = record.kind else {
         unreachable!("spark retirement must contain spark work")
     };
+    assert!(
+        record.obligations.is_empty(),
+        "spark work must not acquire producer settlement obligations"
+    );
     Some(SparkRetirement {
         demand: spark
             .demand
@@ -3048,6 +3169,21 @@ mod tests {
                     Ok::<_, std::convert::Infallible>(())
                 })
                 .expect("infallible test completion should publish");
+        }
+
+        fn complete_guarded(
+            &self,
+            coordinator: &Arc<EvaluationWorkCoordinator>,
+            mutation: &RuntimeMutationGuard<'_>,
+        ) -> CompletionWake {
+            let ((), wake) = self
+                .subscriptions
+                .publish_guarded(coordinator, mutation, || {
+                    let _ = self.terminal.set(());
+                    Ok::<_, std::convert::Infallible>(())
+                })
+                .expect("infallible guarded test completion should publish");
+            wake
         }
 
         fn is_terminal(&self) -> bool {
@@ -3304,6 +3440,63 @@ mod tests {
         assert!(!coordinator.redeliver_test_registration(source.key(), registration));
         assert_eq!(coordinator.work_generation(), generation);
         finish_queued_test_spark(&coordinator);
+    }
+
+    #[test]
+    fn guarded_completion_defers_scheduler_notification_until_admission_is_released() {
+        let (coordinator, _executor, _session, claimed) = claimed_test_spark();
+        let source = TestCompletionSource::new(&coordinator);
+        let Ok(_registration) = coordinator.park_claimed_test_spark(claimed, &source, || {}) else {
+            panic!("same-runtime completion source should accept the subscription")
+        };
+        assert_eq!(coordinator.spark_work_counts(), (0, 0, 1));
+
+        let mutation = coordinator.admission.mutation_guard();
+        let wake = source.complete_guarded(&coordinator, &mutation);
+        assert!(source.is_terminal());
+        assert_eq!(source.subscriber_count(), 0);
+        assert_eq!(coordinator.spark_work_counts(), (1, 0, 0));
+
+        drop(mutation);
+        wake.notify();
+        finish_queued_test_spark(&coordinator);
+    }
+
+    #[test]
+    fn static_producer_obligations_are_taken_once() {
+        let (coordinator, _executor) = super::super::test_execution_resources(0)
+            .expect("test execution resources should build");
+        let session = EvaluationSession::shared(&coordinator);
+        let task = super::super::allocate_task_id(&session.values)
+            .expect("obligation task identity should allocate");
+        let wait = super::super::allocate_wait_token(&session, task)
+            .expect("obligation wait identity should allocate");
+
+        let mut reflection = SettlementObligations::reflection_task(wait.clone());
+        let Some(ProducerSettlementObligation::ReflectionTask {
+            wait: obligation_wait,
+        }) = reflection.take_producer()
+        else {
+            panic!("reflection inventory should contain its task wait")
+        };
+        assert_eq!(obligation_wait, wait);
+        assert!(reflection.take_producer().is_none());
+
+        let lazy = LazyValue::deferred(&session.values, "static obligation", |_| {
+            panic!("static obligation test never evaluates its synthetic lazy")
+        });
+        let producer = DeferredProducer::Lazy(lazy);
+        let mut deferred = SettlementObligations::deferred_claim(wait.clone(), producer.clone());
+        let Some(ProducerSettlementObligation::DeferredClaim {
+            wait: obligation_wait,
+            producer: obligation_producer,
+        }) = deferred.take_producer()
+        else {
+            panic!("deferred inventory should contain its wait and claim")
+        };
+        assert_eq!(obligation_wait, wait);
+        assert_eq!(obligation_producer.id(), producer.id());
+        assert!(deferred.take_producer().is_none());
     }
 
     #[test]
