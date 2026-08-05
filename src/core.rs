@@ -15,8 +15,8 @@ use rpds::RedBlackTreeMapSync;
 use crate::core_net::{CoreDataKey, CoreRuntimeNet};
 use crate::evaluation::{
     CompletionSubscriptionOutcome, CompletionSubscriptions, EvalContext, EvaluationTaskHandle,
-    EvaluationWorkCoordinator, PromiseProducerObligation, PromiseSessionWake,
-    ReflectionTaskResultPolicy, WakeRegistration,
+    EvaluationWorkCoordinator, PromiseProducerObligation, PromiseProducerPublication,
+    PromiseSessionWake, ReflectionTaskResultPolicy, WakeRegistration,
 };
 use crate::number::Number;
 use crate::runtime::{EvaluationRuntimeId, RuntimeIds, RuntimeValueRoot};
@@ -357,6 +357,12 @@ impl CoreValueFactory {
                 .expect("a rejected coordinator binding must already be initialized");
             debug_assert!(installed.ptr_eq(&candidate));
         }
+    }
+
+    pub(crate) fn work_coordinator_binding(
+        &self,
+    ) -> Arc<OnceLock<Weak<EvaluationWorkCoordinator>>> {
+        self.work_coordinator.clone()
     }
 
     pub(crate) fn ids(&self) -> &Arc<RuntimeIds> {
@@ -752,7 +758,7 @@ impl PromiseCell {
                     .lock()
                     .expect("promise follower set was poisoned"),
             );
-            let producer = self.producer.get().and_then(|producer| {
+            let producer = self.producer.get().map(|producer| {
                 producer.publish_assignment(
                     self.assignment
                         .get()
@@ -771,13 +777,14 @@ impl PromiseCell {
 
 struct PromisePublicationWakes {
     followers: Vec<PromiseSessionWake>,
-    producer: Option<PromiseSessionWake>,
+    producer: Option<PromiseProducerPublication>,
 }
 
 impl PromisePublicationWakes {
     fn notify(self) {
+        let producer = self.producer.and_then(PromiseProducerPublication::notify);
         let mut notified = Vec::new();
-        for wake in self.producer.into_iter().chain(self.followers) {
+        for wake in producer.into_iter().chain(self.followers) {
             if notified
                 .iter()
                 .any(|prior: &PromiseSessionWake| prior.same_session(&wake))

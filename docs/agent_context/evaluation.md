@@ -80,11 +80,15 @@ control-flow overview.
   session registry is locked, then their machines and captured state are
   dropped after unlocking. A raced source snapshot may register one redundant
   producer; it must observe the canonical cache and retire harmlessly. Every
-  scheduler wait token shares a lock-free terminal cell. Terminal state is
-  published while the session registry is locked, and polling checks it around
-  registry lookup; a terminal result therefore outlives the weakly held owner
-  session while a pending wait does not keep that session alive. Terminal
-  reflection records and their task-ID indexes are retired immediately.
+  scheduler wait token shares a lock-free terminal cell plus a weak exact-work
+  subscription set. Terminal state is published and producer indexes retire
+  while the session registry is locked; exact subscribers detach and notify
+  the coordinator only after unlocking. Polling checks the cell around
+  registry lookup, so a terminal result outlives the weakly held owner session
+  while a pending wait does not keep that session alive. Terminal reflection
+  records and their task-ID indexes are retired immediately. Production sparks
+  continue using the broad wait disturbance fallback until Phase 6B connects
+  their stable work registrations to this source.
   Unacknowledged reflection failures remain only in the persistent reporting
   ledger; `.task.ack_error` removes that entry without changing the handle's
   terminal observation. Task-owned promise waits follow the same ownership

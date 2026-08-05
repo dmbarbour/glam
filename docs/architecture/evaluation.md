@@ -103,15 +103,20 @@ may register one redundant producer after retirement. That producer observes
 the canonical lazy cache, terminates, and retires without changing the result.
 
 Every scheduler wait token is one shared cell containing identity, a weak
-session owner, and an optional terminal result. Completion, permanent failure,
-and cancellation publish that result while holding the active task-registry
-mutex. Polling checks the cell before and after taking the mutex, so a waiter
-racing publication sees either active state or the terminal result. A terminal
-token remains observable after its owner session is dropped; a pending token
-does not keep the session alive and reports `Abandoned`, not evaluation
-failure, if its owner disappears without publishing a more specific terminal
-result. Active registries retain only unresolved deferred producers and
-nonterminal reflection tasks.
+session owner, an optional terminal result, and exact weak work registrations.
+Completion, permanent failure, cancellation, and abandonment publish the
+result while holding the active task-registry mutex. The producer record and
+indexes retire there; exact registrations detach and reach the coordinator
+only after the registry is released. Polling checks the cell before and after
+taking the mutex, so a waiter racing publication sees either active state or
+the terminal result. A terminal token remains observable after its owner
+session is dropped; a pending token does not keep the session alive and reports
+`Abandoned`, not evaluation failure, if its owner disappears without
+publishing a more specific terminal result. Active registries retain only
+unresolved deferred producers and nonterminal reflection tasks. During the
+work-boundary transition, real wait-blocked sparks still use the broad session
+disturbance index; the token-side exact registration path is installed for the
+next coordinator parking step.
 Reflection task handles own their shared terminal wait cells, so completion,
 failure, and cancellation remain observable after the active record and
 task-ID index are retired. An unacknowledged failure also leaves one minimal

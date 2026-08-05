@@ -31,6 +31,14 @@ pub(crate) struct WakeRegistration {
     subscription_epoch: u64,
 }
 
+#[cfg(test)]
+pub(crate) fn test_wake_registration() -> WakeRegistration {
+    WakeRegistration {
+        work: EvaluationWorkId(NonZeroU64::MAX),
+        subscription_epoch: 0,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum WorkDependencyKey {
     Wait(u64),
@@ -66,6 +74,19 @@ impl CompletionSubscriptions {
         Self {
             runtime,
             source: WorkDependencyKey::Promise(promise.get()),
+            coordinator,
+            registrations: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub(crate) fn for_wait(
+        runtime: EvaluationRuntimeId,
+        wait: NonZeroU64,
+        coordinator: Arc<std::sync::OnceLock<Weak<EvaluationWorkCoordinator>>>,
+    ) -> Self {
+        Self {
+            runtime,
+            source: WorkDependencyKey::Wait(wait.get()),
             coordinator,
             registrations: Mutex::new(Vec::new()),
         }
@@ -124,6 +145,18 @@ impl CompletionSubscriptions {
             coordinator.notify_dependency_wake(changed);
         }
         Ok(result)
+    }
+
+    /// Detaches and delivers registrations for a terminal which was already
+    /// published under its producer registry lock.
+    ///
+    /// Session-owned waits use this transitional split until task
+    /// terminalization moves under coordinator mutation admission. The
+    /// terminal cell is immutable before this call, so subscribe-and-recheck
+    /// still cannot lose a wake.
+    pub(crate) fn notify_published(&self) {
+        self.publish(|| Ok::<_, std::convert::Infallible>(()))
+            .expect("published completion notification is infallible");
     }
 
     pub(crate) fn subscribe(

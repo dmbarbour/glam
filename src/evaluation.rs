@@ -23,6 +23,8 @@ use crate::runtime::{EvaluationRuntimeId, RuntimeValueRoot};
 
 mod coordinator;
 mod executor;
+#[cfg(test)]
+use coordinator::test_wake_registration;
 pub(crate) use coordinator::{
     CompletionSubscriptionOutcome, CompletionSubscriptions, EvaluationWorkCoordinator,
     WakeRegistration,
@@ -73,13 +75,19 @@ fn allocate_wait_token(
     session: &Arc<EvaluationSession>,
     producer: EvaluationTaskId,
 ) -> Result<EvaluationWaitToken, Arc<str>> {
+    let id = session.values.ids().evaluation_wait()?;
     Ok(EvaluationWaitToken(Arc::new(EvaluationWaitState {
-        id: session.values.ids().evaluation_wait()?,
+        id,
         runtime: session.values.runtime_id(),
         owner_id: session.id,
         owner: Arc::downgrade(session),
         producer,
         terminal: OnceLock::new(),
+        completion: CompletionSubscriptions::for_wait(
+            session.values.runtime_id(),
+            id,
+            session.values.work_coordinator_binding(),
+        ),
     })))
 }
 
@@ -94,6 +102,7 @@ struct EvaluationWaitState {
     owner: Weak<EvaluationSession>,
     producer: EvaluationTaskId,
     terminal: OnceLock<EvaluationWaitTerminal>,
+    completion: CompletionSubscriptions,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,6 +163,34 @@ impl EvaluationWaitToken {
             .expect("terminal publication must initialize the wait cell")
             .clone()
     }
+
+    /// Delivers exact completion registrations after the owner registry lock
+    /// which published and retired this wait has been released.
+    fn notify_terminal(&self) {
+        debug_assert!(self.0.terminal.get().is_some());
+        self.0.completion.notify_published();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn subscribe_spark(
+        &self,
+        runtime: EvaluationRuntimeId,
+        registration: WakeRegistration,
+    ) -> CompletionSubscriptionOutcome {
+        self.0
+            .completion
+            .subscribe(runtime, registration, || self.0.terminal.get().is_some())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn spark_subscription_count(&self) -> usize {
+        self.0.completion.len()
+    }
+
+    #[cfg(test)]
+    fn subscribe_test_spark(&self) -> CompletionSubscriptionOutcome {
+        self.subscribe_spark(self.runtime_id(), test_wake_registration())
+    }
 }
 
 /// Temporary broad wake bridge for a session whose deferred follower observed
@@ -190,6 +227,18 @@ pub(crate) struct PromiseProducerObligation {
     wait: EvaluationWaitToken,
 }
 
+pub(crate) struct PromiseProducerPublication {
+    wait: EvaluationWaitToken,
+    session: Option<PromiseSessionWake>,
+}
+
+impl PromiseProducerPublication {
+    pub(crate) fn notify(self) -> Option<PromiseSessionWake> {
+        self.wait.notify_terminal();
+        self.session
+    }
+}
+
 impl PromiseProducerObligation {
     pub(crate) fn owner(&self) -> EvaluationTaskId {
         self.owner
@@ -202,14 +251,20 @@ impl PromiseProducerObligation {
     pub(crate) fn publish_assignment(
         &self,
         assignment: &PromiseAssignment,
-    ) -> Option<PromiseSessionWake> {
+    ) -> PromiseProducerPublication {
         let terminal = promise_assignment_terminal(self.wait.runtime_id(), assignment);
         let Some(owner) = self.wait.owner() else {
             self.wait.publish_terminal(terminal);
-            return None;
+            return PromiseProducerPublication {
+                wait: self.wait.clone(),
+                session: None,
+            };
         };
         owner.complete_promise_wait(&self.wait, terminal);
-        Some(owner.promise_wake())
+        PromiseProducerPublication {
+            wait: self.wait.clone(),
+            session: Some(owner.promise_wake()),
+        }
     }
 }
 
@@ -720,6 +775,7 @@ struct EvaluationTasks {
 struct ReflectionTaskTransition {
     retired: Option<ReflectionTaskRecord>,
     status: Option<TaskStatusUpdate>,
+    terminal: bool,
 }
 
 fn transition_reflection_task(
@@ -754,7 +810,11 @@ fn transition_reflection_task(
         tasks.unacknowledged_failures.insert_mut(task, failure);
     }
     let retired = terminal.then(|| retire_reflection_task(tasks, wait));
-    ReflectionTaskTransition { retired, status }
+    ReflectionTaskTransition {
+        retired,
+        status,
+        terminal,
+    }
 }
 
 fn retire_reflection_task(
@@ -823,7 +883,7 @@ fn retire_promise_wait(
     Some(record)
 }
 
-fn prune_terminal_promise_waits(tasks: &mut EvaluationTasks) {
+fn prune_terminal_promise_waits(tasks: &mut EvaluationTasks) -> Vec<EvaluationWaitToken> {
     let terminal = tasks
         .promises
         .iter()
@@ -831,11 +891,14 @@ fn prune_terminal_promise_waits(tasks: &mut EvaluationTasks) {
             promise_record_terminal(wait, record).map(|terminal| (wait.clone(), terminal))
         })
         .collect::<Vec<_>>();
+    let mut completed = Vec::with_capacity(terminal.len());
     for (wait, terminal) in terminal {
         wait.publish_terminal(terminal);
         let retired = retire_promise_wait(tasks, &wait);
         debug_assert!(retired.is_some());
+        completed.push(wait);
     }
+    completed
 }
 
 fn retire_deferred_task(
@@ -879,7 +942,7 @@ impl fmt::Debug for EvaluationSession {
 
 impl Drop for EvaluationSession {
     fn drop(&mut self) {
-        let (promises, mut reflection, deferred, statuses) = {
+        let (promises, mut reflection, deferred, statuses, terminal_waits) = {
             let tasks = self
                 .tasks
                 .get_mut()
@@ -898,6 +961,7 @@ impl Drop for EvaluationSession {
             let reflection_waits = tasks.reflection.keys().cloned().collect::<Vec<_>>();
             let mut reflection = Vec::with_capacity(reflection_waits.len());
             let mut statuses = Vec::new();
+            let mut terminal_waits = Vec::new();
             for wait in reflection_waits {
                 let record = tasks
                     .reflection
@@ -916,6 +980,7 @@ impl Drop for EvaluationSession {
                         .expect("session shutdown must retire a reflection task"),
                 );
                 statuses.extend(transition.status);
+                terminal_waits.push(wait);
             }
 
             let deferred_ids = tasks.deferred.keys().copied().collect::<Vec<_>>();
@@ -926,11 +991,12 @@ impl Drop for EvaluationSession {
                     .get_mut(&deferred_id)
                     .expect("collected deferred task must remain registered");
                 record.state = publish_deferred_state(&record.wait, DeferredTaskState::Abandoned);
+                terminal_waits.push(record.wait.clone());
                 record.dependency = None;
                 deferred.push(retire_deferred_task(tasks, deferred_id));
             }
             tasks.ready.clear();
-            (promises, reflection, deferred, statuses)
+            (promises, reflection, deferred, statuses, terminal_waits)
         };
 
         // A task-owned promise is a producer obligation, unlike a reusable
@@ -947,7 +1013,12 @@ impl Drop for EvaluationSession {
                 wait.publish_terminal(EvaluationWaitTerminal::Failed(evaluation_failure(
                     "promised value no longer exists",
                 )));
+                wait.notify_terminal();
             }
+        }
+
+        for wait in terminal_waits {
+            wait.notify_terminal();
         }
 
         for status in statuses {
@@ -1086,6 +1157,7 @@ impl EvaluationSession {
                 self.task_changed.notify_all();
                 (retired, dependency)
             };
+            wait.notify_terminal();
             drop(retired);
             let Some(dependency) = dependency else {
                 return;
@@ -1121,9 +1193,12 @@ impl EvaluationSession {
             .tasks
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        prune_terminal_promise_waits(&mut tasks);
+        let completed = prune_terminal_promise_waits(&mut tasks);
         self.task_changed.notify_all();
         drop(tasks);
+        for wait in completed {
+            wait.notify_terminal();
+        }
         self.notify_spark_disturbance();
     }
 
@@ -1469,6 +1544,7 @@ impl EvalContext {
                 wait.publish_terminal(EvaluationWaitTerminal::Failed(evaluation_failure(
                     "promised value no longer exists",
                 )));
+                wait.notify_terminal();
             }
         }
     }
@@ -1595,6 +1671,9 @@ impl EvalContext {
         }
         self.session.task_changed.notify_all();
         drop(tasks);
+        if transition.terminal {
+            handle.wait.notify_terminal();
+        }
         drop(transition.retired);
         publish_task_status(transition.status);
         if queued {
@@ -1652,6 +1731,9 @@ impl EvalContext {
             self.session.task_changed.notify_all();
             transition
         };
+        if transition.terminal {
+            handle.wait.notify_terminal();
+        }
         drop(transition.retired);
         publish_task_status(transition.status);
     }
@@ -1747,7 +1829,7 @@ impl EvalContext {
         if task.wait.terminal_poll().is_some() {
             return EvaluationTaskCancellation::Late;
         }
-        let (retired, status) = {
+        let (retired, status, terminal) = {
             let mut tasks = self
                 .session
                 .tasks
@@ -1782,10 +1864,13 @@ impl EvalContext {
                         &prior,
                     );
                     self.session.task_changed.notify_all();
-                    (transition.retired, transition.status)
+                    (transition.retired, transition.status, transition.terminal)
                 }
             }
         };
+        if terminal {
+            task.wait.notify_terminal();
+        }
         publish_task_status(status);
         let mut retired = retired.expect("terminal cancellation must retire its task record");
         if let Some(mut machine) = retired.machine.take() {
@@ -1843,6 +1928,8 @@ impl EvalContext {
             let terminal = wait.publish_terminal(terminal);
             retire_promise_wait(&mut tasks, wait);
             owner.task_changed.notify_all();
+            drop(tasks);
+            wait.notify_terminal();
             return terminal.to_poll();
         }
         if tasks.reflection.contains_key(wait)
@@ -1898,6 +1985,9 @@ impl EvalContext {
         );
         self.session.task_changed.notify_all();
         drop(tasks);
+        if transition.terminal {
+            wait.notify_terminal();
+        }
         drop(transition.retired);
         publish_task_status(transition.status);
         while matches!(
@@ -1930,6 +2020,9 @@ impl EvalContext {
         );
         self.session.task_changed.notify_all();
         drop(tasks);
+        if transition.terminal {
+            wait.notify_terminal();
+        }
         drop(transition.retired);
         publish_task_status(transition.status);
         while matches!(
@@ -2370,6 +2463,9 @@ impl EvaluationSession {
             );
             self.task_changed.notify_all();
             drop(tasks);
+            if transition.terminal {
+                claimed.wait.notify_terminal();
+            }
             drop(transition.retired);
             return (
                 true,
@@ -2412,6 +2508,9 @@ impl EvaluationSession {
             .map(ReleasedTaskMachine::Drop);
         self.task_changed.notify_all();
         drop(tasks);
+        if transition.terminal {
+            claimed.wait.notify_terminal();
+        }
         drop(retired);
         (made_progress, remains_blocked, released, transition.status)
     }
@@ -2505,8 +2604,15 @@ impl EvaluationSession {
             .deferred
             .get(&claimed.deferred)
             .is_some_and(|record| matches!(record.state, DeferredTaskState::Blocked(_)));
+        let completed_waits = retired_records
+            .iter()
+            .map(|record| record.wait.clone())
+            .collect::<Vec<_>>();
         self.task_changed.notify_all();
         drop(tasks);
+        for wait in completed_waits {
+            wait.notify_terminal();
+        }
         drop(machine);
         drop(retired_records);
         (made_progress, remains_blocked, None, None)
@@ -3430,16 +3536,32 @@ mod tests {
         let cancelled = context
             .schedule_task(|_| Ok(Box::new(Complete)))
             .expect("cancelled task should schedule");
+        for wait in [complete.wait(), failed.wait(), cancelled.wait()] {
+            assert_eq!(
+                wait.subscribe_test_spark(),
+                CompletionSubscriptionOutcome::Pending
+            );
+            assert_eq!(wait.spark_subscription_count(), 1);
+        }
         assert_eq!(
             context.cancel_reflection_task(&cancelled),
             EvaluationTaskCancellation::Requested
         );
+        assert_eq!(cancelled.wait().spark_subscription_count(), 0);
 
         let EvaluationSessionRun::Complete(report) = context.run_until_quiescent() else {
             panic!("terminal tasks should leave no unfinished work");
         };
         assert_eq!(report.failures.size(), 1);
         assert!(report.failures.contains_key(&failed.id()));
+        assert_eq!(complete.wait().spark_subscription_count(), 0);
+        assert_eq!(failed.wait().spark_subscription_count(), 0);
+        assert_eq!(
+            complete.wait().subscribe_test_spark(),
+            CompletionSubscriptionOutcome::AlreadyTerminal,
+            "a late exact subscription must observe the immutable terminal"
+        );
+        assert_eq!(complete.wait().spark_subscription_count(), 0);
 
         for _ in 0..2 {
             assert!(matches!(
@@ -3474,6 +3596,23 @@ mod tests {
             },
             "terminal handles retain outcomes while only unacknowledged failures remain indexed"
         );
+    }
+
+    #[test]
+    fn wait_completion_subscriptions_reject_a_foreign_runtime() {
+        let owner_fixture = SameRuntimeFixture::new();
+        let foreign_fixture = SameRuntimeFixture::new();
+        let owner = owner_fixture.context();
+        let task = owner
+            .schedule_task(|_| Ok(Box::new(AlwaysBlocked)))
+            .expect("pending task should schedule");
+
+        assert_eq!(
+            task.wait()
+                .subscribe_spark(foreign_fixture.runtime.id(), test_wake_registration()),
+            CompletionSubscriptionOutcome::ForeignRuntime
+        );
+        assert_eq!(task.wait().spark_subscription_count(), 0);
     }
 
     #[test]
@@ -3606,6 +3745,10 @@ mod tests {
             let task = owner
                 .schedule_task(|_| Ok(Box::new(AlwaysBlocked)))
                 .expect("abandoned task should schedule");
+            assert_eq!(
+                task.wait().subscribe_test_spark(),
+                CompletionSubscriptionOutcome::Pending
+            );
             owner
                 .session
                 .tasks
@@ -3624,6 +3767,7 @@ mod tests {
             observer.poll_reflection_task(&task),
             EvaluationWaitPoll::Abandoned
         );
+        assert_eq!(task.wait().spark_subscription_count(), 0);
         assert_eq!(
             statuses
                 .0
@@ -3677,8 +3821,17 @@ mod tests {
                 .context()
                 .with_new_task()
                 .expect("promise owner should allocate a task identity");
-            PromisedValue::fixpoint(&owner, "abandoned task promise")
-                .expect("task promise should register")
+            let promise = PromisedValue::fixpoint(&owner, "abandoned task promise")
+                .expect("task promise should register");
+            let wait = promise
+                .task()
+                .expect("task promise should retain producer provenance")
+                .wait();
+            assert_eq!(
+                wait.subscribe_test_spark(),
+                CompletionSubscriptionOutcome::Pending
+            );
+            promise
         };
         let observer = fixture.context();
         let error = task_promise
@@ -3686,6 +3839,14 @@ mod tests {
             .expect("session closure must assign the task promise")
             .expect_err("an abandoned task promise must fail");
         assert!(error.to_string().contains("was abandoned"));
+        assert_eq!(
+            task_promise
+                .task()
+                .expect("task promise should retain producer provenance")
+                .wait()
+                .spark_subscription_count(),
+            0
+        );
         assert!(matches!(
             observer.poll_wait(
                 task_promise
