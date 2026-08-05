@@ -529,6 +529,18 @@ fn n(value: i64) -> Value {
     Value::Number(value.into())
 }
 
+fn same_runtime_contexts() -> (
+    EvalContext,
+    EvalContext,
+    Arc<crate::evaluation::EvaluationExecutor>,
+) {
+    let (coordinator, executor) = crate::evaluation::test_execution_resources(0)
+        .expect("same-runtime evaluator resources should build");
+    let owner = EvalContext::new(crate::evaluation::EvaluationSession::shared(&coordinator));
+    let observer = EvalContext::new(crate::evaluation::EvaluationSession::shared(&coordinator));
+    (owner, observer, executor)
+}
+
 #[test]
 fn promised_values_fail_fast_without_poisoning_later_assignment() {
     let promised = PromisedValue::new(&crate::core::test_value_factory(), "test promised value");
@@ -546,9 +558,10 @@ fn promised_values_fail_fast_without_poisoning_later_assignment() {
 #[test]
 fn deferred_computation_blockage_does_not_poison_its_lazy_cache() {
     let session = test_context();
-    let owner = session.with_new_task().unwrap();
+    let (promise, _owner_task, _owner) = session
+        .task_owned_promise(Arc::from("deferred computation input"))
+        .unwrap();
     let observer = session.with_new_task().unwrap();
-    let promise = PromisedValue::fixpoint(&owner, "deferred computation input").unwrap();
     let promised_value = Value::Promised(promise.clone());
     let attempts = Arc::new(AtomicUsize::new(0));
     let counted_attempts = attempts.clone();
@@ -653,9 +666,10 @@ fn deferred_computation_caches_one_structured_failure() {
 #[test]
 fn deferred_list_effect_work_blocks_and_resumes() {
     let session = test_context();
-    let owner = session.with_new_task().unwrap();
+    let (promise, _owner_task, _owner) = session
+        .task_owned_promise(Arc::from("deferred list effect input"))
+        .unwrap();
     let observer = session.with_new_task().unwrap();
-    let promise = PromisedValue::fixpoint(&owner, "deferred list effect input").unwrap();
     let handled = apply_builtin(
         &observer,
         Builtin::ListEffect,
@@ -693,9 +707,10 @@ fn deferred_list_effect_work_blocks_and_resumes() {
 #[test]
 fn interaction_net_construction_dependency_does_not_poison_its_lazy_value() {
     let session = test_context();
-    let owner = session.with_new_task().unwrap();
+    let (promise, _owner_task, _owner) = session
+        .task_owned_promise(Arc::from("pending net effect"))
+        .unwrap();
     let observer = session.with_new_task().unwrap();
-    let promise = PromisedValue::fixpoint(&owner, "pending net effect").unwrap();
     let lazy = LazyValue::from_net_construction(
         &crate::core::test_value_factory(),
         Value::Promised(promise),
@@ -819,9 +834,10 @@ fn promised_assignment_follows_a_lazy_without_resolving_the_raw_assignment() {
 #[test]
 fn promised_failure_preserves_structured_diagnostic_and_identity() {
     let session = test_context();
-    let owner = session.with_new_task().unwrap();
+    let (promise, _owner_task, _owner) = session
+        .task_owned_promise(Arc::from("structured promise failure"))
+        .unwrap();
     let observer = session.with_new_task().unwrap();
-    let promise = PromisedValue::fixpoint(&owner, "structured promise failure").unwrap();
     let wait = promise
         .task()
         .expect("task-owned promise should expose its wait")
@@ -909,9 +925,10 @@ fn mixed_promise_lazy_cycle_remains_retryable_without_poisoning_the_lazy() {
 #[test]
 fn task_owned_fixpoint_rejects_recursive_demand_and_blocks_other_tasks() {
     let session = test_context();
-    let owner = session.with_new_task().unwrap();
+    let (fixpoint, _owner_task, owner) = session
+        .task_owned_promise(Arc::from("test fixpoint"))
+        .unwrap();
     let observer = session.with_new_task().unwrap();
-    let fixpoint = PromisedValue::fixpoint(&owner, "test fixpoint").unwrap();
     let wait = fixpoint
         .task()
         .expect("task-owned fixpoint should expose its wait")
@@ -949,15 +966,16 @@ fn task_owned_fixpoint_rejects_recursive_demand_and_blocks_other_tasks() {
 #[test]
 fn failed_task_fails_its_unresolved_fixpoint_promises() {
     let session = test_context();
-    let owner = session.with_new_task().unwrap();
+    let (fixpoint, owner_task, _owner) = session
+        .task_owned_promise(Arc::from("test fixpoint"))
+        .unwrap();
     let observer = session.with_new_task().unwrap();
-    let fixpoint = PromisedValue::fixpoint(&owner, "test fixpoint").unwrap();
     let wait = fixpoint
         .task()
         .expect("task-owned fixpoint should expose its wait")
         .wait()
         .clone();
-    let value = Value::Promised(fixpoint);
+    let value = Value::Promised(fixpoint.clone());
 
     assert!(
         eval_value(&observer, &value)
@@ -965,9 +983,7 @@ fn failed_task_fails_its_unresolved_fixpoint_promises() {
             .blocked_on()
             .is_some()
     );
-    owner.fail_unresolved_promises(Arc::new(EvaluationFailure::message(
-        "producer failed deliberately",
-    )));
+    session.fail_wait(owner_task.wait(), "producer failed deliberately");
     assert_eq!(
         eval_value(&observer, &value).unwrap_err().to_string(),
         "producer failed deliberately"
@@ -986,8 +1002,9 @@ fn failed_task_fails_its_unresolved_fixpoint_promises() {
 #[test]
 fn explicitly_failed_task_promise_retires_its_wait_record() {
     let session = test_context();
-    let owner = session.with_new_task().unwrap();
-    let fixpoint = PromisedValue::fixpoint(&owner, "test fixpoint").unwrap();
+    let (fixpoint, _owner_task, _owner) = session
+        .task_owned_promise(Arc::from("test fixpoint"))
+        .unwrap();
     let wait = fixpoint
         .task()
         .expect("task-owned fixpoint should expose its wait")
@@ -1012,12 +1029,10 @@ fn explicitly_failed_task_promise_retires_its_wait_record() {
 #[test]
 fn producer_failure_retires_every_owned_promise_wait() {
     let session = test_context();
-    let owner = session.with_new_task().unwrap();
-    let promises = [
-        PromisedValue::fixpoint(&owner, "first fixpoint").unwrap(),
-        PromisedValue::fixpoint(&owner, "second fixpoint").unwrap(),
-    ];
-    let waits = promises.each_ref().map(|promise| {
+    let (promises, owner_task, _owner) = session
+        .task_owned_promises([Arc::from("first fixpoint"), Arc::from("second fixpoint")])
+        .unwrap();
+    let waits = promises.iter().map(|promise| {
         promise
             .task()
             .expect("task-owned fixpoint should expose its wait")
@@ -1025,9 +1040,7 @@ fn producer_failure_retires_every_owned_promise_wait() {
             .clone()
     });
 
-    owner.fail_unresolved_promises(Arc::new(EvaluationFailure::message(
-        "producer failed all fixpoints",
-    )));
+    session.fail_wait(owner_task.wait(), "producer failed all fixpoints");
 
     for wait in waits {
         assert!(matches!(
@@ -1043,27 +1056,30 @@ fn producer_failure_retires_every_owned_promise_wait() {
 }
 
 #[test]
-fn promise_change_notification_retires_an_abandoned_task_promise() {
+fn producer_completion_retires_a_dropped_task_promise() {
     let session = test_context();
-    let owner = session.with_new_task().unwrap();
-    let wait = {
-        let promise = PromisedValue::fixpoint(&owner, "abandoned fixpoint").unwrap();
-        promise
+    let (wait, owner_task) = {
+        let (promise, owner_task, _owner) = session
+            .task_owned_promise(Arc::from("abandoned fixpoint"))
+            .unwrap();
+        let wait = promise
             .task()
             .expect("task-owned fixpoint should expose its wait")
             .wait()
-            .clone()
+            .clone();
+        (wait, owner_task)
     };
     let counts = session.task_registry_counts();
-    assert_eq!(counts.promises_terminal, 1);
+    assert_eq!(counts.promises_active, 1);
+    assert_eq!(counts.promises_terminal, 0);
     assert_eq!(counts.owned_promise_waits, 1);
 
-    session.notify_promise_changed();
+    session.complete_wait(owner_task.wait());
 
     assert!(matches!(
         session.poll_wait(&wait),
         EvaluationWaitPoll::Failed(error)
-            if error.to_string() == "promised value no longer exists"
+            if error.to_string().contains("completed without fulfilling")
     ));
     let counts = session.task_registry_counts();
     assert_eq!(counts.promises_active, 0);
@@ -4586,9 +4602,8 @@ fn reflection_task_result_returns_arbitrary_lazy_value_once() {
 
 #[test]
 fn reflection_task_result_blocks_across_sessions_and_returns_completion_value() {
-    let owner = test_context();
-    let observer = test_context();
-    let computation = Value::reflection_task_result(&crate::core::test_value_factory(), n(0));
+    let (owner, observer, _executor) = same_runtime_contexts();
+    let computation = Value::reflection_task_result(owner.values(), n(0));
     let blocked = eval_value(&owner, &computation)
         .expect_err("an unlaunched reflection result task should block");
     let wait = blocked
@@ -4695,8 +4710,7 @@ fn reflection_gate_waits_before_continuing_target_demand() {
 
 #[test]
 fn running_reflection_gate_blocks_an_observer_session_without_poisoning_its_cache() {
-    let owner = test_context();
-    let observer = test_context();
+    let (owner, observer, _executor) = same_runtime_contexts();
     let gate = reflection_annotation(&owner, n(0), n(42));
     let Value::Lazy(gate_lazy) = &gate else {
         panic!("reflection annotation should produce a lazy gate")
@@ -5324,9 +5338,10 @@ fn dropping_a_session_discards_its_blocked_sparks() {
 #[test]
 fn metadata_seq_preserves_retryable_promise_blockage() {
     let context = test_context();
-    let owner = context.with_new_task().unwrap();
+    let (promise, _owner_task, _owner) = context
+        .task_owned_promise(Arc::from("blocked metadata"))
+        .unwrap();
     let observer = context.with_new_task().unwrap();
-    let promise = PromisedValue::fixpoint(&owner, "blocked metadata").unwrap();
     let carrier = Value::metadata_carrier(Value::Promised(promise.clone()));
 
     let blocked = apply_values(

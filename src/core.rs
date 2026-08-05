@@ -736,8 +736,8 @@ impl PromisedValue {
 }
 
 impl PromiseCell {
-    pub(crate) fn assignment(&self) -> Option<&PromiseAssignment> {
-        self.assignment.get()
+    pub(crate) fn id(&self) -> PromiseId {
+        self.id
     }
 
     pub(crate) fn fail(
@@ -750,6 +750,39 @@ impl PromiseCell {
     }
 
     fn publish(&self, assignment: PromiseAssignment) -> Result<(), PromiseAssignment> {
+        if let Some(producer) = self.producer.get()
+            && let Some(coordinator) = producer.coordinator()
+        {
+            let mutation = coordinator.mutation_guard();
+            let published = self
+                .completion
+                .publish_guarded(&coordinator, &mutation, || {
+                    self.assignment.set(assignment)?;
+                    let followers = std::mem::take(
+                        &mut *self
+                            .followers
+                            .lock()
+                            .expect("promise follower set was poisoned"),
+                    );
+                    let producer = producer.publish_assignment_guarded(
+                        &coordinator,
+                        &mutation,
+                        self.assignment
+                            .get()
+                            .expect("promise publication must initialize its assignment"),
+                    );
+                    Ok(PromisePublicationWakes {
+                        followers,
+                        producer: Some(producer),
+                    })
+                });
+            let (wakes, completion) = published?;
+            drop(mutation);
+            completion.notify();
+            wakes.notify();
+            return Ok(());
+        }
+
         let wakes = self.completion.publish(|| {
             self.assignment.set(assignment)?;
             let followers = std::mem::take(
@@ -759,7 +792,7 @@ impl PromiseCell {
                     .expect("promise follower set was poisoned"),
             );
             let producer = self.producer.get().map(|producer| {
-                producer.publish_assignment(
+                producer.publish_assignment_detached(
                     self.assignment
                         .get()
                         .expect("promise publication must initialize its assignment"),
@@ -782,9 +815,11 @@ struct PromisePublicationWakes {
 
 impl PromisePublicationWakes {
     fn notify(self) {
-        let producer = self.producer.and_then(PromiseProducerPublication::notify);
+        if let Some(producer) = self.producer {
+            producer.notify();
+        }
         let mut notified = Vec::new();
-        for wake in producer.into_iter().chain(self.followers) {
+        for wake in self.followers {
             if notified
                 .iter()
                 .any(|prior: &PromiseSessionWake| prior.same_session(&wake))

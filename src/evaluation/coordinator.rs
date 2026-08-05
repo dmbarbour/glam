@@ -7,7 +7,7 @@ use std::sync::{Arc, Condvar, Mutex, Weak};
 
 #[cfg(test)]
 use crate::core::CoreValueFactory;
-use crate::core::{DeferredValueId, LazyValue, PromiseId, PromisedValue, Value};
+use crate::core::{DeferredValueId, LazyValue, PromiseCell, PromiseId, PromisedValue, Value};
 use crate::runtime::{
     EvaluationRuntimeId, RuntimeIds, RuntimeMutationAdmission, RuntimeMutationGuard,
     RuntimeValueRoot,
@@ -15,7 +15,7 @@ use crate::runtime::{
 
 use super::{
     EvaluationFailure, EvaluationSession, EvaluationSessionId, EvaluationTaskId,
-    EvaluationWaitToken,
+    EvaluationWaitTerminal, EvaluationWaitToken,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -241,12 +241,6 @@ impl CompletionSubscriptions {
         publish_terminal: impl FnOnce() -> Result<T, E>,
     ) -> Result<(T, CompletionWake), E> {
         debug_assert_eq!(coordinator.runtime, self.runtime);
-        debug_assert!(
-            self.coordinator
-                .get()
-                .and_then(Weak::upgrade)
-                .is_some_and(|bound| Arc::ptr_eq(&bound, coordinator))
-        );
 
         let result = publish_terminal()?;
         let registrations = std::mem::take(
@@ -362,18 +356,28 @@ enum ProducerSettlementObligation {
 #[derive(Default)]
 struct SettlementObligations {
     producer: Option<ProducerSettlementObligation>,
+    owned_promises: Vec<TaskOwnedPromiseObligation>,
+}
+
+#[derive(Clone)]
+struct TaskOwnedPromiseObligation {
+    promise: PromiseId,
+    cell: Weak<PromiseCell>,
+    wait: EvaluationWaitToken,
 }
 
 impl SettlementObligations {
     fn reflection_task(wait: EvaluationWaitToken) -> Self {
         Self {
             producer: Some(ProducerSettlementObligation::ReflectionTask { wait }),
+            owned_promises: Vec::new(),
         }
     }
 
     fn deferred_claim(wait: EvaluationWaitToken, producer: DeferredProducer) -> Self {
         Self {
             producer: Some(ProducerSettlementObligation::DeferredClaim { wait, producer }),
+            owned_promises: Vec::new(),
         }
     }
 
@@ -381,8 +385,28 @@ impl SettlementObligations {
         self.producer.take()
     }
 
+    fn add_owned_promise(&mut self, obligation: TaskOwnedPromiseObligation) {
+        self.owned_promises.push(obligation);
+    }
+
+    fn take_owned_promise(
+        &mut self,
+        wait: &EvaluationWaitToken,
+        promise: PromiseId,
+    ) -> Option<TaskOwnedPromiseObligation> {
+        let index = self
+            .owned_promises
+            .iter()
+            .position(|obligation| obligation.wait == *wait && obligation.promise == promise)?;
+        Some(self.owned_promises.swap_remove(index))
+    }
+
+    fn take_owned_promises(&mut self) -> Vec<TaskOwnedPromiseObligation> {
+        std::mem::take(&mut self.owned_promises)
+    }
+
     fn is_empty(&self) -> bool {
-        self.producer.is_none()
+        self.producer.is_none() && self.owned_promises.is_empty()
     }
 }
 
@@ -702,6 +726,7 @@ struct WorkCoordinatorState {
     deferred_by_task: std::collections::BTreeMap<EvaluationTaskId, EvaluationWorkId>,
     deferred_by_wait: HashMap<EvaluationWaitToken, EvaluationWorkId>,
     deferred_by_value: HashMap<DeferredValueId, EvaluationWorkId>,
+    promise_by_wait: HashMap<EvaluationWaitToken, EvaluationWorkId>,
     observation_waiters: HashMap<EvaluationWorkId, ObservationRegistration>,
     spark_workers: usize,
     prefer_spark: bool,
@@ -794,6 +819,10 @@ impl EvaluationWorkCoordinator {
 
     pub(crate) fn runtime_id(&self) -> EvaluationRuntimeId {
         self.runtime
+    }
+
+    pub(crate) fn mutation_guard(&self) -> RuntimeMutationGuard<'_> {
+        self.admission.mutation_guard()
     }
 
     pub(super) fn register_session(&self, session: &Arc<EvaluationSession>) {
@@ -2192,6 +2221,9 @@ impl EvaluationWorkCoordinator {
             .state
             .lock()
             .expect("evaluation work coordinator was poisoned");
+        if let Some(id) = state.promise_by_wait.get(wait) {
+            return state.work.get(id).and_then(task_for_record);
+        }
         if let Some(id) = state.deferred_by_wait.get(wait) {
             return state.work.get(id).map(|record| deferred_work(record).task);
         }
@@ -2200,6 +2232,125 @@ impl EvaluationWorkCoordinator {
             .get(wait)
             .and_then(|id| state.work.get(id))
             .map(|record| reflection_work(record).task)
+    }
+
+    pub(super) fn register_task_promise(
+        &self,
+        task: EvaluationTaskId,
+        wait: EvaluationWaitToken,
+        promise: &Arc<PromiseCell>,
+    ) -> Result<EvaluationWorkId, Arc<str>> {
+        debug_assert_eq!(wait.runtime_id(), self.runtime);
+        let mutation = self.admission.mutation_guard();
+        let work = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            let work = state
+                .reflection_by_task
+                .get(&task)
+                .or_else(|| state.deferred_by_task.get(&task))
+                .copied()
+                .ok_or_else(|| {
+                    Arc::<str>::from(format!(
+                        "task {} has no active work record for its promise",
+                        task.get()
+                    ))
+                })?;
+            let record = state
+                .work
+                .get_mut(&work)
+                .expect("indexed promise producer work must remain registered");
+            if !matches!(record.state, WorkState::Reserved | WorkState::Running) {
+                return Err(Arc::from(
+                    "a promise cannot be added after its producer stopped running",
+                ));
+            }
+            record
+                .obligations
+                .add_owned_promise(TaskOwnedPromiseObligation {
+                    promise: promise.id(),
+                    cell: Arc::downgrade(promise),
+                    wait: wait.clone(),
+                });
+            assert!(
+                state.promise_by_wait.insert(wait, work).is_none(),
+                "evaluation wait tokens must be unique"
+            );
+            state.work_generation = state.work_generation.wrapping_add(1);
+            work
+        };
+        drop(mutation);
+        self.work_available.notify_all();
+        Ok(work)
+    }
+
+    pub(super) fn complete_task_promise_guarded(
+        &self,
+        _mutation: &RuntimeMutationGuard<'_>,
+        work: EvaluationWorkId,
+        wait: &EvaluationWaitToken,
+        promise: PromiseId,
+    ) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .expect("evaluation work coordinator was poisoned");
+        if state.promise_by_wait.get(wait).copied() != Some(work) {
+            return false;
+        }
+        let record = state
+            .work
+            .get_mut(&work)
+            .expect("indexed promise producer work must remain registered");
+        let obligation = record
+            .obligations
+            .take_owned_promise(wait, promise)
+            .expect("promise wait index must agree with its producer obligation");
+        debug_assert_eq!(obligation.promise, promise);
+        assert_eq!(state.promise_by_wait.remove(wait), Some(work));
+        state.work_generation = state.work_generation.wrapping_add(1);
+        true
+    }
+
+    pub(super) fn fail_task_promises(
+        self: &Arc<Self>,
+        work: EvaluationWorkId,
+        failure: Arc<EvaluationFailure>,
+    ) {
+        let mutation = self.admission.mutation_guard();
+        let obligations = {
+            let state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            let Some(record) = state.work.get(&work) else {
+                return;
+            };
+            record.obligations.owned_promises.clone()
+        };
+        drop(mutation);
+        for obligation in obligations {
+            if let Some(promise) = obligation.cell.upgrade() {
+                let _ = promise.fail(failure.clone());
+            } else {
+                let mutation = self.admission.mutation_guard();
+                assert!(self.complete_task_promise_guarded(
+                    &mutation,
+                    work,
+                    &obligation.wait,
+                    obligation.promise,
+                ));
+                let (_, wake) = obligation.wait.publish_terminal_guarded(
+                    self,
+                    &mutation,
+                    EvaluationWaitTerminal::Failed(failure.clone()),
+                );
+                drop(mutation);
+                wake.notify();
+            }
+        }
     }
 
     pub(super) fn task_dependency(&self, task: EvaluationTaskId) -> Option<EvaluationWaitToken> {
@@ -2335,6 +2486,24 @@ impl EvaluationWorkCoordinator {
             })
             .count();
         (active, waits, tasks)
+    }
+
+    #[cfg(test)]
+    pub(super) fn task_promise_count(&self, session: EvaluationSessionId) -> usize {
+        let state = self
+            .state
+            .lock()
+            .expect("evaluation work coordinator was poisoned");
+        state
+            .promise_by_wait
+            .values()
+            .filter(|work| {
+                state
+                    .work
+                    .get(work)
+                    .is_some_and(|record| record.demand_session == session)
+            })
+            .count()
     }
 
     pub(super) fn wait_for_change(&self, observed_generation: u64) {
@@ -2549,6 +2718,14 @@ fn deferred_work_mut(record: &mut WorkRecord) -> &mut DeferredWork {
         WorkKind::Reflection(_) => {
             panic!("reflection work cannot be used as a deferred producer")
         }
+    }
+}
+
+fn task_for_record(record: &WorkRecord) -> Option<EvaluationTaskId> {
+    match &record.kind {
+        WorkKind::Reflection(work) => Some(work.task),
+        WorkKind::Deferred(work) => Some(work.task),
+        WorkKind::Spark(_) => None,
     }
 }
 
@@ -2830,6 +3007,10 @@ fn detach_reflection(state: &mut WorkCoordinatorState, id: EvaluationWorkId) {
         record.obligations.take_producer().is_none(),
         "reflection producer obligations must be taken exactly once"
     );
+    assert!(
+        record.obligations.take_owned_promises().is_empty(),
+        "reflection work cannot retire with unresolved promise obligations"
+    );
     let WorkKind::Reflection(reflection) = record.kind else {
         panic!("reflection retirement must contain reflection work")
     };
@@ -3001,6 +3182,10 @@ fn detach_deferred(state: &mut WorkCoordinatorState, id: EvaluationWorkId) {
     assert!(
         record.obligations.take_producer().is_none(),
         "deferred producer obligations must be taken exactly once"
+    );
+    assert!(
+        record.obligations.take_owned_promises().is_empty(),
+        "deferred work cannot retire with unresolved promise obligations"
     );
     let WorkKind::Deferred(deferred) = record.kind else {
         panic!("deferred retirement must contain deferred work")

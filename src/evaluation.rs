@@ -19,7 +19,7 @@ use rpds::RedBlackTreeMapSync;
 
 use crate::core::{
     CoreValueFactory, DeferredValueId, EvaluationFailure, LazyCycle, LazyCycleMember, LazyValue,
-    PromiseAssignment, PromiseCell, PromisedValue, Value,
+    PromiseAssignment, PromiseCell, PromiseId, PromisedValue, Value,
 };
 use crate::runtime::{EvaluationRuntimeId, RuntimeValueRoot};
 
@@ -171,6 +171,20 @@ impl EvaluationWaitToken {
             .clone()
     }
 
+    fn publish_terminal_guarded(
+        &self,
+        coordinator: &Arc<EvaluationWorkCoordinator>,
+        mutation: &crate::runtime::RuntimeMutationGuard<'_>,
+        terminal: EvaluationWaitTerminal,
+    ) -> (EvaluationWaitTerminal, coordinator::CompletionWake) {
+        self.0
+            .completion
+            .publish_guarded(coordinator, mutation, || {
+                Ok::<_, std::convert::Infallible>(self.publish_terminal(terminal))
+            })
+            .expect("wait terminal publication is infallible")
+    }
+
     /// Delivers exact completion registrations after the owner registry lock
     /// which published and retired this wait has been released.
     fn notify_terminal(&self) {
@@ -225,23 +239,106 @@ impl PromiseSessionWake {
     }
 }
 
-/// The task-owned terminal obligation attached to one reflection fixpoint
-/// promise. It publishes the promise's shared wait before the session retires
-/// the active owner index, but retains that session only weakly.
+/// Assignment-side access to one task-owned promise obligation.
+///
+/// Scheduled tasks place the reciprocal weak promise cell in their
+/// coordinator work record. Directly driven effect tasks temporarily use a
+/// task-local inventory until client demand becomes coordinator work in Phase
+/// 10B. Neither form retains a producer session or runtime coordinator.
 pub(crate) struct PromiseProducerObligation {
     owner: EvaluationTaskId,
     wait: EvaluationWaitToken,
+    source: PromiseProducerSource,
 }
 
-pub(crate) struct PromiseProducerPublication {
+enum PromiseProducerSource {
+    Coordinator {
+        work: EvaluationWorkId,
+        promise: PromiseId,
+        coordinator: Weak<EvaluationWorkCoordinator>,
+    },
+    Local {
+        promise: PromiseId,
+        owner: Weak<LocalPromiseOwner>,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct LocalPromiseObligation {
+    promise: PromiseId,
+    cell: Weak<PromiseCell>,
     wait: EvaluationWaitToken,
-    session: Option<PromiseSessionWake>,
+}
+
+#[derive(Debug, Default)]
+struct LocalPromiseOwner {
+    obligations: Mutex<Vec<LocalPromiseObligation>>,
+}
+
+impl LocalPromiseOwner {
+    fn register(&self, promise: &Arc<PromiseCell>, wait: EvaluationWaitToken) {
+        self.obligations
+            .lock()
+            .expect("local promise obligations were poisoned")
+            .push(LocalPromiseObligation {
+                promise: promise.id(),
+                cell: Arc::downgrade(promise),
+                wait,
+            });
+    }
+
+    fn contains_wait(&self, wait: &EvaluationWaitToken) -> bool {
+        self.obligations
+            .lock()
+            .expect("local promise obligations were poisoned")
+            .iter()
+            .any(|obligation| obligation.wait == *wait)
+    }
+
+    fn complete(&self, promise: PromiseId, wait: &EvaluationWaitToken) {
+        let mut obligations = self
+            .obligations
+            .lock()
+            .expect("local promise obligations were poisoned");
+        if let Some(index) = obligations
+            .iter()
+            .position(|obligation| obligation.promise == promise && obligation.wait == *wait)
+        {
+            obligations.swap_remove(index);
+        }
+    }
+
+    fn fail_all(&self, failure: Arc<EvaluationFailure>) {
+        let obligations = self
+            .obligations
+            .lock()
+            .expect("local promise obligations were poisoned")
+            .clone();
+        for obligation in obligations {
+            if let Some(cell) = obligation.cell.upgrade() {
+                let _ = cell.fail(failure.clone());
+            } else {
+                self.complete(obligation.promise, &obligation.wait);
+                obligation
+                    .wait
+                    .publish_terminal(EvaluationWaitTerminal::Failed(failure.clone()));
+                obligation.wait.notify_terminal();
+            }
+        }
+    }
+}
+
+pub(crate) enum PromiseProducerPublication {
+    Guarded(coordinator::CompletionWake),
+    Detached(EvaluationWaitToken),
 }
 
 impl PromiseProducerPublication {
-    pub(crate) fn notify(self) -> Option<PromiseSessionWake> {
-        self.wait.notify_terminal();
-        self.session
+    pub(crate) fn notify(self) {
+        match self {
+            Self::Guarded(wake) => wake.notify(),
+            Self::Detached(wait) => wait.notify_terminal(),
+        }
     }
 }
 
@@ -254,23 +351,43 @@ impl PromiseProducerObligation {
         &self.wait
     }
 
-    pub(crate) fn publish_assignment(
+    pub(crate) fn coordinator(&self) -> Option<Arc<EvaluationWorkCoordinator>> {
+        match &self.source {
+            PromiseProducerSource::Coordinator { coordinator, .. } => coordinator.upgrade(),
+            PromiseProducerSource::Local { .. } => None,
+        }
+    }
+
+    pub(crate) fn publish_assignment_guarded(
+        &self,
+        coordinator: &Arc<EvaluationWorkCoordinator>,
+        mutation: &crate::runtime::RuntimeMutationGuard<'_>,
+        assignment: &PromiseAssignment,
+    ) -> PromiseProducerPublication {
+        debug_assert_eq!(coordinator.runtime_id(), self.wait.runtime_id());
+        let PromiseProducerSource::Coordinator { work, promise, .. } = self.source else {
+            panic!("a task-local promise cannot publish through a coordinator guard");
+        };
+        coordinator.complete_task_promise_guarded(mutation, work, &self.wait, promise);
+        let terminal = promise_assignment_terminal(self.wait.runtime_id(), assignment);
+        let (_, wake) = self
+            .wait
+            .publish_terminal_guarded(coordinator, mutation, terminal);
+        PromiseProducerPublication::Guarded(wake)
+    }
+
+    pub(crate) fn publish_assignment_detached(
         &self,
         assignment: &PromiseAssignment,
     ) -> PromiseProducerPublication {
-        let terminal = promise_assignment_terminal(self.wait.runtime_id(), assignment);
-        let Some(owner) = self.wait.owner() else {
-            self.wait.publish_terminal(terminal);
-            return PromiseProducerPublication {
-                wait: self.wait.clone(),
-                session: None,
-            };
-        };
-        owner.complete_promise_wait(&self.wait, terminal);
-        PromiseProducerPublication {
-            wait: self.wait.clone(),
-            session: Some(owner.promise_wake()),
+        if let PromiseProducerSource::Local { promise, owner } = &self.source
+            && let Some(owner) = owner.upgrade()
+        {
+            owner.complete(*promise, &self.wait);
         }
+        let terminal = promise_assignment_terminal(self.wait.runtime_id(), assignment);
+        self.wait.publish_terminal(terminal);
+        PromiseProducerPublication::Detached(self.wait.clone())
     }
 }
 
@@ -404,6 +521,20 @@ pub(crate) trait EvaluationTaskMachine: Send {
     fn poll(&mut self, step_budget: usize) -> EvaluationMachinePoll;
 
     fn cancel(&mut self) {}
+}
+
+#[cfg(test)]
+struct PendingTestPromiseTask;
+
+#[cfg(test)]
+impl EvaluationTaskMachine for PendingTestPromiseTask {
+    fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+        EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
+            lazy: None,
+            observed_epoch: None,
+            error: None,
+        })
+    }
 }
 
 pub(crate) trait ReflectionTaskLauncher: Send + Sync {
@@ -686,19 +817,11 @@ impl Drop for PendingReflectionTaskInner {
     }
 }
 
-#[derive(Debug)]
-struct PromiseRecord {
-    producer: EvaluationTaskId,
-    promise: Weak<PromiseCell>,
-}
-
 #[derive(Default)]
 struct EvaluationTasks {
     reflection: HashMap<EvaluationWaitToken, ReflectionTaskRecord>,
     reflection_by_id: BTreeMap<EvaluationTaskId, EvaluationWaitToken>,
     unacknowledged_failures: RedBlackTreeMapSync<EvaluationTaskId, Arc<EvaluationFailure>>,
-    promises: HashMap<EvaluationWaitToken, PromiseRecord>,
-    owned_promises: HashMap<EvaluationTaskId, Vec<EvaluationWaitToken>>,
     deferred: HashMap<DeferredValueId, DeferredTaskRecord>,
     deferred_by_work: HashMap<EvaluationWorkId, DeferredValueId>,
 }
@@ -788,61 +911,6 @@ fn promise_assignment_terminal(
     }
 }
 
-fn promise_record_terminal(
-    wait: &EvaluationWaitToken,
-    record: &PromiseRecord,
-) -> Option<EvaluationWaitTerminal> {
-    let Some(promise) = record.promise.upgrade() else {
-        return Some(EvaluationWaitTerminal::Failed(evaluation_failure(
-            "promised value no longer exists",
-        )));
-    };
-    promise
-        .assignment()
-        .map(|assignment| promise_assignment_terminal(wait.runtime_id(), assignment))
-}
-
-fn retire_promise_wait(
-    tasks: &mut EvaluationTasks,
-    wait: &EvaluationWaitToken,
-) -> Option<PromiseRecord> {
-    let record = tasks.promises.remove(wait)?;
-    let remove_owner = {
-        let waits = tasks
-            .owned_promises
-            .get_mut(&record.producer)
-            .expect("a registered task promise must belong to its producer");
-        let index = waits
-            .iter()
-            .position(|candidate| candidate == wait)
-            .expect("the promise owner index must contain its registered wait");
-        waits.swap_remove(index);
-        waits.is_empty()
-    };
-    if remove_owner {
-        tasks.owned_promises.remove(&record.producer);
-    }
-    Some(record)
-}
-
-fn prune_terminal_promise_waits(tasks: &mut EvaluationTasks) -> Vec<EvaluationWaitToken> {
-    let terminal = tasks
-        .promises
-        .iter()
-        .filter_map(|(wait, record)| {
-            promise_record_terminal(wait, record).map(|terminal| (wait.clone(), terminal))
-        })
-        .collect::<Vec<_>>();
-    let mut completed = Vec::with_capacity(terminal.len());
-    for (wait, terminal) in terminal {
-        wait.publish_terminal(terminal);
-        let retired = retire_promise_wait(tasks, &wait);
-        debug_assert!(retired.is_some());
-        completed.push(wait);
-    }
-    completed
-}
-
 fn retire_deferred_task(
     tasks: &mut EvaluationTasks,
     deferred: DeferredValueId,
@@ -886,21 +954,11 @@ impl Drop for EvaluationSession {
             .into_iter()
             .map(|work| (work.id, work))
             .collect::<HashMap<_, _>>();
-        let (promises, reflection, deferred, statuses, terminal_waits) = {
+        let (reflection, deferred, statuses, terminal_waits) = {
             let tasks = self
                 .tasks
                 .get_mut()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-
-            let promise_waits = tasks.promises.keys().cloned().collect::<Vec<_>>();
-            let mut promises = Vec::with_capacity(promise_waits.len());
-            for wait in promise_waits {
-                let retired = retire_promise_wait(tasks, &wait);
-                promises.push((
-                    wait,
-                    retired.expect("collected promise wait must remain registered"),
-                ));
-            }
 
             let reflection_waits = tasks.reflection.keys().cloned().collect::<Vec<_>>();
             let mut reflection = Vec::with_capacity(reflection_waits.len());
@@ -951,26 +1009,8 @@ impl Drop for EvaluationSession {
                 terminal_waits.push(record.wait.clone());
                 deferred.push(retire_deferred_task(tasks, deferred_id));
             }
-            (promises, reflection, deferred, statuses, terminal_waits)
+            (reflection, deferred, statuses, terminal_waits)
         };
-
-        // A task-owned promise is a producer obligation, unlike a reusable
-        // lazy or host-promise follower. The records are detached first so
-        // central promise publication never reacquires this session registry.
-        for (wait, record) in promises {
-            let failure = evaluation_failure(format!(
-                "promised value's producer task {} was abandoned when its evaluation session closed",
-                record.producer.get()
-            ));
-            if let Some(promise) = record.promise.upgrade() {
-                let _ = promise.fail(failure);
-            } else {
-                wait.publish_terminal(EvaluationWaitTerminal::Failed(evaluation_failure(
-                    "promised value no longer exists",
-                )));
-                wait.notify_terminal();
-            }
-        }
 
         for wait in terminal_waits {
             wait.notify_terminal();
@@ -980,12 +1020,31 @@ impl Drop for EvaluationSession {
             publish_task_status(Some(status));
         }
         for (work, cancel, mut record) in reflection {
-            self.coordinator.retire_reflection(work);
+            let failure = evaluation_failure(if cancel {
+                format!(
+                    "promised value's producer task {} was cancelled",
+                    record.id.get()
+                )
+            } else {
+                format!(
+                    "promised value's producer task {} was abandoned when its evaluation session closed",
+                    record.id.get()
+                )
+            });
+            self.coordinator.fail_task_promises(work, failure);
             if cancel && let Some(machine) = &mut record.machine {
                 machine.cancel();
             }
+            self.coordinator.retire_reflection(work);
         }
         for record in deferred {
+            self.coordinator.fail_task_promises(
+                record.work,
+                evaluation_failure(format!(
+                    "promised value's producer task {} was abandoned when its evaluation session closed",
+                    record.id.get()
+                )),
+            );
             self.coordinator.retire_deferred(record.work);
             drop(record);
         }
@@ -1109,6 +1168,10 @@ impl EvaluationSession {
                 retired
             };
             wait.notify_terminal();
+            self.coordinator.fail_task_promises(
+                abandoned.id,
+                evaluation_failure("deferred fixpoint producer was abandoned"),
+            );
             self.coordinator.retire_deferred(abandoned.id);
             drop(retired);
             let Some(dependency) = abandoned.dependency else {
@@ -1116,15 +1179,6 @@ impl EvaluationSession {
             };
             wait = dependency;
         }
-    }
-
-    fn complete_promise_wait(&self, wait: &EvaluationWaitToken, terminal: EvaluationWaitTerminal) {
-        let mut tasks = self
-            .tasks
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        wait.publish_terminal(terminal);
-        retire_promise_wait(&mut tasks, wait);
     }
 
     fn promise_wake(self: &Arc<Self>) -> PromiseSessionWake {
@@ -1136,20 +1190,9 @@ impl EvaluationSession {
     }
 
     fn notify_promise_changed(&self) {
-        // Pair the notification with scheduler waits and collect any
-        // task-owned promise records whose terminal cell won a publication
-        // race. Coordinator-owned sparks subscribe directly to promise and
-        // wait completion sources.
-        let mut tasks = self
-            .tasks
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let completed = prune_terminal_promise_waits(&mut tasks);
+        // Promise followers remain a temporary broad retry bridge until task
+        // work subscribes directly to exact dependencies in Phase 7B.2.
         self.notify_task_changed();
-        drop(tasks);
-        for wait in completed {
-            wait.notify_terminal();
-        }
         self.coordinator.retry_blocked_deferred(self.id);
     }
 
@@ -1167,6 +1210,7 @@ pub(crate) struct EvalContext {
     session: Arc<EvaluationSession>,
     task_profile: Arc<ReflectionTaskProfile>,
     task: Arc<OnceLock<Result<EvaluationTaskId, Arc<str>>>>,
+    local_promise_owner: Option<Arc<LocalPromiseOwner>>,
     scheduled_task: bool,
     waits_for_claimed_tasks: bool,
     originating_task: Option<EvaluationTaskId>,
@@ -1184,6 +1228,7 @@ impl EvalContext {
             session,
             task_profile,
             task: Arc::new(OnceLock::new()),
+            local_promise_owner: None,
             scheduled_task: false,
             waits_for_claimed_tasks: false,
             originating_task: None,
@@ -1198,6 +1243,7 @@ impl EvalContext {
             session,
             task_profile,
             task: Arc::new(OnceLock::new()),
+            local_promise_owner: None,
             scheduled_task: false,
             waits_for_claimed_tasks: false,
             originating_task: None,
@@ -1226,6 +1272,7 @@ impl EvalContext {
             session,
             task_profile,
             task,
+            local_promise_owner: None,
             scheduled_task: true,
             waits_for_claimed_tasks: false,
             originating_task: Some(id),
@@ -1245,6 +1292,7 @@ impl EvalContext {
             session,
             task_profile,
             task,
+            local_promise_owner: None,
             scheduled_task: true,
             waits_for_claimed_tasks: false,
             originating_task,
@@ -1260,6 +1308,21 @@ impl EvalContext {
     /// tests; production task services use a runtime-registered session.
     pub(crate) fn isolated(values: CoreValueFactory) -> Self {
         Self::new(EvaluationSession::isolated(values))
+    }
+
+    /// Gives a directly driven effect task a private promise inventory.
+    /// Scheduled task contexts use their coordinator work record instead.
+    pub(crate) fn for_effect_task(mut self) -> Self {
+        if !self.scheduled_task && self.local_promise_owner.is_none() {
+            self.local_promise_owner = Some(Arc::new(LocalPromiseOwner::default()));
+        }
+        self
+    }
+
+    pub(crate) fn fail_local_promises(&self, failure: Arc<EvaluationFailure>) {
+        if let Some(owner) = &self.local_promise_owner {
+            owner.fail_all(failure);
+        }
     }
 
     pub(crate) fn spark(&self, value: Value) {
@@ -1426,6 +1489,7 @@ impl EvalContext {
             session: self.session.clone(),
             task_profile: self.task_profile.clone(),
             task: Arc::new(OnceLock::new()),
+            local_promise_owner: None,
             scheduled_task: false,
             waits_for_claimed_tasks: false,
             originating_task: None,
@@ -1435,6 +1499,53 @@ impl EvalContext {
             originating_task: Some(task),
             ..context
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn task_owned_promises(
+        &self,
+        labels: impl IntoIterator<Item = Arc<str>>,
+    ) -> Result<(Vec<PromisedValue>, EvaluationTaskHandle, EvalContext), Arc<str>> {
+        let labels = labels.into_iter().collect::<Vec<_>>();
+        let promises = Arc::new(Mutex::new(None));
+        let output = promises.clone();
+        let owner_context = Arc::new(Mutex::new(None));
+        let owner_output = owner_context.clone();
+        let task = self.schedule_task(move |context| {
+            let owned = labels
+                .into_iter()
+                .map(|label| PromisedValue::fixpoint(&context, label))
+                .collect::<Result<Vec<_>, _>>()?;
+            *output.lock().expect("test promise output was poisoned") = Some(owned);
+            *owner_output
+                .lock()
+                .expect("test promise owner output was poisoned") = Some(context);
+            Ok(Box::new(PendingTestPromiseTask))
+        })?;
+        let promises = promises
+            .lock()
+            .expect("test promise output was poisoned")
+            .take()
+            .expect("test task construction must publish its promises");
+        let owner_context = owner_context
+            .lock()
+            .expect("test promise owner output was poisoned")
+            .take()
+            .expect("test task construction must publish its owner context");
+        Ok((promises, task, owner_context))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn task_owned_promise(
+        &self,
+        label: impl Into<Arc<str>>,
+    ) -> Result<(PromisedValue, EvaluationTaskHandle, EvalContext), Arc<str>> {
+        let (mut promises, task, owner) = self.task_owned_promises([label.into()])?;
+        Ok((
+            promises.pop().expect("one promise was requested"),
+            task,
+            owner,
+        ))
     }
 
     pub(crate) fn task_id(&self) -> Result<EvaluationTaskId, Arc<str>> {
@@ -1451,65 +1562,40 @@ impl EvalContext {
         self.session.promise_wake()
     }
 
-    #[cfg(test)]
-    pub(crate) fn notify_promise_changed(&self) {
-        self.session.notify_promise_changed();
-    }
-
     pub(crate) fn register_promise(
         &self,
         promise: &Arc<crate::core::PromiseCell>,
     ) -> Result<PromiseProducerObligation, Arc<str>> {
         let owner = self.task_id()?;
         let wait = allocate_wait_token(&self.session, owner)?;
-        let mut tasks = self
-            .session
-            .tasks
-            .lock()
-            .expect("evaluation task registry was poisoned");
-        let replaced = tasks.promises.insert(
-            wait.clone(),
-            PromiseRecord {
-                producer: owner,
-                promise: Arc::downgrade(promise),
-            },
-        );
-        assert!(replaced.is_none(), "evaluation wait tokens must be unique");
-        tasks
-            .owned_promises
-            .entry(owner)
-            .or_default()
-            .push(wait.clone());
-        Ok(PromiseProducerObligation { owner, wait })
-    }
-
-    pub(crate) fn fail_unresolved_promises(&self, failure: Arc<EvaluationFailure>) {
-        let Some(Ok(owner)) = self.task.get() else {
-            return;
-        };
-        let owner = *owner;
-        let promises = {
-            let mut tasks = self
-                .session
-                .tasks
-                .lock()
-                .expect("evaluation task registry was poisoned");
-            let waits = tasks.owned_promises.remove(&owner).unwrap_or_default();
-            waits
-                .into_iter()
-                .filter_map(|wait| tasks.promises.remove(&wait).map(|promise| (wait, promise)))
-                .collect::<Vec<_>>()
-        };
-        for (wait, promise) in promises {
-            if let Some(promise) = promise.promise.upgrade() {
-                let _ = promise.fail(failure.clone());
-            } else {
-                wait.publish_terminal(EvaluationWaitTerminal::Failed(evaluation_failure(
-                    "promised value no longer exists",
-                )));
-                wait.notify_terminal();
+        let source = if self.scheduled_task {
+            let work =
+                self.session
+                    .coordinator
+                    .register_task_promise(owner, wait.clone(), promise)?;
+            PromiseProducerSource::Coordinator {
+                work,
+                promise: promise.id(),
+                coordinator: Arc::downgrade(&self.session.coordinator),
             }
-        }
+        } else if let Some(local_owner) = &self.local_promise_owner {
+            local_owner.register(promise, wait.clone());
+            PromiseProducerSource::Local {
+                promise: promise.id(),
+                owner: Arc::downgrade(local_owner),
+            }
+        } else {
+            return Err(format!(
+                "task {} has no active work record for its promise",
+                owner.get()
+            )
+            .into());
+        };
+        Ok(PromiseProducerObligation {
+            owner,
+            wait,
+            source,
+        })
     }
 
     /// Registers an executable task whose concrete specialization remains
@@ -1524,11 +1610,24 @@ impl EvalContext {
         let id = allocate_task_id(self.values())?;
         let wait = allocate_wait_token(&self.session, id)?;
         let context = Self::for_task(self.session.clone(), id, self.task_profile.clone());
-        let machine = build(context)?;
         let work = self
             .session
             .coordinator
             .reserve_reflection(&self.session, id, wait.clone());
+        let machine = match build(context) {
+            Ok(machine) => machine,
+            Err(error) => {
+                self.session.coordinator.fail_task_promises(
+                    work,
+                    evaluation_failure(format!("task construction failed: {error}")),
+                );
+                assert!(
+                    self.session.coordinator.discard_reserved_reflection(work),
+                    "failed test task construction must discard its reservation"
+                );
+                return Err(error);
+            }
+        };
         let mut tasks = self
             .session
             .tasks
@@ -1645,6 +1744,7 @@ impl EvalContext {
                 }
             }
             Err(error) => {
+                let promise_failure = error.clone();
                 {
                     let mut tasks = self
                         .session
@@ -1678,6 +1778,9 @@ impl EvalContext {
                         )
                     };
                     handle.wait.notify_terminal();
+                    self.session
+                        .coordinator
+                        .fail_task_promises(handle.work, promise_failure);
                     self.session.coordinator.retire_reflection(handle.work);
                     drop(transition.retired);
                     publish_task_status(transition.status);
@@ -1754,6 +1857,10 @@ impl EvalContext {
         if transition.terminal {
             handle.wait.notify_terminal();
         }
+        self.session.coordinator.fail_task_promises(
+            handle.work,
+            evaluation_failure("reflection fixpoint producer was cancelled"),
+        );
         self.session.coordinator.retire_reflection(handle.work);
         drop(transition.retired);
         publish_task_status(transition.status);
@@ -1882,14 +1989,18 @@ impl EvalContext {
                     transition
                 };
                 task.wait.notify_terminal();
-                self.session.coordinator.retire_reflection(task.work);
-                publish_task_status(transition.status);
                 let mut retired = transition
                     .retired
                     .expect("terminal cancellation must retire its task record");
+                self.session.coordinator.fail_task_promises(
+                    task.work,
+                    evaluation_failure("reflection fixpoint producer was cancelled"),
+                );
                 if let Some(mut machine) = retired.machine.take() {
                     machine.cancel();
                 }
+                self.session.coordinator.retire_reflection(task.work);
+                publish_task_status(transition.status);
                 EvaluationTaskCancellation::Requested
             }
         }
@@ -1920,40 +2031,21 @@ impl EvalContext {
         if let Some(terminal) = wait.terminal_poll() {
             return terminal;
         }
-        let owner = match wait.owner() {
-            Some(owner) => owner,
-            None => {
-                return wait
-                    .terminal_poll()
-                    .unwrap_or(EvaluationWaitPoll::Abandoned);
-            }
-        };
-        let mut tasks = owner
-            .tasks
-            .lock()
-            .expect("evaluation task registry was poisoned");
-        if let Some(terminal) = wait.terminal_poll() {
-            return terminal;
-        }
-        if let Some(terminal) = tasks
-            .promises
-            .get(wait)
-            .and_then(|record| promise_record_terminal(wait, record))
+        if self
+            .local_promise_owner
+            .as_ref()
+            .is_some_and(|owner| owner.contains_wait(wait))
         {
-            let terminal = wait.publish_terminal(terminal);
-            retire_promise_wait(&mut tasks, wait);
-            owner.notify_task_changed();
-            drop(tasks);
-            wait.notify_terminal();
-            return terminal.to_poll();
+            return EvaluationWaitPoll::Pending(wait.clone());
         }
-        let promise_pending = tasks.promises.contains_key(wait);
-        drop(tasks);
-        if promise_pending || owner.coordinator.producer_for_wait(wait).is_some() {
+        if self.session.coordinator.producer_for_wait(wait).is_some() {
             return EvaluationWaitPoll::Pending(wait.clone());
         }
         if let Some(terminal) = wait.terminal_poll() {
             return terminal;
+        }
+        if wait.owner().is_none() {
+            return EvaluationWaitPoll::Abandoned;
         }
         EvaluationWaitPoll::Failed(evaluation_failure(
             "evaluation wait token is no longer registered",
@@ -2010,6 +2102,10 @@ impl EvalContext {
         if transition.terminal {
             wait.notify_terminal();
         }
+        self.session.coordinator.fail_task_promises(
+            work,
+            evaluation_failure("reflection task completed without fulfilling its fixpoint"),
+        );
         self.session.coordinator.retire_reflection(work);
         drop(transition.retired);
         publish_task_status(transition.status);
@@ -2021,7 +2117,15 @@ impl EvalContext {
 
     #[cfg(test)]
     pub(crate) fn fail_wait(&self, wait: &EvaluationWaitToken, error: impl Into<Arc<str>>) {
-        let error = error.into();
+        self.fail_wait_with_failure(wait, evaluation_failure(error.into()));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_wait_with_failure(
+        &self,
+        wait: &EvaluationWaitToken,
+        failure: Arc<EvaluationFailure>,
+    ) {
         let target = wait.clone();
         let wait = test_reflection_dependency(&self.session.coordinator, wait);
         let tasks = self
@@ -2044,13 +2148,14 @@ impl EvalContext {
         let transition = transition_reflection_task(
             &mut tasks,
             &wait,
-            EvaluationTaskState::Failed(evaluation_failure(error.as_ref())),
+            EvaluationTaskState::Failed(failure.clone()),
         );
         self.session.notify_task_changed();
         drop(tasks);
         if transition.terminal {
             wait.notify_terminal();
         }
+        self.session.coordinator.fail_task_promises(work, failure);
         self.session.coordinator.retire_reflection(work);
         drop(transition.retired);
         publish_task_status(transition.status);
@@ -2073,21 +2178,12 @@ impl EvalContext {
     #[cfg(test)]
     pub(crate) fn task_registry_counts(&self) -> EvaluationTaskRegistryCounts {
         let deferred_counts = self.session.coordinator.deferred_counts(self.session.id);
+        let promise_count = self.session.coordinator.task_promise_count(self.session.id);
         let tasks = self
             .session
             .tasks
             .lock()
             .expect("evaluation task registry was poisoned");
-        let promises_terminal = tasks
-            .promises
-            .values()
-            .filter(|promise| {
-                promise
-                    .promise
-                    .upgrade()
-                    .is_none_or(|promise| promise.assignment().is_some())
-            })
-            .count();
         EvaluationTaskRegistryCounts {
             reflection_active: tasks.reflection.len(),
             reflection_terminal: 0,
@@ -2097,9 +2193,9 @@ impl EvalContext {
             deferred_terminal: 0,
             deferred_by_wait: deferred_counts.1,
             deferred_by_task: deferred_counts.2,
-            promises_active: tasks.promises.len() - promises_terminal,
-            promises_terminal,
-            owned_promise_waits: tasks.owned_promises.values().map(Vec::len).sum(),
+            promises_active: promise_count,
+            promises_terminal: 0,
+            owned_promise_waits: promise_count,
         }
     }
 
@@ -2521,6 +2617,18 @@ impl EvaluationSession {
         } else {
             terminal_state.expect("terminal reflection poll must carry a terminal result")
         };
+        let promise_failure = match &state {
+            EvaluationTaskState::Complete(_) => {
+                evaluation_failure("reflection task completed without fulfilling its fixpoint")
+            }
+            EvaluationTaskState::Failed(error) => error.clone(),
+            EvaluationTaskState::Cancelled => {
+                evaluation_failure("reflection fixpoint producer was cancelled")
+            }
+            EvaluationTaskState::Abandoned => {
+                evaluation_failure("reflection fixpoint producer was abandoned")
+            }
+        };
         let transition = {
             let mut tasks = self
                 .tasks
@@ -2536,6 +2644,7 @@ impl EvaluationSession {
             .as_ref()
             .expect("terminal reflection transition must retire its machine slot")
             .work;
+        self.coordinator.fail_task_promises(work, promise_failure);
         self.coordinator.retire_reflection(work);
         let mut retired = transition.retired;
         let released = retired
@@ -2618,6 +2727,18 @@ impl EvaluationSession {
         } else {
             terminal.expect("terminal deferred poll must carry a terminal result")
         };
+        let promise_failure = match &terminal {
+            EvaluationWaitTerminal::Complete(_) => {
+                evaluation_failure("evaluation task completed without fulfilling its fixpoint")
+            }
+            EvaluationWaitTerminal::Failed(error) => error.clone(),
+            EvaluationWaitTerminal::Cancelled => {
+                evaluation_failure("evaluation fixpoint producer was cancelled")
+            }
+            EvaluationWaitTerminal::Abandoned => {
+                evaluation_failure("evaluation fixpoint producer was abandoned")
+            }
+        };
         let retired = {
             let mut tasks = self
                 .tasks
@@ -2634,6 +2755,7 @@ impl EvaluationSession {
             retired
         };
         retired.wait.notify_terminal();
+        self.coordinator.fail_task_promises(work, promise_failure);
         self.coordinator.retire_deferred(work);
         drop(retired);
         (release.made_progress, false, None, None)
@@ -2690,6 +2812,8 @@ impl EvaluationSession {
         };
         for (member, _) in terminals {
             member.wait.notify_terminal();
+            self.coordinator
+                .fail_task_promises(member.work, failure.clone());
             self.coordinator.retire_deferred(member.work);
         }
         drop(retired);
@@ -2794,14 +2918,7 @@ impl EvaluationSession {
     }
 
     fn producer_for_wait(&self, wait: &EvaluationWaitToken) -> Option<EvaluationTaskId> {
-        self.coordinator.producer_for_wait(wait).or_else(|| {
-            self.tasks
-                .lock()
-                .expect("evaluation task registry was poisoned")
-                .promises
-                .get(wait)
-                .map(|promise| promise.producer)
-        })
+        self.coordinator.producer_for_wait(wait)
     }
 
     fn task_dependency(&self, id: EvaluationTaskId) -> Option<EvaluationWaitToken> {
@@ -2894,6 +3011,7 @@ impl EvaluationSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Barrier;
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
@@ -3713,11 +3831,9 @@ mod tests {
     fn owner_session_drop_fails_task_promises_but_not_host_promises() {
         let fixture = SameRuntimeFixture::new();
         let task_promise = {
-            let owner = fixture
-                .context()
-                .with_new_task()
-                .expect("promise owner should allocate a task identity");
-            let promise = PromisedValue::fixpoint(&owner, "abandoned task promise")
+            let owner = fixture.context();
+            let (promise, _owner_task, _owner_context) = owner
+                .task_owned_promise(Arc::from("abandoned task promise"))
                 .expect("task promise should register");
             let wait = promise
                 .task()
@@ -3769,6 +3885,67 @@ mod tests {
                 .assignment()
                 .is_some_and(|assignment| assignment.is_ok())
         );
+    }
+
+    #[test]
+    fn promise_assignment_and_producer_failure_publish_one_matching_terminal() {
+        const ITERATIONS: usize = 32;
+
+        let fixture = SameRuntimeFixture::new();
+        for index in 0..ITERATIONS {
+            let context = fixture.context();
+            let (promise, task, _owner_context) = context
+                .task_owned_promise(Arc::from(format!("racing task promise {index}")))
+                .expect("task promise should register");
+            let barrier = Arc::new(Barrier::new(2));
+            let assignment_barrier = barrier.clone();
+            let assigned = promise.clone();
+            let value = context.values().unit();
+            let assignment = std::thread::spawn(move || {
+                assignment_barrier.wait();
+                assigned.set(value)
+            });
+            let failure_barrier = barrier.clone();
+            let failure_context = context.clone();
+            let failure_wait = task.wait().clone();
+            let failure = std::thread::spawn(move || {
+                failure_barrier.wait();
+                failure_context.fail_wait(&failure_wait, "racing producer failure");
+            });
+
+            let assignment_result = assignment.join().expect("assignment thread should finish");
+            failure.join().expect("failure thread should finish");
+            let terminal = promise
+                .assignment()
+                .expect("one racing publication must assign the promise");
+            match (&assignment_result, &terminal) {
+                (Ok(()), Ok(value)) => assert_eq!(value, &context.values().unit()),
+                (Err(_), Err(error)) => {
+                    assert!(error.to_string().contains("racing producer failure"));
+                }
+                _ => panic!("promise assignment and producer wait terminal disagreed"),
+            }
+            assert!(
+                matches!(
+                    context.poll_wait(
+                        promise
+                            .task()
+                            .expect("task promise should retain producer provenance")
+                            .wait()
+                    ),
+                    EvaluationWaitPoll::Complete(_) if terminal.is_ok()
+                ) || matches!(
+                    context.poll_wait(
+                        promise
+                            .task()
+                            .expect("task promise should retain producer provenance")
+                            .wait()
+                    ),
+                    EvaluationWaitPoll::Failed(_) if terminal.is_err()
+                )
+            );
+            assert_eq!(context.task_registry_counts().promises_active, 0);
+        }
     }
 
     #[test]
@@ -3830,10 +4007,8 @@ mod tests {
                 "failed lazy should terminate without retaining its task record"
             );
 
-            let owner = context
-                .with_new_task()
-                .expect("promise owner should receive a task ID");
-            let promise = PromisedValue::fixpoint(&owner, format!("promise {index}"))
+            let (promise, owner_task, _owner_context) = context
+                .task_owned_promise(Arc::from(format!("promise {index}")))
                 .expect("task-owned promise should register");
             let wait = promise
                 .task()
@@ -3849,6 +4024,7 @@ mod tests {
                     .fail_message("long-lived promise failure")
                     .expect("failed promise should complete once");
             }
+            context.complete_wait(owner_task.wait());
             promises.push(wait);
         }
 
@@ -4603,11 +4779,9 @@ mod tests {
     #[test]
     fn pending_cross_session_task_promise_does_not_spin_a_deferred_retry() {
         let fixture = SameRuntimeFixture::new();
-        let owner = fixture
-            .context()
-            .with_new_task()
-            .expect("promise owner should allocate a task identity");
-        let promise = PromisedValue::fixpoint(&owner, "pending cross-session task promise")
+        let owner = fixture.context();
+        let (promise, _owner_task, _owner_context) = owner
+            .task_owned_promise(Arc::from("pending cross-session task promise"))
             .expect("task promise should register");
         let dependency = promise
             .task()

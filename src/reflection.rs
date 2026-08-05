@@ -752,6 +752,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         eval_context: EvalContext,
         retain_all: bool,
     ) -> Result<Self, TaskHalt> {
+        let eval_context = eval_context.for_effect_task();
         let tags = Tags::new();
         let (api, specialized_requests) = effect_api(
             &tags,
@@ -2276,8 +2277,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             )),
             TaskTerminal::Failed(error) => error.clone().into_failure(),
         };
-        self.eval_context
-            .fail_unresolved_promises(unfinished_failure);
+        self.eval_context.fail_local_promises(unfinished_failure);
         self.blocked = None;
         self.terminal = Some(terminal);
     }
@@ -3558,7 +3558,7 @@ mod tests {
 
     use super::*;
     use crate::api::{Assembler, Diagnostic};
-    use crate::evaluation::EvaluationTaskHandle;
+    use crate::evaluation::{EvaluationTaskCancellation, EvaluationTaskHandle};
 
     fn public_record<I, S>(assembler: &Assembler, entries: I) -> PublicValue
     where
@@ -4504,9 +4504,10 @@ mod tests {
         let (assembler, function) =
             compile_effect("\\value -> .eval value >>= (\\result -> .r result.ok)");
         let session = EvalContext::isolated(assembler.core_values());
-        let owner = session.with_new_task().unwrap();
+        let (promised, _owner_task, _owner) = session
+            .task_owned_promise(Arc::from("isolated search dependency"))
+            .unwrap();
         let observer = session.with_new_task().unwrap();
-        let promised = PromisedValue::fixpoint(&owner, "isolated search dependency").unwrap();
         let effect = eval::apply_values(
             &observer,
             function.as_core().clone(),
@@ -5099,9 +5100,10 @@ mod tests {
     fn reflection_eval_suspends_instead_of_failing_around_a_pending_value() {
         let (assembler, function) = compile_effect("\\value -> .eval value");
         let session = EvalContext::standalone();
-        let owner = session.with_new_task().unwrap();
+        let (promised, _owner_task, _owner) = session
+            .task_owned_promise(Arc::from("eval test dependency"))
+            .unwrap();
         let observer = session.with_new_task().unwrap();
-        let promised = PromisedValue::fixpoint(&owner, "eval test dependency").unwrap();
         let effect = eval::apply_values(
             &observer,
             function.as_core().clone(),
@@ -6260,27 +6262,28 @@ mod tests {
 
     #[test]
     fn task_failure_propagates_one_structured_failure_to_owned_promises() {
-        let (assembler, effect) = compile_effect(".r ()");
-        let mut task = EffectTask::new(
-            &assembler.core_values(),
-            effect.as_core().clone(),
-            TestEffects,
-            Arc::new(TestHost::with_values(assembler.core_values())),
-        )
-        .unwrap();
-        let promises = [
-            PromisedValue::fixpoint(&task.eval_context, "first owned promise").unwrap(),
-            PromisedValue::fixpoint(&task.eval_context, "second owned promise").unwrap(),
+        let (assembler, _effect) = compile_effect(".r ()");
+        let context = EvalContext::isolated(assembler.core_values());
+        let (promises, owner_task, owner) = context
+            .task_owned_promises([
+                Arc::from("first owned promise"),
+                Arc::from("second owned promise"),
+                Arc::from("resolved owned promise"),
+            ])
+            .unwrap();
+        let mut promises = promises.into_iter();
+        let unresolved = [
+            promises.next().expect("first promise should exist"),
+            promises.next().expect("second promise should exist"),
         ];
-        let waits = promises.each_ref().map(|promise| {
+        let resolved = promises.next().expect("resolved promise should exist");
+        let waits = unresolved.each_ref().map(|promise| {
             promise
                 .task()
                 .expect("task-owned promise should expose its wait")
                 .wait()
                 .clone()
         });
-        let resolved =
-            PromisedValue::fixpoint(&task.eval_context, "resolved owned promise").unwrap();
         let resolved_wait = resolved
             .task()
             .expect("task-owned promise should expose its wait")
@@ -6305,32 +6308,31 @@ mod tests {
         let frame = eval::evaluation_context_frame("producer_test");
         let failure =
             Arc::new(EvaluationFailure::emission(emission.clone()).with_context(frame.clone()));
-        task.finish(TaskTerminal::Failed(TaskHalt::failure(failure.clone())));
+        context.fail_wait_with_failure(owner_task.wait(), failure.clone());
 
-        for (promise, wait) in promises.into_iter().zip(waits) {
-            let observed = eval::eval_value(&task.eval_context, &Value::Promised(promise))
+        for (promise, wait) in unresolved.into_iter().zip(waits) {
+            let observed = eval::eval_value(&owner, &Value::Promised(promise))
                 .expect_err("unresolved owned promise should inherit producer failure")
                 .into_permanent_failure();
             assert!(Arc::ptr_eq(&failure, &observed));
             assert_eq!(observed.emission_value(), Some(&emission));
             assert_eq!(observed.contexts(), std::slice::from_ref(&frame));
-            let EvaluationWaitPoll::Failed(wait_failure) = task.eval_context.poll_wait(&wait)
-            else {
+            let EvaluationWaitPoll::Failed(wait_failure) = owner.poll_wait(&wait) else {
                 panic!("owned promise wait should publish the producer failure")
             };
             assert!(Arc::ptr_eq(&failure, &wait_failure));
         }
 
         assert_eq!(
-            eval::eval_value(&task.eval_context, &Value::Promised(resolved)).unwrap(),
+            eval::eval_value(&owner, &Value::Promised(resolved)).unwrap(),
             Value::Number(Number::integer(42)),
             "producer failure must not replace an earlier assignment"
         );
         assert_eq!(
-            task.eval_context.poll_wait(&resolved_wait),
+            owner.poll_wait(&resolved_wait),
             EvaluationWaitPoll::Complete(Value::Number(Number::integer(42)))
         );
-        let counts = task.eval_context.task_registry_counts();
+        let counts = context.task_registry_counts();
         assert_eq!(counts.promises_active, 0);
         assert_eq!(counts.promises_terminal, 0);
         assert_eq!(counts.owned_promise_waits, 0);
@@ -6338,49 +6340,44 @@ mod tests {
 
     #[test]
     fn task_completion_and_cancellation_fail_unresolved_owned_promises() {
-        let (assembler, effect) = compile_effect(".r ()");
+        let (assembler, _effect) = compile_effect(".r ()");
+        let context = EvalContext::isolated(assembler.core_values());
         let cases = [
             (
-                TaskTerminal::Complete(PublicValue::from_core(
-                    &assembler.core_values(),
-                    keys::unit_value(),
-                )),
+                false,
                 "reflection task completed without fulfilling its fixpoint",
             ),
-            (
-                TaskTerminal::Cancelled,
-                "reflection fixpoint producer was cancelled",
-            ),
+            (true, "reflection fixpoint producer was cancelled"),
         ];
 
-        for (terminal, expected) in cases {
-            let mut task = EffectTask::new(
-                &assembler.core_values(),
-                effect.as_core().clone(),
-                TestEffects,
-                Arc::new(TestHost::with_values(assembler.core_values())),
-            )
-            .unwrap();
-            let promise =
-                PromisedValue::fixpoint(&task.eval_context, "unfinished owned promise").unwrap();
+        for (cancel, expected) in cases {
+            let (promise, owner_task, owner) = context
+                .task_owned_promise(Arc::from("unfinished owned promise"))
+                .unwrap();
             let wait = promise
                 .task()
                 .expect("task-owned promise should expose its wait")
                 .wait()
                 .clone();
 
-            task.finish(terminal);
+            if cancel {
+                assert_eq!(
+                    context.cancel_reflection_task(&owner_task),
+                    EvaluationTaskCancellation::Requested
+                );
+            } else {
+                context.complete_wait(owner_task.wait());
+            }
 
-            let observed = eval::eval_value(&task.eval_context, &Value::Promised(promise))
+            let observed = eval::eval_value(&owner, &Value::Promised(promise))
                 .expect_err("terminal task should fail its unfinished promise")
                 .into_permanent_failure();
             assert_eq!(observed.to_string(), expected);
-            let EvaluationWaitPoll::Failed(wait_failure) = task.eval_context.poll_wait(&wait)
-            else {
+            let EvaluationWaitPoll::Failed(wait_failure) = owner.poll_wait(&wait) else {
                 panic!("unfinished promise wait should publish its synthesized failure")
             };
             assert!(Arc::ptr_eq(&observed, &wait_failure));
-            let counts = task.eval_context.task_registry_counts();
+            let counts = context.task_registry_counts();
             assert_eq!(counts.promises_active, 0);
             assert_eq!(counts.promises_terminal, 0);
             assert_eq!(counts.owned_promise_waits, 0);
