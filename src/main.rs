@@ -1135,6 +1135,28 @@ struct LoggerTaskHost {
     diagnostic_delivery: RuntimeOutputDelivery<Diagnostic>,
     stderr_writer: RuntimeOutputWriter,
     stderr_delivery: RuntimeOutputDelivery<Bytes>,
+    #[cfg(test)]
+    wait_probe: Option<Arc<LoggerWaitProbe>>,
+}
+
+#[cfg(test)]
+struct LoggerWaitProbe {
+    entered: std::sync::mpsc::Sender<u64>,
+    resume: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+#[cfg(test)]
+impl LoggerWaitProbe {
+    fn pause(&self, observed_generation: u64) {
+        self.entered
+            .send(observed_generation)
+            .expect("logger wait probe receiver should remain live");
+        self.resume
+            .lock()
+            .expect("logger wait probe should not be poisoned")
+            .recv()
+            .expect("logger wait probe should be resumed");
+    }
 }
 
 impl LoggerTaskHost {
@@ -1180,7 +1202,15 @@ impl LoggerTaskHost {
             diagnostic_delivery,
             stderr_writer,
             stderr_delivery,
+            #[cfg(test)]
+            wait_probe: None,
         }
+    }
+
+    #[cfg(test)]
+    fn with_wait_probe(mut self, probe: Arc<LoggerWaitProbe>) -> Self {
+        self.wait_probe = Some(probe);
+        self
     }
 
     fn write_diagnostic(&self, diagnostic: Diagnostic) -> Result<(), Error> {
@@ -1413,6 +1443,10 @@ impl TaskHost<MainEffects> for LoggerTaskHost {
     }
 
     fn wait_for_change(&self, observed_generation: u64) -> bool {
+        #[cfg(test)]
+        if let Some(probe) = &self.wait_probe {
+            probe.pause(observed_generation);
+        }
         let (generation, _, snapshot) = self.input.runtime.logger_transaction_snapshot();
         if snapshot.cancelled() {
             return false;
@@ -2647,6 +2681,99 @@ mod tests {
         assert!(!<LoggerTaskHost as TaskHost<MainEffects>>::wait_for_change(
             &host,
             closed_generation
+        ));
+    }
+
+    #[test]
+    fn closed_logger_wait_can_cancel_a_now_ready_exact_dependency() {
+        // Transitional characterization: `EffectRun` is still a synchronous
+        // Rust-stack demand rather than coordinator work. Once log closure is
+        // its terminal broad observation, it can cancel before reconsidering
+        // an exact dependency made ready at the same boundary. Phase 10B.1's
+        // `ClientDemand` registration replaces this compatibility behavior.
+        let runtime = EvaluationRuntime::new(0).expect("logger test runtime should build");
+        let diagnostics = DiagnosticBus::for_runtime(&runtime);
+        let input = Arc::new(LogHost::with_runtime(runtime.clone(), &diagnostics));
+        let mut resolver = None;
+        let assembler = Assembler::builder()
+            .evaluation_runtime(runtime.clone())
+            .reflection_environment(|environment| {
+                let values = environment.values();
+                let (promise, promise_resolver) = environment.promise("logger wait barrier");
+                resolver = Some(promise_resolver);
+                let test = values.record([("promise", promise)])?;
+                values.record([("test", test)])
+            })
+            .expect("logger test environment should build")
+            .build()
+            .expect("logger test assembler should build");
+        let module = assembler
+            .module(["logger_close_barrier"])
+            .script(
+                "g",
+                concat!(
+                    "language g0\n",
+                    "import 'std\n",
+                    "refl.effect = .log_status >>= (\\_status -> ",
+                    "((.env ['test,'promise]) == 42) =>> .r ())\n",
+                ),
+            )
+            .build()
+            .expect("logger close barrier fixture should compile");
+        let effect = assembler
+            .get(module.value(), "refl.effect")
+            .expect("logger close barrier fixture should define its effect");
+
+        let (entered, waits) = std::sync::mpsc::channel();
+        let (resume, resumed) = std::sync::mpsc::channel();
+        let probe = Arc::new(LoggerWaitProbe {
+            entered,
+            resume: std::sync::Mutex::new(resumed),
+        });
+        let host = Arc::new(
+            LoggerTaskHost::new(
+                input.clone(),
+                DiagnosticBus::new(),
+                assembler.reflection_environment_for_role("logger"),
+            )
+            .with_wait_probe(probe),
+        );
+        let task_runtime = runtime.clone();
+        let task_assembler = assembler.clone();
+        let task = thread::spawn(move || {
+            EffectRun::new(
+                &task_runtime,
+                &effect,
+                MainEffects::new(task_assembler),
+                host,
+            )
+            .run()
+        });
+
+        let open_generation = waits
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("logger should block after observing the open input");
+        input.close_input();
+        resume
+            .send(())
+            .expect("logger should resume after input closure");
+
+        let closed_generation = waits
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("logger should retry and block on the unresolved exact dependency");
+        assert_ne!(open_generation, closed_generation);
+        resolver
+            .take()
+            .expect("logger promise resolver should remain live")
+            .resolve(runtime.values().integer(42))
+            .expect("logger promise should resolve");
+        resume
+            .send(())
+            .expect("logger should resume after exact dependency completion");
+
+        assert!(matches!(
+            task.join().expect("logger task should not panic"),
+            Ok(TaskOutcome::Cancelled)
         ));
     }
 
