@@ -346,13 +346,11 @@ enum ProducerSettlementObligation {
     },
 }
 
-/// Static producer state which must eventually be disposed before a work
-/// record retires.
+/// Producer state which must be disposed before a work record retires.
 ///
-/// This inventory is deliberately passive in Phase 7B.1a. Existing session
-/// terminal paths still publish waits and dispose claims; retirement merely
-/// takes the matching inventory entry exactly once. Later checkpoints move
-/// that disposition itself behind this boundary.
+/// Ordinary terminalization consumes the static producer entry once, then
+/// settles every dynamically registered promise before the transitional
+/// session reporting tail is permitted to retire the work record.
 #[derive(Default)]
 struct SettlementObligations {
     producer: Option<ProducerSettlementObligation>,
@@ -399,10 +397,6 @@ impl SettlementObligations {
             .iter()
             .position(|obligation| obligation.wait == *wait && obligation.promise == promise)?;
         Some(self.owned_promises.swap_remove(index))
-    }
-
-    fn take_owned_promises(&mut self) -> Vec<TaskOwnedPromiseObligation> {
-        std::mem::take(&mut self.owned_promises)
     }
 
     fn is_empty(&self) -> bool {
@@ -626,6 +620,7 @@ pub(super) enum DeferredWorkReservation {
 
 pub(super) struct AbandonedDeferredWork {
     pub(super) id: EvaluationWorkId,
+    pub(super) task: EvaluationTaskId,
     pub(super) producer: DeferredValueId,
     pub(super) dependency: Option<EvaluationWaitToken>,
 }
@@ -1389,7 +1384,7 @@ impl EvaluationWorkCoordinator {
             if !reserved {
                 false
             } else {
-                detach_reflection(&mut state, id);
+                detach_reflection(&mut state, id, false);
                 state.work_generation = state.work_generation.wrapping_add(1);
                 true
             }
@@ -1455,7 +1450,7 @@ impl EvaluationWorkCoordinator {
             if !matches!(record.kind, WorkKind::Reflection(_)) {
                 return ReflectionCancellation::Late;
             }
-            match record.state {
+            let outcome = match record.state {
                 WorkState::Running => {
                     record
                         .control
@@ -1477,7 +1472,11 @@ impl EvaluationWorkCoordinator {
                     ReflectionCancellation::Terminalize
                 }
                 WorkState::Terminalizing => ReflectionCancellation::Late,
+            };
+            if !matches!(outcome, ReflectionCancellation::Late) {
+                state.work_generation = state.work_generation.wrapping_add(1);
             }
+            outcome
         };
         drop(mutation);
         if !matches!(outcome, ReflectionCancellation::Late) {
@@ -1748,7 +1747,7 @@ impl EvaluationWorkCoordinator {
                 .get(&id)
                 .expect("terminal reflection work must remain registered");
             assert!(matches!(record.state, WorkState::Terminalizing));
-            detach_reflection(&mut state, id);
+            detach_reflection(&mut state, id, true);
             state.work_generation = state.work_generation.wrapping_add(1);
         }
         drop(mutation);
@@ -2314,7 +2313,69 @@ impl EvaluationWorkCoordinator {
         true
     }
 
-    pub(super) fn fail_task_promises(
+    /// Consumes one terminalizing work record's producer obligation and
+    /// publishes all producer-owned terminal state before its transitional
+    /// session reporting tail may retire the record.
+    pub(super) fn settle_terminal_work(
+        self: &Arc<Self>,
+        work: EvaluationWorkId,
+        terminal: EvaluationWaitTerminal,
+        promise_failure: Arc<EvaluationFailure>,
+    ) -> EvaluationWaitTerminal {
+        let mutation = self.admission.mutation_guard();
+        let producer = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            let record = state
+                .work
+                .get_mut(&work)
+                .expect("terminalizing work must remain registered");
+            assert!(matches!(record.state, WorkState::Terminalizing));
+            record
+                .obligations
+                .take_producer()
+                .expect("work producer obligations must be consumed exactly once")
+        };
+        let wait = match &producer {
+            ProducerSettlementObligation::ReflectionTask { wait } => wait,
+            ProducerSettlementObligation::DeferredClaim { wait, producer } => {
+                let _producer = producer.id();
+                wait
+            }
+        };
+        let (terminal, wake) = wait.publish_terminal_guarded(self, &mutation, terminal);
+        drop(mutation);
+
+        // Promise publication has its own complete serialization handshake.
+        // If assignment raced this disposition, the winner has removed the
+        // corresponding dynamic obligation before `fail` returns.
+        self.fail_task_promises(work, promise_failure);
+        {
+            let state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            let record = state
+                .work
+                .get(&work)
+                .expect("settled work must remain registered for reporting cleanup");
+            assert!(
+                record.obligations.is_empty(),
+                "terminal settlement must consume every work obligation"
+            );
+        }
+
+        // The deferred producer clone, exact wakes, and any values they
+        // release are all disposed after coordinator/component locks and
+        // mutation admission have been released.
+        drop(producer);
+        wake.notify();
+        terminal
+    }
+
+    fn fail_task_promises(
         self: &Arc<Self>,
         work: EvaluationWorkId,
         failure: Arc<EvaluationFailure>,
@@ -2992,32 +3053,39 @@ fn reflection_state(record: &WorkRecord) -> ReflectionWorkState {
     }
 }
 
-fn detach_reflection(state: &mut WorkCoordinatorState, id: EvaluationWorkId) {
+fn detach_reflection(
+    state: &mut WorkCoordinatorState,
+    id: EvaluationWorkId,
+    require_settled: bool,
+) {
     state.observation_waiters.remove(&id);
     remove_ready_reflection(state, id);
     let mut record = state
         .work
         .remove(&id)
         .expect("retired reflection work must remain registered");
-    let obligation = record
-        .obligations
-        .take_producer()
-        .expect("reflection work must retain its task-wait obligation until retirement");
-    assert!(
-        record.obligations.take_producer().is_none(),
-        "reflection producer obligations must be taken exactly once"
-    );
-    assert!(
-        record.obligations.take_owned_promises().is_empty(),
-        "reflection work cannot retire with unresolved promise obligations"
-    );
+    let discarded = if require_settled {
+        assert!(
+            record.obligations.is_empty(),
+            "reflection work cannot retire before terminal settlement"
+        );
+        None
+    } else {
+        assert!(
+            record.obligations.owned_promises.is_empty(),
+            "an uncommitted reflection reservation cannot own promises"
+        );
+        record.obligations.take_producer()
+    };
     let WorkKind::Reflection(reflection) = record.kind else {
         panic!("reflection retirement must contain reflection work")
     };
-    let ProducerSettlementObligation::ReflectionTask { wait } = obligation else {
-        panic!("reflection work must retain a reflection task-wait obligation")
-    };
-    assert_eq!(wait, reflection.wait);
+    if let Some(obligation) = discarded {
+        let ProducerSettlementObligation::ReflectionTask { wait } = obligation else {
+            panic!("reflection work must retain a reflection task-wait obligation")
+        };
+        assert_eq!(wait, reflection.wait);
+    }
     assert_eq!(
         state.reflection_by_task.remove(&reflection.task),
         Some(id),
@@ -3159,6 +3227,7 @@ fn begin_deferred_abandonment(
     let deferred = deferred_work_mut(record);
     let abandoned = AbandonedDeferredWork {
         id,
+        task: deferred.task,
         producer: deferred.producer.id(),
         dependency: deferred.block.take().and_then(|block| block.lazy),
     };
@@ -3171,30 +3240,17 @@ fn begin_deferred_abandonment(
 fn detach_deferred(state: &mut WorkCoordinatorState, id: EvaluationWorkId) {
     state.observation_waiters.remove(&id);
     remove_ready_deferred(state, id);
-    let mut record = state
+    let record = state
         .work
         .remove(&id)
         .expect("retired deferred work must remain registered");
-    let obligation = record
-        .obligations
-        .take_producer()
-        .expect("deferred work must retain its wait/claim obligation until retirement");
     assert!(
-        record.obligations.take_producer().is_none(),
-        "deferred producer obligations must be taken exactly once"
-    );
-    assert!(
-        record.obligations.take_owned_promises().is_empty(),
-        "deferred work cannot retire with unresolved promise obligations"
+        record.obligations.is_empty(),
+        "deferred work cannot retire before terminal settlement"
     );
     let WorkKind::Deferred(deferred) = record.kind else {
         panic!("deferred retirement must contain deferred work")
     };
-    let ProducerSettlementObligation::DeferredClaim { wait, producer } = obligation else {
-        panic!("deferred work must retain a deferred wait/claim obligation")
-    };
-    assert_eq!(wait, deferred.wait);
-    assert_eq!(producer.id(), deferred.producer.id());
     assert_eq!(state.deferred_by_task.remove(&deferred.task), Some(id));
     assert_eq!(state.deferred_by_wait.remove(&deferred.wait), Some(id));
     assert_eq!(
@@ -3545,6 +3601,27 @@ mod tests {
         claimed
     }
 
+    fn settle_test_reflection(
+        coordinator: &Arc<EvaluationWorkCoordinator>,
+        work: EvaluationWorkId,
+    ) {
+        coordinator.settle_terminal_work(
+            work,
+            EvaluationWaitTerminal::Cancelled,
+            Arc::new(EvaluationFailure::message("test reflection settlement")),
+        );
+        coordinator.retire_reflection(work);
+    }
+
+    fn settle_test_deferred(coordinator: &Arc<EvaluationWorkCoordinator>, work: EvaluationWorkId) {
+        coordinator.settle_terminal_work(
+            work,
+            EvaluationWaitTerminal::Abandoned,
+            Arc::new(EvaluationFailure::message("test deferred settlement")),
+        );
+        coordinator.retire_deferred(work);
+    }
+
     fn finish_queued_test_spark(coordinator: &EvaluationWorkCoordinator) {
         let CoordinatorSelection::Spark(claimed) = coordinator.select() else {
             panic!("woken test spark should be claimable")
@@ -3682,6 +3759,41 @@ mod tests {
         assert_eq!(obligation_wait, wait);
         assert_eq!(obligation_producer.id(), producer.id());
         assert!(deferred.take_producer().is_none());
+    }
+
+    #[test]
+    fn terminal_settlement_publishes_once_before_reporting_retirement() {
+        let (coordinator, _executor) = super::super::test_execution_resources(0)
+            .expect("test execution resources should build");
+        let session = EvaluationSession::shared(&coordinator);
+        let task = super::super::allocate_task_id(&session.values)
+            .expect("settlement task identity should allocate");
+        let wait = super::super::allocate_wait_token(&session, task)
+            .expect("settlement wait identity should allocate");
+        let work = coordinator.reserve_reflection(&session, task, wait.clone());
+        assert!(coordinator.activate_reflection(work));
+        assert!(coordinator.terminalize_reflection(work));
+
+        let terminal = coordinator.settle_terminal_work(
+            work,
+            EvaluationWaitTerminal::Cancelled,
+            Arc::new(EvaluationFailure::message("settled test producer")),
+        );
+        assert_eq!(terminal, EvaluationWaitTerminal::Cancelled);
+        assert_eq!(
+            wait.terminal_poll(),
+            Some(super::super::EvaluationWaitPoll::Cancelled)
+        );
+        assert!(matches!(
+            coordinator.reflection_snapshots(session.id).as_slice(),
+            [ReflectionWorkSnapshot {
+                state: ReflectionWorkState::Terminalizing,
+                ..
+            }]
+        ));
+
+        coordinator.retire_reflection(work);
+        assert!(coordinator.reflection_snapshots(session.id).is_empty());
     }
 
     #[test]
@@ -3872,7 +3984,7 @@ mod tests {
         drop(selected);
         coordinator.requeue_unpolled_task(claimed);
         assert!(coordinator.terminalize_reflection(work));
-        coordinator.retire_reflection(work);
+        settle_test_reflection(&coordinator, work);
         drop(session);
         assert_eq!(coordinator.registered_session_count(), 0);
     }
@@ -3890,12 +4002,12 @@ mod tests {
         assert_eq!(right_claim.task(), right_task);
         let release = coordinator.release_reflection(right_claim, ReflectionWorkPoll::Terminal);
         assert!(release.terminal);
-        coordinator.retire_reflection(right_work);
+        settle_test_reflection(&coordinator, right_work);
 
         let left_claim = claim_ready_test_reflection(&coordinator, left.id);
         let release = coordinator.release_reflection(left_claim, ReflectionWorkPoll::Terminal);
         assert!(release.terminal);
-        coordinator.retire_reflection(left_work);
+        settle_test_reflection(&coordinator, left_work);
     }
 
     #[test]
@@ -3970,7 +4082,7 @@ mod tests {
                 ..
             }]
         ));
-        coordinator.retire_reflection(work);
+        settle_test_reflection(&coordinator, work);
         assert!(coordinator.reflection_snapshots(session.id).is_empty());
     }
 
@@ -4002,7 +4114,7 @@ mod tests {
                 .release_reflection(claimed, ReflectionWorkPoll::Terminal)
                 .terminal
         );
-        coordinator.retire_reflection(work);
+        settle_test_reflection(&coordinator, work);
     }
 
     #[test]
@@ -4048,7 +4160,7 @@ mod tests {
                 .release_reflection(claimed, ReflectionWorkPoll::Terminal)
                 .terminal
         );
-        coordinator.retire_reflection(work);
+        settle_test_reflection(&coordinator, work);
     }
 
     #[test]
@@ -4105,7 +4217,7 @@ mod tests {
                 .release_reflection(claimed, ReflectionWorkPoll::Terminal)
                 .terminal
         );
-        coordinator.retire_reflection(work);
+        settle_test_reflection(&coordinator, work);
     }
 
     #[test]
@@ -4130,7 +4242,7 @@ mod tests {
                 ..
             }]
         ));
-        coordinator.retire_reflection(work);
+        settle_test_reflection(&coordinator, work);
         assert_eq!(
             coordinator.request_reflection_cancellation(work),
             ReflectionCancellation::Late
@@ -4165,7 +4277,7 @@ mod tests {
         };
         coordinator.requeue_unpolled_task(claimed);
         assert!(coordinator.terminalize_reflection(work));
-        coordinator.retire_reflection(work);
+        settle_test_reflection(&coordinator, work);
     }
 
     #[test]
@@ -4263,7 +4375,7 @@ mod tests {
             .expect("yielded serial demand should return to dormant");
         let release = coordinator.release_deferred(claimed, DeferredWorkPoll::Terminal);
         assert!(release.terminal);
-        coordinator.retire_deferred(work);
+        settle_test_deferred(&coordinator, work);
     }
 
     #[test]
@@ -4335,9 +4447,9 @@ mod tests {
         };
         let release = coordinator.release_deferred(producer, DeferredWorkPoll::Terminal);
         assert!(release.terminal);
-        coordinator.retire_deferred(producer_work);
+        settle_test_deferred(&coordinator, producer_work);
         assert!(coordinator.terminalize_reflection(observer_work));
-        coordinator.retire_reflection(observer_work);
+        settle_test_reflection(&coordinator, observer_work);
     }
 
     #[test]
@@ -4359,6 +4471,6 @@ mod tests {
         coordinator.requeue_unpolled_task(claimed);
         assert_eq!(coordinator.registered_session_count(), 1);
         assert!(coordinator.terminalize_reflection(work));
-        coordinator.retire_reflection(work);
+        settle_test_reflection(&coordinator, work);
     }
 }

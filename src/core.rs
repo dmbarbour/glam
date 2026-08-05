@@ -260,6 +260,7 @@ pub(crate) struct PromiseCell {
     id: PromiseId,
     runtime: EvaluationRuntimeId,
     label: Arc<str>,
+    publication: Mutex<()>,
     assignment: OnceLock<PromiseAssignment>,
     completion: CompletionSubscriptions,
     followers: Mutex<Vec<PromiseSessionWake>>,
@@ -627,6 +628,7 @@ impl PromisedValue {
             id,
             runtime: values.runtime_id(),
             label: label.into(),
+            publication: Mutex::new(()),
             assignment: OnceLock::new(),
             completion: CompletionSubscriptions::for_promise(
                 values.runtime_id(),
@@ -750,6 +752,14 @@ impl PromiseCell {
     }
 
     fn publish(&self, assignment: PromiseAssignment) -> Result<(), PromiseAssignment> {
+        // Serialize the complete publication handshake, not merely the
+        // immutable assignment. A losing producer disposition may therefore
+        // rely on the winner having removed its coordinator obligation and
+        // published its wait before this method returns.
+        let _publication = self
+            .publication
+            .lock()
+            .expect("promise publication was poisoned");
         if let Some(producer) = self.producer.get()
             && let Some(coordinator) = producer.coordinator()
         {

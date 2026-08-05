@@ -690,22 +690,35 @@ struct ReflectionTaskRecord {
     status_sinks: Vec<Arc<dyn EvaluationTaskStatusSink>>,
 }
 
-fn publish_reflection_state(
-    wait: &EvaluationWaitToken,
-    state: EvaluationTaskState,
-) -> EvaluationTaskState {
-    let terminal = match state {
-        EvaluationTaskState::Complete(value) => EvaluationWaitTerminal::Complete(value),
-        EvaluationTaskState::Failed(error) => EvaluationWaitTerminal::Failed(error),
-        EvaluationTaskState::Cancelled => EvaluationWaitTerminal::Cancelled,
-        EvaluationTaskState::Abandoned => EvaluationWaitTerminal::Abandoned,
-    };
-    match wait.publish_terminal(terminal) {
+fn evaluation_task_state(terminal: EvaluationWaitTerminal) -> EvaluationTaskState {
+    match terminal {
         EvaluationWaitTerminal::Complete(value) => EvaluationTaskState::Complete(value),
         EvaluationWaitTerminal::Failed(error) => EvaluationTaskState::Failed(error),
         EvaluationWaitTerminal::Cancelled => EvaluationTaskState::Cancelled,
         EvaluationWaitTerminal::Abandoned => EvaluationTaskState::Abandoned,
     }
+}
+
+fn task_wait_terminal(state: &EvaluationTaskState) -> EvaluationWaitTerminal {
+    match state {
+        EvaluationTaskState::Complete(value) => EvaluationWaitTerminal::Complete(value.clone()),
+        EvaluationTaskState::Failed(error) => EvaluationWaitTerminal::Failed(error.clone()),
+        EvaluationTaskState::Cancelled => EvaluationWaitTerminal::Cancelled,
+        EvaluationTaskState::Abandoned => EvaluationWaitTerminal::Abandoned,
+    }
+}
+
+fn settle_task_work(
+    coordinator: &Arc<EvaluationWorkCoordinator>,
+    work: EvaluationWorkId,
+    state: EvaluationTaskState,
+    promise_failure: Arc<EvaluationFailure>,
+) -> EvaluationTaskState {
+    evaluation_task_state(coordinator.settle_terminal_work(
+        work,
+        task_wait_terminal(&state),
+        promise_failure,
+    ))
 }
 
 struct DeferredTaskRecord {
@@ -829,7 +842,6 @@ struct EvaluationTasks {
 struct ReflectionTaskTransition {
     retired: Option<ReflectionTaskRecord>,
     status: Option<TaskStatusUpdate>,
-    terminal: bool,
 }
 
 fn transition_reflection_task(
@@ -837,14 +849,6 @@ fn transition_reflection_task(
     wait: &EvaluationWaitToken,
     state: EvaluationTaskState,
 ) -> ReflectionTaskTransition {
-    let terminal = matches!(
-        state,
-        EvaluationTaskState::Complete(_)
-            | EvaluationTaskState::Failed(_)
-            | EvaluationTaskState::Cancelled
-            | EvaluationTaskState::Abandoned
-    );
-    let state = publish_reflection_state(wait, state);
     let (unacknowledged_failure, status) = {
         let record = tasks
             .reflection
@@ -862,12 +866,8 @@ fn transition_reflection_task(
     if let Some((task, failure)) = unacknowledged_failure {
         tasks.unacknowledged_failures.insert_mut(task, failure);
     }
-    let retired = terminal.then(|| retire_reflection_task(tasks, wait));
-    ReflectionTaskTransition {
-        retired,
-        status,
-        terminal,
-    }
+    let retired = Some(retire_reflection_task(tasks, wait));
+    ReflectionTaskTransition { retired, status }
 }
 
 fn update_reflection_task_status(
@@ -947,14 +947,47 @@ impl Drop for EvaluationSession {
         let abandoning = self.coordinator.abandon_reflection_session(self.id);
         let abandoning = abandoning
             .into_iter()
-            .map(|work| (work.id, (work.task, work.cancel)))
+            .map(|work| {
+                let failure = evaluation_failure(if work.cancel {
+                    format!(
+                        "promised value's producer task {} was cancelled",
+                        work.task.get()
+                    )
+                } else {
+                    format!(
+                        "promised value's producer task {} was abandoned when its evaluation session closed",
+                        work.task.get()
+                    )
+                });
+                let state = settle_task_work(
+                    &self.coordinator,
+                    work.id,
+                    if work.cancel {
+                        EvaluationTaskState::Cancelled
+                    } else {
+                        EvaluationTaskState::Abandoned
+                    },
+                    failure,
+                );
+                (work.id, (work.task, work.cancel, state))
+            })
             .collect::<HashMap<_, _>>();
         let abandoning_deferred = self.coordinator.abandon_deferred_session(self.id);
         let abandoning_deferred = abandoning_deferred
             .into_iter()
-            .map(|work| (work.id, work))
+            .map(|work| {
+                self.coordinator.settle_terminal_work(
+                    work.id,
+                    EvaluationWaitTerminal::Abandoned,
+                    evaluation_failure(format!(
+                        "promised value's producer task {} was abandoned when its evaluation session closed",
+                        work.task.get()
+                    )),
+                );
+                (work.id, work)
+            })
             .collect::<HashMap<_, _>>();
-        let (reflection, deferred, statuses, terminal_waits) = {
+        let (reflection, deferred, statuses) = {
             let tasks = self
                 .tasks
                 .get_mut()
@@ -963,23 +996,17 @@ impl Drop for EvaluationSession {
             let reflection_waits = tasks.reflection.keys().cloned().collect::<Vec<_>>();
             let mut reflection = Vec::with_capacity(reflection_waits.len());
             let mut statuses = Vec::new();
-            let mut terminal_waits = Vec::new();
             for wait in reflection_waits {
                 let record = tasks
                     .reflection
                     .get(&wait)
                     .expect("collected reflection wait must remain registered");
-                let (task, cancel) = abandoning
+                let (task, cancel, state) = abandoning
                     .get(&record.work)
-                    .copied()
+                    .cloned()
                     .expect("coordinator must terminalize every session reflection task");
                 assert_eq!(record.id, task);
                 let work = record.work;
-                let state = if cancel {
-                    EvaluationTaskState::Cancelled
-                } else {
-                    EvaluationTaskState::Abandoned
-                };
                 let transition = transition_reflection_task(tasks, &wait, state);
                 reflection.push((
                     work,
@@ -989,7 +1016,6 @@ impl Drop for EvaluationSession {
                         .expect("session shutdown must retire a reflection task"),
                 ));
                 statuses.extend(transition.status);
-                terminal_waits.push(wait);
             }
 
             let deferred_ids = tasks.deferred.keys().copied().collect::<Vec<_>>();
@@ -1003,48 +1029,21 @@ impl Drop for EvaluationSession {
                     .get(&record.work)
                     .expect("coordinator must terminalize every session deferred producer");
                 assert_eq!(abandoning.producer, deferred_id);
-                record
-                    .wait
-                    .publish_terminal(EvaluationWaitTerminal::Abandoned);
-                terminal_waits.push(record.wait.clone());
                 deferred.push(retire_deferred_task(tasks, deferred_id));
             }
-            (reflection, deferred, statuses, terminal_waits)
+            (reflection, deferred, statuses)
         };
-
-        for wait in terminal_waits {
-            wait.notify_terminal();
-        }
 
         for status in statuses {
             publish_task_status(Some(status));
         }
         for (work, cancel, mut record) in reflection {
-            let failure = evaluation_failure(if cancel {
-                format!(
-                    "promised value's producer task {} was cancelled",
-                    record.id.get()
-                )
-            } else {
-                format!(
-                    "promised value's producer task {} was abandoned when its evaluation session closed",
-                    record.id.get()
-                )
-            });
-            self.coordinator.fail_task_promises(work, failure);
             if cancel && let Some(machine) = &mut record.machine {
                 machine.cancel();
             }
             self.coordinator.retire_reflection(work);
         }
         for record in deferred {
-            self.coordinator.fail_task_promises(
-                record.work,
-                evaluation_failure(format!(
-                    "promised value's producer task {} was abandoned when its evaluation session closed",
-                    record.id.get()
-                )),
-            );
             self.coordinator.retire_deferred(record.work);
             drop(record);
         }
@@ -1152,6 +1151,11 @@ impl EvaluationSession {
             let Some(abandoned) = self.coordinator.abandon_deferred_wait(&wait) else {
                 return;
             };
+            let terminal = self.coordinator.settle_terminal_work(
+                abandoned.id,
+                EvaluationWaitTerminal::Abandoned,
+                evaluation_failure("deferred fixpoint producer was abandoned"),
+            );
             let retired = {
                 let mut tasks = self
                     .tasks
@@ -1162,16 +1166,11 @@ impl EvaluationSession {
                     .get(&abandoned.producer)
                     .expect("terminalizing deferred work must retain its machine slot");
                 assert_eq!(record.work, abandoned.id);
-                wait.publish_terminal(EvaluationWaitTerminal::Abandoned);
+                debug_assert_eq!(wait.terminal_poll(), Some(terminal.to_poll()));
                 let retired = retire_deferred_task(&mut tasks, abandoned.producer);
                 self.notify_task_changed();
                 retired
             };
-            wait.notify_terminal();
-            self.coordinator.fail_task_promises(
-                abandoned.id,
-                evaluation_failure("deferred fixpoint producer was abandoned"),
-            );
             self.coordinator.retire_deferred(abandoned.id);
             drop(retired);
             let Some(dependency) = abandoned.dependency else {
@@ -1617,14 +1616,19 @@ impl EvalContext {
         let machine = match build(context) {
             Ok(machine) => machine,
             Err(error) => {
-                self.session.coordinator.fail_task_promises(
-                    work,
-                    evaluation_failure(format!("task construction failed: {error}")),
-                );
+                let failure = evaluation_failure(format!("task construction failed: {error}"));
                 assert!(
-                    self.session.coordinator.discard_reserved_reflection(work),
-                    "failed test task construction must discard its reservation"
+                    self.session
+                        .coordinator
+                        .terminalize_reserved_reflection(work),
+                    "failed test task construction must terminalize its reservation"
                 );
+                self.session.coordinator.settle_terminal_work(
+                    work,
+                    EvaluationWaitTerminal::Failed(failure.clone()),
+                    failure,
+                );
+                self.session.coordinator.retire_reflection(work);
                 return Err(error);
             }
         };
@@ -1765,25 +1769,23 @@ impl EvalContext {
                     .coordinator
                     .terminalize_reserved_reflection(handle.work)
                 {
+                    let state = settle_task_work(
+                        &self.session.coordinator,
+                        handle.work,
+                        EvaluationTaskState::Failed(error),
+                        promise_failure,
+                    );
                     let transition = {
                         let mut tasks = self
                             .session
                             .tasks
                             .lock()
                             .expect("evaluation task registry was poisoned");
-                        transition_reflection_task(
-                            &mut tasks,
-                            &handle.wait,
-                            EvaluationTaskState::Failed(error),
-                        )
+                        transition_reflection_task(&mut tasks, &handle.wait, state)
                     };
-                    handle.wait.notify_terminal();
-                    self.session
-                        .coordinator
-                        .fail_task_promises(handle.work, promise_failure);
+                    publish_task_status(transition.status);
                     self.session.coordinator.retire_reflection(handle.work);
                     drop(transition.retired);
-                    publish_task_status(transition.status);
                     self.session.notify_task_changed();
                 }
             }
@@ -1840,30 +1842,25 @@ impl EvalContext {
             ReflectionCancellation::Terminalize,
             "a committed pre-launch cancellation must own its reservation"
         );
+        let state = settle_task_work(
+            &self.session.coordinator,
+            handle.work,
+            EvaluationTaskState::Cancelled,
+            evaluation_failure("reflection fixpoint producer was cancelled"),
+        );
         let transition = {
             let mut tasks = self
                 .session
                 .tasks
                 .lock()
                 .expect("evaluation task registry was poisoned");
-            let transition = transition_reflection_task(
-                &mut tasks,
-                &handle.wait,
-                EvaluationTaskState::Cancelled,
-            );
+            let transition = transition_reflection_task(&mut tasks, &handle.wait, state);
             self.session.notify_task_changed();
             transition
         };
-        if transition.terminal {
-            handle.wait.notify_terminal();
-        }
-        self.session.coordinator.fail_task_promises(
-            handle.work,
-            evaluation_failure("reflection fixpoint producer was cancelled"),
-        );
+        publish_task_status(transition.status);
         self.session.coordinator.retire_reflection(handle.work);
         drop(transition.retired);
-        publish_task_status(transition.status);
     }
 
     pub(crate) fn reserve_reflection_task(
@@ -1969,38 +1966,33 @@ impl EvalContext {
             ReflectionCancellation::Requested => EvaluationTaskCancellation::Requested,
             ReflectionCancellation::Late => EvaluationTaskCancellation::Late,
             ReflectionCancellation::Terminalize => {
+                let state = settle_task_work(
+                    &self.session.coordinator,
+                    task.work,
+                    EvaluationTaskState::Cancelled,
+                    evaluation_failure("reflection fixpoint producer was cancelled"),
+                );
                 let transition = {
                     let mut tasks = self
                         .session
                         .tasks
                         .lock()
                         .expect("evaluation task registry was poisoned");
-                    if task.wait.terminal_poll().is_some()
-                        || !tasks.reflection.contains_key(&task.wait)
-                    {
+                    if !tasks.reflection.contains_key(&task.wait) {
                         return EvaluationTaskCancellation::Late;
                     }
-                    let transition = transition_reflection_task(
-                        &mut tasks,
-                        &task.wait,
-                        EvaluationTaskState::Cancelled,
-                    );
+                    let transition = transition_reflection_task(&mut tasks, &task.wait, state);
                     self.session.notify_task_changed();
                     transition
                 };
-                task.wait.notify_terminal();
                 let mut retired = transition
                     .retired
                     .expect("terminal cancellation must retire its task record");
-                self.session.coordinator.fail_task_promises(
-                    task.work,
-                    evaluation_failure("reflection fixpoint producer was cancelled"),
-                );
                 if let Some(mut machine) = retired.machine.take() {
                     machine.cancel();
                 }
-                self.session.coordinator.retire_reflection(task.work);
                 publish_task_status(transition.status);
+                self.session.coordinator.retire_reflection(task.work);
                 EvaluationTaskCancellation::Requested
             }
         }
@@ -2087,28 +2079,23 @@ impl EvalContext {
             .work;
         drop(tasks);
         assert!(self.session.coordinator.terminalize_reflection(work));
+        let state = settle_task_work(
+            &self.session.coordinator,
+            work,
+            EvaluationTaskState::Complete(RuntimeValueRoot::new(&self.session.values, value)),
+            evaluation_failure("reflection task completed without fulfilling its fixpoint"),
+        );
         let mut tasks = self
             .session
             .tasks
             .lock()
             .expect("evaluation task registry was poisoned");
-        let transition = transition_reflection_task(
-            &mut tasks,
-            &wait,
-            EvaluationTaskState::Complete(RuntimeValueRoot::new(&self.session.values, value)),
-        );
+        let transition = transition_reflection_task(&mut tasks, &wait, state);
         self.session.notify_task_changed();
         drop(tasks);
-        if transition.terminal {
-            wait.notify_terminal();
-        }
-        self.session.coordinator.fail_task_promises(
-            work,
-            evaluation_failure("reflection task completed without fulfilling its fixpoint"),
-        );
+        publish_task_status(transition.status);
         self.session.coordinator.retire_reflection(work);
         drop(transition.retired);
-        publish_task_status(transition.status);
         while matches!(
             self.pump_wait(&target, 256),
             EvaluationPumpOutcome::BudgetExhausted
@@ -2140,25 +2127,23 @@ impl EvalContext {
             .work;
         drop(tasks);
         assert!(self.session.coordinator.terminalize_reflection(work));
+        let state = settle_task_work(
+            &self.session.coordinator,
+            work,
+            EvaluationTaskState::Failed(failure.clone()),
+            failure,
+        );
         let mut tasks = self
             .session
             .tasks
             .lock()
             .expect("evaluation task registry was poisoned");
-        let transition = transition_reflection_task(
-            &mut tasks,
-            &wait,
-            EvaluationTaskState::Failed(failure.clone()),
-        );
+        let transition = transition_reflection_task(&mut tasks, &wait, state);
         self.session.notify_task_changed();
         drop(tasks);
-        if transition.terminal {
-            wait.notify_terminal();
-        }
-        self.session.coordinator.fail_task_promises(work, failure);
+        publish_task_status(transition.status);
         self.session.coordinator.retire_reflection(work);
         drop(transition.retired);
-        publish_task_status(transition.status);
         while matches!(
             self.pump_wait(&target, 256),
             EvaluationPumpOutcome::BudgetExhausted
@@ -2261,15 +2246,46 @@ struct ClaimedDeferredTask {
 }
 
 enum ReleasedTaskMachine {
-    Drop(Box<dyn EvaluationTaskMachine>),
-    Cancel(Box<dyn EvaluationTaskMachine>),
+    Drop {
+        machine: Box<dyn EvaluationTaskMachine>,
+        retirement: WorkRetirement,
+    },
+    Cancel {
+        machine: Box<dyn EvaluationTaskMachine>,
+        retirement: WorkRetirement,
+    },
+}
+
+enum WorkRetirement {
+    Reflection(Arc<EvaluationWorkCoordinator>, EvaluationWorkId),
+    Deferred(Arc<EvaluationWorkCoordinator>, EvaluationWorkId),
 }
 
 impl ReleasedTaskMachine {
     fn finish(self) {
-        match self {
-            Self::Drop(machine) => drop(machine),
-            Self::Cancel(mut machine) => machine.cancel(),
+        let retirement = match self {
+            Self::Drop {
+                machine,
+                retirement,
+            } => {
+                drop(machine);
+                retirement
+            }
+            Self::Cancel {
+                mut machine,
+                retirement,
+            } => {
+                machine.cancel();
+                retirement
+            }
+        };
+        match retirement {
+            WorkRetirement::Reflection(coordinator, work) => {
+                coordinator.retire_reflection(work);
+            }
+            WorkRetirement::Deferred(coordinator, work) => {
+                coordinator.retire_deferred(work);
+            }
         }
     }
 }
@@ -2554,6 +2570,7 @@ impl EvaluationSession {
             wait,
             machine,
         } = claimed;
+        let work = claim.id();
         let (work_poll, terminal_state) = match poll {
             EvaluationMachinePoll::Yielded => (ReflectionWorkPoll::Yielded, None),
             EvaluationMachinePoll::Blocked(block) => (ReflectionWorkPoll::Blocked(block), None),
@@ -2629,6 +2646,7 @@ impl EvaluationSession {
                 evaluation_failure("reflection fixpoint producer was abandoned")
             }
         };
+        let state = settle_task_work(&self.coordinator, work, state, promise_failure);
         let transition = {
             let mut tasks = self
                 .tasks
@@ -2638,23 +2656,29 @@ impl EvaluationSession {
             self.notify_task_changed();
             transition
         };
-        wait.notify_terminal();
-        let work = transition
+        let settled_work = transition
             .retired
             .as_ref()
             .expect("terminal reflection transition must retire its machine slot")
             .work;
-        self.coordinator.fail_task_promises(work, promise_failure);
-        self.coordinator.retire_reflection(work);
+        assert_eq!(settled_work, work);
         let mut retired = transition.retired;
-        let released = retired
+        let machine = retired
             .as_mut()
             .and_then(|record| record.machine.take())
-            .map(if release.cancel {
-                ReleasedTaskMachine::Cancel
-            } else {
-                ReleasedTaskMachine::Drop
-            });
+            .expect("terminal reflection work must retain its restored machine");
+        let retirement = WorkRetirement::Reflection(self.coordinator.clone(), work);
+        let released = Some(if release.cancel {
+            ReleasedTaskMachine::Cancel {
+                machine,
+                retirement,
+            }
+        } else {
+            ReleasedTaskMachine::Drop {
+                machine,
+                retirement,
+            }
+        });
         drop(retired);
         (release.made_progress, false, released, transition.status)
     }
@@ -2739,7 +2763,10 @@ impl EvaluationSession {
                 evaluation_failure("evaluation fixpoint producer was abandoned")
             }
         };
-        let retired = {
+        let terminal = self
+            .coordinator
+            .settle_terminal_work(work, terminal, promise_failure);
+        let mut retired = {
             let mut tasks = self
                 .tasks
                 .lock()
@@ -2749,16 +2776,25 @@ impl EvaluationSession {
                 .get(&producer)
                 .expect("terminal deferred work must retain its machine slot");
             assert_eq!(record.work, work);
-            record.wait.publish_terminal(terminal);
+            debug_assert_eq!(record.wait.terminal_poll(), Some(terminal.to_poll()));
             let retired = retire_deferred_task(&mut tasks, producer);
             self.notify_task_changed();
             retired
         };
-        retired.wait.notify_terminal();
-        self.coordinator.fail_task_promises(work, promise_failure);
-        self.coordinator.retire_deferred(work);
+        let machine = retired
+            .machine
+            .take()
+            .expect("terminal deferred work must retain its restored machine");
         drop(retired);
-        (release.made_progress, false, None, None)
+        (
+            release.made_progress,
+            false,
+            Some(ReleasedTaskMachine::Drop {
+                machine,
+                retirement: WorkRetirement::Deferred(self.coordinator.clone(), work),
+            }),
+            None,
+        )
     }
 
     fn poison_lazy_cycle(&self, members: Vec<DeferredLazyCycleMember>) {
@@ -2788,6 +2824,11 @@ impl EvaluationSession {
                         ))
                     }
                 };
+                let terminal = self.coordinator.settle_terminal_work(
+                    member.work,
+                    terminal,
+                    failure.clone(),
+                );
                 (member, terminal)
             })
             .collect::<Vec<_>>();
@@ -2798,7 +2839,7 @@ impl EvaluationSession {
                 .expect("evaluation task registry was poisoned");
             let mut retired = Vec::with_capacity(terminals.len());
             for (member, terminal) in &terminals {
-                member.wait.publish_terminal(terminal.clone());
+                debug_assert_eq!(member.wait.terminal_poll(), Some(terminal.to_poll()));
                 let deferred = DeferredValueId::Lazy(member.lazy.id());
                 let record = tasks
                     .deferred
@@ -2811,9 +2852,11 @@ impl EvaluationSession {
             retired
         };
         for (member, _) in terminals {
-            member.wait.notify_terminal();
-            self.coordinator
-                .fail_task_promises(member.work, failure.clone());
+            let retired = retired
+                .iter()
+                .find(|record| record.work == member.work)
+                .expect("settled lazy cycle member must retain its retired machine slot");
+            debug_assert!(retired.machine.is_some());
             self.coordinator.retire_deferred(member.work);
         }
         drop(retired);
