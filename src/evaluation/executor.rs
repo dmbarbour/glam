@@ -1,4 +1,4 @@
-//! Worker ownership and fair selection across related evaluation sessions.
+//! Worker ownership and fair selection across one runtime's ready work.
 
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -140,12 +140,12 @@ fn evaluation_worker(inner: Arc<EvaluationExecutorInner>) {
         let work = coordinator.select();
 
         match work {
-            CoordinatorSelection::Reflection(session) => {
+            CoordinatorSelection::Task(session, work) => {
                 if inner.stopping.load(Ordering::Acquire) {
-                    coordinator.notify_session_ready(session.id);
+                    coordinator.requeue_unpolled_task(work);
                     return;
                 }
-                session.poll_one_ready_task();
+                session.poll_claimed_task(work);
             }
             CoordinatorSelection::Spark(claimed) => {
                 if inner.stopping.load(Ordering::Acquire) {

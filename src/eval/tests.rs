@@ -4855,6 +4855,41 @@ fn reflection_gate_blocks_and_resumes_the_exact_net_call() {
 }
 
 #[test]
+fn reflection_gate_blocks_and_resumes_the_exact_net_operator_call() {
+    let context = test_context();
+    let key = Key::atom_from_text("answer");
+    let target = closed_function_value(1, TestExpr::Value(n(42)));
+    let gate = reflection_annotation(&context, n(0), target);
+    let applied = closed_net(|builder| {
+        let [input, result] = builder.operator(applicable_operator(gate));
+        let argument = builder.data(key.to_value_with(context.values()));
+        builder.wire(input, argument);
+        result
+    });
+    let runtime = applied.runtime().clone();
+    let pair = runtime
+        .with(|net| net.active_pairs().next())
+        .expect("operator call should start ready");
+    let computation = Value::Lazy(LazyValue::from_net_computation(context.values(), applied));
+
+    let blocked = eval_value(&context, &computation)
+        .expect_err("operator should wait for its reflection gate");
+    let wait = blocked
+        .blocked_on()
+        .expect("operator should report its exact task wait");
+    let blocked = runtime
+        .with(|net| net.blocked_operator_call(pair))
+        .expect("operator should retain its exact task wait");
+    assert!(matches!(
+        context.poll_wait(&blocked.wait.0),
+        EvaluationWaitPoll::Pending(_)
+    ));
+
+    context.complete_wait(&wait.0);
+    assert_eq!(eval_value(&context, &computation).unwrap(), n(42));
+}
+
+#[test]
 fn builtins_are_curried_and_do_not_force_arguments_early() {
     let unforced = Value::deferred(
         &crate::core::test_value_factory(),

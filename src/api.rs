@@ -11,8 +11,10 @@ use std::num::NonZeroU64;
 use std::ops::{Deref, Range};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::Condvar;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use bytes::Bytes;
 use rpds::RedBlackTreeMapSync;
@@ -32,6 +34,7 @@ use crate::eval;
 use crate::evaluation::{
     EvalContext, EvaluationExecutor, EvaluationSession, EvaluationSessionId, EvaluationSessionRun,
     EvaluationTaskId, EvaluationUnfinishedState, EvaluationWorkCoordinator, ReflectionTaskProfile,
+    RuntimeObservationEpoch, RuntimeObservationState,
 };
 use crate::g_syntax::compile_source;
 use crate::interaction_net::{NetBuildError, NetBuilder as CoreNetBuilder, Port as CorePort};
@@ -1508,7 +1511,7 @@ struct RuntimeState {
     work: Arc<EvaluationWorkCoordinator>,
     values: RuntimeValueFactory,
     transactions: RuntimeTransactionState,
-    observations: RuntimeObservationState,
+    observations: Arc<RuntimeObservationState>,
     ids: Arc<RuntimeIds>,
     diagnostic_ingresses: Mutex<Vec<Arc<DiagnosticIngressInner>>>,
     mutation_admission: Arc<RuntimeMutationAdmission>,
@@ -1522,11 +1525,6 @@ struct RuntimeTransactionData {
     reflection: ReflectionStore,
     events: RuntimeEventState,
     logger_lifecycle: RuntimeLoggerLifecycleState,
-}
-
-struct RuntimeObservationState {
-    epoch: Mutex<u64>,
-    changed: Condvar,
 }
 
 #[derive(Clone)]
@@ -2428,15 +2426,13 @@ fn runtime_delivery_failure_snapshot(
 }
 
 fn publish_runtime_observation(runtime: &RuntimeState, mutation: RuntimeMutationGuard<'_>) {
-    let mut epoch = runtime
-        .observations
-        .epoch
-        .lock()
-        .expect("runtime observation mutex should not be poisoned");
-    *epoch = epoch.wrapping_add(1);
-    drop(epoch);
+    let epoch = runtime.observations.advance();
+    let scheduler_changed = runtime
+        .work
+        .publish_runtime_observation_guarded(&mutation, epoch);
     drop(mutation);
-    runtime.observations.changed.notify_all();
+    runtime.observations.notify_all();
+    runtime.work.notify_runtime_observation(scheduler_changed);
 }
 
 impl EvaluationRuntime {
@@ -2458,7 +2454,13 @@ impl EvaluationRuntime {
         };
         let event_conflict_analysis = conflict_analysis.clone();
         let mutation_admission = RuntimeMutationAdmission::new();
-        let work = EvaluationWorkCoordinator::new(id, ids.clone(), mutation_admission.clone());
+        let observations = RuntimeObservationState::new();
+        let work = EvaluationWorkCoordinator::new(
+            id,
+            ids.clone(),
+            mutation_admission.clone(),
+            observations.clone(),
+        );
         values.core().attach_work_coordinator(&work);
         let executor = EvaluationExecutor::new(worker_threads, &work)
             .map_err(|error| Error::new(error.as_ref()))?;
@@ -2475,10 +2477,7 @@ impl EvaluationRuntime {
                         logger_lifecycle: RuntimeLoggerLifecycleState::default(),
                     }),
                 },
-                observations: RuntimeObservationState {
-                    epoch: Mutex::new(1),
-                    changed: Condvar::new(),
-                },
+                observations,
                 ids,
                 diagnostic_ingresses: Mutex::new(Vec::new()),
                 mutation_admission,
@@ -2696,12 +2695,7 @@ impl EvaluationRuntime {
         // Reading the epoch first is intentionally conservative. A concurrent
         // commit can make the returned store newer than the epoch, but cannot
         // leave a waiter holding an old store and a new epoch with no wake.
-        let generation = *self
-            .state
-            .observations
-            .epoch
-            .lock()
-            .expect("runtime observation mutex should not be poisoned");
+        let generation = self.state.observations.current().get();
         let store = self
             .state
             .transactions
@@ -2721,12 +2715,7 @@ impl EvaluationRuntime {
     ) -> (u64, crate::reflection::StoreSnapshot, RuntimeEventSnapshot) {
         // As with `reflection_snapshot`, reading the epoch first prevents a
         // waiter from retaining a new epoch beside stale transactional state.
-        let generation = *self
-            .state
-            .observations
-            .epoch
-            .lock()
-            .expect("runtime observation mutex should not be poisoned");
+        let generation = self.state.observations.current().get();
         let state = self
             .state
             .transactions
@@ -2863,20 +2852,9 @@ impl EvaluationRuntime {
 
     #[doc(hidden)]
     pub fn wait_for_change(&self, observed_generation: u64) -> bool {
-        let mut epoch = self
-            .state
+        self.state
             .observations
-            .epoch
-            .lock()
-            .expect("runtime observation mutex should not be poisoned");
-        while *epoch == observed_generation {
-            epoch = self
-                .state
-                .observations
-                .changed
-                .wait(epoch)
-                .expect("runtime observation mutex should not be poisoned");
-        }
+            .wait_for_change(RuntimeObservationEpoch::from_raw(observed_generation));
         true
     }
 
@@ -2886,12 +2864,7 @@ impl EvaluationRuntime {
     pub fn logger_transaction_snapshot(
         &self,
     ) -> (u64, crate::reflection::StoreSnapshot, RuntimeLoggerSnapshot) {
-        let generation = *self
-            .state
-            .observations
-            .epoch
-            .lock()
-            .expect("runtime observation mutex should not be poisoned");
+        let generation = self.state.observations.current().get();
         let state = self
             .state
             .transactions
@@ -3317,7 +3290,7 @@ pub struct ReasoningTask {
     waiting_on_task: Option<u64>,
     waiting_on_session: Option<u64>,
     wait_id: Option<u64>,
-    observed_generation: Option<u64>,
+    observed_epoch: Option<u64>,
     blocked_diagnostic: Option<Diagnostic>,
 }
 
@@ -3343,8 +3316,8 @@ impl ReasoningTask {
         self.wait_id
     }
 
-    pub fn observed_generation(&self) -> Option<u64> {
-        self.observed_generation
+    pub fn observed_epoch(&self) -> Option<u64> {
+        self.observed_epoch
     }
 
     /// The evaluation error retained while this task waits for an observed
@@ -4016,7 +3989,7 @@ impl Assembler {
                     waiting_on_task: task.dependency.map(|task| task.get()),
                     waiting_on_session: task.dependency_session.map(|session| session.get()),
                     wait_id: task.wait,
-                    observed_generation: task.observed_generation,
+                    observed_epoch: task.observed_epoch.map(RuntimeObservationEpoch::get),
                     blocked_diagnostic: task
                         .error
                         .as_deref()

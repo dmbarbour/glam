@@ -107,6 +107,9 @@ fn drive_net_interface(
             if let Some(blocked) = runtime.with(|net| net.blocked_call(pair)) {
                 return Err(EvaluationHalt::blocked(blocked.wait));
             }
+            if let Some(blocked) = runtime.with(|net| net.blocked_operator_call(pair)) {
+                return Err(EvaluationHalt::blocked(blocked.wait));
+            }
         }
 
         let reduction = runtime.with_mut(|net| net.reduce_next());
@@ -262,6 +265,26 @@ pub(super) fn progress_exact_core_pair(
             }
         };
     }
+    if let Some(blocked) = runtime.with(|net| net.blocked_operator_call(pair)) {
+        return match context.poll_wait(&blocked.wait.0) {
+            crate::evaluation::EvaluationWaitPoll::Pending(_) => Ok(false),
+            crate::evaluation::EvaluationWaitPoll::Complete(_)
+            | crate::evaluation::EvaluationWaitPoll::Failed(_)
+            | crate::evaluation::EvaluationWaitPoll::Cancelled
+            | crate::evaluation::EvaluationWaitPoll::Abandoned => {
+                let call = runtime
+                    .with(|net| net.operator_call(pair))
+                    .expect("blocked core operator call must remain an Operator >< Data pair");
+                let reclaimed =
+                    runtime.with_mut(|net| net.retry_blocked_operator_call(call, &blocked.wait));
+                assert!(
+                    reclaimed,
+                    "matching blocked core operator call must be reclaimable"
+                );
+                progress_core_operator_call(context, runtime, call)
+            }
+        };
+    }
     if runtime.with(|net| net.stuck_reason(pair).is_some()) {
         return Err(stuck_pair_error(runtime, pair));
     }
@@ -324,10 +347,14 @@ pub(super) fn progress_exact_core_call(
             Ok(true)
         }
         Err(error) => {
-            if let Some(wait) = error.blocked_on() {
-                runtime.with_mut(|runtime| runtime.block_claimed_call(call, wait));
-                return Ok(true);
-            }
+            let error = match retryable_evaluation_wait(context, &error) {
+                Ok(Some(wait)) => {
+                    runtime.with_mut(|runtime| runtime.block_claimed_call(call, wait));
+                    return Ok(true);
+                }
+                Ok(None) => error,
+                Err(error) => error,
+            };
             runtime.with_mut(|runtime| runtime.fail_claimed_call(call, error.clone()));
             Err(error)
         }
@@ -424,6 +451,14 @@ pub(super) fn progress_core_operator_call(
             net.complete_operator_call(call, result);
         }),
         Err(error) => {
+            let error = match retryable_evaluation_wait(context, &error) {
+                Ok(Some(wait)) => {
+                    runtime.with_mut(|net| net.block_claimed_operator_call(call, wait));
+                    return Ok(true);
+                }
+                Ok(None) => error,
+                Err(error) => error,
+            };
             // Core operator errors already identify the failed semantic
             // operation. Preserve that structured error while retaining
             // the operator itself in the stuck pair for runtime inspection.
@@ -434,6 +469,22 @@ pub(super) fn progress_core_operator_call(
         }
     }
     Ok(true)
+}
+
+fn retryable_evaluation_wait(
+    context: &EvalContext,
+    error: &EvaluationHalt,
+) -> Result<Option<crate::core_net::CoreWaitToken>, EvaluationHalt> {
+    if let Some(wait) = error.blocked_on() {
+        return Ok(Some(wait));
+    }
+    let Some(promise) = error.unassigned_promise() else {
+        return Ok(None);
+    };
+    promise_wait(context, promise)
+        .map(crate::core_net::CoreWaitToken)
+        .map(Some)
+        .map_err(|error| EvaluationHalt::new(error.as_ref()))
 }
 
 pub(super) fn resolve_core_access(

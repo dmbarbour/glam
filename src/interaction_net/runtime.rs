@@ -136,6 +136,12 @@ pub struct BlockedCall<W> {
     pub wait: W,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockedOperatorCall<W> {
+    pub pair: ActivePairKey,
+    pub wait: W,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlockedCursor {
     pub pair: ActivePairKey,
@@ -147,6 +153,7 @@ pub(super) enum ActivePairState<S: NetSpecialization> {
     Ready,
     Claimed,
     BlockedCall { wait: S::WaitToken },
+    BlockedOperatorCall { wait: S::WaitToken },
     BlockedCursor { cursor: NodeId },
     Stuck(StuckReason<S::StuckReason>),
 }
@@ -482,6 +489,19 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         }
     }
 
+    pub fn blocked_operator_call(
+        &self,
+        pair: ActivePairKey,
+    ) -> Option<BlockedOperatorCall<S::WaitToken>> {
+        match self.active.get(&pair) {
+            Some(ActivePairState::BlockedOperatorCall { wait }) => Some(BlockedOperatorCall {
+                pair,
+                wait: wait.clone(),
+            }),
+            _ => None,
+        }
+    }
+
     /// Recovers the structural call represented by a principal `Bind >< Data`
     /// pair. Pair state is deliberately irrelevant so a blocked call can be
     /// reclaimed after its exact wait completes.
@@ -601,6 +621,51 @@ impl<S: NetSpecialization> RuntimeNet<S> {
             _ => panic!("pending operator call data must exist"),
         };
         (operator, data)
+    }
+
+    /// Recovers the structural operator call represented by a principal
+    /// `Operator >< Data` pair. Pair state is deliberately irrelevant so a
+    /// blocked operation can be reclaimed after its exact wait completes.
+    pub fn operator_call(&self, pair: ActivePairKey) -> Option<OperatorCall> {
+        let (left, right) = self.active_pair_nodes(pair)?;
+        match (self.node(left), self.node(right)) {
+            (Some(RuntimeNode::Operator(_)), Some(RuntimeNode::Data(_))) => Some(OperatorCall {
+                pair,
+                operator: left,
+                data: right,
+            }),
+            (Some(RuntimeNode::Data(_)), Some(RuntimeNode::Operator(_))) => Some(OperatorCall {
+                pair,
+                operator: right,
+                data: left,
+            }),
+            _ => None,
+        }
+    }
+
+    /// Suspends an exact claimed operator call on specialization-owned
+    /// external work.
+    pub fn block_claimed_operator_call(&mut self, call: OperatorCall, wait: S::WaitToken) {
+        let previous = self
+            .active
+            .insert(call.pair, ActivePairState::BlockedOperatorCall { wait });
+        assert!(
+            matches!(previous, Some(ActivePairState::Claimed)),
+            "blocked operator call must still be claimed"
+        );
+    }
+
+    /// Claims a blocked operator call only when the wakeup identifies its
+    /// current wait.
+    pub fn retry_blocked_operator_call(&mut self, call: OperatorCall, wait: &S::WaitToken) -> bool {
+        if !matches!(
+            self.active.get(&call.pair),
+            Some(ActivePairState::BlockedOperatorCall { wait: current }) if current == wait
+        ) {
+            return false;
+        }
+        self.active.insert(call.pair, ActivePairState::Claimed);
+        true
     }
 
     pub fn complete_operator_call(

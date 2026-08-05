@@ -201,9 +201,14 @@ coordinator makes it claimable again. Neither mutex is held while acquiring
 the other. A direct serial demand may claim dormant deferred work without
 publishing it to workers; an outer blocked task promotes its known producer to
 the ready queue. Exact lazy wait tokens still let the serial pump prioritize a
-known producer chain. Coarse host generations currently wake state
-observations; path journals decide whether an optimistic heap commit must
-retry.
+known producer chain. Runtime semantic-state changes wake retry checkpoints
+through a coordinator-owned broad index keyed by work ID, subscription epoch,
+and `RuntimeObservationEpoch`; path journals still decide
+whether an optimistic heap commit must retry. Workers claim exact ready work
+directly from the runtime queue, while serial pumps filter that queue by demand
+session. An exact serial demand may claim one producer installed by another
+same-runtime session, but the claim detaches and returns the machine through
+its registered owner; general ready work remains session-filtered.
 
 Foreground evaluation pumps only tasks needed by the lazy value it is trying
 to observe. Shared workers may opportunistically poll any ready task. Explicit

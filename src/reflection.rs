@@ -48,6 +48,7 @@ use crate::evaluation::{
     EvalContext, EvaluationMachinePoll, EvaluationPumpOutcome, EvaluationSessionRun,
     EvaluationTaskBlock, EvaluationTaskId, EvaluationTaskMachine, EvaluationWaitPoll,
     EvaluationWaitToken, ReflectionTaskLauncher, ReflectionTaskProfile, ReflectionTaskResultPolicy,
+    RuntimeObservationEpoch,
 };
 use crate::interaction_net::NetBuilder;
 use crate::number::Number;
@@ -996,6 +997,12 @@ impl<S: TaskSpecialization> EffectTask<S> {
                             EvaluationPumpOutcome::NoProgress
                                 if blocked.observed_generation.is_none() =>
                             {
+                                if self
+                                    .eval_context
+                                    .wait_for_observed_dependency_progress(&wait)
+                                {
+                                    continue;
+                                }
                                 let error = TaskHalt::new(
                                     "synchronous reflection task has no runnable producer for its dependency",
                                 );
@@ -2321,7 +2328,9 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for ValueEffectTask<S> {
             EffectTaskPoll::Blocked(blocked) => {
                 EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
                     lazy: blocked.lazy,
-                    observed_generation: blocked.observed_generation,
+                    observed_epoch: blocked
+                        .observed_generation
+                        .map(RuntimeObservationEpoch::from_raw),
                     error: blocked.error,
                 })
             }
@@ -2343,7 +2352,9 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for UnitEffectTask<S> {
             EffectTaskPoll::Blocked(blocked) => {
                 EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
                     lazy: blocked.lazy,
-                    observed_generation: blocked.observed_generation,
+                    observed_epoch: blocked
+                        .observed_generation
+                        .map(RuntimeObservationEpoch::from_raw),
                     error: blocked.error,
                 })
             }
@@ -5762,7 +5773,7 @@ mod tests {
                 .find(|task| task.task == parent.id())
                 .expect("parent task should retain its joined error");
             assert!(blocked.wait.is_none());
-            assert!(blocked.observed_generation.is_some());
+            assert!(blocked.observed_epoch.is_some());
             assert!(
                 blocked
                     .error

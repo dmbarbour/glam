@@ -216,7 +216,7 @@ impl LazyTaskMachine {
         if let Some(wait) = error.blocked_on() {
             return EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
                 lazy: Some(wait.0),
-                observed_generation: None,
+                observed_epoch: None,
                 error: None,
             });
         }
@@ -231,7 +231,7 @@ impl LazyTaskMachine {
             };
             return EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
                 lazy: Some(wait),
-                observed_generation: None,
+                observed_epoch: None,
                 error: None,
             });
         }
@@ -266,7 +266,7 @@ impl EvaluationTaskMachine for PromiseFollower {
                     let Some(task) = self.promise.task() else {
                         return EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
                             lazy: None,
-                            observed_generation: None,
+                            observed_epoch: None,
                             error: None,
                         });
                     };
@@ -274,7 +274,7 @@ impl EvaluationTaskMachine for PromiseFollower {
                         EvaluationWaitPoll::Pending(wait) => {
                             EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
                                 lazy: Some(wait),
-                                observed_generation: None,
+                                observed_epoch: None,
                                 error: None,
                             })
                         }
@@ -329,7 +329,7 @@ fn is_deferred(value: &Value) -> bool {
     matches!(value, Value::Lazy(_) | Value::Promised(_))
 }
 
-fn promise_wait(
+pub(super) fn promise_wait(
     context: &EvalContext,
     promise: &PromisedValue,
 ) -> Result<crate::evaluation::EvaluationWaitToken, Arc<str>> {
@@ -346,7 +346,7 @@ fn block_or_fail(context: &EvalContext, error: EvaluationHalt) -> EvaluationMach
     if let Some(wait) = error.blocked_on() {
         return EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
             lazy: Some(wait.0),
-            observed_generation: None,
+            observed_epoch: None,
             error: None,
         });
     }
@@ -354,7 +354,7 @@ fn block_or_fail(context: &EvalContext, error: EvaluationHalt) -> EvaluationMach
         return match promise_wait(context, promise) {
             Ok(wait) => EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
                 lazy: Some(wait),
-                observed_generation: None,
+                observed_epoch: None,
                 error: None,
             }),
             Err(error) => {

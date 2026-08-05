@@ -693,26 +693,26 @@ fn report_reasoning(diagnostics: &DiagnosticBus, values: &Values, report: &Reaso
             ReasoningTaskState::Blocked => match (
                 task.waiting_on_task(),
                 task.waiting_on_session(),
-                task.observed_generation(),
+                task.observed_epoch(),
                 task.wait_id(),
             ) {
-                (Some(dependency), Some(session), Some(generation), _) => {
+                (Some(dependency), Some(session), Some(epoch), _) => {
                     format!(
-                        "waits on task {dependency} in evaluation session {session} and shared-state generation {generation}"
+                        "waits on task {dependency} in evaluation session {session} and shared-state epoch {epoch}"
                     )
                 }
                 (Some(dependency), Some(session), None, _) => {
                     format!("waits on task {dependency} in evaluation session {session}")
                 }
-                (Some(dependency), None, Some(generation), _) => {
-                    format!("waits on task {dependency} and shared-state generation {generation}")
+                (Some(dependency), None, Some(epoch), _) => {
+                    format!("waits on task {dependency} and shared-state epoch {epoch}")
                 }
                 (Some(dependency), None, None, _) => format!("waits on task {dependency}"),
-                (None, _, Some(generation), Some(wait)) => {
-                    format!("waits on token {wait} and shared-state generation {generation}")
+                (None, _, Some(epoch), Some(wait)) => {
+                    format!("waits on token {wait} and shared-state epoch {epoch}")
                 }
-                (None, _, Some(generation), None) => {
-                    format!("waits on shared-state generation {generation}")
+                (None, _, Some(epoch), None) => {
+                    format!("waits on shared-state epoch {epoch}")
                 }
                 (None, _, None, Some(wait)) => format!("waits on token {wait}"),
                 (None, _, None, None) => "is blocked without a wake condition".to_owned(),

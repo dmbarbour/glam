@@ -30,24 +30,24 @@ runtime-default annotation profile, and a persistent ledger of
 unacknowledged reflection failures. The session has no second task lifecycle
 state.
 
-The runtime-owned `EvaluationWorkCoordinator` owns session registration, the
-ready-session queue and de-duplication index, worker fairness, its work
-generation, the condition variable used to await work, and stable runtime-local
-reflection, deferred-producer, and spark records. Reflection and deferred
+The runtime-owned `EvaluationWorkCoordinator` owns session registration, one
+runtime-wide ready-task queue, worker fairness, its work generation, the
+condition variable used to await work, and stable runtime-local reflection,
+deferred-producer, and spark records. Reflection and deferred
 records own reservation/dormancy, queued, running, blocked, control, and
 terminalization state; the session machine store can detach or restore a
-machine only with a coordinator claim. Each spark record retains its demand value, dependency,
+machine only with a coordinator claim. Each spark record retains its demand
+value, dependency,
 demand-session index, checked subscription epoch, and a close request while
 worker-owned. Parked indexes contain `(work ID, subscription epoch)` rather
 than bare IDs. A wake batch is accepted only while the record remains blocked
 on both that epoch and the same runtime-local dependency key; stale completion,
 session teardown, and reblocking notifications are harmless. The attached
 `EvaluationExecutor` owns only worker activation, shutdown, and thread handles.
-Workers retain a weak coordinator attachment and claim either a ready session
-or spark record from it. During the work-boundary transition, a selected
-session then claims one exact coordinator-owned reflection or deferred work
-ID. Sessions
-retain their coordinator while their machine slots remain live; the
+Workers retain a weak coordinator attachment and claim either an exact ready
+task or spark record from it. A task claim retains its upgraded demand session
+while that session detaches only the selected reflection or deferred machine.
+Sessions retain their coordinator while their machine slots remain live; the
 coordinator retains sessions only weakly, so this does not form a cycle. The
 immutable reflection environment belongs to the active task host rather than
 either scheduling component.
@@ -57,6 +57,22 @@ and advance the coordinator's work generation before external wakes. They do
 not advance `RuntimeObservationEpoch`: ready-queue churn is not a semantic
 heap/input disturbance and must not cause a task to invalidate its own prior
 observations.
+
+Runtime store and admitted-input publication advance the separate typed
+`RuntimeObservationEpoch`. Blocked task work records a checked
+`{work ID, subscription epoch, observed epoch}` registration. Publication
+queues every current older registration before releasing shared mutation
+admission; block installation rechecks the epoch under that same admission.
+The two-sided protocol prevents a state change from being lost immediately
+before, during, or after registration.
+
+A synchronous effect facade which exhausts immediate exact work follows its
+dependency chain before deciding that the wait is orphaned. If the chain ends
+at a coordinator-indexed observation epoch, it waits for the corresponding
+scheduler transition; a chain with no exact or broad wake remains quiescent.
+Interaction-net calls preserve the same distinction: both ordinary and
+operator calls retain retryable evaluator waits as blocked pair state, while
+only permanent failures become stuck pairs.
 
 `EvalContext` separately carries the complete profile inherited by
 `.task.new`. A type-erased launcher closes over the specialization, immutable
