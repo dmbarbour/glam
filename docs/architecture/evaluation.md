@@ -24,18 +24,19 @@ it in runtime-owned state.
 Every production evaluator entry receives an `EvalContext` borrowed from an
 `EvaluationSession`. An `Assembler` and its clones share one internal
 `ReasoningSession`, which owns that evaluation session and the assembler's
-reflection host. `EvaluationSession` retains opaque reflection machine slots,
-deferred-value task records, wait lookup, a reference to the runtime-default
-annotation profile, and a persistent ledger of unacknowledged reflection
-failures. The session has no second reflection lifecycle state.
+reflection host. `EvaluationSession` retains opaque reflection and deferred
+machine slots, minimal work-to-machine lookup, a reference to the
+runtime-default annotation profile, and a persistent ledger of
+unacknowledged reflection failures. The session has no second task lifecycle
+state.
 
 The runtime-owned `EvaluationWorkCoordinator` owns session registration, the
 ready-session queue and de-duplication index, worker fairness, its work
 generation, the condition variable used to await work, and stable runtime-local
-reflection and spark records. Reflection records own reservation, queued,
-running, blocked, cancellation, and terminalization state; the session machine
-store can detach or restore a machine only with a coordinator claim. Each
-spark record retains its demand value, dependency,
+reflection, deferred-producer, and spark records. Reflection and deferred
+records own reservation/dormancy, queued, running, blocked, control, and
+terminalization state; the session machine store can detach or restore a
+machine only with a coordinator claim. Each spark record retains its demand value, dependency,
 demand-session index, checked subscription epoch, and a close request while
 worker-owned. Parked indexes contain `(work ID, subscription epoch)` rather
 than bare IDs. A wake batch is accepted only while the record remains blocked
@@ -44,7 +45,8 @@ session teardown, and reblocking notifications are harmless. The attached
 `EvaluationExecutor` owns only worker activation, shutdown, and thread handles.
 Workers retain a weak coordinator attachment and claim either a ready session
 or spark record from it. During the work-boundary transition, a selected
-session then claims one exact coordinator-owned reflection work ID. Sessions
+session then claims one exact coordinator-owned reflection or deferred work
+ID. Sessions
 retain their coordinator while their machine slots remain live; the
 coordinator retains sessions only weakly, so this does not form a cycle. The
 immutable reflection environment belongs to the active task host rather than
@@ -101,29 +103,26 @@ store the retryable cases.
 
 All clones of a lazy value share one source/result cell. Workers clone a source
 snapshot without holding its mutex during evaluation. Terminal cache
-publication precedes removal of the shared source, so concurrent snapshots may
-finish while later observers take the cached path. Terminal deferred-task
-records are removed from every session index; their records and machines are
-dropped after releasing the registry mutex. Blocked tasks retain both source
-and machine. A worker which captured a source before another worker completed
-may register one redundant producer after retirement. That producer observes
-the canonical lazy cache, terminates, and retires without changing the result.
+publication precedes coordinator retirement, so later observers take the
+cached path. A transient coordinator `Reserved` state bridges installation of
+the session machine slot; a racing claimant reuses the canonical work and
+wait. Blocked work retains both its coordinator record and session machine.
+Terminal work retires from coordinator indexes before its detached machine is
+dropped outside locks.
 
 Every scheduler wait token is one shared cell containing identity, a weak
 session owner, an optional terminal result, and exact weak work registrations.
 Completion, permanent failure, cancellation, and abandonment publish the
-result while holding the active task-registry mutex. The producer record and
-indexes retire there; exact registrations detach and reach the coordinator
-only after the registry is released. Polling checks the cell before and after
-taking the mutex, so a waiter racing publication sees either active state or
-the terminal result. A terminal token remains observable after its owner
-session is dropped; a pending token does not keep the session alive and reports
-`Abandoned`, not evaluation failure, if its owner disappears without
-publishing a more specific terminal result. Active registries retain only
-unresolved deferred producers and nonterminal reflection tasks. A blocked
-spark registers its stable work ID and subscription epoch directly with this
-cell. Only terminal publication of that exact wait can requeue it; unrelated
-session task progress does not.
+result before coordinator retirement; exact registrations detach and reach
+the coordinator only after the terminal cell's lock is released. Polling
+checks the cell before and after coordinator lookup, so a waiter racing
+publication sees either active state or the terminal result. A terminal token
+remains observable after its owner session is dropped; a pending token does
+not keep the session alive and reports `Abandoned`, not evaluation failure, if
+its owner disappears without publishing a more specific terminal result. A
+blocked spark registers its stable work ID and subscription epoch directly
+with this cell. Only terminal publication of that exact wait can requeue it;
+unrelated session task progress does not.
 Reflection task handles own their shared terminal wait cells, so completion,
 failure, and cancellation remain observable after the active record and
 task-ID index are retired. An unacknowledged failure also leaves one minimal
@@ -135,23 +134,23 @@ surface leaves the terminal result unchanged.
 
 ### Scheduler State Ownership
 
-The session owns only live scheduling state:
+The session owns executable machine storage, not scheduling state:
 
 | State | Owner |
 | --- | --- |
-| runnable, running, blocked, or unresolved producer | active session registry |
+| reserved, dormant, queued, running, blocked, or terminalizing reflection/deferred work | runtime work coordinator |
 | queued, worker-owned, or dependency-blocked spark | runtime work coordinator |
+| opaque live reflection/deferred machines | demand session machine store |
 | completed, failed, cancelled, or abandoned outcome | shared `EvaluationWaitToken` cell |
 | unacknowledged reflection failure | persistent session reporting ledger |
 | transactional `.task.status`, `.task.value`, or `.task.error` view | reasoning-store query |
 
-Terminal publication happens while the active registry mutex is held and
-precedes record removal. `poll_wait` checks the shared cell before and after
-taking that mutex; after the second check, finding an active record means only
-that the producer is pending. It does not reinterpret terminal state from a
-retained record. A promise assignment observed in the narrow interval before
-its publisher acquires the mutex is canonicalized into the same wait cell and
-retired by the polling path.
+Terminal publication precedes coordinator record removal. `poll_wait` checks
+the shared cell before and after coordinator lookup; after the second check,
+finding an active record means only that the producer is pending. It does not
+reinterpret terminal state from a retained record. A promise assignment
+observed during producer installation is canonicalized into the same wait
+cell and retired by the polling path.
 
 Abandonment describes loss of a session-local producer, not a universal
 failure of the value being awaited. Reflection-task handles retain it as a
@@ -163,11 +162,13 @@ has lost its sole responsible producer. Host promises remain controlled only
 by their resolver.
 
 When a lazy or assigned-promise task blocks on another deferred producer, the
-session records one strict dependency edge. The graph has at most one outgoing
-edge per unresolved producer, so an edge insertion can find a cycle with a
-successor walk. A pure deferred-value cycle receives one canonical structured
-failure shared by all members; an edge through reflection or another external
-producer is not poisoned.
+coordinator records one strict dependency edge. The graph has at most one
+outgoing edge per unresolved producer, so an edge insertion can find a cycle
+with a successor walk. A same-session pure deferred-value cycle receives one
+canonical structured failure shared by all members; an edge through a promise
+or reflection task remains an ordinary wait. Cross-session cycle poisoning is
+deferred until terminal obligations no longer require access to multiple
+session machine stores.
 
 ## Value Observation
 

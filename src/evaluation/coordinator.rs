@@ -7,7 +7,7 @@ use std::sync::{Arc, Condvar, Mutex, Weak};
 
 #[cfg(test)]
 use crate::core::CoreValueFactory;
-use crate::core::{PromiseId, PromisedValue, Value};
+use crate::core::{DeferredValueId, LazyValue, PromiseId, PromisedValue, Value};
 use crate::runtime::{
     EvaluationRuntimeId, RuntimeIds, RuntimeMutationAdmission, RuntimeMutationGuard,
     RuntimeValueRoot,
@@ -319,12 +319,37 @@ struct SparkWork {
 
 struct ReflectionWork {
     task: EvaluationTaskId,
+    wait: EvaluationWaitToken,
     block: Option<EvaluationTaskBlock>,
+}
+
+#[derive(Clone)]
+pub(super) enum DeferredProducer {
+    Lazy(LazyValue),
+    Promise(PromisedValue),
+}
+
+impl DeferredProducer {
+    pub(super) fn id(&self) -> DeferredValueId {
+        match self {
+            Self::Lazy(lazy) => lazy.id().into(),
+            Self::Promise(promise) => promise.id().into(),
+        }
+    }
+}
+
+struct DeferredWork {
+    task: EvaluationTaskId,
+    wait: EvaluationWaitToken,
+    producer: DeferredProducer,
+    block: Option<EvaluationTaskBlock>,
+    demanded_while_reserved: bool,
 }
 
 enum WorkKind {
     Spark(SparkWork),
     Reflection(ReflectionWork),
+    Deferred(DeferredWork),
 }
 
 struct WorkRecord {
@@ -349,6 +374,60 @@ pub(super) struct ClaimedReflectionWork {
     task: EvaluationTaskId,
     demand_session: EvaluationSessionId,
     prior_block: Option<EvaluationTaskBlock>,
+}
+
+pub(super) struct ClaimedDeferredWork {
+    id: EvaluationWorkId,
+    task: EvaluationTaskId,
+    demand_session: EvaluationSessionId,
+    producer: DeferredValueId,
+    prior_block: Option<EvaluationTaskBlock>,
+    requeue_on_yield: bool,
+}
+
+impl ClaimedDeferredWork {
+    pub(super) fn id(&self) -> EvaluationWorkId {
+        self.id
+    }
+
+    pub(super) fn task(&self) -> EvaluationTaskId {
+        self.task
+    }
+
+    pub(super) fn producer(&self) -> DeferredValueId {
+        self.producer
+    }
+}
+
+pub(super) enum DeferredWorkPoll {
+    Yielded,
+    Blocked(EvaluationTaskBlock),
+    Terminal,
+}
+
+pub(super) struct DeferredLazyCycleMember {
+    pub(super) work: EvaluationWorkId,
+    pub(super) wait: EvaluationWaitToken,
+    pub(super) lazy: LazyValue,
+}
+
+pub(super) struct DeferredWorkRelease {
+    pub(super) made_progress: bool,
+    pub(super) remains_blocked: bool,
+    pub(super) terminal: bool,
+    pub(super) abandoned: bool,
+    pub(super) cycle: Vec<DeferredLazyCycleMember>,
+}
+
+pub(super) enum DeferredWorkReservation {
+    New(EvaluationWorkId),
+    Existing(EvaluationWaitToken),
+}
+
+pub(super) struct AbandonedDeferredWork {
+    pub(super) id: EvaluationWorkId,
+    pub(super) producer: DeferredValueId,
+    pub(super) dependency: Option<EvaluationWaitToken>,
 }
 
 impl ClaimedReflectionWork {
@@ -445,6 +524,12 @@ struct WorkCoordinatorState {
     ready_reflection: HashMap<EvaluationSessionId, VecDeque<EvaluationWorkId>>,
     ready_reflection_set: HashSet<EvaluationWorkId>,
     reflection_by_task: std::collections::BTreeMap<EvaluationTaskId, EvaluationWorkId>,
+    reflection_by_wait: HashMap<EvaluationWaitToken, EvaluationWorkId>,
+    ready_deferred: HashMap<EvaluationSessionId, VecDeque<EvaluationWorkId>>,
+    ready_deferred_set: HashSet<EvaluationWorkId>,
+    deferred_by_task: std::collections::BTreeMap<EvaluationTaskId, EvaluationWorkId>,
+    deferred_by_wait: HashMap<EvaluationWaitToken, EvaluationWorkId>,
+    deferred_by_value: HashMap<DeferredValueId, EvaluationWorkId>,
     spark_workers: usize,
     prefer_spark: bool,
     work_generation: u64,
@@ -452,8 +537,9 @@ struct WorkCoordinatorState {
 
 /// Runtime-owned scheduling state shared by serial and worker execution.
 ///
-/// Spark payloads have stable work records here. Reflection and deferred task
-/// records deliberately remain session-owned until their later migration.
+/// Spark payloads and reflection/deferred lifecycle records have stable work
+/// records here. Session registries retain only the task-machine slots which
+/// the coordinator claims through a non-nested lock handshake.
 pub(crate) struct EvaluationWorkCoordinator {
     runtime: EvaluationRuntimeId,
     ids: Arc<RuntimeIds>,
@@ -580,6 +666,19 @@ impl EvaluationWorkCoordinator {
                 .collect::<Vec<_>>();
             let mut retired = Vec::new();
             for id in work {
+                if state.work.get(&id).is_some_and(|record| {
+                    matches!(record.kind, WorkKind::Deferred(_))
+                        && matches!(record.state, WorkState::Running)
+                }) {
+                    state
+                        .work
+                        .get_mut(&id)
+                        .expect("running deferred work must remain registered")
+                        .control
+                        .close_reason
+                        .get_or_insert(WorkCloseReason::DemandSessionClosed);
+                    continue;
+                }
                 if !state
                     .work
                     .get(&id)
@@ -933,22 +1032,25 @@ impl EvaluationWorkCoordinator {
         &self,
         session: &Arc<EvaluationSession>,
         task: EvaluationTaskId,
+        wait: EvaluationWaitToken,
     ) -> EvaluationWorkId {
-        self.insert_reflection(session, task, WorkState::Reserved)
+        self.insert_reflection(session, task, wait, WorkState::Reserved)
     }
 
     pub(super) fn register_dormant_reflection(
         &self,
         session: &Arc<EvaluationSession>,
         task: EvaluationTaskId,
+        wait: EvaluationWaitToken,
     ) -> EvaluationWorkId {
-        self.insert_reflection(session, task, WorkState::Dormant)
+        self.insert_reflection(session, task, wait, WorkState::Dormant)
     }
 
     fn insert_reflection(
         &self,
         session: &Arc<EvaluationSession>,
         task: EvaluationTaskId,
+        wait: EvaluationWaitToken,
         initial: WorkState,
     ) -> EvaluationWorkId {
         debug_assert_eq!(session.values.runtime_id(), self.runtime);
@@ -971,10 +1073,15 @@ impl EvaluationWorkCoordinator {
                 control: WorkControl::default(),
                 obligations: SettlementObligations,
                 state: initial,
-                kind: WorkKind::Reflection(ReflectionWork { task, block: None }),
+                kind: WorkKind::Reflection(ReflectionWork {
+                    task,
+                    wait: wait.clone(),
+                    block: None,
+                }),
             };
             assert!(state.work.insert(id, record).is_none());
             assert!(state.reflection_by_task.insert(task, id).is_none());
+            assert!(state.reflection_by_wait.insert(wait, id).is_none());
             state
                 .work_by_session
                 .entry(session.id)
@@ -1308,6 +1415,19 @@ impl EvaluationWorkCoordinator {
             if matches!(state_after, WorkState::Queued) {
                 queue_reflection(&mut state, claimed.id);
             }
+            if matches!(state_after, WorkState::Blocked)
+                && let Some(wait) = reflection_work(
+                    state
+                        .work
+                        .get(&claimed.id)
+                        .expect("blocked reflection work must remain registered"),
+                )
+                .block
+                .as_ref()
+                .and_then(|block| block.lazy.clone())
+            {
+                promote_deferred_wait_locked(&mut state, &wait);
+            }
             state.work_generation = state.work_generation.wrapping_add(1);
             ReflectionWorkRelease {
                 made_progress,
@@ -1349,56 +1469,6 @@ impl EvaluationWorkCoordinator {
             .copied()
     }
 
-    pub(super) fn reflection_dependency(
-        &self,
-        task: EvaluationTaskId,
-    ) -> Option<EvaluationWaitToken> {
-        let state = self
-            .state
-            .lock()
-            .expect("evaluation work coordinator was poisoned");
-        let id = state.reflection_by_task.get(&task)?;
-        let record = state.work.get(id)?;
-        reflection_work(record)
-            .block
-            .as_ref()
-            .and_then(|block| block.lazy.clone())
-    }
-
-    pub(super) fn reflection_is_claimable(
-        &self,
-        task: EvaluationTaskId,
-        attempted: &HashSet<EvaluationTaskId>,
-    ) -> bool {
-        if attempted.contains(&task) {
-            return false;
-        }
-        let state = self
-            .state
-            .lock()
-            .expect("evaluation work coordinator was poisoned");
-        let Some(id) = state.reflection_by_task.get(&task) else {
-            return false;
-        };
-        state
-            .work
-            .get(id)
-            .is_some_and(|record| matches!(record.state, WorkState::Queued | WorkState::Blocked))
-    }
-
-    pub(super) fn reflection_is_busy(&self, task: EvaluationTaskId) -> bool {
-        let state = self
-            .state
-            .lock()
-            .expect("evaluation work coordinator was poisoned");
-        let Some(id) = state.reflection_by_task.get(&task) else {
-            return false;
-        };
-        state.work.get(id).is_some_and(|record| {
-            matches!(record.state, WorkState::Running | WorkState::Terminalizing)
-        })
-    }
-
     pub(super) fn reflection_snapshots(
         &self,
         session: EvaluationSessionId,
@@ -1418,6 +1488,596 @@ impl EvaluationWorkCoordinator {
                 })
             })
             .collect()
+    }
+
+    pub(super) fn reserve_deferred(
+        &self,
+        session: &Arc<EvaluationSession>,
+        task: EvaluationTaskId,
+        wait: EvaluationWaitToken,
+        producer: DeferredProducer,
+    ) -> DeferredWorkReservation {
+        debug_assert_eq!(session.values.runtime_id(), self.runtime);
+        debug_assert_eq!(wait.runtime_id(), self.runtime);
+        let deferred = producer.id();
+        let mutation = self.admission.mutation_guard();
+        let reservation = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            if let Some(id) = state.deferred_by_value.get(&deferred).copied() {
+                let wait = deferred_work(
+                    state
+                        .work
+                        .get(&id)
+                        .expect("indexed deferred work must remain registered"),
+                )
+                .wait
+                .clone();
+                DeferredWorkReservation::Existing(wait)
+            } else {
+                assert!(
+                    state.sessions.contains_key(&session.id),
+                    "deferred work requires a registered demand session"
+                );
+                let id = EvaluationWorkId(self.ids.evaluation_work());
+                let record = WorkRecord {
+                    id,
+                    demand_session: session.id,
+                    subscription_epoch: 0,
+                    control: WorkControl::default(),
+                    obligations: SettlementObligations,
+                    state: WorkState::Reserved,
+                    kind: WorkKind::Deferred(DeferredWork {
+                        task,
+                        wait: wait.clone(),
+                        producer,
+                        block: None,
+                        demanded_while_reserved: false,
+                    }),
+                };
+                assert!(state.work.insert(id, record).is_none());
+                assert!(state.deferred_by_task.insert(task, id).is_none());
+                assert!(state.deferred_by_wait.insert(wait, id).is_none());
+                assert!(state.deferred_by_value.insert(deferred, id).is_none());
+                state
+                    .work_by_session
+                    .entry(session.id)
+                    .or_default()
+                    .insert(id);
+                state.work_generation = state.work_generation.wrapping_add(1);
+                DeferredWorkReservation::New(id)
+            }
+        };
+        drop(mutation);
+        if matches!(reservation, DeferredWorkReservation::New(_)) {
+            self.work_available.notify_all();
+        }
+        reservation
+    }
+
+    /// Finishes the temporary coordinator-first installation handshake.
+    /// Demand observed while the session installed its machine is preserved
+    /// and makes the producer worker-ready immediately.
+    pub(super) fn activate_deferred(&self, id: EvaluationWorkId) {
+        let mutation = self.admission.mutation_guard();
+        {
+            let mut state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            let demanded = {
+                let record = state
+                    .work
+                    .get_mut(&id)
+                    .expect("reserved deferred work must remain registered");
+                assert!(matches!(record.kind, WorkKind::Deferred(_)));
+                assert!(matches!(record.state, WorkState::Reserved));
+                let demanded = deferred_work(record).demanded_while_reserved;
+                record.state = if demanded {
+                    WorkState::Queued
+                } else {
+                    WorkState::Dormant
+                };
+                demanded
+            };
+            if demanded {
+                queue_deferred(&mut state, id);
+            }
+            state.work_generation = state.work_generation.wrapping_add(1);
+        }
+        drop(mutation);
+        self.work_available.notify_all();
+    }
+
+    #[cfg(test)]
+    pub(super) fn promote_deferred_wait(&self, wait: &EvaluationWaitToken) -> bool {
+        let mutation = self.admission.mutation_guard();
+        let promoted = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            let Some(id) = state.deferred_by_wait.get(wait).copied() else {
+                return false;
+            };
+            let next = state.work.get(&id).map(|record| record.state);
+            match next {
+                Some(WorkState::Reserved) => {
+                    deferred_work_mut(
+                        state
+                            .work
+                            .get_mut(&id)
+                            .expect("reserved deferred work must remain registered"),
+                    )
+                    .demanded_while_reserved = true;
+                    state.work_generation = state.work_generation.wrapping_add(1);
+                    true
+                }
+                Some(WorkState::Dormant) => {
+                    state
+                        .work
+                        .get_mut(&id)
+                        .expect("dormant deferred work must remain registered")
+                        .state = WorkState::Queued;
+                    queue_deferred(&mut state, id);
+                    state.work_generation = state.work_generation.wrapping_add(1);
+                    true
+                }
+                _ => false,
+            }
+        };
+        drop(mutation);
+        if promoted {
+            self.work_available.notify_all();
+        }
+        promoted
+    }
+
+    /// Transitional broad wake for promise followers. Exact deferred-work
+    /// subscriptions arrive in Phase 7B.2; until then one promise completion
+    /// retries every blocked producer in each subscribed demand session.
+    pub(super) fn retry_blocked_deferred(&self, session: EvaluationSessionId) {
+        let mutation = self.admission.mutation_guard();
+        let changed = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            let ids = state
+                .work_by_session
+                .get(&session)
+                .into_iter()
+                .flatten()
+                .copied()
+                .filter(|id| {
+                    state.work.get(id).is_some_and(|record| {
+                        matches!(record.kind, WorkKind::Deferred(_))
+                            && matches!(record.state, WorkState::Blocked)
+                    })
+                })
+                .collect::<Vec<_>>();
+            for id in &ids {
+                state
+                    .work
+                    .get_mut(id)
+                    .expect("indexed blocked deferred work must remain registered")
+                    .state = WorkState::Queued;
+                queue_deferred(&mut state, *id);
+            }
+            if !ids.is_empty() {
+                state.work_generation = state.work_generation.wrapping_add(1);
+            }
+            !ids.is_empty()
+        };
+        drop(mutation);
+        if changed {
+            self.work_available.notify_all();
+        }
+    }
+
+    pub(super) fn claim_ready_deferred(
+        &self,
+        session: EvaluationSessionId,
+    ) -> Option<ClaimedDeferredWork> {
+        let mutation = self.admission.mutation_guard();
+        let claimed = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            let claimed = claim_ready_deferred(&mut state, session);
+            if claimed.is_some() {
+                state.work_generation = state.work_generation.wrapping_add(1);
+            }
+            claimed
+        };
+        drop(mutation);
+        if claimed.is_some() {
+            self.work_available.notify_all();
+        }
+        claimed
+    }
+
+    pub(super) fn claim_deferred(&self, id: EvaluationWorkId) -> Option<ClaimedDeferredWork> {
+        let mutation = self.admission.mutation_guard();
+        let claimed = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            let claimed = claim_deferred(&mut state, id, false);
+            if claimed.is_some() {
+                state.work_generation = state.work_generation.wrapping_add(1);
+            }
+            claimed
+        };
+        drop(mutation);
+        if claimed.is_some() {
+            self.work_available.notify_all();
+        }
+        claimed
+    }
+
+    pub(super) fn claim_blocked_deferred(
+        &self,
+        session: EvaluationSessionId,
+        attempted: &HashSet<EvaluationTaskId>,
+    ) -> Option<ClaimedDeferredWork> {
+        let id = {
+            let state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            state.deferred_by_task.iter().find_map(|(task, id)| {
+                let record = state.work.get(id)?;
+                (record.demand_session == session
+                    && deferred_work_is_retryable(&state, record)
+                    && !attempted.contains(task))
+                .then_some(*id)
+            })
+        }?;
+        let mutation = self.admission.mutation_guard();
+        let claimed = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            let claimed = claim_deferred(&mut state, id, false);
+            if claimed.is_some() {
+                state.work_generation = state.work_generation.wrapping_add(1);
+            }
+            claimed
+        };
+        drop(mutation);
+        if claimed.is_some() {
+            self.work_available.notify_all();
+        }
+        claimed
+    }
+
+    pub(super) fn release_deferred(
+        &self,
+        claimed: ClaimedDeferredWork,
+        poll: DeferredWorkPoll,
+    ) -> DeferredWorkRelease {
+        let mutation = self.admission.mutation_guard();
+        let release = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            {
+                let record = state
+                    .work
+                    .get(&claimed.id)
+                    .expect("claimed deferred work must remain registered");
+                assert_eq!(record.demand_session, claimed.demand_session);
+                assert_eq!(deferred_work(record).task, claimed.task);
+                assert_eq!(deferred_work(record).producer.id(), claimed.producer);
+                assert!(matches!(record.state, WorkState::Running));
+            }
+
+            let abandoned = state.work.get(&claimed.id).is_some_and(|record| {
+                matches!(
+                    record.control.close_reason,
+                    Some(WorkCloseReason::DemandSessionClosed)
+                )
+            });
+            let (state_after, block, made_progress, remains_blocked, terminal) = if abandoned {
+                (WorkState::Terminalizing, None, true, false, true)
+            } else {
+                match poll {
+                    DeferredWorkPoll::Yielded if claimed.requeue_on_yield => {
+                        (WorkState::Queued, None, true, false, false)
+                    }
+                    DeferredWorkPoll::Yielded => (WorkState::Dormant, None, true, false, false),
+                    DeferredWorkPoll::Blocked(block) => {
+                        let unchanged = claimed.prior_block.as_ref() == Some(&block);
+                        (WorkState::Blocked, Some(block), !unchanged, true, false)
+                    }
+                    DeferredWorkPoll::Terminal => {
+                        (WorkState::Terminalizing, None, true, false, true)
+                    }
+                }
+            };
+            {
+                let record = state
+                    .work
+                    .get_mut(&claimed.id)
+                    .expect("claimed deferred work must remain registered");
+                deferred_work_mut(record).block = block;
+                record.state = state_after;
+            }
+            if matches!(state_after, WorkState::Queued) {
+                queue_deferred(&mut state, claimed.id);
+            }
+
+            if matches!(state_after, WorkState::Blocked)
+                && let Some(wait) = deferred_work(
+                    state
+                        .work
+                        .get(&claimed.id)
+                        .expect("blocked deferred work must remain registered"),
+                )
+                .block
+                .as_ref()
+                .and_then(|block| block.lazy.clone())
+            {
+                promote_deferred_wait_locked(&mut state, &wait);
+            }
+
+            let cycle = if matches!(state_after, WorkState::Blocked) {
+                terminalize_pure_lazy_cycle(&mut state, claimed.id)
+            } else {
+                Vec::new()
+            };
+            let cycle_terminal = !cycle.is_empty();
+            state.work_generation = state.work_generation.wrapping_add(1);
+            DeferredWorkRelease {
+                made_progress: made_progress || cycle_terminal,
+                remains_blocked: remains_blocked && !cycle_terminal,
+                terminal: terminal || cycle_terminal,
+                abandoned,
+                cycle,
+            }
+        };
+        drop(mutation);
+        self.work_available.notify_all();
+        release
+    }
+
+    pub(super) fn retire_deferred(&self, id: EvaluationWorkId) {
+        let mutation = self.admission.mutation_guard();
+        {
+            let mut state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            let record = state
+                .work
+                .get(&id)
+                .expect("terminal deferred work must remain registered");
+            assert!(matches!(record.state, WorkState::Terminalizing));
+            detach_deferred(&mut state, id);
+            state.work_generation = state.work_generation.wrapping_add(1);
+        }
+        drop(mutation);
+        self.work_available.notify_all();
+    }
+
+    pub(super) fn abandon_deferred_wait(
+        &self,
+        wait: &EvaluationWaitToken,
+    ) -> Option<AbandonedDeferredWork> {
+        let mutation = self.admission.mutation_guard();
+        let abandoned = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            let id = state.deferred_by_wait.get(wait).copied()?;
+            if state
+                .work
+                .get(&id)
+                .is_some_and(|record| matches!(record.state, WorkState::Running))
+            {
+                return None;
+            }
+            let abandoned = begin_deferred_abandonment(&mut state, id);
+            state.work_generation = state.work_generation.wrapping_add(1);
+            abandoned
+        };
+        drop(mutation);
+        self.work_available.notify_all();
+        Some(abandoned)
+    }
+
+    pub(super) fn abandon_deferred_session(
+        &self,
+        session: EvaluationSessionId,
+    ) -> Vec<AbandonedDeferredWork> {
+        let mutation = self.admission.mutation_guard();
+        let abandoned = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            let ids = state
+                .work_by_session
+                .get(&session)
+                .into_iter()
+                .flatten()
+                .copied()
+                .filter(|id| {
+                    state
+                        .work
+                        .get(id)
+                        .is_some_and(|record| matches!(record.kind, WorkKind::Deferred(_)))
+                })
+                .collect::<Vec<_>>();
+            let mut abandoned = Vec::with_capacity(ids.len());
+            for id in ids {
+                assert!(
+                    !state
+                        .work
+                        .get(&id)
+                        .is_some_and(|record| matches!(record.state, WorkState::Running)),
+                    "a detached deferred machine must retain its evaluation session"
+                );
+                abandoned.push(begin_deferred_abandonment(&mut state, id));
+            }
+            if !abandoned.is_empty() {
+                state.work_generation = state.work_generation.wrapping_add(1);
+            }
+            abandoned
+        };
+        drop(mutation);
+        if !abandoned.is_empty() {
+            self.work_available.notify_all();
+        }
+        abandoned
+    }
+
+    pub(super) fn deferred_work_id(&self, task: EvaluationTaskId) -> Option<EvaluationWorkId> {
+        self.state
+            .lock()
+            .expect("evaluation work coordinator was poisoned")
+            .deferred_by_task
+            .get(&task)
+            .copied()
+    }
+
+    pub(super) fn producer_for_wait(&self, wait: &EvaluationWaitToken) -> Option<EvaluationTaskId> {
+        let state = self
+            .state
+            .lock()
+            .expect("evaluation work coordinator was poisoned");
+        if let Some(id) = state.deferred_by_wait.get(wait) {
+            return state.work.get(id).map(|record| deferred_work(record).task);
+        }
+        state
+            .reflection_by_wait
+            .get(wait)
+            .and_then(|id| state.work.get(id))
+            .map(|record| reflection_work(record).task)
+    }
+
+    pub(super) fn task_dependency(&self, task: EvaluationTaskId) -> Option<EvaluationWaitToken> {
+        let state = self
+            .state
+            .lock()
+            .expect("evaluation work coordinator was poisoned");
+        let id = state
+            .reflection_by_task
+            .get(&task)
+            .or_else(|| state.deferred_by_task.get(&task))?;
+        let record = state.work.get(id)?;
+        match &record.kind {
+            WorkKind::Reflection(work) => work.block.as_ref(),
+            WorkKind::Deferred(work) => work.block.as_ref(),
+            WorkKind::Spark(_) => None,
+        }
+        .and_then(|block| block.lazy.clone())
+    }
+
+    pub(super) fn task_is_claimable(
+        &self,
+        task: EvaluationTaskId,
+        attempted: &HashSet<EvaluationTaskId>,
+    ) -> bool {
+        if attempted.contains(&task) {
+            return false;
+        }
+        let state = self
+            .state
+            .lock()
+            .expect("evaluation work coordinator was poisoned");
+        let id = state
+            .reflection_by_task
+            .get(&task)
+            .or_else(|| state.deferred_by_task.get(&task));
+        id.and_then(|id| state.work.get(id)).is_some_and(|record| {
+            matches!(record.state, WorkState::Dormant | WorkState::Queued)
+                || matches!(record.kind, WorkKind::Reflection(_))
+                    && matches!(record.state, WorkState::Blocked)
+                || matches!(record.kind, WorkKind::Deferred(_))
+                    && deferred_work_is_retryable(&state, record)
+        })
+    }
+
+    pub(super) fn task_is_busy(&self, task: EvaluationTaskId) -> bool {
+        let state = self
+            .state
+            .lock()
+            .expect("evaluation work coordinator was poisoned");
+        let id = state
+            .reflection_by_task
+            .get(&task)
+            .or_else(|| state.deferred_by_task.get(&task));
+        id.and_then(|id| state.work.get(id)).is_some_and(|record| {
+            matches!(
+                record.state,
+                WorkState::Reserved | WorkState::Running | WorkState::Terminalizing
+            )
+        })
+    }
+
+    pub(super) fn session_machine_is_busy(&self, session: EvaluationSessionId) -> bool {
+        let state = self
+            .state
+            .lock()
+            .expect("evaluation work coordinator was poisoned");
+        state
+            .work_by_session
+            .get(&session)
+            .into_iter()
+            .flatten()
+            .filter_map(|id| state.work.get(id))
+            .any(|record| {
+                matches!(record.kind, WorkKind::Reflection(_) | WorkKind::Deferred(_))
+                    && matches!(record.state, WorkState::Running | WorkState::Terminalizing)
+            })
+    }
+
+    #[cfg(test)]
+    pub(super) fn deferred_counts(&self, session: EvaluationSessionId) -> (usize, usize, usize) {
+        let state = self
+            .state
+            .lock()
+            .expect("evaluation work coordinator was poisoned");
+        let active = state
+            .deferred_by_value
+            .values()
+            .filter(|id| {
+                state
+                    .work
+                    .get(id)
+                    .is_some_and(|record| record.demand_session == session)
+            })
+            .count();
+        let waits = state
+            .deferred_by_wait
+            .values()
+            .filter(|id| {
+                state
+                    .work
+                    .get(id)
+                    .is_some_and(|record| record.demand_session == session)
+            })
+            .count();
+        let tasks = state
+            .deferred_by_task
+            .values()
+            .filter(|id| {
+                state
+                    .work
+                    .get(id)
+                    .is_some_and(|record| record.demand_session == session)
+            })
+            .count();
+        (active, waits, tasks)
     }
 
     pub(super) fn wait_for_change(&self, observed_generation: u64) {
@@ -1533,6 +2193,7 @@ fn spark_work(record: &WorkRecord) -> &SparkWork {
     match &record.kind {
         WorkKind::Spark(work) => work,
         WorkKind::Reflection(_) => panic!("reflection work cannot be used as a spark"),
+        WorkKind::Deferred(_) => panic!("deferred work cannot be used as a spark"),
     }
 }
 
@@ -1540,6 +2201,7 @@ fn spark_work_mut(record: &mut WorkRecord) -> &mut SparkWork {
     match &mut record.kind {
         WorkKind::Spark(work) => work,
         WorkKind::Reflection(_) => panic!("reflection work cannot be used as a spark"),
+        WorkKind::Deferred(_) => panic!("deferred work cannot be used as a spark"),
     }
 }
 
@@ -1547,6 +2209,7 @@ fn reflection_work(record: &WorkRecord) -> &ReflectionWork {
     match &record.kind {
         WorkKind::Reflection(work) => work,
         WorkKind::Spark(_) => panic!("spark work cannot be used as a reflection task"),
+        WorkKind::Deferred(_) => panic!("deferred work cannot be used as a reflection task"),
     }
 }
 
@@ -1554,7 +2217,51 @@ fn reflection_work_mut(record: &mut WorkRecord) -> &mut ReflectionWork {
     match &mut record.kind {
         WorkKind::Reflection(work) => work,
         WorkKind::Spark(_) => panic!("spark work cannot be used as a reflection task"),
+        WorkKind::Deferred(_) => panic!("deferred work cannot be used as a reflection task"),
     }
+}
+
+fn deferred_work(record: &WorkRecord) -> &DeferredWork {
+    match &record.kind {
+        WorkKind::Deferred(work) => work,
+        WorkKind::Spark(_) => panic!("spark work cannot be used as a deferred producer"),
+        WorkKind::Reflection(_) => {
+            panic!("reflection work cannot be used as a deferred producer")
+        }
+    }
+}
+
+fn deferred_work_mut(record: &mut WorkRecord) -> &mut DeferredWork {
+    match &mut record.kind {
+        WorkKind::Deferred(work) => work,
+        WorkKind::Spark(_) => panic!("spark work cannot be used as a deferred producer"),
+        WorkKind::Reflection(_) => {
+            panic!("reflection work cannot be used as a deferred producer")
+        }
+    }
+}
+
+fn deferred_work_is_retryable(state: &WorkCoordinatorState, record: &WorkRecord) -> bool {
+    if !matches!(record.state, WorkState::Blocked) {
+        return false;
+    }
+    let deferred = deferred_work(record);
+    if matches!(
+        &deferred.producer,
+        DeferredProducer::Promise(promise) if promise.assignment().is_some()
+    ) {
+        return true;
+    }
+    let Some(wait) = deferred
+        .block
+        .as_ref()
+        .and_then(|block| block.lazy.as_ref())
+    else {
+        return false;
+    };
+    wait.terminal_poll().is_some()
+        || !state.deferred_by_wait.contains_key(wait)
+            && !state.reflection_by_wait.contains_key(wait)
 }
 
 fn queue_session(state: &mut WorkCoordinatorState, session: EvaluationSessionId) {
@@ -1579,6 +2286,33 @@ fn queue_reflection(state: &mut WorkCoordinatorState, id: EvaluationWorkId) {
     queue_session(state, session);
 }
 
+fn queue_deferred(state: &mut WorkCoordinatorState, id: EvaluationWorkId) {
+    let session = state
+        .work
+        .get(&id)
+        .expect("queued deferred work must remain registered")
+        .demand_session;
+    if state.ready_deferred_set.insert(id) {
+        state
+            .ready_deferred
+            .entry(session)
+            .or_default()
+            .push_back(id);
+    }
+    queue_session(state, session);
+}
+
+fn session_has_ready_work(state: &WorkCoordinatorState, session: EvaluationSessionId) -> bool {
+    state
+        .ready_reflection
+        .get(&session)
+        .is_some_and(|ready| !ready.is_empty())
+        || state
+            .ready_deferred
+            .get(&session)
+            .is_some_and(|ready| !ready.is_empty())
+}
+
 fn remove_ready_reflection(state: &mut WorkCoordinatorState, id: EvaluationWorkId) {
     state.ready_reflection_set.remove(&id);
     let Some(session) = state.work.get(&id).map(|record| record.demand_session) else {
@@ -1588,10 +2322,31 @@ fn remove_ready_reflection(state: &mut WorkCoordinatorState, id: EvaluationWorkI
         ready.retain(|candidate| *candidate != id);
         if ready.is_empty() {
             state.ready_reflection.remove(&session);
-            state.ready_session_set.remove(&session);
-            state
-                .ready_sessions
-                .retain(|candidate| *candidate != session);
+            if !session_has_ready_work(state, session) {
+                state.ready_session_set.remove(&session);
+                state
+                    .ready_sessions
+                    .retain(|candidate| *candidate != session);
+            }
+        }
+    }
+}
+
+fn remove_ready_deferred(state: &mut WorkCoordinatorState, id: EvaluationWorkId) {
+    state.ready_deferred_set.remove(&id);
+    let Some(session) = state.work.get(&id).map(|record| record.demand_session) else {
+        return;
+    };
+    if let Some(ready) = state.ready_deferred.get_mut(&session) {
+        ready.retain(|candidate| *candidate != id);
+        if ready.is_empty() {
+            state.ready_deferred.remove(&session);
+            if !session_has_ready_work(state, session) {
+                state.ready_session_set.remove(&session);
+                state
+                    .ready_sessions
+                    .retain(|candidate| *candidate != session);
+            }
         }
     }
 }
@@ -1614,11 +2369,7 @@ fn claim_ready_reflection(
             state.ready_reflection.remove(&session);
         }
         if let Some(claimed) = claim_reflection(state, id) {
-            if state
-                .ready_reflection
-                .get(&session)
-                .is_some_and(|ready| !ready.is_empty())
-            {
+            if session_has_ready_work(state, session) {
                 queue_session(state, session);
             }
             return Some(claimed);
@@ -1651,6 +2402,68 @@ fn claim_reflection(
     })
 }
 
+fn claim_ready_deferred(
+    state: &mut WorkCoordinatorState,
+    session: EvaluationSessionId,
+) -> Option<ClaimedDeferredWork> {
+    loop {
+        let id = state
+            .ready_deferred
+            .get_mut(&session)
+            .and_then(VecDeque::pop_front)?;
+        state.ready_deferred_set.remove(&id);
+        if state
+            .ready_deferred
+            .get(&session)
+            .is_some_and(VecDeque::is_empty)
+        {
+            state.ready_deferred.remove(&session);
+        }
+        if let Some(claimed) = claim_deferred(state, id, true) {
+            if session_has_ready_work(state, session) {
+                queue_session(state, session);
+            }
+            return Some(claimed);
+        }
+    }
+}
+
+fn claim_deferred(
+    state: &mut WorkCoordinatorState,
+    id: EvaluationWorkId,
+    requeue_on_yield: bool,
+) -> Option<ClaimedDeferredWork> {
+    let (task, demand_session, producer, prior_block) = {
+        let record = state.work.get_mut(&id)?;
+        if !matches!(record.kind, WorkKind::Deferred(_))
+            || !matches!(
+                record.state,
+                WorkState::Dormant | WorkState::Queued | WorkState::Blocked
+            )
+        {
+            return None;
+        }
+        record.state = WorkState::Running;
+        let demand_session = record.demand_session;
+        let deferred = deferred_work_mut(record);
+        (
+            deferred.task,
+            demand_session,
+            deferred.producer.id(),
+            deferred.block.take(),
+        )
+    };
+    remove_ready_deferred(state, id);
+    Some(ClaimedDeferredWork {
+        id,
+        task,
+        demand_session,
+        producer,
+        prior_block,
+        requeue_on_yield,
+    })
+}
+
 fn reflection_state(record: &WorkRecord) -> ReflectionWorkState {
     match record.state {
         WorkState::Dormant => ReflectionWorkState::Dormant,
@@ -1680,6 +2493,164 @@ fn detach_reflection(state: &mut WorkCoordinatorState, id: EvaluationWorkId) {
         state.reflection_by_task.remove(&reflection.task),
         Some(id),
         "reflection task index must agree with its work record"
+    );
+    assert_eq!(
+        state.reflection_by_wait.remove(&reflection.wait),
+        Some(id),
+        "reflection wait index must agree with its work record"
+    );
+    if let Some(session_work) = state.work_by_session.get_mut(&record.demand_session) {
+        session_work.remove(&id);
+        if session_work.is_empty() {
+            state.work_by_session.remove(&record.demand_session);
+        }
+    }
+}
+
+fn promote_deferred_wait_locked(
+    state: &mut WorkCoordinatorState,
+    wait: &EvaluationWaitToken,
+) -> bool {
+    let Some(id) = state.deferred_by_wait.get(wait).copied() else {
+        return false;
+    };
+    match state.work.get(&id).map(|record| record.state) {
+        Some(WorkState::Reserved) => {
+            deferred_work_mut(
+                state
+                    .work
+                    .get_mut(&id)
+                    .expect("reserved deferred work must remain registered"),
+            )
+            .demanded_while_reserved = true;
+            true
+        }
+        Some(WorkState::Dormant) => {
+            state
+                .work
+                .get_mut(&id)
+                .expect("dormant deferred work must remain registered")
+                .state = WorkState::Queued;
+            queue_deferred(state, id);
+            true
+        }
+        _ => false,
+    }
+}
+
+fn deferred_dependency_cycle(
+    state: &WorkCoordinatorState,
+    start: EvaluationWorkId,
+) -> Option<Vec<EvaluationWorkId>> {
+    let mut path: Vec<EvaluationWorkId> = Vec::new();
+    let mut positions = HashMap::new();
+    let mut current = start;
+    loop {
+        if let Some(first) = positions.insert(current, path.len()) {
+            let mut cycle = path.split_off(first);
+            let canonical = cycle
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, work)| work.get())
+                .map(|(position, _)| position)
+                .expect("a repeated successor must produce a non-empty cycle");
+            cycle.rotate_left(canonical);
+            return Some(cycle);
+        }
+        path.push(current);
+        let record = state.work.get(&current)?;
+        let wait = deferred_work(record).block.as_ref()?.lazy.as_ref()?;
+        current = *state.deferred_by_wait.get(wait)?;
+    }
+}
+
+fn terminalize_pure_lazy_cycle(
+    state: &mut WorkCoordinatorState,
+    start: EvaluationWorkId,
+) -> Vec<DeferredLazyCycleMember> {
+    let Some(cycle) = deferred_dependency_cycle(state, start) else {
+        return Vec::new();
+    };
+    let session = state
+        .work
+        .get(&start)
+        .expect("cycle start must remain registered")
+        .demand_session;
+    let pure_local = cycle.iter().all(|id| {
+        state.work.get(id).is_some_and(|record| {
+            record.demand_session == session
+                && matches!(record.state, WorkState::Blocked)
+                && matches!(deferred_work(record).producer, DeferredProducer::Lazy(_))
+        })
+    });
+    if !pure_local {
+        return Vec::new();
+    }
+
+    let members = cycle
+        .iter()
+        .map(|id| {
+            let record = state
+                .work
+                .get(id)
+                .expect("cycle member must remain registered");
+            let DeferredProducer::Lazy(lazy) = &deferred_work(record).producer else {
+                unreachable!("pure lazy cycle cannot contain a promise")
+            };
+            DeferredLazyCycleMember {
+                work: *id,
+                wait: deferred_work(record).wait.clone(),
+                lazy: lazy.clone(),
+            }
+        })
+        .collect::<Vec<_>>();
+    for id in cycle {
+        let record = state
+            .work
+            .get_mut(&id)
+            .expect("cycle member must remain registered");
+        deferred_work_mut(record).block = None;
+        record.state = WorkState::Terminalizing;
+        remove_ready_deferred(state, id);
+    }
+    members
+}
+
+fn begin_deferred_abandonment(
+    state: &mut WorkCoordinatorState,
+    id: EvaluationWorkId,
+) -> AbandonedDeferredWork {
+    let record = state
+        .work
+        .get_mut(&id)
+        .expect("abandoned deferred work must remain registered");
+    assert!(matches!(record.kind, WorkKind::Deferred(_)));
+    assert!(!matches!(record.state, WorkState::Running));
+    let deferred = deferred_work_mut(record);
+    let abandoned = AbandonedDeferredWork {
+        id,
+        producer: deferred.producer.id(),
+        dependency: deferred.block.take().and_then(|block| block.lazy),
+    };
+    record.state = WorkState::Terminalizing;
+    remove_ready_deferred(state, id);
+    abandoned
+}
+
+fn detach_deferred(state: &mut WorkCoordinatorState, id: EvaluationWorkId) {
+    remove_ready_deferred(state, id);
+    let record = state
+        .work
+        .remove(&id)
+        .expect("retired deferred work must remain registered");
+    let WorkKind::Deferred(deferred) = record.kind else {
+        panic!("deferred retirement must contain deferred work")
+    };
+    assert_eq!(state.deferred_by_task.remove(&deferred.task), Some(id));
+    assert_eq!(state.deferred_by_wait.remove(&deferred.wait), Some(id));
+    assert_eq!(
+        state.deferred_by_value.remove(&deferred.producer.id()),
+        Some(id)
     );
     if let Some(session_work) = state.work_by_session.get_mut(&record.demand_session) {
         session_work.remove(&id);
@@ -2253,7 +3224,9 @@ mod tests {
         let session = EvaluationSession::shared(&coordinator);
         let task = super::super::allocate_task_id(&session.values)
             .expect("reflection task identity should allocate");
-        let work = coordinator.reserve_reflection(&session, task);
+        let wait = super::super::allocate_wait_token(&session, task)
+            .expect("reflection wait identity should allocate");
+        let work = coordinator.reserve_reflection(&session, task, wait);
         assert_eq!(
             coordinator.reflection_snapshots(session.id),
             vec![ReflectionWorkSnapshot {
@@ -2324,7 +3297,9 @@ mod tests {
         let session = EvaluationSession::shared(&coordinator);
         let task = super::super::allocate_task_id(&session.values)
             .expect("reflection task identity should allocate");
-        let work = coordinator.reserve_reflection(&session, task);
+        let wait = super::super::allocate_wait_token(&session, task)
+            .expect("reflection wait identity should allocate");
+        let work = coordinator.reserve_reflection(&session, task, wait);
 
         assert_eq!(
             coordinator.request_reflection_cancellation(work),
@@ -2394,6 +3369,131 @@ mod tests {
 
         assert_eq!(coordinator.spark_work_counts(), (0, 0, 0));
         assert_eq!(coordinator.retained_spark_count(), 0);
+    }
+
+    #[test]
+    fn coordinator_owns_dormant_deferred_promotion_and_release() {
+        let (coordinator, _executor) = super::super::test_execution_resources(0)
+            .expect("test execution resources should build");
+        let session = EvaluationSession::shared(&coordinator);
+        let task = super::super::allocate_task_id(&session.values)
+            .expect("deferred task identity should allocate");
+        let wait = super::super::allocate_wait_token(&session, task)
+            .expect("deferred wait identity should allocate");
+        let lazy = LazyValue::deferred(&session.values, "coordinator deferred lifecycle", |_| {
+            panic!("coordinator lifecycle test never evaluates its synthetic lazy")
+        });
+        let DeferredWorkReservation::New(work) = coordinator.reserve_deferred(
+            &session,
+            task,
+            wait.clone(),
+            DeferredProducer::Lazy(lazy),
+        ) else {
+            panic!("fresh deferred work should reserve a canonical record")
+        };
+
+        assert!(coordinator.claim_ready_deferred(session.id).is_none());
+        assert!(coordinator.promote_deferred_wait(&wait));
+        coordinator.activate_deferred(work);
+        let claimed = coordinator
+            .claim_ready_deferred(session.id)
+            .expect("demand observed during installation should queue the producer");
+        let dependency_task = super::super::allocate_task_id(&session.values)
+            .expect("dependency task identity should allocate");
+        let dependency = super::super::allocate_wait_token(&session, dependency_task)
+            .expect("dependency wait identity should allocate");
+        let release = coordinator.release_deferred(
+            claimed,
+            DeferredWorkPoll::Blocked(EvaluationTaskBlock {
+                lazy: Some(dependency),
+                observed_generation: None,
+                error: None,
+            }),
+        );
+        assert!(release.remains_blocked);
+        assert!(!release.terminal);
+
+        let claimed = coordinator
+            .claim_blocked_deferred(session.id, &HashSet::new())
+            .expect("a serial blocked pass should claim the producer once");
+        let release = coordinator.release_deferred(claimed, DeferredWorkPoll::Yielded);
+        assert!(release.made_progress);
+        assert!(!release.remains_blocked);
+        assert!(coordinator.claim_ready_deferred(session.id).is_none());
+        let claimed = coordinator
+            .claim_deferred(work)
+            .expect("yielded serial demand should return to dormant");
+        let release = coordinator.release_deferred(claimed, DeferredWorkPoll::Terminal);
+        assert!(release.terminal);
+        coordinator.retire_deferred(work);
+    }
+
+    #[test]
+    fn outer_block_promotes_one_canonical_deferred_producer() {
+        let (coordinator, _executor) = super::super::test_execution_resources(0)
+            .expect("test execution resources should build");
+        let producer_session = EvaluationSession::shared(&coordinator);
+        let observer_session = EvaluationSession::shared(&coordinator);
+        let producer_task = super::super::allocate_task_id(&producer_session.values)
+            .expect("producer task identity should allocate");
+        let producer_wait = super::super::allocate_wait_token(&producer_session, producer_task)
+            .expect("producer wait identity should allocate");
+        let lazy = LazyValue::deferred(
+            &producer_session.values,
+            "cross-session canonical producer",
+            |_| panic!("coordinator promotion test does not evaluate its lazy"),
+        );
+        let DeferredWorkReservation::New(producer_work) = coordinator.reserve_deferred(
+            &producer_session,
+            producer_task,
+            producer_wait.clone(),
+            DeferredProducer::Lazy(lazy.clone()),
+        ) else {
+            panic!("first demand should reserve the canonical producer")
+        };
+        coordinator.activate_deferred(producer_work);
+
+        let duplicate_task = super::super::allocate_task_id(&observer_session.values)
+            .expect("duplicate task identity should allocate");
+        let duplicate_wait = super::super::allocate_wait_token(&observer_session, duplicate_task)
+            .expect("duplicate wait identity should allocate");
+        let DeferredWorkReservation::Existing(canonical_wait) = coordinator.reserve_deferred(
+            &observer_session,
+            duplicate_task,
+            duplicate_wait,
+            DeferredProducer::Lazy(lazy),
+        ) else {
+            panic!("a racing demand must reuse the canonical producer")
+        };
+        assert_eq!(canonical_wait, producer_wait);
+
+        let observer_task = super::super::allocate_task_id(&observer_session.values)
+            .expect("observer task identity should allocate");
+        let observer_wait = super::super::allocate_wait_token(&observer_session, observer_task)
+            .expect("observer wait identity should allocate");
+        let observer_work =
+            coordinator.reserve_reflection(&observer_session, observer_task, observer_wait);
+        assert!(coordinator.activate_reflection(observer_work));
+        let claimed = coordinator
+            .claim_ready_reflection(observer_session.id)
+            .expect("observer reflection work should be ready");
+        let release = coordinator.release_reflection(
+            claimed,
+            ReflectionWorkPoll::Blocked(EvaluationTaskBlock {
+                lazy: Some(producer_wait),
+                observed_generation: None,
+                error: None,
+            }),
+        );
+        assert!(release.remains_blocked);
+        let producer = coordinator
+            .claim_ready_deferred(producer_session.id)
+            .expect("publishing the outer dependency should promote its dormant producer");
+        let release = coordinator.release_deferred(producer, DeferredWorkPoll::Terminal);
+        assert!(release.terminal);
+        coordinator.retire_deferred(producer_work);
+        assert!(coordinator.terminalize_reflection(observer_work));
+        coordinator.retire_reflection(observer_work);
     }
 
     #[test]

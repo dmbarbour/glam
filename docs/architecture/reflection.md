@@ -192,15 +192,18 @@ reflection API.
 
 ## Session Scheduling
 
-`EvaluationSession` stores type-erased reflection machine slots and the still-
-transitional deferred producer records. The runtime coordinator owns each
-reflection task's reservation, queued, running, blocked, cancellation, and
+`EvaluationSession` stores type-erased reflection and deferred machine slots
+plus minimal lookup indexes. The runtime coordinator owns each task's
+reservation or dormancy, queued, running, blocked, control, and
 terminalization state. It marks work running before the session detaches the
 corresponding machine; release restores a retained machine before the
 coordinator makes it claimable again. Neither mutex is held while acquiring
-the other. Exact lazy wait tokens still let the serial pump prioritize a known
-producer chain. Coarse host generations currently wake state observations;
-path journals decide whether an optimistic heap commit must retry.
+the other. A direct serial demand may claim dormant deferred work without
+publishing it to workers; an outer blocked task promotes its known producer to
+the ready queue. Exact lazy wait tokens still let the serial pump prioritize a
+known producer chain. Coarse host generations currently wake state
+observations; path journals decide whether an optimistic heap commit must
+retry.
 
 Foreground evaluation pumps only tasks needed by the lazy value it is trying
 to observe. Shared workers may opportunistically poll any ready task. Explicit
