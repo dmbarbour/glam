@@ -70,6 +70,14 @@ the other registration stale. The two-sided protocols prevent either a state
 change or terminal dependency from being lost immediately before, during, or
 after registration.
 
+An effect handler's transaction generation remains private to that handler;
+it is not itself a runtime observation epoch. A scheduled effect machine
+captures the current runtime epoch before polling and uses that checkpoint
+when the poll reports that it observed host state. Hosts which change such
+state publish a runtime observation after their own commit. This keeps broad
+wakes in one domain without requiring every handler's private counter to use
+the runtime's numbering.
+
 A synchronous effect facade which exhausts immediate exact work follows its
 dependency chain before deciding that the wait is orphaned. If the chain ends
 at a coordinator-indexed observation epoch, it waits for the corresponding
@@ -100,6 +108,13 @@ without copying the bundle. The built-in `.g` compiler can consequently share
 all lowered helpers, effect values, builtin modules, and its diagnostic
 formatter across modules in one runtime while consulting the runtime
 attachment map once per compilation.
+
+The core factory also carries one replaceable weak binding to the runtime's
+work coordinator. At most one coordinator may be live for a runtime. An
+isolated context reuses that coordinator when present, and may replace only an
+expired weak binding. Consequently completion sources allocated through the
+factory always deliver exact wakes to the coordinator which owns their work,
+without making escaped values retain the coordinator.
 
 The runtime resource state and immutable default reflection profile remain
 sibling roots owned by `EvaluationRuntime`. A profile launcher retains its
@@ -360,12 +375,11 @@ Sparks are performance hints outside reflection transactions and reasoning
 completion. They do not keep sessions alive or report independent failure. A
 divergent spark can occupy a worker forever; the bootstrap currently provides
 neither evaluator fuel nor cooperative cancellation. A retryably blocked spark
-is parked without occupying a worker and re-advertised after its evaluation
-session changes. A session generation check prevents promise resolution racing
-with parking from losing the wakeup. Broad disturbance now routes through the
-same epoch-and-dependency validator intended for one-shot completion sources.
-Promise cells own the source-side exact subscriber set, but sparks do not join
-it yet; wait cells likewise remain broad. One relevant change may therefore
-still retry other blocked sparks in the same session.
+is parked without occupying a worker. Wait and promise dependencies retain its
+exact work registration; terminal publication re-advertises only work still
+blocked on that source. Subscribe-and-recheck prevents completion racing with
+parking from losing the wakeup, while subscription epochs make late or
+unrelated notifications harmless. Broad semantic disturbance uses the
+independent runtime observation epoch rather than a session generation.
 Dropping the session discards its parked sparks; any later registration is
 stale and retains neither that session nor its work.

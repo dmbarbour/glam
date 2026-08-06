@@ -100,6 +100,10 @@ assignments, task and wait terminals, pending reflection work, and stable
 queued or blocked spark records retain the same internal root wrapper.
 Production evaluation likewise has no standalone session or context
 constructor; isolated work still receives the selected runtime's core factory.
+That factory weakly names the runtime's one live work coordinator, so isolated
+contexts reuse its scheduling domain and exact completion sources cannot wake
+a detached coordinator. An expired weak binding may be replaced without
+letting escaped values retain the old coordinator.
 The runtime cache owns canonical protocol values, the initial metadata carrier,
 and complete type-indexed compiler bundles. Attachments are
 built outside synchronization and publish one completed winner; each

@@ -48,7 +48,7 @@ use crate::evaluation::{
     EvalContext, EvaluationMachinePoll, EvaluationPumpOutcome, EvaluationSessionRun,
     EvaluationTaskBlock, EvaluationTaskId, EvaluationTaskMachine, EvaluationWaitPoll,
     EvaluationWaitToken, ReflectionTaskLauncher, ReflectionTaskProfile, ReflectionTaskResultPolicy,
-    RuntimeObservationEpoch, WorkDependency,
+    WorkDependency,
 };
 use crate::interaction_net::NetBuilder;
 use crate::number::Number;
@@ -2323,14 +2323,13 @@ struct ValueEffectTask<S: TaskSpecialization>(EffectTask<S>);
 
 impl<S: TaskSpecialization> EvaluationTaskMachine for ValueEffectTask<S> {
     fn poll(&mut self, step_budget: usize) -> EvaluationMachinePoll {
+        let observed_epoch = self.0.eval_context.current_observation_epoch();
         match self.0.poll(step_budget) {
             EffectTaskPoll::Yielded => EvaluationMachinePoll::Yielded,
             EffectTaskPoll::Blocked(blocked) => {
                 EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
                     dependency: blocked.lazy.map(WorkDependency::Wait),
-                    observed_epoch: blocked
-                        .observed_generation
-                        .map(RuntimeObservationEpoch::from_raw),
+                    observed_epoch: blocked.observed_generation.map(|_| observed_epoch),
                     error: blocked.error,
                 })
             }
@@ -2347,14 +2346,13 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for ValueEffectTask<S> {
 
 impl<S: TaskSpecialization> EvaluationTaskMachine for UnitEffectTask<S> {
     fn poll(&mut self, step_budget: usize) -> EvaluationMachinePoll {
+        let observed_epoch = self.0.eval_context.current_observation_epoch();
         match self.0.poll(step_budget) {
             EffectTaskPoll::Yielded => EvaluationMachinePoll::Yielded,
             EffectTaskPoll::Blocked(blocked) => {
                 EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
                     dependency: blocked.lazy.map(WorkDependency::Wait),
-                    observed_epoch: blocked
-                        .observed_generation
-                        .map(RuntimeObservationEpoch::from_raw),
+                    observed_epoch: blocked.observed_generation.map(|_| observed_epoch),
                     error: blocked.error,
                 })
             }
@@ -3849,10 +3847,13 @@ mod tests {
         }
 
         fn emit_diagnostic(&self, diagnostic: Diagnostic) {
-            let mut state = self.state.lock().unwrap();
-            state.diagnostics.push(diagnostic);
-            state.extra_revision += 1;
-            state.generation += 1;
+            {
+                let mut state = self.state.lock().unwrap();
+                state.diagnostics.push(diagnostic);
+                state.extra_revision += 1;
+                state.generation += 1;
+            }
+            self.publish_runtime_observation();
         }
 
         fn write_stderr(&self, bytes: Bytes) {
@@ -3860,23 +3861,35 @@ mod tests {
         }
 
         fn wait_for_change(&self, observed_generation: u64) -> bool {
-            let mut state = self.state.lock().unwrap();
-            state.wait_count += 1;
-            if state.generation != observed_generation {
-                return true;
-            }
-            if let Some(heap) = state.wake_heap.take() {
-                state.store.replace_root(heap);
-                state.generation += 1;
-                return true;
-            }
-            let Some(diagnostic) = state.wake_diagnostic.take() else {
-                return false;
+            let (changed, result) = {
+                let mut state = self.state.lock().unwrap();
+                state.wait_count += 1;
+                if state.generation != observed_generation {
+                    (false, true)
+                } else if let Some(heap) = state.wake_heap.take() {
+                    state.store.replace_root(heap);
+                    state.generation += 1;
+                    (true, true)
+                } else if let Some(diagnostic) = state.wake_diagnostic.take() {
+                    state.diagnostics.push(diagnostic);
+                    state.extra_revision += 1;
+                    state.generation += 1;
+                    (true, true)
+                } else {
+                    (false, false)
+                }
             };
-            state.diagnostics.push(diagnostic);
-            state.extra_revision += 1;
-            state.generation += 1;
-            true
+            if changed {
+                self.publish_runtime_observation();
+            }
+            result
+        }
+
+        fn publish_runtime_observation(&self) {
+            let coordinator = self.state.lock().unwrap().store.values().work_coordinator();
+            if let Some(coordinator) = coordinator {
+                coordinator.publish_runtime_observation();
+            }
         }
     }
 
@@ -3930,9 +3943,16 @@ mod tests {
         }
 
         fn update_query(&self, handle: &Arc<EvaluationQueryHandle>, result: PublicValue) {
-            let mut state = self.state.lock().unwrap();
-            if state.store.update_query(handle, result) {
-                state.generation += 1;
+            let updated = {
+                let mut state = self.state.lock().unwrap();
+                let updated = state.store.update_query(handle, result);
+                if updated {
+                    state.generation += 1;
+                }
+                updated
+            };
+            if updated {
+                self.publish_runtime_observation();
             }
         }
     }
@@ -3981,6 +4001,7 @@ mod tests {
                 state.generation += 1;
             }
             journal.reflection.commit_updates();
+            self.publish_runtime_observation();
             CommitResult::Committed
         }
 
@@ -3997,18 +4018,21 @@ mod tests {
 
         fn commit(&self, commit: TaskCommit<StandardEffects>) -> CommitResult {
             let (store, _snapshot, _journal) = commit.into_parts();
-            let mut state = self.state.lock().unwrap();
-            if state.closed {
-                return CommitResult::Closed;
-            }
-            match state.store.try_commit(&store) {
-                StoreCommitResult::Committed => {}
-                StoreCommitResult::Conflict => return CommitResult::Conflict,
-                StoreCommitResult::MissingVolume(volume) => {
-                    return CommitResult::MissingVolume(volume);
+            {
+                let mut state = self.state.lock().unwrap();
+                if state.closed {
+                    return CommitResult::Closed;
                 }
+                match state.store.try_commit(&store) {
+                    StoreCommitResult::Committed => {}
+                    StoreCommitResult::Conflict => return CommitResult::Conflict,
+                    StoreCommitResult::MissingVolume(volume) => {
+                        return CommitResult::MissingVolume(volume);
+                    }
+                }
+                state.generation += 1;
             }
-            state.generation += 1;
+            self.publish_runtime_observation();
             CommitResult::Committed
         }
 
@@ -4046,6 +4070,7 @@ mod tests {
                 state.generation += 1;
             }
             journal.commit_updates();
+            self.publish_runtime_observation();
             CommitResult::Committed
         }
 
@@ -5536,8 +5561,10 @@ mod tests {
         };
         assert!(id.to_u64_if_integer().is_some_and(|id| id > 0));
 
-        let (assembler, extract) =
-            compile_effect(".task.new (.fail) >>= (\\task -> .task.error task)");
+        let (_, extract) = compile_effect_with_runtime(
+            &assembler.evaluation_runtime(),
+            ".task.new (.fail) >>= (\\task -> .task.error task)",
+        );
         let (context, task) = schedule_composed_test_task(&assembler, &extract, host);
         let poll = pump_composed_test_task(&context, &task);
         let EvaluationWaitPoll::Complete(value) = poll else {

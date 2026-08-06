@@ -139,7 +139,7 @@ pub(crate) struct DependencyWakeBatch {
 pub(crate) struct CompletionSubscriptions {
     runtime: EvaluationRuntimeId,
     source: WorkDependencyKey,
-    coordinator: Arc<std::sync::OnceLock<Weak<EvaluationWorkCoordinator>>>,
+    coordinator: Arc<Mutex<Weak<EvaluationWorkCoordinator>>>,
     registrations: Mutex<Vec<WakeRegistration>>,
 }
 
@@ -165,7 +165,7 @@ impl CompletionSubscriptions {
     pub(crate) fn for_promise(
         runtime: EvaluationRuntimeId,
         promise: PromiseId,
-        coordinator: Arc<std::sync::OnceLock<Weak<EvaluationWorkCoordinator>>>,
+        coordinator: Arc<Mutex<Weak<EvaluationWorkCoordinator>>>,
     ) -> Self {
         Self {
             runtime,
@@ -178,7 +178,7 @@ impl CompletionSubscriptions {
     pub(crate) fn for_wait(
         runtime: EvaluationRuntimeId,
         wait: NonZeroU64,
-        coordinator: Arc<std::sync::OnceLock<Weak<EvaluationWorkCoordinator>>>,
+        coordinator: Arc<Mutex<Weak<EvaluationWorkCoordinator>>>,
     ) -> Self {
         Self {
             runtime,
@@ -190,10 +190,7 @@ impl CompletionSubscriptions {
 
     #[cfg(test)]
     fn for_test(coordinator: &Arc<EvaluationWorkCoordinator>, source: WorkDependencyKey) -> Self {
-        let binding = Arc::new(std::sync::OnceLock::new());
-        binding
-            .set(Arc::downgrade(coordinator))
-            .expect("test completion coordinator should bind once");
+        let binding = Arc::new(Mutex::new(Arc::downgrade(coordinator)));
         Self {
             runtime: coordinator.runtime,
             source,
@@ -212,8 +209,9 @@ impl CompletionSubscriptions {
     ) -> Result<T, E> {
         let coordinator = self
             .coordinator
-            .get()
-            .and_then(Weak::upgrade)
+            .lock()
+            .expect("runtime work-coordinator binding was poisoned")
+            .upgrade()
             .filter(|coordinator| coordinator.runtime == self.runtime);
         let Some(coordinator) = coordinator else {
             let result = publish_terminal()?;
@@ -468,15 +466,6 @@ impl WorkDependency {
             Self::Promise(_) => None,
             #[cfg(test)]
             Self::Test(_) => None,
-        }
-    }
-
-    pub(super) fn is_terminal(&self) -> bool {
-        match self {
-            Self::Wait(wait) => wait.terminal_poll().is_some(),
-            Self::Promise(promise) => promise.assignment().is_some(),
-            #[cfg(test)]
-            Self::Test(_) => false,
         }
     }
 
@@ -869,6 +858,20 @@ impl EvaluationWorkCoordinator {
 
     pub(crate) fn runtime_id(&self) -> EvaluationRuntimeId {
         self.runtime
+    }
+
+    pub(crate) fn current_observation_epoch(&self) -> RuntimeObservationEpoch {
+        self.observations.current()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn publish_runtime_observation(&self) {
+        let mutation = self.admission.mutation_guard();
+        let epoch = self.observations.advance();
+        let changed = self.publish_runtime_observation_guarded(&mutation, epoch);
+        drop(mutation);
+        self.observations.notify_all();
+        self.notify_runtime_observation(changed);
     }
 
     pub(crate) fn mutation_guard(&self) -> RuntimeMutationGuard<'_> {
@@ -1650,47 +1653,6 @@ impl EvaluationWorkCoordinator {
         claimed
     }
 
-    pub(super) fn claim_reflection(&self, id: EvaluationWorkId) -> Option<ClaimedReflectionWork> {
-        let mutation = self.admission.mutation_guard();
-        let claimed = {
-            let mut state = self
-                .state
-                .lock()
-                .expect("evaluation work coordinator was poisoned");
-            let claimed = claim_reflection(&mut state, id);
-            if claimed.is_some() {
-                state.work_generation = state.work_generation.wrapping_add(1);
-            }
-            claimed
-        };
-        drop(mutation);
-        if claimed.is_some() {
-            self.work_available.notify_all();
-        }
-        claimed
-    }
-
-    pub(super) fn claim_blocked_reflection(
-        &self,
-        session: EvaluationSessionId,
-        attempted: &HashSet<EvaluationTaskId>,
-    ) -> Option<ClaimedReflectionWork> {
-        let id = {
-            let state = self
-                .state
-                .lock()
-                .expect("evaluation work coordinator was poisoned");
-            state.reflection_by_task.iter().find_map(|(task, id)| {
-                let record = state.work.get(id)?;
-                (record.demand_session == session
-                    && matches!(record.state, WorkState::Blocked)
-                    && !attempted.contains(task))
-                .then_some(*id)
-            })
-        }?;
-        self.claim_reflection(id)
-    }
-
     pub(super) fn release_reflection(
         &self,
         claimed: ClaimedReflectionWork,
@@ -1974,43 +1936,6 @@ impl EvaluationWorkCoordinator {
             self.work_available.notify_all();
         }
         promoted
-    }
-
-    pub(super) fn claim_blocked_deferred(
-        &self,
-        session: EvaluationSessionId,
-        attempted: &HashSet<EvaluationTaskId>,
-    ) -> Option<ClaimedDeferredWork> {
-        let id = {
-            let state = self
-                .state
-                .lock()
-                .expect("evaluation work coordinator was poisoned");
-            state.deferred_by_task.iter().find_map(|(task, id)| {
-                let record = state.work.get(id)?;
-                (record.demand_session == session
-                    && deferred_work_is_retryable(record)
-                    && !attempted.contains(task))
-                .then_some(*id)
-            })
-        }?;
-        let mutation = self.admission.mutation_guard();
-        let claimed = {
-            let mut state = self
-                .state
-                .lock()
-                .expect("evaluation work coordinator was poisoned");
-            let claimed = claim_deferred(&mut state, id, false);
-            if claimed.is_some() {
-                state.work_generation = state.work_generation.wrapping_add(1);
-            }
-            claimed
-        };
-        drop(mutation);
-        if claimed.is_some() {
-            self.work_available.notify_all();
-        }
-        claimed
     }
 
     pub(super) fn release_deferred(
@@ -2461,14 +2386,7 @@ impl EvaluationWorkCoordinator {
             .and_then(|block| block.observed_epoch)
     }
 
-    pub(super) fn task_is_claimable(
-        &self,
-        task: EvaluationTaskId,
-        attempted: &HashSet<EvaluationTaskId>,
-    ) -> bool {
-        if attempted.contains(&task) {
-            return false;
-        }
+    pub(super) fn task_is_claimable(&self, task: EvaluationTaskId) -> bool {
         let state = self
             .state
             .lock()
@@ -2477,13 +2395,8 @@ impl EvaluationWorkCoordinator {
             .reflection_by_task
             .get(&task)
             .or_else(|| state.deferred_by_task.get(&task));
-        id.and_then(|id| state.work.get(id)).is_some_and(|record| {
-            matches!(record.state, WorkState::Dormant | WorkState::Queued)
-                || matches!(record.kind, WorkKind::Reflection(_))
-                    && matches!(record.state, WorkState::Blocked)
-                || matches!(record.kind, WorkKind::Deferred(_))
-                    && deferred_work_is_retryable(record)
-        })
+        id.and_then(|id| state.work.get(id))
+            .is_some_and(|record| matches!(record.state, WorkState::Dormant | WorkState::Queued))
     }
 
     pub(super) fn task_is_busy(&self, task: EvaluationTaskId) -> bool {
@@ -2822,31 +2735,6 @@ fn task_for_record(record: &WorkRecord) -> Option<EvaluationTaskId> {
     }
 }
 
-fn deferred_work_is_retryable(record: &WorkRecord) -> bool {
-    if !matches!(record.state, WorkState::Blocked) {
-        return false;
-    }
-    let deferred = deferred_work(record);
-    if matches!(
-        &deferred.producer,
-        DeferredProducer::Promise(promise) if promise.assignment().is_some()
-    ) {
-        return true;
-    }
-    let Some(dependency) = deferred
-        .block
-        .as_ref()
-        .and_then(|block| block.dependency.as_ref())
-    else {
-        return false;
-    };
-    // A resolver-owned promise has no coordinator producer, while a
-    // task-owned promise projects through its producer obligation. In either
-    // case exact completion is authoritative; this conservative pass remains
-    // only until Phase 7B.2d removes blocked-task polling.
-    dependency.is_terminal()
-}
-
 fn task_block(record: &WorkRecord) -> Option<&EvaluationTaskBlock> {
     match &record.kind {
         WorkKind::Reflection(work) => work.block.as_ref(),
@@ -3045,7 +2933,7 @@ fn claim_reflection(
     let (task, demand_session, prior_block) = {
         let record = state.work.get_mut(&id)?;
         if !matches!(record.kind, WorkKind::Reflection(_))
-            || !matches!(record.state, WorkState::Queued | WorkState::Blocked)
+            || !matches!(record.state, WorkState::Queued)
         {
             return None;
         }
@@ -3072,10 +2960,7 @@ fn claim_deferred(
     let (task, demand_session, producer, prior_block) = {
         let record = state.work.get_mut(&id)?;
         if !matches!(record.kind, WorkKind::Deferred(_))
-            || !matches!(
-                record.state,
-                WorkState::Dormant | WorkState::Queued | WorkState::Blocked
-            )
+            || !matches!(record.state, WorkState::Dormant | WorkState::Queued)
         {
             return None;
         }
@@ -3607,8 +3492,9 @@ mod tests {
         fn coordinator_is_live(&self) -> bool {
             self.subscriptions
                 .coordinator
-                .get()
-                .and_then(Weak::upgrade)
+                .lock()
+                .expect("test work-coordinator binding was poisoned")
+                .upgrade()
                 .is_some()
         }
     }
@@ -4328,9 +4214,10 @@ mod tests {
             }]
         ));
 
+        let observed = coordinator.observations.current();
         let block = EvaluationTaskBlock {
             dependency: None,
-            observed_epoch: Some(RuntimeObservationEpoch::from_raw(7)),
+            observed_epoch: Some(observed),
             error: None,
         };
         let release =
@@ -4346,9 +4233,8 @@ mod tests {
             }]
         );
 
-        let claimed = coordinator
-            .claim_blocked_reflection(session.id, &HashSet::new())
-            .expect("blocked reflection work should be retryable");
+        assert!(publish_test_observation(&coordinator) > observed);
+        let claimed = claim_ready_test_reflection(&coordinator, session.id);
         let release = coordinator.release_reflection(claimed, ReflectionWorkPoll::Terminal);
         assert!(release.terminal);
         assert!(matches!(
@@ -4464,7 +4350,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_wait_completion_does_not_wake_a_task_reblocked_elsewhere() {
+    fn a_task_reblocked_on_another_wait_ignores_its_prior_terminal_source() {
         let (coordinator, _executor) = super::super::test_execution_resources(0)
             .expect("test execution resources should build");
         let session = EvaluationSession::shared(&coordinator);
@@ -4491,9 +4377,16 @@ mod tests {
                 )
                 .remains_blocked
         );
-        let claimed = coordinator
-            .claim_blocked_reflection(session.id, &HashSet::new())
-            .expect("the conservative retry path should reclaim the blocked task");
+        assert_eq!(wait_a.exact_subscription_count(), 1);
+        wait_a.publish_terminal(EvaluationWaitTerminal::Complete(RuntimeValueRoot::new(
+            &session.values,
+            crate::core::keys::unit_value(),
+        )));
+        wait_a.notify_terminal();
+        assert_eq!(wait_a.exact_subscription_count(), 0);
+        assert_eq!(coordinator.ready_task_count(), 1);
+
+        let claimed = claim_ready_test_reflection(&coordinator, session.id);
         assert!(
             coordinator
                 .release_reflection(
@@ -4506,13 +4399,11 @@ mod tests {
                 )
                 .remains_blocked
         );
-        assert_eq!(wait_a.exact_subscription_count(), 1);
         assert_eq!(wait_b.exact_subscription_count(), 1);
+        assert_eq!(coordinator.ready_task_count(), 0);
 
-        wait_a.publish_terminal(EvaluationWaitTerminal::Complete(RuntimeValueRoot::new(
-            &session.values,
-            crate::core::keys::unit_value(),
-        )));
+        // Re-notifying the prior terminal source cannot revive work whose
+        // subscription epoch now names wait B.
         wait_a.notify_terminal();
         assert_eq!(coordinator.ready_task_count(), 0);
         wait_b.publish_terminal(EvaluationWaitTerminal::Complete(RuntimeValueRoot::new(

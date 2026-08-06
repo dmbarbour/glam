@@ -261,11 +261,9 @@ control-flow overview.
 - A spark is best-effort background `seq` demand, not just execution of work
   directly owned by its outer value. Admit lazy values, promises, and sealed
   metadata, but not already-WHNF nets. Retryably blocked sparks park without
-  occupying workers. Promise dependencies use exact source subscriptions;
-  wait-token dependencies still resume conservatively after their session
-  changes. Subscribe-and-recheck or the session generation, respectively,
-  closes the completion-before-parking race. Session teardown discards parked
-  sparks.
+  occupying workers. Promise and wait-token dependencies use exact source
+  subscriptions; subscribe-and-recheck closes the completion-before-parking
+  race without a session-wide retry. Session teardown discards parked sparks.
 - A divergent spark may occupy a worker indefinitely. Cooperative cancellation,
   evaluator fuel, and fine-grained wake indexes remain deliberate future work.
 - Claimed interaction-net pairs are live work, not quiescence. An observer must

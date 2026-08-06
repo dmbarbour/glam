@@ -272,7 +272,7 @@ pub(crate) struct CoreValueFactory {
     runtime: EvaluationRuntimeId,
     ids: Arc<RuntimeIds>,
     cache: Arc<RuntimeValueCache>,
-    work_coordinator: Arc<OnceLock<Weak<EvaluationWorkCoordinator>>>,
+    work_coordinator: Arc<Mutex<Weak<EvaluationWorkCoordinator>>>,
     local_extensions: Option<SharedExtensionMap>,
 }
 
@@ -330,7 +330,7 @@ impl CoreValueFactory {
                 #[cfg(test)]
                 extension_lookups: AtomicUsize::new(0),
             }),
-            work_coordinator: Arc::new(OnceLock::new()),
+            work_coordinator: Arc::new(Mutex::new(Weak::new())),
             local_extensions: None,
         }
     }
@@ -349,18 +349,45 @@ impl CoreValueFactory {
 
     pub(crate) fn attach_work_coordinator(&self, coordinator: &Arc<EvaluationWorkCoordinator>) {
         debug_assert_eq!(coordinator.runtime_id(), self.runtime);
-        if let Err(candidate) = self.work_coordinator.set(Arc::downgrade(coordinator)) {
-            let installed = self
-                .work_coordinator
-                .get()
-                .expect("a rejected coordinator binding must already be initialized");
-            debug_assert!(installed.ptr_eq(&candidate));
+        let mut binding = self
+            .work_coordinator
+            .lock()
+            .expect("runtime work-coordinator binding was poisoned");
+        if let Some(installed) = binding.upgrade() {
+            assert!(
+                Arc::ptr_eq(&installed, coordinator),
+                "one live evaluation runtime cannot have multiple work coordinators"
+            );
+        } else {
+            *binding = Arc::downgrade(coordinator);
         }
     }
 
-    pub(crate) fn work_coordinator_binding(
+    pub(crate) fn work_coordinator(&self) -> Option<Arc<EvaluationWorkCoordinator>> {
+        self.work_coordinator
+            .lock()
+            .expect("runtime work-coordinator binding was poisoned")
+            .upgrade()
+    }
+
+    pub(crate) fn work_coordinator_or_attach(
         &self,
-    ) -> Arc<OnceLock<Weak<EvaluationWorkCoordinator>>> {
+        candidate: Arc<EvaluationWorkCoordinator>,
+    ) -> Arc<EvaluationWorkCoordinator> {
+        debug_assert_eq!(candidate.runtime_id(), self.runtime);
+        let mut binding = self
+            .work_coordinator
+            .lock()
+            .expect("runtime work-coordinator binding was poisoned");
+        if let Some(installed) = binding.upgrade() {
+            installed
+        } else {
+            *binding = Arc::downgrade(&candidate);
+            candidate
+        }
+    }
+
+    pub(crate) fn work_coordinator_binding(&self) -> Arc<Mutex<Weak<EvaluationWorkCoordinator>>> {
         self.work_coordinator.clone()
     }
 
