@@ -15,7 +15,7 @@ use crate::runtime::{
 
 use super::{
     EvaluationFailure, EvaluationSession, EvaluationSessionId, EvaluationTaskId,
-    EvaluationWaitTerminal, EvaluationWaitToken,
+    EvaluationWaitTerminal, EvaluationWaitToken, SessionMachineStore,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -613,15 +613,6 @@ pub(super) enum ClaimedTaskWork {
     Deferred(ClaimedDeferredWork),
 }
 
-impl ClaimedTaskWork {
-    pub(super) fn demand_session(&self) -> EvaluationSessionId {
-        match self {
-            Self::Reflection(work) => work.demand_session,
-            Self::Deferred(work) => work.demand_session,
-        }
-    }
-}
-
 impl ClaimedDeferredWork {
     pub(super) fn id(&self) -> EvaluationWorkId {
         self.id
@@ -646,7 +637,7 @@ pub(super) struct DeferredLazyCycleMember {
     pub(super) work: EvaluationWorkId,
     pub(super) wait: EvaluationWaitToken,
     pub(super) lazy: LazyValue,
-    pub(super) session: Arc<EvaluationSession>,
+    pub(super) machines: Arc<SessionMachineStore>,
 }
 
 pub(super) struct DeferredWorkRelease {
@@ -690,6 +681,7 @@ pub(super) struct ReflectionWorkRelease {
     pub(super) remains_blocked: bool,
     pub(super) terminal: bool,
     pub(super) cancel: bool,
+    pub(super) abandoned: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -753,7 +745,7 @@ impl SparkRetirement {
 
 #[derive(Default)]
 struct WorkCoordinatorState {
-    sessions: HashMap<EvaluationSessionId, Weak<EvaluationSession>>,
+    machine_stores: HashMap<EvaluationSessionId, Arc<SessionMachineStore>>,
     work: HashMap<EvaluationWorkId, WorkRecord>,
     work_by_session: HashMap<EvaluationSessionId, HashSet<EvaluationWorkId>>,
     ready_tasks: VecDeque<EvaluationWorkId>,
@@ -789,7 +781,7 @@ pub(crate) struct EvaluationWorkCoordinator {
 }
 
 pub(super) enum CoordinatorSelection {
-    Task(Arc<EvaluationSession>, ClaimedTaskWork),
+    Task(Arc<SessionMachineStore>, ClaimedTaskWork),
     Spark(ClaimedSparkWork),
     None,
 }
@@ -803,7 +795,7 @@ impl fmt::Debug for EvaluationWorkCoordinator {
         formatter
             .debug_struct("EvaluationWorkCoordinator")
             .field("runtime", &self.runtime)
-            .field("session_count", &state.sessions.len())
+            .field("session_count", &state.machine_stores.len())
             .field("ready_task_count", &state.ready_task_set.len())
             .field("work_count", &state.work.len())
             .field("work_generation", &state.work_generation)
@@ -881,7 +873,9 @@ impl EvaluationWorkCoordinator {
     pub(super) fn register_session(&self, session: &Arc<EvaluationSession>) {
         debug_assert_eq!(session.values.runtime_id(), self.runtime);
         self.publish_transition(|state| {
-            let replaced = state.sessions.insert(session.id, Arc::downgrade(session));
+            let replaced = state
+                .machine_stores
+                .insert(session.id, session.machines.clone());
             assert!(
                 replaced.is_none(),
                 "evaluation session identities must be unique within a runtime"
@@ -897,21 +891,6 @@ impl EvaluationWorkCoordinator {
                 .lock()
                 .expect("evaluation work coordinator was poisoned");
             let initial_generation = state.work_generation;
-            state.sessions.remove(&session);
-
-            debug_assert!(
-                state
-                    .work_by_session
-                    .get(&session)
-                    .into_iter()
-                    .flatten()
-                    .all(|id| state
-                        .work
-                        .get(id)
-                        .is_none_or(|record| !matches!(record.kind, WorkKind::Reflection(_)))),
-                "reflection work must be retired before its machine session unregisters"
-            );
-
             let work = state
                 .work_by_session
                 .get(&session)
@@ -921,19 +900,6 @@ impl EvaluationWorkCoordinator {
                 .collect::<Vec<_>>();
             let mut retired = Vec::new();
             for id in work {
-                if state.work.get(&id).is_some_and(|record| {
-                    matches!(record.kind, WorkKind::Deferred(_))
-                        && matches!(record.state, WorkState::Running)
-                }) {
-                    state
-                        .work
-                        .get_mut(&id)
-                        .expect("running deferred work must remain registered")
-                        .control
-                        .close_reason
-                        .get_or_insert(WorkCloseReason::DemandSessionClosed);
-                    continue;
-                }
                 if !state
                     .work
                     .get(&id)
@@ -960,6 +926,9 @@ impl EvaluationWorkCoordinator {
                     retired.push(record);
                 }
             }
+            if !state.work_by_session.contains_key(&session) {
+                state.machine_stores.remove(&session);
+            }
             state.work_generation = state.work_generation.wrapping_add(1);
             (retired, state.work_generation != initial_generation)
         };
@@ -972,16 +941,17 @@ impl EvaluationWorkCoordinator {
         }
     }
 
-    pub(super) fn registered_session(
+    #[cfg(test)]
+    pub(super) fn registered_machine_store(
         &self,
         session: EvaluationSessionId,
-    ) -> Option<Arc<EvaluationSession>> {
+    ) -> Option<Arc<SessionMachineStore>> {
         self.state
             .lock()
             .expect("evaluation work coordinator was poisoned")
-            .sessions
+            .machine_stores
             .get(&session)
-            .and_then(Weak::upgrade)
+            .cloned()
     }
 
     pub(super) fn submit_spark(&self, session: &Arc<EvaluationSession>, value: Value) {
@@ -997,7 +967,12 @@ impl EvaluationWorkCoordinator {
                 .state
                 .lock()
                 .expect("evaluation work coordinator was poisoned");
-            if state.spark_workers == 0 || !state.sessions.contains_key(&session.id) {
+            if state.spark_workers == 0
+                || state
+                    .machine_stores
+                    .get(&session.id)
+                    .is_none_or(|store| store.is_closed())
+            {
                 false
             } else {
                 let session_id = session.id;
@@ -1346,7 +1321,10 @@ impl EvaluationWorkCoordinator {
                 .lock()
                 .expect("evaluation work coordinator was poisoned");
             assert!(
-                state.sessions.contains_key(&session.id),
+                state
+                    .machine_stores
+                    .get(&session.id)
+                    .is_some_and(|store| !store.is_closed()),
                 "reflection work requires a registered demand session"
             );
             let record = WorkRecord {
@@ -1528,16 +1506,17 @@ impl EvaluationWorkCoordinator {
         outcome
     }
 
-    /// Moves every non-running reflection task owned by `session` into the
-    /// terminalization handshake. A running task retains the session through
-    /// its detached machine context, so observing one here would violate the
-    /// session lifetime invariant.
+    /// Requests closure of every reflection task owned by `session`.
+    ///
+    /// Non-running work enters terminalization immediately. Running work keeps
+    /// its current claim and observes the close request when that quantum is
+    /// released.
     pub(super) fn abandon_reflection_session(
         &self,
         session: EvaluationSessionId,
     ) -> Vec<AbandonedReflectionWork> {
         let mutation = self.admission.mutation_guard();
-        let abandoned = {
+        let (abandoned, changed) = {
             let mut state = self
                 .state
                 .lock()
@@ -1550,6 +1529,7 @@ impl EvaluationWorkCoordinator {
                 .copied()
                 .collect::<Vec<_>>();
             let mut abandoned = Vec::new();
+            let mut changed = false;
             for id in ids {
                 let Some(record) = state.work.get(&id) else {
                     continue;
@@ -1557,11 +1537,16 @@ impl EvaluationWorkCoordinator {
                 if !matches!(record.kind, WorkKind::Reflection(_)) {
                     continue;
                 }
-                assert!(
-                    !matches!(record.state, WorkState::Running),
-                    "a detached reflection machine must retain its evaluation session"
-                );
                 let task = reflection_work(record).task;
+                if matches!(record.state, WorkState::Terminalizing) {
+                    // The operation which moved this record into
+                    // `Terminalizing` owns settlement. In particular, a
+                    // worker may have released a completed quantum and still
+                    // be between that transition and consuming the producer
+                    // obligation. Session closure must not steal or repeat
+                    // that settlement.
+                    continue;
+                }
                 let cancel = matches!(
                     record.control.close_reason,
                     Some(WorkCloseReason::ExplicitCancellation)
@@ -1575,18 +1560,22 @@ impl EvaluationWorkCoordinator {
                 } else {
                     WorkCloseReason::DemandSessionClosed
                 });
+                changed = true;
+                if matches!(record.state, WorkState::Running) {
+                    continue;
+                }
                 record.state = WorkState::Terminalizing;
                 state.observation_waiters.remove(&id);
                 remove_ready_reflection(&mut state, id);
                 abandoned.push(AbandonedReflectionWork { id, task, cancel });
             }
-            if !abandoned.is_empty() {
+            if changed {
                 state.work_generation = state.work_generation.wrapping_add(1);
             }
-            abandoned
+            (abandoned, changed)
         };
         drop(mutation);
-        if !abandoned.is_empty() {
+        if changed {
             self.work_available.notify_all();
         }
         abandoned
@@ -1615,12 +1604,12 @@ impl EvaluationWorkCoordinator {
         claimed
     }
 
-    /// Claims one exact task dependency together with a strong lease on the
-    /// demand session which owns its transitional machine slot.
+    /// Claims one exact task dependency together with the transitional store
+    /// which owns its opaque machine slot.
     pub(super) fn claim_task(
         &self,
         task: EvaluationTaskId,
-    ) -> Option<(Arc<EvaluationSession>, ClaimedTaskWork)> {
+    ) -> Option<(Arc<SessionMachineStore>, ClaimedTaskWork)> {
         let mutation = self.admission.mutation_guard();
         let claimed = {
             let mut state = self
@@ -1633,7 +1622,7 @@ impl EvaluationWorkCoordinator {
                 .or_else(|| state.deferred_by_task.get(&task))
                 .copied()?;
             let session = state.work.get(&id)?.demand_session;
-            let owner = state.sessions.get(&session).and_then(Weak::upgrade)?;
+            let machines = state.machine_stores.get(&session)?.clone();
             let work = match state.work.get(&id)?.kind {
                 WorkKind::Reflection(_) => {
                     claim_reflection(&mut state, id).map(ClaimedTaskWork::Reflection)
@@ -1644,7 +1633,7 @@ impl EvaluationWorkCoordinator {
                 WorkKind::Spark(_) => None,
             }?;
             state.work_generation = state.work_generation.wrapping_add(1);
-            Some((owner, work))
+            Some((machines, work))
         };
         drop(mutation);
         if claimed.is_some() {
@@ -1664,7 +1653,7 @@ impl EvaluationWorkCoordinator {
                 .state
                 .lock()
                 .expect("evaluation work coordinator was poisoned");
-            let cancel = {
+            let (cancel, abandoned) = {
                 let record = state
                     .work
                     .get(&claimed.id)
@@ -1672,12 +1661,20 @@ impl EvaluationWorkCoordinator {
                 assert_eq!(record.demand_session, claimed.demand_session);
                 assert_eq!(reflection_work(record).task, claimed.task);
                 assert!(matches!(record.state, WorkState::Running));
-                matches!(
-                    record.control.close_reason,
-                    Some(WorkCloseReason::ExplicitCancellation)
+                (
+                    matches!(
+                        record.control.close_reason,
+                        Some(WorkCloseReason::ExplicitCancellation)
+                    ),
+                    matches!(
+                        record.control.close_reason,
+                        Some(WorkCloseReason::DemandSessionClosed)
+                    ),
                 )
             };
-            let (state_after, block, made_progress, remains_blocked, terminal) = if cancel {
+            let (state_after, block, made_progress, remains_blocked, terminal) = if cancel
+                || abandoned
+            {
                 (WorkState::Terminalizing, None, true, false, true)
             } else {
                 match poll {
@@ -1729,6 +1726,7 @@ impl EvaluationWorkCoordinator {
                     remains_blocked,
                     terminal,
                     cancel,
+                    abandoned,
                 },
                 exact_subscription,
             )
@@ -1818,7 +1816,10 @@ impl EvaluationWorkCoordinator {
                 DeferredWorkReservation::Existing(wait)
             } else {
                 assert!(
-                    state.sessions.contains_key(&session.id),
+                    state
+                        .machine_stores
+                        .get(&session.id)
+                        .is_some_and(|store| !store.is_closed()),
                     "deferred work requires a registered demand session"
                 );
                 let id = EvaluationWorkId(self.ids.evaluation_work());
@@ -2105,7 +2106,7 @@ impl EvaluationWorkCoordinator {
         session: EvaluationSessionId,
     ) -> Vec<AbandonedDeferredWork> {
         let mutation = self.admission.mutation_guard();
-        let abandoned = {
+        let (abandoned, changed) = {
             let mut state = self
                 .state
                 .lock()
@@ -2124,23 +2125,43 @@ impl EvaluationWorkCoordinator {
                 })
                 .collect::<Vec<_>>();
             let mut abandoned = Vec::with_capacity(ids.len());
+            let mut changed = false;
             for id in ids {
-                assert!(
-                    !state
+                if state
+                    .work
+                    .get(&id)
+                    .is_some_and(|record| matches!(record.state, WorkState::Terminalizing))
+                {
+                    // A prior transition owns terminal settlement. The
+                    // machine may still be completing the release tail
+                    // outside the coordinator lock.
+                    continue;
+                }
+                if state
+                    .work
+                    .get(&id)
+                    .is_some_and(|record| matches!(record.state, WorkState::Running))
+                {
+                    state
                         .work
-                        .get(&id)
-                        .is_some_and(|record| matches!(record.state, WorkState::Running)),
-                    "a detached deferred machine must retain its evaluation session"
-                );
+                        .get_mut(&id)
+                        .expect("running deferred work must remain registered")
+                        .control
+                        .close_reason
+                        .get_or_insert(WorkCloseReason::DemandSessionClosed);
+                    changed = true;
+                    continue;
+                }
                 abandoned.push(begin_deferred_abandonment(&mut state, id));
+                changed = true;
             }
-            if !abandoned.is_empty() {
+            if changed {
                 state.work_generation = state.work_generation.wrapping_add(1);
             }
-            abandoned
+            (abandoned, changed)
         };
         drop(mutation);
-        if !abandoned.is_empty() {
+        if changed {
             self.work_available.notify_all();
         }
         abandoned
@@ -2627,7 +2648,7 @@ impl EvaluationWorkCoordinator {
         self.state
             .lock()
             .expect("evaluation work coordinator was poisoned")
-            .sessions
+            .machine_stores
             .len()
     }
 
@@ -2884,7 +2905,7 @@ fn remove_ready_task(state: &mut WorkCoordinatorState, id: EvaluationWorkId) {
 fn claim_ready_task(
     state: &mut WorkCoordinatorState,
     session: Option<EvaluationSessionId>,
-) -> Option<(Arc<EvaluationSession>, ClaimedTaskWork)> {
+) -> Option<(Arc<SessionMachineStore>, ClaimedTaskWork)> {
     loop {
         let position = match session {
             Some(session) => state
@@ -2912,7 +2933,7 @@ fn claim_ready_task(
             continue;
         };
         let demand_session = record.demand_session;
-        let Some(owner) = state.sessions.get(&demand_session).and_then(Weak::upgrade) else {
+        let Some(machines) = state.machine_stores.get(&demand_session).cloned() else {
             continue;
         };
         let claimed = match &record.kind {
@@ -2921,7 +2942,7 @@ fn claim_ready_task(
             WorkKind::Spark(_) => None,
         };
         if let Some(claimed) = claimed {
-            return Some((owner, claimed));
+            return Some((machines, claimed));
         }
     }
 }
@@ -3051,6 +3072,7 @@ fn detach_reflection(
             state.work_by_session.remove(&record.demand_session);
         }
     }
+    prune_closed_machine_store(state, record.demand_session);
 }
 
 fn promote_deferred_wait_locked(
@@ -3153,16 +3175,16 @@ fn terminalize_pure_lazy_cycle(
             let DeferredProducer::Lazy(lazy) = &deferred_work(record).producer else {
                 unreachable!("pure lazy cycle cannot contain a promise")
             };
-            let session = state
-                .sessions
+            let machines = state
+                .machine_stores
                 .get(&record.demand_session)
-                .and_then(Weak::upgrade)
+                .cloned()
                 .expect("blocked deferred work must retain its demand session");
             DeferredLazyCycleMember {
                 work: *id,
                 wait: deferred_work(record).wait.clone(),
                 lazy: lazy.clone(),
-                session,
+                machines,
             }
         })
         .collect::<Vec<_>>();
@@ -3231,6 +3253,18 @@ fn detach_deferred(state: &mut WorkCoordinatorState, id: EvaluationWorkId) {
         if session_work.is_empty() {
             state.work_by_session.remove(&record.demand_session);
         }
+    }
+    prune_closed_machine_store(state, record.demand_session);
+}
+
+fn prune_closed_machine_store(state: &mut WorkCoordinatorState, session: EvaluationSessionId) {
+    if !state.work_by_session.contains_key(&session)
+        && state
+            .machine_stores
+            .get(&session)
+            .is_some_and(|store| store.is_closed())
+    {
+        state.machine_stores.remove(&session);
     }
 }
 
@@ -3314,6 +3348,7 @@ fn detach_spark(state: &mut WorkCoordinatorState, id: EvaluationWorkId) -> Optio
             state.work_by_session.remove(&record.demand_session);
         }
     }
+    prune_closed_machine_store(state, record.demand_session);
     let WorkKind::Spark(mut spark) = record.kind else {
         unreachable!("spark retirement must contain spark work")
     };
@@ -3959,6 +3994,28 @@ mod tests {
     }
 
     #[test]
+    fn session_close_does_not_steal_an_already_terminalizing_claims_settlement() {
+        let (coordinator, _executor) = super::super::test_execution_resources(0)
+            .expect("test execution resources should build");
+        let session = EvaluationSession::shared(&coordinator);
+        let (_, work) = reserve_ready_test_reflection(&coordinator, &session);
+        let claimed = claim_ready_test_reflection(&coordinator, session.id);
+
+        let release = coordinator.release_reflection(claimed, ReflectionWorkPoll::Terminal);
+        assert!(release.terminal);
+        assert!(
+            coordinator
+                .abandon_reflection_session(session.id)
+                .is_empty(),
+            "the claim which published terminalization must retain settlement ownership"
+        );
+
+        settle_test_reflection(&coordinator, work);
+        drop(session);
+        assert_eq!(coordinator.registered_session_count(), 0);
+    }
+
+    #[test]
     fn stale_dependency_wake_does_not_requeue_work_blocked_elsewhere() {
         let (coordinator, _executor, _session, claimed) = claimed_test_spark();
         let source_a = TestCompletionSource::new(&coordinator);
@@ -4139,7 +4196,7 @@ mod tests {
         let CoordinatorSelection::Task(selected, claimed) = coordinator.select() else {
             panic!("the exact ready task should be selected")
         };
-        assert!(Arc::ptr_eq(&selected, &session));
+        assert!(Arc::ptr_eq(&selected, &session.machines));
         assert!(matches!(&claimed, ClaimedTaskWork::Reflection(_)));
         assert_eq!(coordinator.ready_task_count(), 0);
 

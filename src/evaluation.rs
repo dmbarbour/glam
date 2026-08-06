@@ -2,11 +2,13 @@
 //!
 //! The runtime supplies task and wait identity, value provenance, and the
 //! authoritative reflection-task lifecycle. During the work-boundary
-//! transition, the session retains opaque reflection and deferred machine
-//! slots, minimal machine lookup indexes, failure/status plumbing, and its
-//! serial cooperative pump. The runtime coordinator owns both task kinds'
-//! lifecycle state. Reflection specializations remain outside this module
-//! behind a small type-erased task-machine boundary.
+//! transition, an explicit session machine store retains opaque reflection and
+//! deferred machine slots plus minimal lookup indexes while the demand state
+//! retains failure/status plumbing and its serial cooperative pump. The
+//! runtime coordinator owns both task kinds' lifecycle state and retains each
+//! transitional store only while indexed work remains. Reflection
+//! specializations remain outside this module behind a small type-erased
+//! task-machine boundary.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
@@ -831,12 +833,52 @@ impl Drop for PendingReflectionTaskInner {
 }
 
 #[derive(Default)]
-struct EvaluationTasks {
+struct SessionMachineState {
     reflection: HashMap<EvaluationWaitToken, ReflectionTaskRecord>,
     reflection_by_id: BTreeMap<EvaluationTaskId, EvaluationWaitToken>,
-    unacknowledged_failures: RedBlackTreeMapSync<EvaluationTaskId, Arc<EvaluationFailure>>,
     deferred: HashMap<DeferredValueId, DeferredTaskRecord>,
     deferred_by_work: HashMap<EvaluationWorkId, DeferredValueId>,
+}
+
+type SessionFailureLedger = RedBlackTreeMapSync<EvaluationTaskId, Arc<EvaluationFailure>>;
+
+/// Transitional opaque machine storage for one demand session.
+///
+/// The coordinator retains this store while indexed work remains, and a
+/// claimed task retains it for the duration of its poll quantum. The store
+/// deliberately has no direct route to demand state and only a weak route to
+/// the coordinator. Resident machines may retain their machine-visible demand
+/// state, but can never retain the external [`EvaluationSession`] owner lease
+/// through here.
+pub(super) struct SessionMachineStore {
+    id: EvaluationSessionId,
+    values: CoreValueFactory,
+    state: Mutex<SessionMachineState>,
+    failures: Arc<Mutex<SessionFailureLedger>>,
+    closed: Arc<AtomicBool>,
+    coordinator: Weak<EvaluationWorkCoordinator>,
+}
+
+impl fmt::Debug for SessionMachineStore {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SessionMachineStore")
+            .field("id", &self.id)
+            .field("closed", &self.is_closed())
+            .finish_non_exhaustive()
+    }
+}
+
+impl SessionMachineStore {
+    fn coordinator(&self) -> Arc<EvaluationWorkCoordinator> {
+        self.coordinator
+            .upgrade()
+            .expect("an indexed or claimed machine store must retain its coordinator")
+    }
+
+    fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
 }
 
 struct ReflectionTaskTransition {
@@ -845,7 +887,8 @@ struct ReflectionTaskTransition {
 }
 
 fn transition_reflection_task(
-    tasks: &mut EvaluationTasks,
+    tasks: &mut SessionMachineState,
+    failures: &Mutex<SessionFailureLedger>,
     wait: &EvaluationWaitToken,
     state: EvaluationTaskState,
 ) -> ReflectionTaskTransition {
@@ -864,14 +907,17 @@ fn transition_reflection_task(
         (failure, status)
     };
     if let Some((task, failure)) = unacknowledged_failure {
-        tasks.unacknowledged_failures.insert_mut(task, failure);
+        failures
+            .lock()
+            .expect("evaluation failure ledger was poisoned")
+            .insert_mut(task, failure);
     }
     let retired = Some(retire_reflection_task(tasks, wait));
     ReflectionTaskTransition { retired, status }
 }
 
 fn update_reflection_task_status(
-    tasks: &mut EvaluationTasks,
+    tasks: &mut SessionMachineState,
     wait: &EvaluationWaitToken,
     status: EvaluationTaskStatus,
 ) -> Option<TaskStatusUpdate> {
@@ -883,7 +929,7 @@ fn update_reflection_task_status(
 }
 
 fn retire_reflection_task(
-    tasks: &mut EvaluationTasks,
+    tasks: &mut SessionMachineState,
     wait: &EvaluationWaitToken,
 ) -> ReflectionTaskRecord {
     let record = tasks
@@ -912,7 +958,7 @@ fn promise_assignment_terminal(
 }
 
 fn retire_deferred_task(
-    tasks: &mut EvaluationTasks,
+    tasks: &mut SessionMachineState,
     deferred: DeferredValueId,
 ) -> DeferredTaskRecord {
     let record = tasks
@@ -926,10 +972,11 @@ fn retire_deferred_task(
 pub(crate) struct EvaluationDemandState {
     id: EvaluationSessionId,
     values: CoreValueFactory,
-    tasks: Mutex<EvaluationTasks>,
+    machines: Weak<SessionMachineStore>,
+    failures: Arc<Mutex<SessionFailureLedger>>,
     default_reflection_profile: Arc<ReflectionTaskProfile>,
     require_default_reflection_profile: bool,
-    closed: AtomicBool,
+    closed: Arc<AtomicBool>,
     coordinator: Weak<EvaluationWorkCoordinator>,
 }
 
@@ -952,16 +999,24 @@ impl EvaluationDemandState {
         self.closed.load(Ordering::Acquire)
     }
 
+    fn machine_store(&self) -> Option<Arc<SessionMachineStore>> {
+        self.machines.upgrade()
+    }
+
     fn acknowledge_reflection_task_error(&self, task: &EvaluationTaskHandle) {
-        let mut tasks = self
-            .tasks
-            .lock()
-            .expect("evaluation task registry was poisoned");
-        if let Some(record) = tasks.reflection.get_mut(&task.wait) {
-            record.error_acknowledged = true;
-        } else {
-            tasks.unacknowledged_failures.remove_mut(&task.id);
+        if let Some(machines) = self.machine_store() {
+            let mut tasks = machines
+                .state
+                .lock()
+                .expect("evaluation task registry was poisoned");
+            if let Some(record) = tasks.reflection.get_mut(&task.wait) {
+                record.error_acknowledged = true;
+            }
         }
+        self.failures
+            .lock()
+            .expect("evaluation failure ledger was poisoned")
+            .remove_mut(&task.id);
     }
 
     fn abandon_spark_wait(&self, wait: &EvaluationWaitToken) {
@@ -982,8 +1037,11 @@ impl EvaluationDemandState {
                 evaluation_failure("deferred fixpoint producer was abandoned"),
             );
             let retired = {
-                let mut tasks = self
-                    .tasks
+                let machines = self
+                    .machine_store()
+                    .expect("active deferred work must retain its machine store");
+                let mut tasks = machines
+                    .state
                     .lock()
                     .expect("evaluation task registry was poisoned");
                 let record = tasks
@@ -1005,10 +1063,9 @@ impl EvaluationDemandState {
 
     fn closed_run_report(&self) -> EvaluationSessionRun {
         let failures = self
-            .tasks
+            .failures
             .lock()
-            .expect("evaluation task registry was poisoned")
-            .unacknowledged_failures
+            .expect("evaluation failure ledger was poisoned")
             .clone();
         EvaluationSessionRun::Complete(EvaluationSessionReport {
             failures,
@@ -1024,6 +1081,7 @@ impl EvaluationDemandState {
 /// close and unregister the demand domain.
 pub(crate) struct EvaluationSession {
     demand: Arc<EvaluationDemandState>,
+    machines: Arc<SessionMachineStore>,
     coordinator: Arc<EvaluationWorkCoordinator>,
 }
 
@@ -1091,7 +1149,8 @@ impl Drop for EvaluationSession {
             .collect::<HashMap<_, _>>();
         let (reflection, deferred, statuses) = {
             let mut tasks = self
-                .tasks
+                .machines
+                .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
 
@@ -1103,13 +1162,19 @@ impl Drop for EvaluationSession {
                     .reflection
                     .get(&wait)
                     .expect("collected reflection wait must remain registered");
-                let (task, cancel, state) = abandoning
-                    .get(&record.work)
-                    .cloned()
-                    .expect("coordinator must terminalize every session reflection task");
+                let Some((task, cancel, state)) = abandoning.get(&record.work).cloned() else {
+                    // Another operation owns this record's terminal tail. A
+                    // running claim keeps the slot detached; a claim which
+                    // has already published `Terminalizing` may have restored
+                    // the machine before settling its producer obligation.
+                    // In either case the coordinator retains this store until
+                    // that owner retires the record.
+                    continue;
+                };
                 assert_eq!(record.id, task);
                 let work = record.work;
-                let transition = transition_reflection_task(&mut tasks, &wait, state);
+                let transition =
+                    transition_reflection_task(&mut tasks, &self.machines.failures, &wait, state);
                 reflection.push((
                     work,
                     cancel,
@@ -1127,9 +1192,11 @@ impl Drop for EvaluationSession {
                     .deferred
                     .get(&deferred_id)
                     .expect("collected deferred task must remain registered");
-                let abandoning = abandoning_deferred
-                    .get(&record.work)
-                    .expect("coordinator must terminalize every session deferred producer");
+                let Some(abandoning) = abandoning_deferred.get(&record.work) else {
+                    // A running or already-terminalizing operation owns the
+                    // remaining settlement and retirement tail.
+                    continue;
+                };
                 assert_eq!(abandoning.producer, deferred_id);
                 deferred.push(retire_deferred_task(&mut tasks, deferred_id));
             }
@@ -1175,15 +1242,32 @@ impl EvaluationSession {
     ) -> Arc<Self> {
         let demand = Arc::new(EvaluationDemandState {
             id: EvaluationSessionId(values.ids().evaluation_session()),
-            values,
-            tasks: Mutex::new(EvaluationTasks::default()),
+            values: values.clone(),
+            machines: Weak::new(),
+            failures: Arc::new(Mutex::new(SessionFailureLedger::new_sync())),
             default_reflection_profile,
             require_default_reflection_profile,
-            closed: AtomicBool::new(false),
+            closed: Arc::new(AtomicBool::new(false)),
             coordinator: Arc::downgrade(&coordinator),
         });
+        let machines = Arc::new(SessionMachineStore {
+            id: demand.id,
+            values,
+            state: Mutex::new(SessionMachineState::default()),
+            failures: demand.failures.clone(),
+            closed: demand.closed.clone(),
+            coordinator: Arc::downgrade(&coordinator),
+        });
+        // Construction is private and the demand state has not escaped yet.
+        // Install only a weak route back to the sibling machine store so
+        // resident machine contexts cannot complete an ownership cycle.
+        let mut demand = demand;
+        Arc::get_mut(&mut demand)
+            .expect("fresh demand state must be uniquely owned")
+            .machines = Arc::downgrade(&machines);
         Arc::new(Self {
             demand,
+            machines,
             coordinator,
         })
     }
@@ -1282,6 +1366,12 @@ impl OwnedEvalContext {
 }
 
 impl EvalContext {
+    fn machine_store(&self) -> Result<Arc<SessionMachineStore>, Arc<str>> {
+        self.session
+            .machine_store()
+            .ok_or_else(|| Arc::from("evaluation session machine store is closed"))
+    }
+
     #[cfg(test)]
     pub(crate) fn standalone() -> OwnedEvalContext {
         Self::isolated(crate::core::test_value_factory())
@@ -1514,11 +1604,11 @@ impl EvalContext {
     where
         F: FnOnce(EvalContext) -> Box<dyn EvaluationTaskMachine>,
     {
+        let machines = self.machine_store()?;
         let deferred = producer.id();
         {
-            let tasks = self
-                .session
-                .tasks
+            let tasks = machines
+                .state
                 .lock()
                 .expect("evaluation task registry was poisoned");
             if let Some(record) = tasks.deferred.get(&deferred) {
@@ -1546,9 +1636,8 @@ impl EvalContext {
             DeferredWorkReservation::Existing(wait) => return Ok(wait),
             DeferredWorkReservation::New(work) => work,
         };
-        let mut tasks = self
-            .session
-            .tasks
+        let mut tasks = machines
+            .state
             .lock()
             .expect("evaluation task registry was poisoned");
         let record = DeferredTaskRecord {
@@ -1702,6 +1791,7 @@ impl EvalContext {
         F: FnOnce(EvalContext) -> Result<Box<dyn EvaluationTaskMachine>, Arc<str>>,
     {
         let owner = self.owner()?;
+        let machines = self.machine_store()?;
         let id = allocate_task_id(self.values())?;
         let wait = allocate_wait_token(&self.session, id)?;
         let context = Self::for_task(
@@ -1730,9 +1820,8 @@ impl EvalContext {
                 return Err(error);
             }
         };
-        let mut tasks = self
-            .session
-            .tasks
+        let mut tasks = machines
+            .state
             .lock()
             .expect("evaluation task registry was poisoned");
         let replaced = tasks.reflection.insert(
@@ -1761,14 +1850,14 @@ impl EvalContext {
 
     fn reserve_task(&self) -> Result<EvaluationTaskHandle, Arc<str>> {
         let owner = self.owner()?;
+        let machines = self.machine_store()?;
         let id = allocate_task_id(self.values())?;
         let wait = allocate_wait_token(&self.session, id)?;
         let work = owner
             .coordinator
             .reserve_reflection(&owner, id, wait.clone());
-        let mut tasks = self
-            .session
-            .tasks
+        let mut tasks = machines
+            .state
             .lock()
             .expect("evaluation task registry was poisoned");
         let replaced = tasks.reflection.insert(
@@ -1802,6 +1891,9 @@ impl EvalContext {
         let Ok(owner) = self.owner() else {
             return;
         };
+        let Ok(machines) = self.machine_store() else {
+            return;
+        };
         let coordinator = &owner.coordinator;
         let result = task_profile
             .launcher()
@@ -1825,9 +1917,8 @@ impl EvalContext {
         match result {
             Ok(machine) => {
                 let installed = {
-                    let mut tasks = self
-                        .session
-                        .tasks
+                    let mut tasks = machines
+                        .state
                         .lock()
                         .expect("evaluation task registry was poisoned");
                     let Some(record) = tasks.reflection.get_mut(&handle.wait) else {
@@ -1854,9 +1945,8 @@ impl EvalContext {
             Err(error) => {
                 let promise_failure = error.clone();
                 {
-                    let mut tasks = self
-                        .session
-                        .tasks
+                    let mut tasks = machines
+                        .state
                         .lock()
                         .expect("evaluation task registry was poisoned");
                     let Some(record) = tasks.reflection.get_mut(&handle.wait) else {
@@ -1876,12 +1966,16 @@ impl EvalContext {
                         promise_failure,
                     );
                     let transition = {
-                        let mut tasks = self
-                            .session
-                            .tasks
+                        let mut tasks = machines
+                            .state
                             .lock()
                             .expect("evaluation task registry was poisoned");
-                        transition_reflection_task(&mut tasks, &handle.wait, state)
+                        transition_reflection_task(
+                            &mut tasks,
+                            &machines.failures,
+                            &handle.wait,
+                            state,
+                        )
                     };
                     publish_task_status(transition.status);
                     coordinator.retire_reflection(handle.work);
@@ -1898,9 +1992,11 @@ impl EvalContext {
         if !coordinator.discard_reserved_reflection(handle.work) {
             return;
         }
-        let mut tasks = self
-            .session
-            .tasks
+        let Some(machines) = self.session.machine_store() else {
+            return;
+        };
+        let mut tasks = machines
+            .state
             .lock()
             .expect("evaluation task registry was poisoned");
         let retired = if tasks.reflection.contains_key(&handle.wait) {
@@ -1920,10 +2016,12 @@ impl EvalContext {
         let Some(coordinator) = self.coordinator() else {
             return;
         };
+        let Some(machines) = self.session.machine_store() else {
+            return;
+        };
         {
-            let mut tasks = self
-                .session
-                .tasks
+            let mut tasks = machines
+                .state
                 .lock()
                 .expect("evaluation task registry was poisoned");
             let record = tasks
@@ -1946,12 +2044,11 @@ impl EvalContext {
             evaluation_failure("reflection fixpoint producer was cancelled"),
         );
         let transition = {
-            let mut tasks = self
-                .session
-                .tasks
+            let mut tasks = machines
+                .state
                 .lock()
                 .expect("evaluation task registry was poisoned");
-            transition_reflection_task(&mut tasks, &handle.wait, state)
+            transition_reflection_task(&mut tasks, &machines.failures, &handle.wait, state)
         };
         publish_task_status(transition.status);
         coordinator.retire_reflection(handle.work);
@@ -2008,13 +2105,13 @@ impl EvalContext {
         // bare session. Preserve an inspectable wait record for them; ordinary
         // Assembler sessions always install a launcher.
         let id = allocate_task_id(self.values())?;
+        let machines = self.machine_store()?;
         let wait = allocate_wait_token(&self.session, id)?;
         let work = owner
             .coordinator
             .register_dormant_reflection(&owner, id, wait.clone());
-        let mut tasks = self
-            .session
-            .tasks
+        let mut tasks = machines
+            .state
             .lock()
             .expect("evaluation task registry was poisoned");
         let replaced = tasks.reflection.insert(
@@ -2061,6 +2158,9 @@ impl EvalContext {
             ReflectionCancellation::Requested => EvaluationTaskCancellation::Requested,
             ReflectionCancellation::Late => EvaluationTaskCancellation::Late,
             ReflectionCancellation::Terminalize => {
+                let Some(machines) = self.session.machine_store() else {
+                    return EvaluationTaskCancellation::Late;
+                };
                 let state = settle_task_work(
                     &coordinator,
                     task.work,
@@ -2068,15 +2168,14 @@ impl EvalContext {
                     evaluation_failure("reflection fixpoint producer was cancelled"),
                 );
                 let transition = {
-                    let mut tasks = self
-                        .session
-                        .tasks
+                    let mut tasks = machines
+                        .state
                         .lock()
                         .expect("evaluation task registry was poisoned");
                     if !tasks.reflection.contains_key(&task.wait) {
                         return EvaluationTaskCancellation::Late;
                     }
-                    transition_reflection_task(&mut tasks, &task.wait, state)
+                    transition_reflection_task(&mut tasks, &machines.failures, &task.wait, state)
                 };
                 let mut retired = transition
                     .retired
@@ -2105,10 +2204,9 @@ impl EvalContext {
 
     pub(crate) fn acknowledge_task_failure(&self, task: EvaluationTaskId) {
         self.session
-            .tasks
+            .failures
             .lock()
-            .expect("evaluation task registry was poisoned")
-            .unacknowledged_failures
+            .expect("evaluation failure ledger was poisoned")
             .remove_mut(&task);
     }
 
@@ -2176,9 +2274,12 @@ impl EvalContext {
             .expect("test wait must retain its coordinator");
         let target = wait.clone();
         let wait = test_reflection_dependency(&coordinator, wait);
-        let tasks = self
+        let machines = self
             .session
-            .tasks
+            .machine_store()
+            .expect("test task must retain its machine store");
+        let tasks = machines
+            .state
             .lock()
             .expect("evaluation task registry was poisoned");
         let work = tasks
@@ -2194,12 +2295,11 @@ impl EvalContext {
             EvaluationTaskState::Complete(RuntimeValueRoot::new(&self.session.values, value)),
             evaluation_failure("reflection task completed without fulfilling its fixpoint"),
         );
-        let mut tasks = self
-            .session
-            .tasks
+        let mut tasks = machines
+            .state
             .lock()
             .expect("evaluation task registry was poisoned");
-        let transition = transition_reflection_task(&mut tasks, &wait, state);
+        let transition = transition_reflection_task(&mut tasks, &machines.failures, &wait, state);
         drop(tasks);
         publish_task_status(transition.status);
         coordinator.retire_reflection(work);
@@ -2226,9 +2326,12 @@ impl EvalContext {
             .expect("test wait must retain its coordinator");
         let target = wait.clone();
         let wait = test_reflection_dependency(&coordinator, wait);
-        let tasks = self
+        let machines = self
             .session
-            .tasks
+            .machine_store()
+            .expect("test task must retain its machine store");
+        let tasks = machines
+            .state
             .lock()
             .expect("evaluation task registry was poisoned");
         let work = tasks
@@ -2244,12 +2347,11 @@ impl EvalContext {
             EvaluationTaskState::Failed(failure.clone()),
             failure,
         );
-        let mut tasks = self
-            .session
-            .tasks
+        let mut tasks = machines
+            .state
             .lock()
             .expect("evaluation task registry was poisoned");
-        let transition = transition_reflection_task(&mut tasks, &wait, state);
+        let transition = transition_reflection_task(&mut tasks, &machines.failures, &wait, state);
         drop(tasks);
         publish_task_status(transition.status);
         coordinator.retire_reflection(work);
@@ -2277,16 +2379,24 @@ impl EvalContext {
             .expect("test demand must retain its coordinator");
         let deferred_counts = coordinator.deferred_counts(self.session.id);
         let promise_count = coordinator.task_promise_count(self.session.id);
-        let tasks = self
+        let machines = self
             .session
-            .tasks
+            .machine_store()
+            .expect("test demand must retain its machine store");
+        let tasks = machines
+            .state
             .lock()
             .expect("evaluation task registry was poisoned");
         EvaluationTaskRegistryCounts {
             reflection_active: tasks.reflection.len(),
             reflection_terminal: 0,
             reflection_by_id: tasks.reflection_by_id.len(),
-            unacknowledged_failures: tasks.unacknowledged_failures.size(),
+            unacknowledged_failures: self
+                .session
+                .failures
+                .lock()
+                .expect("evaluation failure ledger was poisoned")
+                .size(),
             deferred_active: deferred_counts.0,
             deferred_terminal: 0,
             deferred_by_wait: deferred_counts.1,
@@ -2414,7 +2524,7 @@ struct ReportedDependency {
 }
 
 struct ClaimedTask {
-    owner: Arc<EvaluationSession>,
+    machines: Arc<SessionMachineStore>,
     kind: ClaimedTaskKind,
 }
 
@@ -2440,7 +2550,7 @@ impl ClaimedTask {
         Option<ReleasedTaskMachine>,
         Option<TaskStatusUpdate>,
     ) {
-        self.owner.release_task(self.kind, poll)
+        self.machines.release_task(self.kind, poll)
     }
 }
 
@@ -2476,10 +2586,9 @@ impl EvaluationSession {
     fn session_run_report(&self) -> EvaluationSessionRun {
         let snapshots = self.coordinator.reflection_snapshots(self.id);
         let failures = self
-            .tasks
+            .failures
             .lock()
-            .expect("evaluation task registry was poisoned")
-            .unacknowledged_failures
+            .expect("evaluation failure ledger was poisoned")
             .clone();
         let mut unfinished = Vec::new();
         let mut has_live_cross_session_dependency = false;
@@ -2603,7 +2712,9 @@ impl EvaluationSession {
             }
         }
     }
+}
 
+impl SessionMachineStore {
     fn release_task(
         &self,
         claimed: ClaimedTaskKind,
@@ -2630,6 +2741,7 @@ impl EvaluationSession {
         Option<ReleasedTaskMachine>,
         Option<TaskStatusUpdate>,
     ) {
+        let coordinator = self.coordinator();
         let ClaimedReflectionTask {
             claim,
             wait,
@@ -2660,7 +2772,7 @@ impl EvaluationSession {
         // transition. No coordinator lock is held while touching the session.
         {
             let mut tasks = self
-                .tasks
+                .state
                 .lock()
                 .expect("evaluation task registry was poisoned");
             let record = tasks
@@ -2672,11 +2784,11 @@ impl EvaluationSession {
             record.machine = Some(machine);
         }
 
-        let release = self.coordinator.release_reflection(claim, work_poll);
+        let release = coordinator.release_reflection(claim, work_poll);
         if !release.terminal {
             let status = {
                 let mut tasks = self
-                    .tasks
+                    .state
                     .lock()
                     .expect("evaluation task registry was poisoned");
                 update_reflection_task_status(
@@ -2694,6 +2806,8 @@ impl EvaluationSession {
 
         let state = if release.cancel {
             EvaluationTaskState::Cancelled
+        } else if release.abandoned {
+            EvaluationTaskState::Abandoned
         } else {
             terminal_state.expect("terminal reflection poll must carry a terminal result")
         };
@@ -2709,13 +2823,13 @@ impl EvaluationSession {
                 evaluation_failure("reflection fixpoint producer was abandoned")
             }
         };
-        let state = settle_task_work(&self.coordinator, work, state, promise_failure);
+        let state = settle_task_work(&coordinator, work, state, promise_failure);
         let transition = {
             let mut tasks = self
-                .tasks
+                .state
                 .lock()
                 .expect("evaluation task registry was poisoned");
-            transition_reflection_task(&mut tasks, &wait, state)
+            transition_reflection_task(&mut tasks, &self.failures, &wait, state)
         };
         let settled_work = transition
             .retired
@@ -2728,7 +2842,7 @@ impl EvaluationSession {
             .as_mut()
             .and_then(|record| record.machine.take())
             .expect("terminal reflection work must retain its restored machine");
-        let retirement = WorkRetirement::Reflection(self.coordinator.clone(), work);
+        let retirement = WorkRetirement::Reflection(coordinator, work);
         let released = Some(if release.cancel {
             ReleasedTaskMachine::Cancel {
                 machine,
@@ -2754,6 +2868,7 @@ impl EvaluationSession {
         Option<ReleasedTaskMachine>,
         Option<TaskStatusUpdate>,
     ) {
+        let coordinator = self.coordinator();
         let ClaimedDeferredTask { claim, machine } = claimed;
         let work = claim.id();
         let producer = claim.producer();
@@ -2784,7 +2899,7 @@ impl EvaluationSession {
         // claimable.
         {
             let mut tasks = self
-                .tasks
+                .state
                 .lock()
                 .expect("evaluation task registry was poisoned");
             let record = tasks
@@ -2797,7 +2912,7 @@ impl EvaluationSession {
             record.machine = Some(machine);
         }
 
-        let release = self.coordinator.release_deferred(claim, work_poll);
+        let release = coordinator.release_deferred(claim, work_poll);
         if !release.cycle.is_empty() {
             self.poison_lazy_cycle(release.cycle);
             return (release.made_progress, false, None, None);
@@ -2823,12 +2938,10 @@ impl EvaluationSession {
                 evaluation_failure("evaluation fixpoint producer was abandoned")
             }
         };
-        let terminal = self
-            .coordinator
-            .settle_terminal_work(work, terminal, promise_failure);
+        let terminal = coordinator.settle_terminal_work(work, terminal, promise_failure);
         let mut retired = {
             let mut tasks = self
-                .tasks
+                .state
                 .lock()
                 .expect("evaluation task registry was poisoned");
             let record = tasks
@@ -2849,13 +2962,14 @@ impl EvaluationSession {
             false,
             Some(ReleasedTaskMachine::Drop {
                 machine,
-                retirement: WorkRetirement::Deferred(self.coordinator.clone(), work),
+                retirement: WorkRetirement::Deferred(coordinator, work),
             }),
             None,
         )
     }
 
     fn poison_lazy_cycle(&self, members: Vec<DeferredLazyCycleMember>) {
+        let coordinator = self.coordinator();
         let cycle = Arc::new(LazyCycle {
             members: members
                 .iter()
@@ -2889,19 +3003,16 @@ impl EvaluationSession {
             })
             .collect::<Vec<_>>();
         for (member, terminal) in &mut terminals {
-            *terminal = self.coordinator.settle_terminal_work(
-                member.work,
-                terminal.clone(),
-                failure.clone(),
-            );
+            *terminal =
+                coordinator.settle_terminal_work(member.work, terminal.clone(), failure.clone());
         }
         let mut retired = Vec::with_capacity(terminals.len());
         for (member, terminal) in &terminals {
-            debug_assert!(Arc::ptr_eq(&member.session.coordinator, &self.coordinator));
+            debug_assert!(Arc::ptr_eq(&member.machines.coordinator(), &coordinator));
             let record = {
                 let mut tasks = member
-                    .session
-                    .tasks
+                    .machines
+                    .state
                     .lock()
                     .expect("evaluation task registry was poisoned");
                 debug_assert_eq!(member.wait.terminal_poll(), Some(terminal.to_poll()));
@@ -2918,14 +3029,14 @@ impl EvaluationSession {
         for ((member, _), retired) in terminals.into_iter().zip(&retired) {
             debug_assert_eq!(retired.work, member.work);
             debug_assert!(retired.machine.is_some());
-            self.coordinator.retire_deferred(member.work);
+            coordinator.retire_deferred(member.work);
         }
         drop(retired);
     }
 
     fn claim_reflection_machine(&self, claim: ClaimedReflectionWork) -> ClaimedTaskKind {
         let mut tasks = self
-            .tasks
+            .state
             .lock()
             .expect("evaluation task registry was poisoned");
         let wait = tasks
@@ -2951,7 +3062,7 @@ impl EvaluationSession {
 
     fn claim_deferred_machine(&self, claim: ClaimedDeferredWork) -> ClaimedTaskKind {
         let mut tasks = self
-            .tasks
+            .state
             .lock()
             .expect("evaluation task registry was poisoned");
         let deferred = tasks
@@ -2972,33 +3083,37 @@ impl EvaluationSession {
         ClaimedTaskKind::Deferred(ClaimedDeferredTask { claim, machine })
     }
 
+    fn poll_claimed_task(self: &Arc<Self>, work: ClaimedTaskWork) {
+        let mut claimed = Self::claim_task_machine(self.clone(), work);
+        let poll = claimed.poll(TASK_POLL_QUANTUM);
+        let (_, _, released, status) = claimed.release(poll);
+        publish_task_status(status);
+        if let Some(machine) = released {
+            machine.finish();
+        }
+    }
+
+    fn claim_task_machine(machines: Arc<Self>, work: ClaimedTaskWork) -> ClaimedTask {
+        let kind = match work {
+            ClaimedTaskWork::Reflection(claim) => machines.claim_reflection_machine(claim),
+            ClaimedTaskWork::Deferred(claim) => machines.claim_deferred_machine(claim),
+        };
+        ClaimedTask { machines, kind }
+    }
+}
+
+impl EvaluationSession {
     fn claim_task(&self, id: EvaluationTaskId) -> Option<ClaimedTask> {
-        let (owner, work) = self.coordinator.claim_task(id)?;
-        Some(Self::claim_task_machine_from_owner(owner, work))
+        let (machines, work) = self.coordinator.claim_task(id)?;
+        Some(SessionMachineStore::claim_task_machine(machines, work))
     }
 
     fn claim_ready_task(&self) -> Option<ClaimedTask> {
         let work = self.coordinator.claim_ready_task_for_session(self.id)?;
-        Some(self.claim_task_machine(work))
-    }
-
-    fn claim_task_machine(&self, work: ClaimedTaskWork) -> ClaimedTask {
-        let owner = self
-            .coordinator
-            .registered_session(work.demand_session())
-            .expect("claimed work must retain its demand session through its machine");
-        Self::claim_task_machine_from_owner(owner, work)
-    }
-
-    fn claim_task_machine_from_owner(
-        owner: Arc<EvaluationSession>,
-        work: ClaimedTaskWork,
-    ) -> ClaimedTask {
-        let kind = match work {
-            ClaimedTaskWork::Reflection(claim) => owner.claim_reflection_machine(claim),
-            ClaimedTaskWork::Deferred(claim) => owner.claim_deferred_machine(claim),
-        };
-        ClaimedTask { owner, kind }
+        Some(SessionMachineStore::claim_task_machine(
+            self.machines.clone(),
+            work,
+        ))
     }
 
     fn producer_for_wait(&self, wait: &EvaluationWaitToken) -> Option<EvaluationTaskId> {
@@ -3080,16 +3195,6 @@ impl EvaluationSession {
 
     fn task_is_running(&self) -> bool {
         self.coordinator.session_machine_is_busy(self.id)
-    }
-
-    fn poll_claimed_task(&self, work: ClaimedTaskWork) {
-        let mut claimed = self.claim_task_machine(work);
-        let poll = claimed.poll(TASK_POLL_QUANTUM);
-        let (_, _, released, status) = claimed.release(poll);
-        publish_task_status(status);
-        if let Some(machine) = released {
-            machine.finish();
-        }
     }
 }
 
@@ -3198,6 +3303,7 @@ mod tests {
             test_execution_resources(0).expect("test execution resources should build");
         let owner = EvaluationSession::shared(&coordinator);
         let owner_weak = Arc::downgrade(&owner);
+        let machines_weak = Arc::downgrade(&owner.machines);
         let context = EvalContext::new(&owner);
         let task = context
             .schedule_task(|_| Ok(Box::new(AlwaysBlocked)))
@@ -3214,6 +3320,79 @@ mod tests {
             context.poll_reflection_task(&task),
             EvaluationWaitPoll::Abandoned
         ));
+        assert!(
+            machines_weak.upgrade().is_none(),
+            "blocked owner closure must retire the transitional machine store"
+        );
+    }
+
+    #[test]
+    fn running_machine_finishes_its_quantum_after_owner_drop_without_retaining_the_owner() {
+        let (coordinator, _executor) =
+            test_execution_resources(1).expect("test execution resources should build");
+        let owner = EvaluationSession::shared(&coordinator);
+        let owner_weak = Arc::downgrade(&owner);
+        let machines_weak = Arc::downgrade(&owner.machines);
+        let owner_session = owner.id;
+        let context = EvalContext::new(&owner);
+        let (started_sender, started_receiver) = mpsc::channel();
+        let (release_sender, release_receiver) = mpsc::channel();
+        let task = context
+            .schedule_task(move |_| {
+                Ok(Box::new(CompleteAfterRelease {
+                    started: Some(started_sender),
+                    release: release_receiver,
+                }))
+            })
+            .expect("running owner-drop task should schedule");
+        started_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("worker should claim the task");
+        assert!(Arc::ptr_eq(
+            &coordinator
+                .registered_machine_store(owner_session)
+                .expect("running work must keep its machine store registered"),
+            &owner.machines,
+        ));
+
+        drop(owner);
+        assert!(owner_weak.upgrade().is_none());
+        assert!(context.session.is_closed());
+        assert!(machines_weak.upgrade().is_some());
+        assert!(
+            context
+                .schedule_task(|_| Ok(Box::new(Complete)))
+                .expect_err("closed demand must reject later task admission")
+                .contains("closed")
+        );
+        assert!(matches!(
+            context.poll_reflection_task(&task),
+            EvaluationWaitPoll::Pending(_)
+        ));
+
+        release_sender
+            .send(())
+            .expect("running machine should still own its current quantum");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while matches!(
+            context.poll_reflection_task(&task),
+            EvaluationWaitPoll::Pending(_)
+        ) && Instant::now() < deadline
+        {
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            context.poll_reflection_task(&task),
+            EvaluationWaitPoll::Abandoned,
+            "owner closure must override the completed poll result"
+        );
+        while machines_weak.upgrade().is_some() && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert!(
+            machines_weak.upgrade().is_none(),
+            "terminal release must retire the closed session's machine store"
+        );
     }
 
     struct Complete;
@@ -3357,9 +3536,12 @@ mod tests {
     }
 
     fn assert_deferred_task_retired(context: &EvalContext, lazy: &LazyValue) {
-        let tasks = context
+        let machines = context
             .session
-            .tasks
+            .machine_store()
+            .expect("test context must retain its machine store");
+        let tasks = machines
+            .state
             .lock()
             .expect("evaluation task registry was poisoned");
         assert!(
@@ -3567,10 +3749,13 @@ mod tests {
 
     impl Drop for CompleteAndCheckReflectionDrop {
         fn drop(&mut self) {
-            self.dropped_without_registry_lock.store(
-                self.context.session.tasks.try_lock().is_ok(),
-                Ordering::Release,
-            );
+            let unlocked = self
+                .context
+                .session
+                .machine_store()
+                .is_none_or(|machines| machines.state.try_lock().is_ok());
+            self.dropped_without_registry_lock
+                .store(unlocked, Ordering::Release);
         }
     }
 
@@ -4016,7 +4201,9 @@ mod tests {
             );
             owner
                 .session
-                .tasks
+                .machine_store()
+                .expect("scheduled task must retain its machine store")
+                .state
                 .lock()
                 .expect("evaluation task registry was poisoned")
                 .reflection
@@ -4969,9 +5156,12 @@ mod tests {
         let reserved = context.reserve_task().expect("task should reserve");
         assert!(context.acknowledge_reflection_task_error(&reserved));
         {
-            let tasks = context
+            let machines = context
                 .session
-                .tasks
+                .machine_store()
+                .expect("reserved task must retain its machine store");
+            let tasks = machines
+                .state
                 .lock()
                 .expect("evaluation task registry was poisoned");
             assert!(
@@ -4993,9 +5183,12 @@ mod tests {
         );
         assert!(context.acknowledge_reflection_task_error(&blocked));
         {
-            let tasks = context
+            let machines = context
                 .session
-                .tasks
+                .machine_store()
+                .expect("blocked task must retain its machine store");
+            let tasks = machines
+                .state
                 .lock()
                 .expect("evaluation task registry was poisoned");
             assert!(

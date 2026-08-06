@@ -26,13 +26,14 @@ external `EvaluationSession` owner lease. An `Assembler` and its clones share
 one internal `ReasoningSession`, which retains that lease and the assembler's
 reflection host. `EvalContext` retains only `Arc<EvaluationDemandState>`, its
 selected task profile, and current task provenance. The demand state holds the
-value factory, session policy, explicit closed flag, opaque reflection and
-deferred machine slots, minimal work-to-machine lookup, and the persistent
-ledger of unacknowledged reflection failures; its coordinator route is weak.
-Dropping the final owner marks the state closed before asking the strongly held
-coordinator to abandon and unregister its work. Direct isolated evaluation
-uses an explicit owner/context wrapper instead of hiding the lease in
-`EvalContext`.
+value factory, session policy, explicit closed flag, and persistent ledger of
+unacknowledged reflection failures; its routes to both the coordinator and
+transitional machine store are weak. Opaque reflection/deferred machines and
+their minimal indexes reside in an explicit `Arc<SessionMachineStore>` sibling
+of the demand state. Dropping the final owner marks their shared closed flag
+before asking the strongly held coordinator to abandon and unregister its
+work. Direct isolated evaluation uses an explicit owner/context wrapper
+instead of hiding the lease in `EvalContext`.
 
 The runtime-owned `EvaluationWorkCoordinator` owns session registration, one
 runtime-wide ready-task queue, worker fairness, its work generation, the
@@ -40,7 +41,10 @@ condition variable used to await work, and stable runtime-local reflection,
 deferred-producer, and spark records. Reflection and deferred records own
 reservation/dormancy, queued, running, blocked, control, and terminalization
 state; the session machine store can detach or restore a machine only with a
-coordinator claim. Blocked reflection, deferred, and spark records retain
+coordinator claim. Session registration retains the transitional store while
+indexed work remains, and a task claim retains the store for its poll quantum;
+neither route recovers or retains the external owner lease. Blocked reflection,
+deferred, and spark records retain
 their exact dependency and checked subscription epoch; spark records
 additionally retain their demand value, demand-session index, and a close
 request while worker-owned. Completion sources retain
@@ -51,12 +55,14 @@ reblocking notifications are harmless. The attached
 `EvaluationExecutor` owns only worker activation, shutdown, and thread handles.
 Workers retain a weak coordinator attachment and claim either an exact ready
 task or spark record from it. During the transitional machine-store phase, a
-task claim retains its upgraded external owner lease while that owner detaches
-only the selected reflection or deferred machine. The owner retains its
-coordinator, while both demand state and coordinator registration point back
-weakly, so machine contexts cannot retain the owner through themselves. The
-immutable reflection environment belongs to the active task host rather than
-either scheduling component.
+task claim retains the registered store while detaching only its selected
+reflection or deferred machine. The store has only a weak coordinator route
+and no direct demand-state route; resident machine contexts may retain demand
+state, whose route back to the store is weak, but no route reaches the owner
+lease. Final owner drop can therefore close queued and blocked work immediately
+while a worker safely finishes one already-claimed quantum. The immutable
+reflection environment belongs to the active task host rather than either
+scheduling component.
 
 Coordinator mutations participate in the runtime settlement-admission gate
 and advance the coordinator's work generation before external wakes. They do
@@ -152,12 +158,13 @@ snapshot without holding its mutex during evaluation. Terminal cache
 publication precedes coordinator retirement, so later observers take the
 cached path. A transient coordinator `Reserved` state bridges installation of
 the session machine slot; a racing claimant reuses the canonical work and
-wait. Blocked work retains both its coordinator record and session machine.
-Terminal work retires from coordinator indexes before its detached machine is
-dropped outside locks.
+wait. Blocked work retains both its coordinator record and registered machine
+store. Terminal work retires from coordinator indexes before its detached
+machine is dropped outside locks.
 
 Every scheduler wait token is one shared cell containing identity, a weak
-session owner, an optional terminal result, and exact weak work registrations.
+demand-state reference, an optional terminal result, and exact weak work
+registrations.
 Completion, permanent failure, cancellation, and abandonment publish the
 result before coordinator retirement; exact registrations detach and reach
 the coordinator only after the terminal cell's lock is released. Polling
@@ -181,7 +188,8 @@ surface leaves the terminal result unchanged.
 
 ### Scheduler State Ownership
 
-The session owns executable machine storage, not scheduling state:
+The transitional session machine store owns executable machine storage, not
+scheduling state:
 
 | State | Owner |
 | --- | --- |

@@ -76,19 +76,22 @@ control-flow overview.
   published before that cell releases its `LazySource`; active workers retain
   only their source snapshots and may finish harmlessly against the canonical
   cache. Blocking and retryable promise conditions retain the source.
-  Terminal deferred-task records and all their indexes are removed while the
-  session registry is locked, then their machines and captured state are
-  dropped after unlocking. A raced source snapshot may register one redundant
-  producer; it must observe the canonical cache and retire harmlessly. Every
+  Terminal deferred-task records and all their temporary indexes are removed
+  while the explicit session machine store is locked, then their machines and
+  captured state are dropped after unlocking. The coordinator retains that
+  store while indexed work remains; claimed work retains it for its poll
+  quantum, but neither route retains the external demand-owner lease. A raced
+  source snapshot may register one redundant producer; it must observe the
+  canonical cache and retire harmlessly. Every
   scheduler wait token shares a lock-free terminal cell plus a weak exact-work
   subscription set. Terminal state is published and producer indexes retire
-  while the session registry is locked; exact subscribers detach and notify
-  the coordinator only after unlocking. Polling checks the cell around
-  registry lookup, so a terminal result outlives the weakly held owner session
-  while a pending wait does not keep that session alive. Terminal reflection
-  records and their task-ID indexes are retired immediately. A wait-blocked
-  spark subscribes its stable work ID and epoch directly to this source;
-  unrelated task progress must not wake it.
+  through the owning coordinator/store transition; exact subscribers detach
+  and notify the coordinator only after unlocking. Polling checks the cell
+  around registry lookup, so a terminal result outlives the weakly held demand
+  state while a pending wait does not keep its external owner alive. Terminal
+  reflection records and their task-ID indexes are retired immediately. A
+  wait-blocked spark subscribes its stable work ID and epoch directly to this
+  source; unrelated task progress must not wake it.
   Unacknowledged reflection failures remain only in the persistent reporting
   ledger; `.task.ack_error` removes that entry without changing the handle's
   terminal observation. Task-owned promise waits follow the same ownership
