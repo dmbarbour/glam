@@ -116,12 +116,16 @@ expired weak binding. Consequently completion sources allocated through the
 factory always deliver exact wakes to the coordinator which owns their work,
 without making escaped values retain the coordinator.
 
-The runtime resource state and immutable default reflection profile remain
-sibling roots owned by `EvaluationRuntime`. A profile launcher retains its
-host, and that host may retain the resource state; placing the profile inside
-that state would therefore create a direct cycle. The sibling arrangement lets
-an escaped `EvalContext` keep both resources usable and releases both when the
-last context disappears.
+The public `EvaluationRuntime` owns its lifecycle `RuntimeState` and immutable
+default reflection profile as sibling roots. `RuntimeState` in turn owns one
+`Arc<RuntimeSharedResources>` containing the value factory, transaction state,
+observation epoch, mutation admission, and runtime-local IDs. That bundle has
+only a weak route back to the work coordinator; the executor, coordinator
+ownership, and diagnostic-ingress registry remain in `RuntimeState`. A profile
+launcher currently retains its host, and that host retains `RuntimeState` until
+the next ownership slice retargets it to the acyclic bundle. Keeping the
+default profile outside `RuntimeState` avoids the direct profile/host cycle
+throughout the transition.
 
 Lazy values retain computation and a stable identity, not a captured evaluator
 session. The observing `EvalContext` supplies host and scheduling behavior when

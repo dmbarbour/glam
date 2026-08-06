@@ -109,9 +109,12 @@ and complete type-indexed compiler bundles. Attachments are
 built outside synchronization and publish one completed winner; each
 `CompileContext` keeps a compilation-local lookup view without duplicating the
 runtime bundle. Process-global protocol keys remain immutable descriptions,
-but no production static retains a constructed value. Runtime resources and
-the sealed default reflection profile remain acyclic sibling roots so an
-escaped evaluation context can keep both usable without retaining a cycle.
+but no production static retains a constructed value. The public runtime owns
+its lifecycle state and sealed default reflection profile as sibling roots.
+Lifecycle state owns an acyclic `RuntimeSharedResources` bundle for values,
+transactions, observations, mutation admission, and local IDs; that bundle
+has only a weak coordinator route and retains neither executor nor diagnostic
+ingress policy.
 The runtime transaction domain also owns registered admitted-input FIFOs.
 Rust hosts create a typed sender plus a runtime-bound transactional reader with
 `EvaluationRuntime::input_endpoint`; conversion occurs before admission, while

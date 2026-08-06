@@ -1506,15 +1506,25 @@ pub struct EvaluationRuntime {
 }
 
 struct RuntimeState {
-    id: EvaluationRuntimeId,
     executor: Arc<EvaluationExecutor>,
     work: Arc<EvaluationWorkCoordinator>,
+    shared_resources: Arc<RuntimeSharedResources>,
+    diagnostic_ingresses: Mutex<Vec<Arc<DiagnosticIngressInner>>>,
+}
+
+/// Acyclic runtime infrastructure needed by evaluation and reflection work.
+///
+/// The coordinator route is deliberately weak: retaining these resources must
+/// not retain the runtime scheduler, executor, public runtime wrapper, or
+/// default reflection profile.
+struct RuntimeSharedResources {
+    id: EvaluationRuntimeId,
     values: RuntimeValueFactory,
     transactions: RuntimeTransactionState,
     observations: Arc<RuntimeObservationState>,
     ids: Arc<RuntimeIds>,
-    diagnostic_ingresses: Mutex<Vec<Arc<DiagnosticIngressInner>>>,
     mutation_admission: Arc<RuntimeMutationAdmission>,
+    work: Weak<EvaluationWorkCoordinator>,
 }
 
 struct RuntimeTransactionState {
@@ -1864,13 +1874,13 @@ impl RuntimeEventJournal {
         value: Value,
     ) -> Result<RuntimeDeliveryId, Error> {
         let owner = output.validate_runtime(self.runtime)?;
-        let id = owner.ids.delivery().map_err(Error::new)?;
+        let id = owner.shared_resources.ids.delivery().map_err(Error::new)?;
         let delivery =
             RuntimeDeliveryId::from_u64(id.get()).expect("runtime delivery IDs start at one");
         self.outputs.push(RuntimeOutputIntent {
             delivery,
             endpoint: output.endpoint,
-            payload: owner.values.root(value)?,
+            payload: owner.shared_resources.values.root(value)?,
         });
         Ok(delivery)
     }
@@ -1959,7 +1969,7 @@ impl<T> RuntimeInputSender<T> {
             runtime: self.runtime,
             owner: Arc::downgrade(&owner),
             endpoint: self.endpoint,
-            payload: owner.values.root(value)?,
+            payload: owner.shared_resources.values.root(value)?,
         })
     }
 }
@@ -2077,7 +2087,7 @@ impl<T> RuntimeOutputDelivery<T> {
                 self.endpoint.get()
             ))
         })?;
-        if owner.id != self.runtime {
+        if owner.shared_resources.id != self.runtime {
             return Err(Error::new("output endpoint runtime provenance mismatch"));
         }
         let Some(ticket) = claim_runtime_delivery(
@@ -2148,7 +2158,7 @@ impl<T> RuntimeDeliveryTicket<T> {
             adapter,
         } = self;
         let invocation = catch_unwind(AssertUnwindSafe(|| {
-            let decoded = decode(payload.value(runtime.id))
+            let decoded = decode(payload.value(runtime.shared_resources.id))
                 .map_err(|error| (RuntimeDeliveryFailureKind::Decode, error))?;
             adapter(decoded).map_err(|error| (RuntimeDeliveryFailureKind::Adapter, error))
         }));
@@ -2244,10 +2254,11 @@ fn admit_runtime_input(
     endpoint: RuntimeInputEndpointId,
     payload: RuntimeValueRoot,
 ) -> Result<RuntimeInputSequence, Error> {
-    debug_assert_eq!(payload.runtime_id(), runtime.id);
-    let mutation = runtime.mutation_admission.mutation_guard();
+    let resources = &runtime.shared_resources;
+    debug_assert_eq!(payload.runtime_id(), resources.id);
+    let mutation = resources.mutation_admission.mutation_guard();
     let sequence = {
-        let mut state = runtime
+        let mut state = resources
             .transactions
             .state
             .lock()
@@ -2278,7 +2289,7 @@ fn admit_runtime_input(
             .insert(ConflictAddress::input_slot(endpoint, sequence), revision);
         sequence
     };
-    publish_runtime_observation(runtime, mutation);
+    publish_runtime_observation(resources, mutation);
     Ok(sequence)
 }
 
@@ -2288,9 +2299,10 @@ fn claim_runtime_delivery<T>(
     decode: Arc<RuntimeOutputDecoder<T>>,
     adapter: Arc<RuntimeOutputAdapter<T>>,
 ) -> Result<Option<RuntimeDeliveryTicket<T>>, Error> {
-    let mutation = runtime.mutation_admission.mutation_guard();
+    let resources = &runtime.shared_resources;
+    let mutation = resources.mutation_admission.mutation_guard();
     let claimed = {
-        let mut state = runtime
+        let mut state = resources
             .transactions
             .state
             .lock()
@@ -2336,24 +2348,25 @@ fn claim_runtime_delivery<T>(
 }
 
 fn terminalize_runtime_delivery(
-    runtime: &Arc<RuntimeState>,
+    runtime: &RuntimeState,
     endpoint: RuntimeOutputEndpointId,
     delivery: RuntimeDeliveryId,
     failure: Option<(RuntimeDeliveryFailureKind, Error)>,
 ) -> Result<Option<Arc<RuntimeDeliveryFailure>>, Error> {
+    let resources = &runtime.shared_resources;
     let failure = failure.map(|(kind, error)| {
         Arc::new(RuntimeDeliveryFailure {
-            runtime: runtime.id,
+            runtime: resources.id,
             delivery,
             endpoint,
             kind,
             error,
         })
     });
-    let mutation = runtime.mutation_admission.mutation_guard();
+    let mutation = resources.mutation_admission.mutation_guard();
     let retired =
         {
-            let mut state = runtime
+            let mut state = resources
                 .transactions
                 .state
                 .lock()
@@ -2392,7 +2405,7 @@ fn terminalize_runtime_delivery(
             }
             retired
         };
-    publish_runtime_observation(runtime, mutation);
+    publish_runtime_observation(resources, mutation);
     drop(retired);
     Ok(failure)
 }
@@ -2401,7 +2414,8 @@ fn runtime_delivery_failure_snapshot(
     runtime: &RuntimeState,
     endpoint: Option<RuntimeOutputEndpointId>,
 ) -> RuntimeDeliveryFailureSnapshot {
-    let state = runtime
+    let resources = &runtime.shared_resources;
+    let state = resources
         .transactions
         .state
         .lock()
@@ -2420,19 +2434,25 @@ fn runtime_delivery_failure_snapshot(
         None => state.events.outputs.failures.clone(),
     };
     RuntimeDeliveryFailureSnapshot {
-        runtime: runtime.id,
+        runtime: resources.id,
         failures,
     }
 }
 
-fn publish_runtime_observation(runtime: &RuntimeState, mutation: RuntimeMutationGuard<'_>) {
-    let epoch = runtime.observations.advance();
-    let scheduler_changed = runtime
-        .work
-        .publish_runtime_observation_guarded(&mutation, epoch);
+fn publish_runtime_observation(
+    resources: &RuntimeSharedResources,
+    mutation: RuntimeMutationGuard<'_>,
+) {
+    let epoch = resources.observations.advance();
+    let work = resources.work.upgrade();
+    let scheduler_changed = work
+        .as_ref()
+        .map(|work| work.publish_runtime_observation_guarded(&mutation, epoch));
     drop(mutation);
-    runtime.observations.notify_all();
-    runtime.work.notify_runtime_observation(scheduler_changed);
+    resources.observations.notify_all();
+    if let (Some(work), Some(changed)) = (work, scheduler_changed) {
+        work.notify_runtime_observation(changed);
+    }
 }
 
 impl EvaluationRuntime {
@@ -2464,30 +2484,34 @@ impl EvaluationRuntime {
         values.core().attach_work_coordinator(&work);
         let executor = EvaluationExecutor::new(worker_threads, &work)
             .map_err(|error| Error::new(error.as_ref()))?;
+        let shared_resources = Arc::new(RuntimeSharedResources {
+            id,
+            values: values.clone(),
+            transactions: RuntimeTransactionState {
+                state: Mutex::new(RuntimeTransactionData {
+                    reflection: ReflectionStore::new(values.core().clone(), conflict_analysis),
+                    events: RuntimeEventState::new(event_conflict_analysis),
+                    logger_lifecycle: RuntimeLoggerLifecycleState::default(),
+                }),
+            },
+            observations,
+            ids,
+            mutation_admission,
+            work: Arc::downgrade(&work),
+        });
         Ok(Self {
             state: Arc::new(RuntimeState {
-                id,
                 executor,
                 work,
-                values: values.clone(),
-                transactions: RuntimeTransactionState {
-                    state: Mutex::new(RuntimeTransactionData {
-                        reflection: ReflectionStore::new(values.core().clone(), conflict_analysis),
-                        events: RuntimeEventState::new(event_conflict_analysis),
-                        logger_lifecycle: RuntimeLoggerLifecycleState::default(),
-                    }),
-                },
-                observations,
-                ids,
+                shared_resources,
                 diagnostic_ingresses: Mutex::new(Vec::new()),
-                mutation_admission,
             }),
             default_reflection_profile: Arc::new(ReflectionTaskProfile::unsealed()),
         })
     }
 
     pub fn id(&self) -> EvaluationRuntimeId {
-        self.state.id
+        self.state.shared_resources.id
     }
 
     pub fn worker_threads(&self) -> usize {
@@ -2498,7 +2522,7 @@ impl EvaluationRuntime {
     pub fn values(&self) -> Values {
         Values {
             runtime: self.id(),
-            core: self.state.values.core().clone(),
+            core: self.state.shared_resources.values.core().clone(),
         }
     }
 
@@ -2511,11 +2535,17 @@ impl EvaluationRuntime {
     where
         F: Fn(T) -> Result<Value, Error> + Send + Sync + 'static,
     {
-        let id = self.state.ids.input_endpoint().map_err(Error::new)?;
+        let id = self
+            .state
+            .shared_resources
+            .ids
+            .input_endpoint()
+            .map_err(Error::new)?;
         let endpoint = RuntimeInputEndpointId::from_u64(id.get())
             .expect("runtime input endpoint IDs start at one");
         let _mutation = self.mutation_guard();
         self.state
+            .shared_resources
             .transactions
             .state
             .lock()
@@ -2551,11 +2581,17 @@ impl EvaluationRuntime {
         D: Fn(Value) -> Result<T, Error> + Send + Sync + 'static,
         A: Fn(T) -> Result<(), Error> + Send + Sync + 'static,
     {
-        let id = self.state.ids.output_endpoint().map_err(Error::new)?;
+        let id = self
+            .state
+            .shared_resources
+            .ids
+            .output_endpoint()
+            .map_err(Error::new)?;
         let endpoint = RuntimeOutputEndpointId::from_u64(id.get())
             .expect("runtime output endpoint IDs start at one");
         let _mutation = self.mutation_guard();
         self.state
+            .shared_resources
             .transactions
             .state
             .lock()
@@ -2594,6 +2630,7 @@ impl EvaluationRuntime {
         let removed = {
             let mut state = self
                 .state
+                .shared_resources
                 .transactions
                 .state
                 .lock()
@@ -2616,6 +2653,7 @@ impl EvaluationRuntime {
     pub fn has_delivery_activity(&self) -> bool {
         !self
             .state
+            .shared_resources
             .transactions
             .state
             .lock()
@@ -2643,7 +2681,7 @@ impl EvaluationRuntime {
         }
         Ok(EvaluationSession::shared_with_default_profile(
             &self.state.work,
-            self.state.values.core().clone(),
+            self.state.shared_resources.values.core().clone(),
             self.default_reflection_profile.clone(),
         ))
     }
@@ -2662,24 +2700,30 @@ impl EvaluationRuntime {
     }
 
     fn root_value(&self, value: Value) -> Result<RuntimeValueRoot, Error> {
-        self.state.values.root(value)
+        self.state.shared_resources.values.root(value)
     }
 
     fn allocate_reasoning_session_id(&self) -> ReasoningSessionId {
-        ReasoningSessionId::from_u64(self.state.ids.reasoning_session().get())
+        ReasoningSessionId::from_u64(self.state.shared_resources.ids.reasoning_session().get())
             .expect("reasoning session IDs start at one")
     }
 
     pub(crate) fn allocate_cli_invocation_id(&self) -> u64 {
-        self.state.ids.cli_invocation().get()
+        self.state.shared_resources.ids.cli_invocation().get()
     }
 
     fn mutation_guard(&self) -> RuntimeMutationGuard<'_> {
-        self.state.mutation_admission.mutation_guard()
+        self.state
+            .shared_resources
+            .mutation_admission
+            .mutation_guard()
     }
 
     fn try_settlement_guard(&self) -> Option<RuntimeSettlementGuard<'_>> {
-        self.state.mutation_admission.try_settlement_guard()
+        self.state
+            .shared_resources
+            .mutation_admission
+            .try_settlement_guard()
     }
 
     /// Reports whether exclusive runtime mutation admission can be acquired
@@ -2695,9 +2739,10 @@ impl EvaluationRuntime {
         // Reading the epoch first is intentionally conservative. A concurrent
         // commit can make the returned store newer than the epoch, but cannot
         // leave a waiter holding an old store and a new epoch with no wake.
-        let generation = self.state.observations.current().get();
+        let generation = self.state.shared_resources.observations.current().get();
         let store = self
             .state
+            .shared_resources
             .transactions
             .state
             .lock()
@@ -2715,9 +2760,10 @@ impl EvaluationRuntime {
     ) -> (u64, crate::reflection::StoreSnapshot, RuntimeEventSnapshot) {
         // As with `reflection_snapshot`, reading the epoch first prevents a
         // waiter from retaining a new epoch beside stale transactional state.
-        let generation = self.state.observations.current().get();
+        let generation = self.state.shared_resources.observations.current().get();
         let state = self
             .state
+            .shared_resources
             .transactions
             .state
             .lock()
@@ -2744,6 +2790,7 @@ impl EvaluationRuntime {
         let (result, changed) = {
             let mut state = self
                 .state
+                .shared_resources
                 .transactions
                 .state
                 .lock()
@@ -2776,6 +2823,7 @@ impl EvaluationRuntime {
         let mutation = self.mutation_guard();
         let result = {
             self.state
+                .shared_resources
                 .transactions
                 .state
                 .lock()
@@ -2793,6 +2841,7 @@ impl EvaluationRuntime {
         initial.require_runtime(self.id())?;
         let _mutation = self.mutation_guard();
         self.state
+            .shared_resources
             .transactions
             .state
             .lock()
@@ -2806,6 +2855,7 @@ impl EvaluationRuntime {
         let mutation = self.mutation_guard();
         let value = {
             self.state
+                .shared_resources
                 .transactions
                 .state
                 .lock()
@@ -2833,6 +2883,7 @@ impl EvaluationRuntime {
         let mutation = self.mutation_guard();
         let updated = {
             self.state
+                .shared_resources
                 .transactions
                 .state
                 .lock()
@@ -2847,12 +2898,13 @@ impl EvaluationRuntime {
     }
 
     fn publish_observation(&self, mutation: RuntimeMutationGuard<'_>) {
-        publish_runtime_observation(&self.state, mutation);
+        publish_runtime_observation(&self.state.shared_resources, mutation);
     }
 
     #[doc(hidden)]
     pub fn wait_for_change(&self, observed_generation: u64) -> bool {
         self.state
+            .shared_resources
             .observations
             .wait_for_change(RuntimeObservationEpoch::from_raw(observed_generation));
         true
@@ -2864,9 +2916,10 @@ impl EvaluationRuntime {
     pub fn logger_transaction_snapshot(
         &self,
     ) -> (u64, crate::reflection::StoreSnapshot, RuntimeLoggerSnapshot) {
-        let generation = self.state.observations.current().get();
+        let generation = self.state.shared_resources.observations.current().get();
         let state = self
             .state
+            .shared_resources
             .transactions
             .state
             .lock()
@@ -2901,6 +2954,7 @@ impl EvaluationRuntime {
         let (result, changed) = {
             let mut state = self
                 .state
+                .shared_resources
                 .transactions
                 .state
                 .lock()
@@ -2932,6 +2986,7 @@ impl EvaluationRuntime {
         {
             let mut state = self
                 .state
+                .shared_resources
                 .transactions
                 .state
                 .lock()
@@ -2948,6 +3003,7 @@ impl EvaluationRuntime {
         {
             let mut state = self
                 .state
+                .shared_resources
                 .transactions
                 .state
                 .lock()
@@ -2961,6 +3017,7 @@ impl EvaluationRuntime {
     #[cfg(test)]
     fn reflection_root(&self) -> Value {
         self.state
+            .shared_resources
             .transactions
             .state
             .lock()
@@ -2972,6 +3029,7 @@ impl EvaluationRuntime {
 
     fn conflict_analysis(&self) -> Arc<dyn ConflictAnalysisStrategy> {
         self.state
+            .shared_resources
             .transactions
             .state
             .lock()
@@ -4706,7 +4764,7 @@ mod tests {
         assert_ne!(first.id(), second.id());
 
         let allocate_one_of_each = |runtime: &EvaluationRuntime| {
-            let ids = &runtime.state.ids;
+            let ids = &runtime.state.shared_resources.ids;
             (
                 ids.evaluation_session().get(),
                 ids.evaluation_task().unwrap().get(),
@@ -4740,6 +4798,44 @@ mod tests {
             Ok(second_unit.clone())
         });
         assert_eq!(first_lazy.id().get(), second_lazy.id().get());
+    }
+
+    #[test]
+    fn runtime_shared_resources_do_not_retain_runtime_lifecycle_owners() {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let runtime_id = runtime.id();
+        let state = Arc::downgrade(&runtime.state);
+        let coordinator = Arc::downgrade(&runtime.state.work);
+        let executor = Arc::downgrade(&runtime.state.executor);
+        let profile = Arc::downgrade(&runtime.default_reflection_profile);
+        let resources = runtime.state.shared_resources.clone();
+        let retained_resources = Arc::downgrade(&resources);
+
+        drop(runtime);
+
+        assert!(state.upgrade().is_none());
+        assert!(coordinator.upgrade().is_none());
+        assert!(executor.upgrade().is_none());
+        assert!(profile.upgrade().is_none());
+        assert!(resources.work.upgrade().is_none());
+        assert_eq!(resources.id, runtime_id);
+        assert_eq!(resources.values.core().runtime_id(), runtime_id);
+
+        let before = resources.observations.current();
+        let mutation = resources.mutation_admission.mutation_guard();
+        publish_runtime_observation(&resources, mutation);
+        assert!(resources.observations.current() > before);
+        assert!(resources.ids.reasoning_session().get() > 0);
+        let _snapshot = resources
+            .transactions
+            .state
+            .lock()
+            .expect("runtime transaction mutex should not be poisoned")
+            .reflection
+            .snapshot();
+
+        drop(resources);
+        assert!(retained_resources.upgrade().is_none());
     }
 
     #[test]
@@ -5311,6 +5407,7 @@ mod tests {
 
         let state = runtime
             .state
+            .shared_resources
             .transactions
             .state
             .lock()
@@ -5361,6 +5458,7 @@ mod tests {
         {
             let mut state = runtime
                 .state
+                .shared_resources
                 .transactions
                 .state
                 .lock()
@@ -5392,7 +5490,7 @@ mod tests {
         );
 
         let endpoint_count = after.inputs.len();
-        runtime.state.ids.exhaust_input_endpoints();
+        runtime.state.shared_resources.ids.exhaust_input_endpoints();
         assert!(runtime.input_endpoint(integer_converter(&runtime)).is_err());
         let (_, _, after_id_failure) = runtime.transaction_snapshot();
         assert_eq!(after_id_failure.inputs.len(), endpoint_count);
@@ -5655,7 +5753,7 @@ mod tests {
         let endpoint = runtime
             .output_endpoint(decode_test_integer, |_: i64| Ok(()))
             .expect("output endpoint should register");
-        runtime.state.ids.exhaust_deliveries();
+        runtime.state.shared_resources.ids.exhaust_deliveries();
         let (_, mut events) = input_transaction(&runtime);
         assert!(
             events
@@ -5666,6 +5764,7 @@ mod tests {
 
         let endpoint_count = runtime
             .state
+            .shared_resources
             .transactions
             .state
             .lock()
@@ -5674,7 +5773,11 @@ mod tests {
             .outputs
             .ready_by_endpoint
             .len();
-        runtime.state.ids.exhaust_output_endpoints();
+        runtime
+            .state
+            .shared_resources
+            .ids
+            .exhaust_output_endpoints();
         assert!(
             runtime
                 .output_endpoint(decode_test_integer, |_: i64| Ok(()))
@@ -5683,6 +5786,7 @@ mod tests {
         assert_eq!(
             runtime
                 .state
+                .shared_resources
                 .transactions
                 .state
                 .lock()
@@ -6030,7 +6134,13 @@ mod tests {
         impl Drop for DeliveryLease {
             fn drop(&mut self) {
                 if let Some(runtime) = self.runtime.upgrade() {
-                    assert!(runtime.mutation_admission.try_settlement_guard().is_some());
+                    assert!(
+                        runtime
+                            .shared_resources
+                            .mutation_admission
+                            .try_settlement_guard()
+                            .is_some()
+                    );
                 }
                 self.dropped.store(true, Ordering::Release);
             }
@@ -6250,7 +6360,7 @@ mod tests {
         let (before, _) = runtime.reflection_snapshot();
         let session = EvaluationSession::shared_with_default_profile(
             &runtime.state.work,
-            runtime.state.values.core().clone(),
+            runtime.state.shared_resources.values.core().clone(),
             Arc::new(ReflectionTaskProfile::unsealed()),
         );
         let context = EvalContext::new(session.clone());
