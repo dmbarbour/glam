@@ -2815,7 +2815,10 @@ impl EvaluationSession {
                 .collect(),
         });
         let failure = Arc::new(EvaluationFailure::dependency_cycle(cycle));
-        let terminals = members
+        // Make the shared failure authoritative in every lazy before any
+        // producer wait wakes. The already-batched `Terminalizing` transition
+        // prevents another worker from reclaiming a cycle member meanwhile.
+        let mut terminals = members
             .iter()
             .map(|member| {
                 let terminal = match member.lazy.cache(Err(failure.clone())) {
@@ -2831,21 +2834,25 @@ impl EvaluationSession {
                         ))
                     }
                 };
-                let terminal = self.coordinator.settle_terminal_work(
-                    member.work,
-                    terminal,
-                    failure.clone(),
-                );
                 (member, terminal)
             })
             .collect::<Vec<_>>();
-        let retired = {
-            let mut tasks = self
-                .tasks
-                .lock()
-                .expect("evaluation task registry was poisoned");
-            let mut retired = Vec::with_capacity(terminals.len());
-            for (member, terminal) in &terminals {
+        for (member, terminal) in &mut terminals {
+            *terminal = self.coordinator.settle_terminal_work(
+                member.work,
+                terminal.clone(),
+                failure.clone(),
+            );
+        }
+        let mut retired = Vec::with_capacity(terminals.len());
+        for (member, terminal) in &terminals {
+            debug_assert!(Arc::ptr_eq(&member.session.coordinator, &self.coordinator));
+            let record = {
+                let mut tasks = member
+                    .session
+                    .tasks
+                    .lock()
+                    .expect("evaluation task registry was poisoned");
                 debug_assert_eq!(member.wait.terminal_poll(), Some(terminal.to_poll()));
                 let deferred = DeferredValueId::Lazy(member.lazy.id());
                 let record = tasks
@@ -2853,16 +2860,13 @@ impl EvaluationSession {
                     .get(&deferred)
                     .expect("terminalizing lazy cycle member must retain its machine slot");
                 assert_eq!(record.work, member.work);
-                retired.push(retire_deferred_task(&mut tasks, deferred));
-            }
-            self.notify_task_changed();
-            retired
-        };
-        for (member, _) in terminals {
-            let retired = retired
-                .iter()
-                .find(|record| record.work == member.work)
-                .expect("settled lazy cycle member must retain its retired machine slot");
+                retire_deferred_task(&mut tasks, deferred)
+            };
+            member.session.notify_task_changed();
+            retired.push(record);
+        }
+        for ((member, _), retired) in terminals.into_iter().zip(&retired) {
+            debug_assert_eq!(retired.work, member.work);
             debug_assert!(retired.machine.is_some());
             self.coordinator.retire_deferred(member.work);
         }
@@ -3175,7 +3179,11 @@ mod tests {
     }
 
     fn inert_lazy(label: &'static str) -> LazyValue {
-        LazyValue::deferred(&crate::core::test_value_factory(), label, |_| {
+        inert_lazy_for(&crate::core::test_value_factory(), label)
+    }
+
+    fn inert_lazy_for(values: &CoreValueFactory, label: &'static str) -> LazyValue {
+        LazyValue::deferred(values, label, |_| {
             panic!("scheduler cycle fixtures must use their installed test machine")
         })
     }
@@ -3193,6 +3201,21 @@ mod tests {
                 })
             })
             .expect("test lazy task should register")
+    }
+
+    fn register_promise_await(
+        context: &EvalContext,
+        promise: &PromisedValue,
+        dependency: Arc<OnceLock<EvaluationWaitToken>>,
+    ) -> EvaluationWaitToken {
+        context
+            .promise_task(promise, move |task_context| {
+                Box::new(AwaitCell {
+                    context: task_context,
+                    dependency,
+                })
+            })
+            .expect("test promise task should register")
     }
 
     fn assert_deferred_task_retired(context: &EvalContext, lazy: &LazyValue) {
@@ -4310,6 +4333,103 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![left.id(), right.id()]
         );
+    }
+
+    #[test]
+    fn two_sessions_share_and_retire_one_pure_lazy_cycle_failure() {
+        let fixture = SameRuntimeFixture::new();
+        let left_context = fixture.context();
+        let right_context = fixture.context();
+        let left = inert_lazy_for(left_context.values(), "cross-session left");
+        let right = inert_lazy_for(right_context.values(), "cross-session right");
+        let left_dependency = Arc::new(OnceLock::new());
+        let right_dependency = Arc::new(OnceLock::new());
+        let left_wait = register_lazy_await(&left_context, &left, left_dependency.clone());
+        let right_wait = register_lazy_await(&right_context, &right, right_dependency.clone());
+        left_dependency
+            .set(right_wait.clone())
+            .expect("left dependency should be installed once");
+        right_dependency
+            .set(left_wait.clone())
+            .expect("right dependency should be installed once");
+
+        assert_eq!(
+            left_context.pump_wait(&left_wait, 256),
+            EvaluationPumpOutcome::TargetReady
+        );
+        assert_eq!(
+            right_context.pump_wait(&right_wait, 256),
+            EvaluationPumpOutcome::TargetReady
+        );
+        assert!(matches!(
+            left_context.poll_wait(&left_wait),
+            EvaluationWaitPoll::Failed(_)
+        ));
+        assert!(matches!(
+            right_context.poll_wait(&right_wait),
+            EvaluationWaitPoll::Failed(_)
+        ));
+
+        let left_failure = left_context
+            .lazy_failure(&left)
+            .expect("left cycle member should retain its failure");
+        let right_failure = right_context
+            .lazy_failure(&right)
+            .expect("right cycle member should retain its failure");
+        assert!(Arc::ptr_eq(&left_failure, &right_failure));
+        let cycle = dependency_cycle(&left);
+        assert_eq!(
+            cycle
+                .members
+                .iter()
+                .map(|member| member.id)
+                .collect::<Vec<_>>(),
+            vec![left.id(), right.id()]
+        );
+        assert!(left.source_snapshot().is_none());
+        assert!(right.source_snapshot().is_none());
+        assert_deferred_task_retired(&left_context, &left);
+        assert_deferred_task_retired(&right_context, &right);
+    }
+
+    #[test]
+    fn a_cross_session_promise_lazy_cycle_remains_unpoisoned() {
+        let fixture = SameRuntimeFixture::new();
+        let lazy_context = fixture.context();
+        let promise_context = fixture.context();
+        let lazy = inert_lazy_for(lazy_context.values(), "mixed cross-session lazy");
+        let promise = PromisedValue::new(lazy_context.values(), "mixed cross-session promise");
+        let lazy_dependency = Arc::new(OnceLock::new());
+        let promise_dependency = Arc::new(OnceLock::new());
+        let lazy_wait = register_lazy_await(&lazy_context, &lazy, lazy_dependency.clone());
+        let promise_wait =
+            register_promise_await(&promise_context, &promise, promise_dependency.clone());
+        lazy_dependency
+            .set(promise_wait.clone())
+            .expect("lazy dependency should be installed once");
+        promise_dependency
+            .set(lazy_wait.clone())
+            .expect("promise dependency should be installed once");
+
+        assert_eq!(
+            lazy_context.pump_wait(&lazy_wait, 256),
+            EvaluationPumpOutcome::NoProgress
+        );
+        assert_eq!(
+            promise_context.pump_wait(&promise_wait, 256),
+            EvaluationPumpOutcome::NoProgress
+        );
+        assert!(lazy.cached().is_none());
+        assert!(lazy.source_snapshot().is_some());
+        assert!(promise.assignment().is_none());
+        assert!(matches!(
+            lazy_context.poll_wait(&lazy_wait),
+            EvaluationWaitPoll::Pending(_)
+        ));
+        assert!(matches!(
+            promise_context.poll_wait(&promise_wait),
+            EvaluationWaitPoll::Pending(_)
+        ));
     }
 
     #[test]

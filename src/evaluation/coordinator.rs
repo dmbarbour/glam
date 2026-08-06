@@ -603,6 +603,7 @@ pub(super) struct DeferredLazyCycleMember {
     pub(super) work: EvaluationWorkId,
     pub(super) wait: EvaluationWaitToken,
     pub(super) lazy: LazyValue,
+    pub(super) session: Arc<EvaluationSession>,
 }
 
 pub(super) struct DeferredWorkRelease {
@@ -3172,19 +3173,13 @@ fn terminalize_pure_lazy_cycle(
     let Some(cycle) = deferred_dependency_cycle(state, start) else {
         return Vec::new();
     };
-    let session = state
-        .work
-        .get(&start)
-        .expect("cycle start must remain registered")
-        .demand_session;
-    let pure_local = cycle.iter().all(|id| {
+    let pure_lazy = cycle.iter().all(|id| {
         state.work.get(id).is_some_and(|record| {
-            record.demand_session == session
-                && matches!(record.state, WorkState::Blocked)
+            matches!(record.state, WorkState::Blocked)
                 && matches!(deferred_work(record).producer, DeferredProducer::Lazy(_))
         })
     });
-    if !pure_local {
+    if !pure_lazy {
         return Vec::new();
     }
 
@@ -3198,10 +3193,16 @@ fn terminalize_pure_lazy_cycle(
             let DeferredProducer::Lazy(lazy) = &deferred_work(record).producer else {
                 unreachable!("pure lazy cycle cannot contain a promise")
             };
+            let session = state
+                .sessions
+                .get(&record.demand_session)
+                .and_then(Weak::upgrade)
+                .expect("blocked deferred work must retain its demand session");
             DeferredLazyCycleMember {
                 work: *id,
                 wait: deferred_work(record).wait.clone(),
                 lazy: lazy.clone(),
+                session,
             }
         })
         .collect::<Vec<_>>();
