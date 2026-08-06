@@ -2352,8 +2352,9 @@ impl EvaluationWorkCoordinator {
         // while this work is Running. Cancellation from another thread only
         // records a request; terminalization happens when that same poll
         // releases the machine. Therefore an assignment observed here has
-        // already removed its dynamic obligation. Do not add an independently
-        // usable task-promise resolver without revisiting this invariant.
+        // already removed its dynamic obligation. A promise with an
+        // independently usable resolver is resolver-owned instead and must not
+        // enter this inventory.
         self.fail_task_promises(work, promise_failure);
         {
             let state = self

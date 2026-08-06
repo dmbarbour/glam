@@ -246,8 +246,8 @@ impl PromiseSessionWake {
 /// synchronously by its owning machine while that work is `Running`, and no
 /// other thread may terminalize running work. Consequently assignment removes
 /// this obligation before the owning poll can release the work for terminal
-/// settlement. Introducing an independently usable resolver for task-owned
-/// promises would require revisiting that publication invariant.
+/// settlement. Resolver-owned promises are a distinct ownership model and do
+/// not acquire a task obligation.
 ///
 /// Directly driven effect tasks temporarily use a task-local inventory until
 /// client demand becomes coordinator work in Phase 10B. Neither form retains
