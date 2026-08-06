@@ -7,7 +7,7 @@ use crate::core::{
 use crate::core_net::CoreWaitToken;
 use crate::evaluation::{
     EvalContext, EvaluationMachinePoll, EvaluationPumpOutcome, EvaluationTaskBlock,
-    EvaluationTaskMachine, EvaluationWaitPoll,
+    EvaluationTaskMachine, EvaluationWaitPoll, WorkDependency,
 };
 use crate::list::ListItem;
 use crate::number::Number;
@@ -215,7 +215,7 @@ impl LazyTaskMachine {
     fn fail(&self, error: EvaluationHalt) -> EvaluationMachinePoll {
         if let Some(wait) = error.blocked_on() {
             return EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
-                lazy: Some(wait.0),
+                dependency: Some(WorkDependency::Wait(wait.0)),
                 observed_epoch: None,
                 error: None,
             });
@@ -230,7 +230,7 @@ impl LazyTaskMachine {
                 }
             };
             return EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
-                lazy: Some(wait),
+                dependency: Some(WorkDependency::Wait(wait)),
                 observed_epoch: None,
                 error: None,
             });
@@ -265,7 +265,7 @@ impl EvaluationTaskMachine for PromiseFollower {
                     }
                     let Some(task) = self.promise.task() else {
                         return EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
-                            lazy: None,
+                            dependency: None,
                             observed_epoch: None,
                             error: None,
                         });
@@ -273,7 +273,7 @@ impl EvaluationTaskMachine for PromiseFollower {
                     return match self.context.poll_wait(task.wait()) {
                         EvaluationWaitPoll::Pending(wait) => {
                             EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
-                                lazy: Some(wait),
+                                dependency: Some(WorkDependency::Wait(wait)),
                                 observed_epoch: None,
                                 error: None,
                             })
@@ -345,7 +345,7 @@ pub(super) fn promise_wait(
 fn block_or_fail(context: &EvalContext, error: EvaluationHalt) -> EvaluationMachinePoll {
     if let Some(wait) = error.blocked_on() {
         return EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
-            lazy: Some(wait.0),
+            dependency: Some(WorkDependency::Wait(wait.0)),
             observed_epoch: None,
             error: None,
         });
@@ -353,7 +353,7 @@ fn block_or_fail(context: &EvalContext, error: EvaluationHalt) -> EvaluationMach
     if let Some(promise) = error.unassigned_promise() {
         return match promise_wait(context, promise) {
             Ok(wait) => EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
-                lazy: Some(wait),
+                dependency: Some(WorkDependency::Wait(wait)),
                 observed_epoch: None,
                 error: None,
             }),

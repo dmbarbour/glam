@@ -35,6 +35,7 @@ use coordinator::{
 pub(crate) use coordinator::{
     CompletionSubscriptionOutcome, CompletionSubscriptions, EvaluationTaskBlock,
     EvaluationWorkCoordinator, RuntimeObservationEpoch, RuntimeObservationState, WakeRegistration,
+    WorkDependency,
 };
 pub(crate) use executor::EvaluationExecutor;
 
@@ -537,7 +538,7 @@ struct PendingTestPromiseTask;
 impl EvaluationTaskMachine for PendingTestPromiseTask {
     fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
         EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
-            lazy: None,
+            dependency: None,
             observed_epoch: None,
             error: None,
         })
@@ -2234,7 +2235,10 @@ fn test_reflection_dependency(
         let Some(dependency) = coordinator.task_dependency(producer) else {
             break;
         };
-        wait = dependency;
+        let Some(dependency_wait) = dependency.producer_wait() else {
+            break;
+        };
+        wait = dependency_wait.clone();
     }
     wait
 }
@@ -2350,10 +2354,8 @@ impl EvaluationSession {
         // coordinator's global generation lets two quiescent sessions keep
         // each other alive by publishing only scheduler transitions.
         let mut attempted_blocked = HashSet::new();
-        let mut attempted_dependencies: HashMap<
-            EvaluationTaskId,
-            Option<(EvaluationWaitToken, bool)>,
-        > = HashMap::new();
+        let mut attempted_dependencies: HashMap<EvaluationTaskId, Option<(WorkDependency, bool)>> =
+            HashMap::new();
         loop {
             let mut claimed = loop {
                 if let Some(claimed) = self
@@ -2374,9 +2376,11 @@ impl EvaluationSession {
                     continue;
                 }
                 if attempted_dependencies.values().any(|dependency| {
-                    dependency.as_ref().is_some_and(|(wait, was_terminal)| {
-                        !was_terminal && wait.terminal_poll().is_some()
-                    })
+                    dependency
+                        .as_ref()
+                        .is_some_and(|(dependency, was_terminal)| {
+                            !was_terminal && dependency.is_terminal()
+                        })
                 }) {
                     attempted_blocked.clear();
                     attempted_dependencies.clear();
@@ -2400,9 +2404,9 @@ impl EvaluationSession {
                 attempted_blocked.insert(claimed_id);
                 attempted_dependencies.insert(
                     claimed_id,
-                    self.task_dependency(claimed_id).map(|wait| {
-                        let terminal = wait.terminal_poll().is_some();
-                        (wait, terminal)
+                    self.task_dependency(claimed_id).map(|dependency| {
+                        let terminal = dependency.is_terminal();
+                        (dependency, terminal)
                     }),
                 );
             }
@@ -2431,8 +2435,8 @@ impl EvaluationSession {
                 ReflectionWorkState::Terminalizing => (EvaluationUnfinishedState::Running, None),
             };
             let dependency = block
-                .and_then(|block| block.lazy.as_ref())
-                .map(|wait| self.reported_dependency(wait));
+                .and_then(|block| block.dependency.as_ref())
+                .and_then(|dependency| self.reported_dependency(dependency));
             has_live_cross_session_dependency |= dependency
                 .as_ref()
                 .is_some_and(|dependency| dependency.live_cross_session);
@@ -2459,27 +2463,35 @@ impl EvaluationSession {
         }
     }
 
-    fn reported_dependency(&self, initial: &EvaluationWaitToken) -> ReportedDependency {
-        let mut wait = initial.clone();
+    fn reported_dependency(&self, initial: &WorkDependency) -> Option<ReportedDependency> {
+        let mut wait = initial.producer_wait()?.clone();
         let mut seen = HashSet::new();
         loop {
             if !seen.insert(wait.get()) || wait.owner_id() != self.id {
-                return ReportedDependency {
+                return Some(ReportedDependency {
                     task: wait.producer(),
                     session: wait.owner_id(),
                     wait: wait.get(),
                     live_cross_session: wait.owner_id() != self.id && wait.owner().is_some(),
-                };
+                });
             }
             let Some(next) = self.task_dependency(wait.producer()) else {
-                return ReportedDependency {
+                return Some(ReportedDependency {
                     task: wait.producer(),
                     session: wait.owner_id(),
                     wait: wait.get(),
                     live_cross_session: false,
-                };
+                });
             };
-            wait = next;
+            let Some(next_wait) = next.producer_wait() else {
+                return Some(ReportedDependency {
+                    task: wait.producer(),
+                    session: wait.owner_id(),
+                    wait: wait.get(),
+                    live_cross_session: false,
+                });
+            };
+            wait = next_wait.clone();
         }
     }
 
@@ -2975,7 +2987,7 @@ impl EvaluationSession {
         self.coordinator.producer_for_wait(wait)
     }
 
-    fn task_dependency(&self, id: EvaluationTaskId) -> Option<EvaluationWaitToken> {
+    fn task_dependency(&self, id: EvaluationTaskId) -> Option<WorkDependency> {
         self.coordinator.task_dependency(id)
     }
 
@@ -3003,7 +3015,10 @@ impl EvaluationSession {
             let Some(dependency) = self.task_dependency(id) else {
                 break;
             };
-            wait = dependency;
+            let Some(dependency_wait) = dependency.producer_wait() else {
+                break;
+            };
+            wait = dependency_wait.clone();
         }
         chain
             .into_iter()
@@ -3024,7 +3039,10 @@ impl EvaluationSession {
             let Some(dependency) = self.coordinator.task_dependency(id) else {
                 return false;
             };
-            wait = dependency;
+            let Some(dependency_wait) = dependency.producer_wait() else {
+                return false;
+            };
+            wait = dependency_wait.clone();
         }
         false
     }
@@ -3042,7 +3060,10 @@ impl EvaluationSession {
             let Some(dependency) = self.coordinator.task_dependency(task) else {
                 return false;
             };
-            wait = dependency;
+            let Some(dependency_wait) = dependency.producer_wait() else {
+                return false;
+            };
+            wait = dependency_wait.clone();
         }
         false
     }
@@ -3126,7 +3147,7 @@ mod tests {
             match self.context.poll_wait(&self.dependency) {
                 EvaluationWaitPoll::Pending(wait) => {
                     EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
-                        lazy: Some(wait),
+                        dependency: Some(WorkDependency::Wait(wait)),
                         observed_epoch: None,
                         error: None,
                     })
@@ -3159,7 +3180,7 @@ mod tests {
             match self.context.poll_wait(dependency) {
                 EvaluationWaitPoll::Pending(wait) => {
                     EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
-                        lazy: Some(wait),
+                        dependency: Some(WorkDependency::Wait(wait)),
                         observed_epoch: None,
                         error: None,
                     })
@@ -3259,7 +3280,7 @@ mod tests {
     impl EvaluationTaskMachine for AlwaysBlocked {
         fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
             EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
-                lazy: None,
+                dependency: None,
                 observed_epoch: Some(RuntimeObservationEpoch::from_raw(7)),
                 error: Some(Arc::new(EvaluationFailure::message(
                     "retryable evaluation error",

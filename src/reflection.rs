@@ -48,7 +48,7 @@ use crate::evaluation::{
     EvalContext, EvaluationMachinePoll, EvaluationPumpOutcome, EvaluationSessionRun,
     EvaluationTaskBlock, EvaluationTaskId, EvaluationTaskMachine, EvaluationWaitPoll,
     EvaluationWaitToken, ReflectionTaskLauncher, ReflectionTaskProfile, ReflectionTaskResultPolicy,
-    RuntimeObservationEpoch,
+    RuntimeObservationEpoch, WorkDependency,
 };
 use crate::interaction_net::NetBuilder;
 use crate::number::Number;
@@ -2327,7 +2327,7 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for ValueEffectTask<S> {
             EffectTaskPoll::Yielded => EvaluationMachinePoll::Yielded,
             EffectTaskPoll::Blocked(blocked) => {
                 EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
-                    lazy: blocked.lazy,
+                    dependency: blocked.lazy.map(WorkDependency::Wait),
                     observed_epoch: blocked
                         .observed_generation
                         .map(RuntimeObservationEpoch::from_raw),
@@ -2351,7 +2351,7 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for UnitEffectTask<S> {
             EffectTaskPoll::Yielded => EvaluationMachinePoll::Yielded,
             EffectTaskPoll::Blocked(blocked) => {
                 EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
-                    lazy: blocked.lazy,
+                    dependency: blocked.lazy.map(WorkDependency::Wait),
                     observed_epoch: blocked
                         .observed_generation
                         .map(RuntimeObservationEpoch::from_raw),

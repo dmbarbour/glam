@@ -20,7 +20,7 @@ use super::{
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct EvaluationTaskBlock {
-    pub(crate) lazy: Option<EvaluationWaitToken>,
+    pub(crate) dependency: Option<WorkDependency>,
     pub(crate) observed_epoch: Option<RuntimeObservationEpoch>,
     pub(crate) error: Option<Arc<EvaluationFailure>>,
 }
@@ -415,7 +415,7 @@ enum WorkState {
 }
 
 #[derive(Clone)]
-pub(super) enum WorkDependency {
+pub(crate) enum WorkDependency {
     Wait(EvaluationWaitToken),
     Promise(PromisedValue),
     #[cfg(test)]
@@ -443,6 +443,38 @@ impl WorkDependency {
 
     fn same_source(&self, other: &Self) -> bool {
         self.runtime_id() == other.runtime_id() && self.key() == other.key()
+    }
+
+    /// The producer wait through which scheduler graph traversal can continue.
+    ///
+    /// Resolver-owned promises have no producer edge. Task-owned promises do,
+    /// but ordinary task blocks do not publish promise dependencies until
+    /// Phase 7B.2c.
+    pub(super) fn producer_wait(&self) -> Option<&EvaluationWaitToken> {
+        match self {
+            Self::Wait(wait) => Some(wait),
+            Self::Promise(promise) => promise.task().map(|task| task.wait()),
+            #[cfg(test)]
+            Self::Test(_) => None,
+        }
+    }
+
+    pub(super) fn into_wait(self) -> Option<EvaluationWaitToken> {
+        match self {
+            Self::Wait(wait) => Some(wait),
+            Self::Promise(_) => None,
+            #[cfg(test)]
+            Self::Test(_) => None,
+        }
+    }
+
+    pub(super) fn is_terminal(&self) -> bool {
+        match self {
+            Self::Wait(wait) => wait.terminal_poll().is_some(),
+            Self::Promise(promise) => promise.assignment().is_some(),
+            #[cfg(test)]
+            Self::Test(_) => false,
+        }
     }
 
     fn subscribe_spark(
@@ -474,9 +506,28 @@ impl WorkDependency {
     }
 }
 
+impl PartialEq for WorkDependency {
+    fn eq(&self, other: &Self) -> bool {
+        self.same_source(other)
+    }
+}
+
+impl Eq for WorkDependency {}
+
+impl fmt::Debug for WorkDependency {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Wait(wait) => formatter.debug_tuple("Wait").field(wait).finish(),
+            Self::Promise(promise) => formatter.debug_tuple("Promise").field(promise).finish(),
+            #[cfg(test)]
+            Self::Test(dependency) => formatter.debug_tuple("Test").field(dependency).finish(),
+        }
+    }
+}
+
 #[cfg(test)]
-#[derive(Clone)]
-pub(super) struct TestWorkDependency {
+#[derive(Debug, Clone)]
+pub(crate) struct TestWorkDependency {
     runtime: EvaluationRuntimeId,
     id: NonZeroU64,
 }
@@ -1715,7 +1766,9 @@ impl EvaluationWorkCoordinator {
                 )
                 .block
                 .as_ref()
-                .and_then(|block| block.lazy.clone())
+                .and_then(|block| block.dependency.as_ref())
+                .and_then(WorkDependency::producer_wait)
+                .cloned()
             {
                 promote_deferred_wait_locked(&mut state, &wait);
             }
@@ -2095,7 +2148,9 @@ impl EvaluationWorkCoordinator {
                 )
                 .block
                 .as_ref()
-                .and_then(|block| block.lazy.clone())
+                .and_then(|block| block.dependency.as_ref())
+                .and_then(WorkDependency::producer_wait)
+                .cloned()
             {
                 promote_deferred_wait_locked(&mut state, &wait);
             }
@@ -2419,7 +2474,7 @@ impl EvaluationWorkCoordinator {
         }
     }
 
-    pub(super) fn task_dependency(&self, task: EvaluationTaskId) -> Option<EvaluationWaitToken> {
+    pub(super) fn task_dependency(&self, task: EvaluationTaskId) -> Option<WorkDependency> {
         let state = self
             .state
             .lock()
@@ -2434,7 +2489,7 @@ impl EvaluationWorkCoordinator {
             WorkKind::Deferred(work) => work.block.as_ref(),
             WorkKind::Spark(_) => None,
         }
-        .and_then(|block| block.lazy.clone())
+        .and_then(|block| block.dependency.clone())
     }
 
     pub(super) fn task_observed_epoch(
@@ -2809,7 +2864,7 @@ fn deferred_work_is_retryable(record: &WorkRecord) -> bool {
     let Some(wait) = deferred
         .block
         .as_ref()
-        .and_then(|block| block.lazy.as_ref())
+        .and_then(|block| block.dependency.as_ref())
     else {
         return false;
     };
@@ -2817,7 +2872,7 @@ fn deferred_work_is_retryable(record: &WorkRecord) -> bool {
     // promise in another demand session. Session shutdown publishes a
     // terminal disposition before unregistering waits, so only an observed
     // terminal makes this blocked producer locally retryable.
-    wait.terminal_poll().is_some()
+    wait.is_terminal()
 }
 
 fn task_block(record: &WorkRecord) -> Option<&EvaluationTaskBlock> {
@@ -3143,13 +3198,15 @@ fn promote_deferred_wait_locked(
 fn deferred_dependency_cycle(
     state: &WorkCoordinatorState,
     start: EvaluationWorkId,
-) -> Option<Vec<EvaluationWorkId>> {
+) -> Option<DeferredDependencyCycle> {
     let mut path: Vec<EvaluationWorkId> = Vec::new();
+    let mut promise_edges = Vec::new();
     let mut positions = HashMap::new();
     let mut current = start;
     loop {
         if let Some(first) = positions.insert(current, path.len()) {
             let mut cycle = path.split_off(first);
+            let contains_promise = promise_edges.split_off(first).into_iter().any(|edge| edge);
             let canonical = cycle
                 .iter()
                 .enumerate()
@@ -3157,13 +3214,23 @@ fn deferred_dependency_cycle(
                 .map(|(position, _)| position)
                 .expect("a repeated successor must produce a non-empty cycle");
             cycle.rotate_left(canonical);
-            return Some(cycle);
+            return Some(DeferredDependencyCycle {
+                members: cycle,
+                contains_promise,
+            });
         }
         path.push(current);
         let record = state.work.get(&current)?;
-        let wait = deferred_work(record).block.as_ref()?.lazy.as_ref()?;
+        let dependency = deferred_work(record).block.as_ref()?.dependency.as_ref()?;
+        promise_edges.push(matches!(dependency, WorkDependency::Promise(_)));
+        let wait = dependency.producer_wait()?;
         current = *state.deferred_by_wait.get(wait)?;
     }
+}
+
+struct DeferredDependencyCycle {
+    members: Vec<EvaluationWorkId>,
+    contains_promise: bool,
 }
 
 fn terminalize_pure_lazy_cycle(
@@ -3173,7 +3240,10 @@ fn terminalize_pure_lazy_cycle(
     let Some(cycle) = deferred_dependency_cycle(state, start) else {
         return Vec::new();
     };
-    let pure_lazy = cycle.iter().all(|id| {
+    if cycle.contains_promise {
+        return Vec::new();
+    }
+    let pure_lazy = cycle.members.iter().all(|id| {
         state.work.get(id).is_some_and(|record| {
             matches!(record.state, WorkState::Blocked)
                 && matches!(deferred_work(record).producer, DeferredProducer::Lazy(_))
@@ -3184,6 +3254,7 @@ fn terminalize_pure_lazy_cycle(
     }
 
     let members = cycle
+        .members
         .iter()
         .map(|id| {
             let record = state
@@ -3206,7 +3277,7 @@ fn terminalize_pure_lazy_cycle(
             }
         })
         .collect::<Vec<_>>();
-    for id in cycle {
+    for id in cycle.members {
         let record = state
             .work
             .get_mut(&id)
@@ -3234,7 +3305,11 @@ fn begin_deferred_abandonment(
         id,
         task: deferred.task,
         producer: deferred.producer.id(),
-        dependency: deferred.block.take().and_then(|block| block.lazy),
+        dependency: deferred
+            .block
+            .take()
+            .and_then(|block| block.dependency)
+            .and_then(WorkDependency::into_wait),
     };
     record.state = WorkState::Terminalizing;
     state.observation_waiters.remove(&id);
@@ -3370,6 +3445,56 @@ mod tests {
     use std::thread;
 
     use super::*;
+
+    #[test]
+    fn task_block_dependency_identity_includes_the_runtime() {
+        let id = NonZeroU64::new(17).expect("test dependency identity must be nonzero");
+        let dependency = WorkDependency::Test(TestWorkDependency {
+            runtime: crate::runtime::allocate_evaluation_runtime_id(),
+            id,
+        });
+        let same_dependency = dependency.clone();
+        let foreign_dependency = WorkDependency::Test(TestWorkDependency {
+            runtime: crate::runtime::allocate_evaluation_runtime_id(),
+            id,
+        });
+
+        assert_eq!(dependency, same_dependency);
+        assert_ne!(dependency, foreign_dependency);
+        assert_eq!(
+            EvaluationTaskBlock {
+                dependency: Some(dependency),
+                observed_epoch: None,
+                error: None,
+            },
+            EvaluationTaskBlock {
+                dependency: Some(same_dependency),
+                observed_epoch: None,
+                error: None,
+            }
+        );
+    }
+
+    #[test]
+    fn promise_dependency_projects_only_a_task_owned_producer_wait() {
+        let (coordinator, _executor) = super::super::test_execution_resources(0)
+            .expect("test execution resources should build");
+        let session = EvaluationSession::shared(&coordinator);
+        let context = super::super::EvalContext::new(session).for_effect_task();
+        let resolver_owned = PromisedValue::new(context.values(), "resolver-owned promise");
+        let task_owned = PromisedValue::fixpoint(&context, "task-owned promise")
+            .expect("the local task should own its promise");
+
+        assert!(
+            WorkDependency::Promise(resolver_owned)
+                .producer_wait()
+                .is_none()
+        );
+        assert_eq!(
+            WorkDependency::Promise(task_owned.clone()).producer_wait(),
+            task_owned.task().map(|task| task.wait())
+        );
+    }
 
     struct TestCompletionSource {
         id: NonZeroU64,
@@ -4058,7 +4183,7 @@ mod tests {
         ));
 
         let block = EvaluationTaskBlock {
-            lazy: None,
+            dependency: None,
             observed_epoch: Some(RuntimeObservationEpoch::from_raw(7)),
             error: None,
         };
@@ -4104,7 +4229,7 @@ mod tests {
         let release = coordinator.release_reflection(
             claimed,
             ReflectionWorkPoll::Blocked(EvaluationTaskBlock {
-                lazy: None,
+                dependency: None,
                 observed_epoch: Some(observed),
                 error: None,
             }),
@@ -4138,7 +4263,7 @@ mod tests {
         let release = coordinator.release_reflection(
             claimed,
             ReflectionWorkPoll::Blocked(EvaluationTaskBlock {
-                lazy: Some(dependency.clone()),
+                dependency: Some(WorkDependency::Wait(dependency.clone())),
                 observed_epoch: Some(observed),
                 error: None,
             }),
@@ -4149,7 +4274,7 @@ mod tests {
             coordinator.reflection_snapshots(session.id).as_slice(),
             [ReflectionWorkSnapshot {
                 state: ReflectionWorkState::Blocked(EvaluationTaskBlock {
-                    lazy: Some(wait),
+                    dependency: Some(WorkDependency::Wait(wait)),
                     observed_epoch: Some(epoch),
                     ..
                 }),
@@ -4187,7 +4312,7 @@ mod tests {
                 coordinator.release_reflection(
                     claimed,
                     ReflectionWorkPoll::Blocked(EvaluationTaskBlock {
-                        lazy: None,
+                        dependency: None,
                         observed_epoch: Some(observed),
                         error: None,
                     }),
@@ -4356,7 +4481,7 @@ mod tests {
         let release = coordinator.release_deferred(
             claimed,
             DeferredWorkPoll::Blocked(EvaluationTaskBlock {
-                lazy: Some(dependency),
+                dependency: Some(WorkDependency::Wait(dependency)),
                 observed_epoch: None,
                 error: None,
             }),
@@ -4438,7 +4563,7 @@ mod tests {
         let release = coordinator.release_reflection(
             claimed,
             ReflectionWorkPoll::Blocked(EvaluationTaskBlock {
-                lazy: Some(producer_wait),
+                dependency: Some(WorkDependency::Wait(producer_wait)),
                 observed_epoch: None,
                 error: None,
             }),
