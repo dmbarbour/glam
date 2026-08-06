@@ -214,32 +214,6 @@ impl EvaluationWaitToken {
     }
 }
 
-/// Temporary broad wake bridge for a session whose deferred follower observed
-/// one pending promise. Promise completion retains this weakly and notifies it
-/// only after terminal publication and runtime mutation admission complete.
-#[derive(Clone)]
-pub(crate) struct PromiseSessionWake {
-    runtime: EvaluationRuntimeId,
-    session_id: EvaluationSessionId,
-    session: Weak<EvaluationSession>,
-}
-
-impl PromiseSessionWake {
-    pub(crate) fn is_live(&self) -> bool {
-        self.session.strong_count() != 0
-    }
-
-    pub(crate) fn same_session(&self, other: &Self) -> bool {
-        self.runtime == other.runtime && self.session_id == other.session_id
-    }
-
-    pub(crate) fn notify(self) {
-        if let Some(session) = self.session.upgrade() {
-            session.notify_promise_changed();
-        }
-    }
-}
-
 /// Assignment-side access to one task-owned promise obligation.
 ///
 /// Scheduled tasks place the reciprocal weak promise cell in their
@@ -539,7 +513,7 @@ impl EvaluationTaskMachine for PendingTestPromiseTask {
     fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
         EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
             dependency: None,
-            observed_epoch: None,
+            observed_epoch: Some(RuntimeObservationEpoch::from_raw(7)),
             error: None,
         })
     }
@@ -1188,21 +1162,6 @@ impl EvaluationSession {
         }
     }
 
-    fn promise_wake(self: &Arc<Self>) -> PromiseSessionWake {
-        PromiseSessionWake {
-            runtime: self.values.runtime_id(),
-            session_id: self.id,
-            session: Arc::downgrade(self),
-        }
-    }
-
-    fn notify_promise_changed(&self) {
-        // Promise followers remain a temporary broad retry bridge until task
-        // work subscribes directly to promises in Phase 7B.2c.
-        self.notify_task_changed();
-        self.coordinator.retry_blocked_deferred(self.id);
-    }
-
     pub(crate) fn submit_spark(self: &Arc<Self>, value: Value) {
         self.coordinator.submit_spark(self, value);
     }
@@ -1563,10 +1522,6 @@ impl EvalContext {
 
     pub(crate) fn session_id(&self) -> EvaluationSessionId {
         self.session.id
-    }
-
-    pub(crate) fn promise_wake(&self) -> PromiseSessionWake {
-        self.session.promise_wake()
     }
 
     pub(crate) fn register_promise(
@@ -3166,6 +3121,24 @@ mod tests {
         }
     }
 
+    struct AwaitPromise {
+        promise: PromisedValue,
+    }
+
+    impl EvaluationTaskMachine for AwaitPromise {
+        fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+            match self.promise.assignment() {
+                None => EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
+                    dependency: Some(WorkDependency::Promise(self.promise.clone())),
+                    observed_epoch: None,
+                    error: None,
+                }),
+                Some(Ok(value)) => EvaluationMachinePoll::Complete(value),
+                Some(Err(error)) => EvaluationMachinePoll::Failed(error),
+            }
+        }
+    }
+
     struct AwaitCell {
         context: EvalContext,
         dependency: Arc<OnceLock<EvaluationWaitToken>>,
@@ -4035,6 +4008,72 @@ mod tests {
             host_promise
                 .assignment()
                 .is_some_and(|assignment| assignment.is_ok())
+        );
+    }
+
+    #[test]
+    fn owner_session_drop_exactly_wakes_a_task_promise_follower() {
+        let fixture = SameRuntimeFixture::new();
+        let observer = fixture.context();
+        let (promise, lazy) = {
+            let owner = fixture.context();
+            let (promise, _owner_task, _owner_context) = owner
+                .task_owned_promise(Arc::from("abandoned exact promise"))
+                .expect("task-owned promise should register");
+            let lazy = LazyValue::from_access(
+                observer.values(),
+                Arc::from([]),
+                Arc::from([Value::Promised(promise.clone())]),
+            );
+            let blocked = crate::eval::eval_value(&observer, &Value::Lazy(lazy.clone()))
+                .expect_err("the unresolved task promise should block its follower");
+            assert!(blocked.blocked_on().is_some());
+            assert_eq!(promise.exact_subscription_count(), 1);
+            (promise, lazy)
+        };
+
+        assert_eq!(promise.exact_subscription_count(), 0);
+        assert!(
+            promise
+                .assignment()
+                .is_some_and(|assignment| assignment.is_err())
+        );
+        assert!(
+            crate::eval::eval_value(&observer, &Value::Lazy(lazy))
+                .expect_err("owner abandonment should fail the exact follower")
+                .to_string()
+                .contains("was abandoned")
+        );
+    }
+
+    #[test]
+    fn task_cancellation_exactly_wakes_its_promise_follower() {
+        let fixture = SameRuntimeFixture::new();
+        let owner = fixture.context();
+        let observer = fixture.context();
+        let (promise, owner_task, _owner_context) = owner
+            .task_owned_promise(Arc::from("cancelled exact promise"))
+            .expect("task-owned promise should register");
+        let lazy = LazyValue::from_access(
+            observer.values(),
+            Arc::from([]),
+            Arc::from([Value::Promised(promise.clone())]),
+        );
+
+        let blocked = crate::eval::eval_value(&observer, &Value::Lazy(lazy.clone()))
+            .expect_err("the unresolved task promise should block its follower");
+        assert!(blocked.blocked_on().is_some());
+        assert_eq!(promise.exact_subscription_count(), 1);
+        assert_eq!(
+            owner.cancel_reflection_task(&owner_task),
+            EvaluationTaskCancellation::Requested
+        );
+        assert_eq!(promise.exact_subscription_count(), 0);
+        assert!(
+            crate::eval::eval_value(&observer, &Value::Lazy(lazy))
+                .expect_err("producer cancellation should fail the exact follower")
+                .to_string()
+                .contains("was cancelled")
         );
     }
 
@@ -4999,6 +5038,81 @@ mod tests {
     }
 
     #[test]
+    fn task_owned_promise_dependency_reports_its_cross_session_producer() {
+        let fixture = SameRuntimeFixture::new();
+        let owner = fixture.context();
+        let (promise, producer, _producer_context) = owner
+            .task_owned_promise(Arc::from("reported task promise"))
+            .expect("task-owned promise should register");
+        let observer = fixture.context();
+        let follower = observer
+            .schedule_task({
+                let promise = promise.clone();
+                move |_| Ok(Box::new(AwaitPromise { promise }))
+            })
+            .expect("promise follower should schedule");
+
+        let EvaluationSessionRun::Quiescent(report) = observer.run_until_quiescent() else {
+            panic!("a live cross-session promise producer should remain quiescent")
+        };
+        let blocked = report
+            .unfinished
+            .iter()
+            .find(|task| task.task == follower.id())
+            .expect("the promise follower should remain blocked");
+        assert_eq!(blocked.dependency, Some(producer.id()));
+        assert_eq!(blocked.dependency_session, Some(owner.session_id()));
+        assert_eq!(
+            blocked.wait,
+            promise.task().map(|producer| producer.wait().get())
+        );
+        assert_eq!(promise.exact_subscription_count(), 1);
+
+        promise
+            .set(observer.values().unit())
+            .expect("the task-owned promise should resolve once");
+        assert_eq!(promise.exact_subscription_count(), 0);
+        let EvaluationSessionRun::Complete(report) = observer.run_until_quiescent() else {
+            panic!("the exact promise wake should complete its follower")
+        };
+        assert!(report.unfinished.is_empty());
+    }
+
+    #[test]
+    fn resolver_owned_promise_dependency_reports_no_synthetic_producer() {
+        let context = EvalContext::standalone();
+        let promise = PromisedValue::new(context.values(), "reported resolver promise");
+        let follower = context
+            .schedule_task({
+                let promise = promise.clone();
+                move |_| Ok(Box::new(AwaitPromise { promise }))
+            })
+            .expect("promise follower should schedule");
+
+        let EvaluationSessionRun::Deadlocked(report) = context.run_until_quiescent() else {
+            panic!("an unresolved host promise has no runnable producer")
+        };
+        let blocked = report
+            .unfinished
+            .iter()
+            .find(|task| task.task == follower.id())
+            .expect("the promise follower should remain blocked");
+        assert_eq!(blocked.dependency, None);
+        assert_eq!(blocked.dependency_session, None);
+        assert_eq!(blocked.wait, None);
+        assert_eq!(promise.exact_subscription_count(), 1);
+
+        promise
+            .fail_message("resolver promise failed")
+            .expect("the resolver promise should fail once");
+        assert_eq!(promise.exact_subscription_count(), 0);
+        let EvaluationSessionRun::Complete(report) = context.run_until_quiescent() else {
+            panic!("the exact promise wake should terminalize its follower")
+        };
+        assert!(report.failures.contains_key(&follower.id()));
+    }
+
+    #[test]
     fn exact_demand_can_poll_a_same_runtime_cross_session_dependency() {
         let fixture = SameRuntimeFixture::new();
         let owner = fixture.context();
@@ -5210,7 +5324,6 @@ mod tests {
             park_next_spark(&coordinator);
         }
 
-        assert_eq!(promise.follower_count(), 0);
         assert_eq!(promise.exact_subscription_count(), 2);
         assert_eq!(coordinator.spark_work_counts(), (0, 0, 2));
         promise

@@ -266,13 +266,13 @@ unresolved. Its producer obligation publishes the same terminal assignment
 into the shared wait cell while the owner record and index are retired.
 Outstanding wait handles therefore retain late terminal observation without
 keeping session scheduler state. Host promises have no task-owned wait record.
-Session-owned task followers register one deduplicated weak target; one
-resolver publication wakes every such same-runtime session without retaining
-it. A coordinator-owned spark does not install that broad target. When it
-parks, its stable work ID and current subscription epoch enter the promise
-cell's exact-subscriber component. Terminal publication therefore queues only
-work still blocked on that promise; the common subscribe-and-recheck protocol
-closes assignment races without nested component locks.
+Deferred followers and sparks publish the promise itself as their exact
+dependency. When either parks, its stable work ID and current subscription
+epoch enter the promise cell's exact-subscriber component. Terminal
+publication therefore queues only work still blocked on that promise; there
+is no session-wide promise wake. The common subscribe-and-recheck protocol
+closes assignment races without nested component locks, and the retained
+registration does not keep its demand session alive.
 
 Reflection annotations are also lazy producers. Constructing a gate demands
 neither its effect nor its target. Demand on the gate registers or resumes the

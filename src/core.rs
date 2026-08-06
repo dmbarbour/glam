@@ -15,8 +15,8 @@ use rpds::RedBlackTreeMapSync;
 use crate::core_net::{CoreDataKey, CoreRuntimeNet};
 use crate::evaluation::{
     CompletionSubscriptionOutcome, CompletionSubscriptions, EvalContext, EvaluationTaskHandle,
-    EvaluationWorkCoordinator, PromiseProducerObligation, PromiseProducerPublication,
-    PromiseSessionWake, ReflectionTaskResultPolicy, WakeRegistration,
+    EvaluationWorkCoordinator, PromiseProducerObligation, ReflectionTaskResultPolicy,
+    WakeRegistration,
 };
 use crate::number::Number;
 use crate::runtime::{EvaluationRuntimeId, RuntimeIds, RuntimeValueRoot};
@@ -262,7 +262,6 @@ pub(crate) struct PromiseCell {
     label: Arc<str>,
     assignment: OnceLock<PromiseAssignment>,
     completion: CompletionSubscriptions,
-    followers: Mutex<Vec<PromiseSessionWake>>,
     producer: OnceLock<Arc<PromiseProducerObligation>>,
 }
 
@@ -633,7 +632,6 @@ impl PromisedValue {
                 id,
                 values.work_coordinator.clone(),
             ),
-            followers: Mutex::new(Vec::new()),
             producer: OnceLock::new(),
         }))
     }
@@ -687,25 +685,6 @@ impl PromisedValue {
             .map(|assignment| assignment.map(RuntimeValueRoot::into_core))
     }
 
-    pub(crate) fn subscribe_follower(&self, wake: PromiseSessionWake) -> bool {
-        let mut followers = self
-            .0
-            .followers
-            .lock()
-            .expect("promise follower set was poisoned");
-        if self.0.assignment.get().is_some() {
-            return false;
-        }
-        followers.retain(PromiseSessionWake::is_live);
-        if !followers
-            .iter()
-            .any(|candidate| candidate.same_session(&wake))
-        {
-            followers.push(wake);
-        }
-        true
-    }
-
     pub(crate) fn subscribe_work(
         &self,
         runtime: EvaluationRuntimeId,
@@ -714,15 +693,6 @@ impl PromisedValue {
         self.0
             .completion
             .subscribe(runtime, registration, || self.0.assignment.get().is_some())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn follower_count(&self) -> usize {
-        self.0
-            .followers
-            .lock()
-            .expect("promise follower set was poisoned")
-            .len()
     }
 
     #[cfg(test)]
@@ -758,12 +728,6 @@ impl PromiseCell {
                 .completion
                 .publish_guarded(&coordinator, &mutation, || {
                     self.assignment.set(assignment)?;
-                    let followers = std::mem::take(
-                        &mut *self
-                            .followers
-                            .lock()
-                            .expect("promise follower set was poisoned"),
-                    );
                     let producer = producer.publish_assignment_guarded(
                         &coordinator,
                         &mutation,
@@ -771,64 +735,29 @@ impl PromiseCell {
                             .get()
                             .expect("promise publication must initialize its assignment"),
                     );
-                    Ok(PromisePublicationWakes {
-                        followers,
-                        producer: Some(producer),
-                    })
+                    Ok(producer)
                 });
-            let (wakes, completion) = published?;
+            let (producer, completion) = published?;
             drop(mutation);
             completion.notify();
-            wakes.notify();
+            producer.notify();
             return Ok(());
         }
 
-        let wakes = self.completion.publish(|| {
+        let producer = self.completion.publish(|| {
             self.assignment.set(assignment)?;
-            let followers = std::mem::take(
-                &mut *self
-                    .followers
-                    .lock()
-                    .expect("promise follower set was poisoned"),
-            );
-            let producer = self.producer.get().map(|producer| {
+            Ok(self.producer.get().map(|producer| {
                 producer.publish_assignment_detached(
                     self.assignment
                         .get()
                         .expect("promise publication must initialize its assignment"),
                 )
-            });
-            Ok(PromisePublicationWakes {
-                followers,
-                producer,
-            })
+            }))
         })?;
-        wakes.notify();
-        Ok(())
-    }
-}
-
-struct PromisePublicationWakes {
-    followers: Vec<PromiseSessionWake>,
-    producer: Option<PromiseProducerPublication>,
-}
-
-impl PromisePublicationWakes {
-    fn notify(self) {
-        if let Some(producer) = self.producer {
+        if let Some(producer) = producer {
             producer.notify();
         }
-        let mut notified = Vec::new();
-        for wake in self.followers {
-            if notified
-                .iter()
-                .any(|prior: &PromiseSessionWake| prior.same_session(&wake))
-            {
-                continue;
-            }
-            notified.push(wake.clone());
-            wake.notify();
-        }
+        Ok(())
     }
 }
 

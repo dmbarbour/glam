@@ -800,15 +800,79 @@ fn computed_lazy_waits_on_an_empty_promise_without_caching_its_error() {
 
     let blocked = eval_value(&context, &value).expect_err("empty promise should block its lazy");
     assert!(blocked.blocked_on().is_some());
+    assert_eq!(promise.exact_subscription_count(), 1);
     assert!(lazy.cached().is_none());
     assert_eq!(promise.assignment(), None);
 
     promise.set(n(42)).unwrap();
+    assert_eq!(promise.exact_subscription_count(), 0);
     assert_eq!(eval_value(&context, &value).unwrap(), n(42));
     assert_eq!(
         lazy.cached(),
         Some(Ok(EvaluatedValue::try_from(n(42)).unwrap()))
     );
+}
+
+#[test]
+fn resolver_failure_exactly_wakes_its_deferred_follower() {
+    let context = test_context();
+    let promise = PromisedValue::new(context.values(), "failed resolver input");
+    let lazy = LazyValue::from_access(
+        context.values(),
+        Arc::from([]),
+        Arc::from([Value::Promised(promise.clone())]),
+    );
+    let value = Value::Lazy(lazy);
+
+    let blocked = eval_value(&context, &value)
+        .expect_err("an unresolved resolver promise should block its follower");
+    assert!(blocked.blocked_on().is_some());
+    assert_eq!(promise.exact_subscription_count(), 1);
+
+    promise
+        .fail_message("resolver failed deliberately")
+        .expect("the unresolved resolver promise should fail once");
+    assert_eq!(promise.exact_subscription_count(), 0);
+    assert_eq!(
+        eval_value(&context, &value)
+            .expect_err("the woken follower should expose the resolver failure")
+            .to_string(),
+        "resolver failed deliberately"
+    );
+}
+
+#[test]
+fn resolver_completion_wakes_only_its_cross_session_deferred_follower() {
+    let (owner, observer, _executor) = same_runtime_contexts();
+    let promise_a = PromisedValue::new(owner.values(), "cross-session promise A");
+    let promise_b = PromisedValue::new(owner.values(), "cross-session promise B");
+    let lazy_for = |promise: &PromisedValue| {
+        Value::Lazy(LazyValue::from_access(
+            observer.values(),
+            Arc::from([]),
+            Arc::from([Value::Promised(promise.clone())]),
+        ))
+    };
+    let lazy_a = lazy_for(&promise_a);
+    let lazy_b = lazy_for(&promise_b);
+
+    assert!(eval_value(&observer, &lazy_a).is_err());
+    assert!(eval_value(&observer, &lazy_b).is_err());
+    assert_eq!(promise_a.exact_subscription_count(), 1);
+    assert_eq!(promise_b.exact_subscription_count(), 1);
+
+    promise_a
+        .set(n(41))
+        .expect("promise A should accept its assignment");
+    assert_eq!(promise_a.exact_subscription_count(), 0);
+    assert_eq!(promise_b.exact_subscription_count(), 1);
+    assert_eq!(eval_value(&observer, &lazy_a).unwrap(), n(41));
+
+    promise_b
+        .set(n(42))
+        .expect("promise B should accept its assignment");
+    assert_eq!(promise_b.exact_subscription_count(), 0);
+    assert_eq!(eval_value(&observer, &lazy_b).unwrap(), n(42));
 }
 
 #[test]
@@ -945,12 +1009,14 @@ fn task_owned_fixpoint_rejects_recursive_demand_and_blocks_other_tasks() {
 
     let blocked = eval_value(&observer, &value).unwrap_err();
     assert!(blocked.blocked_on().is_some());
+    assert_eq!(fixpoint.exact_subscription_count(), 1);
     let counts = session.task_registry_counts();
     assert_eq!(counts.promises_active, 1);
     assert_eq!(counts.promises_terminal, 0);
     assert_eq!(counts.owned_promise_waits, 1);
 
     fixpoint.set(n(42)).unwrap();
+    assert_eq!(fixpoint.exact_subscription_count(), 0);
     assert_eq!(eval_value(&observer, &value).unwrap(), n(42));
     assert_eq!(
         session.poll_wait(&wait),
@@ -983,7 +1049,9 @@ fn failed_task_fails_its_unresolved_fixpoint_promises() {
             .blocked_on()
             .is_some()
     );
+    assert_eq!(fixpoint.exact_subscription_count(), 1);
     session.fail_wait(owner_task.wait(), "producer failed deliberately");
+    assert_eq!(fixpoint.exact_subscription_count(), 0);
     assert_eq!(
         eval_value(&observer, &value).unwrap_err().to_string(),
         "producer failed deliberately"

@@ -253,11 +253,11 @@ spark.
 Named promises share one runtime-bound `PromiseCell`. Resolution, explicit
 failure, resolver drop, reflection-producer failure, and producer-session
 closure use its single terminal publication path under runtime mutation
-admission. Session-owned task followers which encounter the unresolved promise
-are retained only as deduplicated weak wake targets. Spark contexts omit that
-broad registration and park their stable work ID directly in the cell's exact
-subscription set, so publication wakes only sparks which still await that
-promise without embedding one assembler context in the resolver.
+admission. Deferred followers and sparks which encounter an unresolved promise
+park their stable work ID and subscription epoch directly in the cell's exact
+subscription set. Publication therefore wakes only work which still awaits
+that promise, without retaining a demand session or embedding one assembler
+context in the resolver.
 
 `CompileContext` constructs one opaque provenance handle for each traced source
 input. The `.g` front end places it in shallow, static definition-initialization

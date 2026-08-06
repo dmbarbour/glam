@@ -339,9 +339,9 @@ impl Value {
 /// [`fail_message`](Self::fail_message). Dropping it unresolved permanently
 /// fails the promised value.
 ///
-/// Completion wakes every same-runtime evaluation session which has observed
-/// the unresolved promise. Sharing the value does not keep any observer
-/// session alive.
+/// Completion wakes every same-runtime work item currently blocked on the
+/// unresolved promise. Sharing the value and registering that exact wake do
+/// not keep an observing session alive.
 ///
 /// The resolver is consumed by every terminal operation, so attempting to
 /// complete the same public promise twice is a compile-time error:
@@ -3594,7 +3594,7 @@ impl ReflectionEnvironmentBuilder<'_> {
     }
 
     /// Creates a promised environment value and its affine host resolver.
-    /// Same-runtime sessions subscribe when they first observe the value, so
+    /// Same-runtime work subscribes directly when it blocks on the value, so
     /// the resolver needs no later assembler-specific arming step.
     pub fn promise(&mut self, label: impl Into<Arc<str>>) -> (Value, PromiseResolver) {
         let values = self.host.runtime().values();
@@ -3872,8 +3872,8 @@ impl Assembler {
 
     /// Creates a host-resolved promised value and its unique resolver.
     ///
-    /// Resolving, failing, or dropping the resolver wakes every same-runtime
-    /// session which has observed the unresolved value.
+    /// Resolving, failing, or dropping the resolver wakes each same-runtime
+    /// work item currently blocked on the unresolved value.
     pub fn promise(&self, label: impl Into<Arc<str>>) -> (Value, PromiseResolver) {
         let promise = PromisedValue::new(self.eval_context().values(), label);
         (

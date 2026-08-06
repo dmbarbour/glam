@@ -260,55 +260,11 @@ impl EvaluationTaskMachine for PromiseFollower {
             PromiseFollowerState::AwaitAssignment => match self.promise.assignment() {
                 Some(result) => result.map_err(EvaluationHalt::failure),
                 None => {
-                    if !self.promise.subscribe_follower(self.context.promise_wake()) {
-                        return EvaluationMachinePoll::Yielded;
-                    }
-                    let Some(task) = self.promise.task() else {
-                        return EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
-                            dependency: None,
-                            observed_epoch: None,
-                            error: None,
-                        });
-                    };
-                    return match self.context.poll_wait(task.wait()) {
-                        EvaluationWaitPoll::Pending(wait) => {
-                            EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
-                                dependency: Some(WorkDependency::Wait(wait)),
-                                observed_epoch: None,
-                                error: None,
-                            })
-                        }
-                        EvaluationWaitPoll::Complete(_) => match self.promise.assignment() {
-                            Some(result) => match result {
-                                Ok(value) => {
-                                    self.state = PromiseFollowerState::FollowAssignment(value);
-                                    EvaluationMachinePoll::Yielded
-                                }
-                                Err(error) => EvaluationMachinePoll::Failed(error),
-                            },
-                            None => {
-                                EvaluationMachinePoll::Failed(Arc::new(EvaluationFailure::message(
-                                    "promised value's producer completed without assigning it",
-                                )))
-                            }
-                        },
-                        EvaluationWaitPoll::Failed(error) => EvaluationMachinePoll::Failed(error),
-                        EvaluationWaitPoll::Cancelled => EvaluationMachinePoll::Failed(Arc::new(
-                            EvaluationFailure::message("promised value's producer was cancelled"),
-                        )),
-                        EvaluationWaitPoll::Abandoned => match self.promise.assignment() {
-                            Some(Ok(value)) => {
-                                self.state = PromiseFollowerState::FollowAssignment(value);
-                                EvaluationMachinePoll::Yielded
-                            }
-                            Some(Err(error)) => EvaluationMachinePoll::Failed(error),
-                            None => {
-                                EvaluationMachinePoll::Failed(Arc::new(EvaluationFailure::message(
-                                    "promised value's producer was abandoned",
-                                )))
-                            }
-                        },
-                    };
+                    return EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
+                        dependency: Some(WorkDependency::Promise(self.promise.clone())),
+                        observed_epoch: None,
+                        error: None,
+                    });
                 }
             },
             PromiseFollowerState::FollowAssignment(target) => eval_value(&self.context, target),

@@ -447,9 +447,9 @@ impl WorkDependency {
 
     /// The producer wait through which scheduler graph traversal can continue.
     ///
-    /// Resolver-owned promises have no producer edge. Task-owned promises do,
-    /// but ordinary task blocks do not publish promise dependencies until
-    /// Phase 7B.2c.
+    /// Resolver-owned promises have no producer edge. Task-owned promises
+    /// project through the producer obligation while retaining the promise as
+    /// the exact completion source in the machine block.
     pub(super) fn producer_wait(&self) -> Option<&EvaluationWaitToken> {
         match self {
             Self::Wait(wait) => Some(wait),
@@ -1973,48 +1973,6 @@ impl EvaluationWorkCoordinator {
         promoted
     }
 
-    /// Transitional broad wake for promise followers. Exact deferred-work
-    /// subscriptions arrive in Phase 7B.2; until then one promise completion
-    /// retries every blocked producer in each subscribed demand session.
-    pub(super) fn retry_blocked_deferred(&self, session: EvaluationSessionId) {
-        let mutation = self.admission.mutation_guard();
-        let changed = {
-            let mut state = self
-                .state
-                .lock()
-                .expect("evaluation work coordinator was poisoned");
-            let ids = state
-                .work_by_session
-                .get(&session)
-                .into_iter()
-                .flatten()
-                .copied()
-                .filter(|id| {
-                    state.work.get(id).is_some_and(|record| {
-                        matches!(record.kind, WorkKind::Deferred(_))
-                            && matches!(record.state, WorkState::Blocked)
-                    })
-                })
-                .collect::<Vec<_>>();
-            for id in &ids {
-                state
-                    .work
-                    .get_mut(id)
-                    .expect("indexed blocked deferred work must remain registered")
-                    .state = WorkState::Queued;
-                queue_deferred(&mut state, *id);
-            }
-            if !ids.is_empty() {
-                state.work_generation = state.work_generation.wrapping_add(1);
-            }
-            !ids.is_empty()
-        };
-        drop(mutation);
-        if changed {
-            self.work_available.notify_all();
-        }
-    }
-
     pub(super) fn claim_blocked_deferred(
         &self,
         session: EvaluationSessionId,
@@ -2872,18 +2830,18 @@ fn deferred_work_is_retryable(record: &WorkRecord) -> bool {
     ) {
         return true;
     }
-    let Some(wait) = deferred
+    let Some(dependency) = deferred
         .block
         .as_ref()
         .and_then(|block| block.dependency.as_ref())
     else {
         return false;
     };
-    // A wait without a coordinator producer may still be a live task-owned
-    // promise in another demand session. Session shutdown publishes a
-    // terminal disposition before unregistering waits, so only an observed
-    // terminal makes this blocked producer locally retryable.
-    wait.is_terminal()
+    // A resolver-owned promise has no coordinator producer, while a
+    // task-owned promise projects through its producer obligation. In either
+    // case exact completion is authoritative; this conservative pass remains
+    // only until Phase 7B.2d removes blocked-task polling.
+    dependency.is_terminal()
 }
 
 fn task_block(record: &WorkRecord) -> Option<&EvaluationTaskBlock> {
@@ -2919,6 +2877,10 @@ fn publish_task_block_locked(
     block: EvaluationTaskBlock,
 ) -> Option<(WorkDependency, WakeRegistration)> {
     debug_assert_task_block_runtime(runtime, &block);
+    assert!(
+        block.dependency.is_some() || block.observed_epoch.is_some(),
+        "blocked task work must publish an exact dependency or observed runtime epoch"
+    );
     state.observation_waiters.remove(&id);
     let dependency = block.dependency.clone();
     let observed_epoch = block.observed_epoch;
@@ -4383,6 +4345,24 @@ mod tests {
         ));
         settle_test_reflection(&coordinator, work);
         assert!(coordinator.reflection_snapshots(session.id).is_empty());
+    }
+
+    #[test]
+    fn coordinator_rejects_a_block_without_an_exact_or_broad_wake() {
+        let mut state = WorkCoordinatorState::default();
+        let rejected = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            publish_task_block_locked(
+                &mut state,
+                crate::runtime::allocate_evaluation_runtime_id(),
+                EvaluationWorkId(NonZeroU64::new(1).expect("test work identity should be nonzero")),
+                EvaluationTaskBlock {
+                    dependency: None,
+                    observed_epoch: None,
+                    error: None,
+                },
+            )
+        }));
+        assert!(rejected.is_err());
     }
 
     #[test]
