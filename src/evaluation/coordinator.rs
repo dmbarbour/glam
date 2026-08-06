@@ -3404,7 +3404,7 @@ mod tests {
         let (coordinator, _executor) = super::super::test_execution_resources(0)
             .expect("test execution resources should build");
         let session = EvaluationSession::shared(&coordinator);
-        let context = super::super::EvalContext::new(session).for_effect_task();
+        let context = super::super::EvalContext::new(&session).for_effect_task();
         let resolver_owned = PromisedValue::new(context.values(), "resolver-owned promise");
         let task_owned = PromisedValue::fixpoint(&context, "task-owned promise")
             .expect("the local task should own its promise");

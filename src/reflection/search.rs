@@ -157,6 +157,7 @@ pub enum IsolatedSearchPoll<S: TaskSpecialization> {
 #[doc(hidden)]
 pub struct IsolatedEffectSearch<S: TaskSpecialization> {
     task: EffectTask<S>,
+    _owner: Option<Arc<super::super::evaluation::EvaluationSession>>,
 }
 
 impl<S: TaskSpecialization> IsolatedEffectSearch<S> {
@@ -166,8 +167,11 @@ impl<S: TaskSpecialization> IsolatedEffectSearch<S> {
         specialization: S,
         host: Arc<S::Host>,
     ) -> Result<Self, TaskHalt> {
-        let context = EvalContext::new(runtime.new_evaluation_session()?);
-        Self::new_in_context(effect, specialization, host, context)
+        let owner = runtime.new_evaluation_session()?;
+        let context = EvalContext::new(&owner);
+        let mut search = Self::new_in_context(effect, specialization, host, context)?;
+        search._owner = Some(owner);
+        Ok(search)
     }
 
     pub(crate) fn new_in_context(
@@ -183,6 +187,7 @@ impl<S: TaskSpecialization> IsolatedEffectSearch<S> {
                 host,
                 context,
             )?,
+            _owner: None,
         })
     }
 

@@ -21,14 +21,18 @@ construction domain before an embedding client builds a value. Every public
 another runtime before exposing its recursive core representation or retaining
 it in runtime-owned state.
 
-Every production evaluator entry receives an `EvalContext` borrowed from an
-`EvaluationSession`. An `Assembler` and its clones share one internal
-`ReasoningSession`, which owns that evaluation session and the assembler's
-reflection host. `EvaluationSession` retains opaque reflection and deferred
-machine slots, minimal work-to-machine lookup, a reference to the
-runtime-default annotation profile, and a persistent ledger of
-unacknowledged reflection failures. The session has no second task lifecycle
-state.
+Every production evaluator entry receives an `EvalContext` derived from an
+external `EvaluationSession` owner lease. An `Assembler` and its clones share
+one internal `ReasoningSession`, which retains that lease and the assembler's
+reflection host. `EvalContext` retains only `Arc<EvaluationDemandState>`, its
+selected task profile, and current task provenance. The demand state holds the
+value factory, session policy, explicit closed flag, opaque reflection and
+deferred machine slots, minimal work-to-machine lookup, and the persistent
+ledger of unacknowledged reflection failures; its coordinator route is weak.
+Dropping the final owner marks the state closed before asking the strongly held
+coordinator to abandon and unregister its work. Direct isolated evaluation
+uses an explicit owner/context wrapper instead of hiding the lease in
+`EvalContext`.
 
 The runtime-owned `EvaluationWorkCoordinator` owns session registration, one
 runtime-wide ready-task queue, worker fairness, its work generation, the
@@ -46,10 +50,11 @@ runtime-local dependency key; stale completion, session teardown, and
 reblocking notifications are harmless. The attached
 `EvaluationExecutor` owns only worker activation, shutdown, and thread handles.
 Workers retain a weak coordinator attachment and claim either an exact ready
-task or spark record from it. A task claim retains its upgraded demand session
-while that session detaches only the selected reflection or deferred machine.
-Sessions retain their coordinator while their machine slots remain live; the
-coordinator retains sessions only weakly, so this does not form a cycle. The
+task or spark record from it. During the transitional machine-store phase, a
+task claim retains its upgraded external owner lease while that owner detaches
+only the selected reflection or deferred machine. The owner retains its
+coordinator, while both demand state and coordinator registration point back
+weakly, so machine contexts cannot retain the owner through themselves. The
 immutable reflection environment belongs to the active task host rather than
 either scheduling component.
 

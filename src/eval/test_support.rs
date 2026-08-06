@@ -23,7 +23,7 @@ pub(super) enum TestKey {
     PathIndex(Arc<TestExpr>),
 }
 
-pub(crate) fn test_context() -> EvalContext {
+pub(crate) fn test_context() -> OwnedEvalContext {
     EvalContext::isolated(crate::core::test_value_factory())
 }
 

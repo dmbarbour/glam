@@ -236,7 +236,8 @@ Assembler -> EvalContext -> Value
   -> apply a builtin/function/net
   -> drive a net until its interface exposes data
 
-EvaluationSession -> EvaluationWorkCoordinator <- EvaluationExecutor
+EvaluationSession owner -> EvaluationWorkCoordinator <- EvaluationExecutor
+  -> weakly linked EvaluationDemandState -> EvalContext
   -> demanded reflection producers via the serial pump
   -> coordinator-selected reflection work via shared workers
   -> coordinator-owned stable spark work via shared workers
@@ -250,6 +251,13 @@ knows topology; `core_net` and `eval` supply core semantics. See the
 Permanent failures carry Glam diagnostic values and ordered context frames
 through lazy memoization and task status queries; blocking and unassigned
 promises remain scheduler control states rather than errors.
+
+`EvaluationSession` is the external owner lease, not the machine-visible task
+state. It strongly retains the coordinator so its final drop can close the
+demand domain. `EvalContext` retains the separate `EvaluationDemandState`,
+whose explicit closed flag gates new admissions and whose coordinator route is
+weak. Isolated direct clients use a small owner/context wrapper; scheduled
+machine contexts never retain their own owner lease.
 
 Each coordinator-owned blocked spark publishes a checked subscription epoch
 beside its retained dependency. Wait tokens and promises both retain that

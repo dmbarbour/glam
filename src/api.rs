@@ -1272,6 +1272,7 @@ struct AssemblerReflectionHost {
 pub(crate) struct CompilationExecution {
     lookup: EvalContext,
     macros: EvalContext,
+    _macro_owner: Arc<EvaluationSession>,
     #[cfg(test)]
     macro_host: Arc<AssemblerReflectionHost>,
     macro_diagnostics: DiagnosticBus,
@@ -1310,7 +1311,8 @@ impl CompilationExecution {
 
         Ok(Self {
             lookup: reasoning.eval_context(),
-            macros: EvalContext::patient_with_task_profile(evaluation, task_profile),
+            macros: EvalContext::patient_with_task_profile(&evaluation, task_profile),
+            _macro_owner: evaluation,
             #[cfg(test)]
             macro_host: host,
             macro_diagnostics: diagnostics,
@@ -3131,7 +3133,7 @@ impl ReasoningSession {
     }
 
     fn eval_context(&self) -> EvalContext {
-        EvalContext::patient_with_task_profile(self.evaluation.clone(), self.task_profile.clone())
+        EvalContext::patient_with_task_profile(&self.evaluation, self.task_profile.clone())
     }
 
     fn conflict_analysis(&self) -> Arc<dyn ConflictAnalysisStrategy> {
@@ -6411,7 +6413,7 @@ mod tests {
             runtime.state.shared_resources.values.core().clone(),
             Arc::new(ReflectionTaskProfile::unsealed()),
         );
-        let context = EvalContext::new(session.clone());
+        let context = EvalContext::new(&session);
         let _task = context
             .schedule_task(|_| Ok(Box::new(FailedReasoningTask)))
             .expect("test task should enter the coordinator ready queue");

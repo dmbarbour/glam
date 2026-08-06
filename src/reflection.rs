@@ -43,12 +43,12 @@ use crate::core_net::{CoreDataKey, CoreSpecialization, CoreWaitToken};
 use crate::diagnostic::Severity;
 use crate::eval;
 #[cfg(test)]
-use crate::evaluation::EvaluationSession;
+use crate::evaluation::OwnedEvalContext;
 use crate::evaluation::{
-    EvalContext, EvaluationMachinePoll, EvaluationPumpOutcome, EvaluationSessionRun,
-    EvaluationTaskBlock, EvaluationTaskId, EvaluationTaskMachine, EvaluationWaitPoll,
-    EvaluationWaitToken, ReflectionTaskLauncher, ReflectionTaskProfile, ReflectionTaskResultPolicy,
-    WorkDependency,
+    EvalContext, EvaluationMachinePoll, EvaluationPumpOutcome, EvaluationSession,
+    EvaluationSessionRun, EvaluationTaskBlock, EvaluationTaskId, EvaluationTaskMachine,
+    EvaluationWaitPoll, EvaluationWaitToken, ReflectionTaskLauncher, ReflectionTaskProfile,
+    ReflectionTaskResultPolicy, WorkDependency,
 };
 use crate::interaction_net::NetBuilder;
 use crate::number::Number;
@@ -521,7 +521,7 @@ impl<S: TaskSpecialization> EffectRun<S> {
             effect.into_core(),
             specialization,
             host,
-            EvalContext::with_task_profile(session, task_profile),
+            EvalContext::with_task_profile(&session, task_profile),
         )?;
         if result_policy == EffectResultPolicy::RequireUnit {
             task = task.requiring_unit_result();
@@ -696,6 +696,7 @@ impl Tags {
 
 struct EffectTask<S: TaskSpecialization> {
     eval_context: EvalContext,
+    _demand_owner: Option<Arc<EvaluationSession>>,
     id: EvaluationTaskId,
     specialization: S,
     host: Arc<S::Host>,
@@ -719,12 +720,25 @@ impl<S: TaskSpecialization> EffectTask<S> {
         specialization: S,
         host: Arc<S::Host>,
     ) -> Result<Self, TaskHalt> {
-        Self::new_in_context(
+        Self::new_owned_in_context(
             effect,
             specialization,
             host,
             EvalContext::isolated(values.clone()),
         )
+    }
+
+    #[cfg(test)]
+    fn new_owned_in_context(
+        effect: Value,
+        specialization: S,
+        host: Arc<S::Host>,
+        eval_context: OwnedEvalContext,
+    ) -> Result<Self, TaskHalt> {
+        let (eval_context, owner) = eval_context.into_parts();
+        let mut task = Self::new_in_context(effect, specialization, host, eval_context)?;
+        task._demand_owner = Some(owner);
+        Ok(task)
     }
 
     fn new_in_context(
@@ -773,6 +787,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         };
         Ok(Self {
             eval_context,
+            _demand_owner: None,
             id,
             specialization,
             host,
@@ -4099,7 +4114,7 @@ mod tests {
         effect: &PublicValue,
         host: Arc<TestHost>,
     ) -> Result<TaskOutcome, TaskHalt> {
-        run_composed_effect_task(EffectTask::new_in_context(
+        run_composed_effect_task(EffectTask::new_owned_in_context(
             effect.as_core().clone(),
             TestEffects,
             host,
@@ -4113,7 +4128,7 @@ mod tests {
         host: Arc<TestHost>,
     ) -> Result<TaskOutcome, TaskHalt> {
         let host: Arc<dyn ReflectionHost<ReflectionEffects>> = host;
-        run_composed_effect_task(EffectTask::new_in_context(
+        run_composed_effect_task(EffectTask::new_owned_in_context(
             effect.as_core().clone(),
             ReflectionEffects,
             host,
@@ -4125,7 +4140,7 @@ mod tests {
         assembler: &Assembler,
         effect: &PublicValue,
     ) -> Result<TaskOutcome, TaskHalt> {
-        run_composed_effect_task(EffectTask::new_in_context(
+        run_composed_effect_task(EffectTask::new_owned_in_context(
             effect.as_core().clone(),
             StandardEffects,
             Arc::new(TestHost::with_values(assembler.core_values())),
@@ -4138,7 +4153,7 @@ mod tests {
         effect: &PublicValue,
         host: Arc<TestHost>,
     ) -> Result<TaskOutcome, TaskHalt> {
-        run_composed_effect_task(EffectTask::new_in_context(
+        run_composed_effect_task(EffectTask::new_owned_in_context(
             effect.as_core().clone(),
             StandardEffects,
             host,
@@ -4707,7 +4722,7 @@ mod tests {
         assembler: &Assembler,
         effect: &PublicValue,
         host: Arc<TestHost>,
-    ) -> (EvalContext, EvaluationTaskHandle) {
+    ) -> (OwnedEvalContext, EvaluationTaskHandle) {
         let context = EvalContext::isolated(assembler.core_values());
         context
             .install_reflection_launcher(task_launcher(TestEffects, host.clone()))
@@ -5465,7 +5480,8 @@ mod tests {
         let host = Arc::new(TestHost::with_values(assembler.core_values()));
         let (coordinator, _executor) =
             crate::evaluation::test_execution_resources(2).expect("test executor should start");
-        let context = EvalContext::new(EvaluationSession::shared(&coordinator));
+        let session = EvaluationSession::shared(&coordinator);
+        let context = EvalContext::new(&session);
         let builds = Arc::new(AtomicUsize::new(0));
         let launcher: Arc<dyn ReflectionTaskLauncher> = Arc::new(CountingLauncher {
             inner: task_launcher(TestEffects, host.clone()),

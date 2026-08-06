@@ -15,9 +15,9 @@ use crate::interaction_net::{
     ActivePairKey, Call, Callable, CursorDependency, NetBuilder, NetSpecialization, OperatorCall,
     OperatorYield, Port, Reduction, ReductionKind, StuckReason,
 };
-#[cfg(test)]
-use crate::list::ListItem;
 use crate::number::Number;
+#[cfg(test)]
+use crate::{evaluation::OwnedEvalContext, list::ListItem};
 
 mod application;
 mod builtins;
