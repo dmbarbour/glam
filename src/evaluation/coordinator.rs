@@ -37,17 +37,18 @@ impl EvaluationWorkId {
 /// Runtime-wide semantic-state revision observed by retryable evaluation.
 ///
 /// Scheduler queue churn uses a separate work generation and never advances
-/// this value.
+/// this value. Epochs begin at one so `Option<RuntimeObservationEpoch>` can use
+/// the zero niche for absence without increasing the block representation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct RuntimeObservationEpoch(u64);
+pub(crate) struct RuntimeObservationEpoch(NonZeroU64);
 
 impl RuntimeObservationEpoch {
     pub(crate) fn from_raw(epoch: u64) -> Self {
-        Self(epoch)
+        Self(NonZeroU64::new(epoch).expect("runtime observation epochs must be nonzero"))
     }
 
     pub(crate) fn get(self) -> u64 {
-        self.0
+        self.0.get()
     }
 }
 
@@ -59,7 +60,7 @@ pub(crate) struct RuntimeObservationState {
 impl RuntimeObservationState {
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
-            epoch: Mutex::new(RuntimeObservationEpoch(1)),
+            epoch: Mutex::new(RuntimeObservationEpoch::from_raw(1)),
             changed: Condvar::new(),
         })
     }
@@ -76,10 +77,12 @@ impl RuntimeObservationState {
             .epoch
             .lock()
             .expect("runtime observation mutex should not be poisoned");
-        epoch.0 = epoch
-            .0
-            .checked_add(1)
-            .expect("runtime observation epochs exhausted");
+        *epoch = RuntimeObservationEpoch::from_raw(
+            epoch
+                .get()
+                .checked_add(1)
+                .expect("runtime observation epochs exhausted"),
+        );
         *epoch
     }
 
@@ -3449,6 +3452,18 @@ mod tests {
     use std::thread;
 
     use super::*;
+
+    #[test]
+    fn observation_epochs_are_nonzero_and_option_niche_optimized() {
+        assert_eq!(
+            std::mem::size_of::<Option<RuntimeObservationEpoch>>(),
+            std::mem::size_of::<u64>()
+        );
+
+        let observations = RuntimeObservationState::new();
+        assert_eq!(observations.current().get(), 1);
+        assert_eq!(observations.advance().get(), 2);
+    }
 
     #[test]
     fn task_block_dependency_identity_includes_the_runtime() {
