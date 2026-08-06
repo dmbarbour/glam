@@ -33,16 +33,17 @@ state.
 The runtime-owned `EvaluationWorkCoordinator` owns session registration, one
 runtime-wide ready-task queue, worker fairness, its work generation, the
 condition variable used to await work, and stable runtime-local reflection,
-deferred-producer, and spark records. Reflection and deferred
-records own reservation/dormancy, queued, running, blocked, control, and
-terminalization state; the session machine store can detach or restore a
-machine only with a coordinator claim. Each spark record retains its demand
-value, dependency,
-demand-session index, checked subscription epoch, and a close request while
-worker-owned. Parked indexes contain `(work ID, subscription epoch)` rather
-than bare IDs. A wake batch is accepted only while the record remains blocked
-on both that epoch and the same runtime-local dependency key; stale completion,
-session teardown, and reblocking notifications are harmless. The attached
+deferred-producer, and spark records. Reflection and deferred records own
+reservation/dormancy, queued, running, blocked, control, and terminalization
+state; the session machine store can detach or restore a machine only with a
+coordinator claim. Blocked reflection, deferred, and spark records retain
+their exact dependency and checked subscription epoch; spark records
+additionally retain their demand value, demand-session index, and a close
+request while worker-owned. Completion sources retain
+`(work ID, subscription epoch)` rather than bare IDs. A wake batch is accepted
+only while the record remains blocked on both that epoch and the same
+runtime-local dependency key; stale completion, session teardown, and
+reblocking notifications are harmless. The attached
 `EvaluationExecutor` owns only worker activation, shutdown, and thread handles.
 Workers retain a weak coordinator attachment and claim either an exact ready
 task or spark record from it. A task claim retains its upgraded demand session
@@ -63,8 +64,11 @@ Runtime store and admitted-input publication advance the separate typed
 `{work ID, subscription epoch, observed epoch}` registration. Publication
 queues every current older registration before releasing shared mutation
 admission; block installation rechecks the epoch under that same admission.
-The two-sided protocol prevents a state change from being lost immediately
-before, during, or after registration.
+When a block also carries an exact wait, both registrations use the same
+subscription epoch: the first wake queues the task and either removes or makes
+the other registration stale. The two-sided protocols prevent either a state
+change or terminal dependency from being lost immediately before, during, or
+after registration.
 
 A synchronous effect facade which exhausts immediate exact work follows its
 dependency chain before deciding that the wait is orphaned. If the chain ends
@@ -135,10 +139,11 @@ checks the cell before and after coordinator lookup, so a waiter racing
 publication sees either active state or the terminal result. A terminal token
 remains observable after its owner session is dropped; a pending token does
 not keep the session alive and reports `Abandoned`, not evaluation failure, if
-its owner disappears without publishing a more specific terminal result. A
-blocked spark registers its stable work ID and subscription epoch directly
-with this cell. Only terminal publication of that exact wait can requeue it;
-unrelated session task progress does not.
+its owner disappears without publishing a more specific terminal result.
+Blocked reflection tasks, deferred producers, and sparks register their stable
+work ID and subscription epoch directly with this cell. Only terminal
+publication of that exact wait can requeue them; unrelated session task
+progress does not.
 Reflection task handles own their shared terminal wait cells, so completion,
 failure, and cancellation remain observable after the active record and
 task-ID index are retired. An unacknowledged failure also leaves one minimal

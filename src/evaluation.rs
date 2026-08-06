@@ -193,7 +193,7 @@ impl EvaluationWaitToken {
         self.0.completion.notify_published();
     }
 
-    pub(crate) fn subscribe_spark(
+    pub(crate) fn subscribe_work(
         &self,
         runtime: EvaluationRuntimeId,
         registration: WakeRegistration,
@@ -204,13 +204,13 @@ impl EvaluationWaitToken {
     }
 
     #[cfg(test)]
-    pub(crate) fn spark_subscription_count(&self) -> usize {
+    pub(crate) fn exact_subscription_count(&self) -> usize {
         self.0.completion.len()
     }
 
     #[cfg(test)]
-    fn subscribe_test_spark(&self) -> CompletionSubscriptionOutcome {
-        self.subscribe_spark(self.runtime_id(), test_wake_registration())
+    fn subscribe_test_work(&self) -> CompletionSubscriptionOutcome {
+        self.subscribe_work(self.runtime_id(), test_wake_registration())
     }
 }
 
@@ -1198,7 +1198,7 @@ impl EvaluationSession {
 
     fn notify_promise_changed(&self) {
         // Promise followers remain a temporary broad retry bridge until task
-        // work subscribes directly to exact dependencies in Phase 7B.2.
+        // work subscribes directly to promises in Phase 7B.2c.
         self.notify_task_changed();
         self.coordinator.retry_blocked_deferred(self.id);
     }
@@ -3668,30 +3668,30 @@ mod tests {
             .expect("cancelled task should schedule");
         for wait in [complete.wait(), failed.wait(), cancelled.wait()] {
             assert_eq!(
-                wait.subscribe_test_spark(),
+                wait.subscribe_test_work(),
                 CompletionSubscriptionOutcome::Pending
             );
-            assert_eq!(wait.spark_subscription_count(), 1);
+            assert_eq!(wait.exact_subscription_count(), 1);
         }
         assert_eq!(
             context.cancel_reflection_task(&cancelled),
             EvaluationTaskCancellation::Requested
         );
-        assert_eq!(cancelled.wait().spark_subscription_count(), 0);
+        assert_eq!(cancelled.wait().exact_subscription_count(), 0);
 
         let EvaluationSessionRun::Complete(report) = context.run_until_quiescent() else {
             panic!("terminal tasks should leave no unfinished work");
         };
         assert_eq!(report.failures.size(), 1);
         assert!(report.failures.contains_key(&failed.id()));
-        assert_eq!(complete.wait().spark_subscription_count(), 0);
-        assert_eq!(failed.wait().spark_subscription_count(), 0);
+        assert_eq!(complete.wait().exact_subscription_count(), 0);
+        assert_eq!(failed.wait().exact_subscription_count(), 0);
         assert_eq!(
-            complete.wait().subscribe_test_spark(),
+            complete.wait().subscribe_test_work(),
             CompletionSubscriptionOutcome::AlreadyTerminal,
             "a late exact subscription must observe the immutable terminal"
         );
-        assert_eq!(complete.wait().spark_subscription_count(), 0);
+        assert_eq!(complete.wait().exact_subscription_count(), 0);
 
         for _ in 0..2 {
             assert!(matches!(
@@ -3739,10 +3739,10 @@ mod tests {
 
         assert_eq!(
             task.wait()
-                .subscribe_spark(foreign_fixture.runtime.id(), test_wake_registration()),
+                .subscribe_work(foreign_fixture.runtime.id(), test_wake_registration()),
             CompletionSubscriptionOutcome::ForeignRuntime
         );
-        assert_eq!(task.wait().spark_subscription_count(), 0);
+        assert_eq!(task.wait().exact_subscription_count(), 0);
     }
 
     #[test]
@@ -3876,7 +3876,7 @@ mod tests {
                 .schedule_task(|_| Ok(Box::new(AlwaysBlocked)))
                 .expect("abandoned task should schedule");
             assert_eq!(
-                task.wait().subscribe_test_spark(),
+                task.wait().subscribe_test_work(),
                 CompletionSubscriptionOutcome::Pending
             );
             owner
@@ -3897,7 +3897,7 @@ mod tests {
             observer.poll_reflection_task(&task),
             EvaluationWaitPoll::Abandoned
         );
-        assert_eq!(task.wait().spark_subscription_count(), 0);
+        assert_eq!(task.wait().exact_subscription_count(), 0);
         assert_eq!(
             statuses
                 .0
@@ -3906,6 +3906,41 @@ mod tests {
                 .as_slice(),
             [EvaluationTaskStatus::Abandoned]
         );
+    }
+
+    #[test]
+    fn owner_session_drop_exactly_wakes_a_cross_session_task_waiter() {
+        let fixture = SameRuntimeFixture::new();
+        let observer = fixture.context();
+        let (dependency, follower) = {
+            let owner = fixture.context();
+            let dependency = owner
+                .schedule_task(|_| Ok(Box::new(AlwaysBlocked)))
+                .expect("abandoned dependency should schedule");
+            let dependency_wait = dependency.wait.clone();
+            let follower = observer
+                .schedule_task(move |task_context| {
+                    Ok(Box::new(Await {
+                        context: task_context,
+                        dependency: dependency_wait,
+                    }))
+                })
+                .expect("cross-session follower should schedule");
+
+            let EvaluationSessionRun::Quiescent(report) = observer.run_until_quiescent() else {
+                panic!("the live owner should leave its cross-session follower quiescent")
+            };
+            assert_eq!(report.unfinished.len(), 1);
+            assert_eq!(dependency.wait().exact_subscription_count(), 1);
+            (dependency, follower)
+        };
+
+        assert_eq!(dependency.wait().exact_subscription_count(), 0);
+        assert_eq!(observer.session.coordinator.ready_task_count(), 1);
+        let EvaluationSessionRun::Complete(report) = observer.run_until_quiescent() else {
+            panic!("owner abandonment should wake and terminalize the follower")
+        };
+        assert!(report.failures.contains_key(&follower.id()));
     }
 
     #[test]
@@ -3956,7 +3991,7 @@ mod tests {
                 .expect("task promise should retain producer provenance")
                 .wait();
             assert_eq!(
-                wait.subscribe_test_spark(),
+                wait.subscribe_test_work(),
                 CompletionSubscriptionOutcome::Pending
             );
             promise
@@ -3972,7 +4007,7 @@ mod tests {
                 .task()
                 .expect("task promise should retain producer provenance")
                 .wait()
-                .spark_subscription_count(),
+                .exact_subscription_count(),
             0
         );
         assert!(matches!(
@@ -4343,6 +4378,8 @@ mod tests {
         assert!(Arc::ptr_eq(&left_failure, &right_failure));
         assert!(left.source_snapshot().is_none());
         assert!(right.source_snapshot().is_none());
+        assert_eq!(left_wait.exact_subscription_count(), 0);
+        assert_eq!(right_wait.exact_subscription_count(), 0);
         assert_deferred_task_retired(&context, &left);
         assert_deferred_task_retired(&context, &right);
         let cycle = dependency_cycle(&left);
@@ -4409,6 +4446,8 @@ mod tests {
         );
         assert!(left.source_snapshot().is_none());
         assert!(right.source_snapshot().is_none());
+        assert_eq!(left_wait.exact_subscription_count(), 0);
+        assert_eq!(right_wait.exact_subscription_count(), 0);
         assert_deferred_task_retired(&left_context, &left);
         assert_deferred_task_retired(&right_context, &right);
     }
@@ -5172,7 +5211,7 @@ mod tests {
         }
 
         assert_eq!(promise.follower_count(), 0);
-        assert_eq!(promise.spark_subscription_count(), 2);
+        assert_eq!(promise.exact_subscription_count(), 2);
         assert_eq!(coordinator.spark_work_counts(), (0, 0, 2));
         promise
             .set(left.values().unit())
@@ -5210,7 +5249,7 @@ mod tests {
             .set(context.values().unit())
             .expect("promise A should resolve once");
         assert_eq!(coordinator.spark_work_counts(), (1, 0, 1));
-        assert_eq!(promise_b.spark_subscription_count(), 1);
+        assert_eq!(promise_b.exact_subscription_count(), 1);
 
         let coordinator::CoordinatorSelection::Spark(claimed) = coordinator.select() else {
             panic!("promise A should wake its own spark")
@@ -5255,7 +5294,7 @@ mod tests {
             .expect("the promise should resolve before subscription");
 
         coordinator.release_spark(claimed, coordinator::SparkWorkPoll::Blocked(dependency));
-        assert_eq!(promise.spark_subscription_count(), 0);
+        assert_eq!(promise.exact_subscription_count(), 0);
         assert_eq!(coordinator.spark_work_counts(), (1, 0, 0));
         let coordinator::CoordinatorSelection::Spark(claimed) = coordinator.select() else {
             panic!("terminal recheck should requeue the spark")
@@ -5298,8 +5337,8 @@ mod tests {
                 )),
             );
         }
-        assert_eq!(wait_a.wait().spark_subscription_count(), 1);
-        assert_eq!(wait_b.wait().spark_subscription_count(), 1);
+        assert_eq!(wait_a.wait().exact_subscription_count(), 1);
+        assert_eq!(wait_b.wait().exact_subscription_count(), 1);
         assert_eq!(coordinator.spark_work_counts(), (0, 0, 2));
 
         assert_eq!(
@@ -5316,8 +5355,8 @@ mod tests {
             context.pump_wait(wait_a.wait(), 256),
             EvaluationPumpOutcome::TargetReady
         );
-        assert_eq!(wait_a.wait().spark_subscription_count(), 0);
-        assert_eq!(wait_b.wait().spark_subscription_count(), 1);
+        assert_eq!(wait_a.wait().exact_subscription_count(), 0);
+        assert_eq!(wait_b.wait().exact_subscription_count(), 1);
         assert_eq!(coordinator.spark_work_counts(), (1, 0, 1));
         let claimed = claim_next_spark(&coordinator);
         coordinator.release_spark(claimed, coordinator::SparkWorkPoll::Complete);
@@ -5326,7 +5365,7 @@ mod tests {
             context.pump_wait(wait_b.wait(), 256),
             EvaluationPumpOutcome::TargetReady
         );
-        assert_eq!(wait_b.wait().spark_subscription_count(), 0);
+        assert_eq!(wait_b.wait().exact_subscription_count(), 0);
         assert_eq!(coordinator.spark_work_counts(), (1, 0, 0));
         let claimed = claim_next_spark(&coordinator);
         coordinator.release_spark(claimed, coordinator::SparkWorkPoll::Complete);

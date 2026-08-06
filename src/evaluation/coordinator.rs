@@ -477,14 +477,14 @@ impl WorkDependency {
         }
     }
 
-    fn subscribe_spark(
+    fn subscribe_work(
         &self,
         runtime: EvaluationRuntimeId,
         registration: WakeRegistration,
     ) -> CompletionSubscriptionOutcome {
         match self {
-            Self::Wait(wait) => wait.subscribe_spark(runtime, registration),
-            Self::Promise(promise) => promise.subscribe_spark(runtime, registration),
+            Self::Wait(wait) => wait.subscribe_work(runtime, registration),
+            Self::Promise(promise) => promise.subscribe_work(runtime, registration),
             #[cfg(test)]
             Self::Test(_) => {
                 unreachable!("synthetic completion sources install their own subscription")
@@ -1293,22 +1293,7 @@ impl EvaluationWorkCoordinator {
         };
 
         if let Some((dependency, registration)) = exact_subscription {
-            let source = dependency.key();
-            match dependency.subscribe_spark(self.runtime, registration) {
-                CompletionSubscriptionOutcome::Pending => {}
-                CompletionSubscriptionOutcome::AlreadyTerminal => {
-                    self.wake_dependency_batch_guarded(
-                        &mutation,
-                        DependencyWakeBatch {
-                            source,
-                            registrations: vec![registration],
-                        },
-                    );
-                }
-                CompletionSubscriptionOutcome::ForeignRuntime => {
-                    unreachable!("foreign dependencies must be rejected before parking")
-                }
-            }
+            self.subscribe_dependency_guarded(&mutation, dependency, registration);
         }
         drop(mutation);
         self.work_available.notify_all();
@@ -1709,7 +1694,7 @@ impl EvaluationWorkCoordinator {
         poll: ReflectionWorkPoll,
     ) -> ReflectionWorkRelease {
         let mutation = self.admission.mutation_guard();
-        let mut release = {
+        let (mut release, exact_subscription) = {
             let mut state = self
                 .state
                 .lock()
@@ -1733,7 +1718,6 @@ impl EvaluationWorkCoordinator {
                 match poll {
                     ReflectionWorkPoll::Yielded => (WorkState::Queued, None, true, false, false),
                     ReflectionWorkPoll::Blocked(block) => {
-                        debug_assert_task_block_runtime(self.runtime, &block);
                         let unchanged = claimed.prior_block.as_ref() == Some(&block);
                         (WorkState::Blocked, Some(block), !unchanged, true, false)
                     }
@@ -1742,19 +1726,19 @@ impl EvaluationWorkCoordinator {
                     }
                 }
             };
-            {
+            let exact_subscription = if let Some(block) = block {
+                assert!(matches!(state_after, WorkState::Blocked));
+                publish_task_block_locked(&mut state, self.runtime, claimed.id, block)
+            } else {
                 let record = state
                     .work
                     .get_mut(&claimed.id)
                     .expect("claimed reflection work must remain registered");
-                reflection_work_mut(record).block = block;
+                reflection_work_mut(record).block = None;
                 record.state = state_after;
-            }
-            if matches!(state_after, WorkState::Blocked) {
-                register_observation_wait(&mut state, claimed.id);
-            } else {
                 state.observation_waiters.remove(&claimed.id);
-            }
+                None
+            };
             if matches!(state_after, WorkState::Queued) {
                 queue_reflection(&mut state, claimed.id);
             }
@@ -1774,13 +1758,24 @@ impl EvaluationWorkCoordinator {
                 promote_deferred_wait_locked(&mut state, &wait);
             }
             state.work_generation = state.work_generation.wrapping_add(1);
-            ReflectionWorkRelease {
-                made_progress,
-                remains_blocked,
-                terminal,
-                cancel,
-            }
+            (
+                ReflectionWorkRelease {
+                    made_progress,
+                    remains_blocked,
+                    terminal,
+                    cancel,
+                },
+                exact_subscription,
+            )
         };
+        if release.remains_blocked
+            && exact_subscription.is_some_and(|(dependency, registration)| {
+                self.subscribe_dependency_guarded(&mutation, dependency, registration)
+            })
+        {
+            release.made_progress = true;
+            release.remains_blocked = false;
+        }
         if release.remains_blocked && self.recheck_observation_wait(claimed.id) {
             release.made_progress = true;
             release.remains_blocked = false;
@@ -2020,27 +2015,6 @@ impl EvaluationWorkCoordinator {
         }
     }
 
-    #[cfg(test)]
-    pub(super) fn claim_deferred(&self, id: EvaluationWorkId) -> Option<ClaimedDeferredWork> {
-        let mutation = self.admission.mutation_guard();
-        let claimed = {
-            let mut state = self
-                .state
-                .lock()
-                .expect("evaluation work coordinator was poisoned");
-            let claimed = claim_deferred(&mut state, id, false);
-            if claimed.is_some() {
-                state.work_generation = state.work_generation.wrapping_add(1);
-            }
-            claimed
-        };
-        drop(mutation);
-        if claimed.is_some() {
-            self.work_available.notify_all();
-        }
-        claimed
-    }
-
     pub(super) fn claim_blocked_deferred(
         &self,
         session: EvaluationSessionId,
@@ -2084,7 +2058,7 @@ impl EvaluationWorkCoordinator {
         poll: DeferredWorkPoll,
     ) -> DeferredWorkRelease {
         let mutation = self.admission.mutation_guard();
-        let mut release = {
+        let (mut release, exact_subscription) = {
             let mut state = self
                 .state
                 .lock()
@@ -2115,7 +2089,6 @@ impl EvaluationWorkCoordinator {
                     }
                     DeferredWorkPoll::Yielded => (WorkState::Dormant, None, true, false, false),
                     DeferredWorkPoll::Blocked(block) => {
-                        debug_assert_task_block_runtime(self.runtime, &block);
                         let unchanged = claimed.prior_block.as_ref() == Some(&block);
                         (WorkState::Blocked, Some(block), !unchanged, true, false)
                     }
@@ -2124,19 +2097,19 @@ impl EvaluationWorkCoordinator {
                     }
                 }
             };
-            {
+            let mut exact_subscription = if let Some(block) = block {
+                assert!(matches!(state_after, WorkState::Blocked));
+                publish_task_block_locked(&mut state, self.runtime, claimed.id, block)
+            } else {
                 let record = state
                     .work
                     .get_mut(&claimed.id)
                     .expect("claimed deferred work must remain registered");
-                deferred_work_mut(record).block = block;
+                deferred_work_mut(record).block = None;
                 record.state = state_after;
-            }
-            if matches!(state_after, WorkState::Blocked) {
-                register_observation_wait(&mut state, claimed.id);
-            } else {
                 state.observation_waiters.remove(&claimed.id);
-            }
+                None
+            };
             if matches!(state_after, WorkState::Queued) {
                 queue_deferred(&mut state, claimed.id);
             }
@@ -2163,15 +2136,29 @@ impl EvaluationWorkCoordinator {
                 Vec::new()
             };
             let cycle_terminal = !cycle.is_empty();
-            state.work_generation = state.work_generation.wrapping_add(1);
-            DeferredWorkRelease {
-                made_progress: made_progress || cycle_terminal,
-                remains_blocked: remains_blocked && !cycle_terminal,
-                terminal: terminal || cycle_terminal,
-                abandoned,
-                cycle,
+            if cycle_terminal {
+                exact_subscription = None;
             }
+            state.work_generation = state.work_generation.wrapping_add(1);
+            (
+                DeferredWorkRelease {
+                    made_progress: made_progress || cycle_terminal,
+                    remains_blocked: remains_blocked && !cycle_terminal,
+                    terminal: terminal || cycle_terminal,
+                    abandoned,
+                    cycle,
+                },
+                exact_subscription,
+            )
         };
+        if release.remains_blocked
+            && exact_subscription.is_some_and(|(dependency, registration)| {
+                self.subscribe_dependency_guarded(&mutation, dependency, registration)
+            })
+        {
+            release.made_progress = true;
+            release.remains_blocked = false;
+        }
         if release.remains_blocked && self.recheck_observation_wait(claimed.id) {
             release.made_progress = true;
             release.remains_blocked = false;
@@ -2642,6 +2629,28 @@ impl EvaluationWorkCoordinator {
         }
     }
 
+    fn subscribe_dependency_guarded(
+        &self,
+        mutation: &RuntimeMutationGuard<'_>,
+        dependency: WorkDependency,
+        registration: WakeRegistration,
+    ) -> bool {
+        let source = dependency.key();
+        match dependency.subscribe_work(self.runtime, registration) {
+            CompletionSubscriptionOutcome::Pending => false,
+            CompletionSubscriptionOutcome::AlreadyTerminal => self.wake_dependency_batch_guarded(
+                mutation,
+                DependencyWakeBatch {
+                    source,
+                    registrations: vec![registration],
+                },
+            ),
+            CompletionSubscriptionOutcome::ForeignRuntime => {
+                unreachable!("foreign dependencies must be rejected before task publication")
+            }
+        }
+    }
+
     /// Queues registrations which still describe the work's current blocked
     /// dependency. The caller already owns this runtime's mutation admission;
     /// dependency publication and the scheduler transition therefore form one
@@ -2885,6 +2894,14 @@ fn task_block(record: &WorkRecord) -> Option<&EvaluationTaskBlock> {
     }
 }
 
+fn work_dependency(record: &WorkRecord) -> Option<&WorkDependency> {
+    match &record.kind {
+        WorkKind::Spark(work) => work.dependency.as_ref(),
+        WorkKind::Reflection(work) => work.block.as_ref()?.dependency.as_ref(),
+        WorkKind::Deferred(work) => work.block.as_ref()?.dependency.as_ref(),
+    }
+}
+
 fn debug_assert_task_block_runtime(runtime: EvaluationRuntimeId, block: &EvaluationTaskBlock) {
     if let Some(dependency) = &block.dependency {
         debug_assert_eq!(
@@ -2895,35 +2912,45 @@ fn debug_assert_task_block_runtime(runtime: EvaluationRuntimeId, block: &Evaluat
     }
 }
 
-fn register_observation_wait(state: &mut WorkCoordinatorState, id: EvaluationWorkId) {
+fn publish_task_block_locked(
+    state: &mut WorkCoordinatorState,
+    runtime: EvaluationRuntimeId,
+    id: EvaluationWorkId,
+    block: EvaluationTaskBlock,
+) -> Option<(WorkDependency, WakeRegistration)> {
+    debug_assert_task_block_runtime(runtime, &block);
     state.observation_waiters.remove(&id);
-    let observed_epoch = state
-        .work
-        .get(&id)
-        .and_then(task_block)
-        .and_then(|block| block.observed_epoch);
-    let Some(observed_epoch) = observed_epoch else {
-        return;
-    };
+    let dependency = block.dependency.clone();
+    let observed_epoch = block.observed_epoch;
     let record = state
         .work
         .get_mut(&id)
-        .expect("blocked observation work must remain registered");
-    assert!(matches!(record.state, WorkState::Blocked));
+        .expect("blocked task work must remain registered");
+    assert!(matches!(record.state, WorkState::Running));
     record.subscription_epoch = record
         .subscription_epoch
         .checked_add(1)
         .expect("evaluation work subscription epochs exhausted");
-    state.observation_waiters.insert(
-        id,
-        ObservationRegistration {
-            wake: WakeRegistration {
-                work: id,
-                subscription_epoch: record.subscription_epoch,
+    let registration = WakeRegistration {
+        work: id,
+        subscription_epoch: record.subscription_epoch,
+    };
+    match &mut record.kind {
+        WorkKind::Reflection(work) => work.block = Some(block),
+        WorkKind::Deferred(work) => work.block = Some(block),
+        WorkKind::Spark(_) => panic!("spark work cannot publish a task block"),
+    }
+    record.state = WorkState::Blocked;
+    if let Some(observed_epoch) = observed_epoch {
+        state.observation_waiters.insert(
+            id,
+            ObservationRegistration {
+                wake: registration,
+                observed_epoch,
             },
-            observed_epoch,
-        },
-    );
+        );
+    }
+    dependency.map(|dependency| (dependency, registration))
 }
 
 fn queue_current_observation(
@@ -3368,24 +3395,27 @@ fn queue_current_registration(
     registration: WakeRegistration,
     source: Option<WorkDependencyKey>,
 ) -> bool {
-    {
+    let spark = {
         let Some(record) = state.work.get_mut(&registration.work) else {
             return false;
         };
         if !matches!(record.state, WorkState::Blocked)
             || record.subscription_epoch != registration.subscription_epoch
             || source.is_some_and(|source| {
-                spark_work(record)
-                    .dependency
-                    .as_ref()
-                    .is_none_or(|dependency| dependency.key() != source)
+                work_dependency(record).is_none_or(|dependency| dependency.key() != source)
             })
         {
             return false;
         }
         record.state = WorkState::Queued;
+        matches!(record.kind, WorkKind::Spark(_))
+    };
+    state.observation_waiters.remove(&registration.work);
+    if spark {
+        queue_spark(state, registration.work);
+    } else {
+        queue_task(state, registration.work);
     }
-    queue_spark(state, registration.work);
     true
 }
 
@@ -3607,6 +3637,63 @@ mod tests {
     }
 
     impl EvaluationWorkCoordinator {
+        fn park_claimed_test_reflection(
+            self: &Arc<Self>,
+            claimed: ClaimedReflectionWork,
+            source: &TestCompletionSource,
+            before_insert: impl FnOnce(),
+        ) -> WakeRegistration {
+            assert_eq!(source.runtime_id(), self.runtime);
+            let mutation = self.admission.mutation_guard();
+            let (dependency, registration) = {
+                let mut state = self
+                    .state
+                    .lock()
+                    .expect("evaluation work coordinator was poisoned");
+                let record = state
+                    .work
+                    .get(&claimed.id)
+                    .expect("claimed test reflection work must remain registered");
+                assert_eq!(record.demand_session, claimed.demand_session);
+                assert_eq!(reflection_work(record).task, claimed.task);
+                assert!(matches!(record.state, WorkState::Running));
+                let exact = publish_task_block_locked(
+                    &mut state,
+                    self.runtime,
+                    claimed.id,
+                    EvaluationTaskBlock {
+                        dependency: Some(source.dependency()),
+                        observed_epoch: None,
+                        error: None,
+                    },
+                )
+                .expect("the synthetic task block should retain its dependency");
+                state.work_generation = state.work_generation.wrapping_add(1);
+                exact
+            };
+            assert!(dependency.same_source(&source.dependency()));
+            let outcome = source.subscriptions.subscribe_with(
+                self.runtime,
+                registration,
+                || source.is_terminal(),
+                before_insert,
+            );
+            let woke = if outcome == CompletionSubscriptionOutcome::AlreadyTerminal {
+                self.wake_dependency_batch_guarded(
+                    &mutation,
+                    DependencyWakeBatch {
+                        source: source.key(),
+                        registrations: vec![registration],
+                    },
+                )
+            } else {
+                false
+            };
+            drop(mutation);
+            self.notify_dependency_wake(woke);
+            registration
+        }
+
         fn park_claimed_test_spark(
             &self,
             claimed: ClaimedSparkWork,
@@ -3846,6 +3933,56 @@ mod tests {
         assert_eq!(source.subscriber_count(), 0);
         assert_eq!(coordinator.spark_work_counts(), (1, 0, 0));
         finish_queued_test_spark(&coordinator);
+    }
+
+    #[test]
+    fn task_completion_during_subscription_cannot_lose_the_wake() {
+        let (coordinator, _executor) = super::super::test_execution_resources(0)
+            .expect("test execution resources should build");
+        let session = EvaluationSession::shared(&coordinator);
+        let (_, work) = reserve_ready_test_reflection(&coordinator, &session);
+        let claimed = claim_ready_test_reflection(&coordinator, session.id);
+        let source = TestCompletionSource::new(&coordinator);
+        let started = Arc::new(Barrier::new(2));
+        let completer = Arc::new(Mutex::new(None));
+
+        coordinator.park_claimed_test_reflection(claimed, &source, {
+            let source = source.clone();
+            let started = started.clone();
+            let completer = completer.clone();
+            move || {
+                let completion_source = source.clone();
+                let completion_started = started.clone();
+                *completer
+                    .lock()
+                    .expect("completion thread slot was poisoned") =
+                    Some(thread::spawn(move || {
+                        completion_started.wait();
+                        completion_source.complete();
+                    }));
+                started.wait();
+                while !source.is_terminal() {
+                    thread::yield_now();
+                }
+            }
+        });
+        completer
+            .lock()
+            .expect("completion thread slot was poisoned")
+            .take()
+            .expect("the subscription hook should start a completer")
+            .join()
+            .expect("test completion thread should not panic");
+
+        assert_eq!(source.subscriber_count(), 0);
+        assert_eq!(coordinator.ready_task_count(), 1);
+        let claimed = claim_ready_test_reflection(&coordinator, session.id);
+        assert!(
+            coordinator
+                .release_reflection(claimed, ReflectionWorkPoll::Terminal)
+                .terminal
+        );
+        settle_test_reflection(&coordinator, work);
     }
 
     #[test]
@@ -4097,7 +4234,7 @@ mod tests {
             SparkWorkPoll::Blocked(WorkDependency::Promise(promise.clone())),
         );
 
-        assert_eq!(promise.spark_subscription_count(), 0);
+        assert_eq!(promise.exact_subscription_count(), 0);
         assert_eq!(coordinator.retained_spark_count(), 0);
     }
 
@@ -4117,7 +4254,7 @@ mod tests {
             SparkWorkPoll::Blocked(WorkDependency::Wait(wait.clone())),
         );
 
-        assert_eq!(wait.spark_subscription_count(), 0);
+        assert_eq!(wait.exact_subscription_count(), 0);
         assert_eq!(coordinator.retained_spark_count(), 0);
     }
 
@@ -4277,6 +4414,220 @@ mod tests {
                 .terminal
         );
         settle_test_reflection(&coordinator, work);
+    }
+
+    #[test]
+    fn exact_wait_completion_requeues_only_its_cross_session_task() {
+        let (coordinator, _executor) = super::super::test_execution_resources(0)
+            .expect("test execution resources should build");
+        let producer = EvaluationSession::shared(&coordinator);
+        let observer = EvaluationSession::shared(&coordinator);
+        let dependency_task = super::super::allocate_task_id(&producer.values)
+            .expect("dependency task identity should allocate");
+        let dependency = super::super::allocate_wait_token(&producer, dependency_task)
+            .expect("dependency wait identity should allocate");
+        let unrelated_task = super::super::allocate_task_id(&producer.values)
+            .expect("unrelated task identity should allocate");
+        let unrelated = super::super::allocate_wait_token(&producer, unrelated_task)
+            .expect("unrelated wait identity should allocate");
+        let (_, work) = reserve_ready_test_reflection(&coordinator, &observer);
+        let claimed = claim_ready_test_reflection(&coordinator, observer.id);
+
+        let release = coordinator.release_reflection(
+            claimed,
+            ReflectionWorkPoll::Blocked(EvaluationTaskBlock {
+                dependency: Some(WorkDependency::Wait(dependency.clone())),
+                observed_epoch: None,
+                error: None,
+            }),
+        );
+        assert!(release.remains_blocked);
+        assert_eq!(dependency.exact_subscription_count(), 1);
+        assert_eq!(coordinator.ready_task_count(), 0);
+
+        unrelated.publish_terminal(EvaluationWaitTerminal::Complete(RuntimeValueRoot::new(
+            &producer.values,
+            crate::core::keys::unit_value(),
+        )));
+        unrelated.notify_terminal();
+        assert_eq!(coordinator.ready_task_count(), 0);
+        dependency.publish_terminal(EvaluationWaitTerminal::Complete(RuntimeValueRoot::new(
+            &producer.values,
+            crate::core::keys::unit_value(),
+        )));
+        dependency.notify_terminal();
+        assert_eq!(dependency.exact_subscription_count(), 0);
+        assert_eq!(coordinator.ready_task_count(), 1);
+
+        let claimed = claim_ready_test_reflection(&coordinator, observer.id);
+        assert!(
+            coordinator
+                .release_reflection(claimed, ReflectionWorkPoll::Terminal)
+                .terminal
+        );
+        settle_test_reflection(&coordinator, work);
+    }
+
+    #[test]
+    fn stale_wait_completion_does_not_wake_a_task_reblocked_elsewhere() {
+        let (coordinator, _executor) = super::super::test_execution_resources(0)
+            .expect("test execution resources should build");
+        let session = EvaluationSession::shared(&coordinator);
+        let task_a = super::super::allocate_task_id(&session.values)
+            .expect("wait A task identity should allocate");
+        let wait_a = super::super::allocate_wait_token(&session, task_a)
+            .expect("wait A identity should allocate");
+        let task_b = super::super::allocate_task_id(&session.values)
+            .expect("wait B task identity should allocate");
+        let wait_b = super::super::allocate_wait_token(&session, task_b)
+            .expect("wait B identity should allocate");
+        let (_, work) = reserve_ready_test_reflection(&coordinator, &session);
+        let claimed = claim_ready_test_reflection(&coordinator, session.id);
+
+        assert!(
+            coordinator
+                .release_reflection(
+                    claimed,
+                    ReflectionWorkPoll::Blocked(EvaluationTaskBlock {
+                        dependency: Some(WorkDependency::Wait(wait_a.clone())),
+                        observed_epoch: None,
+                        error: None,
+                    }),
+                )
+                .remains_blocked
+        );
+        let claimed = coordinator
+            .claim_blocked_reflection(session.id, &HashSet::new())
+            .expect("the conservative retry path should reclaim the blocked task");
+        assert!(
+            coordinator
+                .release_reflection(
+                    claimed,
+                    ReflectionWorkPoll::Blocked(EvaluationTaskBlock {
+                        dependency: Some(WorkDependency::Wait(wait_b.clone())),
+                        observed_epoch: None,
+                        error: None,
+                    }),
+                )
+                .remains_blocked
+        );
+        assert_eq!(wait_a.exact_subscription_count(), 1);
+        assert_eq!(wait_b.exact_subscription_count(), 1);
+
+        wait_a.publish_terminal(EvaluationWaitTerminal::Complete(RuntimeValueRoot::new(
+            &session.values,
+            crate::core::keys::unit_value(),
+        )));
+        wait_a.notify_terminal();
+        assert_eq!(coordinator.ready_task_count(), 0);
+        wait_b.publish_terminal(EvaluationWaitTerminal::Complete(RuntimeValueRoot::new(
+            &session.values,
+            crate::core::keys::unit_value(),
+        )));
+        wait_b.notify_terminal();
+        assert_eq!(coordinator.ready_task_count(), 1);
+
+        let claimed = claim_ready_test_reflection(&coordinator, session.id);
+        assert!(
+            coordinator
+                .release_reflection(claimed, ReflectionWorkPoll::Terminal)
+                .terminal
+        );
+        settle_test_reflection(&coordinator, work);
+    }
+
+    #[test]
+    fn exact_and_broad_task_wakes_share_one_block_epoch() {
+        for exact_wins in [true, false] {
+            let (coordinator, _executor) = super::super::test_execution_resources(0)
+                .expect("test execution resources should build");
+            let session = EvaluationSession::shared(&coordinator);
+            let observed = coordinator.observations.current();
+            let dependency_task = super::super::allocate_task_id(&session.values)
+                .expect("dependency task identity should allocate");
+            let dependency = super::super::allocate_wait_token(&session, dependency_task)
+                .expect("dependency wait identity should allocate");
+            let (_, work) = reserve_ready_test_reflection(&coordinator, &session);
+            let claimed = claim_ready_test_reflection(&coordinator, session.id);
+
+            assert!(
+                coordinator
+                    .release_reflection(
+                        claimed,
+                        ReflectionWorkPoll::Blocked(EvaluationTaskBlock {
+                            dependency: Some(WorkDependency::Wait(dependency.clone())),
+                            observed_epoch: Some(observed),
+                            error: None,
+                        }),
+                    )
+                    .remains_blocked
+            );
+            assert_eq!(dependency.exact_subscription_count(), 1);
+
+            let complete = || {
+                dependency.publish_terminal(EvaluationWaitTerminal::Complete(
+                    RuntimeValueRoot::new(&session.values, crate::core::keys::unit_value()),
+                ));
+                dependency.notify_terminal();
+            };
+            if exact_wins {
+                complete();
+                publish_test_observation(&coordinator);
+            } else {
+                publish_test_observation(&coordinator);
+                complete();
+            }
+            assert_eq!(dependency.exact_subscription_count(), 0);
+            assert_eq!(coordinator.ready_task_count(), 1);
+
+            let claimed = claim_ready_test_reflection(&coordinator, session.id);
+            assert!(
+                coordinator
+                    .release_reflection(claimed, ReflectionWorkPoll::Terminal)
+                    .terminal
+            );
+            settle_test_reflection(&coordinator, work);
+        }
+    }
+
+    #[test]
+    fn retired_task_makes_a_late_exact_wait_wake_harmless() {
+        let (coordinator, _executor) = super::super::test_execution_resources(0)
+            .expect("test execution resources should build");
+        let session = EvaluationSession::shared(&coordinator);
+        let dependency_task = super::super::allocate_task_id(&session.values)
+            .expect("dependency task identity should allocate");
+        let dependency = super::super::allocate_wait_token(&session, dependency_task)
+            .expect("dependency wait identity should allocate");
+        let (_, work) = reserve_ready_test_reflection(&coordinator, &session);
+        let claimed = claim_ready_test_reflection(&coordinator, session.id);
+
+        assert!(
+            coordinator
+                .release_reflection(
+                    claimed,
+                    ReflectionWorkPoll::Blocked(EvaluationTaskBlock {
+                        dependency: Some(WorkDependency::Wait(dependency.clone())),
+                        observed_epoch: None,
+                        error: None,
+                    }),
+                )
+                .remains_blocked
+        );
+        assert_eq!(
+            coordinator.request_reflection_cancellation(work),
+            ReflectionCancellation::Terminalize
+        );
+        settle_test_reflection(&coordinator, work);
+        assert_eq!(dependency.exact_subscription_count(), 1);
+
+        dependency.publish_terminal(EvaluationWaitTerminal::Complete(RuntimeValueRoot::new(
+            &session.values,
+            crate::core::keys::unit_value(),
+        )));
+        dependency.notify_terminal();
+        assert_eq!(dependency.exact_subscription_count(), 0);
+        assert_eq!(coordinator.ready_task_count(), 0);
     }
 
     #[test]
@@ -4518,23 +4869,24 @@ mod tests {
                 error: None,
             }),
         );
-        assert!(release.remains_blocked);
+        assert!(!release.remains_blocked);
         assert!(!release.terminal);
 
-        let claimed = coordinator
-            .claim_blocked_deferred(session.id, &HashSet::new())
-            .expect("a terminal dependency should make the producer retryable once");
+        let ClaimedTaskWork::Deferred(claimed) = coordinator
+            .claim_ready_task_for_session(session.id)
+            .expect("a terminal dependency should immediately requeue the producer")
+        else {
+            panic!("the requeued producer should preserve its deferred kind")
+        };
         let release = coordinator.release_deferred(claimed, DeferredWorkPoll::Yielded);
         assert!(release.made_progress);
         assert!(!release.remains_blocked);
-        assert!(
-            coordinator
-                .claim_ready_task_for_session(session.id)
-                .is_none()
-        );
-        let claimed = coordinator
-            .claim_deferred(work)
-            .expect("yielded serial demand should return to dormant");
+        let ClaimedTaskWork::Deferred(claimed) = coordinator
+            .claim_ready_task_for_session(session.id)
+            .expect("a yielded queued demand should remain ready")
+        else {
+            panic!("the yielded producer should preserve its deferred kind")
+        };
         let release = coordinator.release_deferred(claimed, DeferredWorkPoll::Terminal);
         assert!(release.terminal);
         settle_test_deferred(&coordinator, work);

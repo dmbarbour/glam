@@ -706,7 +706,7 @@ impl PromisedValue {
         true
     }
 
-    pub(crate) fn subscribe_spark(
+    pub(crate) fn subscribe_work(
         &self,
         runtime: EvaluationRuntimeId,
         registration: WakeRegistration,
@@ -726,7 +726,7 @@ impl PromisedValue {
     }
 
     #[cfg(test)]
-    pub(crate) fn spark_subscription_count(&self) -> usize {
+    pub(crate) fn exact_subscription_count(&self) -> usize {
         self.0.completion.len()
     }
 
