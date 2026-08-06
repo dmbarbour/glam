@@ -242,9 +242,16 @@ impl PromiseSessionWake {
 /// Assignment-side access to one task-owned promise obligation.
 ///
 /// Scheduled tasks place the reciprocal weak promise cell in their
-/// coordinator work record. Directly driven effect tasks temporarily use a
-/// task-local inventory until client demand becomes coordinator work in Phase
-/// 10B. Neither form retains a producer session or runtime coordinator.
+/// coordinator work record. A task-owned promise is assignable only
+/// synchronously by its owning machine while that work is `Running`, and no
+/// other thread may terminalize running work. Consequently assignment removes
+/// this obligation before the owning poll can release the work for terminal
+/// settlement. Introducing an independently usable resolver for task-owned
+/// promises would require revisiting that publication invariant.
+///
+/// Directly driven effect tasks temporarily use a task-local inventory until
+/// client demand becomes coordinator work in Phase 10B. Neither form retains
+/// a producer session or runtime coordinator.
 pub(crate) struct PromiseProducerObligation {
     owner: EvaluationTaskId,
     wait: EvaluationWaitToken,
@@ -3054,7 +3061,6 @@ impl EvaluationSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Barrier;
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
@@ -3327,6 +3333,29 @@ mod tests {
 
         fn cancel(&mut self) {
             self.cancelled.store(true, Ordering::Release);
+        }
+    }
+
+    struct AssignPromiseThenYield {
+        promise: Option<PromisedValue>,
+        assigned: Option<mpsc::Sender<()>>,
+    }
+
+    impl EvaluationTaskMachine for AssignPromiseThenYield {
+        fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+            let promise = self
+                .promise
+                .take()
+                .expect("assignment fixture should publish exactly once");
+            promise
+                .set(crate::core::keys::unit_value())
+                .expect("the owning machine should assign its promise once");
+            self.assigned
+                .take()
+                .expect("assignment fixture should signal exactly once")
+                .send(())
+                .expect("assignment observer should remain live");
+            EvaluationMachinePoll::Yielded
         }
     }
 
@@ -3931,64 +3960,62 @@ mod tests {
     }
 
     #[test]
-    fn promise_assignment_and_producer_failure_publish_one_matching_terminal() {
-        const ITERATIONS: usize = 32;
-
+    fn assigned_task_promise_is_removed_before_later_task_terminalization() {
         let fixture = SameRuntimeFixture::new();
-        for index in 0..ITERATIONS {
-            let context = fixture.context();
-            let (promise, task, _owner_context) = context
-                .task_owned_promise(Arc::from(format!("racing task promise {index}")))
-                .expect("task promise should register");
-            let barrier = Arc::new(Barrier::new(2));
-            let assignment_barrier = barrier.clone();
-            let assigned = promise.clone();
-            let value = context.values().unit();
-            let assignment = std::thread::spawn(move || {
-                assignment_barrier.wait();
-                assigned.set(value)
-            });
-            let failure_barrier = barrier.clone();
-            let failure_context = context.clone();
-            let failure_wait = task.wait().clone();
-            let failure = std::thread::spawn(move || {
-                failure_barrier.wait();
-                failure_context.fail_wait(&failure_wait, "racing producer failure");
-            });
+        let context = fixture.context();
+        let (promise_sender, promise_receiver) = mpsc::channel();
+        let (assigned_sender, assigned_receiver) = mpsc::channel();
+        let task = context
+            .schedule_task(move |task_context| {
+                let promise = PromisedValue::fixpoint(&task_context, "assigned task promise")?;
+                promise_sender
+                    .send(promise.clone())
+                    .expect("test should receive its task-owned promise");
+                Ok(Box::new(AssignPromiseThenYield {
+                    promise: Some(promise),
+                    assigned: Some(assigned_sender),
+                }))
+            })
+            .expect("task promise should register");
+        let promise = promise_receiver
+            .recv()
+            .expect("task construction should publish its promise");
+        let promise_wait = promise
+            .task()
+            .expect("task promise should retain producer provenance")
+            .wait()
+            .clone();
 
-            let assignment_result = assignment.join().expect("assignment thread should finish");
-            failure.join().expect("failure thread should finish");
-            let terminal = promise
-                .assignment()
-                .expect("one racing publication must assign the promise");
-            match (&assignment_result, &terminal) {
-                (Ok(()), Ok(value)) => assert_eq!(value, &context.values().unit()),
-                (Err(_), Err(error)) => {
-                    assert!(error.to_string().contains("racing producer failure"));
-                }
-                _ => panic!("promise assignment and producer wait terminal disagreed"),
-            }
-            assert!(
-                matches!(
-                    context.poll_wait(
-                        promise
-                            .task()
-                            .expect("task promise should retain producer provenance")
-                            .wait()
-                    ),
-                    EvaluationWaitPoll::Complete(_) if terminal.is_ok()
-                ) || matches!(
-                    context.poll_wait(
-                        promise
-                            .task()
-                            .expect("task promise should retain producer provenance")
-                            .wait()
-                    ),
-                    EvaluationWaitPoll::Failed(_) if terminal.is_err()
-                )
-            );
-            assert_eq!(context.task_registry_counts().promises_active, 0);
-        }
+        assert_eq!(
+            context.pump_wait(task.wait(), 1),
+            EvaluationPumpOutcome::BudgetExhausted
+        );
+        assigned_receiver
+            .recv()
+            .expect("the owning machine should publish before yielding");
+        assert_eq!(
+            context.task_registry_counts().promises_active,
+            0,
+            "synchronous assignment must remove the producer obligation before returning"
+        );
+        assert!(matches!(
+            context.poll_wait(&promise_wait),
+            EvaluationWaitPoll::Complete(value) if value == context.values().unit()
+        ));
+
+        assert_eq!(
+            context.cancel_reflection_task(&task),
+            EvaluationTaskCancellation::Requested
+        );
+        assert_eq!(
+            context.poll_reflection_task(&task),
+            EvaluationWaitPoll::Cancelled
+        );
+        assert!(matches!(
+            context.poll_wait(&promise_wait),
+            EvaluationWaitPoll::Complete(value) if value == context.values().unit()
+        ));
+        assert_eq!(context.task_registry_counts().promises_active, 0);
     }
 
     #[test]
@@ -4442,12 +4469,20 @@ mod tests {
         let fixture = SameRuntimeFixture::new();
         let context = fixture.context();
         let cancelled = Arc::new(AtomicBool::new(false));
+        let (promise_sender, promise_receiver) = mpsc::channel();
         let (started_sender, started_receiver) = mpsc::channel();
         let (release_sender, release_receiver) = mpsc::channel();
         let task = context
             .schedule_task({
                 let cancelled = cancelled.clone();
-                move |_| {
+                move |task_context| {
+                    let promise = PromisedValue::fixpoint(
+                        &task_context,
+                        "promise owned by running cancellable task",
+                    )?;
+                    promise_sender
+                        .send(promise)
+                        .expect("running cancellation test must receive its promise");
                     Ok(Box::new(CancellableAfterRelease {
                         started: Some(started_sender),
                         release: release_receiver,
@@ -4456,6 +4491,14 @@ mod tests {
                 }
             })
             .expect("running cancellation fixture should schedule");
+        let promise = promise_receiver
+            .recv()
+            .expect("task construction should publish its owned promise");
+        let promise_wait = promise
+            .task()
+            .expect("task-owned promise should retain producer provenance")
+            .wait()
+            .clone();
         let worker = {
             let context = context.clone();
             let wait = task.wait().clone();
@@ -4473,6 +4516,11 @@ mod tests {
             context.poll_reflection_task(&task),
             EvaluationWaitPoll::Pending(_)
         ));
+        assert!(promise.assignment().is_none());
+        assert!(matches!(
+            context.poll_wait(&promise_wait),
+            EvaluationWaitPoll::Pending(_)
+        ));
         assert!(
             !cancelled.load(Ordering::Acquire),
             "the cancellation hook cannot run while the worker owns the machine"
@@ -4486,6 +4534,16 @@ mod tests {
             EvaluationPumpOutcome::TargetReady
         );
         assert!(cancelled.load(Ordering::Acquire));
+        let promise_failure = promise
+            .assignment()
+            .expect("owner-thread terminalization must settle its unresolved promise")
+            .expect_err("cancellation must fail the unresolved task-owned promise");
+        assert!(promise_failure.to_string().contains("was cancelled"));
+        assert!(matches!(
+            context.poll_wait(&promise_wait),
+            EvaluationWaitPoll::Failed(wait_failure)
+                if Arc::ptr_eq(&promise_failure, &wait_failure)
+        ));
         for _ in 0..2 {
             assert_eq!(
                 context.poll_reflection_task(&task),

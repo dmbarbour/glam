@@ -2348,9 +2348,12 @@ impl EvaluationWorkCoordinator {
         let (terminal, wake) = wait.publish_terminal_guarded(self, &mutation, terminal);
         drop(mutation);
 
-        // Promise publication has its own complete serialization handshake.
-        // If assignment raced this disposition, the winner has removed the
-        // corresponding dynamic obligation before `fail` returns.
+        // A task-owned promise is assigned synchronously by its owning machine
+        // while this work is Running. Cancellation from another thread only
+        // records a request; terminalization happens when that same poll
+        // releases the machine. Therefore an assignment observed here has
+        // already removed its dynamic obligation. Do not add an independently
+        // usable task-promise resolver without revisiting this invariant.
         self.fail_task_promises(work, promise_failure);
         {
             let state = self
