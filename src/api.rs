@@ -1202,6 +1202,7 @@ impl DiagnosticIngressInner {
 /// The bus retains this ingress weakly and the runtime retains its routing
 /// state. Dropping this escaping handle therefore neither detaches nor permits
 /// a replacement lifecycle.
+#[derive(Clone)]
 pub struct DiagnosticIngress {
     inner: Arc<DiagnosticIngressInner>,
 }
@@ -1255,9 +1256,7 @@ where
 }
 
 struct AssemblerReflectionHost {
-    runtime: Arc<RuntimeState>,
-    default_reflection_profile: Weak<ReflectionTaskProfile>,
-    runtime_id: EvaluationRuntimeId,
+    resources: Arc<RuntimeSharedResources>,
     reasoning_session: ReasoningSessionId,
     reflection_environment: OnceLock<RuntimeValueRoot>,
     diagnostics: DiagnosticBus,
@@ -1334,7 +1333,7 @@ impl CompilationExecution {
 
     #[cfg(test)]
     pub(crate) fn macro_heap(&self) -> Value {
-        self.macro_host.runtime().reflection_root()
+        self.macro_host.resources.reflection_root()
     }
 
     fn drain(&self) -> bool {
@@ -1409,36 +1408,28 @@ fn macro_reflection_diagnostic(diagnostic: &Diagnostic) -> Diagnostic {
 
 impl AssemblerReflectionHost {
     fn new_unsealed(runtime: &EvaluationRuntime, diagnostics: DiagnosticBus) -> Self {
+        let resources = runtime.shared_resources();
         Self {
-            reasoning_session: runtime.allocate_reasoning_session_id(),
-            runtime: runtime.state.clone(),
-            default_reflection_profile: Arc::downgrade(&runtime.default_reflection_profile),
-            runtime_id: runtime.id(),
+            reasoning_session: resources.allocate_reasoning_session_id(),
+            resources,
             reflection_environment: OnceLock::new(),
             diagnostics,
         }
     }
 
-    fn runtime(&self) -> EvaluationRuntime {
-        EvaluationRuntime {
-            state: self.runtime.clone(),
-            default_reflection_profile: self
-                .default_reflection_profile
-                .upgrade()
-                .expect("a running reflection host must retain its evaluation runtime"),
-        }
+    fn values(&self) -> Values {
+        self.resources.values()
     }
 
     fn seal_environment(&self, environment: Value) -> Result<(), Error> {
         self.reflection_environment
-            .set(self.runtime().root_value(environment)?)
+            .set(self.resources.root_value(environment)?)
             .map_err(|_| Error::new("reflection environment was already configured"))
     }
 
     fn create_volume(&self, initial: Value) -> Result<(VolumeId, Value), Error> {
-        let runtime = self.runtime();
-        let volume = runtime.create_volume(initial)?;
-        Ok((volume, volume_effects(runtime.values().core(), volume)))
+        let volume = self.resources.create_volume(initial)?;
+        Ok((volume, volume_effects(self.resources.values.core(), volume)))
     }
 }
 
@@ -1447,7 +1438,7 @@ impl TaskEnvironment for AssemblerReflectionHost {
         self.reflection_environment
             .get()
             .expect("reasoning host must be sealed before it runs tasks")
-            .value(self.runtime_id)
+            .value(self.resources.id)
     }
 }
 
@@ -1457,7 +1448,7 @@ impl ReflectionServices for AssemblerReflectionHost {
     }
 
     fn update_query(&self, handle: &Arc<crate::reflection::EvaluationQueryHandle>, result: Value) {
-        self.runtime()
+        self.resources
             .update_query(handle, result)
             .expect("reflection query results belong to the host runtime");
     }
@@ -1465,13 +1456,13 @@ impl ReflectionServices for AssemblerReflectionHost {
 
 impl TaskHost<ReflectionEffects> for AssemblerReflectionHost {
     fn snapshot(&self) -> HostSnapshot<ReflectionEffects> {
-        let (generation, store) = self.runtime().reflection_snapshot();
+        let (generation, store) = self.resources.reflection_snapshot();
         HostSnapshot::new(generation, store, ())
     }
 
     fn commit(&self, commit: TaskCommit<ReflectionEffects>) -> CommitResult {
         let (store, _extra_snapshot, extra) = commit.into_parts();
-        match self.runtime().commit_reflection(&store) {
+        match self.resources.commit_reflection(&store) {
             crate::reflection::StoreCommitResult::Committed => {}
             crate::reflection::StoreCommitResult::Conflict => {
                 return CommitResult::Conflict;
@@ -1493,7 +1484,7 @@ impl TaskHost<ReflectionEffects> for AssemblerReflectionHost {
     }
 
     fn wait_for_change(&self, observed_generation: u64) -> bool {
-        self.runtime().wait_for_change(observed_generation)
+        self.resources.wait_for_change(observed_generation)
     }
 }
 
@@ -1517,7 +1508,8 @@ struct RuntimeState {
 /// The coordinator route is deliberately weak: retaining these resources must
 /// not retain the runtime scheduler, executor, public runtime wrapper, or
 /// default reflection profile.
-struct RuntimeSharedResources {
+#[doc(hidden)]
+pub struct RuntimeSharedResources {
     id: EvaluationRuntimeId,
     values: RuntimeValueFactory,
     transactions: RuntimeTransactionState,
@@ -1874,13 +1866,13 @@ impl RuntimeEventJournal {
         value: Value,
     ) -> Result<RuntimeDeliveryId, Error> {
         let owner = output.validate_runtime(self.runtime)?;
-        let id = owner.shared_resources.ids.delivery().map_err(Error::new)?;
+        let id = owner.ids.delivery().map_err(Error::new)?;
         let delivery =
             RuntimeDeliveryId::from_u64(id.get()).expect("runtime delivery IDs start at one");
         self.outputs.push(RuntimeOutputIntent {
             delivery,
             endpoint: output.endpoint,
-            payload: owner.shared_resources.values.root(value)?,
+            payload: owner.values.root(value)?,
         });
         Ok(delivery)
     }
@@ -1890,7 +1882,7 @@ impl RuntimeEventJournal {
 #[derive(Clone)]
 pub struct RuntimeInputReader {
     runtime: EvaluationRuntimeId,
-    owner: Weak<RuntimeState>,
+    owner: Weak<RuntimeSharedResources>,
     endpoint: RuntimeInputEndpointId,
 }
 
@@ -1924,7 +1916,7 @@ type RuntimeInputConverter<T> = dyn Fn(T) -> Result<Value, Error> + Send + Sync;
 /// Typed host-side sender for one runtime input FIFO.
 pub struct RuntimeInputSender<T> {
     runtime: EvaluationRuntimeId,
-    owner: Weak<RuntimeState>,
+    owner: Weak<RuntimeSharedResources>,
     endpoint: RuntimeInputEndpointId,
     convert: Arc<RuntimeInputConverter<T>>,
     marker: PhantomData<fn(T)>,
@@ -1969,14 +1961,14 @@ impl<T> RuntimeInputSender<T> {
             runtime: self.runtime,
             owner: Arc::downgrade(&owner),
             endpoint: self.endpoint,
-            payload: owner.shared_resources.values.root(value)?,
+            payload: owner.values.root(value)?,
         })
     }
 }
 
 struct RuntimePreparedInput {
     runtime: EvaluationRuntimeId,
-    owner: Weak<RuntimeState>,
+    owner: Weak<RuntimeSharedResources>,
     endpoint: RuntimeInputEndpointId,
     payload: RuntimeValueRoot,
 }
@@ -2018,7 +2010,7 @@ impl<T> RuntimeInputEndpoint<T> {
 #[derive(Clone)]
 pub struct RuntimeOutputWriter {
     runtime: EvaluationRuntimeId,
-    owner: Weak<RuntimeState>,
+    owner: Weak<RuntimeSharedResources>,
     endpoint: RuntimeOutputEndpointId,
 }
 
@@ -2027,7 +2019,10 @@ impl RuntimeOutputWriter {
         self.endpoint
     }
 
-    fn validate_runtime(&self, runtime: EvaluationRuntimeId) -> Result<Arc<RuntimeState>, Error> {
+    fn validate_runtime(
+        &self,
+        runtime: EvaluationRuntimeId,
+    ) -> Result<Arc<RuntimeSharedResources>, Error> {
         if self.runtime != runtime {
             return Err(Error::new(format!(
                 "output endpoint {} belongs to evaluation runtime {}, not {}",
@@ -2052,7 +2047,7 @@ type RuntimeOutputAdapter<T> = dyn Fn(T) -> Result<(), Error> + Send + Sync;
 /// Host-side claimant and adapter for one runtime output endpoint.
 pub struct RuntimeOutputDelivery<T> {
     runtime: EvaluationRuntimeId,
-    owner: Weak<RuntimeState>,
+    owner: Weak<RuntimeSharedResources>,
     endpoint: RuntimeOutputEndpointId,
     decode: Arc<RuntimeOutputDecoder<T>>,
     adapter: Arc<RuntimeOutputAdapter<T>>,
@@ -2087,7 +2082,7 @@ impl<T> RuntimeOutputDelivery<T> {
                 self.endpoint.get()
             ))
         })?;
-        if owner.shared_resources.id != self.runtime {
+        if owner.id != self.runtime {
             return Err(Error::new("output endpoint runtime provenance mismatch"));
         }
         let Some(ticket) = claim_runtime_delivery(
@@ -2139,7 +2134,7 @@ impl<T> RuntimeOutputEndpoint<T> {
 }
 
 struct RuntimeDeliveryTicket<T> {
-    runtime: Arc<RuntimeState>,
+    resources: Arc<RuntimeSharedResources>,
     delivery: RuntimeDeliveryId,
     endpoint: RuntimeOutputEndpointId,
     payload: RuntimeValueRoot,
@@ -2150,7 +2145,7 @@ struct RuntimeDeliveryTicket<T> {
 impl<T> RuntimeDeliveryTicket<T> {
     fn deliver(self) -> Result<RuntimeDeliveryOutcome, Error> {
         let Self {
-            runtime,
+            resources,
             delivery,
             endpoint,
             payload,
@@ -2158,7 +2153,7 @@ impl<T> RuntimeDeliveryTicket<T> {
             adapter,
         } = self;
         let invocation = catch_unwind(AssertUnwindSafe(|| {
-            let decoded = decode(payload.value(runtime.shared_resources.id))
+            let decoded = decode(payload.value(resources.id))
                 .map_err(|error| (RuntimeDeliveryFailureKind::Decode, error))?;
             adapter(decoded).map_err(|error| (RuntimeDeliveryFailureKind::Adapter, error))
         }));
@@ -2173,7 +2168,7 @@ impl<T> RuntimeDeliveryTicket<T> {
                 )),
             )),
         };
-        let failure = terminalize_runtime_delivery(&runtime, endpoint, delivery, failure)?;
+        let failure = terminalize_runtime_delivery(&resources, endpoint, delivery, failure)?;
         drop(payload);
         Ok(match failure {
             Some(failure) => RuntimeDeliveryOutcome::Failed(failure),
@@ -2250,11 +2245,10 @@ impl RuntimeValueRoot {
 }
 
 fn admit_runtime_input(
-    runtime: &Arc<RuntimeState>,
+    resources: &Arc<RuntimeSharedResources>,
     endpoint: RuntimeInputEndpointId,
     payload: RuntimeValueRoot,
 ) -> Result<RuntimeInputSequence, Error> {
-    let resources = &runtime.shared_resources;
     debug_assert_eq!(payload.runtime_id(), resources.id);
     let mutation = resources.mutation_admission.mutation_guard();
     let sequence = {
@@ -2294,12 +2288,11 @@ fn admit_runtime_input(
 }
 
 fn claim_runtime_delivery<T>(
-    runtime: Arc<RuntimeState>,
+    resources: Arc<RuntimeSharedResources>,
     endpoint: RuntimeOutputEndpointId,
     decode: Arc<RuntimeOutputDecoder<T>>,
     adapter: Arc<RuntimeOutputAdapter<T>>,
 ) -> Result<Option<RuntimeDeliveryTicket<T>>, Error> {
-    let resources = &runtime.shared_resources;
     let mutation = resources.mutation_admission.mutation_guard();
     let claimed = {
         let mut state = resources
@@ -2338,7 +2331,7 @@ fn claim_runtime_delivery<T>(
     };
     drop(mutation);
     Ok(claimed.map(|(delivery, payload)| RuntimeDeliveryTicket {
-        runtime,
+        resources,
         delivery,
         endpoint,
         payload,
@@ -2348,12 +2341,11 @@ fn claim_runtime_delivery<T>(
 }
 
 fn terminalize_runtime_delivery(
-    runtime: &RuntimeState,
+    resources: &RuntimeSharedResources,
     endpoint: RuntimeOutputEndpointId,
     delivery: RuntimeDeliveryId,
     failure: Option<(RuntimeDeliveryFailureKind, Error)>,
 ) -> Result<Option<Arc<RuntimeDeliveryFailure>>, Error> {
-    let resources = &runtime.shared_resources;
     let failure = failure.map(|(kind, error)| {
         Arc::new(RuntimeDeliveryFailure {
             runtime: resources.id,
@@ -2411,10 +2403,9 @@ fn terminalize_runtime_delivery(
 }
 
 fn runtime_delivery_failure_snapshot(
-    runtime: &RuntimeState,
+    resources: &RuntimeSharedResources,
     endpoint: Option<RuntimeOutputEndpointId>,
 ) -> RuntimeDeliveryFailureSnapshot {
-    let resources = &runtime.shared_resources;
     let state = resources
         .transactions
         .state
@@ -2452,6 +2443,202 @@ fn publish_runtime_observation(
     resources.observations.notify_all();
     if let (Some(work), Some(changed)) = (work, scheduler_changed) {
         work.notify_runtime_observation(changed);
+    }
+}
+
+impl RuntimeSharedResources {
+    #[doc(hidden)]
+    pub fn id(&self) -> EvaluationRuntimeId {
+        self.id
+    }
+
+    #[doc(hidden)]
+    pub fn values(&self) -> Values {
+        Values {
+            runtime: self.id,
+            core: self.values.core().clone(),
+        }
+    }
+
+    fn root_value(&self, value: Value) -> Result<RuntimeValueRoot, Error> {
+        self.values.root(value)
+    }
+
+    fn allocate_reasoning_session_id(&self) -> ReasoningSessionId {
+        ReasoningSessionId::from_u64(self.ids.reasoning_session().get())
+            .expect("reasoning session IDs start at one")
+    }
+
+    fn mutation_guard(&self) -> RuntimeMutationGuard<'_> {
+        self.mutation_admission.mutation_guard()
+    }
+
+    fn publish_observation(&self, mutation: RuntimeMutationGuard<'_>) {
+        publish_runtime_observation(self, mutation);
+    }
+
+    fn reflection_snapshot(&self) -> (u64, crate::reflection::StoreSnapshot) {
+        let generation = self.observations.current().get();
+        let store = self
+            .transactions
+            .state
+            .lock()
+            .expect("runtime transaction mutex should not be poisoned")
+            .reflection
+            .snapshot();
+        (generation, store)
+    }
+
+    fn commit_reflection(
+        &self,
+        journal: &crate::reflection::StoreJournal,
+    ) -> crate::reflection::StoreCommitResult {
+        let mutation = self.mutation_guard();
+        let result = {
+            self.transactions
+                .state
+                .lock()
+                .expect("runtime transaction mutex should not be poisoned")
+                .reflection
+                .try_commit(journal)
+        };
+        if matches!(result, crate::reflection::StoreCommitResult::Committed) {
+            self.publish_observation(mutation);
+        }
+        result
+    }
+
+    fn create_volume(&self, initial: Value) -> Result<VolumeId, Error> {
+        initial.require_runtime(self.id)?;
+        let _mutation = self.mutation_guard();
+        self.transactions
+            .state
+            .lock()
+            .expect("runtime transaction mutex should not be poisoned")
+            .reflection
+            .create_volume(initial)
+            .map_err(|error| Error::new(error.as_ref()))
+    }
+
+    fn revoke_volume(&self, volume: VolumeId) -> Result<Value, Error> {
+        let mutation = self.mutation_guard();
+        let value = {
+            self.transactions
+                .state
+                .lock()
+                .expect("runtime transaction mutex should not be poisoned")
+                .reflection
+                .revoke_volume(volume)
+                .ok_or_else(|| {
+                    Error::new(format!(
+                        "reflection volume {} has already been revoked",
+                        volume.get()
+                    ))
+                })?
+        };
+        self.publish_observation(mutation);
+        Ok(value)
+    }
+
+    #[doc(hidden)]
+    pub fn update_query(
+        &self,
+        handle: &Arc<crate::reflection::EvaluationQueryHandle>,
+        result: Value,
+    ) -> Result<(), Error> {
+        result.require_runtime(self.id)?;
+        let mutation = self.mutation_guard();
+        let updated = {
+            self.transactions
+                .state
+                .lock()
+                .expect("runtime transaction mutex should not be poisoned")
+                .reflection
+                .update_query(handle, result)
+        };
+        if updated {
+            self.publish_observation(mutation);
+        }
+        Ok(())
+    }
+
+    #[doc(hidden)]
+    pub fn wait_for_change(&self, observed_generation: u64) -> bool {
+        self.observations
+            .wait_for_change(RuntimeObservationEpoch::from_raw(observed_generation));
+        true
+    }
+
+    #[doc(hidden)]
+    pub fn logger_transaction_snapshot(
+        &self,
+    ) -> (u64, crate::reflection::StoreSnapshot, RuntimeLoggerSnapshot) {
+        let generation = self.observations.current().get();
+        let state = self
+            .transactions
+            .state
+            .lock()
+            .expect("runtime transaction mutex should not be poisoned");
+        (
+            generation,
+            state.reflection.snapshot(),
+            RuntimeLoggerSnapshot {
+                events: state.events.snapshot(self.id),
+                input_closed: state.logger_lifecycle.input_closed,
+                cancelled: state.logger_lifecycle.cancelled,
+                lifecycle_revision: state.logger_lifecycle.revision,
+            },
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn try_commit_logger_transaction(
+        &self,
+        store: &crate::reflection::StoreJournal,
+        snapshot: &RuntimeLoggerSnapshot,
+        observed_lifecycle: bool,
+        events: &RuntimeEventJournal,
+    ) -> crate::reflection::StoreCommitResult {
+        if events.runtime != self.id || snapshot.events.runtime != self.id {
+            return crate::reflection::StoreCommitResult::Conflict;
+        }
+        let mutation = self.mutation_guard();
+        let (result, changed) = {
+            let mut state = self
+                .transactions
+                .state
+                .lock()
+                .expect("runtime transaction mutex should not be poisoned");
+            if observed_lifecycle && state.logger_lifecycle.revision != snapshot.lifecycle_revision
+            {
+                return crate::reflection::StoreCommitResult::Conflict;
+            }
+            let result = state.reflection.validate(store);
+            if !matches!(result, crate::reflection::StoreCommitResult::Committed) {
+                return result;
+            }
+            if !state.events.validate(events) {
+                return crate::reflection::StoreCommitResult::Conflict;
+            }
+            let reflection_changed = state.reflection.commit_validated(store);
+            let event_changed = state.events.commit_validated(events);
+            (result, reflection_changed || event_changed)
+        };
+        if changed {
+            self.publish_observation(mutation);
+        }
+        result
+    }
+
+    #[cfg(test)]
+    fn reflection_root(&self) -> Value {
+        self.transactions
+            .state
+            .lock()
+            .expect("runtime transaction mutex should not be poisoned")
+            .reflection
+            .root()
+            .clone()
     }
 }
 
@@ -2511,7 +2698,12 @@ impl EvaluationRuntime {
     }
 
     pub fn id(&self) -> EvaluationRuntimeId {
-        self.state.shared_resources.id
+        self.state.shared_resources.id()
+    }
+
+    #[doc(hidden)]
+    pub fn shared_resources(&self) -> Arc<RuntimeSharedResources> {
+        self.state.shared_resources.clone()
     }
 
     pub fn worker_threads(&self) -> usize {
@@ -2520,10 +2712,7 @@ impl EvaluationRuntime {
 
     /// Returns this runtime's explicit value-construction service.
     pub fn values(&self) -> Values {
-        Values {
-            runtime: self.id(),
-            core: self.state.shared_resources.values.core().clone(),
-        }
+        self.state.shared_resources.values()
     }
 
     /// Registers a runtime-local FIFO input boundary.
@@ -2553,7 +2742,7 @@ impl EvaluationRuntime {
             .events
             .inputs
             .insert(endpoint, Arc::new(RuntimeInputBuffer::default()));
-        let owner = Arc::downgrade(&self.state);
+        let owner = Arc::downgrade(&self.state.shared_resources);
         Ok(RuntimeInputEndpoint {
             sender: RuntimeInputSender {
                 runtime: self.id(),
@@ -2600,7 +2789,7 @@ impl EvaluationRuntime {
             .outputs
             .ready_by_endpoint
             .insert(endpoint, std::collections::VecDeque::new());
-        let owner = Arc::downgrade(&self.state);
+        let owner = Arc::downgrade(&self.state.shared_resources);
         Ok(RuntimeOutputEndpoint {
             writer: RuntimeOutputWriter {
                 runtime: self.id(),
@@ -2619,7 +2808,7 @@ impl EvaluationRuntime {
 
     /// Captures every currently retained external delivery failure.
     pub fn delivery_failure_snapshot(&self) -> RuntimeDeliveryFailureSnapshot {
-        runtime_delivery_failure_snapshot(&self.state, None)
+        runtime_delivery_failure_snapshot(&self.state.shared_resources, None)
     }
 
     /// Acknowledges one retained delivery failure. This changes reporting
@@ -2699,15 +2888,6 @@ impl EvaluationRuntime {
         self.default_reflection_profile.is_sealed()
     }
 
-    fn root_value(&self, value: Value) -> Result<RuntimeValueRoot, Error> {
-        self.state.shared_resources.values.root(value)
-    }
-
-    fn allocate_reasoning_session_id(&self) -> ReasoningSessionId {
-        ReasoningSessionId::from_u64(self.state.shared_resources.ids.reasoning_session().get())
-            .expect("reasoning session IDs start at one")
-    }
-
     pub(crate) fn allocate_cli_invocation_id(&self) -> u64 {
         self.state.shared_resources.ids.cli_invocation().get()
     }
@@ -2736,20 +2916,7 @@ impl EvaluationRuntime {
 
     #[doc(hidden)]
     pub fn reflection_snapshot(&self) -> (u64, crate::reflection::StoreSnapshot) {
-        // Reading the epoch first is intentionally conservative. A concurrent
-        // commit can make the returned store newer than the epoch, but cannot
-        // leave a waiter holding an old store and a new epoch with no wake.
-        let generation = self.state.shared_resources.observations.current().get();
-        let store = self
-            .state
-            .shared_resources
-            .transactions
-            .state
-            .lock()
-            .expect("runtime transaction mutex should not be poisoned")
-            .reflection
-            .snapshot();
-        (generation, store)
+        self.state.shared_resources.reflection_snapshot()
     }
 
     /// Captures the reflection store and admitted-input state under the same
@@ -2820,57 +2987,7 @@ impl EvaluationRuntime {
         &self,
         journal: &crate::reflection::StoreJournal,
     ) -> crate::reflection::StoreCommitResult {
-        let mutation = self.mutation_guard();
-        let result = {
-            self.state
-                .shared_resources
-                .transactions
-                .state
-                .lock()
-                .expect("runtime transaction mutex should not be poisoned")
-                .reflection
-                .try_commit(journal)
-        };
-        if matches!(result, crate::reflection::StoreCommitResult::Committed) {
-            self.publish_observation(mutation);
-        }
-        result
-    }
-
-    fn create_volume(&self, initial: Value) -> Result<VolumeId, Error> {
-        initial.require_runtime(self.id())?;
-        let _mutation = self.mutation_guard();
-        self.state
-            .shared_resources
-            .transactions
-            .state
-            .lock()
-            .expect("runtime transaction mutex should not be poisoned")
-            .reflection
-            .create_volume(initial)
-            .map_err(|error| Error::new(error.as_ref()))
-    }
-
-    fn revoke_volume(&self, volume: VolumeId) -> Result<Value, Error> {
-        let mutation = self.mutation_guard();
-        let value = {
-            self.state
-                .shared_resources
-                .transactions
-                .state
-                .lock()
-                .expect("runtime transaction mutex should not be poisoned")
-                .reflection
-                .revoke_volume(volume)
-                .ok_or_else(|| {
-                    Error::new(format!(
-                        "reflection volume {} has already been revoked",
-                        volume.get()
-                    ))
-                })?
-        };
-        self.publish_observation(mutation);
-        Ok(value)
+        self.state.shared_resources.commit_reflection(journal)
     }
 
     #[doc(hidden)]
@@ -2879,22 +2996,7 @@ impl EvaluationRuntime {
         handle: &Arc<crate::reflection::EvaluationQueryHandle>,
         result: Value,
     ) -> Result<(), Error> {
-        result.require_runtime(self.id())?;
-        let mutation = self.mutation_guard();
-        let updated = {
-            self.state
-                .shared_resources
-                .transactions
-                .state
-                .lock()
-                .expect("runtime transaction mutex should not be poisoned")
-                .reflection
-                .update_query(handle, result)
-        };
-        if updated {
-            self.publish_observation(mutation);
-        }
-        Ok(())
+        self.state.shared_resources.update_query(handle, result)
     }
 
     fn publish_observation(&self, mutation: RuntimeMutationGuard<'_>) {
@@ -2905,9 +3007,7 @@ impl EvaluationRuntime {
     pub fn wait_for_change(&self, observed_generation: u64) -> bool {
         self.state
             .shared_resources
-            .observations
-            .wait_for_change(RuntimeObservationEpoch::from_raw(observed_generation));
-        true
+            .wait_for_change(observed_generation)
     }
 
     /// Captures the reflection store, generic events, and temporary logger
@@ -2916,24 +3016,7 @@ impl EvaluationRuntime {
     pub fn logger_transaction_snapshot(
         &self,
     ) -> (u64, crate::reflection::StoreSnapshot, RuntimeLoggerSnapshot) {
-        let generation = self.state.shared_resources.observations.current().get();
-        let state = self
-            .state
-            .shared_resources
-            .transactions
-            .state
-            .lock()
-            .expect("runtime transaction mutex should not be poisoned");
-        (
-            generation,
-            state.reflection.snapshot(),
-            RuntimeLoggerSnapshot {
-                events: state.events.snapshot(self.id()),
-                input_closed: state.logger_lifecycle.input_closed,
-                cancelled: state.logger_lifecycle.cancelled,
-                lifecycle_revision: state.logger_lifecycle.revision,
-            },
-        )
+        self.state.shared_resources.logger_transaction_snapshot()
     }
 
     /// Atomically validates and applies one logger transaction across the
@@ -2947,37 +3030,12 @@ impl EvaluationRuntime {
         observed_lifecycle: bool,
         events: &RuntimeEventJournal,
     ) -> crate::reflection::StoreCommitResult {
-        if events.runtime != self.id() || snapshot.events.runtime != self.id() {
-            return crate::reflection::StoreCommitResult::Conflict;
-        }
-        let mutation = self.mutation_guard();
-        let (result, changed) = {
-            let mut state = self
-                .state
-                .shared_resources
-                .transactions
-                .state
-                .lock()
-                .expect("runtime transaction mutex should not be poisoned");
-            if observed_lifecycle && state.logger_lifecycle.revision != snapshot.lifecycle_revision
-            {
-                return crate::reflection::StoreCommitResult::Conflict;
-            }
-            let result = state.reflection.validate(store);
-            if !matches!(result, crate::reflection::StoreCommitResult::Committed) {
-                return result;
-            }
-            if !state.events.validate(events) {
-                return crate::reflection::StoreCommitResult::Conflict;
-            }
-            let reflection_changed = state.reflection.commit_validated(store);
-            let event_changed = state.events.commit_validated(events);
-            (result, reflection_changed || event_changed)
-        };
-        if changed {
-            self.publish_observation(mutation);
-        }
-        result
+        self.state.shared_resources.try_commit_logger_transaction(
+            store,
+            snapshot,
+            observed_lifecycle,
+            events,
+        )
     }
 
     #[doc(hidden)]
@@ -3016,15 +3074,7 @@ impl EvaluationRuntime {
 
     #[cfg(test)]
     fn reflection_root(&self) -> Value {
-        self.state
-            .shared_resources
-            .transactions
-            .state
-            .lock()
-            .expect("runtime transaction mutex should not be poisoned")
-            .reflection
-            .root()
-            .clone()
+        self.state.shared_resources.reflection_root()
     }
 
     fn conflict_analysis(&self) -> Arc<dyn ConflictAnalysisStrategy> {
@@ -3475,8 +3525,7 @@ fn reflection_environment_for_role(environment: &Value, role: &str) -> Value {
 /// volume and recover its final unforced value. Dropping the handle does not
 /// revoke the volume.
 pub struct ReasoningVolume {
-    runtime: EvaluationRuntime,
-    runtime_id: EvaluationRuntimeId,
+    resources: Arc<RuntimeSharedResources>,
     volume: VolumeId,
     effects: Value,
 }
@@ -3484,7 +3533,7 @@ pub struct ReasoningVolume {
 impl ReasoningVolume {
     /// Returns the closed `{get, set, rewrite}` effect capability value.
     pub fn effects(&self) -> Value {
-        debug_assert_eq!(self.effects.runtime_id(), self.runtime_id);
+        debug_assert_eq!(self.effects.runtime_id(), self.resources.id);
         self.effects.clone()
     }
 
@@ -3492,8 +3541,7 @@ impl ReasoningVolume {
     /// Further uses of any capability for this volume produce
     /// use-after-revoke errors.
     pub fn revoke(self) -> Result<Value, Error> {
-        debug_assert_eq!(self.runtime.id(), self.runtime_id);
-        self.runtime.revoke_volume(self.volume)
+        self.resources.revoke_volume(self.volume)
     }
 }
 
@@ -3643,7 +3691,7 @@ pub struct ReflectionEnvironmentBuilder<'a> {
 impl ReflectionEnvironmentBuilder<'_> {
     /// Returns the selected runtime's value-construction service.
     pub fn values(&self) -> Values {
-        self.host.runtime().values()
+        self.host.values()
     }
 
     /// Creates a protected volume belonging to the selected evaluation runtime.
@@ -3655,12 +3703,12 @@ impl ReflectionEnvironmentBuilder<'_> {
     /// Same-runtime work subscribes directly when it blocks on the value, so
     /// the resolver needs no later assembler-specific arming step.
     pub fn promise(&mut self, label: impl Into<Arc<str>>) -> (Value, PromiseResolver) {
-        let values = self.host.runtime().values();
+        let values = self.host.values();
         let promise = PromisedValue::new(&values.core, label);
         (
             Value::from_core(&values.core, CoreValue::Promised(promise.clone())),
             PromiseResolver {
-                runtime: self.host.runtime_id,
+                runtime: self.host.resources.id,
                 promise: Some(promise),
             },
         )
@@ -3881,8 +3929,7 @@ fn create_reasoning_volume(
 ) -> Result<ReasoningVolume, Error> {
     let (volume, effects) = host.create_volume(initial)?;
     Ok(ReasoningVolume {
-        runtime: host.runtime(),
-        runtime_id: host.runtime_id,
+        resources: host.resources.clone(),
         volume,
         effects,
     })
@@ -6127,16 +6174,15 @@ mod tests {
     #[test]
     fn output_payload_is_retained_through_callback_and_dropped_after_locks() {
         struct DeliveryLease {
-            runtime: Weak<RuntimeState>,
+            resources: Weak<RuntimeSharedResources>,
             dropped: Arc<AtomicBool>,
         }
 
         impl Drop for DeliveryLease {
             fn drop(&mut self) {
-                if let Some(runtime) = self.runtime.upgrade() {
+                if let Some(resources) = self.resources.upgrade() {
                     assert!(
-                        runtime
-                            .shared_resources
+                        resources
                             .mutation_admission
                             .try_settlement_guard()
                             .is_some()
@@ -6149,7 +6195,7 @@ mod tests {
         let runtime = EvaluationRuntime::new(0).expect("runtime should build");
         let dropped = Arc::new(AtomicBool::new(false));
         let lease = Arc::new(DeliveryLease {
-            runtime: Arc::downgrade(&runtime.state),
+            resources: Arc::downgrade(&runtime.state.shared_resources),
             dropped: dropped.clone(),
         });
         let retained = Arc::downgrade(&lease);
@@ -6189,9 +6235,10 @@ mod tests {
     }
 
     #[test]
-    fn running_delivery_retains_runtime_until_terminal_publication() {
+    fn running_delivery_retains_shared_resources_until_terminal_publication() {
         let runtime = EvaluationRuntime::new(0).expect("runtime should build");
         let runtime_state = Arc::downgrade(&runtime.state);
+        let resources = Arc::downgrade(&runtime.state.shared_resources);
         let barrier = Arc::new(std::sync::Barrier::new(2));
         let callback_barrier = barrier.clone();
         let (entered, waiting) = std::sync::mpsc::channel();
@@ -6218,10 +6265,11 @@ mod tests {
 
         drop(endpoint);
         drop(runtime);
-        assert!(runtime_state.upgrade().is_some());
+        assert!(runtime_state.upgrade().is_none());
+        assert!(resources.upgrade().is_some());
         barrier.wait();
         assert!(worker.join().unwrap().is_some());
-        assert!(runtime_state.upgrade().is_none());
+        assert!(resources.upgrade().is_none());
     }
 
     #[test]
@@ -6588,9 +6636,56 @@ mod tests {
     }
 
     #[test]
+    fn retained_reflection_profile_keeps_only_shared_resources_alive() {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let state = Arc::downgrade(&runtime.state);
+        let coordinator = Arc::downgrade(&runtime.state.work);
+        let executor = Arc::downgrade(&runtime.state.executor);
+        let default_profile = Arc::downgrade(&runtime.default_reflection_profile);
+        let resources = Arc::downgrade(&runtime.state.shared_resources);
+        let host = Arc::new(AssemblerReflectionHost::new_unsealed(
+            &runtime,
+            DiagnosticBus::for_runtime(&runtime),
+        ));
+        host.seal_environment(
+            authoritative_reflection_environment(runtime.values().empty_record(), "retained")
+                .unwrap()
+                .0,
+        )
+        .unwrap();
+        let profile = Arc::new(ReflectionTaskProfile::sealed(task_launcher(
+            ReflectionEffects,
+            host.clone(),
+        )));
+        drop(host);
+        drop(runtime);
+
+        assert!(state.upgrade().is_none());
+        assert!(coordinator.upgrade().is_none());
+        assert!(executor.upgrade().is_none());
+        assert!(default_profile.upgrade().is_none());
+
+        let retained = resources
+            .upgrade()
+            .expect("the retained profile host should keep runtime resources alive");
+        let (_, snapshot) = retained.reflection_snapshot();
+        assert_eq!(snapshot.root(), &retained.values().empty_record());
+        let initial = retained.values().empty_record();
+        let volume = retained
+            .create_volume(initial.clone())
+            .expect("retained resources should still create volumes");
+        assert_eq!(retained.revoke_volume(volume).unwrap(), initial);
+        drop(retained);
+
+        drop(profile);
+        assert!(resources.upgrade().is_none());
+    }
+
+    #[test]
     fn evaluation_context_retains_runtime_cache_and_profile_without_a_cycle() {
         let runtime = EvaluationRuntime::new(0).expect("runtime should build");
         let state = Arc::downgrade(&runtime.state);
+        let resources = Arc::downgrade(&runtime.state.shared_resources);
         let profile = Arc::downgrade(&runtime.default_reflection_profile);
         let assembler = Assembler::builder()
             .evaluation_runtime(runtime.clone())
@@ -6601,12 +6696,13 @@ mod tests {
 
         drop(assembler);
         drop(runtime);
-        assert!(state.upgrade().is_some());
+        assert!(state.upgrade().is_none());
+        assert!(resources.upgrade().is_some());
         assert!(profile.upgrade().is_some());
         assert_eq!(eval::eval_value(&context, &unit).unwrap(), unit);
 
         drop(context);
-        assert!(state.upgrade().is_none());
+        assert!(resources.upgrade().is_none());
         assert!(profile.upgrade().is_none());
     }
 

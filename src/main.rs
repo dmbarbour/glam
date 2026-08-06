@@ -24,7 +24,7 @@ use glam::{
     Error, EvaluationRuntime, FileSourceSystem, ModuleInput, PromiseResolver, ReasoningReport,
     ReasoningStatus, ReasoningTaskState, RuntimeDeliveryOutcome, RuntimeEventJournal,
     RuntimeInputReader, RuntimeLoggerSnapshot, RuntimeOutputDelivery, RuntimeOutputWriter,
-    Severity, Value, Values, check_local_manifest, inspect_g_source,
+    RuntimeSharedResources, Severity, Value, Values, check_local_manifest, inspect_g_source,
 };
 
 trait DiagnosticBusLocal {
@@ -1048,8 +1048,7 @@ fn log_status(
     Ok(RequestResult::Return(
         context
             .host()
-            .input
-            .runtime
+            .resources
             .values()
             .atom_from_text(if input_closed { "closed" } else { "open" }),
     ))
@@ -1058,7 +1057,7 @@ fn log_status(
 fn read_log(
     context: &mut RequestContext<'_, MainEffects>,
 ) -> Result<RequestResult, glam::reflection::TaskHalt> {
-    let diagnostic_reader = context.host().input.diagnostic_reader.clone();
+    let diagnostic_reader = context.host().diagnostic_reader.clone();
     if let Some(generation) = context.transaction_generation() {
         context.observe_host_generation(generation);
         let mut transaction = context
@@ -1070,7 +1069,7 @@ fn read_log(
             .map_err(glam::reflection::TaskHalt::from)?
         {
             return Diagnostic::from_transport_value(&value)
-                .and_then(|diagnostic| diagnostic.enrich(&context.host().input.runtime.values()))
+                .and_then(|diagnostic| diagnostic.enrich(&context.host().resources.values()))
                 .map(RequestResult::Return)
                 .map_err(glam::reflection::TaskHalt::from);
         }
@@ -1090,7 +1089,7 @@ fn read_log(
             return Ok(RequestResult::Fail);
         };
         let value = Diagnostic::from_transport_value(&value)
-            .and_then(|diagnostic| diagnostic.enrich(&context.host().input.runtime.values()))
+            .and_then(|diagnostic| diagnostic.enrich(&context.host().resources.values()))
             .map_err(glam::reflection::TaskHalt::from)?;
         let commit = TaskCommit::new(
             glam::reflection::StoreJournal::new(snapshot.store().clone()),
@@ -1120,15 +1119,17 @@ fn read_log(
 
 struct LogHost {
     runtime: EvaluationRuntime,
-    _diagnostic_ingress: DiagnosticIngress,
+    diagnostic_ingress: DiagnosticIngress,
     diagnostic_reader: RuntimeInputReader,
 }
 
 /// Capabilities and mutable state belonging to the logger's evaluation
-/// session. Incoming assembler diagnostics remain in `input`; diagnostics
-/// emitted by this session go only to its diagnostic bus.
+/// session. Incoming assembler diagnostics remain in the runtime input queue;
+/// diagnostics emitted by this session go only to its diagnostic bus.
 struct LoggerTaskHost {
-    input: Arc<LogHost>,
+    resources: Arc<RuntimeSharedResources>,
+    _diagnostic_ingress: DiagnosticIngress,
+    diagnostic_reader: RuntimeInputReader,
     diagnostics: DiagnosticBus,
     reflection_environment: Value,
     diagnostic_writer: RuntimeOutputWriter,
@@ -1195,7 +1196,9 @@ impl LoggerTaskHost {
         let (diagnostic_writer, diagnostic_delivery) = diagnostic_output.into_parts();
         let (stderr_writer, stderr_delivery) = stderr_output.into_parts();
         Self {
-            input,
+            resources: input.runtime.shared_resources(),
+            _diagnostic_ingress: input.diagnostic_ingress.clone(),
+            diagnostic_reader: input.diagnostic_reader.clone(),
             diagnostics,
             reflection_environment,
             diagnostic_writer,
@@ -1214,13 +1217,13 @@ impl LoggerTaskHost {
     }
 
     fn write_diagnostic(&self, diagnostic: Diagnostic) -> Result<(), Error> {
-        let (_generation, store, snapshot) = self.input.runtime.logger_transaction_snapshot();
+        let (_generation, store, snapshot) = self.resources.logger_transaction_snapshot();
         let mut events = RuntimeEventJournal::new(snapshot.events().clone());
         events.write(
             &self.diagnostic_writer,
-            diagnostic.transport_value(&self.input.runtime.values())?,
+            diagnostic.transport_value(&self.resources.values())?,
         )?;
-        match self.input.runtime.try_commit_logger_transaction(
+        match self.resources.try_commit_logger_transaction(
             &glam::reflection::StoreJournal::new(store),
             &snapshot,
             false,
@@ -1238,13 +1241,10 @@ impl LoggerTaskHost {
     }
 
     fn write_stderr(&self, bytes: Bytes) -> Result<(), Error> {
-        let (_generation, store, snapshot) = self.input.runtime.logger_transaction_snapshot();
+        let (_generation, store, snapshot) = self.resources.logger_transaction_snapshot();
         let mut events = RuntimeEventJournal::new(snapshot.events().clone());
-        events.write(
-            &self.stderr_writer,
-            self.input.runtime.values().binary(bytes),
-        )?;
-        match self.input.runtime.try_commit_logger_transaction(
+        events.write(&self.stderr_writer, self.resources.values().binary(bytes))?;
+        match self.resources.try_commit_logger_transaction(
             &glam::reflection::StoreJournal::new(store),
             &snapshot,
             false,
@@ -1297,7 +1297,7 @@ impl LogHost {
             .expect("logger diagnostic ingress should be constructible");
         Self {
             runtime,
-            _diagnostic_ingress: ingress,
+            diagnostic_ingress: ingress,
             diagnostic_reader,
         }
     }
@@ -1364,15 +1364,14 @@ impl ReflectionServices for LoggerTaskHost {
         if let Err(error) = self.write_diagnostic(diagnostic) {
             self.diagnostics.publish_local(
                 error
-                    .diagnostic(&self.input.runtime.values())
+                    .diagnostic(&self.resources.values())
                     .expect("logger failures belong to the logger runtime"),
             );
         }
     }
 
     fn update_query(&self, handle: &Arc<glam::reflection::EvaluationQueryHandle>, result: Value) {
-        self.input
-            .runtime
+        self.resources
             .update_query(handle, result)
             .expect("logger query results belong to the logger runtime");
     }
@@ -1380,7 +1379,7 @@ impl ReflectionServices for LoggerTaskHost {
 
 impl TaskHost<MainEffects> for LoggerTaskHost {
     fn snapshot(&self) -> HostSnapshot<MainEffects> {
-        let (generation, store, input) = self.input.runtime.logger_transaction_snapshot();
+        let (generation, store, input) = self.resources.logger_transaction_snapshot();
         HostSnapshot::new(generation, store, input)
     }
 
@@ -1393,31 +1392,27 @@ impl TaskHost<MainEffects> for LoggerTaskHost {
             if let Err(error) = events.write(
                 &self.diagnostic_writer,
                 diagnostic
-                    .transport_value(&self.input.runtime.values())
+                    .transport_value(&self.resources.values())
                     .map_err(|_| ())
                     .unwrap_or_else(|()| {
-                        self.input
-                            .runtime
+                        self.resources
                             .values()
                             .record([(
                                 "emission",
-                                self.input
-                                    .runtime
-                                    .values()
-                                    .text("diagnostic transport failed"),
+                                self.resources.values().text("diagnostic transport failed"),
                             )])
                             .expect("fallback diagnostic is local")
                     }),
             ) {
                 self.diagnostics.publish_local(
                     error
-                        .diagnostic(&self.input.runtime.values())
+                        .diagnostic(&self.resources.values())
                         .expect("logger failures belong to the logger runtime"),
                 );
                 return CommitResult::Closed;
             }
         }
-        match self.input.runtime.try_commit_logger_transaction(
+        match self.resources.try_commit_logger_transaction(
             &store,
             &snapshot,
             journal.observed_lifecycle,
@@ -1435,7 +1430,7 @@ impl TaskHost<MainEffects> for LoggerTaskHost {
         if let Err(error) = self.deliver_outputs() {
             self.diagnostics.publish_local(
                 error
-                    .diagnostic(&self.input.runtime.values())
+                    .diagnostic(&self.resources.values())
                     .expect("logger failures belong to the logger runtime"),
             );
         }
@@ -1447,15 +1442,15 @@ impl TaskHost<MainEffects> for LoggerTaskHost {
         if let Some(probe) = &self.wait_probe {
             probe.pause(observed_generation);
         }
-        let (generation, _, snapshot) = self.input.runtime.logger_transaction_snapshot();
+        let (generation, _, snapshot) = self.resources.logger_transaction_snapshot();
         if snapshot.cancelled() {
             return false;
         }
         if snapshot.input_closed() {
             return generation != observed_generation;
         }
-        self.input.runtime.wait_for_change(observed_generation);
-        let (generation, _, snapshot) = self.input.runtime.logger_transaction_snapshot();
+        self.resources.wait_for_change(observed_generation);
+        let (generation, _, snapshot) = self.resources.logger_transaction_snapshot();
         !snapshot.cancelled() && (!snapshot.input_closed() || generation != observed_generation)
     }
 }

@@ -26,7 +26,7 @@ pub use api::{
     RuntimeDeliveryId, RuntimeDeliveryOutcome, RuntimeEventJournal, RuntimeEventSnapshot,
     RuntimeInputEndpoint, RuntimeInputReader, RuntimeInputSender, RuntimeLoggerSnapshot,
     RuntimeOutputDelivery, RuntimeOutputEndpoint, RuntimeOutputEndpointId, RuntimeOutputWriter,
-    Value, ValueKind, Values,
+    RuntimeSharedResources, Value, ValueKind, Values,
 };
 pub use diagnostic::Severity;
 pub use g_source::{

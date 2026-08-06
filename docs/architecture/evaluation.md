@@ -122,10 +122,12 @@ default reflection profile as sibling roots. `RuntimeState` in turn owns one
 observation epoch, mutation admission, and runtime-local IDs. That bundle has
 only a weak route back to the work coordinator; the executor, coordinator
 ownership, and diagnostic-ingress registry remain in `RuntimeState`. A profile
-launcher currently retains its host, and that host retains `RuntimeState` until
-the next ownership slice retargets it to the acyclic bundle. Keeping the
-default profile outside `RuntimeState` avoids the direct profile/host cycle
-throughout the transition.
+launcher retains its role-specific host, while runtime-backed hosts retain only
+the acyclic resource bundle plus their selected environment and diagnostic
+capabilities. A retained profile can therefore keep values, transactions, and
+volumes usable without keeping `RuntimeState`, the executor, or the coordinator
+alive. Keeping the default profile outside `RuntimeState` avoids a direct
+profile ownership cycle while the remaining demand-state transition proceeds.
 
 Lazy values retain computation and a stable identity, not a captured evaluator
 session. The observing `EvalContext` supplies host and scheduling behavior when
