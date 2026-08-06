@@ -1733,6 +1733,7 @@ impl EvaluationWorkCoordinator {
                 match poll {
                     ReflectionWorkPoll::Yielded => (WorkState::Queued, None, true, false, false),
                     ReflectionWorkPoll::Blocked(block) => {
+                        debug_assert_task_block_runtime(self.runtime, &block);
                         let unchanged = claimed.prior_block.as_ref() == Some(&block);
                         (WorkState::Blocked, Some(block), !unchanged, true, false)
                     }
@@ -2114,6 +2115,7 @@ impl EvaluationWorkCoordinator {
                     }
                     DeferredWorkPoll::Yielded => (WorkState::Dormant, None, true, false, false),
                     DeferredWorkPoll::Blocked(block) => {
+                        debug_assert_task_block_runtime(self.runtime, &block);
                         let unchanged = claimed.prior_block.as_ref() == Some(&block);
                         (WorkState::Blocked, Some(block), !unchanged, true, false)
                     }
@@ -2883,6 +2885,16 @@ fn task_block(record: &WorkRecord) -> Option<&EvaluationTaskBlock> {
     }
 }
 
+fn debug_assert_task_block_runtime(runtime: EvaluationRuntimeId, block: &EvaluationTaskBlock) {
+    if let Some(dependency) = &block.dependency {
+        debug_assert_eq!(
+            dependency.runtime_id(),
+            runtime,
+            "published task block dependency must belong to its coordinator runtime"
+        );
+    }
+}
+
 fn register_observation_wait(state: &mut WorkCoordinatorState, id: EvaluationWorkId) {
     state.observation_waiters.remove(&id);
     let observed_epoch = state
@@ -3473,6 +3485,26 @@ mod tests {
                 error: None,
             }
         );
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(
+        expected = "published task block dependency must belong to its coordinator runtime"
+    )]
+    fn task_block_publication_asserts_the_runtime_invariant() {
+        let runtime = crate::runtime::allocate_evaluation_runtime_id();
+        let foreign_runtime = crate::runtime::allocate_evaluation_runtime_id();
+        let block = EvaluationTaskBlock {
+            dependency: Some(WorkDependency::Test(TestWorkDependency {
+                runtime: foreign_runtime,
+                id: NonZeroU64::new(23).expect("test dependency identity must be nonzero"),
+            })),
+            observed_epoch: None,
+            error: None,
+        };
+
+        debug_assert_task_block_runtime(runtime, &block);
     }
 
     #[test]
