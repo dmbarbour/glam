@@ -5321,6 +5321,10 @@ fn spark_admission_drops_whnf_and_follows_completed_promises() {
         .recv_timeout(std::time::Duration::from_secs(2))
         .expect("worker should process the earlier spark jobs first");
     wait_for_lazy_cache(&sentinel, "worker must finish the sentinel spark");
+    wait_for_lazy_cache(
+        &promised_work,
+        "worker must finish useful work exposed through the completed promise",
+    );
     wait_for_no_deferred_tasks(
         &context,
         "completed spark jobs must retire their deferred records",

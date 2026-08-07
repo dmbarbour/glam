@@ -100,6 +100,15 @@ control-flow overview.
   terminal observation. Task-owned promise waits follow the same ownership
   boundary: terminal assignment is copied into the shared wait cell before the
   promise record and owner index are retired.
+- Final demand-owner drop is one guarded coordinator transition. It records
+  the first close reason on running work and takes queued or blocked work for
+  terminal settlement. Settle reflection/deferred producer obligations before
+  abandoning dependencies detached from parked sparks; reversing that order
+  can attempt to release one reusable deferred claim twice.
+- Machine and spark contexts may retain `Arc<EvaluationDemandState>`, but never
+  the external `EvaluationSession` lease. The closed flag is a fast rejection;
+  coordinator reservation must repeat the authoritative open-session check
+  under its state transition so closure and admission have a defined winner.
 - A weak wait owner disappearing is `Abandoned`, never an inferred evaluation
   failure. Interpret abandonment according to the producer obligation:
   reflection task handles retain a terminal abandoned status; reusable lazy
@@ -240,8 +249,9 @@ control-flow overview.
   logger, and future IDE sessions and owns ready-session selection, fairness,
   its work generation, worker waiting, and stable spark records.
   `EvaluationExecutor` owns worker activation and shutdown; workers retain only
-  a weak coordinator attachment. Active reflection/deferred records remain
-  session-owned during the current transition.
+  a weak coordinator attachment. Active reflection/deferred records and their
+  claimable machines are coordinator-owned; session state retains reporting
+  policy only.
 - Every published spark blockage advances a checked, non-wrapping subscription
   epoch. Parked indexes and one-shot subscriber cells retain only the work ID
   and that epoch. A coordinator wake must still match `Blocked`, the epoch, and
@@ -250,17 +260,18 @@ control-flow overview.
   nested, and notification occurs after shared runtime mutation admission is
   released. Promise cells own that exact subscriber component, and unresolved
   spark demand registers with it directly. Spark contexts do not also install
-  the temporary weak session wake, so one promise cannot broadly wake work
-  parked on another. Wait cells have not yet adopted the exact subscriber side;
-  task followers still wake their session, and wait-token sparks retain broad
-  session disturbance until the next slice.
+  a weak session wake, so one dependency cannot broadly wake work parked on
+  another. Wait cells and promise cells both publish through the exact
+  subscriber path.
 - Coordinator transitions take shared runtime mutation admission and publish
   their own work generation before waking workers. They must not advance the
   semantic `RuntimeObservationEpoch`; otherwise ordinary scheduler churn can
   spuriously invalidate the state observations of the task being scheduled.
 - Workers opportunistically poll reflection tasks and are the only consumers
   of sparks. A serial pump continues to select task records directly within
-  its chosen session.
+  its chosen session by coordinator demand ID. It must not upgrade the external
+  owner lease: worker and task contexts may need to finish exact dependencies
+  after the client has released that lease.
 - Zero workers discard sparks without queueing. Sparks are nontransactional
   hints: rollback does not retract them, their errors are not independently
   reported, and queued work does not keep a session alive.
@@ -269,7 +280,9 @@ control-flow overview.
   metadata, but not already-WHNF nets. Retryably blocked sparks park without
   occupying workers. Promise and wait-token dependencies use exact source
   subscriptions; subscribe-and-recheck closes the completion-before-parking
-  race without a session-wide retry. Session teardown discards parked sparks.
+  race without a session-wide retry. A wait-blocked spark promotes its deferred
+  producer directly, without borrowing the session's serial pump. Session
+  teardown discards parked sparks.
 - A divergent spark may occupy a worker indefinitely. Cooperative cancellation,
   evaluator fuel, and fine-grained wake indexes remain deliberate future work.
 - Claimed interaction-net pairs are live work, not quiescence. An observer must

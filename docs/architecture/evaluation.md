@@ -32,10 +32,14 @@ task reporting store are weak. An explicit
 `Arc<SessionTaskReportingStore>` sibling of the demand state owns only task
 acknowledgement, published status, and status-sink indexes. Opaque reflection
 and deferred machines reside directly in coordinator work records. Dropping
-the final owner marks their shared closed flag
-before asking the strongly held coordinator to abandon and unregister its
-work. Direct isolated evaluation uses an explicit owner/context wrapper
-instead of hiding the lease in `EvalContext`.
+the final owner marks their shared closed flag, then performs one guarded
+coordinator closure transition across every record indexed by that demand ID.
+Queued and blocked work terminalizes immediately; running work retains its
+first close reason and exclusive machine claim until release. Task producer
+obligations settle before dependencies retired with parked sparks are
+abandoned, so one closure cannot release the same reusable claim twice. Direct
+isolated evaluation uses an explicit owner/context wrapper instead of hiding
+the lease in `EvalContext`.
 
 The runtime-owned `EvaluationWorkCoordinator` owns session registration, one
 runtime-wide ready-task queue, worker fairness, its work generation, the
@@ -49,9 +53,10 @@ registration retains the reporting store while indexed reflection work
 remains, and a reflection claim retains that store for its poll quantum; neither
 route recovers or retains the external owner lease. Blocked reflection,
 deferred, and spark records retain their exact dependency and checked
-subscription epoch; spark records
-additionally retain their demand value, demand-session index, and a close
-request while worker-owned. Completion sources retain
+subscription epoch; spark records additionally retain their demand value, an
+`Arc<EvaluationDemandState>` which cannot recover the external owner lease,
+their demand-session index, and a close request while worker-owned. Completion
+sources retain
 `(work ID, subscription epoch)` rather than bare IDs. A wake batch is accepted
 only while the record remains blocked on both that epoch and the same
 runtime-local dependency key; stale completion, session teardown, and
@@ -67,6 +72,15 @@ no route reaches the owner lease. Final owner drop can therefore close queued
 and blocked work immediately while a worker safely finishes one
 already-claimed quantum. The immutable reflection environment belongs to the
 active task host rather than either scheduling component.
+
+Machine-visible admission uses demand state and a weak coordinator route, not
+an upgraded owner lease. Its fast closed-flag check is advisory; reflection
+and deferred reservation repeat the decisive check against registered open
+demand state under the coordinator transition. If closure wins, admission
+returns a closed-demand error. If reservation wins, the subsequent closure
+sees and terminalizes that new record. `.task.new` descendants are ordinary
+members of the same flat demand set: parent completion does not close them,
+while final owner drop reaches every unfinished descendant.
 
 Coordinator mutations participate in the runtime settlement-admission gate
 and advance the coordinator's work generation before external wakes. They do
@@ -162,8 +176,10 @@ snapshot without holding its mutex during evaluation. Terminal cache
 publication precedes coordinator retirement, so later observers take the
 cached path. A transient coordinator `Reserved` state bridges installation of
 the coordinator-owned deferred machine; a racing claimant reuses the
-canonical work and wait. Blocked reflection and deferred work retain their
-machines in their coordinator records. Terminal work retires from
+canonical work and wait. Closure may win between reservation and activation;
+activation then declines the already-terminalizing record rather than
+asserting that it remains reserved. Blocked reflection and deferred work
+retain their machines in their coordinator records. Terminal work retires from
 coordinator indexes and destroys its detached machine outside runtime locks.
 
 Every scheduler wait token is one shared cell containing identity, a weak
@@ -378,7 +394,10 @@ rules.
 Related assembler, logger, and future IDE sessions register with one
 `EvaluationExecutor`. Its fixed worker pool alternates between ready reflection
 sessions and optional spark work. The serial pump remains available for exact
-foreground dependencies and explicit batch draining.
+foreground dependencies and explicit batch draining. It selects by demand ID
+through the coordinator and does not require the external session owner lease;
+an ownerless spark context can therefore finish a deferred follower within the
+same demand instead of restarting from its original value.
 
 Demand on `seq A B` demands `A` to weak-head normal form before transferring
 that demand to `B`. Demand on `spark A B` records the same demand as
@@ -406,5 +425,7 @@ blocked on that source. Subscribe-and-recheck prevents completion racing with
 parking from losing the wakeup, while subscription epochs make late or
 unrelated notifications harmless. Broad semantic disturbance uses the
 independent runtime observation epoch rather than a session generation.
+When a spark blocks on a newly reserved lazy producer, publishing the blockage
+also promotes that producer; the spark never needs a serial-pump owner lease.
 Dropping the session discards its parked sparks; any later registration is
-stale and retains neither that session nor its work.
+stale and retains neither the owner lease nor its work.

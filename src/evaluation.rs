@@ -1056,8 +1056,8 @@ impl fmt::Debug for EvaluationSession {
 impl Drop for EvaluationSession {
     fn drop(&mut self) {
         self.demand.closed.store(true, Ordering::Release);
-        let abandoning = self.coordinator.abandon_reflection_session(self.id);
-        let abandoning = abandoning
+        let mut closing = self.coordinator.close_session(self.id);
+        let abandoning = std::mem::take(&mut closing.reflection)
             .into_iter()
             .map(|work| {
                 let failure = evaluation_failure(if work.cancel {
@@ -1084,9 +1084,7 @@ impl Drop for EvaluationSession {
                 (work.id, (work.task, work.cancel, state))
             })
             .collect::<HashMap<_, _>>();
-        let abandoning_deferred = self
-            .coordinator
-            .abandon_deferred_session(self.id)
+        let abandoning_deferred = std::mem::take(&mut closing.deferred)
             .into_iter()
             .inspect(|work| {
                 self.coordinator.settle_terminal_work(
@@ -1154,8 +1152,7 @@ impl Drop for EvaluationSession {
             self.coordinator.retire_deferred(work.id);
             drop(work.machine);
         }
-
-        self.coordinator.unregister_session(self.id);
+        closing.finish();
     }
 }
 
@@ -1245,10 +1242,6 @@ impl EvaluationSession {
         coordinator.register_session(&session);
         session
     }
-
-    pub(crate) fn submit_spark(self: &Arc<Self>, value: Value) {
-        self.coordinator.submit_spark(self, value);
-    }
 }
 
 /// Cheap per-evaluation handle to one shared demand session.
@@ -1318,6 +1311,20 @@ impl EvalContext {
         Self {
             session: session.demand.clone(),
             owner: Arc::downgrade(session),
+            task_profile,
+            task: Arc::new(OnceLock::new()),
+            local_promise_owner: None,
+            scheduled_task: false,
+            waits_for_claimed_tasks: false,
+            originating_task: None,
+        }
+    }
+
+    fn for_spark(session: Arc<EvaluationDemandState>) -> Self {
+        let task_profile = session.default_reflection_profile.clone();
+        Self {
+            session,
+            owner: Weak::new(),
             task_profile,
             task: Arc::new(OnceLock::new()),
             local_promise_owner: None,
@@ -1400,13 +1407,12 @@ impl EvalContext {
         &self.session.values
     }
 
-    fn owner(&self) -> Result<Arc<EvaluationSession>, Arc<str>> {
+    fn coordinator_for_admission(&self) -> Result<Arc<EvaluationWorkCoordinator>, Arc<str>> {
         if self.session.is_closed() {
             return Err(Arc::from("evaluation demand session is closed"));
         }
-        self.owner
-            .upgrade()
-            .ok_or_else(|| Arc::from("evaluation demand session owner was dropped"))
+        self.coordinator()
+            .ok_or_else(|| Arc::from("evaluation demand coordinator expired"))
     }
 
     fn coordinator(&self) -> Option<Arc<EvaluationWorkCoordinator>> {
@@ -1448,9 +1454,10 @@ impl EvalContext {
         if matches!(
             value,
             Value::Lazy(_) | Value::Promised(_) | Value::Metadata(_)
-        ) && let Ok(owner) = self.owner()
+        ) && !self.session.is_closed()
+            && let Some(coordinator) = self.coordinator()
         {
-            owner.submit_spark(value);
+            coordinator.submit_spark(self.session.clone(), value);
         }
     }
 
@@ -1472,14 +1479,14 @@ impl EvalContext {
         if target.owner_id() != self.session.id {
             return;
         }
-        let Ok(owner) = self.owner() else {
+        let Some(coordinator) = self.coordinator() else {
             return;
         };
-        let generation = owner.coordinator.work_generation();
-        if !owner.target_has_running_producer(target) {
+        let generation = coordinator.work_generation();
+        if !coordinator.target_has_running_producer(target) {
             return;
         }
-        owner.coordinator.wait_for_change(generation);
+        coordinator.wait_for_change(generation);
     }
 
     /// Waits for one scheduler transition when an exact dependency chain ends
@@ -1492,15 +1499,15 @@ impl EvalContext {
         &self,
         target: &EvaluationWaitToken,
     ) -> bool {
-        let Ok(owner) = self.owner() else {
+        let Some(coordinator) = self.coordinator() else {
             return false;
         };
-        let generation = owner.coordinator.work_generation();
-        if !owner.dependency_observes_runtime(target) {
+        let generation = coordinator.work_generation();
+        if !coordinator.dependency_observes_runtime(target) {
             return false;
         }
-        if owner.coordinator.work_generation() == generation {
-            owner.coordinator.wait_for_change(generation);
+        if coordinator.work_generation() == generation {
+            coordinator.wait_for_change(generation);
         }
         true
     }
@@ -1540,9 +1547,9 @@ impl EvalContext {
     where
         F: FnOnce(EvalContext) -> Box<dyn EvaluationTaskMachine>,
     {
-        let owner = self.owner()?;
+        let coordinator = self.coordinator_for_admission()?;
         let deferred = producer.id();
-        if let Some(wait) = owner.coordinator.deferred_wait(deferred) {
+        if let Some(wait) = coordinator.deferred_wait(deferred) {
             return Ok(wait);
         }
 
@@ -1558,15 +1565,17 @@ impl EvalContext {
             originating_task,
             self.task_profile.clone(),
         ));
-        let work =
-            match owner
-                .coordinator
-                .reserve_deferred(&owner, id, wait.clone(), producer, machine)
-            {
-                DeferredWorkReservation::Existing(wait) => return Ok(wait),
-                DeferredWorkReservation::New(work) => work,
-            };
-        owner.coordinator.activate_deferred(work);
+        let work = match coordinator.reserve_deferred(
+            &self.session,
+            id,
+            wait.clone(),
+            producer,
+            machine,
+        )? {
+            DeferredWorkReservation::Existing(wait) => return Ok(wait),
+            DeferredWorkReservation::New(work) => work,
+        };
+        let _ = coordinator.activate_deferred(work);
         Ok(wait)
     }
 
@@ -1662,18 +1671,18 @@ impl EvalContext {
         &self,
         promise: &Arc<crate::core::PromiseCell>,
     ) -> Result<PromiseProducerObligation, Arc<str>> {
-        let session_owner = self.owner()?;
+        if self.session.is_closed() {
+            return Err(Arc::from("evaluation demand session is closed"));
+        }
         let owner = self.task_id()?;
         let wait = allocate_wait_token(&self.session, owner)?;
         let source = if self.scheduled_task {
-            let work =
-                session_owner
-                    .coordinator
-                    .register_task_promise(owner, wait.clone(), promise)?;
+            let coordinator = self.coordinator_for_admission()?;
+            let work = coordinator.register_task_promise(owner, wait.clone(), promise)?;
             PromiseProducerSource::Coordinator {
                 work,
                 promise: promise.id(),
-                coordinator: Arc::downgrade(&session_owner.coordinator),
+                coordinator: Arc::downgrade(&coordinator),
             }
         } else if let Some(local_owner) = &self.local_promise_owner {
             local_owner.register(promise, wait.clone());
@@ -1704,7 +1713,7 @@ impl EvalContext {
     where
         F: FnOnce(EvalContext) -> Result<Box<dyn EvaluationTaskMachine>, Arc<str>>,
     {
-        let owner = self.owner()?;
+        let coordinator = self.coordinator_for_admission()?;
         let reporting = self.reporting_store()?;
         let id = allocate_task_id(self.values())?;
         let wait = allocate_wait_token(&self.session, id)?;
@@ -1714,23 +1723,21 @@ impl EvalContext {
             id,
             self.task_profile.clone(),
         );
-        let work = owner
-            .coordinator
-            .reserve_reflection(&owner, id, wait.clone());
+        let work = coordinator.reserve_reflection(&self.session, id, wait.clone())?;
         let machine = match build(context) {
             Ok(machine) => machine,
             Err(error) => {
                 let failure = evaluation_failure(format!("task construction failed: {error}"));
                 assert!(
-                    owner.coordinator.terminalize_reserved_reflection(work),
+                    coordinator.terminalize_reserved_reflection(work),
                     "failed test task construction must terminalize its reservation"
                 );
-                owner.coordinator.settle_terminal_work(
+                coordinator.settle_terminal_work(
                     work,
                     EvaluationWaitTerminal::Failed(failure.clone()),
                     failure,
                 );
-                drop(owner.coordinator.retire_reflection(work));
+                drop(coordinator.retire_reflection(work));
                 return Err(error);
             }
         };
@@ -1754,25 +1761,22 @@ impl EvalContext {
             "evaluation task identities must be unique"
         );
         drop(tasks);
-        owner
-            .coordinator
+        coordinator
             .install_reflection_machine(work, machine)
             .unwrap_or_else(|_| panic!("fresh reflection reservation must accept its machine"));
         assert!(
-            owner.coordinator.activate_reflection(work),
+            coordinator.activate_reflection(work),
             "fresh reflection reservation must activate"
         );
         Ok(EvaluationTaskHandle { id, work, wait })
     }
 
     fn reserve_task(&self) -> Result<EvaluationTaskHandle, Arc<str>> {
-        let owner = self.owner()?;
+        let coordinator = self.coordinator_for_admission()?;
         let reporting = self.reporting_store()?;
         let id = allocate_task_id(self.values())?;
         let wait = allocate_wait_token(&self.session, id)?;
-        let work = owner
-            .coordinator
-            .reserve_reflection(&owner, id, wait.clone());
+        let work = coordinator.reserve_reflection(&self.session, id, wait.clone())?;
         let mut tasks = reporting
             .state
             .lock()
@@ -1804,13 +1808,12 @@ impl EvalContext {
         status_sink: Option<Arc<dyn EvaluationTaskStatusSink>>,
         error_acknowledged: bool,
     ) {
-        let Ok(owner) = self.owner() else {
+        let Ok(coordinator) = self.coordinator_for_admission() else {
             return;
         };
         let Ok(reporting) = self.reporting_store() else {
             return;
         };
-        let coordinator = &owner.coordinator;
         let result = task_profile
             .launcher()
             .ok_or_else(|| {
@@ -1873,7 +1876,7 @@ impl EvalContext {
                 }
                 if coordinator.terminalize_reserved_reflection(handle.work) {
                     let state = settle_task_work(
-                        coordinator,
+                        &coordinator,
                         handle.work,
                         EvaluationTaskState::Failed(error),
                         promise_failure,
@@ -1972,7 +1975,7 @@ impl EvalContext {
         &self,
         effect: Value,
     ) -> Result<PendingReflectionTask, Arc<str>> {
-        self.owner()?;
+        self.coordinator_for_admission()?;
         if !self.task_profile.is_sealed() {
             return Err(Arc::from(
                 "current task has no sealed reflection task profile",
@@ -1993,7 +1996,7 @@ impl EvalContext {
         effect: Value,
         result_policy: ReflectionTaskResultPolicy,
     ) -> Result<EvaluationTaskHandle, Arc<str>> {
-        let owner = self.owner()?;
+        let coordinator = self.coordinator_for_admission()?;
         let default_profile = self.session.default_reflection_profile.clone();
         if default_profile.is_sealed() {
             let handle = self.reserve_task()?;
@@ -2020,9 +2023,7 @@ impl EvalContext {
         let id = allocate_task_id(self.values())?;
         let reporting = self.reporting_store()?;
         let wait = allocate_wait_token(&self.session, id)?;
-        let work = owner
-            .coordinator
-            .register_dormant_reflection(&owner, id, wait.clone());
+        let work = coordinator.register_dormant_reflection(&self.session, id, wait.clone())?;
         let mut tasks = reporting
             .state
             .lock()
@@ -2157,14 +2158,14 @@ impl EvalContext {
         wait: &EvaluationWaitToken,
         step_budget: usize,
     ) -> EvaluationPumpOutcome {
-        let Ok(owner) = self.owner() else {
+        let Some(coordinator) = self.coordinator() else {
             return if wait.terminal_poll().is_some() {
                 EvaluationPumpOutcome::TargetReady
             } else {
                 EvaluationPumpOutcome::NoProgress
             };
         };
-        owner.pump(self, wait, step_budget)
+        pump_demand(&coordinator, self.session.id, self, wait, step_budget)
     }
 
     /// Runs every executable task until all are terminal or one complete pass
@@ -2586,52 +2587,80 @@ impl EvaluationSession {
             wait = next_wait.clone();
         }
     }
+}
 
-    fn pump(
-        &self,
-        context: &EvalContext,
-        target: &EvaluationWaitToken,
-        mut step_budget: usize,
-    ) -> EvaluationPumpOutcome {
-        if target.terminal_poll().is_some() {
+fn prioritized_task_for(
+    coordinator: &EvaluationWorkCoordinator,
+    target: &EvaluationWaitToken,
+) -> Option<EvaluationTaskId> {
+    let mut chain = Vec::new();
+    let mut seen = HashSet::new();
+    let mut wait = target.clone();
+    while let Some(task) = coordinator.producer_for_wait(&wait) {
+        if !seen.insert(task) {
+            break;
+        }
+        chain.push(task);
+        let Some(dependency) = coordinator.task_dependency(task) else {
+            break;
+        };
+        let Some(dependency_wait) = dependency.producer_wait() else {
+            break;
+        };
+        wait = dependency_wait.clone();
+    }
+    chain
+        .into_iter()
+        .rev()
+        .find(|task| coordinator.task_is_claimable(*task))
+}
+
+fn pump_demand(
+    coordinator: &Arc<EvaluationWorkCoordinator>,
+    session: EvaluationSessionId,
+    context: &EvalContext,
+    target: &EvaluationWaitToken,
+    mut step_budget: usize,
+) -> EvaluationPumpOutcome {
+    if target.terminal_poll().is_some() {
+        return EvaluationPumpOutcome::TargetReady;
+    }
+    if !target.belongs_to(&context.session) {
+        return EvaluationPumpOutcome::NoProgress;
+    }
+    loop {
+        if !matches!(context.poll_wait(target), EvaluationWaitPoll::Pending(_)) {
             return EvaluationPumpOutcome::TargetReady;
         }
-        if !target.belongs_to(&context.session) {
-            return EvaluationPumpOutcome::NoProgress;
+        if step_budget == 0 {
+            return EvaluationPumpOutcome::BudgetExhausted;
         }
-        loop {
+
+        if coordinator.target_has_running_producer(target) {
+            return EvaluationPumpOutcome::Busy;
+        }
+        let prioritized = prioritized_task_for(coordinator, target);
+        let claimed = prioritized
+            .and_then(|task| coordinator.claim_task(task))
+            .or_else(|| coordinator.claim_ready_task_for_session(session));
+        let Some(work) = claimed else {
+            if coordinator.target_has_running_producer(target) {
+                return EvaluationPumpOutcome::Busy;
+            }
             if !matches!(context.poll_wait(target), EvaluationWaitPoll::Pending(_)) {
                 return EvaluationPumpOutcome::TargetReady;
             }
-            if step_budget == 0 {
-                return EvaluationPumpOutcome::BudgetExhausted;
-            }
+            return EvaluationPumpOutcome::NoProgress;
+        };
 
-            if self.target_has_running_producer(target) {
-                return EvaluationPumpOutcome::Busy;
-            }
-            let prioritized = self.prioritized_task(target);
-            let claimed = prioritized
-                .and_then(|id| self.claim_task(id))
-                .or_else(|| self.claim_ready_task());
-            let Some(mut claimed) = claimed else {
-                if self.target_has_running_producer(target) {
-                    return EvaluationPumpOutcome::Busy;
-                }
-                if !matches!(context.poll_wait(target), EvaluationWaitPoll::Pending(_)) {
-                    return EvaluationPumpOutcome::TargetReady;
-                }
-                return EvaluationPumpOutcome::NoProgress;
-            };
-
-            let quantum = step_budget.min(TASK_POLL_QUANTUM);
-            step_budget -= quantum;
-            let poll = claimed.poll(quantum);
-            let (_, _, released, status) = claimed.release(poll);
-            publish_task_status(status);
-            if let Some(machine) = released {
-                machine.finish();
-            }
+        let mut claimed = ClaimedTask::new(coordinator.clone(), work);
+        let quantum = step_budget.min(TASK_POLL_QUANTUM);
+        step_budget -= quantum;
+        let poll = claimed.poll(quantum);
+        let (_, _, released, status) = claimed.release(poll);
+        publish_task_status(status);
+        if let Some(machine) = released {
+            machine.finish();
         }
     }
 }
@@ -2890,91 +2919,13 @@ impl EvaluationWorkCoordinator {
 }
 
 impl EvaluationSession {
-    fn claim_task(&self, id: EvaluationTaskId) -> Option<ClaimedTask> {
-        let work = self.coordinator.claim_task(id)?;
-        Some(ClaimedTask::new(self.coordinator.clone(), work))
-    }
-
     fn claim_ready_task(&self) -> Option<ClaimedTask> {
         let work = self.coordinator.claim_ready_task_for_session(self.id)?;
         Some(ClaimedTask::new(self.coordinator.clone(), work))
     }
 
-    fn producer_for_wait(&self, wait: &EvaluationWaitToken) -> Option<EvaluationTaskId> {
-        self.coordinator.producer_for_wait(wait)
-    }
-
     fn task_dependency(&self, id: EvaluationTaskId) -> Option<WorkDependency> {
         self.coordinator.task_dependency(id)
-    }
-
-    fn task_is_claimable(&self, id: EvaluationTaskId) -> bool {
-        self.coordinator.task_is_claimable(id)
-    }
-
-    fn prioritized_task(&self, target: &EvaluationWaitToken) -> Option<EvaluationTaskId> {
-        let mut chain = Vec::new();
-        let mut seen = HashSet::new();
-        let mut wait = target.clone();
-        while let Some(id) = self.producer_for_wait(&wait) {
-            if !seen.insert(id) {
-                break;
-            }
-            chain.push(id);
-            let Some(dependency) = self.task_dependency(id) else {
-                break;
-            };
-            let Some(dependency_wait) = dependency.producer_wait() else {
-                break;
-            };
-            wait = dependency_wait.clone();
-        }
-        chain
-            .into_iter()
-            .rev()
-            .find(|id| self.task_is_claimable(*id))
-    }
-
-    fn target_has_running_producer(&self, target: &EvaluationWaitToken) -> bool {
-        let mut seen = HashSet::new();
-        let mut wait = target.clone();
-        while let Some(id) = self.producer_for_wait(&wait) {
-            if !seen.insert(id) {
-                return false;
-            }
-            if self.coordinator.task_is_busy(id) {
-                return true;
-            }
-            let Some(dependency) = self.coordinator.task_dependency(id) else {
-                return false;
-            };
-            let Some(dependency_wait) = dependency.producer_wait() else {
-                return false;
-            };
-            wait = dependency_wait.clone();
-        }
-        false
-    }
-
-    fn dependency_observes_runtime(&self, target: &EvaluationWaitToken) -> bool {
-        let mut seen = HashSet::new();
-        let mut wait = target.clone();
-        while seen.insert(wait.get()) {
-            let Some(task) = self.producer_for_wait(&wait) else {
-                return false;
-            };
-            if self.coordinator.task_observed_epoch(task).is_some() {
-                return true;
-            }
-            let Some(dependency) = self.coordinator.task_dependency(task) else {
-                return false;
-            };
-            let Some(dependency_wait) = dependency.producer_wait() else {
-                return false;
-            };
-            wait = dependency_wait.clone();
-        }
-        false
     }
 
     fn task_is_running(&self) -> bool {
@@ -2985,7 +2936,6 @@ impl EvaluationSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Condvar;
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
@@ -3079,6 +3029,22 @@ mod tests {
         drop(closed_context);
         drop(context);
         assert!(demand.upgrade().is_none());
+    }
+
+    #[test]
+    fn guarded_work_admission_rejects_a_closed_demand_without_an_owner_lease() {
+        let (coordinator, _executor) =
+            test_execution_resources(0).expect("test execution resources should build");
+        let owner = EvaluationSession::shared(&coordinator);
+        let demand = owner.demand.clone();
+        drop(owner);
+
+        let task = allocate_task_id(&demand.values).expect("test task identity should allocate");
+        let wait = allocate_wait_token(&demand, task).expect("test wait identity should allocate");
+        let error = coordinator
+            .reserve_reflection(&demand, task, wait)
+            .expect_err("guarded admission must reject an already-closed demand");
+        assert!(error.contains("closed"));
     }
 
     #[test]
@@ -5371,8 +5337,8 @@ mod tests {
         );
         assert!(
             context
-                .owner()
-                .expect("test demand owner should be live")
+                .coordinator()
+                .expect("test demand coordinator should be live")
                 .dependency_observes_runtime(follower.wait()),
             "the synchronous facade must distinguish an observation wake from an orphaned wait"
         );
@@ -5488,10 +5454,8 @@ mod tests {
 
     fn park_next_spark(coordinator: &EvaluationWorkCoordinator) {
         let claimed = claim_next_spark(coordinator);
-        let session = claimed
-            .session()
-            .expect("the manually claimed spark should retain its demand session");
-        let halt = crate::eval::eval_value(&EvalContext::new(&session), claimed.value().as_core())
+        let context = EvalContext::for_spark(claimed.demand_session());
+        let halt = crate::eval::eval_value(&context, claimed.value().as_core())
             .expect_err("the unresolved promise should park its spark follower");
         let dependency = if let Some(wait) = halt.blocked_on() {
             coordinator::WorkDependency::Wait(wait.0)
@@ -5599,10 +5563,8 @@ mod tests {
         let coordinator::CoordinatorSelection::Spark(claimed) = coordinator.select() else {
             panic!("the promise spark should be claimable")
         };
-        let session = claimed
-            .session()
-            .expect("the manually claimed spark should retain its demand session");
-        let halt = crate::eval::eval_value(&EvalContext::new(&session), claimed.value().as_core())
+        let spark_context = EvalContext::for_spark(claimed.demand_session());
+        let halt = crate::eval::eval_value(&spark_context, claimed.value().as_core())
             .expect_err("the unresolved promise should halt the spark");
         let dependency = coordinator::WorkDependency::Promise(
             halt.unassigned_promise()
@@ -5730,17 +5692,21 @@ mod tests {
         );
         assert!(context.task_registry_counts().deferred_active > 0);
 
-        coordinator.unregister_session(session.id);
+        drop(session);
 
         wait_for_spark_work_counts(
             &coordinator,
             (0, 0, 0),
             "closing the demand session should immediately abandon blocked sparks",
         );
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while coordinator.deferred_counts(context.session.id).0 != 0 && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
         assert_eq!(
-            context.task_registry_counts().deferred_active,
+            coordinator.deferred_counts(context.session.id).0,
             0,
-            "spark abandonment must release the reusable deferred claim"
+            "spark abandonment or the returning worker must release the reusable deferred claim"
         );
         assert!(lazy.cached().is_none());
 
@@ -5761,47 +5727,30 @@ mod tests {
 
     #[test]
     fn closing_a_session_keeps_worker_owned_spark_work_busy_until_release() {
-        let (coordinator, _executor) = test_execution_resources(1).unwrap();
+        let (coordinator, _executor) = test_execution_resources(0).unwrap();
         let session = EvaluationSession::shared(&coordinator);
         let context = EvalContext::new(&session);
-        let release = Arc::new((Mutex::new(false), Condvar::new()));
-        let producer_release = release.clone();
-        let (started_sender, started_receiver) = mpsc::channel();
-        let lazy = LazyValue::deferred(context.values(), "worker-owned spark", move |context| {
-            started_sender
-                .send(())
-                .expect("test should still await the worker-owned spark");
-            let (lock, changed) = &*producer_release;
-            let mut released = lock.lock().expect("spark release lock was poisoned");
-            while !*released {
-                released = changed
-                    .wait(released)
-                    .expect("spark release lock was poisoned");
-            }
-            Ok(context.values().unit())
-        });
+        coordinator.executor_started(1);
+        let lazy = inert_lazy_for(context.values(), "worker-owned spark");
         context.spark(Value::Lazy(lazy));
-        started_receiver
-            .recv_timeout(Duration::from_secs(2))
-            .expect("worker should own the spark before session closure");
+        let coordinator::CoordinatorSelection::Spark(claimed) = coordinator.select() else {
+            panic!("the test worker should claim the spark before session closure")
+        };
         assert_eq!(coordinator.spark_work_counts(), (0, 1, 0));
 
-        coordinator.unregister_session(session.id);
-        coordinator.unregister_session(session.id);
+        let closed_session = session.id;
+        drop(session);
+        assert!(context.session.is_closed());
+        let repeated = coordinator.close_session(closed_session);
+        assert!(repeated.reflection.is_empty() && repeated.deferred.is_empty());
 
         assert_eq!(
             coordinator.spark_work_counts(),
             (0, 1, 0),
             "a close request must retain worker-owned work and its session index"
         );
-        let (lock, changed) = &*release;
-        *lock.lock().expect("spark release lock was poisoned") = true;
-        changed.notify_all();
-        wait_for_spark_work_counts(
-            &coordinator,
-            (0, 0, 0),
-            "the returning worker should apply the saved close request exactly once",
-        );
+        coordinator.release_spark(claimed, coordinator::SparkWorkPoll::Complete);
+        assert_eq!(coordinator.spark_work_counts(), (0, 0, 0));
     }
 
     #[test]

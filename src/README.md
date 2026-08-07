@@ -262,6 +262,13 @@ deferred machines reside in coordinator work records while claimable; a
 running claim detaches the machine exclusively, and release either restores it
 before requeueing/blocking or carries it out for terminal destruction. The
 session-side `SessionTaskReportingStore` contains no executable machine.
+Final owner drop closes all coordinator records for the demand ID in one
+guarded transition. Non-running work terminalizes immediately; running work
+keeps its first close reason until release. Machine contexts and stable spark
+records retain demand state, not the external owner lease, and guarded
+reservation rejects work after closure wins. Cooperative exact-dependency
+pumping likewise selects coordinator work by demand ID rather than recovering
+the owner lease.
 
 Each coordinator-owned blocked spark publishes a checked subscription epoch
 beside its retained dependency. Wait tokens and promises both retain that
@@ -269,7 +276,8 @@ exact registration and queue it only when work ID, blocked state, epoch, and
 runtime-local dependency key still match. Late notifications after reblocking,
 demand-session closure, executor shutdown, or runtime teardown therefore
 retain no scheduling authority; unrelated task progress does not repoll the
-spark.
+spark. A spark blocked on a lazy task also promotes that deferred producer
+directly, so worker progress does not depend on upgrading a serial-pump owner.
 
 Named promises share one runtime-bound `PromiseCell`. Resolution, explicit
 failure, resolver drop, reflection-producer failure, and producer-session

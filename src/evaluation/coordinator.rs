@@ -14,9 +14,9 @@ use crate::runtime::{
 };
 
 use super::{
-    EvaluationFailure, EvaluationMachinePoll, EvaluationSession, EvaluationSessionId,
-    EvaluationTaskId, EvaluationTaskMachine, EvaluationWaitTerminal, EvaluationWaitToken,
-    SessionTaskReportingStore,
+    EvaluationDemandState, EvaluationFailure, EvaluationMachinePoll, EvaluationSession,
+    EvaluationSessionId, EvaluationTaskId, EvaluationTaskMachine, EvaluationWaitTerminal,
+    EvaluationWaitToken, SessionTaskReportingStore,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -526,7 +526,7 @@ pub(crate) struct TestWorkDependency {
 }
 
 struct SparkDemand {
-    session: Weak<EvaluationSession>,
+    session: Arc<EvaluationDemandState>,
     value: RuntimeValueRoot,
 }
 
@@ -729,9 +729,33 @@ pub(super) struct AbandonedReflectionWork {
     pub(super) cancel: bool,
 }
 
+pub(super) struct SessionClosureWork {
+    pub(super) reflection: Vec<AbandonedReflectionWork>,
+    pub(super) deferred: Vec<AbandonedDeferredWork>,
+    retired_sparks: Vec<SparkRetirement>,
+}
+
+impl SessionClosureWork {
+    fn finish_sparks(&mut self) {
+        for record in self.retired_sparks.drain(..) {
+            record.abandon();
+        }
+    }
+
+    pub(super) fn finish(mut self) {
+        self.finish_sparks();
+    }
+}
+
+impl Drop for SessionClosureWork {
+    fn drop(&mut self) {
+        self.finish_sparks();
+    }
+}
+
 impl ClaimedSparkWork {
-    pub(super) fn session(&self) -> Option<Arc<EvaluationSession>> {
-        self.demand.session.upgrade()
+    pub(super) fn demand_session(&self) -> Arc<EvaluationDemandState> {
+        self.demand.session.clone()
     }
 
     pub(super) fn value(&self) -> &RuntimeValueRoot {
@@ -914,9 +938,15 @@ impl EvaluationWorkCoordinator {
         });
     }
 
-    pub(super) fn unregister_session(&self, session: EvaluationSessionId) {
+    /// Closes one demand session in a single guarded coordinator transition.
+    ///
+    /// Non-running task work enters terminalization immediately. Running work
+    /// retains its exclusive claim and its first close reason until release.
+    /// Spark dependencies are abandoned only after runtime locks and mutation
+    /// admission have been released.
+    pub(super) fn close_session(&self, session: EvaluationSessionId) -> SessionClosureWork {
         let mutation = self.admission.mutation_guard();
-        let (retired, changed) = {
+        let (reflection, deferred, retired_sparks, changed) = {
             let mut state = self
                 .state
                 .lock()
@@ -929,44 +959,99 @@ impl EvaluationWorkCoordinator {
                 .flatten()
                 .copied()
                 .collect::<Vec<_>>();
-            let mut retired = Vec::new();
+            let mut reflection = Vec::new();
+            let mut deferred = Vec::new();
+            let mut retired_sparks = Vec::new();
+            let mut changed = false;
             for id in work {
-                if !state
-                    .work
-                    .get(&id)
-                    .is_some_and(|record| matches!(record.kind, WorkKind::Spark(_)))
-                {
+                let Some(record) = state.work.get(&id) else {
+                    continue;
+                };
+                if matches!(record.state, WorkState::Terminalizing) {
+                    // The operation which published terminalization owns its
+                    // producer settlement and retirement tail.
                     continue;
                 }
-                let is_running = state
-                    .work
-                    .get(&id)
-                    .is_some_and(|record| matches!(record.state, WorkState::Running));
-                if is_running {
-                    let record = state
-                        .work
-                        .get_mut(&id)
-                        .expect("indexed running spark work must remain registered");
-                    record.control.close_reason = Some(WorkCloseReason::DemandSessionClosed);
-                } else if state
-                    .work
-                    .get(&id)
-                    .is_some_and(|record| matches!(record.kind, WorkKind::Spark(_)))
-                    && let Some(record) = detach_spark(&mut state, id)
-                {
-                    retired.push(record);
+                let running = matches!(record.state, WorkState::Running);
+                match &record.kind {
+                    WorkKind::Reflection(reflection_work) => {
+                        let task = reflection_work.task;
+                        let cancel = matches!(
+                            record.control.close_reason,
+                            Some(WorkCloseReason::ExplicitCancellation)
+                        );
+                        let record = state
+                            .work
+                            .get_mut(&id)
+                            .expect("indexed reflection work must remain registered");
+                        if record.control.close_reason.is_none() {
+                            debug_assert!(!cancel);
+                            record.control.close_reason =
+                                Some(WorkCloseReason::DemandSessionClosed);
+                            changed = true;
+                        }
+                        if running {
+                            continue;
+                        }
+                        record.state = WorkState::Terminalizing;
+                        state.observation_waiters.remove(&id);
+                        remove_ready_reflection(&mut state, id);
+                        reflection.push(AbandonedReflectionWork { id, task, cancel });
+                        changed = true;
+                    }
+                    WorkKind::Deferred(_) => {
+                        let record = state
+                            .work
+                            .get_mut(&id)
+                            .expect("indexed deferred work must remain registered");
+                        if record.control.close_reason.is_none() {
+                            record.control.close_reason =
+                                Some(WorkCloseReason::DemandSessionClosed);
+                            changed = true;
+                        }
+                        if running {
+                            continue;
+                        }
+                        deferred.push(begin_deferred_abandonment(&mut state, id));
+                        changed = true;
+                    }
+                    WorkKind::Spark(_) => {
+                        if running {
+                            let record = state
+                                .work
+                                .get_mut(&id)
+                                .expect("indexed running spark work must remain registered");
+                            if record.control.close_reason.is_none() {
+                                record.control.close_reason =
+                                    Some(WorkCloseReason::DemandSessionClosed);
+                                changed = true;
+                            }
+                        } else if let Some(record) = detach_spark(&mut state, id) {
+                            retired_sparks.push(record);
+                            changed = true;
+                        }
+                    }
                 }
             }
-            prune_closed_reporting_store(&mut state, session);
-            state.work_generation = state.work_generation.wrapping_add(1);
-            (retired, state.work_generation != initial_generation)
+            changed |= prune_closed_reporting_store(&mut state, session);
+            if changed {
+                state.work_generation = state.work_generation.wrapping_add(1);
+            }
+            (
+                reflection,
+                deferred,
+                retired_sparks,
+                state.work_generation != initial_generation,
+            )
         };
         drop(mutation);
         if changed {
             self.work_available.notify_all();
         }
-        for record in retired {
-            record.abandon();
+        SessionClosureWork {
+            reflection,
+            deferred,
+            retired_sparks,
         }
     }
 
@@ -983,11 +1068,11 @@ impl EvaluationWorkCoordinator {
             .cloned()
     }
 
-    pub(super) fn submit_spark(&self, session: &Arc<EvaluationSession>, value: Value) {
+    pub(super) fn submit_spark(&self, session: Arc<EvaluationDemandState>, value: Value) {
         debug_assert_eq!(session.values.runtime_id(), self.runtime);
         let id = EvaluationWorkId(self.ids.evaluation_work());
         let demand = SparkDemand {
-            session: Arc::downgrade(session),
+            session: session.clone(),
             value: RuntimeValueRoot::new(&session.values, value),
         };
         let mutation = self.admission.mutation_guard();
@@ -1311,6 +1396,19 @@ impl EvaluationWorkCoordinator {
                 record.state = WorkState::Terminalizing;
                 detach_spark(&mut state, claimed.id)
             };
+            if state
+                .work
+                .get(&claimed.id)
+                .is_some_and(|record| matches!(record.state, WorkState::Blocked))
+                && let Some(wait) = state
+                    .work
+                    .get(&claimed.id)
+                    .and_then(|record| spark_work(record).dependency.as_ref())
+                    .and_then(WorkDependency::producer_wait)
+                    .cloned()
+            {
+                promote_deferred_wait_locked(&mut state, &wait);
+            }
             state.work_generation = state.work_generation.wrapping_add(1);
             (retired, obsolete_dependency, exact_subscription)
         };
@@ -1330,29 +1428,29 @@ impl EvaluationWorkCoordinator {
 
     pub(super) fn reserve_reflection(
         &self,
-        session: &Arc<EvaluationSession>,
+        session: &EvaluationDemandState,
         task: EvaluationTaskId,
         wait: EvaluationWaitToken,
-    ) -> EvaluationWorkId {
+    ) -> Result<EvaluationWorkId, Arc<str>> {
         self.insert_reflection(session, task, wait, WorkState::Reserved)
     }
 
     pub(super) fn register_dormant_reflection(
         &self,
-        session: &Arc<EvaluationSession>,
+        session: &EvaluationDemandState,
         task: EvaluationTaskId,
         wait: EvaluationWaitToken,
-    ) -> EvaluationWorkId {
+    ) -> Result<EvaluationWorkId, Arc<str>> {
         self.insert_reflection(session, task, wait, WorkState::Dormant)
     }
 
     fn insert_reflection(
         &self,
-        session: &Arc<EvaluationSession>,
+        session: &EvaluationDemandState,
         task: EvaluationTaskId,
         wait: EvaluationWaitToken,
         initial: WorkState,
-    ) -> EvaluationWorkId {
+    ) -> Result<EvaluationWorkId, Arc<str>> {
         debug_assert_eq!(session.values.runtime_id(), self.runtime);
         debug_assert!(matches!(initial, WorkState::Dormant | WorkState::Reserved));
         let id = EvaluationWorkId(self.ids.evaluation_work());
@@ -1362,13 +1460,13 @@ impl EvaluationWorkCoordinator {
                 .state
                 .lock()
                 .expect("evaluation work coordinator was poisoned");
-            assert!(
-                state
-                    .reporting_stores
-                    .get(&session.id)
-                    .is_some_and(|store| !store.is_closed()),
-                "reflection work requires a registered demand session"
-            );
+            if state
+                .reporting_stores
+                .get(&session.id)
+                .is_none_or(|store| store.is_closed())
+            {
+                return Err(Arc::from("evaluation demand session is closed"));
+            }
             let record = WorkRecord {
                 id,
                 demand_session: session.id,
@@ -1395,7 +1493,7 @@ impl EvaluationWorkCoordinator {
         }
         drop(mutation);
         self.work_available.notify_all();
-        id
+        Ok(id)
     }
 
     /// Installs a fully constructed machine into its reserved reflection work
@@ -1591,81 +1689,6 @@ impl EvaluationWorkCoordinator {
             self.work_available.notify_all();
         }
         outcome
-    }
-
-    /// Requests closure of every reflection task owned by `session`.
-    ///
-    /// Non-running work enters terminalization immediately. Running work keeps
-    /// its current claim and observes the close request when that quantum is
-    /// released.
-    pub(super) fn abandon_reflection_session(
-        &self,
-        session: EvaluationSessionId,
-    ) -> Vec<AbandonedReflectionWork> {
-        let mutation = self.admission.mutation_guard();
-        let (abandoned, changed) = {
-            let mut state = self
-                .state
-                .lock()
-                .expect("evaluation work coordinator was poisoned");
-            let ids = state
-                .work_by_session
-                .get(&session)
-                .into_iter()
-                .flatten()
-                .copied()
-                .collect::<Vec<_>>();
-            let mut abandoned = Vec::new();
-            let mut changed = false;
-            for id in ids {
-                let Some(record) = state.work.get(&id) else {
-                    continue;
-                };
-                if !matches!(record.kind, WorkKind::Reflection(_)) {
-                    continue;
-                }
-                let task = reflection_work(record).task;
-                if matches!(record.state, WorkState::Terminalizing) {
-                    // The operation which moved this record into
-                    // `Terminalizing` owns settlement. In particular, a
-                    // worker may have released a completed quantum and still
-                    // be between that transition and consuming the producer
-                    // obligation. Session closure must not steal or repeat
-                    // that settlement.
-                    continue;
-                }
-                let cancel = matches!(
-                    record.control.close_reason,
-                    Some(WorkCloseReason::ExplicitCancellation)
-                );
-                let record = state
-                    .work
-                    .get_mut(&id)
-                    .expect("indexed reflection work must remain registered");
-                record.control.close_reason.get_or_insert(if cancel {
-                    WorkCloseReason::ExplicitCancellation
-                } else {
-                    WorkCloseReason::DemandSessionClosed
-                });
-                changed = true;
-                if matches!(record.state, WorkState::Running) {
-                    continue;
-                }
-                record.state = WorkState::Terminalizing;
-                state.observation_waiters.remove(&id);
-                remove_ready_reflection(&mut state, id);
-                abandoned.push(AbandonedReflectionWork { id, task, cancel });
-            }
-            if changed {
-                state.work_generation = state.work_generation.wrapping_add(1);
-            }
-            (abandoned, changed)
-        };
-        drop(mutation);
-        if changed {
-            self.work_available.notify_all();
-        }
-        abandoned
     }
 
     pub(super) fn claim_ready_task_for_session(
@@ -1898,12 +1921,12 @@ impl EvaluationWorkCoordinator {
 
     pub(super) fn reserve_deferred(
         &self,
-        session: &Arc<EvaluationSession>,
+        session: &EvaluationDemandState,
         task: EvaluationTaskId,
         wait: EvaluationWaitToken,
         producer: DeferredProducer,
         machine: Box<dyn EvaluationTaskMachine>,
-    ) -> DeferredWorkReservation {
+    ) -> Result<DeferredWorkReservation, Arc<str>> {
         debug_assert_eq!(session.values.runtime_id(), self.runtime);
         debug_assert_eq!(wait.runtime_id(), self.runtime);
         let deferred = producer.id();
@@ -1914,6 +1937,13 @@ impl EvaluationWorkCoordinator {
                 .state
                 .lock()
                 .expect("evaluation work coordinator was poisoned");
+            if state
+                .reporting_stores
+                .get(&session.id)
+                .is_none_or(|store| store.is_closed())
+            {
+                return Err(Arc::from("evaluation demand session is closed"));
+            }
             if let Some(id) = state.deferred_by_value.get(&deferred).copied() {
                 let wait = deferred_work(
                     state
@@ -1925,13 +1955,6 @@ impl EvaluationWorkCoordinator {
                 .clone();
                 DeferredWorkReservation::Existing(wait)
             } else {
-                assert!(
-                    state
-                        .reporting_stores
-                        .get(&session.id)
-                        .is_some_and(|store| !store.is_closed()),
-                    "deferred work requires a registered demand session"
-                );
                 let id = EvaluationWorkId(self.ids.evaluation_work());
                 let record = WorkRecord {
                     id,
@@ -1973,7 +1996,7 @@ impl EvaluationWorkCoordinator {
         if matches!(reservation, DeferredWorkReservation::New(_)) {
             self.work_available.notify_all();
         }
-        reservation
+        Ok(reservation)
     }
 
     pub(super) fn deferred_wait(&self, producer: DeferredValueId) -> Option<EvaluationWaitToken> {
@@ -1997,20 +2020,21 @@ impl EvaluationWorkCoordinator {
     /// Finishes the temporary coordinator-first installation handshake.
     /// Demand observed while the session installed its machine is preserved
     /// and makes the producer worker-ready immediately.
-    pub(super) fn activate_deferred(&self, id: EvaluationWorkId) {
+    pub(super) fn activate_deferred(&self, id: EvaluationWorkId) -> bool {
         let mutation = self.admission.mutation_guard();
-        {
+        let activated = {
             let mut state = self
                 .state
                 .lock()
                 .expect("evaluation work coordinator was poisoned");
             let demanded = {
-                let record = state
-                    .work
-                    .get_mut(&id)
-                    .expect("reserved deferred work must remain registered");
+                let Some(record) = state.work.get_mut(&id) else {
+                    return false;
+                };
                 assert!(matches!(record.kind, WorkKind::Deferred(_)));
-                assert!(matches!(record.state, WorkState::Reserved));
+                if !matches!(record.state, WorkState::Reserved) {
+                    return false;
+                }
                 let demanded = deferred_work(record).demanded_while_reserved;
                 record.state = if demanded {
                     WorkState::Queued
@@ -2023,9 +2047,11 @@ impl EvaluationWorkCoordinator {
                 queue_deferred(&mut state, id);
             }
             state.work_generation = state.work_generation.wrapping_add(1);
-        }
+            true
+        };
         drop(mutation);
         self.work_available.notify_all();
+        activated
     }
 
     #[cfg(test)]
@@ -2243,11 +2269,11 @@ impl EvaluationWorkCoordinator {
                 .lock()
                 .expect("evaluation work coordinator was poisoned");
             let id = state.deferred_by_wait.get(wait).copied()?;
-            if state
-                .work
-                .get(&id)
-                .is_some_and(|record| matches!(record.state, WorkState::Running))
-            {
+            if state.work.get(&id).is_some_and(|record| {
+                matches!(record.state, WorkState::Running | WorkState::Terminalizing)
+            }) {
+                // A running claim still owns the machine. A terminalizing
+                // release already took it and owns settlement/retirement.
                 return None;
             }
             let abandoned = begin_deferred_abandonment(&mut state, id);
@@ -2257,72 +2283,6 @@ impl EvaluationWorkCoordinator {
         drop(mutation);
         self.work_available.notify_all();
         Some(abandoned)
-    }
-
-    pub(super) fn abandon_deferred_session(
-        &self,
-        session: EvaluationSessionId,
-    ) -> Vec<AbandonedDeferredWork> {
-        let mutation = self.admission.mutation_guard();
-        let (abandoned, changed) = {
-            let mut state = self
-                .state
-                .lock()
-                .expect("evaluation work coordinator was poisoned");
-            let ids = state
-                .work_by_session
-                .get(&session)
-                .into_iter()
-                .flatten()
-                .copied()
-                .filter(|id| {
-                    state
-                        .work
-                        .get(id)
-                        .is_some_and(|record| matches!(record.kind, WorkKind::Deferred(_)))
-                })
-                .collect::<Vec<_>>();
-            let mut abandoned = Vec::with_capacity(ids.len());
-            let mut changed = false;
-            for id in ids {
-                if state
-                    .work
-                    .get(&id)
-                    .is_some_and(|record| matches!(record.state, WorkState::Terminalizing))
-                {
-                    // A prior transition owns terminal settlement. The
-                    // machine may still be completing the release tail
-                    // outside the coordinator lock.
-                    continue;
-                }
-                if state
-                    .work
-                    .get(&id)
-                    .is_some_and(|record| matches!(record.state, WorkState::Running))
-                {
-                    state
-                        .work
-                        .get_mut(&id)
-                        .expect("running deferred work must remain registered")
-                        .control
-                        .close_reason
-                        .get_or_insert(WorkCloseReason::DemandSessionClosed);
-                    changed = true;
-                    continue;
-                }
-                abandoned.push(begin_deferred_abandonment(&mut state, id));
-                changed = true;
-            }
-            if changed {
-                state.work_generation = state.work_generation.wrapping_add(1);
-            }
-            (abandoned, changed)
-        };
-        drop(mutation);
-        if changed {
-            self.work_available.notify_all();
-        }
-        abandoned
     }
 
     pub(super) fn producer_for_wait(&self, wait: &EvaluationWaitToken) -> Option<EvaluationTaskId> {
@@ -2371,6 +2331,9 @@ impl EvaluationWorkCoordinator {
                 .work
                 .get_mut(&work)
                 .expect("indexed promise producer work must remain registered");
+            if record.control.close_reason.is_some() {
+                return Err(Arc::from("evaluation demand session is closed"));
+            }
             if !matches!(record.state, WorkState::Reserved | WorkState::Running) {
                 return Err(Arc::from(
                     "a promise cannot be added after its producer stopped running",
@@ -2593,6 +2556,48 @@ impl EvaluationWorkCoordinator {
                 WorkState::Reserved | WorkState::Running | WorkState::Terminalizing
             )
         })
+    }
+
+    pub(super) fn target_has_running_producer(&self, target: &EvaluationWaitToken) -> bool {
+        let mut seen = HashSet::new();
+        let mut wait = target.clone();
+        while let Some(task) = self.producer_for_wait(&wait) {
+            if !seen.insert(task) {
+                return false;
+            }
+            if self.task_is_busy(task) {
+                return true;
+            }
+            let Some(dependency) = self.task_dependency(task) else {
+                return false;
+            };
+            let Some(dependency_wait) = dependency.producer_wait() else {
+                return false;
+            };
+            wait = dependency_wait.clone();
+        }
+        false
+    }
+
+    pub(super) fn dependency_observes_runtime(&self, target: &EvaluationWaitToken) -> bool {
+        let mut seen = HashSet::new();
+        let mut wait = target.clone();
+        while seen.insert(wait.get()) {
+            let Some(task) = self.producer_for_wait(&wait) else {
+                return false;
+            };
+            if self.task_observed_epoch(task).is_some() {
+                return true;
+            }
+            let Some(dependency) = self.task_dependency(task) else {
+                return false;
+            };
+            let Some(dependency_wait) = dependency.producer_wait() else {
+                return false;
+            };
+            wait = dependency_wait.clone();
+        }
+        false
     }
 
     pub(super) fn session_machine_is_busy(&self, session: EvaluationSessionId) -> bool {
@@ -3434,7 +3439,10 @@ fn detach_deferred(state: &mut WorkCoordinatorState, id: EvaluationWorkId) {
     prune_closed_reporting_store(state, record.demand_session);
 }
 
-fn prune_closed_reporting_store(state: &mut WorkCoordinatorState, session: EvaluationSessionId) {
+fn prune_closed_reporting_store(
+    state: &mut WorkCoordinatorState,
+    session: EvaluationSessionId,
+) -> bool {
     let has_reflection_work = state
         .work_by_session
         .get(&session)
@@ -3453,6 +3461,9 @@ fn prune_closed_reporting_store(state: &mut WorkCoordinatorState, session: Evalu
             .is_some_and(|store| store.is_closed())
     {
         state.reporting_stores.remove(&session);
+        true
+    } else {
+        false
     }
 }
 
@@ -3900,7 +3911,7 @@ mod tests {
             .expect("test execution resources should build");
         let session = EvaluationSession::shared(&coordinator);
         coordinator.executor_started(1);
-        coordinator.submit_spark(&session, crate::core::keys::unit_value());
+        coordinator.submit_spark(session.demand.clone(), crate::core::keys::unit_value());
         let CoordinatorSelection::Spark(claimed) = coordinator.select() else {
             panic!("test spark should be claimable")
         };
@@ -3965,7 +3976,9 @@ mod tests {
             .expect("reflection task identity should allocate");
         let wait = super::super::allocate_wait_token(session, task)
             .expect("reflection wait identity should allocate");
-        let work = coordinator.reserve_reflection(session, task, wait);
+        let work = coordinator
+            .reserve_reflection(session, task, wait)
+            .expect("open test session should reserve reflection work");
         activate_test_reflection(coordinator, work);
         (task, work)
     }
@@ -4073,8 +4086,9 @@ mod tests {
         let (coordinator, _executor) = super::super::test_execution_resources(0)
             .expect("test execution resources should build");
         let session = EvaluationSession::shared(&coordinator);
+        let session_id = session.id;
         let (_, work) = reserve_ready_test_reflection(&coordinator, &session);
-        let claimed = claim_ready_test_reflection(&coordinator, session.id);
+        let claimed = claim_ready_test_reflection(&coordinator, session_id);
         let source = TestCompletionSource::new(&coordinator);
         let started = Arc::new(Barrier::new(2));
         let completer = Arc::new(Mutex::new(None));
@@ -4202,7 +4216,9 @@ mod tests {
             .expect("settlement task identity should allocate");
         let wait = super::super::allocate_wait_token(&session, task)
             .expect("settlement wait identity should allocate");
-        let work = coordinator.reserve_reflection(&session, task, wait.clone());
+        let work = coordinator
+            .reserve_reflection(&session, task, wait.clone())
+            .expect("open test session should reserve reflection work");
         activate_test_reflection(&coordinator, work);
         assert!(coordinator.terminalize_reflection(work));
 
@@ -4233,20 +4249,45 @@ mod tests {
         let (coordinator, _executor) = super::super::test_execution_resources(0)
             .expect("test execution resources should build");
         let session = EvaluationSession::shared(&coordinator);
+        let session_id = session.id;
         let (_, work) = reserve_ready_test_reflection(&coordinator, &session);
-        let claimed = claim_ready_test_reflection(&coordinator, session.id);
+        let claimed = claim_ready_test_reflection(&coordinator, session_id);
 
         let release = coordinator.release_reflection(claimed, ReflectionWorkPoll::Terminal);
         assert!(release.terminal);
-        assert!(
-            coordinator
-                .abandon_reflection_session(session.id)
-                .is_empty(),
-            "the claim which published terminalization must retain settlement ownership"
-        );
+        drop(session);
+        assert!(matches!(
+            coordinator.reflection_snapshots(session_id).as_slice(),
+            [ReflectionWorkSnapshot {
+                state: ReflectionWorkState::Terminalizing,
+                ..
+            }]
+        ));
 
         settle_test_reflection(&coordinator, work);
+        assert_eq!(coordinator.registered_session_count(), 0);
+    }
+
+    #[test]
+    fn session_close_preserves_an_earlier_running_task_cancellation() {
+        let (coordinator, _executor) = super::super::test_execution_resources(0)
+            .expect("test execution resources should build");
+        let session = EvaluationSession::shared(&coordinator);
+        let session_id = session.id;
+        let (_, work) = reserve_ready_test_reflection(&coordinator, &session);
+        let claimed = claim_ready_test_reflection(&coordinator, session_id);
+
+        assert_eq!(
+            coordinator.request_reflection_cancellation(work),
+            ReflectionCancellation::Requested
+        );
         drop(session);
+        let release = coordinator.release_reflection(claimed, ReflectionWorkPoll::Terminal);
+        assert!(release.terminal);
+        assert!(release.cancel);
+        assert!(!release.abandoned);
+
+        settle_test_reflection(&coordinator, work);
         assert_eq!(coordinator.registered_session_count(), 0);
     }
 
@@ -4422,7 +4463,9 @@ mod tests {
             .expect("reflection task identity should allocate");
         let wait = super::super::allocate_wait_token(&session, task)
             .expect("reflection wait identity should allocate");
-        let work = coordinator.reserve_reflection(&session, task, wait);
+        let work = coordinator
+            .reserve_reflection(&session, task, wait)
+            .expect("open test session should reserve reflection work");
         activate_test_reflection(&coordinator, work);
 
         assert_eq!(coordinator.registered_session_count(), 1);
@@ -4478,7 +4521,9 @@ mod tests {
             .expect("reflection task identity should allocate");
         let wait = super::super::allocate_wait_token(&session, task)
             .expect("reflection wait identity should allocate");
-        let work = coordinator.reserve_reflection(&session, task, wait);
+        let work = coordinator
+            .reserve_reflection(&session, task, wait)
+            .expect("open test session should reserve reflection work");
         assert_eq!(
             coordinator.reflection_snapshots(session.id),
             vec![ReflectionWorkSnapshot {
@@ -4929,7 +4974,9 @@ mod tests {
             .expect("reflection task identity should allocate");
         let wait = super::super::allocate_wait_token(&session, task)
             .expect("reflection wait identity should allocate");
-        let work = coordinator.reserve_reflection(&session, task, wait);
+        let work = coordinator
+            .reserve_reflection(&session, task, wait)
+            .expect("open test session should reserve reflection work");
 
         assert_eq!(
             coordinator.request_reflection_cancellation(work),
@@ -4955,12 +5002,14 @@ mod tests {
             .expect("test execution resources should build");
         let session = EvaluationSession::shared(&coordinator);
         coordinator.executor_started(1);
-        coordinator.submit_spark(&session, crate::core::keys::unit_value());
+        coordinator.submit_spark(session.demand.clone(), crate::core::keys::unit_value());
         let task = super::super::allocate_task_id(&session.values)
             .expect("reflection task identity should allocate");
         let wait = super::super::allocate_wait_token(&session, task)
             .expect("reflection wait identity should allocate");
-        let work = coordinator.reserve_reflection(&session, task, wait);
+        let work = coordinator
+            .reserve_reflection(&session, task, wait)
+            .expect("open test session should reserve reflection work");
         activate_test_reflection(&coordinator, work);
 
         let CoordinatorSelection::Task(claimed) = coordinator.select() else {
@@ -4986,7 +5035,7 @@ mod tests {
             .expect("test execution resources should build");
         let session = EvaluationSession::shared(&coordinator);
         coordinator.executor_started(1);
-        coordinator.submit_spark(&session, crate::core::keys::unit_value());
+        coordinator.submit_spark(session.demand.clone(), crate::core::keys::unit_value());
         let [work] = coordinator
             .state
             .lock()
@@ -5001,7 +5050,7 @@ mod tests {
         assert_ne!(work.get(), 0);
         assert_eq!(coordinator.spark_work_counts(), (1, 0, 0));
 
-        coordinator.unregister_session(session.id);
+        drop(session);
 
         assert_eq!(coordinator.spark_work_counts(), (0, 0, 0));
         assert_eq!(coordinator.retained_spark_count(), 0);
@@ -5019,13 +5068,16 @@ mod tests {
         let lazy = LazyValue::deferred(&session.values, "coordinator deferred lifecycle", |_| {
             panic!("coordinator lifecycle test never evaluates its synthetic lazy")
         });
-        let DeferredWorkReservation::New(work) = coordinator.reserve_deferred(
-            &session,
-            task,
-            wait.clone(),
-            DeferredProducer::Lazy(lazy),
-            Box::new(TestTaskMachine),
-        ) else {
+        let DeferredWorkReservation::New(work) = coordinator
+            .reserve_deferred(
+                &session,
+                task,
+                wait.clone(),
+                DeferredProducer::Lazy(lazy),
+                Box::new(TestTaskMachine),
+            )
+            .expect("open test session should reserve deferred work")
+        else {
             panic!("fresh deferred work should reserve a canonical record")
         };
 
@@ -5035,7 +5087,7 @@ mod tests {
                 .is_none()
         );
         assert!(coordinator.promote_deferred_wait(&wait));
-        coordinator.activate_deferred(work);
+        assert!(coordinator.activate_deferred(work));
         let ClaimedTaskWork::Deferred(claimed) = coordinator
             .claim_ready_task_for_session(session.id)
             .expect("demand observed during installation should queue the producer")
@@ -5093,19 +5145,22 @@ mod tests {
             panic!("coordinator ownership test never evaluates its synthetic lazy")
         });
         let dropped_without_runtime_locks = Arc::new(AtomicBool::new(false));
-        let DeferredWorkReservation::New(work) = coordinator.reserve_deferred(
-            &session,
-            task,
-            wait.clone(),
-            DeferredProducer::Lazy(lazy),
-            Box::new(CheckDeferredDropLocks {
-                coordinator: Arc::downgrade(&coordinator),
-                dropped_without_runtime_locks: dropped_without_runtime_locks.clone(),
-            }),
-        ) else {
+        let DeferredWorkReservation::New(work) = coordinator
+            .reserve_deferred(
+                &session,
+                task,
+                wait.clone(),
+                DeferredProducer::Lazy(lazy),
+                Box::new(CheckDeferredDropLocks {
+                    coordinator: Arc::downgrade(&coordinator),
+                    dropped_without_runtime_locks: dropped_without_runtime_locks.clone(),
+                }),
+            )
+            .expect("open test session should reserve deferred work")
+        else {
             panic!("fresh deferred work should reserve a canonical record")
         };
-        coordinator.activate_deferred(work);
+        assert!(coordinator.activate_deferred(work));
         assert!(coordinator.promote_deferred_wait(&wait));
         let ClaimedTaskWork::Deferred(claimed) = coordinator
             .claim_ready_task_for_session(session.id)
@@ -5151,28 +5206,34 @@ mod tests {
             "cross-session canonical producer",
             |_| panic!("coordinator promotion test does not evaluate its lazy"),
         );
-        let DeferredWorkReservation::New(producer_work) = coordinator.reserve_deferred(
-            &producer_session,
-            producer_task,
-            producer_wait.clone(),
-            DeferredProducer::Lazy(lazy.clone()),
-            Box::new(TestTaskMachine),
-        ) else {
+        let DeferredWorkReservation::New(producer_work) = coordinator
+            .reserve_deferred(
+                &producer_session,
+                producer_task,
+                producer_wait.clone(),
+                DeferredProducer::Lazy(lazy.clone()),
+                Box::new(TestTaskMachine),
+            )
+            .expect("open producer session should reserve deferred work")
+        else {
             panic!("first demand should reserve the canonical producer")
         };
-        coordinator.activate_deferred(producer_work);
+        assert!(coordinator.activate_deferred(producer_work));
 
         let duplicate_task = super::super::allocate_task_id(&observer_session.values)
             .expect("duplicate task identity should allocate");
         let duplicate_wait = super::super::allocate_wait_token(&observer_session, duplicate_task)
             .expect("duplicate wait identity should allocate");
-        let DeferredWorkReservation::Existing(canonical_wait) = coordinator.reserve_deferred(
-            &observer_session,
-            duplicate_task,
-            duplicate_wait,
-            DeferredProducer::Lazy(lazy),
-            Box::new(TestTaskMachine),
-        ) else {
+        let DeferredWorkReservation::Existing(canonical_wait) = coordinator
+            .reserve_deferred(
+                &observer_session,
+                duplicate_task,
+                duplicate_wait,
+                DeferredProducer::Lazy(lazy),
+                Box::new(TestTaskMachine),
+            )
+            .expect("open observer session should reuse deferred work")
+        else {
             panic!("a racing demand must reuse the canonical producer")
         };
         assert_eq!(canonical_wait, producer_wait);
@@ -5181,8 +5242,9 @@ mod tests {
             .expect("observer task identity should allocate");
         let observer_wait = super::super::allocate_wait_token(&observer_session, observer_task)
             .expect("observer wait identity should allocate");
-        let observer_work =
-            coordinator.reserve_reflection(&observer_session, observer_task, observer_wait);
+        let observer_work = coordinator
+            .reserve_reflection(&observer_session, observer_task, observer_wait)
+            .expect("open observer session should reserve reflection work");
         activate_test_reflection(&coordinator, observer_work);
         let ClaimedTaskWork::Reflection { claim: claimed, .. } = coordinator
             .claim_ready_task_for_session(observer_session.id)
@@ -5221,7 +5283,9 @@ mod tests {
             .expect("reflection task identity should allocate");
         let wait = super::super::allocate_wait_token(&session, task)
             .expect("reflection wait identity should allocate");
-        let work = coordinator.reserve_reflection(&session, task, wait);
+        let work = coordinator
+            .reserve_reflection(&session, task, wait)
+            .expect("open test session should reserve reflection work");
         activate_test_reflection(&coordinator, work);
         drop(executor);
 
