@@ -214,5 +214,5 @@ pub(in crate::g_syntax) fn lower_unique(
 
 #[cfg(test)]
 pub(in crate::g_syntax) fn builtin_list_module() -> Dict {
-    compiler_values::builtin_list_module(&crate::core::test_value_factory())
+    compiler_values::builtin_list_module(&crate::compiler::test_value_factory())
 }

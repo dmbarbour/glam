@@ -140,12 +140,12 @@ fn evaluation_worker(inner: Arc<EvaluationExecutorInner>) {
         let work = coordinator.select();
 
         match work {
-            CoordinatorSelection::Task(session, work) => {
+            CoordinatorSelection::Task(work) => {
                 if inner.stopping.load(Ordering::Acquire) {
                     coordinator.requeue_unpolled_task(work);
                     return;
                 }
-                session.poll_claimed_task(work);
+                coordinator.poll_claimed_task(work);
             }
             CoordinatorSelection::Spark(claimed) => {
                 if inner.stopping.load(Ordering::Acquire) {

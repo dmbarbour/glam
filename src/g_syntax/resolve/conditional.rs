@@ -437,7 +437,7 @@ mod tests {
     }
 
     fn is_root_effect_call(expression: &ResolvedExpr<Value>, name: &str) -> bool {
-        let values = crate::core::test_value_factory();
+        let values = crate::compiler::test_value_factory();
         matches!(
             expression,
             ResolvedExpr::Apply { function, .. }
@@ -448,7 +448,7 @@ mod tests {
 
     fn returned(value: i64) -> ResolvedExpr<Value> {
         effect_call_resolved(
-            &crate::core::test_value_factory(),
+            &crate::compiler::test_value_factory(),
             "r",
             [ResolvedExpr::Embedded(Value::Number(Number::from(value)))],
         )
@@ -459,10 +459,10 @@ mod tests {
         assert_eq!(
             resolve(&[]),
             effect_call_resolved(
-                &crate::core::test_value_factory(),
+                &crate::compiler::test_value_factory(),
                 "cut",
                 [lower_effect_expr_resolved(
-                    &crate::core::test_value_factory(),
+                    &crate::compiler::test_value_factory(),
                     "fail",
                 )],
             )
@@ -474,7 +474,7 @@ mod tests {
         let result = number(1);
         assert_eq!(
             resolve(&[pass(&result)]),
-            effect_call_resolved(&crate::core::test_value_factory(), "cut", [returned(1)])
+            effect_call_resolved(&crate::compiler::test_value_factory(), "cut", [returned(1)])
         );
     }
 
@@ -490,10 +490,10 @@ mod tests {
                 result: &result,
             }]),
             effect_call_resolved(
-                &crate::core::test_value_factory(),
+                &crate::compiler::test_value_factory(),
                 "cut",
                 [lower_effect_expr_resolved(
-                    &crate::core::test_value_factory(),
+                    &crate::compiler::test_value_factory(),
                     "fail",
                 )],
             )
@@ -522,15 +522,15 @@ mod tests {
         let second = number(2);
         let third = number(3);
         let expected = effect_call_resolved(
-            &crate::core::test_value_factory(),
+            &crate::compiler::test_value_factory(),
             "cut",
             [effect_call_resolved(
-                &crate::core::test_value_factory(),
+                &crate::compiler::test_value_factory(),
                 "alt",
                 [
                     returned(1),
                     effect_call_resolved(
-                        &crate::core::test_value_factory(),
+                        &crate::compiler::test_value_factory(),
                         "alt",
                         [returned(2), returned(3)],
                     ),
@@ -755,7 +755,7 @@ mod tests {
         .expect("empty open host match should resolve");
         assert_eq!(
             resolved_host,
-            lower_effect_expr_resolved(&crate::core::test_value_factory(), "fail")
+            lower_effect_expr_resolved(&crate::compiler::test_value_factory(), "fail")
         );
 
         let pure = MatchWhenExpr {
@@ -774,7 +774,7 @@ mod tests {
         assert_eq!(
             resolved_pure,
             compiler_values::run_pure_open_match_resolved(lower_effect_expr_resolved(
-                &crate::core::test_value_factory(),
+                &crate::compiler::test_value_factory(),
                 "fail",
             ))
         );
@@ -910,7 +910,7 @@ mod tests {
     }
 
     fn contains_effect(expression: &ResolvedExpr<Value>, name: &str) -> bool {
-        let target = compiler_values::effect_value(&crate::core::test_value_factory(), name);
+        let target = compiler_values::effect_value(&crate::compiler::test_value_factory(), name);
         match expression {
             ResolvedExpr::Embedded(value) | ResolvedExpr::Provided(value) => value == &target,
             ResolvedExpr::Local(_) => false,

@@ -301,7 +301,7 @@ mod resolver_context_tests {
         let mut resolver = ResolverContext::default();
         let parameter = resolver.fresh_binding();
         let net = ResolvedNetLowerer::lower_template(
-            &crate::core::test_value_factory(),
+            &crate::compiler::test_value_factory(),
             vec![parameter],
             ResolvedExpr::Local(parameter),
         );
@@ -326,7 +326,7 @@ mod resolver_context_tests {
         let mut resolver = ResolverContext::default();
         let parameter = resolver.fresh_binding();
         let net = ResolvedNetLowerer::lower_template(
-            &crate::core::test_value_factory(),
+            &crate::compiler::test_value_factory(),
             vec![parameter],
             ResolvedExpr::Embedded(unit()),
         );
@@ -343,7 +343,7 @@ mod resolver_context_tests {
             [ResolvedExpr::Local(parameter)],
         );
         let net = ResolvedNetLowerer::lower_template(
-            &crate::core::test_value_factory(),
+            &crate::compiler::test_value_factory(),
             vec![parameter],
             body,
         );
@@ -363,7 +363,7 @@ mod resolver_context_tests {
         let first = resolver.fresh_binding();
         let second = resolver.fresh_binding();
         let net = ResolvedNetLowerer::lower_template(
-            &crate::core::test_value_factory(),
+            &crate::compiler::test_value_factory(),
             vec![first, second],
             ResolvedExpr::Local(first),
         );
@@ -383,7 +383,7 @@ mod resolver_context_tests {
         let parameter = resolver.fresh_binding();
         let capture = resolver.fresh_binding();
         let (code, captures) = ResolvedNetLowerer::lower_code(
-            &crate::core::test_value_factory(),
+            &crate::compiler::test_value_factory(),
             vec![parameter],
             ResolvedExpr::Local(capture),
         );

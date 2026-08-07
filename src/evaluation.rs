@@ -2,11 +2,10 @@
 //!
 //! The runtime supplies task and wait identity, value provenance, and the
 //! authoritative reflection-task lifecycle. During the work-boundary
-//! transition, an explicit session machine store retains opaque reflection and
-//! deferred machine slots plus minimal lookup indexes while the demand state
-//! retains failure/status plumbing and its serial cooperative pump. The
-//! runtime coordinator owns both task kinds' lifecycle state and retains each
-//! transitional store only while indexed work remains. Reflection
+//! transition, an explicit session machine store retains opaque reflection
+//! machine slots plus minimal reporting indexes while the runtime coordinator
+//! owns deferred machines directly with their lifecycle records. Demand state
+//! retains failure/status plumbing and its serial cooperative pump. Reflection
 //! specializations remain outside this module behind a small type-erased
 //! task-machine boundary.
 
@@ -21,8 +20,8 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use rpds::RedBlackTreeMapSync;
 
 use crate::core::{
-    CoreValueFactory, DeferredValueId, EvaluationFailure, LazyCycle, LazyCycleMember, LazyValue,
-    PromiseAssignment, PromiseCell, PromiseId, PromisedValue, Value,
+    CoreValueFactory, EvaluationFailure, LazyCycle, LazyCycleMember, LazyValue, PromiseAssignment,
+    PromiseCell, PromiseId, PromisedValue, Value,
 };
 use crate::runtime::{EvaluationRuntimeId, RuntimeValueRoot};
 
@@ -723,13 +722,6 @@ fn settle_task_work(
     ))
 }
 
-struct DeferredTaskRecord {
-    id: EvaluationTaskId,
-    work: EvaluationWorkId,
-    wait: EvaluationWaitToken,
-    machine: Option<Box<dyn EvaluationTaskMachine>>,
-}
-
 struct TaskStatusUpdate {
     status: EvaluationTaskStatus,
     sinks: Vec<Arc<dyn EvaluationTaskStatusSink>>,
@@ -836,16 +828,14 @@ impl Drop for PendingReflectionTaskInner {
 struct SessionMachineState {
     reflection: HashMap<EvaluationWaitToken, ReflectionTaskRecord>,
     reflection_by_id: BTreeMap<EvaluationTaskId, EvaluationWaitToken>,
-    deferred: HashMap<DeferredValueId, DeferredTaskRecord>,
-    deferred_by_work: HashMap<EvaluationWorkId, DeferredValueId>,
 }
 
 type SessionFailureLedger = RedBlackTreeMapSync<EvaluationTaskId, Arc<EvaluationFailure>>;
 
 /// Transitional opaque machine storage for one demand session.
 ///
-/// The coordinator retains this store while indexed work remains, and a
-/// claimed task retains it for the duration of its poll quantum. The store
+/// The coordinator retains this store while indexed reflection work remains,
+/// and a claimed reflection task retains it for its poll quantum. The store
 /// deliberately has no direct route to demand state and only a weak route to
 /// the coordinator. Resident machines may retain their machine-visible demand
 /// state, but can never retain the external [`EvaluationSession`] owner lease
@@ -957,18 +947,6 @@ fn promise_assignment_terminal(
     }
 }
 
-fn retire_deferred_task(
-    tasks: &mut SessionMachineState,
-    deferred: DeferredValueId,
-) -> DeferredTaskRecord {
-    let record = tasks
-        .deferred
-        .remove(&deferred)
-        .expect("retired deferred task must remain registered");
-    assert_eq!(tasks.deferred_by_work.remove(&record.work), Some(deferred));
-    record
-}
-
 pub(crate) struct EvaluationDemandState {
     id: EvaluationSessionId,
     values: CoreValueFactory,
@@ -1036,24 +1014,9 @@ impl EvaluationDemandState {
                 EvaluationWaitTerminal::Abandoned,
                 evaluation_failure("deferred fixpoint producer was abandoned"),
             );
-            let retired = {
-                let machines = self
-                    .machine_store()
-                    .expect("active deferred work must retain its machine store");
-                let mut tasks = machines
-                    .state
-                    .lock()
-                    .expect("evaluation task registry was poisoned");
-                let record = tasks
-                    .deferred
-                    .get(&abandoned.producer)
-                    .expect("terminalizing deferred work must retain its machine slot");
-                assert_eq!(record.work, abandoned.id);
-                debug_assert_eq!(wait.terminal_poll(), Some(terminal.to_poll()));
-                retire_deferred_task(&mut tasks, abandoned.producer)
-            };
+            debug_assert_eq!(wait.terminal_poll(), Some(terminal.to_poll()));
             coordinator.retire_deferred(abandoned.id);
-            drop(retired);
+            drop(abandoned.machine);
             let Some(dependency) = abandoned.dependency else {
                 return;
             };
@@ -1132,10 +1095,11 @@ impl Drop for EvaluationSession {
                 (work.id, (work.task, work.cancel, state))
             })
             .collect::<HashMap<_, _>>();
-        let abandoning_deferred = self.coordinator.abandon_deferred_session(self.id);
-        let abandoning_deferred = abandoning_deferred
+        let abandoning_deferred = self
+            .coordinator
+            .abandon_deferred_session(self.id)
             .into_iter()
-            .map(|work| {
+            .inspect(|work| {
                 self.coordinator.settle_terminal_work(
                     work.id,
                     EvaluationWaitTerminal::Abandoned,
@@ -1144,10 +1108,9 @@ impl Drop for EvaluationSession {
                         work.task.get()
                     )),
                 );
-                (work.id, work)
             })
-            .collect::<HashMap<_, _>>();
-        let (reflection, deferred, statuses) = {
+            .collect::<Vec<_>>();
+        let (reflection, statuses) = {
             let mut tasks = self
                 .machines
                 .state
@@ -1185,22 +1148,7 @@ impl Drop for EvaluationSession {
                 statuses.extend(transition.status);
             }
 
-            let deferred_ids = tasks.deferred.keys().copied().collect::<Vec<_>>();
-            let mut deferred = Vec::with_capacity(deferred_ids.len());
-            for deferred_id in deferred_ids {
-                let record = tasks
-                    .deferred
-                    .get(&deferred_id)
-                    .expect("collected deferred task must remain registered");
-                let Some(abandoning) = abandoning_deferred.get(&record.work) else {
-                    // A running or already-terminalizing operation owns the
-                    // remaining settlement and retirement tail.
-                    continue;
-                };
-                assert_eq!(abandoning.producer, deferred_id);
-                deferred.push(retire_deferred_task(&mut tasks, deferred_id));
-            }
-            (reflection, deferred, statuses)
+            (reflection, statuses)
         };
 
         for status in statuses {
@@ -1212,9 +1160,9 @@ impl Drop for EvaluationSession {
             }
             self.coordinator.retire_reflection(work);
         }
-        for record in deferred {
-            self.coordinator.retire_deferred(record.work);
-            drop(record);
+        for work in abandoning_deferred {
+            self.coordinator.retire_deferred(work.id);
+            drop(work.machine);
         }
 
         self.coordinator.unregister_session(self.id);
@@ -1604,19 +1552,12 @@ impl EvalContext {
     where
         F: FnOnce(EvalContext) -> Box<dyn EvaluationTaskMachine>,
     {
-        let machines = self.machine_store()?;
+        let owner = self.owner()?;
         let deferred = producer.id();
-        {
-            let tasks = machines
-                .state
-                .lock()
-                .expect("evaluation task registry was poisoned");
-            if let Some(record) = tasks.deferred.get(&deferred) {
-                return Ok(record.wait.clone());
-            }
+        if let Some(wait) = owner.coordinator.deferred_wait(deferred) {
+            return Ok(wait);
         }
 
-        let owner = self.owner()?;
         let id = allocate_task_id(self.values())?;
         let wait = allocate_wait_token(&self.session, id)?;
         let originating_task = self
@@ -1629,29 +1570,14 @@ impl EvalContext {
             originating_task,
             self.task_profile.clone(),
         ));
-        let work = match owner
-            .coordinator
-            .reserve_deferred(&owner, id, wait.clone(), producer)
-        {
-            DeferredWorkReservation::Existing(wait) => return Ok(wait),
-            DeferredWorkReservation::New(work) => work,
-        };
-        let mut tasks = machines
-            .state
-            .lock()
-            .expect("evaluation task registry was poisoned");
-        let record = DeferredTaskRecord {
-            id,
-            work,
-            wait: wait.clone(),
-            machine: Some(machine),
-        };
-        assert!(
-            tasks.deferred.insert(deferred, record).is_none()
-                && tasks.deferred_by_work.insert(work, deferred).is_none(),
-            "deferred task identities must be unique"
-        );
-        drop(tasks);
+        let work =
+            match owner
+                .coordinator
+                .reserve_deferred(&owner, id, wait.clone(), producer, machine)
+            {
+                DeferredWorkReservation::Existing(wait) => return Ok(wait),
+                DeferredWorkReservation::New(work) => work,
+            };
         owner.coordinator.activate_deferred(work);
         Ok(wait)
     }
@@ -2466,11 +2392,6 @@ struct ClaimedReflectionTask {
     machine: Box<dyn EvaluationTaskMachine>,
 }
 
-struct ClaimedDeferredTask {
-    claim: ClaimedDeferredWork,
-    machine: Box<dyn EvaluationTaskMachine>,
-}
-
 enum ReleasedTaskMachine {
     Drop {
         machine: Box<dyn EvaluationTaskMachine>,
@@ -2524,20 +2445,34 @@ struct ReportedDependency {
 }
 
 struct ClaimedTask {
-    machines: Arc<SessionMachineStore>,
+    coordinator: Arc<EvaluationWorkCoordinator>,
     kind: ClaimedTaskKind,
 }
 
 enum ClaimedTaskKind {
-    Reflection(ClaimedReflectionTask),
-    Deferred(ClaimedDeferredTask),
+    Reflection {
+        machines: Arc<SessionMachineStore>,
+        task: ClaimedReflectionTask,
+    },
+    Deferred(ClaimedDeferredWork),
 }
 
 impl ClaimedTask {
+    fn new(coordinator: Arc<EvaluationWorkCoordinator>, work: ClaimedTaskWork) -> Self {
+        let kind = match work {
+            ClaimedTaskWork::Reflection { machines, claim } => {
+                let task = machines.claim_reflection_machine(claim);
+                ClaimedTaskKind::Reflection { machines, task }
+            }
+            ClaimedTaskWork::Deferred(claim) => ClaimedTaskKind::Deferred(claim),
+        };
+        Self { coordinator, kind }
+    }
+
     fn poll(&mut self, step_budget: usize) -> EvaluationMachinePoll {
         match &mut self.kind {
-            ClaimedTaskKind::Reflection(task) => task.machine.poll(step_budget),
-            ClaimedTaskKind::Deferred(task) => task.machine.poll(step_budget),
+            ClaimedTaskKind::Reflection { task, .. } => task.machine.poll(step_budget),
+            ClaimedTaskKind::Deferred(task) => task.poll(step_budget),
         }
     }
 
@@ -2550,7 +2485,12 @@ impl ClaimedTask {
         Option<ReleasedTaskMachine>,
         Option<TaskStatusUpdate>,
     ) {
-        self.machines.release_task(self.kind, poll)
+        match self.kind {
+            ClaimedTaskKind::Reflection { machines, task } => {
+                machines.release_reflection_task(task, poll)
+            }
+            ClaimedTaskKind::Deferred(task) => release_deferred_task(&self.coordinator, task, poll),
+        }
     }
 }
 
@@ -2715,22 +2655,6 @@ impl EvaluationSession {
 }
 
 impl SessionMachineStore {
-    fn release_task(
-        &self,
-        claimed: ClaimedTaskKind,
-        poll: EvaluationMachinePoll,
-    ) -> (
-        bool,
-        bool,
-        Option<ReleasedTaskMachine>,
-        Option<TaskStatusUpdate>,
-    ) {
-        match claimed {
-            ClaimedTaskKind::Reflection(claimed) => self.release_reflection_task(claimed, poll),
-            ClaimedTaskKind::Deferred(claimed) => self.release_deferred_task(claimed, poll),
-        }
-    }
-
     fn release_reflection_task(
         &self,
         claimed: ClaimedReflectionTask,
@@ -2857,184 +2781,137 @@ impl SessionMachineStore {
         drop(retired);
         (release.made_progress, false, released, transition.status)
     }
+}
 
-    fn release_deferred_task(
-        &self,
-        claimed: ClaimedDeferredTask,
-        poll: EvaluationMachinePoll,
-    ) -> (
-        bool,
-        bool,
-        Option<ReleasedTaskMachine>,
-        Option<TaskStatusUpdate>,
-    ) {
-        let coordinator = self.coordinator();
-        let ClaimedDeferredTask { claim, machine } = claimed;
-        let work = claim.id();
-        let producer = claim.producer();
-        let (work_poll, terminal) = match poll {
-            EvaluationMachinePoll::Yielded => (DeferredWorkPoll::Yielded, None),
-            EvaluationMachinePoll::Blocked(block) => (DeferredWorkPoll::Blocked(block), None),
-            EvaluationMachinePoll::Complete(value) => (
-                DeferredWorkPoll::Terminal,
-                Some(EvaluationWaitTerminal::Complete(RuntimeValueRoot::new(
-                    &self.values,
-                    value,
-                ))),
-            ),
-            EvaluationMachinePoll::Failed(error) => (
-                DeferredWorkPoll::Terminal,
-                Some(EvaluationWaitTerminal::Failed(error)),
-            ),
-            EvaluationMachinePoll::Cancelled => (
-                DeferredWorkPoll::Terminal,
-                Some(EvaluationWaitTerminal::Failed(Arc::new(
-                    EvaluationFailure::message("deferred evaluation task was cancelled"),
-                ))),
-            ),
-        };
+fn release_deferred_task(
+    coordinator: &Arc<EvaluationWorkCoordinator>,
+    claimed: ClaimedDeferredWork,
+    poll: EvaluationMachinePoll,
+) -> (
+    bool,
+    bool,
+    Option<ReleasedTaskMachine>,
+    Option<TaskStatusUpdate>,
+) {
+    let work = claimed.id();
+    let (work_poll, terminal) = match poll {
+        EvaluationMachinePoll::Yielded => (DeferredWorkPoll::Yielded, None),
+        EvaluationMachinePoll::Blocked(block) => (DeferredWorkPoll::Blocked(block), None),
+        EvaluationMachinePoll::Complete(value) => (
+            DeferredWorkPoll::Terminal,
+            Some(EvaluationWaitTerminal::Complete(
+                RuntimeValueRoot::from_runtime(coordinator.runtime_id(), value),
+            )),
+        ),
+        EvaluationMachinePoll::Failed(error) => (
+            DeferredWorkPoll::Terminal,
+            Some(EvaluationWaitTerminal::Failed(error)),
+        ),
+        EvaluationMachinePoll::Cancelled => (
+            DeferredWorkPoll::Terminal,
+            Some(EvaluationWaitTerminal::Failed(Arc::new(
+                EvaluationFailure::message("deferred evaluation task was cancelled"),
+            ))),
+        ),
+    };
 
-        // As with reflection work, restore the machine while the coordinator
-        // still marks the record Running. Only then can its next state become
-        // claimable.
-        {
-            let mut tasks = self
-                .state
-                .lock()
-                .expect("evaluation task registry was poisoned");
-            let record = tasks
-                .deferred
-                .get_mut(&claim.producer())
-                .expect("claimed deferred work must retain its machine slot");
-            assert_eq!(record.id, claim.task());
-            assert_eq!(record.work, claim.id());
-            assert!(record.machine.is_none(), "claimed machine must be absent");
-            record.machine = Some(machine);
-        }
-
-        let release = coordinator.release_deferred(claim, work_poll);
-        if !release.cycle.is_empty() {
-            self.poison_lazy_cycle(release.cycle);
-            return (release.made_progress, false, None, None);
-        }
-        if !release.terminal {
-            return (release.made_progress, release.remains_blocked, None, None);
-        }
-
-        let terminal = if release.abandoned {
-            EvaluationWaitTerminal::Abandoned
-        } else {
-            terminal.expect("terminal deferred poll must carry a terminal result")
-        };
-        let promise_failure = match &terminal {
-            EvaluationWaitTerminal::Complete(_) => {
-                evaluation_failure("evaluation task completed without fulfilling its fixpoint")
-            }
-            EvaluationWaitTerminal::Failed(error) => error.clone(),
-            EvaluationWaitTerminal::Cancelled => {
-                evaluation_failure("evaluation fixpoint producer was cancelled")
-            }
-            EvaluationWaitTerminal::Abandoned => {
-                evaluation_failure("evaluation fixpoint producer was abandoned")
-            }
-        };
-        let terminal = coordinator.settle_terminal_work(work, terminal, promise_failure);
-        let mut retired = {
-            let mut tasks = self
-                .state
-                .lock()
-                .expect("evaluation task registry was poisoned");
-            let record = tasks
-                .deferred
-                .get(&producer)
-                .expect("terminal deferred work must retain its machine slot");
-            assert_eq!(record.work, work);
-            debug_assert_eq!(record.wait.terminal_poll(), Some(terminal.to_poll()));
-            retire_deferred_task(&mut tasks, producer)
-        };
-        let machine = retired
-            .machine
-            .take()
-            .expect("terminal deferred work must retain its restored machine");
-        drop(retired);
-        (
-            release.made_progress,
-            false,
-            Some(ReleasedTaskMachine::Drop {
-                machine,
-                retirement: WorkRetirement::Deferred(coordinator, work),
-            }),
-            None,
-        )
+    let mut release = coordinator.release_deferred(claimed, work_poll);
+    if !release.cycle.is_empty() {
+        poison_lazy_cycle(coordinator, std::mem::take(&mut release.cycle));
+        return (release.made_progress, false, None, None);
+    }
+    if !release.terminal {
+        debug_assert!(release.machine.is_none());
+        return (release.made_progress, release.remains_blocked, None, None);
     }
 
-    fn poison_lazy_cycle(&self, members: Vec<DeferredLazyCycleMember>) {
-        let coordinator = self.coordinator();
-        let cycle = Arc::new(LazyCycle {
-            members: members
-                .iter()
-                .map(|member| LazyCycleMember {
-                    id: member.lazy.id(),
-                    label: member.lazy.label().clone(),
-                })
-                .collect(),
-        });
-        let failure = Arc::new(EvaluationFailure::dependency_cycle(cycle));
-        // Make the shared failure authoritative in every lazy before any
-        // producer wait wakes. The already-batched `Terminalizing` transition
-        // prevents another worker from reclaiming a cycle member meanwhile.
-        let mut terminals = members
+    let terminal = if release.abandoned {
+        EvaluationWaitTerminal::Abandoned
+    } else {
+        terminal.expect("terminal deferred poll must carry a terminal result")
+    };
+    let promise_failure = match &terminal {
+        EvaluationWaitTerminal::Complete(_) => {
+            evaluation_failure("evaluation task completed without fulfilling its fixpoint")
+        }
+        EvaluationWaitTerminal::Failed(error) => error.clone(),
+        EvaluationWaitTerminal::Cancelled => {
+            evaluation_failure("evaluation fixpoint producer was cancelled")
+        }
+        EvaluationWaitTerminal::Abandoned => {
+            evaluation_failure("evaluation fixpoint producer was abandoned")
+        }
+    };
+    coordinator.settle_terminal_work(work, terminal, promise_failure);
+    let machine = release
+        .machine
+        .take()
+        .expect("terminal deferred release must detach its machine");
+    (
+        release.made_progress,
+        false,
+        Some(ReleasedTaskMachine::Drop {
+            machine,
+            retirement: WorkRetirement::Deferred(coordinator.clone(), work),
+        }),
+        None,
+    )
+}
+
+fn poison_lazy_cycle(
+    coordinator: &Arc<EvaluationWorkCoordinator>,
+    members: Vec<DeferredLazyCycleMember>,
+) {
+    let cycle = Arc::new(LazyCycle {
+        members: members
             .iter()
-            .map(|member| {
-                let terminal = match member.lazy.cache(Err(failure.clone())) {
-                    Err(error) => EvaluationWaitTerminal::Failed(error),
-                    Ok(value) => {
-                        debug_assert!(
-                            false,
-                            "a successful concurrent lazy result contradicts a strict dependency cycle"
-                        );
-                        EvaluationWaitTerminal::Complete(RuntimeValueRoot::from_runtime(
-                            member.wait.runtime_id(),
-                            value.into_value(),
-                        ))
-                    }
-                };
-                (member, terminal)
+            .map(|member| LazyCycleMember {
+                id: member.lazy.id(),
+                label: member.lazy.label().clone(),
             })
-            .collect::<Vec<_>>();
-        for (member, terminal) in &mut terminals {
-            *terminal =
-                coordinator.settle_terminal_work(member.work, terminal.clone(), failure.clone());
-        }
-        let mut retired = Vec::with_capacity(terminals.len());
-        for (member, terminal) in &terminals {
-            debug_assert!(Arc::ptr_eq(&member.machines.coordinator(), &coordinator));
-            let record = {
-                let mut tasks = member
-                    .machines
-                    .state
-                    .lock()
-                    .expect("evaluation task registry was poisoned");
-                debug_assert_eq!(member.wait.terminal_poll(), Some(terminal.to_poll()));
-                let deferred = DeferredValueId::Lazy(member.lazy.id());
-                let record = tasks
-                    .deferred
-                    .get(&deferred)
-                    .expect("terminalizing lazy cycle member must retain its machine slot");
-                assert_eq!(record.work, member.work);
-                retire_deferred_task(&mut tasks, deferred)
+            .collect(),
+    });
+    let failure = Arc::new(EvaluationFailure::dependency_cycle(cycle));
+    // Make the shared failure authoritative in every lazy before any
+    // producer wait wakes. The already-batched `Terminalizing` transition
+    // prevents another worker from reclaiming a cycle member meanwhile.
+    let mut terminals = members
+        .iter()
+        .map(|member| {
+            let terminal = match member.lazy.cache(Err(failure.clone())) {
+                Err(error) => EvaluationWaitTerminal::Failed(error),
+                Ok(value) => {
+                    debug_assert!(
+                        false,
+                        "a successful concurrent lazy result contradicts a strict dependency cycle"
+                    );
+                    EvaluationWaitTerminal::Complete(RuntimeValueRoot::from_runtime(
+                        member.wait.runtime_id(),
+                        value.into_value(),
+                    ))
+                }
             };
-            retired.push(record);
-        }
-        for ((member, _), retired) in terminals.into_iter().zip(&retired) {
-            debug_assert_eq!(retired.work, member.work);
-            debug_assert!(retired.machine.is_some());
-            coordinator.retire_deferred(member.work);
-        }
-        drop(retired);
+            (member, terminal)
+        })
+        .collect::<Vec<_>>();
+    for (member, terminal) in &mut terminals {
+        *terminal =
+            coordinator.settle_terminal_work(member.work, terminal.clone(), failure.clone());
     }
+    for (member, terminal) in &terminals {
+        debug_assert_eq!(member.wait.terminal_poll(), Some(terminal.to_poll()));
+        coordinator.retire_deferred(member.work);
+    }
+    drop(terminals);
+    let machines = members
+        .into_iter()
+        .map(|member| member.machine)
+        .collect::<Vec<_>>();
+    drop(machines);
+}
 
-    fn claim_reflection_machine(&self, claim: ClaimedReflectionWork) -> ClaimedTaskKind {
+impl SessionMachineStore {
+    fn claim_reflection_machine(&self, claim: ClaimedReflectionWork) -> ClaimedReflectionTask {
         let mut tasks = self
             .state
             .lock()
@@ -3053,38 +2930,17 @@ impl SessionMachineStore {
             .machine
             .take()
             .expect("coordinator-claimable reflection work must retain its machine");
-        ClaimedTaskKind::Reflection(ClaimedReflectionTask {
+        ClaimedReflectionTask {
             claim,
             wait,
             machine,
-        })
+        }
     }
+}
 
-    fn claim_deferred_machine(&self, claim: ClaimedDeferredWork) -> ClaimedTaskKind {
-        let mut tasks = self
-            .state
-            .lock()
-            .expect("evaluation task registry was poisoned");
-        let deferred = tasks
-            .deferred_by_work
-            .get(&claim.id())
-            .copied()
-            .expect("claimed deferred work must retain its work lookup");
-        assert_eq!(deferred, claim.producer());
-        let record = tasks
-            .deferred
-            .get_mut(&deferred)
-            .expect("claimed deferred work must retain its machine slot");
-        assert_eq!(record.id, claim.task());
-        let machine = record
-            .machine
-            .take()
-            .expect("coordinator-claimable deferred work must retain its machine");
-        ClaimedTaskKind::Deferred(ClaimedDeferredTask { claim, machine })
-    }
-
+impl EvaluationWorkCoordinator {
     fn poll_claimed_task(self: &Arc<Self>, work: ClaimedTaskWork) {
-        let mut claimed = Self::claim_task_machine(self.clone(), work);
+        let mut claimed = ClaimedTask::new(self.clone(), work);
         let poll = claimed.poll(TASK_POLL_QUANTUM);
         let (_, _, released, status) = claimed.release(poll);
         publish_task_status(status);
@@ -3092,28 +2948,17 @@ impl SessionMachineStore {
             machine.finish();
         }
     }
-
-    fn claim_task_machine(machines: Arc<Self>, work: ClaimedTaskWork) -> ClaimedTask {
-        let kind = match work {
-            ClaimedTaskWork::Reflection(claim) => machines.claim_reflection_machine(claim),
-            ClaimedTaskWork::Deferred(claim) => machines.claim_deferred_machine(claim),
-        };
-        ClaimedTask { machines, kind }
-    }
 }
 
 impl EvaluationSession {
     fn claim_task(&self, id: EvaluationTaskId) -> Option<ClaimedTask> {
-        let (machines, work) = self.coordinator.claim_task(id)?;
-        Some(SessionMachineStore::claim_task_machine(machines, work))
+        let work = self.coordinator.claim_task(id)?;
+        Some(ClaimedTask::new(self.coordinator.clone(), work))
     }
 
     fn claim_ready_task(&self) -> Option<ClaimedTask> {
         let work = self.coordinator.claim_ready_task_for_session(self.id)?;
-        Some(SessionMachineStore::claim_task_machine(
-            self.machines.clone(),
-            work,
-        ))
+        Some(ClaimedTask::new(self.coordinator.clone(), work))
     }
 
     fn producer_for_wait(&self, wait: &EvaluationWaitToken) -> Option<EvaluationTaskId> {
@@ -3395,6 +3240,67 @@ mod tests {
         );
     }
 
+    #[test]
+    fn running_deferred_machine_is_coordinator_owned_after_owner_drop() {
+        let (coordinator, _executor) =
+            test_execution_resources(1).expect("test execution resources should build");
+        let owner = EvaluationSession::shared(&coordinator);
+        let owner_weak = Arc::downgrade(&owner);
+        let machines_weak = Arc::downgrade(&owner.machines);
+        let context = EvalContext::new(&owner);
+        let lazy = inert_lazy_for(
+            context.values(),
+            "running coordinator-owned deferred machine",
+        );
+        let (started_sender, started_receiver) = mpsc::channel();
+        let (release_sender, release_receiver) = mpsc::channel();
+        let wait = context
+            .lazy_task(&lazy, move |_| {
+                Box::new(CompleteAfterRelease {
+                    started: Some(started_sender),
+                    release: release_receiver,
+                })
+            })
+            .expect("running deferred owner-drop task should schedule");
+        assert!(
+            coordinator.promote_deferred_wait(&wait),
+            "the test's explicit demand should make the deferred producer runnable"
+        );
+        started_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("worker should claim the deferred machine");
+
+        drop(owner);
+        assert!(owner_weak.upgrade().is_none());
+        assert!(context.session.is_closed());
+        assert!(
+            machines_weak.upgrade().is_none(),
+            "deferred work must not retain the transitional reflection-machine store"
+        );
+        assert_eq!(coordinator.registered_session_count(), 0);
+        assert!(matches!(
+            context.poll_wait(&wait),
+            EvaluationWaitPoll::Pending(_)
+        ));
+
+        release_sender
+            .send(())
+            .expect("running deferred machine should finish its current quantum");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while matches!(context.poll_wait(&wait), EvaluationWaitPoll::Pending(_))
+            && Instant::now() < deadline
+        {
+            std::thread::yield_now();
+        }
+        assert_eq!(context.poll_wait(&wait), EvaluationWaitPoll::Abandoned);
+        while coordinator.deferred_counts(context.session.id) != (0, 0, 0)
+            && Instant::now() < deadline
+        {
+            std::thread::yield_now();
+        }
+        assert_eq!(coordinator.deferred_counts(context.session.id), (0, 0, 0));
+    }
+
     struct Complete;
 
     impl EvaluationTaskMachine for Complete {
@@ -3535,29 +3441,7 @@ mod tests {
             .expect("test promise task should register")
     }
 
-    fn assert_deferred_task_retired(context: &EvalContext, lazy: &LazyValue) {
-        let machines = context
-            .session
-            .machine_store()
-            .expect("test context must retain its machine store");
-        let tasks = machines
-            .state
-            .lock()
-            .expect("evaluation task registry was poisoned");
-        assert!(
-            !tasks
-                .deferred
-                .contains_key(&DeferredValueId::Lazy(lazy.id())),
-            "terminal deferred records must be removed"
-        );
-        assert!(
-            tasks
-                .deferred_by_work
-                .values()
-                .all(|id| *id != DeferredValueId::Lazy(lazy.id())),
-            "terminal deferred work indexes must be removed"
-        );
-        drop(tasks);
+    fn assert_deferred_task_retired(context: &EvalContext, _lazy: &LazyValue) {
         let counts = context
             .coordinator()
             .expect("test coordinator should be live")
@@ -5679,7 +5563,7 @@ mod tests {
         loop {
             match coordinator.select() {
                 coordinator::CoordinatorSelection::Spark(claimed) => return claimed,
-                coordinator::CoordinatorSelection::Task(_, work) => {
+                coordinator::CoordinatorSelection::Task(work) => {
                     coordinator.requeue_unpolled_task(work);
                 }
                 coordinator::CoordinatorSelection::None => {
@@ -5811,7 +5695,7 @@ mod tests {
             .schedule_task(|_| Ok(Box::new(Complete)))
             .expect("wait B producer should schedule");
 
-        let coordinator::CoordinatorSelection::Task(_, claimed) = coordinator.select() else {
+        let coordinator::CoordinatorSelection::Task(claimed) = coordinator.select() else {
             panic!("the unrelated reflection task should be selected first")
         };
         coordinator.requeue_unpolled_task(claimed);

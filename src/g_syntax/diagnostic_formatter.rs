@@ -122,7 +122,7 @@ mod tests {
 
     #[test]
     fn formatter_is_cached_after_exposing_its_function() {
-        let values = crate::core::test_value_factory();
+        let values = crate::compiler::test_value_factory();
         let first = value(&values);
         let second = value(&values);
         assert!(matches!(first, Value::Function(_)));

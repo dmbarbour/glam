@@ -711,7 +711,7 @@ mod tests {
 
     #[test]
     fn closed_compiler_values_are_cached_after_exposing_their_functions() {
-        let values = crate::core::test_value_factory();
+        let values = crate::compiler::test_value_factory();
         let first_effect = effect_value(&values, "compiler_cache_test");
         let second_effect = effect_value(&values, "compiler_cache_test");
         assert_eq!(first_effect, second_effect);
@@ -755,7 +755,7 @@ mod tests {
 
     #[test]
     fn macro_environment_extends_a_dictionary_with_ordinary_introduction_rules() {
-        let values = crate::core::test_value_factory();
+        let values = crate::compiler::test_value_factory();
         let base = Value::Dict(
             Dict::new_sync().insert(name_as_key("existing"), Value::Number(Number::integer(1))),
         );
@@ -781,7 +781,7 @@ mod tests {
 
     #[test]
     fn macro_environment_reinstantiates_an_adapting_object() {
-        let values = crate::core::test_value_factory();
+        let values = crate::compiler::test_value_factory();
         let mut locals = ResolverContext::default();
         let base = locals.push_internal_binding("<base>");
         let self_value = locals.push_internal_binding("<self>");

@@ -3091,6 +3091,57 @@ impl EvaluationRuntime {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn compiler_test_runtime() -> EvaluationRuntime {
+    static RUNTIME: std::sync::LazyLock<EvaluationRuntime> = std::sync::LazyLock::new(|| {
+        let core = crate::compiler::test_value_factory();
+        let id = core.runtime_id();
+        let ids = core.ids().clone();
+        let work = core.work_coordinator().unwrap_or_else(|| {
+            let candidate = EvaluationWorkCoordinator::new(
+                id,
+                ids.clone(),
+                RuntimeMutationAdmission::new(),
+                RuntimeObservationState::new(),
+            );
+            core.work_coordinator_or_attach(candidate)
+        });
+        let mutation_admission = work.shared_mutation_admission();
+        let observations = work.shared_observations();
+        let values = RuntimeValueFactory {
+            runtime: id,
+            core: core.clone(),
+        };
+        let executor = EvaluationExecutor::new(0, &work)
+            .expect("compiler test executor should be constructible");
+        let shared_resources = Arc::new(RuntimeSharedResources {
+            id,
+            values: values.clone(),
+            transactions: RuntimeTransactionState {
+                state: Mutex::new(RuntimeTransactionData {
+                    reflection: ReflectionStore::new(core, Arc::new(ExactConflictAnalysis)),
+                    events: RuntimeEventState::new(Arc::new(ExactConflictAnalysis)),
+                    logger_lifecycle: RuntimeLoggerLifecycleState::default(),
+                }),
+            },
+            observations,
+            ids,
+            mutation_admission,
+            work: Arc::downgrade(&work),
+        });
+        EvaluationRuntime {
+            state: Arc::new(RuntimeState {
+                executor,
+                work,
+                shared_resources,
+                diagnostic_ingresses: Mutex::new(Vec::new()),
+            }),
+            default_reflection_profile: Arc::new(ReflectionTaskProfile::unsealed()),
+        }
+    });
+    RUNTIME.clone()
+}
+
 #[derive(Clone)]
 struct ReasoningSession {
     host: Arc<AssemblerReflectionHost>,

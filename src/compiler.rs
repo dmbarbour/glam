@@ -61,8 +61,19 @@ pub(crate) struct CompileContext {
 #[cfg(test)]
 impl Default for CompileContext {
     fn default() -> Self {
-        Self::new(crate::core::test_value_factory())
+        Self::new(test_value_factory())
     }
+}
+
+#[cfg(test)]
+pub(crate) fn test_value_factory() -> CoreValueFactory {
+    static FACTORY: std::sync::LazyLock<CoreValueFactory> = std::sync::LazyLock::new(|| {
+        CoreValueFactory::new(
+            crate::runtime::allocate_evaluation_runtime_id(),
+            crate::runtime::RuntimeIds::compiler_test_values(),
+        )
+    });
+    FACTORY.clone()
 }
 
 impl CompileContext {
@@ -96,7 +107,7 @@ impl CompileContext {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        Self::from_module_path_with_values(crate::core::test_value_factory(), parts)
+        Self::from_module_path_with_values(test_value_factory(), parts)
     }
 
     pub(crate) fn values(&self) -> &CoreValueFactory {

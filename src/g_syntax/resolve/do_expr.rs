@@ -567,7 +567,7 @@ mod tests {
             count_embedded_value(
                 &resolved,
                 &crate::g_syntax::compiler_values::effect_value(
-                    &crate::core::test_value_factory(),
+                    &crate::compiler::test_value_factory(),
                     "r",
                 )
             ),
@@ -690,7 +690,7 @@ mod tests {
             count_embedded_value(
                 &resolved,
                 &crate::g_syntax::compiler_values::effect_value(
-                    &crate::core::test_value_factory(),
+                    &crate::compiler::test_value_factory(),
                     "fix",
                 )
             ),
@@ -744,7 +744,7 @@ mod tests {
             count_embedded_value(
                 &resolved,
                 &crate::g_syntax::compiler_values::effect_value(
-                    &crate::core::test_value_factory(),
+                    &crate::compiler::test_value_factory(),
                     "fix",
                 )
             ),

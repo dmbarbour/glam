@@ -2,10 +2,22 @@ use crate::compiler::CompileContext;
 use crate::core::{Dict, Key, Value};
 use crate::number::Number;
 
-fn test_eval_context() -> crate::evaluation::EvalContext {
-    static ASSEMBLER: std::sync::LazyLock<crate::api::Assembler> =
-        std::sync::LazyLock::new(crate::api::Assembler::default);
-    ASSEMBLER.eval_context()
+fn test_assembler() -> &'static crate::api::Assembler {
+    static ASSEMBLER: std::sync::LazyLock<crate::api::Assembler> = std::sync::LazyLock::new(|| {
+        crate::api::Assembler::builder()
+            .evaluation_runtime(crate::api::compiler_test_runtime())
+            .build()
+            .expect("compiler test assembler should be constructible")
+    });
+    &ASSEMBLER
+}
+
+fn test_eval_context() -> crate::evaluation::OwnedEvalContext {
+    let session = test_assembler()
+        .evaluation_runtime()
+        .new_evaluation_session()
+        .expect("compiler test evaluation session should be constructible");
+    crate::evaluation::OwnedEvalContext::new(session)
 }
 
 fn core_global_access(context: &CompileContext, path: Vec<Key>) -> Value {
@@ -202,17 +214,35 @@ fn reflection_test_module(
     Value,
     Arc<Mutex<Vec<crate::api::DiagnosticEvent>>>,
 ) {
+    let diagnostics = Arc::new(Mutex::new(Vec::new()));
+    let received = diagnostics.clone();
+    let runtime = crate::api::EvaluationRuntime::new(0)
+        .expect("reflection test runtime should be constructible");
+    let assembler = crate::api::Assembler::builder()
+        .evaluation_runtime(runtime)
+        .diagnostic_callback(move |event| {
+            received
+                .lock()
+                .expect("diagnostic collector should not be poisoned")
+                .push(event);
+        })
+        .build()
+        .expect("reflection test assembler should be constructible");
+    let context = CompileContext::from_module_path_with_values(
+        assembler.core_values(),
+        module_path.iter().copied(),
+    );
     let prior = guards.iter().fold(Dict::new_sync(), |dict, (name, path)| {
-        let value = CompileContext::from_module_path(module_path.iter().copied())
-            .abstract_global_path(path);
-        dict.insert(Key::atom_from_text(name), value)
+        dict.insert(
+            Key::atom_from_text(name),
+            context.abstract_global_path(path),
+        )
     });
     let prior = prior.insert(
         Key::atom_from_text("object_refl_marker"),
         keys::object_reflection_guard_value(),
     );
-    let context = CompileContext::from_module_path(module_path.iter().copied())
-        .with_prior_defs(Value::Dict(prior));
+    let context = context.with_prior_defs(Value::Dict(prior));
     let lowered = lower_parsed_source(parse(source), &context);
     assert_eq!(lowered.diagnostics, []);
     let Value::Promised(final_defs) = context.final_defs() else {
@@ -222,14 +252,6 @@ fn reflection_test_module(
         .set(lowered.definitions.clone())
         .expect("final module binding should be unset");
 
-    let diagnostics = Arc::new(Mutex::new(Vec::new()));
-    let received = diagnostics.clone();
-    let assembler = crate::api::Assembler::default().with_diagnostic_callback(move |event| {
-        received
-            .lock()
-            .expect("diagnostic collector should not be poisoned")
-            .push(event);
-    });
     let eval_context = assembler.eval_context();
     let definitions = crate::eval::eval_value(&eval_context, &lowered.definitions)
         .expect("reflection-enabled module should expose its dictionary");
