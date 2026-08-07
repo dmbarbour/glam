@@ -4621,7 +4621,7 @@ mod tests {
     #[test]
     fn evaluation_session_pumps_a_type_erased_effect_task() {
         let (assembler, effect) = compile_effect("(.write_stderr \"scheduled\") =>> .r ()");
-        let context = EvalContext::standalone();
+        let context = EvalContext::isolated(assembler.core_values());
         let host = Arc::new(TestHost::with_values(assembler.core_values()));
         let launcher = task_launcher(TestEffects, host.clone());
         let task = context
@@ -4658,7 +4658,7 @@ mod tests {
     #[test]
     fn reflection_task_launcher_returns_arbitrary_effect_result_when_requested() {
         let (assembler, effect) = compile_effect(".r 42");
-        let context = EvalContext::standalone();
+        let context = EvalContext::isolated(assembler.core_values());
         let launcher = task_launcher(
             TestEffects,
             Arc::new(TestHost::with_values(assembler.core_values())),
@@ -4688,7 +4688,7 @@ mod tests {
     #[test]
     fn reflection_task_launcher_requires_unit_when_requested() {
         let (assembler, effect) = compile_effect(".r 42");
-        let context = EvalContext::standalone();
+        let context = EvalContext::isolated(assembler.core_values());
         let launcher = task_launcher(
             TestEffects,
             Arc::new(TestHost::with_values(assembler.core_values())),
@@ -5139,7 +5139,7 @@ mod tests {
     #[test]
     fn reflection_eval_suspends_instead_of_failing_around_a_pending_value() {
         let (assembler, function) = compile_effect("\\value -> .eval value");
-        let session = EvalContext::standalone();
+        let session = EvalContext::isolated(assembler.core_values());
         let (promised, _owner_task, _owner) = session
             .task_owned_promise(Arc::from("eval test dependency"))
             .unwrap();

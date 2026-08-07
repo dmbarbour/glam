@@ -48,7 +48,7 @@ not define future language semantics or collect subsystem invariants.
 | `core_net.rs` | Core data/operator specialization of generic interaction nets |
 | `interaction_net/model.rs`, `builder.rs` | Generic identities, agents, specialization protocol, and checked construction |
 | `interaction_net/runtime/` | Mutable graph, active-pair rewrites, cursors, and runtime tests |
-| `evaluation.rs`, `evaluation/coordinator.rs`, `evaluation/executor.rs` | Demand-owner leases, transitional reflection-machine storage, coordinator-owned deferred/spark work, coordination, and worker lifecycle |
+| `evaluation.rs`, `evaluation/coordinator.rs`, `evaluation/executor.rs` | Demand-owner leases, reporting-only task state, coordinator-owned reflection/deferred/spark work, coordination, and worker lifecycle |
 | `eval/value.rs`, `application.rs`, `operator.rs`, `net.rs` | Value forcing, application, operator staging, and net driving |
 | `eval/builtins/` | Builtin implementations split by semantic family |
 | `eval/builtins/net/construction.rs` | Lazy `interaction_net` effect search, branch-local construction journals, opaque port capabilities, and checked replay |
@@ -257,7 +257,11 @@ state. It strongly retains the coordinator so its final drop can close the
 demand domain. `EvalContext` retains the separate `EvaluationDemandState`,
 whose explicit closed flag gates new admissions and whose coordinator route is
 weak. Isolated direct clients use a small owner/context wrapper; scheduled
-machine contexts never retain their own owner lease.
+machine contexts never retain their own owner lease. Both reflection and
+deferred machines reside in coordinator work records while claimable; a
+running claim detaches the machine exclusively, and release either restores it
+before requeueing/blocking or carries it out for terminal destruction. The
+session-side `SessionTaskReportingStore` contains no executable machine.
 
 Each coordinator-owned blocked spark publishes a checked subscription epoch
 beside its retained dependency. Wait tokens and promises both retain that

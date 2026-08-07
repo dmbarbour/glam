@@ -76,14 +76,15 @@ control-flow overview.
   published before that cell releases its `LazySource`; active workers retain
   only their source snapshots and may finish harmlessly against the canonical
   cache. Blocking and retryable promise conditions retain the source.
-  A deferred machine resides in its coordinator work record while claimable.
-  Claiming takes it under the coordinator lock; release restores it before a
-  nonterminal record becomes claimable or returns it for terminal destruction.
-  Abandonment and pure-cycle terminalization likewise take machines during the
-  authoritative coordinator transition. Machine cancellation/destruction and
-  captured-value release happen only after coordinator/component locks and
-  mutation admission are released. The transitional session store now retains
-  reflection machines only. A raced source snapshot may register one redundant
+  Reflection and deferred machines reside in their coordinator work records
+  while claimable. Claiming takes a machine under the coordinator lock;
+  release restores it before a nonterminal record becomes claimable or returns
+  it for terminal destruction. Abandonment and pure-cycle terminalization
+  likewise take machines during the authoritative coordinator transition.
+  Machine cancellation/destruction and captured-value release happen only
+  after coordinator/component locks and mutation admission are released. The
+  session reporting store retains only acknowledgement and published-status
+  state, never executable machines. A raced source snapshot may register one redundant
   producer; it must observe the canonical cache and retire harmlessly. Every
   scheduler wait token shares a lock-free terminal cell plus a weak exact-work
   subscription set. Terminal state is published and producer indexes retire
