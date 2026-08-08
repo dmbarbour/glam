@@ -261,7 +261,11 @@ machine contexts never retain their own owner lease. Both reflection and
 deferred machines reside in coordinator work records while claimable; a
 running claim detaches the machine exclusively, and release either restores it
 before requeueing/blocking or carries it out for terminal destruction. The
-session-side `SessionTaskReportingStore` contains no executable machine.
+session-side `SessionTaskReportingStore` contains no executable machine or
+failure policy. The coordinator records acknowledgement on active reflection
+work and retains unacknowledged terminal failures in a persistent hierarchy
+keyed first by producer-owner session, so reports select one bucket without
+making failure lifetime depend on the owner lease.
 Final owner drop closes all coordinator records for the demand ID in one
 guarded transition. Non-running work terminalizes immediately; running work
 keeps its first close reason until release. Machine contexts and stable spark

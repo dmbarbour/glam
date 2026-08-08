@@ -16,7 +16,7 @@ use crate::runtime::{
 use super::{
     EvaluationDemandState, EvaluationFailure, EvaluationMachinePoll, EvaluationSession,
     EvaluationSessionId, EvaluationTaskId, EvaluationTaskMachine, EvaluationWaitTerminal,
-    EvaluationWaitToken, SessionTaskReportingStore,
+    EvaluationWaitToken, RuntimeFailureLedger, SessionTaskReportingStore, TaskFailureLedger,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -535,8 +535,14 @@ struct SparkWork {
     dependency: Option<WorkDependency>,
 }
 
+struct TaskFailureReporting {
+    owner_session: EvaluationSessionId,
+    acknowledged: bool,
+}
+
 struct ReflectionWork {
     task: EvaluationTaskId,
+    failure_reporting: TaskFailureReporting,
     wait: EvaluationWaitToken,
     machine: Option<Box<dyn EvaluationTaskMachine>>,
     block: Option<EvaluationTaskBlock>,
@@ -786,6 +792,7 @@ impl SparkRetirement {
 #[derive(Default)]
 struct WorkCoordinatorState {
     reporting_stores: HashMap<EvaluationSessionId, Arc<SessionTaskReportingStore>>,
+    failures: RuntimeFailureLedger,
     work: HashMap<EvaluationWorkId, WorkRecord>,
     work_by_session: HashMap<EvaluationSessionId, HashSet<EvaluationWorkId>>,
     ready_tasks: VecDeque<EvaluationWorkId>,
@@ -909,6 +916,84 @@ impl EvaluationWorkCoordinator {
 
     pub(crate) fn current_observation_epoch(&self) -> RuntimeObservationEpoch {
         self.observations.current()
+    }
+
+    /// Returns one persistent owner bucket from the runtime failure ledger.
+    pub(super) fn failure_snapshot(&self, session: EvaluationSessionId) -> TaskFailureLedger {
+        self.state
+            .lock()
+            .expect("evaluation work coordinator was poisoned")
+            .failures
+            .get(&session)
+            .cloned()
+            .unwrap_or_else(TaskFailureLedger::new_sync)
+    }
+
+    #[cfg(test)]
+    pub(super) fn failure_ledger_snapshot(&self) -> RuntimeFailureLedger {
+        self.state
+            .lock()
+            .expect("evaluation work coordinator was poisoned")
+            .failures
+            .clone()
+    }
+
+    #[cfg(test)]
+    pub(super) fn task_failure_is_acknowledged(&self, task: EvaluationTaskId) -> bool {
+        let state = self
+            .state
+            .lock()
+            .expect("evaluation work coordinator was poisoned");
+        let Some(work) = state.reflection_by_task.get(&task) else {
+            return false;
+        };
+        state
+            .work
+            .get(work)
+            .is_some_and(|record| reflection_work(record).failure_reporting.acknowledged)
+    }
+
+    /// Acknowledges a task failure in its immutable producer-owner bucket.
+    ///
+    /// If the task is still active, this also records the timing-independent
+    /// policy which prevents a later failure from entering the ledger. If it
+    /// has already failed and retired, removing the persistent entry is
+    /// sufficient. Both paths share the coordinator transition with terminal
+    /// failure publication, so acknowledgement cannot race between the policy
+    /// check and ledger insertion.
+    pub(super) fn acknowledge_task_failure(
+        &self,
+        owner: EvaluationSessionId,
+        task: EvaluationTaskId,
+    ) {
+        let mutation = self.admission.mutation_guard();
+        let changed = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            let mut changed = false;
+            if let Some(work) = state.reflection_by_task.get(&task).copied()
+                && let Some(record) = state.work.get_mut(&work)
+            {
+                let reflection = reflection_work_mut(record);
+                if reflection.failure_reporting.owner_session == owner
+                    && !reflection.failure_reporting.acknowledged
+                {
+                    reflection.failure_reporting.acknowledged = true;
+                    changed = true;
+                }
+            }
+            changed |= remove_task_failure(&mut state.failures, owner, task);
+            if changed {
+                state.work_generation = state.work_generation.wrapping_add(1);
+            }
+            changed
+        };
+        drop(mutation);
+        if changed {
+            self.work_available.notify_all();
+        }
     }
 
     #[cfg(test)]
@@ -1476,6 +1561,10 @@ impl EvaluationWorkCoordinator {
                 state: initial,
                 kind: WorkKind::Reflection(ReflectionWork {
                     task,
+                    failure_reporting: TaskFailureReporting {
+                        owner_session: session.id,
+                        acknowledged: false,
+                    },
                     wait: wait.clone(),
                     machine: None,
                     block: None,
@@ -2401,15 +2490,35 @@ impl EvaluationWorkCoordinator {
                 .state
                 .lock()
                 .expect("evaluation work coordinator was poisoned");
-            let record = state
-                .work
-                .get_mut(&work)
-                .expect("terminalizing work must remain registered");
-            assert!(matches!(record.state, WorkState::Terminalizing));
-            record
-                .obligations
-                .take_producer()
-                .expect("work producer obligations must be consumed exactly once")
+            let (producer, failure) = {
+                let record = state
+                    .work
+                    .get_mut(&work)
+                    .expect("terminalizing work must remain registered");
+                assert!(matches!(record.state, WorkState::Terminalizing));
+                let failure = match (&record.kind, &terminal) {
+                    (WorkKind::Reflection(reflection), EvaluationWaitTerminal::Failed(error))
+                        if !reflection.failure_reporting.acknowledged =>
+                    {
+                        Some((
+                            reflection.failure_reporting.owner_session,
+                            reflection.task,
+                            error.clone(),
+                        ))
+                    }
+                    _ => None,
+                };
+                let producer = record
+                    .obligations
+                    .take_producer()
+                    .expect("work producer obligations must be consumed exactly once");
+                (producer, failure)
+            };
+            if let Some((owner, task, failure)) = failure {
+                insert_task_failure(&mut state.failures, owner, task, failure);
+                state.work_generation = state.work_generation.wrapping_add(1);
+            }
+            producer
         };
         let wait = match &producer {
             ProducerSettlementObligation::ReflectionTask { wait } => wait,
@@ -3204,6 +3313,43 @@ fn reflection_state(record: &WorkRecord) -> ReflectionWorkState {
         ),
         WorkState::Terminalizing => ReflectionWorkState::Terminalizing,
     }
+}
+
+fn insert_task_failure(
+    ledger: &mut RuntimeFailureLedger,
+    owner: EvaluationSessionId,
+    task: EvaluationTaskId,
+    failure: Arc<EvaluationFailure>,
+) {
+    let mut failures = ledger
+        .get(&owner)
+        .cloned()
+        .unwrap_or_else(TaskFailureLedger::new_sync);
+    assert!(
+        !failures.contains_key(&task),
+        "a task failure may enter its owner ledger only once"
+    );
+    failures.insert_mut(task, failure);
+    ledger.insert_mut(owner, failures);
+}
+
+fn remove_task_failure(
+    ledger: &mut RuntimeFailureLedger,
+    owner: EvaluationSessionId,
+    task: EvaluationTaskId,
+) -> bool {
+    let Some(mut failures) = ledger.get(&owner).cloned() else {
+        return false;
+    };
+    if !failures.remove_mut(&task) {
+        return false;
+    }
+    if failures.is_empty() {
+        ledger.remove_mut(&owner);
+    } else {
+        ledger.insert_mut(owner, failures);
+    }
+    true
 }
 
 fn detach_reflection(

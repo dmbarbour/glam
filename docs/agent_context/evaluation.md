@@ -83,9 +83,10 @@ control-flow overview.
   likewise take machines during the authoritative coordinator transition.
   Machine cancellation/destruction and captured-value release happen only
   after coordinator/component locks and mutation admission are released. The
-  session reporting store retains only acknowledgement and published-status
-  state, never executable machines. A raced source snapshot may register one redundant
-  producer; it must observe the canonical cache and retire harmlessly. Every
+  session reporting store retains only published-status state, never
+  executable machines or failure policy. A raced source snapshot may register
+  one redundant producer; it must observe the canonical cache and retire
+  harmlessly. Every
   scheduler wait token shares a lock-free terminal cell plus a weak exact-work
   subscription set. Terminal state is published and producer indexes retire
   through the owning coordinator/store transition; exact subscribers detach
@@ -95,11 +96,14 @@ control-flow overview.
   reflection records and their task-ID indexes are retired immediately. A
   wait-blocked spark subscribes its stable work ID and epoch directly to this
   source; unrelated task progress must not wake it.
-  Unacknowledged reflection failures remain only in the persistent reporting
-  ledger; `.task.ack_error` removes that entry without changing the handle's
-  terminal observation. Task-owned promise waits follow the same ownership
-  boundary: terminal assignment is copied into the shared wait cell before the
-  promise record and owner index are retired.
+  Unacknowledged reflection failures remain only in the coordinator's
+  persistent runtime ledger, partitioned by producer-owner session;
+  `.task.ack_error` updates the active coordinator policy or removes that
+  owner's terminal entry without changing the handle's observation. Terminal
+  wait publication occurs only after that ledger decision under the same
+  runtime mutation admission. Task-owned promise waits follow the same
+  ownership boundary: terminal assignment is copied into the shared wait cell
+  before the promise record and owner index are retired.
 - Final demand-owner drop is one guarded coordinator transition. It records
   the first close reason on running work and takes queued or blocked work for
   terminal settlement. Settle reflection/deferred producer obligations before

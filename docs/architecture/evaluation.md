@@ -26,12 +26,15 @@ external `EvaluationSession` owner lease. An `Assembler` and its clones share
 one internal `ReasoningSession`, which retains that lease and the assembler's
 reflection host. `EvalContext` retains only `Arc<EvaluationDemandState>`, its
 selected task profile, and current task provenance. The demand state holds the
-value factory, session policy, explicit closed flag, and persistent ledger of
-unacknowledged reflection failures; its routes to both the coordinator and
-task reporting store are weak. An explicit
-`Arc<SessionTaskReportingStore>` sibling of the demand state owns only task
-acknowledgement, published status, and status-sink indexes. Opaque reflection
-and deferred machines reside directly in coordinator work records. Dropping
+value factory, session policy, and explicit closed flag; its routes to both
+the coordinator and task reporting store are weak. An explicit
+`Arc<SessionTaskReportingStore>` sibling of the demand state owns only
+published status and status-sink indexes. Opaque reflection and deferred
+machines, failure-acknowledgement policy, and the persistent failure ledger
+reside directly in coordinator state. The ledger is a persistent map from
+owner session to that owner's task/failure map, so owner closure does not erase
+an unacknowledged failure and a session report cheaply clones only its bucket.
+Dropping
 the final owner marks their shared closed flag, then performs one guarded
 coordinator closure transition across every record indexed by that demand ID.
 Queued and blocked work terminalizes immediately; running work retains its
@@ -200,7 +203,8 @@ progress does not.
 Reflection task handles own their shared terminal wait cells, so completion,
 failure, and cancellation remain observable after the active record and
 task-ID index are retired. An unacknowledged failure also leaves one minimal
-session-ledger entry until `.task.ack_error` removes it. Rust clients receive
+entry in its producer owner's runtime-ledger bucket until `.task.ack_error`
+removes it. Rust clients receive
 the corresponding opaque, session-bound `ReasoningFailure` from
 `Assembler::drain_reasoning` and may remove the same entry with
 `Assembler::acknowledge_reasoning_failure`. Acknowledgement through either
@@ -216,9 +220,10 @@ state:
 | reserved, dormant, queued, running, blocked, or terminalizing reflection/deferred work | runtime work coordinator |
 | queued, worker-owned, or dependency-blocked spark | runtime work coordinator |
 | opaque live reflection/deferred machines | runtime work coordinator or its exclusive claim |
-| task acknowledgement, published status, and status sinks | demand session reporting store |
+| task failure acknowledgement policy | runtime work coordinator task record |
+| unacknowledged task failures, partitioned by owner session | runtime work coordinator ledger |
+| published status and status sinks | demand session reporting store |
 | completed, failed, cancelled, or abandoned outcome | shared `EvaluationWaitToken` cell |
-| unacknowledged reflection failure | persistent session reporting ledger |
 | transactional `.task.status`, `.task.value`, or `.task.error` view | reasoning-store query |
 
 Terminal publication precedes coordinator record removal. `poll_wait` checks

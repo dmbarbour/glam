@@ -3,10 +3,11 @@
 //! The runtime supplies task and wait identity, value provenance, and the
 //! authoritative reflection-task lifecycle. During the work-boundary
 //! transition, the runtime coordinator owns opaque reflection and deferred
-//! machines directly with their lifecycle records. A session reporting store
-//! retains only acknowledgement and status plumbing. Demand state retains its
-//! serial cooperative pump. Reflection specializations remain outside this
-//! module behind a small type-erased task-machine boundary.
+//! machines directly with their lifecycle records and the runtime-owned task
+//! failure ledger. A session reporting store retains only status plumbing.
+//! Demand state retains its serial cooperative pump. Reflection
+//! specializations remain outside this module behind a small type-erased
+//! task-machine boundary.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
@@ -684,7 +685,6 @@ enum EvaluationTaskState {
 struct ReflectionTaskReportingRecord {
     id: EvaluationTaskId,
     work: EvaluationWorkId,
-    error_acknowledged: bool,
     published_status: EvaluationTaskStatus,
     status_sinks: Vec<Arc<dyn EvaluationTaskStatusSink>>,
 }
@@ -828,19 +828,19 @@ struct SessionTaskReportingState {
     reflection_by_id: BTreeMap<EvaluationTaskId, EvaluationWaitToken>,
 }
 
-type SessionFailureLedger = RedBlackTreeMapSync<EvaluationTaskId, Arc<EvaluationFailure>>;
+type TaskFailureLedger = RedBlackTreeMapSync<EvaluationTaskId, Arc<EvaluationFailure>>;
+type RuntimeFailureLedger = RedBlackTreeMapSync<EvaluationSessionId, TaskFailureLedger>;
 
 /// Transitional task reporting state for one demand session.
 ///
-/// This store contains acknowledgement policy, published status, and status
-/// sinks only. Executable machines belong to coordinator work records. The
-/// coordinator retains the store while an indexed reflection task still has a
-/// reporting tail, without recovering the external [`EvaluationSession`]
-/// owner lease.
+/// This store contains published status and status sinks only. Executable
+/// machines and failure acknowledgement policy belong to coordinator work
+/// records. The coordinator retains the store while an indexed reflection
+/// task still has a reporting tail, without recovering the external
+/// [`EvaluationSession`] owner lease.
 pub(super) struct SessionTaskReportingStore {
     id: EvaluationSessionId,
     state: Mutex<SessionTaskReportingState>,
-    failures: Arc<Mutex<SessionFailureLedger>>,
     closed: Arc<AtomicBool>,
 }
 
@@ -867,30 +867,16 @@ struct ReflectionTaskTransition {
 
 fn transition_reflection_task(
     tasks: &mut SessionTaskReportingState,
-    failures: &Mutex<SessionFailureLedger>,
     wait: &EvaluationWaitToken,
     state: EvaluationTaskState,
 ) -> ReflectionTaskTransition {
-    let (unacknowledged_failure, status) = {
+    let status = {
         let record = tasks
             .reflection
             .get_mut(wait)
             .expect("transitioned reflection task must remain registered");
-        let failure = match &state {
-            EvaluationTaskState::Failed(error) if !record.error_acknowledged => {
-                Some((record.id, error.clone()))
-            }
-            _ => None,
-        };
-        let status = task_status_update(record, task_status(&state));
-        (failure, status)
+        task_status_update(record, task_status(&state))
     };
-    if let Some((task, failure)) = unacknowledged_failure {
-        failures
-            .lock()
-            .expect("evaluation failure ledger was poisoned")
-            .insert_mut(task, failure);
-    }
     let retired = Some(retire_reflection_task(tasks, wait));
     ReflectionTaskTransition { retired, status }
 }
@@ -940,7 +926,6 @@ pub(crate) struct EvaluationDemandState {
     id: EvaluationSessionId,
     values: CoreValueFactory,
     reporting: Weak<SessionTaskReportingStore>,
-    failures: Arc<Mutex<SessionFailureLedger>>,
     default_reflection_profile: Arc<ReflectionTaskProfile>,
     require_default_reflection_profile: bool,
     closed: Arc<AtomicBool>,
@@ -971,19 +956,9 @@ impl EvaluationDemandState {
     }
 
     fn acknowledge_reflection_task_error(&self, task: &EvaluationTaskHandle) {
-        if let Some(reporting) = self.reporting_store() {
-            let mut tasks = reporting
-                .state
-                .lock()
-                .expect("evaluation task registry was poisoned");
-            if let Some(record) = tasks.reflection.get_mut(&task.wait) {
-                record.error_acknowledged = true;
-            }
+        if let Some(coordinator) = self.coordinator() {
+            coordinator.acknowledge_task_failure(task.session_id(), task.id());
         }
-        self.failures
-            .lock()
-            .expect("evaluation failure ledger was poisoned")
-            .remove_mut(&task.id);
     }
 
     fn abandon_spark_wait(&self, wait: &EvaluationWaitToken) {
@@ -1015,10 +990,10 @@ impl EvaluationDemandState {
 
     fn closed_run_report(&self) -> EvaluationSessionRun {
         let failures = self
-            .failures
-            .lock()
-            .expect("evaluation failure ledger was poisoned")
-            .clone();
+            .coordinator()
+            .map_or_else(TaskFailureLedger::new_sync, |coordinator| {
+                coordinator.failure_snapshot(self.id)
+            });
         EvaluationSessionRun::Complete(EvaluationSessionReport {
             failures,
             unfinished: Vec::new(),
@@ -1122,8 +1097,7 @@ impl Drop for EvaluationSession {
                 };
                 assert_eq!(record.id, task);
                 let work = record.work;
-                let transition =
-                    transition_reflection_task(&mut tasks, &self.reporting.failures, &wait, state);
+                let transition = transition_reflection_task(&mut tasks, &wait, state);
                 reflection.push((
                     work,
                     cancel,
@@ -1179,7 +1153,6 @@ impl EvaluationSession {
             id: EvaluationSessionId(values.ids().evaluation_session()),
             values: values.clone(),
             reporting: Weak::new(),
-            failures: Arc::new(Mutex::new(SessionFailureLedger::new_sync())),
             default_reflection_profile,
             require_default_reflection_profile,
             closed: Arc::new(AtomicBool::new(false)),
@@ -1188,7 +1161,6 @@ impl EvaluationSession {
         let reporting = Arc::new(SessionTaskReportingStore {
             id: demand.id,
             state: Mutex::new(SessionTaskReportingState::default()),
-            failures: demand.failures.clone(),
             closed: demand.closed.clone(),
         });
         // Construction is private and the demand state has not escaped yet.
@@ -1728,6 +1700,10 @@ impl EvalContext {
             Ok(machine) => machine,
             Err(error) => {
                 let failure = evaluation_failure(format!("task construction failed: {error}"));
+                // This helper reports construction failure directly to its
+                // Rust caller; it never returns a launched task handle whose
+                // failure would need runtime reporting.
+                coordinator.acknowledge_task_failure(self.session.id, id);
                 assert!(
                     coordinator.terminalize_reserved_reflection(work),
                     "failed test task construction must terminalize its reservation"
@@ -1750,7 +1726,6 @@ impl EvalContext {
             ReflectionTaskReportingRecord {
                 id,
                 work,
-                error_acknowledged: false,
                 published_status: EvaluationTaskStatus::Launched,
                 status_sinks: Vec::new(),
             },
@@ -1786,7 +1761,6 @@ impl EvalContext {
             ReflectionTaskReportingRecord {
                 id,
                 work,
-                error_acknowledged: false,
                 published_status: EvaluationTaskStatus::Launched,
                 status_sinks: Vec::new(),
             },
@@ -1814,6 +1788,9 @@ impl EvalContext {
         let Ok(reporting) = self.reporting_store() else {
             return;
         };
+        if error_acknowledged {
+            coordinator.acknowledge_task_failure(handle.session_id(), handle.id());
+        }
         let result = task_profile
             .launcher()
             .ok_or_else(|| {
@@ -1844,7 +1821,6 @@ impl EvalContext {
                         return;
                     };
                     assert_eq!(record.work, handle.work);
-                    record.error_acknowledged = error_acknowledged;
                     if let Some(status_sink) = status_sink {
                         record.status_sinks.push(status_sink);
                     }
@@ -1869,7 +1845,6 @@ impl EvalContext {
                         return;
                     };
                     assert_eq!(record.work, handle.work);
-                    record.error_acknowledged = error_acknowledged;
                     if let Some(status_sink) = status_sink {
                         record.status_sinks.push(status_sink);
                     }
@@ -1886,12 +1861,7 @@ impl EvalContext {
                             .state
                             .lock()
                             .expect("evaluation task registry was poisoned");
-                        transition_reflection_task(
-                            &mut tasks,
-                            &reporting.failures,
-                            &handle.wait,
-                            state,
-                        )
+                        transition_reflection_task(&mut tasks, &handle.wait, state)
                     };
                     publish_task_status(transition.status);
                     drop(coordinator.retire_reflection(handle.work));
@@ -1964,7 +1934,7 @@ impl EvalContext {
                 .state
                 .lock()
                 .expect("evaluation task registry was poisoned");
-            transition_reflection_task(&mut tasks, &reporting.failures, &handle.wait, state)
+            transition_reflection_task(&mut tasks, &handle.wait, state)
         };
         publish_task_status(transition.status);
         drop(coordinator.retire_reflection(handle.work));
@@ -2033,7 +2003,6 @@ impl EvalContext {
             ReflectionTaskReportingRecord {
                 id,
                 work,
-                error_acknowledged: false,
                 published_status: EvaluationTaskStatus::Launched,
                 status_sinks: Vec::new(),
             },
@@ -2088,7 +2057,7 @@ impl EvalContext {
                     if !tasks.reflection.contains_key(&task.wait) {
                         return EvaluationTaskCancellation::Late;
                     }
-                    transition_reflection_task(&mut tasks, &reporting.failures, &task.wait, state)
+                    transition_reflection_task(&mut tasks, &task.wait, state)
                 };
                 let retired = transition
                     .retired
@@ -2118,11 +2087,9 @@ impl EvalContext {
     }
 
     pub(crate) fn acknowledge_task_failure(&self, task: EvaluationTaskId) {
-        self.session
-            .failures
-            .lock()
-            .expect("evaluation failure ledger was poisoned")
-            .remove_mut(&task);
+        if let Some(coordinator) = self.coordinator() {
+            coordinator.acknowledge_task_failure(self.session.id, task);
+        }
     }
 
     pub(crate) fn poll_wait(&self, wait: &EvaluationWaitToken) -> EvaluationWaitPoll {
@@ -2214,7 +2181,7 @@ impl EvalContext {
             .state
             .lock()
             .expect("evaluation task registry was poisoned");
-        let transition = transition_reflection_task(&mut tasks, &reporting.failures, &wait, state);
+        let transition = transition_reflection_task(&mut tasks, &wait, state);
         drop(tasks);
         publish_task_status(transition.status);
         drop(coordinator.retire_reflection(work));
@@ -2266,7 +2233,7 @@ impl EvalContext {
             .state
             .lock()
             .expect("evaluation task registry was poisoned");
-        let transition = transition_reflection_task(&mut tasks, &reporting.failures, &wait, state);
+        let transition = transition_reflection_task(&mut tasks, &wait, state);
         drop(tasks);
         publish_task_status(transition.status);
         drop(coordinator.retire_reflection(work));
@@ -2298,20 +2265,18 @@ impl EvalContext {
             .session
             .reporting_store()
             .expect("test demand must retain its reporting store");
-        let tasks = reporting
-            .state
-            .lock()
-            .expect("evaluation task registry was poisoned");
-        EvaluationTaskRegistryCounts {
-            reflection_active: tasks.reflection.len(),
-            reflection_terminal: 0,
-            reflection_by_id: tasks.reflection_by_id.len(),
-            unacknowledged_failures: self
-                .session
-                .failures
+        let (reflection_active, reflection_by_id) = {
+            let tasks = reporting
+                .state
                 .lock()
-                .expect("evaluation failure ledger was poisoned")
-                .size(),
+                .expect("evaluation task registry was poisoned");
+            (tasks.reflection.len(), tasks.reflection_by_id.len())
+        };
+        EvaluationTaskRegistryCounts {
+            reflection_active,
+            reflection_terminal: 0,
+            reflection_by_id,
+            unacknowledged_failures: coordinator.failure_snapshot(self.session.id).size(),
             deferred_active: deferred_counts.0,
             deferred_terminal: 0,
             deferred_by_wait: deferred_counts.1,
@@ -2508,11 +2473,7 @@ impl EvaluationSession {
 
     fn session_run_report(&self) -> EvaluationSessionRun {
         let snapshots = self.coordinator.reflection_snapshots(self.id);
-        let failures = self
-            .failures
-            .lock()
-            .expect("evaluation failure ledger was poisoned")
-            .clone();
+        let failures = self.coordinator.failure_snapshot(self.id);
         let mut unfinished = Vec::new();
         let mut has_live_cross_session_dependency = false;
         for snapshot in snapshots {
@@ -2753,7 +2714,7 @@ fn release_reflection_task(
             .state
             .lock()
             .expect("evaluation task reporting store was poisoned");
-        transition_reflection_task(&mut tasks, &reporting.failures, &wait, state)
+        transition_reflection_task(&mut tasks, &wait, state)
     };
     let retired = transition
         .retired
@@ -4949,23 +4910,12 @@ mod tests {
 
         let reserved = context.reserve_task().expect("task should reserve");
         assert!(context.acknowledge_reflection_task_error(&reserved));
-        {
-            let reporting = context
-                .session
-                .reporting_store()
-                .expect("reserved task must retain its reporting store");
-            let tasks = reporting
-                .state
-                .lock()
-                .expect("evaluation task registry was poisoned");
-            assert!(
-                tasks
-                    .reflection
-                    .get(reserved.wait())
-                    .expect("reserved task should remain registered")
-                    .error_acknowledged
-            );
-        }
+        assert!(
+            context
+                .coordinator()
+                .expect("reserved task must retain its coordinator")
+                .task_failure_is_acknowledged(reserved.id())
+        );
         context.cancel_reserved_task(&reserved);
 
         let blocked = context
@@ -4976,23 +4926,12 @@ mod tests {
             EvaluationPumpOutcome::NoProgress
         );
         assert!(context.acknowledge_reflection_task_error(&blocked));
-        {
-            let reporting = context
-                .session
-                .reporting_store()
-                .expect("blocked task must retain its reporting store");
-            let tasks = reporting
-                .state
-                .lock()
-                .expect("evaluation task registry was poisoned");
-            assert!(
-                tasks
-                    .reflection
-                    .get(blocked.wait())
-                    .expect("blocked task should remain registered")
-                    .error_acknowledged
-            );
-        }
+        assert!(
+            context
+                .coordinator()
+                .expect("blocked task must retain its coordinator")
+                .task_failure_is_acknowledged(blocked.id())
+        );
         assert_eq!(
             context.cancel_reflection_task(&blocked),
             EvaluationTaskCancellation::Requested
@@ -5091,6 +5030,85 @@ mod tests {
             counts.unacknowledged_failures, 0,
             "acknowledging before or after failure must leave no reporting entry"
         );
+    }
+
+    #[test]
+    fn runtime_failure_ledger_preserves_owner_buckets_and_persistent_snapshots() {
+        let (coordinator, _executor) =
+            test_execution_resources(0).expect("test runtime should build");
+        let first_owner = EvaluationSession::shared(&coordinator);
+        let second_owner = EvaluationSession::shared(&coordinator);
+        let first_context = EvalContext::new(&first_owner);
+        let second_context = EvalContext::new(&second_owner);
+
+        let first_task = first_context
+            .schedule_task(|_| Ok(Box::new(Fail)))
+            .expect("first failing task should schedule");
+        let second_task = second_context
+            .schedule_task(|_| Ok(Box::new(Fail)))
+            .expect("second failing task should schedule");
+        assert_eq!(
+            second_task.id().get(),
+            first_task.id().get() + 1,
+            "task identities should be adjacent in the shared runtime domain"
+        );
+
+        let EvaluationSessionRun::Complete(first_report) = first_context.run_until_quiescent()
+        else {
+            panic!("the first owner should drain its failing task")
+        };
+        let EvaluationSessionRun::Complete(second_report) = second_context.run_until_quiescent()
+        else {
+            panic!("the second owner should drain its failing task")
+        };
+        assert!(first_report.failures.contains_key(&first_task.id()));
+        assert!(!first_report.failures.contains_key(&second_task.id()));
+        assert!(second_report.failures.contains_key(&second_task.id()));
+        assert!(!second_report.failures.contains_key(&first_task.id()));
+
+        let first_snapshot = first_report.failures.clone();
+        let first_owner_id = first_context.session_id();
+        let second_owner_id = second_context.session_id();
+        let first_task_id = first_task.id();
+        let second_task_id = second_task.id();
+        drop(first_task);
+        drop(first_owner);
+
+        let ledger = coordinator.failure_ledger_snapshot();
+        assert_eq!(ledger.size(), 2);
+        assert!(
+            ledger
+                .get(&first_owner_id)
+                .is_some_and(|failures| failures.contains_key(&first_task_id)),
+            "owner closure and final task-handle drop must not erase its failure bucket"
+        );
+        assert!(
+            ledger
+                .get(&second_owner_id)
+                .is_some_and(|failures| failures.contains_key(&second_task_id))
+        );
+
+        first_context.acknowledge_task_failure(first_task_id);
+        assert!(
+            first_snapshot.contains_key(&first_task_id),
+            "persistent report snapshots must remain valid after later acknowledgement"
+        );
+        let ledger = coordinator.failure_ledger_snapshot();
+        assert!(
+            !ledger.contains_key(&first_owner_id),
+            "acknowledging the last owner failure should remove its empty bucket"
+        );
+        assert!(
+            ledger
+                .get(&second_owner_id)
+                .is_some_and(|failures| failures.contains_key(&second_task_id)),
+            "acknowledgement must not disturb another owner bucket"
+        );
+
+        drop(second_task);
+        drop(second_owner);
+        second_context.acknowledge_task_failure(second_task_id);
+        assert!(coordinator.failure_ledger_snapshot().is_empty());
     }
 
     #[test]
