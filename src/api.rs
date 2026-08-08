@@ -3661,7 +3661,10 @@ impl ReflectionInspector<'_> {
     pub fn associated_metadata(&self, value: &Value) -> Result<Option<Value>, Error> {
         value.require_runtime(self.assembler.reasoning.runtime.id())?;
         let values = self.assembler.core_values();
-        let value = eval::eval_value(&self.assembler.eval_context(), value.as_core())
+        let value = self
+            .assembler
+            .eval_context()
+            .evaluate_whnf(value.as_core())
             .map_err(|error| self.assembler.evaluation_error(error))?;
         Ok(value
             .associated_metadata()
@@ -3675,7 +3678,10 @@ impl ReflectionInspector<'_> {
     pub fn list_items(&self, value: &Value) -> Result<Vec<Value>, Error> {
         value.require_runtime(self.assembler.reasoning.runtime.id())?;
         let values = self.assembler.core_values();
-        let value = eval::eval_value(&self.assembler.eval_context(), value.as_core())
+        let value = self
+            .assembler
+            .eval_context()
+            .evaluate_whnf(value.as_core())
             .map_err(|error| self.assembler.evaluation_error(error))?;
         let CoreValue::List(list) = value else {
             return Err(Error::new(format!(
@@ -3698,7 +3704,10 @@ impl ReflectionInspector<'_> {
     pub fn dictionary_items(&self, value: &Value) -> Result<Vec<(Value, Value)>, Error> {
         value.require_runtime(self.assembler.reasoning.runtime.id())?;
         let values = self.assembler.core_values();
-        let value = eval::eval_value(&self.assembler.eval_context(), value.as_core())
+        let value = self
+            .assembler
+            .eval_context()
+            .evaluate_whnf(value.as_core())
             .map_err(|error| self.assembler.evaluation_error(error))?;
         let CoreValue::Dict(dict) = value else {
             return Err(Error::new(format!(
@@ -3721,7 +3730,10 @@ impl ReflectionInspector<'_> {
     pub fn atom_key(&self, value: &Value) -> Result<Value, Error> {
         value.require_runtime(self.assembler.reasoning.runtime.id())?;
         let values = self.assembler.core_values();
-        let value = eval::eval_value(&self.assembler.eval_context(), value.as_core())
+        let value = self
+            .assembler
+            .eval_context()
+            .evaluate_whnf(value.as_core())
             .map_err(|error| self.assembler.evaluation_error(error))?;
         let CoreValue::Atom(atom) = value else {
             return Err(Error::new(format!(
@@ -4278,7 +4290,8 @@ impl Assembler {
     pub fn evaluate(&self, value: &Value) -> Result<Value, Error> {
         value.require_runtime(self.reasoning.runtime.id())?;
         let values = self.core_values();
-        eval::eval_value(&self.eval_context(), value.as_core())
+        self.eval_context()
+            .evaluate_whnf(value.as_core())
             .map(|value| Value::from_core(&values, value))
             .map_err(|error| self.evaluation_error(error))
     }

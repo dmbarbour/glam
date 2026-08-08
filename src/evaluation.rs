@@ -24,14 +24,15 @@ use crate::core::{
     CoreValueFactory, EvaluationFailure, LazyCycle, LazyCycleMember, LazyValue, PromiseAssignment,
     PromiseCell, PromiseId, PromisedValue, Value,
 };
+use crate::core_net::CoreWaitToken;
 use crate::runtime::{EvaluationRuntimeId, RuntimeMutationGuard, RuntimeValueRoot};
 
 mod coordinator;
 mod executor;
 use coordinator::{
-    ClaimedDeferredWork, ClaimedReflectionWork, ClaimedTaskWork, DeferredLazyCycleMember,
-    DeferredProducer, DeferredWorkPoll, DeferredWorkReservation, EvaluationWorkId,
-    ReflectionCancellation, ReflectionWorkPoll, ReflectionWorkState,
+    ClaimedDeferredWork, ClaimedReflectionWork, ClaimedTaskWork, ClientDemandSnapshot,
+    DeferredLazyCycleMember, DeferredProducer, DeferredWorkPoll, DeferredWorkReservation,
+    EvaluationWorkId, ReflectionCancellation, ReflectionWorkPoll, ReflectionWorkState,
 };
 pub(crate) use coordinator::{
     CompletionSubscriptionOutcome, CompletionSubscriptions, EvaluationTaskBlock,
@@ -629,24 +630,10 @@ pub(crate) trait EvaluationTaskMachine: Send {
 /// runtime roots and retry behavior remain auditable. Composite operations
 /// will extend this enum in Phase 10B.1c.
 #[derive(Debug)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Phase 10B.1a installs runtime demand ownership before 10B.1b migrates public callers"
-    )
-)]
 pub(crate) enum ClientDemandOperation {
     DemandWhnf(RuntimeValueRoot),
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Phase 10B.1a installs runtime demand ownership before 10B.1b migrates public callers"
-    )
-)]
 impl ClientDemandOperation {
     fn runtime_id(&self) -> EvaluationRuntimeId {
         match self {
@@ -675,13 +662,6 @@ struct ClientDemandResultCell {
     changed: Condvar,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Phase 10B.1a installs the result cell before 10B.1b migrates synchronous clients"
-    )
-)]
 impl ClientDemandResultCell {
     fn new() -> Arc<Self> {
         Arc::new(Self {
@@ -710,6 +690,22 @@ impl ClientDemandResultCell {
             .expect("client demand result cell was poisoned")
             .clone()
     }
+
+    fn wait(&self) -> ClientDemandResult {
+        let mut result = self
+            .result
+            .lock()
+            .expect("client demand result cell was poisoned");
+        loop {
+            if let Some(result) = result.clone() {
+                return result;
+            }
+            result = self
+                .changed
+                .wait(result)
+                .expect("client demand result cell was poisoned");
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -717,13 +713,6 @@ pub(super) struct ClientDemandSink {
     cell: Arc<ClientDemandResultCell>,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Phase 10B.1a installs result ownership before 10B.1b migrates synchronous clients"
-    )
-)]
 impl ClientDemandSink {
     fn new(cell: Arc<ClientDemandResultCell>) -> Self {
         Self { cell }
@@ -739,13 +728,6 @@ impl ClientDemandSink {
 /// Dropping or explicitly abandoning this handle retires only its consumer
 /// registration. The independently owned lazy/promise producer remains
 /// available to other consumers.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Phase 10B.1a installs the internal handle before 10B.1b migrates synchronous clients"
-    )
-)]
 pub(crate) struct ClientDemandHandle {
     runtime: EvaluationRuntimeId,
     work: EvaluationWorkId,
@@ -770,6 +752,10 @@ impl ClientDemandHandle {
         self.cell.poll()
     }
 
+    fn wait(&self) -> ClientDemandResult {
+        self.cell.wait()
+    }
+
     pub(crate) fn abandon(mut self) {
         self.abandon_inner();
     }
@@ -786,6 +772,18 @@ impl ClientDemandHandle {
         if !retired {
             let _ = self.cell.publish(ClientDemandResult::Abandoned);
         }
+    }
+
+    fn abandon_if_stably_blocked(&mut self, subscription_epoch: u64) -> Option<WorkDependency> {
+        if !self.active {
+            return None;
+        }
+        let dependency = self
+            .coordinator
+            .upgrade()?
+            .abandon_blocked_client_demand(self.work, subscription_epoch)?;
+        self.active = false;
+        Some(dependency)
     }
 
     #[cfg(test)]
@@ -1506,13 +1504,6 @@ impl EvalContext {
         }
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Phase 10B.1a installs admission before 10B.1b migrates synchronous clients"
-        )
-    )]
     pub(crate) fn demand_whnf(
         &self,
         value: RuntimeValueRoot,
@@ -1536,6 +1527,71 @@ impl EvalContext {
             cell,
             active: true,
         })
+    }
+
+    pub(crate) fn evaluate_whnf(
+        &self,
+        value: &Value,
+    ) -> Result<Value, crate::core::EvaluationHalt> {
+        let coordinator = self
+            .coordinator_for_admission()
+            .map_err(|error| crate::core::EvaluationHalt::new(error.as_ref()))?;
+        let mut handle = self
+            .demand_whnf(RuntimeValueRoot::new(self.values(), value.clone()))
+            .map_err(|error| crate::core::EvaluationHalt::new(error.as_ref()))?;
+
+        loop {
+            if let Some(result) = handle.poll() {
+                return client_demand_result(result);
+            }
+            if let Some(claimed) = coordinator.claim_client_demand(handle.work) {
+                coordinator.poll_claimed_client_demand(claimed);
+                continue;
+            }
+
+            let generation = coordinator.work_generation();
+            let Some(snapshot) = coordinator.client_demand_snapshot(handle.work) else {
+                // Retirement removes the coordinator record before publishing
+                // its sink. Waiting on the cell closes that intentionally
+                // tiny handoff without racing a completion notification.
+                return client_demand_result(handle.wait());
+            };
+            match snapshot {
+                ClientDemandSnapshot::Queued => continue,
+                ClientDemandSnapshot::Running => {
+                    if handle.poll().is_none() && coordinator.work_generation() == generation {
+                        coordinator.wait_for_change(generation);
+                    }
+                }
+                ClientDemandSnapshot::Blocked {
+                    dependency,
+                    subscription_epoch,
+                } => {
+                    if let Some(wait) = dependency.producer_wait() {
+                        if let Some(task) = prioritized_task_for(&coordinator, wait)
+                            && let Some(work) = coordinator.claim_task(task)
+                        {
+                            coordinator.poll_claimed_task(work);
+                            continue;
+                        }
+                        if coordinator.target_has_running_producer(wait) {
+                            if handle.poll().is_none()
+                                && coordinator.work_generation() == generation
+                            {
+                                coordinator.wait_for_change(generation);
+                            }
+                            continue;
+                        }
+                    }
+
+                    let Some(dependency) = handle.abandon_if_stably_blocked(subscription_epoch)
+                    else {
+                        continue;
+                    };
+                    return Err(client_demand_halt(dependency));
+                }
+            }
+        }
     }
 
     pub(crate) fn runs_scheduled_task(&self) -> bool {
@@ -2194,6 +2250,29 @@ impl EvalContext {
     }
 }
 
+fn client_demand_result(result: ClientDemandResult) -> Result<Value, crate::core::EvaluationHalt> {
+    match result {
+        ClientDemandResult::Complete(value) => Ok(value.into_core()),
+        ClientDemandResult::Failed(failure) | ClientDemandResult::Killed(failure) => {
+            Err(crate::core::EvaluationHalt::failure(failure))
+        }
+        ClientDemandResult::Abandoned => Err(crate::core::EvaluationHalt::new(
+            "client evaluation demand was abandoned",
+        )),
+    }
+}
+
+fn client_demand_halt(dependency: WorkDependency) -> crate::core::EvaluationHalt {
+    match dependency {
+        WorkDependency::Wait(wait) => crate::core::EvaluationHalt::blocked(CoreWaitToken(wait)),
+        WorkDependency::Promise(promise) => crate::core::EvaluationHalt::unassigned(promise),
+        #[cfg(test)]
+        WorkDependency::Test(_) => crate::core::EvaluationHalt::new(
+            "client evaluation blocked on a synthetic test dependency",
+        ),
+    }
+}
+
 #[cfg(test)]
 fn test_reflection_dependency(
     coordinator: &EvaluationWorkCoordinator,
@@ -2760,7 +2839,7 @@ impl EvaluationDemandState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::mpsc;
+    use std::sync::{Barrier, mpsc};
     use std::time::{Duration, Instant};
 
     struct SameRuntimeFixture {
@@ -3007,6 +3086,84 @@ mod tests {
         assert!(matches!(
             handle.poll(),
             Some(ClientDemandResult::Killed(actual)) if Arc::ptr_eq(&actual, &failure)
+        ));
+    }
+
+    #[test]
+    fn synchronous_whnf_facade_preserves_retryable_promise_behavior() {
+        let fixture = SameRuntimeFixture::new();
+        let context = fixture.context();
+        let coordinator = context.coordinator().expect("coordinator should be live");
+        let promise = PromisedValue::new(context.values(), "synchronous client input");
+        let promised = Value::Promised(promise.clone());
+
+        let halt = context
+            .evaluate_whnf(&promised)
+            .expect_err("an unassigned host promise must remain retryable");
+        assert_eq!(
+            halt.unassigned_promise().map(PromisedValue::id),
+            Some(promise.id())
+        );
+        assert_eq!(promise.exact_subscription_count(), 0);
+        assert_eq!(coordinator.client_demand_count(), 0);
+
+        let expected = Value::Number(23.into());
+        promise
+            .set(expected.clone())
+            .expect("host promise should remain assignable after stable abandonment");
+        assert_eq!(
+            context
+                .evaluate_whnf(&promised)
+                .expect("resolved promise should complete synchronously"),
+            expected
+        );
+        assert_eq!(coordinator.client_demand_count(), 0);
+    }
+
+    #[test]
+    fn retained_client_handle_waits_across_external_disturbance_without_a_lost_wake() {
+        let fixture = SameRuntimeFixture::new();
+        let context = fixture.context();
+        let coordinator = context.coordinator().expect("coordinator should be live");
+        let promise = PromisedValue::new(context.values(), "parked client input");
+        let handle = context
+            .demand_whnf(RuntimeValueRoot::new(
+                context.values(),
+                Value::Promised(promise.clone()),
+            ))
+            .expect("retained demand should be admitted");
+        assert!(poll_one_runtime_work(&coordinator));
+
+        let parking = Arc::new(Barrier::new(2));
+        let waiter = std::thread::spawn({
+            let parking = parking.clone();
+            move || {
+                parking.wait();
+                handle.wait()
+            }
+        });
+        parking.wait();
+        let expected = Value::Number(29.into());
+        promise
+            .set(expected.clone())
+            .expect("external producer should resolve once");
+        assert!(poll_one_runtime_work(&coordinator));
+        assert!(matches!(
+            waiter.join().expect("client waiter should finish"),
+            ClientDemandResult::Complete(value) if value.as_core() == &expected
+        ));
+        assert_eq!(coordinator.client_demand_count(), 0);
+
+        let already_complete = context
+            .demand_whnf(RuntimeValueRoot::new(
+                context.values(),
+                context.values().unit(),
+            ))
+            .expect("unit demand should be admitted");
+        assert!(poll_one_runtime_work(&coordinator));
+        assert!(matches!(
+            already_complete.wait(),
+            ClientDemandResult::Complete(value) if value.as_core() == &context.values().unit()
         ));
     }
 

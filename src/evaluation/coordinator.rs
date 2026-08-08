@@ -358,13 +358,6 @@ struct WorkControl {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WorkCloseReason {
     ExplicitCancellation,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Phase 10B.1a installs client abandonment before 10B.1b migrates public callers"
-        )
-    )]
     ClientDemandAbandoned,
     DemandSessionClosed,
     ExecutorShutdown,
@@ -465,13 +458,6 @@ impl SettlementObligations {
         }
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Phase 10B.1a installs client obligations before 10B.1b migrates public callers"
-        )
-    )]
     fn client_demand(sink: ClientDemandSink) -> Self {
         Self {
             producer: None,
@@ -605,6 +591,15 @@ impl WorkDependency {
         }
     }
 
+    fn is_terminal(&self) -> bool {
+        match self {
+            Self::Wait(wait) => wait.terminal_poll().is_some(),
+            Self::Promise(promise) => promise.assignment().is_some(),
+            #[cfg(test)]
+            Self::Test(_) => false,
+        }
+    }
+
     fn abandon(self) {
         match self {
             Self::Wait(wait) => wait.abandon_deferred_producer(),
@@ -710,13 +705,6 @@ enum WorkKind {
     Spark(SparkWork),
     Reflection(ReflectionWork),
     Deferred(DeferredWork),
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Phase 10B.1a installs client work before 10B.1b migrates public callers"
-        )
-    )]
     ClientDemand(ClientDemandWork),
 }
 
@@ -754,6 +742,15 @@ pub(super) enum ClientDemandPoll {
     Complete(RuntimeValueRoot),
     Failed(Arc<EvaluationFailure>),
     Blocked(WorkDependency),
+}
+
+pub(super) enum ClientDemandSnapshot {
+    Queued,
+    Running,
+    Blocked {
+        dependency: WorkDependency,
+        subscription_epoch: u64,
+    },
 }
 
 struct ClientDemandRetirement {
@@ -1456,13 +1453,6 @@ impl EvaluationWorkCoordinator {
         }
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Phase 10B.1a installs admission before 10B.1b migrates public callers"
-        )
-    )]
     pub(super) fn admit_client_demand(
         &self,
         demand: Arc<EvaluationDemandState>,
@@ -1758,6 +1748,60 @@ impl EvaluationWorkCoordinator {
         self.work_available.notify_all();
     }
 
+    pub(super) fn claim_client_demand(&self, id: EvaluationWorkId) -> Option<ClaimedClientDemand> {
+        let mutation = self.admission.mutation_guard();
+        let claimed = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            let claimed = claim_client_demand(&mut state, id);
+            if claimed.is_some() {
+                state.work_generation = state.work_generation.wrapping_add(1);
+            }
+            claimed
+        };
+        drop(mutation);
+        if claimed.is_some() {
+            self.work_available.notify_all();
+        }
+        claimed
+    }
+
+    pub(super) fn client_demand_snapshot(
+        &self,
+        id: EvaluationWorkId,
+    ) -> Option<ClientDemandSnapshot> {
+        let state = self
+            .state
+            .lock()
+            .expect("evaluation work coordinator was poisoned");
+        let record = state.work.get(&id)?;
+        let WorkKind::ClientDemand(client) = &record.kind else {
+            return None;
+        };
+        match record.state {
+            WorkState::Queued => Some(ClientDemandSnapshot::Queued),
+            WorkState::Running => Some(ClientDemandSnapshot::Running),
+            WorkState::Blocked => {
+                let subscription = client
+                    .subscription
+                    .as_ref()
+                    .expect("blocked client demand must retain its exact subscription");
+                Some(ClientDemandSnapshot::Blocked {
+                    dependency: subscription.dependency.clone(),
+                    subscription_epoch: subscription.registration.subscription_epoch,
+                })
+            }
+            WorkState::Dormant
+            | WorkState::Reserved
+            | WorkState::ExitWaiting
+            | WorkState::Terminalizing => {
+                unreachable!("client demand entered an unsupported work state")
+            }
+        }
+    }
+
     pub(super) fn release_spark(&self, claimed: ClaimedSparkWork, poll: SparkWorkPoll) {
         let mutation = self.admission.mutation_guard();
         let (retired, obsolete_dependency, exact_subscription) = {
@@ -2015,13 +2059,6 @@ impl EvaluationWorkCoordinator {
         self.notify_dependency_wake(woke);
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Phase 10B.1a installs abandonment before 10B.1b migrates public callers"
-        )
-    )]
     pub(super) fn abandon_client_demand(&self, id: EvaluationWorkId) -> bool {
         let mutation = self.admission.mutation_guard();
         let (accepted, retirement) = {
@@ -2058,6 +2095,88 @@ impl EvaluationWorkCoordinator {
         drop(mutation);
         self.work_available.notify_all();
         accepted
+    }
+
+    pub(super) fn abandon_blocked_client_demand(
+        &self,
+        id: EvaluationWorkId,
+        subscription_epoch: u64,
+    ) -> Option<WorkDependency> {
+        let mutation = self.admission.mutation_guard();
+        let (dependency, registration) = {
+            let state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            let record = state.work.get(&id)?;
+            if !matches!(record.state, WorkState::Blocked) {
+                return None;
+            }
+            let WorkKind::ClientDemand(client) = &record.kind else {
+                return None;
+            };
+            let subscription = client
+                .subscription
+                .as_ref()
+                .expect("blocked client demand must retain its exact subscription");
+            if subscription.registration.subscription_epoch != subscription_epoch {
+                return None;
+            }
+            (subscription.dependency.clone(), subscription.registration)
+        };
+
+        // Completion becomes authoritative before its exact subscriber is
+        // delivered. Recheck the source outside the coordinator lock so a
+        // publisher in that narrow handoff cannot be mistaken for stable
+        // blocking. A later completion linearizes after abandonment.
+        if dependency.is_terminal() {
+            let queued = {
+                let mut state = self
+                    .state
+                    .lock()
+                    .expect("evaluation work coordinator was poisoned");
+                let queued =
+                    queue_current_registration(&mut state, registration, Some(dependency.key()));
+                if queued {
+                    state.work_generation = state.work_generation.wrapping_add(1);
+                }
+                queued
+            };
+            drop(mutation);
+            if queued {
+                self.work_available.notify_all();
+            }
+            return None;
+        }
+
+        let (dependency, retirement) = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            let record = state.work.get(&id)?;
+            if !matches!(record.state, WorkState::Blocked) {
+                return None;
+            }
+            let WorkKind::ClientDemand(client) = &record.kind else {
+                return None;
+            };
+            let subscription = client
+                .subscription
+                .as_ref()
+                .expect("blocked client demand must retain its exact subscription");
+            if subscription.registration.subscription_epoch != subscription_epoch {
+                return None;
+            }
+            let retirement =
+                detach_client_demand(&mut state, id, None, None, ClientDemandResult::Abandoned);
+            state.work_generation = state.work_generation.wrapping_add(1);
+            (dependency, retirement)
+        };
+        retirement.finish();
+        drop(mutation);
+        self.work_available.notify_all();
+        Some(dependency)
     }
 
     #[cfg(test)]
@@ -3395,6 +3514,17 @@ impl EvaluationWorkCoordinator {
             .count()
     }
 
+    #[cfg(test)]
+    pub(super) fn client_demand_count(&self) -> usize {
+        self.state
+            .lock()
+            .expect("evaluation work coordinator was poisoned")
+            .work
+            .values()
+            .filter(|record| matches!(record.kind, WorkKind::ClientDemand(_)))
+            .count()
+    }
+
     pub(super) fn wait_for_change(&self, observed_generation: u64) {
         let mut state = self
             .state
@@ -4429,30 +4559,41 @@ fn queue_current_registration(
 fn claim_ready_client_demand(state: &mut WorkCoordinatorState) -> Option<ClaimedClientDemand> {
     while let Some(id) = state.ready_client_demands.pop_front() {
         state.ready_client_demand_set.remove(&id);
-        let Some(record) = state.work.get_mut(&id) else {
-            continue;
-        };
-        if !matches!(record.state, WorkState::Queued)
-            || !matches!(record.kind, WorkKind::ClientDemand(_))
-        {
-            continue;
+        if let Some(claimed) = claim_client_demand(state, id) {
+            return Some(claimed);
         }
-        record.state = WorkState::Running;
-        let client = client_demand_work_mut(record);
-        let demand = client.demand.clone();
-        let operation = client
-            .operation
-            .take()
-            .expect("queued client demand must retain its operation");
-        let prior_subscription = client.subscription.take();
-        return Some(ClaimedClientDemand {
-            id,
-            demand,
-            operation: Some(operation),
-            prior_subscription,
-        });
     }
     None
+}
+
+fn claim_client_demand(
+    state: &mut WorkCoordinatorState,
+    id: EvaluationWorkId,
+) -> Option<ClaimedClientDemand> {
+    let record = state.work.get_mut(&id)?;
+    if !matches!(record.state, WorkState::Queued)
+        || !matches!(record.kind, WorkKind::ClientDemand(_))
+    {
+        return None;
+    }
+    state.ready_client_demand_set.remove(&id);
+    state
+        .ready_client_demands
+        .retain(|candidate| *candidate != id);
+    record.state = WorkState::Running;
+    let client = client_demand_work_mut(record);
+    let demand = client.demand.clone();
+    let operation = client
+        .operation
+        .take()
+        .expect("queued client demand must retain its operation");
+    let prior_subscription = client.subscription.take();
+    Some(ClaimedClientDemand {
+        id,
+        demand,
+        operation: Some(operation),
+        prior_subscription,
+    })
 }
 
 fn claim_ready_spark(state: &mut WorkCoordinatorState) -> Option<ClaimedSparkWork> {
