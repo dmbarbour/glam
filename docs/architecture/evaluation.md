@@ -26,13 +26,12 @@ external `EvaluationSession` owner lease. An `Assembler` and its clones share
 one internal `ReasoningSession`, which retains that lease and the assembler's
 reflection host. `EvalContext` retains only `Arc<EvaluationDemandState>`, its
 selected task profile, and current task provenance. The demand state holds the
-value factory, session policy, and explicit closed flag; its routes to both
-the coordinator and task reporting store are weak. An explicit
-`Arc<SessionTaskReportingStore>` sibling of the demand state owns only the
-transitional task/wait indexes used by serial pumping and retirement. Opaque
-reflection and deferred machines, failure-acknowledgement policy, protected
-status publication, and the persistent failure ledger reside directly in
-coordinator state. The ledger is a persistent map from
+value factory, session policy, and explicit closed flag; its coordinator route
+is weak. The coordinator retains one weak demand-session registration solely
+for guarded admission and removes it when the owner closes. Opaque reflection
+and deferred machines, task/wait indexes, failure-acknowledgement policy,
+protected status publication, and the persistent failure ledger reside
+directly in coordinator state. The ledger is a persistent map from
 owner session to that owner's task/failure map, so owner closure does not erase
 an unacknowledged failure and a session report cheaply clones only its bucket.
 Dropping
@@ -52,11 +51,11 @@ deferred-producer, and spark records. Reflection and deferred records own
 reservation/dormancy, queued, running, blocked, control, and terminalization
 state. Reflection and deferred claims take their machine from the work record
 while marking it `Running`; release either restores the machine before making
-the record claimable or returns it for terminal destruction. Session
-registration retains the reporting store while indexed reflection work
-remains, and a reflection claim retains that store for its transitional
-task/wait lookup during a poll quantum; neither route recovers or retains the
-external owner lease. Blocked reflection,
+the record claimable or returns it for terminal destruction. The weak session
+registration validates admission but does not retain demand state or survive
+owner closure. A reflection claim needs no session-owned reporting tail:
+task/wait identity and terminal publication remain in its stable coordinator
+record. Blocked reflection,
 deferred, and spark records retain their exact dependency and checked
 subscription epoch; spark records additionally retain their demand value, an
 `Arc<EvaluationDemandState>` which cannot recover the external owner lease,
@@ -68,13 +67,10 @@ runtime-local dependency key; stale completion, session teardown, and
 reblocking notifications are harmless. The attached
 `EvaluationExecutor` owns only worker activation, shutdown, and thread handles.
 Workers retain a weak coordinator attachment and claim either an exact ready
-task or spark record from it. A reflection claim retains the registered
-reporting store while its machine remains exclusively in the coordinator
-claim; deferred claims need only the coordinator record. The store has only
-a weak coordinator route and no direct demand-state route; resident machine
-contexts may retain demand state, whose route back to the store is weak, but
-no route reaches the owner lease. Final owner drop can therefore close queued
-and blocked work immediately while a worker safely finishes one
+task or spark record from it. Reflection and deferred claims need only their
+coordinator records; resident machine contexts may retain closed demand state,
+but no route recovers the owner lease. Final owner drop can therefore close
+queued and blocked work immediately while a worker safely finishes one
 already-claimed quantum. The immutable reflection environment belongs to the
 active task host rather than either scheduling component.
 
@@ -224,8 +220,8 @@ state:
 | opaque live reflection/deferred machines | runtime work coordinator or its exclusive claim |
 | task failure acknowledgement policy | runtime work coordinator task record |
 | unacknowledged task failures, partitioned by owner session | runtime work coordinator ledger |
-| current published status and optional protected-query publisher | runtime work coordinator task record |
-| transitional task/wait lookup and retirement indexes | demand session reporting store |
+| task wait, current published status, and optional protected-query publisher | coordinator `TaskTerminalPublisher` obligation |
+| task/wait lookup and retirement indexes | runtime work coordinator |
 | completed, failed, cancelled, or abandoned outcome | shared `EvaluationWaitToken` cell |
 | transactional `.task.status`, `.task.value`, or `.task.error` view | reasoning-store query |
 
@@ -375,19 +371,19 @@ its coordinator record. Internal reflection tasks use the same lifecycle with
 no status query. The publisher retains the query handle, value factory, and a
 narrow writer backed by `RuntimeSharedResources`; it does not retain the role
 host, reflection environment, diagnostic bus, launcher, demand state, or
-external owner lease. Current status stays beside that optional publisher in
-the coordinator record, while the session reporting store supplies only the
-remaining task/wait lookup tail.
+external owner lease. `TaskTerminalPublisher` keeps that optional publisher,
+current status, and the shared wait together in the coordinator's settlement
+inventory.
 
-Active reflection records retain machines. Every terminal transition first
-publishes the shared wait result and records an unacknowledged failure when
-needed. It detaches the protected-status update while changing coordinator
-state, then applies that update only after scheduler state and mutation
-admission have been released. Completion and failure destroy the detached
-machine after unlocking. Cancellation similarly invokes the detached
-machine's cancellation hook only after unlocking. Phase 8B.1c consolidates
-these sequential publications before removing the transitional reporting
-indexes.
+Active reflection records retain machines. Every terminal transition takes
+its `TaskTerminalPublisher` exactly once. Under one runtime mutation admission,
+it records any unacknowledged failure, publishes the shared wait terminal, and
+updates the protected status query while acquiring coordinator, completion,
+and transaction-state mutexes only in separate component steps. Exact wakes,
+runtime-observation notifications, cancellation hooks, value release, and
+machine destruction happen only after all component locks and mutation
+admission have been released. A work record cannot retire until its terminal
+publisher and producer-owned promise obligations are empty.
 
 ## Interaction-Net Handoff
 

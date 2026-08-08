@@ -83,13 +83,12 @@ control-flow overview.
   likewise take machines during the authoritative coordinator transition.
   Machine cancellation/destruction and captured-value release happen only
   after coordinator/component locks and mutation admission are released. The
-  session reporting store retains only transitional task/wait lookup and
-  retirement indexes, never executable machines, failure policy, or protected
-  status publication. Current task status and the optional protected-query
-  publisher reside in the coordinator work record. That publisher retains a
-  narrow runtime query writer, not its role host or owner lease. A raced source
-  snapshot may register one redundant producer; it must observe the canonical
-  cache and retire harmlessly. Every
+  coordinator work record retains task/wait lookup, failure policy, and a
+  `TaskTerminalPublisher` containing the wait, current status, and optional
+  protected-query publisher. The latter retains a narrow runtime query writer,
+  not its role host or owner lease. There is no session-side reporting store.
+  A raced source snapshot may register one redundant producer; it must observe
+  the canonical cache and retire harmlessly. Every
   scheduler wait token shares a lock-free terminal cell plus a weak exact-work
   subscription set. Terminal state is published and producer indexes retire
   through the owning coordinator/store transition; exact subscribers detach
@@ -240,10 +239,10 @@ control-flow overview.
   executor, while same-transaction error acknowledgement must be installed
   before an immediate failure can be reported. Older-task modifiers remain
   ordinary committed updates.
-- Never invoke task status sinks, task cancellation hooks, or machine
-  destructors while holding the scheduler registry mutex. A terminal
-  reflection transition detaches its record under the mutex, then releases or
-  cancels the machine after unlocking.
+- Never notify task-status observers, invoke task cancellation hooks, or
+  destroy machines while holding a coordinator/component mutex or runtime
+  mutation admission. Protected status itself is published under the guard;
+  notifications and destruction happen after it is released.
 
 ## Sessions and Workers
 

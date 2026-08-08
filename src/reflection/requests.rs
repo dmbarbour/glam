@@ -7,8 +7,8 @@ use crate::diagnostic::Severity;
 use crate::eval;
 use crate::evaluation::{
     EvalContext, EvaluationTaskCancellation, EvaluationTaskHandle, EvaluationTaskId,
-    EvaluationTaskStatus, EvaluationTaskStatusSink, EvaluationWaitPoll, PendingReflectionTask,
-    PendingTaskPolicy,
+    EvaluationTaskStatus, EvaluationWaitPoll, PendingReflectionTask, PendingTaskPolicy,
+    TaskStatusPublisher, TaskStatusWake,
 };
 use crate::number::Number;
 
@@ -40,25 +40,10 @@ pub enum ReflectionRequest {
 enum ReflectionUpdate {
     Launch {
         task: PendingReflectionTask,
-        publisher: Arc<dyn EvaluationTaskStatusSink>,
+        publisher: TaskStatusPublisher,
     },
     Cancel(EvalContext, EvaluationTaskHandle),
     AcknowledgeError(EvalContext, EvaluationTaskHandle),
-}
-
-struct TaskStatusPublisher {
-    writer: Arc<dyn ReflectionQueryWriter>,
-    handle: Arc<EvaluationQueryHandle>,
-    values: CoreValueFactory,
-}
-
-impl EvaluationTaskStatusSink for TaskStatusPublisher {
-    fn update(&self, status: EvaluationTaskStatus) {
-        self.writer.update_query(
-            &self.handle,
-            Value::from_core(&self.values, task_status_query_value(&self.values, status)),
-        );
-    }
 }
 
 /// Transactional writes and deferred observations for reflection requests.
@@ -154,7 +139,29 @@ pub trait ReflectionServices: Send + Sync {
 /// Narrow runtime capability for completing protected asynchronous queries.
 #[doc(hidden)]
 pub trait ReflectionQueryWriter: Send + Sync {
-    fn update_query(&self, handle: &Arc<EvaluationQueryHandle>, result: Value);
+    fn update_query_guarded(
+        &self,
+        mutation: ReflectionQueryMutation<'_, '_>,
+        handle: &Arc<EvaluationQueryHandle>,
+        result: Value,
+    ) -> Box<dyn FnOnce() + Send>;
+}
+
+/// Opaque proof that a protected query update participates in the caller's
+/// current runtime mutation admission.
+#[doc(hidden)]
+pub struct ReflectionQueryMutation<'guard, 'runtime> {
+    mutation: &'guard crate::runtime::RuntimeMutationGuard<'runtime>,
+}
+
+impl<'guard, 'runtime> ReflectionQueryMutation<'guard, 'runtime> {
+    fn new(mutation: &'guard crate::runtime::RuntimeMutationGuard<'runtime>) -> Self {
+        Self { mutation }
+    }
+
+    pub(crate) fn guard(&self) -> &crate::runtime::RuntimeMutationGuard<'runtime> {
+        self.mutation
+    }
 }
 
 /// A task host that combines specialization transactions with reflection
@@ -370,11 +377,8 @@ where
                         task: pending.handle().clone(),
                         status: result.clone(),
                     });
-                    let publisher = Arc::new(TaskStatusPublisher {
-                        writer: query_writer,
-                        handle: result,
-                        values: eval_context.values().clone(),
-                    });
+                    let publisher =
+                        task_status_publisher(query_writer, result, eval_context.values().clone());
                     transaction.parts().1.reflection_journal().updates.push(
                         ReflectionUpdate::Launch {
                             task: pending,
@@ -402,11 +406,8 @@ where
                         task: pending.handle().clone(),
                         status: result.clone(),
                     });
-                    let publisher = Arc::new(TaskStatusPublisher {
-                        writer: query_writer,
-                        handle: result,
-                        values: eval_context.values().clone(),
-                    });
+                    let publisher =
+                        task_status_publisher(query_writer, result, eval_context.values().clone());
                     let mut journal = S::Journal::default();
                     journal
                         .reflection_journal()
@@ -631,6 +632,21 @@ fn task_status_query_value(values: &CoreValueFactory, status: EvaluationTaskStat
     }
 }
 
+fn task_status_publisher(
+    writer: Arc<dyn ReflectionQueryWriter>,
+    handle: Arc<EvaluationQueryHandle>,
+    values: CoreValueFactory,
+) -> TaskStatusPublisher {
+    TaskStatusPublisher::new(move |mutation, status| {
+        let notify = writer.update_query_guarded(
+            ReflectionQueryMutation::new(mutation),
+            &handle,
+            Value::from_core(&values, task_status_query_value(&values, status)),
+        );
+        TaskStatusWake::new(notify)
+    })
+}
+
 enum TaggedTaskState {
     Launched,
     Blocked,
@@ -822,7 +838,12 @@ mod tests {
     }
 
     impl ReflectionQueryWriter for TestQueryWriter {
-        fn update_query(&self, handle: &Arc<EvaluationQueryHandle>, result: Value) {
+        fn update_query_guarded(
+            &self,
+            _mutation: ReflectionQueryMutation<'_, '_>,
+            handle: &Arc<EvaluationQueryHandle>,
+            result: Value,
+        ) -> Box<dyn FnOnce() + Send> {
             self.updates
                 .lock()
                 .expect("test query updates were poisoned")
@@ -833,6 +854,7 @@ mod tests {
                     .expect("test query store was poisoned")
                     .update_query(handle, result)
             );
+            Box::new(|| {})
         }
     }
 
@@ -882,18 +904,19 @@ mod tests {
             }),
         });
         let role_host_weak = Arc::downgrade(&role_host);
-        let publisher = TaskStatusPublisher {
-            writer: role_host.writer.clone(),
-            handle: handle.clone(),
-            values: values.clone(),
-        };
+        let publisher =
+            task_status_publisher(role_host.writer.clone(), handle.clone(), values.clone());
         drop(role_host);
         assert!(
             role_host_weak.upgrade().is_none(),
             "the status publisher must not retain its originating role host"
         );
 
-        publisher.update(EvaluationTaskStatus::Blocked);
+        let admission = crate::runtime::RuntimeMutationAdmission::new();
+        let mutation = admission.mutation_guard();
+        let wake = publisher.publish_guarded(&mutation, EvaluationTaskStatus::Blocked);
+        drop(mutation);
+        wake.notify();
         let query = store
             .lock()
             .expect("test query store was poisoned")

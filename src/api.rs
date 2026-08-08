@@ -42,9 +42,9 @@ use crate::number::Number;
 use crate::reflection::{
     CommitResult, ConflictAddress, ConflictAnalysisStrategy, ConflictObservationIndex,
     ExactConflictAnalysis, HostSnapshot, ReasoningSessionId, ReflectionEffects,
-    ReflectionQueryWriter, ReflectionServices, ReflectionStore, RuntimeInputEndpointId,
-    RuntimeInputSequence, TaskCommit, TaskEnvironment, TaskHost, VolumeId, task_launcher,
-    volume_effects,
+    ReflectionQueryMutation, ReflectionQueryWriter, ReflectionServices, ReflectionStore,
+    RuntimeInputEndpointId, RuntimeInputSequence, TaskCommit, TaskEnvironment, TaskHost, VolumeId,
+    task_launcher, volume_effects,
 };
 use crate::runtime::{
     EvaluationRuntimeId, RuntimeIds, RuntimeMutationAdmission, RuntimeMutationGuard,
@@ -1456,9 +1456,39 @@ impl ReflectionServices for AssemblerReflectionHost {
 }
 
 impl ReflectionQueryWriter for RuntimeSharedResources {
-    fn update_query(&self, handle: &Arc<crate::reflection::EvaluationQueryHandle>, result: Value) {
-        RuntimeSharedResources::update_query(self, handle, result)
+    fn update_query_guarded(
+        &self,
+        mutation: ReflectionQueryMutation<'_, '_>,
+        handle: &Arc<crate::reflection::EvaluationQueryHandle>,
+        result: Value,
+    ) -> Box<dyn FnOnce() + Send> {
+        result
+            .require_runtime(self.id)
             .expect("reflection query results belong to the runtime");
+        let updated = self
+            .transactions
+            .state
+            .lock()
+            .expect("runtime transaction mutex should not be poisoned")
+            .reflection
+            .update_query(handle, result);
+        assert!(
+            updated,
+            "task status query must remain in its runtime domain"
+        );
+
+        let epoch = self.observations.advance();
+        let work = self.work.upgrade();
+        let scheduler_changed = work
+            .as_ref()
+            .map(|work| work.publish_runtime_observation_guarded(mutation.guard(), epoch));
+        let observations = self.observations.clone();
+        Box::new(move || {
+            observations.notify_all();
+            if let (Some(work), Some(changed)) = (work, scheduler_changed) {
+                work.notify_runtime_observation(changed);
+            }
+        })
     }
 }
 

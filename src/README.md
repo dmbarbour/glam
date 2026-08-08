@@ -260,13 +260,12 @@ weak. Isolated direct clients use a small owner/context wrapper; scheduled
 machine contexts never retain their own owner lease. Both reflection and
 deferred machines reside in coordinator work records while claimable; a
 running claim detaches the machine exclusively, and release either restores it
-before requeueing/blocking or carries it out for terminal destruction. The
-session-side `SessionTaskReportingStore` contains no executable machine or
-failure policy; it retains only transitional task/wait lookup and retirement
-indexes. The coordinator records acknowledgement and current published status
-on active reflection work, and an optional protected-query publisher retains
-only runtime query resources rather than its role host. Unacknowledged
-terminal failures remain in a persistent hierarchy keyed first by
+before requeueing/blocking or carries it out for terminal destruction. There
+is no session-side task registry: the coordinator owns task/wait indexes,
+acknowledgement, and a `TaskTerminalPublisher` containing the wait, current
+status, and optional protected-query publisher. That publisher retains only
+runtime query resources rather than its role host. Unacknowledged terminal
+failures remain in a persistent hierarchy keyed first by
 producer-owner session, so reports select one bucket without making failure
 lifetime depend on the owner lease.
 Final owner drop closes all coordinator records for the demand ID in one

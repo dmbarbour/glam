@@ -16,9 +16,8 @@ use crate::runtime::{
 use super::{
     EvaluationDemandState, EvaluationFailure, EvaluationMachinePoll, EvaluationSession,
     EvaluationSessionId, EvaluationTaskId, EvaluationTaskMachine, EvaluationTaskStatus,
-    EvaluationTaskStatusSink, EvaluationWaitTerminal, EvaluationWaitToken, RuntimeFailureLedger,
-    SessionTaskReportingStore, TaskFailureLedger, TaskStatusReporting, TaskStatusUpdate,
-    task_status_update,
+    EvaluationWaitTerminal, EvaluationWaitToken, RuntimeFailureLedger, TaskFailureLedger,
+    TaskStatusPublisher,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -341,20 +340,67 @@ enum WorkCloseReason {
 }
 
 enum ProducerSettlementObligation {
-    ReflectionTask {
-        wait: EvaluationWaitToken,
-    },
+    ReflectionTask(TaskTerminalPublisher),
     DeferredClaim {
         wait: EvaluationWaitToken,
         producer: DeferredProducer,
     },
 }
 
+struct TaskTerminalPublisher {
+    wait: EvaluationWaitToken,
+    published_status: EvaluationTaskStatus,
+    protected_status: Option<TaskStatusPublisher>,
+}
+
+impl TaskTerminalPublisher {
+    fn new(wait: EvaluationWaitToken) -> Self {
+        Self {
+            wait,
+            published_status: EvaluationTaskStatus::Launched,
+            protected_status: None,
+        }
+    }
+
+    fn attach_status(&mut self, publisher: TaskStatusPublisher) {
+        assert!(
+            self.protected_status.replace(publisher).is_none(),
+            "a reflection task may expose only one status query"
+        );
+    }
+
+    fn update_status(
+        &mut self,
+        status: EvaluationTaskStatus,
+        terminal: bool,
+    ) -> Option<(TaskStatusPublisher, EvaluationTaskStatus)> {
+        if self.published_status == status {
+            return None;
+        }
+        self.published_status = status.clone();
+        let publisher = if terminal {
+            self.protected_status.take()
+        } else {
+            self.protected_status.clone()
+        }?;
+        Some((publisher, status))
+    }
+}
+
+fn terminal_task_status(terminal: &EvaluationWaitTerminal) -> EvaluationTaskStatus {
+    match terminal {
+        EvaluationWaitTerminal::Complete(value) => EvaluationTaskStatus::Complete(value.clone()),
+        EvaluationWaitTerminal::Failed(error) => EvaluationTaskStatus::Failed(error.clone()),
+        EvaluationWaitTerminal::Cancelled => EvaluationTaskStatus::Cancelled,
+        EvaluationWaitTerminal::Abandoned => EvaluationTaskStatus::Abandoned,
+    }
+}
+
 /// Producer state which must be disposed before a work record retires.
 ///
-/// Ordinary terminalization consumes the static producer entry once, then
-/// settles every dynamically registered promise before the transitional
-/// session reporting tail is permitted to retire the work record.
+/// Ordinary terminalization consumes the static producer entry once, publishes
+/// every task terminal surface, then settles dynamically registered promises
+/// before the work record may retire.
 #[derive(Default)]
 struct SettlementObligations {
     producer: Option<ProducerSettlementObligation>,
@@ -371,7 +417,9 @@ struct TaskOwnedPromiseObligation {
 impl SettlementObligations {
     fn reflection_task(wait: EvaluationWaitToken) -> Self {
         Self {
-            producer: Some(ProducerSettlementObligation::ReflectionTask { wait }),
+            producer: Some(ProducerSettlementObligation::ReflectionTask(
+                TaskTerminalPublisher::new(wait),
+            )),
             owned_promises: Vec::new(),
         }
     }
@@ -385,6 +433,13 @@ impl SettlementObligations {
 
     fn take_producer(&mut self) -> Option<ProducerSettlementObligation> {
         self.producer.take()
+    }
+
+    fn task_publisher_mut(&mut self) -> Option<&mut TaskTerminalPublisher> {
+        match self.producer.as_mut()? {
+            ProducerSettlementObligation::ReflectionTask(publisher) => Some(publisher),
+            ProducerSettlementObligation::DeferredClaim { .. } => None,
+        }
     }
 
     fn add_owned_promise(&mut self, obligation: TaskOwnedPromiseObligation) {
@@ -545,7 +600,6 @@ struct TaskFailureReporting {
 struct ReflectionWork {
     task: EvaluationTaskId,
     failure_reporting: TaskFailureReporting,
-    status_reporting: TaskStatusReporting,
     wait: EvaluationWaitToken,
     machine: Option<Box<dyn EvaluationTaskMachine>>,
     block: Option<EvaluationTaskBlock>,
@@ -623,10 +677,7 @@ pub(super) struct ClaimedDeferredWork {
 }
 
 pub(super) enum ClaimedTaskWork {
-    Reflection {
-        reporting: Arc<SessionTaskReportingStore>,
-        claim: ClaimedReflectionWork,
-    },
+    Reflection(ClaimedReflectionWork),
     Deferred(ClaimedDeferredWork),
 }
 
@@ -682,6 +733,7 @@ impl ClaimedReflectionWork {
         self.id
     }
 
+    #[cfg(test)]
     pub(super) fn task(&self) -> EvaluationTaskId {
         self.task
     }
@@ -794,7 +846,7 @@ impl SparkRetirement {
 
 #[derive(Default)]
 struct WorkCoordinatorState {
-    reporting_stores: HashMap<EvaluationSessionId, Arc<SessionTaskReportingStore>>,
+    demand_sessions: HashMap<EvaluationSessionId, Weak<EvaluationDemandState>>,
     failures: RuntimeFailureLedger,
     work: HashMap<EvaluationWorkId, WorkRecord>,
     work_by_session: HashMap<EvaluationSessionId, HashSet<EvaluationWorkId>>,
@@ -818,7 +870,7 @@ struct WorkCoordinatorState {
 ///
 /// Spark payloads and reflection/deferred lifecycle records, including their
 /// claimable machine slots, have stable work records here. Session reporting
-/// stores retain only acknowledgement and published-status state.
+/// registrations retain only weak demand-state liveness and closure state.
 pub(crate) struct EvaluationWorkCoordinator {
     runtime: EvaluationRuntimeId,
     ids: Arc<RuntimeIds>,
@@ -845,7 +897,7 @@ impl fmt::Debug for EvaluationWorkCoordinator {
         formatter
             .debug_struct("EvaluationWorkCoordinator")
             .field("runtime", &self.runtime)
-            .field("session_count", &state.reporting_stores.len())
+            .field("session_count", &state.demand_sessions.len())
             .field("ready_task_count", &state.ready_task_set.len())
             .field("work_count", &state.work.len())
             .field("work_generation", &state.work_generation)
@@ -957,7 +1009,7 @@ impl EvaluationWorkCoordinator {
     }
 
     #[cfg(test)]
-    pub(super) fn task_has_status_sink(&self, task: EvaluationTaskId) -> bool {
+    pub(super) fn task_has_status_publisher(&self, task: EvaluationTaskId) -> bool {
         let state = self
             .state
             .lock()
@@ -966,9 +1018,16 @@ impl EvaluationWorkCoordinator {
             return false;
         };
         state.work.get(work).is_some_and(|record| {
-            reflection_work(record)
-                .status_reporting
-                .status_sink
+            record
+                .obligations
+                .producer
+                .as_ref()
+                .and_then(|producer| match producer {
+                    ProducerSettlementObligation::ReflectionTask(publisher) => {
+                        publisher.protected_status.as_ref()
+                    }
+                    ProducerSettlementObligation::DeferredClaim { .. } => None,
+                })
                 .is_some()
         })
     }
@@ -1018,10 +1077,10 @@ impl EvaluationWorkCoordinator {
 
     /// Attaches the one protected-query publisher created by a committed
     /// public `.task.new` operation.
-    pub(super) fn attach_reflection_status_sink(
+    pub(super) fn attach_reflection_status_publisher(
         &self,
         work: EvaluationWorkId,
-        sink: Arc<dyn EvaluationTaskStatusSink>,
+        publisher: TaskStatusPublisher,
     ) -> bool {
         let _mutation = self.admission.mutation_guard();
         let mut state = self
@@ -1031,23 +1090,23 @@ impl EvaluationWorkCoordinator {
         let Some(record) = state.work.get_mut(&work) else {
             return false;
         };
-        let reflection = reflection_work_mut(record);
-        assert!(
-            reflection.status_reporting.status_sink.is_none(),
-            "a reflection task may expose only one status query"
-        );
-        reflection.status_reporting.status_sink = Some(sink);
+        record
+            .obligations
+            .task_publisher_mut()
+            .expect("status publishers belong only to reflection tasks")
+            .attach_status(publisher);
         true
     }
 
-    /// Advances one task's protected-query status without retaining its role
-    /// host in the coordinator record. The returned update is delivered only
-    /// after coordinator state and mutation admission have been released.
+    /// Advances one task's protected-query status under one runtime mutation
+    /// admission without retaining its role host in the coordinator record.
+    /// External notification happens only after mutation admission is
+    /// released.
     pub(super) fn update_reflection_status(
         &self,
         work: EvaluationWorkId,
         status: EvaluationTaskStatus,
-    ) -> Option<TaskStatusUpdate> {
+    ) {
         let mutation = self.admission.mutation_guard();
         let update = {
             let mut state = self
@@ -1058,10 +1117,17 @@ impl EvaluationWorkCoordinator {
                 .work
                 .get_mut(&work)
                 .expect("reported reflection work must remain registered");
-            task_status_update(&mut reflection_work_mut(record).status_reporting, status)
+            record
+                .obligations
+                .task_publisher_mut()
+                .expect("active reflection work must retain its terminal publisher")
+                .update_status(status, false)
         };
+        let wake = update.map(|(publisher, status)| publisher.publish_guarded(&mutation, status));
         drop(mutation);
-        update
+        if let Some(wake) = wake {
+            wake.notify();
+        }
     }
 
     #[cfg(test)]
@@ -1082,8 +1148,8 @@ impl EvaluationWorkCoordinator {
         debug_assert_eq!(session.values.runtime_id(), self.runtime);
         self.publish_transition(|state| {
             let replaced = state
-                .reporting_stores
-                .insert(session.id, session.reporting.clone());
+                .demand_sessions
+                .insert(session.id, Arc::downgrade(&session.demand));
             assert!(
                 replaced.is_none(),
                 "evaluation session identities must be unique within a runtime"
@@ -1186,7 +1252,7 @@ impl EvaluationWorkCoordinator {
                     }
                 }
             }
-            changed |= prune_closed_reporting_store(&mut state, session);
+            changed |= prune_closed_session_registration(&mut state, session);
             if changed {
                 state.work_generation = state.work_generation.wrapping_add(1);
             }
@@ -1208,19 +1274,6 @@ impl EvaluationWorkCoordinator {
         }
     }
 
-    #[cfg(test)]
-    pub(super) fn registered_task_reporting_store(
-        &self,
-        session: EvaluationSessionId,
-    ) -> Option<Arc<SessionTaskReportingStore>> {
-        self.state
-            .lock()
-            .expect("evaluation work coordinator was poisoned")
-            .reporting_stores
-            .get(&session)
-            .cloned()
-    }
-
     pub(super) fn submit_spark(&self, session: Arc<EvaluationDemandState>, value: Value) {
         debug_assert_eq!(session.values.runtime_id(), self.runtime);
         let id = EvaluationWorkId(self.ids.evaluation_work());
@@ -1234,12 +1287,7 @@ impl EvaluationWorkCoordinator {
                 .state
                 .lock()
                 .expect("evaluation work coordinator was poisoned");
-            if state.spark_workers == 0
-                || state
-                    .reporting_stores
-                    .get(&session.id)
-                    .is_none_or(|store| store.is_closed())
-            {
+            if state.spark_workers == 0 || demand_session_is_closed(&state, session.id) {
                 false
             } else {
                 let session_id = session.id;
@@ -1396,10 +1444,7 @@ impl EvaluationWorkCoordinator {
                 .lock()
                 .expect("evaluation work coordinator was poisoned");
             let id = match claimed {
-                ClaimedTaskWork::Reflection {
-                    reporting: _,
-                    mut claim,
-                } => {
+                ClaimedTaskWork::Reflection(mut claim) => {
                     let record = state
                         .work
                         .get_mut(&claim.id)
@@ -1613,11 +1658,7 @@ impl EvaluationWorkCoordinator {
                 .state
                 .lock()
                 .expect("evaluation work coordinator was poisoned");
-            if state
-                .reporting_stores
-                .get(&session.id)
-                .is_none_or(|store| store.is_closed())
-            {
+            if demand_session_is_closed(&state, session.id) {
                 return Err(Arc::from("evaluation demand session is closed"));
             }
             let record = WorkRecord {
@@ -1632,10 +1673,6 @@ impl EvaluationWorkCoordinator {
                     failure_reporting: TaskFailureReporting {
                         owner_session: session.id,
                         acknowledged: false,
-                    },
-                    status_reporting: TaskStatusReporting {
-                        published_status: EvaluationTaskStatus::Launched,
-                        status_sink: None,
                     },
                     wait: wait.clone(),
                     machine: None,
@@ -1876,8 +1913,8 @@ impl EvaluationWorkCoordinator {
     }
 
     /// Claims one exact task dependency and detaches its opaque machine from
-    /// the coordinator record. Reflection additionally retains its reporting
-    /// store for status publication; deferred work has no such tail.
+    /// the coordinator record. All reporting identity remains in the stable
+    /// work record while the machine is claimed.
     pub(super) fn claim_task(&self, task: EvaluationTaskId) -> Option<ClaimedTaskWork> {
         let mutation = self.admission.mutation_guard();
         let claimed = {
@@ -2098,11 +2135,7 @@ impl EvaluationWorkCoordinator {
                 .state
                 .lock()
                 .expect("evaluation work coordinator was poisoned");
-            if state
-                .reporting_stores
-                .get(&session.id)
-                .is_none_or(|store| store.is_closed())
-            {
+            if demand_session_is_closed(&state, session.id) {
                 return Err(Arc::from("evaluation demand session is closed"));
             }
             if let Some(id) = state.deferred_by_value.get(&deferred).copied() {
@@ -2548,8 +2581,9 @@ impl EvaluationWorkCoordinator {
     }
 
     /// Consumes one terminalizing work record's producer obligation and
-    /// publishes all producer-owned terminal state before its transitional
-    /// session reporting tail may retire the record.
+    /// publishes its failure-ledger decision, wait terminal, and protected
+    /// status query under one runtime mutation admission before the record may
+    /// retire.
     pub(super) fn settle_terminal_work(
         self: &Arc<Self>,
         work: EvaluationWorkId,
@@ -2557,12 +2591,12 @@ impl EvaluationWorkCoordinator {
         promise_failure: Arc<EvaluationFailure>,
     ) -> EvaluationWaitTerminal {
         let mutation = self.admission.mutation_guard();
-        let producer = {
+        let (producer, status_update) = {
             let mut state = self
                 .state
                 .lock()
                 .expect("evaluation work coordinator was poisoned");
-            let (producer, failure) = {
+            let (producer, failure, status_update) = {
                 let record = state
                     .work
                     .get_mut(&work)
@@ -2580,26 +2614,36 @@ impl EvaluationWorkCoordinator {
                     }
                     _ => None,
                 };
-                let producer = record
+                let mut producer = record
                     .obligations
                     .take_producer()
                     .expect("work producer obligations must be consumed exactly once");
-                (producer, failure)
+                let status_update = match &mut producer {
+                    ProducerSettlementObligation::ReflectionTask(publisher) => {
+                        publisher.update_status(terminal_task_status(&terminal), true)
+                    }
+                    ProducerSettlementObligation::DeferredClaim { .. } => None,
+                };
+                (producer, failure, status_update)
             };
             if let Some((owner, task, failure)) = failure {
                 insert_task_failure(&mut state.failures, owner, task, failure);
                 state.work_generation = state.work_generation.wrapping_add(1);
             }
-            producer
+            (producer, status_update)
         };
         let wait = match &producer {
-            ProducerSettlementObligation::ReflectionTask { wait } => wait,
+            ProducerSettlementObligation::ReflectionTask(publisher) => &publisher.wait,
             ProducerSettlementObligation::DeferredClaim { wait, producer } => {
                 let _producer = producer.id();
                 wait
             }
         };
         let (terminal, wake) = wait.publish_terminal_guarded(self, &mutation, terminal);
+        let status_wake = status_update.map(|(publisher, status)| {
+            debug_assert_eq!(status, terminal_task_status(&terminal));
+            publisher.publish_guarded(&mutation, status)
+        });
         drop(mutation);
 
         // A task-owned promise is assigned synchronously by its owning machine
@@ -2630,6 +2674,9 @@ impl EvaluationWorkCoordinator {
         // mutation admission have been released.
         drop(producer);
         wake.notify();
+        if let Some(status_wake) = status_wake {
+            status_wake.notify();
+        }
         terminal
     }
 
@@ -2992,8 +3039,52 @@ impl EvaluationWorkCoordinator {
         self.state
             .lock()
             .expect("evaluation work coordinator was poisoned")
-            .reporting_stores
+            .demand_sessions
             .len()
+    }
+
+    #[cfg(test)]
+    pub(super) fn reflection_work_for_wait(
+        &self,
+        wait: &EvaluationWaitToken,
+    ) -> Option<EvaluationWorkId> {
+        self.state
+            .lock()
+            .expect("evaluation work coordinator was poisoned")
+            .reflection_by_wait
+            .get(wait)
+            .copied()
+    }
+
+    #[cfg(test)]
+    pub(super) fn reflection_counts(&self, session: EvaluationSessionId) -> (usize, usize) {
+        let state = self
+            .state
+            .lock()
+            .expect("evaluation work coordinator was poisoned");
+        let active = state
+            .work_by_session
+            .get(&session)
+            .into_iter()
+            .flatten()
+            .filter(|id| {
+                state
+                    .work
+                    .get(id)
+                    .is_some_and(|record| matches!(record.kind, WorkKind::Reflection(_)))
+            })
+            .count();
+        let indexed = state
+            .reflection_by_task
+            .values()
+            .filter(|id| {
+                state
+                    .work
+                    .get(id)
+                    .is_some_and(|record| record.demand_session == session)
+            })
+            .count();
+        (active, indexed)
     }
 
     #[cfg(test)]
@@ -3291,10 +3382,7 @@ fn claim_reflection_task(
     state: &mut WorkCoordinatorState,
     id: EvaluationWorkId,
 ) -> Option<ClaimedTaskWork> {
-    let session = state.work.get(&id)?.demand_session;
-    let reporting = state.reporting_stores.get(&session)?.clone();
-    let claim = claim_reflection(state, id)?;
-    Some(ClaimedTaskWork::Reflection { reporting, claim })
+    claim_reflection(state, id).map(ClaimedTaskWork::Reflection)
 }
 
 fn claim_reflection(
@@ -3452,10 +3540,10 @@ fn detach_reflection(
         panic!("reflection retirement must contain reflection work")
     };
     if let Some(obligation) = discarded {
-        let ProducerSettlementObligation::ReflectionTask { wait } = obligation else {
+        let ProducerSettlementObligation::ReflectionTask(publisher) = obligation else {
             panic!("reflection work must retain a reflection task-wait obligation")
         };
-        assert_eq!(wait, reflection.wait);
+        assert_eq!(publisher.wait, reflection.wait);
     }
     assert_eq!(
         state.reflection_by_task.remove(&reflection.task),
@@ -3473,7 +3561,7 @@ fn detach_reflection(
             state.work_by_session.remove(&record.demand_session);
         }
     }
-    prune_closed_reporting_store(state, record.demand_session);
+    prune_closed_session_registration(state, record.demand_session);
     reflection.machine
 }
 
@@ -3654,31 +3742,23 @@ fn detach_deferred(state: &mut WorkCoordinatorState, id: EvaluationWorkId) {
             state.work_by_session.remove(&record.demand_session);
         }
     }
-    prune_closed_reporting_store(state, record.demand_session);
+    prune_closed_session_registration(state, record.demand_session);
 }
 
-fn prune_closed_reporting_store(
+fn demand_session_is_closed(state: &WorkCoordinatorState, session: EvaluationSessionId) -> bool {
+    state
+        .demand_sessions
+        .get(&session)
+        .and_then(Weak::upgrade)
+        .is_none_or(|demand| demand.is_closed())
+}
+
+fn prune_closed_session_registration(
     state: &mut WorkCoordinatorState,
     session: EvaluationSessionId,
 ) -> bool {
-    let has_reflection_work = state
-        .work_by_session
-        .get(&session)
-        .into_iter()
-        .flatten()
-        .any(|id| {
-            state
-                .work
-                .get(id)
-                .is_some_and(|record| matches!(record.kind, WorkKind::Reflection(_)))
-        });
-    if !has_reflection_work
-        && state
-            .reporting_stores
-            .get(&session)
-            .is_some_and(|store| store.is_closed())
-    {
-        state.reporting_stores.remove(&session);
+    if demand_session_is_closed(state, session) {
+        state.demand_sessions.remove(&session);
         true
     } else {
         false
@@ -3765,7 +3845,7 @@ fn detach_spark(state: &mut WorkCoordinatorState, id: EvaluationWorkId) -> Optio
             state.work_by_session.remove(&record.demand_session);
         }
     }
-    prune_closed_reporting_store(state, record.demand_session);
+    prune_closed_session_registration(state, record.demand_session);
     let WorkKind::Spark(mut spark) = record.kind else {
         unreachable!("spark retirement must contain spark work")
     };
@@ -4205,7 +4285,7 @@ mod tests {
         coordinator: &EvaluationWorkCoordinator,
         session: EvaluationSessionId,
     ) -> ClaimedReflectionWork {
-        let ClaimedTaskWork::Reflection { claim: claimed, .. } = coordinator
+        let ClaimedTaskWork::Reflection(claimed) = coordinator
             .claim_ready_task_for_session(session)
             .expect("queued reflection work should be claimable")
         else {
@@ -4399,13 +4479,12 @@ mod tests {
             .expect("obligation wait identity should allocate");
 
         let mut reflection = SettlementObligations::reflection_task(wait.clone());
-        let Some(ProducerSettlementObligation::ReflectionTask {
-            wait: obligation_wait,
-        }) = reflection.take_producer()
+        let Some(ProducerSettlementObligation::ReflectionTask(publisher)) =
+            reflection.take_producer()
         else {
             panic!("reflection inventory should contain its task wait")
         };
-        assert_eq!(obligation_wait, wait);
+        assert_eq!(publisher.wait, wait);
         assert!(reflection.take_producer().is_none());
 
         let lazy = LazyValue::deferred(&session.values, "static obligation", |_| {
@@ -4689,20 +4768,13 @@ mod tests {
         assert_eq!(coordinator.registered_session_count(), 1);
         assert_eq!(coordinator.ready_task_count(), 1);
 
-        let CoordinatorSelection::Task(ClaimedTaskWork::Reflection {
-            reporting: selected,
-            claim: claimed,
-        }) = coordinator.select()
+        let CoordinatorSelection::Task(ClaimedTaskWork::Reflection(claimed)) = coordinator.select()
         else {
             panic!("the exact ready task should be selected")
         };
-        assert!(Arc::ptr_eq(&selected, &session.reporting));
         assert_eq!(coordinator.ready_task_count(), 0);
 
-        coordinator.requeue_unpolled_task(ClaimedTaskWork::Reflection {
-            reporting: selected,
-            claim: claimed,
-        });
+        coordinator.requeue_unpolled_task(ClaimedTaskWork::Reflection(claimed));
         assert!(coordinator.terminalize_reflection(work));
         settle_test_reflection(&coordinator, work);
         drop(session);
@@ -4759,7 +4831,7 @@ mod tests {
             }]
         ));
 
-        let ClaimedTaskWork::Reflection { claim: claimed, .. } = coordinator
+        let ClaimedTaskWork::Reflection(claimed) = coordinator
             .claim_ready_task_for_session(session.id)
             .expect("queued reflection work should be claimable")
         else {
@@ -5464,7 +5536,7 @@ mod tests {
             .reserve_reflection(&observer_session, observer_task, observer_wait)
             .expect("open observer session should reserve reflection work");
         activate_test_reflection(&coordinator, observer_work);
-        let ClaimedTaskWork::Reflection { claim: claimed, .. } = coordinator
+        let ClaimedTaskWork::Reflection(claimed) = coordinator
             .claim_ready_task_for_session(observer_session.id)
             .expect("observer reflection work should be ready")
         else {

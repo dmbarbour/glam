@@ -14,8 +14,9 @@ pub use search::{
 };
 
 pub use requests::{
-    ReflectionHost, ReflectionJournal, ReflectionQueryWriter, ReflectionRequest,
-    ReflectionServices, ReflectionTransaction, handle_reflection_request, reflection_request_specs,
+    ReflectionHost, ReflectionJournal, ReflectionQueryMutation, ReflectionQueryWriter,
+    ReflectionRequest, ReflectionServices, ReflectionTransaction, handle_reflection_request,
+    reflection_request_specs,
 };
 pub(crate) use requests::{environment_log_request_specs, parse_severity, prepare_message};
 pub use store::{
@@ -3965,7 +3966,12 @@ mod tests {
     }
 
     impl ReflectionQueryWriter for TestQueryWriter {
-        fn update_query(&self, handle: &Arc<EvaluationQueryHandle>, result: PublicValue) {
+        fn update_query_guarded(
+            &self,
+            _mutation: ReflectionQueryMutation<'_, '_>,
+            handle: &Arc<EvaluationQueryHandle>,
+            result: PublicValue,
+        ) -> Box<dyn FnOnce() + Send> {
             let updated = {
                 let mut state = self.state.lock().unwrap();
                 let updated = state.store.update_query(handle, result);
@@ -3974,12 +3980,14 @@ mod tests {
                 }
                 updated
             };
-            if updated {
-                let coordinator = self.state.lock().unwrap().store.values().work_coordinator();
+            let coordinator = updated
+                .then(|| self.state.lock().unwrap().store.values().work_coordinator())
+                .flatten();
+            Box::new(move || {
                 if let Some(coordinator) = coordinator {
                     coordinator.publish_runtime_observation();
                 }
-            }
+            })
         }
     }
 
