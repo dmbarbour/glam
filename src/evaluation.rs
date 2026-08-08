@@ -108,7 +108,6 @@ fn allocate_wait_token(
         id,
         runtime: session.values.runtime_id(),
         owner_id: session.id,
-        owner: Arc::downgrade(session),
         producer,
         terminal: OnceLock::new(),
         completion: CompletionSubscriptions::for_wait(
@@ -127,7 +126,6 @@ struct EvaluationWaitState {
     id: NonZeroU64,
     runtime: EvaluationRuntimeId,
     owner_id: EvaluationSessionId,
-    owner: Weak<EvaluationDemandState>,
     producer: EvaluationTaskId,
     terminal: OnceLock<EvaluationWaitTerminal>,
     completion: CompletionSubscriptions,
@@ -161,13 +159,12 @@ impl EvaluationWaitToken {
         self.0.producer
     }
 
-    fn owner(&self) -> Option<Arc<EvaluationDemandState>> {
-        self.0.owner.upgrade()
+    fn coordinator(&self) -> Option<Arc<EvaluationWorkCoordinator>> {
+        self.0.completion.coordinator()
     }
 
     fn belongs_to(&self, session: &Arc<EvaluationDemandState>) -> bool {
-        self.owner()
-            .is_some_and(|owner| Arc::ptr_eq(session, &owner))
+        self.runtime_id() == session.values.runtime_id() && self.owner_id() == session.id
     }
 
     fn terminal_poll(&self) -> Option<EvaluationWaitPoll> {
@@ -211,6 +208,41 @@ impl EvaluationWaitToken {
     fn notify_terminal(&self) {
         debug_assert!(self.0.terminal.get().is_some());
         self.0.completion.notify_published();
+    }
+
+    /// Abandons the transient deferred-producer chain retained solely for a
+    /// best-effort spark dependency.
+    ///
+    /// The wait cell routes through the runtime coordinator rather than its
+    /// originating demand state. Owner identity remains scalar provenance;
+    /// dropping a task handle or wait cannot retain or recover the owner
+    /// session lease.
+    fn abandon_deferred_producer(&self) {
+        let Some(coordinator) = self.coordinator() else {
+            return;
+        };
+        let owner = self.owner_id();
+        let mut wait = self.clone();
+        loop {
+            if wait.owner_id() != owner || wait.terminal_poll().is_some() {
+                return;
+            }
+            let Some(abandoned) = coordinator.abandon_deferred_wait(&wait) else {
+                return;
+            };
+            let terminal = coordinator.settle_terminal_work(
+                abandoned.id,
+                EvaluationWaitTerminal::Abandoned,
+                evaluation_failure("deferred fixpoint producer was abandoned"),
+            );
+            debug_assert_eq!(wait.terminal_poll(), Some(terminal.to_poll()));
+            coordinator.retire_deferred(abandoned.id);
+            drop(abandoned.machine);
+            let Some(dependency) = abandoned.dependency else {
+                return;
+            };
+            wait = dependency;
+        }
     }
 
     pub(crate) fn subscribe_work(
@@ -434,16 +466,41 @@ impl Hash for EvaluationWaitToken {
 pub(crate) struct EvaluationTaskHandle {
     id: EvaluationTaskId,
     work: EvaluationWorkId,
+    owner_session: EvaluationSessionId,
+    coordinator: Weak<EvaluationWorkCoordinator>,
     wait: EvaluationWaitToken,
 }
 
 impl EvaluationTaskHandle {
+    fn new(
+        coordinator: &Arc<EvaluationWorkCoordinator>,
+        owner_session: EvaluationSessionId,
+        id: EvaluationTaskId,
+        work: EvaluationWorkId,
+        wait: EvaluationWaitToken,
+    ) -> Self {
+        debug_assert_eq!(coordinator.runtime_id(), wait.runtime_id());
+        debug_assert_eq!(owner_session, wait.owner_id());
+        debug_assert_eq!(id, wait.producer());
+        Self {
+            id,
+            work,
+            owner_session,
+            coordinator: Arc::downgrade(coordinator),
+            wait,
+        }
+    }
+
     pub(crate) fn id(&self) -> EvaluationTaskId {
         self.id
     }
 
     pub(crate) fn session_id(&self) -> EvaluationSessionId {
-        self.wait.owner_id()
+        self.owner_session
+    }
+
+    pub(crate) fn runtime_id(&self) -> EvaluationRuntimeId {
+        self.wait.runtime_id()
     }
 
     #[cfg(test)]
@@ -454,10 +511,13 @@ impl EvaluationTaskHandle {
     /// Transfers reporting responsibility for a propagated terminal failure
     /// from the task ledger to the consumer of this handle.
     pub(crate) fn acknowledge_propagated_failure(&self) {
-        let Some(owner) = self.wait.owner() else {
-            return;
-        };
-        owner.acknowledge_reflection_task_error(self);
+        self.acknowledge_failure();
+    }
+
+    fn acknowledge_failure(&self) {
+        if let Some(coordinator) = self.coordinator.upgrade() {
+            coordinator.acknowledge_task_failure(self.owner_session, self.id);
+        }
     }
 }
 
@@ -467,6 +527,7 @@ impl fmt::Debug for EvaluationTaskHandle {
             .debug_struct("EvaluationTaskHandle")
             .field("task", &self.id.get())
             .field("work", &self.work.get())
+            .field("runtime", &self.runtime_id())
             .field("session", &self.session_id().get())
             .finish_non_exhaustive()
     }
@@ -847,39 +908,6 @@ impl EvaluationDemandState {
 
     fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Acquire)
-    }
-
-    fn acknowledge_reflection_task_error(&self, task: &EvaluationTaskHandle) {
-        if let Some(coordinator) = self.coordinator() {
-            coordinator.acknowledge_task_failure(task.session_id(), task.id());
-        }
-    }
-
-    fn abandon_spark_wait(&self, wait: &EvaluationWaitToken) {
-        let Some(coordinator) = self.coordinator() else {
-            return;
-        };
-        let mut wait = wait.clone();
-        loop {
-            if wait.owner_id() != self.id || wait.terminal_poll().is_some() {
-                return;
-            }
-            let Some(abandoned) = coordinator.abandon_deferred_wait(&wait) else {
-                return;
-            };
-            let terminal = coordinator.settle_terminal_work(
-                abandoned.id,
-                EvaluationWaitTerminal::Abandoned,
-                evaluation_failure("deferred fixpoint producer was abandoned"),
-            );
-            debug_assert_eq!(wait.terminal_poll(), Some(terminal.to_poll()));
-            coordinator.retire_deferred(abandoned.id);
-            drop(abandoned.machine);
-            let Some(dependency) = abandoned.dependency else {
-                return;
-            };
-            wait = dependency;
-        }
     }
 
     fn closed_run_report(&self) -> EvaluationSessionRun {
@@ -1549,7 +1577,13 @@ impl EvalContext {
             coordinator.activate_reflection(work),
             "fresh reflection reservation must activate"
         );
-        Ok(EvaluationTaskHandle { id, work, wait })
+        Ok(EvaluationTaskHandle::new(
+            &coordinator,
+            self.session.id,
+            id,
+            work,
+            wait,
+        ))
     }
 
     fn reserve_task(&self) -> Result<EvaluationTaskHandle, Arc<str>> {
@@ -1557,7 +1591,13 @@ impl EvalContext {
         let id = allocate_task_id(self.values())?;
         let wait = allocate_wait_token(&self.session, id)?;
         let work = coordinator.reserve_reflection(&self.session, id, wait.clone())?;
-        Ok(EvaluationTaskHandle { id, work, wait })
+        Ok(EvaluationTaskHandle::new(
+            &coordinator,
+            self.session.id,
+            id,
+            work,
+            wait,
+        ))
     }
 
     fn activate_reflection_task(
@@ -1711,11 +1751,28 @@ impl EvalContext {
         let id = allocate_task_id(self.values())?;
         let wait = allocate_wait_token(&self.session, id)?;
         let work = coordinator.register_dormant_reflection(&self.session, id, wait.clone())?;
-        Ok(EvaluationTaskHandle { id, work, wait })
+        Ok(EvaluationTaskHandle::new(
+            &coordinator,
+            self.session.id,
+            id,
+            work,
+            wait,
+        ))
     }
 
     pub(crate) fn poll_reflection_task(&self, task: &EvaluationTaskHandle) -> EvaluationWaitPoll {
         self.poll_wait(&task.wait)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn attach_task_status_publisher(
+        &self,
+        task: &EvaluationTaskHandle,
+        publisher: TaskStatusPublisher,
+    ) -> bool {
+        self.coordinator().is_some_and(|coordinator| {
+            coordinator.attach_reflection_status_publisher(task.work, publisher)
+        })
     }
 
     pub(crate) fn owns_task(&self, task: &EvaluationTaskHandle) -> bool {
@@ -1763,7 +1820,7 @@ impl EvalContext {
         if !self.owns_task(task) {
             return false;
         }
-        self.session.acknowledge_reflection_task_error(task);
+        task.acknowledge_failure();
         true
     }
 
@@ -1792,9 +1849,6 @@ impl EvalContext {
         }
         if let Some(terminal) = wait.terminal_poll() {
             return terminal;
-        }
-        if wait.owner().is_none_or(|owner| owner.is_closed()) {
-            return EvaluationWaitPoll::Abandoned;
         }
         EvaluationWaitPoll::Failed(evaluation_failure(
             "evaluation wait token is no longer registered",
@@ -2144,7 +2198,9 @@ impl EvaluationSession {
                     session: wait.owner_id(),
                     wait: wait.get(),
                     live_cross_session: wait.owner_id() != self.id
-                        && wait.owner().is_some_and(|owner| !owner.is_closed()),
+                        && self.coordinator().is_some_and(|coordinator| {
+                            coordinator.demand_session_is_open(wait.owner_id())
+                        }),
                 });
             }
             let Some(next) = self.task_dependency(wait.producer()) else {
@@ -2583,6 +2639,26 @@ mod tests {
     }
 
     #[test]
+    fn unregistered_nonterminal_wait_is_not_inferred_as_owner_abandonment() {
+        let (coordinator, _executor) =
+            test_execution_resources(0).expect("test execution resources should build");
+        let owner = EvaluationSession::shared(&coordinator);
+        let context = EvalContext::new(&owner);
+        let task = allocate_task_id(context.values()).expect("test task identity should allocate");
+        let wait = allocate_wait_token(&context.session, task)
+            .expect("unregistered test wait should allocate");
+
+        drop(owner);
+        let EvaluationWaitPoll::Failed(failure) = context.poll_wait(&wait) else {
+            panic!("an unregistered nonterminal wait must be an invariant failure");
+        };
+        assert_eq!(
+            failure.to_string(),
+            "evaluation wait token is no longer registered"
+        );
+    }
+
+    #[test]
     fn blocked_machine_context_does_not_retain_its_owner_lease() {
         let (coordinator, _executor) =
             test_execution_resources(0).expect("test execution resources should build");
@@ -2605,6 +2681,56 @@ mod tests {
             EvaluationWaitPoll::Abandoned
         ));
         assert_eq!(coordinator.registered_session_count(), 0);
+    }
+
+    #[test]
+    fn task_handle_acknowledges_terminal_failure_after_owner_lease_closes() {
+        let (coordinator, _executor) =
+            test_execution_resources(0).expect("test execution resources should build");
+        let owner = EvaluationSession::shared(&coordinator);
+        let owner_weak = Arc::downgrade(&owner);
+        let owner_id = owner.id;
+        let context = EvalContext::new(&owner);
+        let demand_weak = Arc::downgrade(&context.session);
+        let task = context
+            .schedule_task(|_| Ok(Box::new(Fail)))
+            .expect("failed task should schedule");
+
+        assert!(matches!(
+            context.run_until_quiescent(),
+            EvaluationSessionRun::Complete(_)
+        ));
+        assert!(
+            coordinator
+                .failure_snapshot(owner_id)
+                .contains_key(&task.id())
+        );
+        assert!(matches!(
+            task.wait.terminal_poll(),
+            Some(EvaluationWaitPoll::Failed(_))
+        ));
+
+        drop(context);
+        drop(owner);
+        assert!(owner_weak.upgrade().is_none());
+        assert!(
+            demand_weak.upgrade().is_none(),
+            "a terminal task handle must not retain its former demand state"
+        );
+        assert_eq!(task.runtime_id(), coordinator.runtime_id());
+        assert_eq!(task.session_id(), owner_id);
+
+        task.acknowledge_propagated_failure();
+        assert!(
+            !coordinator
+                .failure_snapshot(owner_id)
+                .contains_key(&task.id()),
+            "the handle reporting identity must route acknowledgement without recovering its owner"
+        );
+        assert!(matches!(
+            task.wait.terminal_poll(),
+            Some(EvaluationWaitPoll::Failed(_))
+        ));
     }
 
     #[test]

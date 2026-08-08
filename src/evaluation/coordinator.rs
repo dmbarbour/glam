@@ -164,6 +164,17 @@ impl CompletionWake {
 }
 
 impl CompletionSubscriptions {
+    pub(crate) fn coordinator(&self) -> Option<Arc<EvaluationWorkCoordinator>> {
+        let coordinator = self
+            .coordinator
+            .lock()
+            .expect("runtime work-coordinator binding was poisoned")
+            .clone();
+        coordinator
+            .upgrade()
+            .filter(|coordinator| coordinator.runtime == self.runtime)
+    }
+
     pub(crate) fn for_promise(
         runtime: EvaluationRuntimeId,
         promise: PromiseId,
@@ -209,12 +220,7 @@ impl CompletionSubscriptions {
         &self,
         publish_terminal: impl FnOnce() -> Result<T, E>,
     ) -> Result<T, E> {
-        let coordinator = self
-            .coordinator
-            .lock()
-            .expect("runtime work-coordinator binding was poisoned")
-            .upgrade()
-            .filter(|coordinator| coordinator.runtime == self.runtime);
+        let coordinator = self.coordinator();
         let Some(coordinator) = coordinator else {
             let result = publish_terminal()?;
             self.registrations
@@ -544,11 +550,7 @@ impl WorkDependency {
 
     fn abandon(self) {
         match self {
-            Self::Wait(wait) => {
-                if let Some(owner) = wait.owner() {
-                    owner.abandon_spark_wait(&wait);
-                }
-            }
+            Self::Wait(wait) => wait.abandon_deferred_producer(),
             Self::Promise(_) => {}
             #[cfg(test)]
             Self::Test(_) => {}
@@ -3032,6 +3034,19 @@ impl EvaluationWorkCoordinator {
         }
         drop(mutation);
         self.work_available.notify_all();
+    }
+
+    pub(super) fn demand_session_is_open(&self, session: EvaluationSessionId) -> bool {
+        let demand = self
+            .state
+            .lock()
+            .expect("evaluation work coordinator was poisoned")
+            .demand_sessions
+            .get(&session)
+            .cloned();
+        demand
+            .and_then(|demand| demand.upgrade())
+            .is_some_and(|demand| !demand.is_closed())
     }
 
     #[cfg(test)]

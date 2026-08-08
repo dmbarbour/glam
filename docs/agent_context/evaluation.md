@@ -90,11 +90,15 @@ control-flow overview.
   A raced source snapshot may register one redundant producer; it must observe
   the canonical cache and retire harmlessly. Every
   scheduler wait token shares a lock-free terminal cell plus a weak exact-work
-  subscription set. Terminal state is published and producer indexes retire
+  subscription set routed through the runtime coordinator. It retains scalar
+  runtime, owner-session, and producer identity, but no weak demand-state
+  route. Terminal state is published and producer indexes retire
   through the owning coordinator/store transition; exact subscribers detach
   and notify the coordinator only after unlocking. Polling checks the cell
-  around registry lookup, so a terminal result outlives the weakly held demand
-  state while a pending wait does not keep its external owner alive. Terminal
+  around registry lookup, so a terminal result outlives its former demand
+  state while a pending wait cannot recover or keep its external owner alive.
+  An unregistered nonterminal wait is an invariant failure; owner closure must
+  publish abandonment before retirement. Terminal
   reflection records and their task-ID indexes are retired immediately. A
   wait-blocked spark subscribes its stable work ID and epoch directly to this
   source; unrelated task progress must not wake it.
@@ -115,8 +119,9 @@ control-flow overview.
   the external `EvaluationSession` lease. The closed flag is a fast rejection;
   coordinator reservation must repeat the authoritative open-session check
   under its state transition so closure and admission have a defined winner.
-- A weak wait owner disappearing is `Abandoned`, never an inferred evaluation
-  failure. Interpret abandonment according to the producer obligation:
+- Owner-session closure publishes `Abandoned`; it is never inferred from a
+  failed weak-owner upgrade. Interpret abandonment according to the producer
+  obligation:
   reflection task handles retain a terminal abandoned status; reusable lazy
   claims and host-promise followers may be replaced without poisoning their
   value; unresolved task-owned promises fail because their sole responsible
@@ -217,7 +222,8 @@ control-flow overview.
   public or joinable. `meta_refl` is the evaluator production use of the
   result-producing form; its result remains hidden behind metadata carriers.
 - When a demand-owned reflection task failure is propagated into its lazy
-  consumer, the task handle acknowledges the owner's reporting ledger,
+  consumer, the task handle acknowledges the owner's reporting ledger through
+  its scalar reporting identity and weak runtime-coordinator route,
   including when demand transfers through an observer in another session of
   the same runtime. If nobody observes the failure, it remains unacknowledged
   and is reported during reasoning drain.
@@ -225,8 +231,10 @@ control-flow overview.
   drive that task: pending work becomes a cross-session dependency in the
   local lazy-task record, while a terminal result transfers demand to the
   target. Both sessions are in the same runtime; another runtime rejects the
-  value before demand. Wait tokens retain the owner weakly plus stable session
-  and producer IDs, so a dropped owner is a terminal failure and live
+  value before demand. Wait tokens retain stable runtime, session, and
+  producer IDs but no owner reference; coordinator registration determines
+  live cross-session work, and exhaustive closure publication makes a dropped
+  owner terminal. Live
   cross-session work remains visible in quiescence reports without becoming a
   cached `LazyFailure`.
 - Opaque reflection task values retain `EvaluationTaskHandle`, not a bare task

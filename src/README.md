@@ -268,6 +268,13 @@ runtime query resources rather than its role host. Unacknowledged terminal
 failures remain in a persistent hierarchy keyed first by
 producer-owner session, so reports select one bucket without making failure
 lifetime depend on the owner lease.
+Every public task-handle clone shares one opaque `TaskHandleCell` containing
+its terminal wait, protected status-query lease, scalar runtime/task/owner
+identity, and a weak coordinator reporting route. It cannot retain or recover
+demand state or the external session owner. Propagated failure
+acknowledgement therefore reaches the producer-owner ledger after owner
+closure, while final handle drop queues status-query retirement through
+ordinary reflection-store maintenance.
 Final owner drop closes all coordinator records for the demand ID in one
 guarded transition. Non-running work terminalizes immediately; running work
 keeps its first close reason until release. Machine contexts and stable spark

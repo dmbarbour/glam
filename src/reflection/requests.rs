@@ -372,7 +372,7 @@ where
                     let pending = eval_context
                         .reserve_reflection_task(effect)
                         .map_err(|error| TaskHalt::new(error.as_ref()))?;
-                    let handle = Arc::new(ReflectionTaskHandle {
+                    let handle = Arc::new(TaskHandleCell {
                         runtime: eval_context.values().runtime_id(),
                         task: pending.handle().clone(),
                         status: result.clone(),
@@ -401,7 +401,7 @@ where
                     let pending = eval_context
                         .reserve_reflection_task(effect)
                         .map_err(|error| TaskHalt::new(error.as_ref()))?;
-                    let handle = Arc::new(ReflectionTaskHandle {
+                    let handle = Arc::new(TaskHandleCell {
                         runtime: eval_context.values().runtime_id(),
                         task: pending.handle().clone(),
                         status: result.clone(),
@@ -590,14 +590,24 @@ fn tagged_result(context: &EvalContext, tag: &Key, value: Value) -> Value {
     )
 }
 
-struct ReflectionTaskHandle {
+/// Runtime-local opaque task capability shared by every clone of the Glam
+/// handle value.
+///
+/// The nested task identity retains only scalar runtime/owner provenance, the
+/// terminal wait cell, and a weak coordinator reporting route. It cannot keep
+/// the originating demand state or external owner lease alive. The protected
+/// query handle remains the sole transactional status/value/error view and
+/// queues its own retirement after the final task-cell and publisher clone are
+/// dropped.
+struct TaskHandleCell {
     runtime: crate::runtime::EvaluationRuntimeId,
     task: EvaluationTaskHandle,
     status: Arc<EvaluationQueryHandle>,
 }
 
-fn task_handle_value(context: &EvalContext, handle: Arc<ReflectionTaskHandle>) -> Value {
+fn task_handle_value(context: &EvalContext, handle: Arc<TaskHandleCell>) -> Value {
     debug_assert_eq!(handle.runtime, context.values().runtime_id());
+    debug_assert_eq!(handle.runtime, handle.task.runtime_id());
     Value::from_core(
         context.values(),
         CoreValue::Opaque(OpaqueValue::new(handle)),
@@ -697,7 +707,7 @@ fn task_handle_argument(
     context: &EvalContext,
     arguments: Vec<Value>,
     request: &str,
-) -> Result<Arc<ReflectionTaskHandle>, TaskHalt> {
+) -> Result<Arc<TaskHandleCell>, TaskHalt> {
     let [handle]: [Value; 1] = arguments.try_into().map_err(|_| {
         TaskHalt::new(format!(
             "`.{request}` received the wrong number of arguments"
@@ -709,11 +719,11 @@ fn task_handle_argument(
         )));
     };
     handle
-        .downcast::<ReflectionTaskHandle>()
+        .downcast::<TaskHandleCell>()
         .ok_or_else(|| TaskHalt::new(format!("`.{request}` requires a reflection task handle")))
 }
 
-fn ensure_local_task(context: &EvalContext, handle: &ReflectionTaskHandle) -> Result<(), TaskHalt> {
+fn ensure_local_task(context: &EvalContext, handle: &TaskHandleCell) -> Result<(), TaskHalt> {
     if handle.runtime != context.values().runtime_id() {
         Err(TaskHalt::new(
             "task handle belongs to a different evaluation runtime",
@@ -736,7 +746,7 @@ fn read_task_status<S: TaskSpecialization>(
     context: &mut RequestContext<'_, S>,
     arguments: Vec<Value>,
     request: &str,
-) -> Result<(Arc<ReflectionTaskHandle>, QueryRead), TaskHalt> {
+) -> Result<(Arc<TaskHandleCell>, QueryRead), TaskHalt> {
     let handle = task_handle_argument(context.eval_context(), arguments, request)?;
     ensure_local_task(context.eval_context(), &handle)?;
     let status = read_query(context, &handle.status)?;
@@ -828,6 +838,8 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
+    use crate::evaluation::{EvaluationMachinePoll, EvaluationTaskMachine};
+
     struct TestQueryWriter {
         store: Arc<Mutex<crate::reflection::ReflectionStore>>,
         updates: Arc<Mutex<Vec<Value>>>,
@@ -835,6 +847,14 @@ mod tests {
 
     struct TestRoleHost {
         writer: Arc<dyn ReflectionQueryWriter>,
+    }
+
+    struct CompleteTask(CoreValue);
+
+    impl EvaluationTaskMachine for CompleteTask {
+        fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+            EvaluationMachinePoll::Complete(self.0.clone())
+        }
     }
 
     impl ReflectionQueryWriter for TestQueryWriter {
@@ -928,5 +948,64 @@ mod tests {
         let updates = updates.lock().expect("test query updates were poisoned");
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].as_core(), &values.key_value(&keys::BLOCKED));
+    }
+
+    #[test]
+    fn terminal_task_handle_cell_releases_the_final_query_lease() {
+        let context = EvalContext::standalone();
+        let values = context.values().clone();
+        let task = context
+            .schedule_task(|task_context| Ok(Box::new(CompleteTask(task_context.values().unit()))))
+            .expect("terminal task-handle fixture should schedule");
+        let store = Arc::new(Mutex::new(crate::reflection::ReflectionStore::new(
+            values.clone(),
+            Arc::new(crate::reflection::ExactConflictAnalysis),
+        )));
+        let status = {
+            let mut store = store.lock().expect("test query store was poisoned");
+            let mut journal = StoreJournal::new(store.snapshot());
+            let status = journal
+                .reserve_query_with(Value::from_core(
+                    &values,
+                    task_status_query_value(&values, EvaluationTaskStatus::Launched),
+                ))
+                .expect("task status query should reserve");
+            assert!(matches!(
+                store.try_commit(&journal),
+                crate::reflection::StoreCommitResult::Committed
+            ));
+            status
+        };
+        let status_weak = Arc::downgrade(&status);
+        let writer: Arc<dyn ReflectionQueryWriter> = Arc::new(TestQueryWriter {
+            store,
+            updates: Arc::new(Mutex::new(Vec::new())),
+        });
+        assert!(context.attach_task_status_publisher(
+            &task,
+            task_status_publisher(writer, status.clone(), values),
+        ));
+        let handle = Arc::new(TaskHandleCell {
+            runtime: context.values().runtime_id(),
+            task,
+            status: status.clone(),
+        });
+        let opaque = task_handle_value(&context, handle);
+        drop(status);
+
+        assert!(matches!(
+            context.run_until_quiescent(),
+            crate::evaluation::EvaluationSessionRun::Complete(_)
+        ));
+        assert!(
+            status_weak.upgrade().is_some(),
+            "the terminal opaque handle must retain its transactional query"
+        );
+
+        drop(opaque);
+        assert!(
+            status_weak.upgrade().is_none(),
+            "dropping the final opaque handle must release the final query lease"
+        );
     }
 }

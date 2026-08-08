@@ -183,26 +183,34 @@ asserting that it remains reserved. Blocked reflection and deferred work
 retain their machines in their coordinator records. Terminal work retires from
 coordinator indexes and destroys its detached machine outside runtime locks.
 
-Every scheduler wait token is one shared cell containing identity, a weak
-demand-state reference, an optional terminal result, and exact weak work
-registrations.
+Every scheduler wait token is one shared cell containing runtime-local
+identity, scalar producer/owner provenance, an optional terminal result, and
+exact weak work registrations routed through the runtime coordinator.
 Completion, permanent failure, cancellation, and abandonment publish the
 result before coordinator retirement; exact registrations detach and reach
 the coordinator only after the terminal cell's lock is released. Polling
 checks the cell before and after coordinator lookup, so a waiter racing
 publication sees either active state or the terminal result. A terminal token
-remains observable after its owner session is dropped; a pending token does
-not keep the session alive and reports `Abandoned`, not evaluation failure, if
-its owner disappears without publishing a more specific terminal result.
+remains observable after its owner session is dropped. A pending token does
+not retain or recover that session: owner closure must publish `Abandoned` or
+a more specific terminal result before retiring the coordinator record, and an
+unregistered nonterminal token is an invariant failure rather than inferred
+lifecycle state.
 Blocked reflection tasks, deferred producers, and sparks register their stable
 work ID and subscription epoch directly with this cell. Only terminal
 publication of that exact wait can requeue them; unrelated session task
 progress does not.
-Reflection task handles own their shared terminal wait cells, so completion,
-failure, and cancellation remain observable after the active record and
-task-ID index are retired. An unacknowledged failure also leaves one minimal
-entry in its producer owner's runtime-ledger bucket until `.task.ack_error`
-removes it. Rust clients receive
+Every clone of a public reflection task handle shares one opaque
+`TaskHandleCell`. It owns the shared terminal wait and protected-query lease,
+plus scalar runtime/task/owner identity and a weak coordinator reporting
+route; it retains neither demand state nor the external owner lease.
+Completion, failure, cancellation, and abandonment therefore remain
+observable after the active record and task-ID index are retired. Final cell
+drop queues protected-query retirement through ordinary store maintenance.
+An unacknowledged failure also leaves one minimal entry in its producer
+owner's runtime-ledger bucket until `.task.ack_error` removes it. Propagated
+failure acknowledgement follows the handle's reporting identity directly to
+that bucket instead of upgrading the former owner session. Rust clients receive
 the corresponding opaque, session-bound `ReasoningFailure` from
 `Assembler::drain_reasoning` and may remove the same entry with
 `Assembler::acknowledge_reasoning_failure`. Acknowledgement through either
