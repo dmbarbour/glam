@@ -5364,7 +5364,118 @@ mod tests {
     }
 
     #[test]
-    fn task_observers_reject_a_handle_from_another_session() {
+    fn task_observers_accept_handles_from_another_same_runtime_session() {
+        let (assembler, publish) = compile_effect(
+            ".task.new (.cut (.heap.get ['never] >>= (\\_ -> .fail))) >>= (\\blocked -> .task.new (.r \"done\") >>= (\\complete -> .task.new (.fail) >>= (\\failed -> .task.new (.r ()) >>= (\\canceled -> .task.cancel canceled =>> .heap.set ['observed_tasks] { blocked:blocked, complete:complete, failed:failed, canceled:canceled }))))",
+        );
+        let host = Arc::new(TestHost::with_values(assembler.core_values()));
+        let (owner, publish_task) = schedule_composed_test_task(&assembler, &publish, host.clone());
+        assert!(matches!(
+            pump_composed_test_task(&owner, &publish_task),
+            EvaluationWaitPoll::Complete(_)
+        ));
+        let (_, inspect_launched) = compile_effect_with_runtime(
+            &assembler.evaluation_runtime(),
+            ".heap.get ['observed_tasks] >>= (\\tasks -> .task.status tasks.complete)",
+        );
+        let (launched_observer, inspect_launched_task) =
+            schedule_composed_test_task(&assembler, &inspect_launched, host.clone());
+        let EvaluationWaitPoll::Complete(launched) =
+            pump_composed_test_task(&launched_observer, &inspect_launched_task)
+        else {
+            panic!("a same-runtime observer should read the pre-pump task status")
+        };
+        assert_eq!(launched, assembler.core_values().key_value(&keys::LAUNCHED));
+        drop(launched_observer);
+
+        let EvaluationSessionRun::Deadlocked(before_observation) = owner.run_until_quiescent()
+        else {
+            panic!("the blocked child should leave its owner session deadlocked")
+        };
+        assert_eq!(before_observation.failures.size(), 1);
+        assert_eq!(before_observation.unfinished.len(), 1);
+
+        let (_, inspect) = compile_effect_with_runtime(
+            &assembler.evaluation_runtime(),
+            ".heap.get ['observed_tasks] >>= (\\tasks -> .task.status tasks.blocked >>= (\\blocked_status -> .task.status tasks.complete >>= (\\complete_status -> .task.value tasks.complete >>= (\\complete_value -> .task.status tasks.failed >>= (\\failed_status -> .task.error tasks.failed >>= (\\failed_error -> .task.status tasks.canceled >>= (\\canceled_status -> .r { blocked_status:blocked_status, complete_status:complete_status, complete_value:complete_value, failed_status:failed_status, failed_error:failed_error, canceled_status:canceled_status })))))))",
+        );
+        let (observer, inspect_task) =
+            schedule_composed_test_task(&assembler, &inspect, host.clone());
+        let EvaluationWaitPoll::Complete(observed) =
+            pump_composed_test_task(&observer, &inspect_task)
+        else {
+            panic!("same-runtime task observations should complete")
+        };
+        let observed = eval::eval_value(&observer, &observed)
+            .expect("task observation result should evaluate");
+        let Value::Dict(observed) = observed else {
+            panic!("task observation fixture should return a dictionary")
+        };
+        let field = |name: &str| {
+            eval::eval_value(
+                &observer,
+                observed
+                    .get(&Key::atom_from_text(name))
+                    .unwrap_or_else(|| panic!("task observation should define {name}")),
+            )
+            .unwrap_or_else(|error| panic!("task observation {name} should evaluate: {error}"))
+        };
+        assert_eq!(
+            field("blocked_status"),
+            assembler.core_values().key_value(&keys::BLOCKED)
+        );
+        let Value::Dict(complete_status) = field("complete_status") else {
+            panic!("complete task status should be tagged data")
+        };
+        assert_eq!(
+            eval::eval_value(
+                &observer,
+                complete_status
+                    .get(&*keys::OK)
+                    .expect("complete status should contain ok"),
+            )
+            .expect("complete status payload should evaluate"),
+            Value::binary_from_text("done")
+        );
+        assert_eq!(field("complete_value"), Value::binary_from_text("done"));
+        let Value::Dict(failed_status) = field("failed_status") else {
+            panic!("failed task status should be tagged data")
+        };
+        assert!(failed_status.get(&*keys::ERR).is_some());
+        assert!(matches!(field("failed_error"), Value::Dict(_)));
+        assert_eq!(
+            field("canceled_status"),
+            assembler.core_values().key_value(&keys::CANCELED)
+        );
+
+        let EvaluationSessionRun::Deadlocked(after_observation) = owner.run_until_quiescent()
+        else {
+            panic!("observation must not disturb the blocked owner task")
+        };
+        assert_eq!(after_observation.failures, before_observation.failures);
+        assert_eq!(after_observation.unfinished.len(), 1);
+
+        drop(owner);
+        let (_, inspect_abandoned) = compile_effect_with_runtime(
+            &assembler.evaluation_runtime(),
+            ".heap.get ['observed_tasks] >>= (\\tasks -> .task.status tasks.blocked)",
+        );
+        let (late_observer, inspect_abandoned_task) =
+            schedule_composed_test_task(&assembler, &inspect_abandoned, host.clone());
+        let EvaluationWaitPoll::Complete(abandoned) =
+            pump_composed_test_task(&late_observer, &inspect_abandoned_task)
+        else {
+            panic!("a retained same-runtime handle should remain observable after owner closure")
+        };
+        assert_eq!(
+            abandoned,
+            assembler.core_values().key_value(&keys::ABANDONED),
+            "observer-held task handles must not keep their producer demand open"
+        );
+    }
+
+    #[test]
+    fn task_join_and_acknowledgement_remain_owner_session_operations() {
         let (assembler, spawn) = compile_effect(".task.new (.r ())");
         let host = Arc::new(TestHost::with_values(assembler.core_values()));
         let (first_context, first_task) =
@@ -5375,7 +5486,7 @@ mod tests {
             panic!("first session should return a task handle")
         };
 
-        for operation in ["status", "value", "error", "join", "ack_error"] {
+        for operation in ["join", "ack_error"] {
             let (_, inspect) = compile_effect_with_runtime(
                 &assembler.evaluation_runtime(),
                 &format!("\\task -> .task.{operation} task"),
@@ -5398,7 +5509,7 @@ mod tests {
                         if error.to_string()
                             == "task handle does not belong to this evaluation session"
                 ),
-                "task.{operation} should reject a handle owned by another session"
+                "task.{operation} should remain owner-scoped until its later checkpoint"
             );
         }
     }

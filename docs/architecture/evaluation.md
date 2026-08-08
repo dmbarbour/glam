@@ -362,6 +362,10 @@ Join polls that wait directly. Cancellation first validates that the handle
 belongs to the caller's evaluation session, then updates the record addressed
 by the same wait token. Transactional status, value, and error observations
 remain query-backed and therefore keep their existing snapshot semantics.
+Any session in the same runtime may make those read-only observations; they
+do not change the task's captured profile, demand scope, reporting owner, or
+failure ledger. Runtime provenance is the capability boundary, while join and
+control remain owner-session operations until their dedicated transitions.
 
 Task creation reserves a non-runnable record. At transaction commit, all
 modifiers for tasks created by that same journal are folded into one

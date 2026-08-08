@@ -275,6 +275,10 @@ demand state or the external session owner. Propagated failure
 acknowledgement therefore reaches the producer-owner ledger after owner
 closure, while final handle drop queues status-query retirement through
 ordinary reflection-store maintenance.
+The query-backed `.task.status`, `.task.value`, and `.task.error` operations
+are readable from any session in that runtime. Observation changes neither
+the task profile nor demand/reporting ownership; join and task control remain
+owner-scoped until their separate lifecycle checkpoints.
 Final owner drop closes all coordinator records for the demand ID in one
 guarded transition. Non-running work terminalizes immediately; running work
 keeps its first close reason until release. Machine contexts and stable spark

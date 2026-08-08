@@ -238,9 +238,11 @@ control-flow overview.
   cross-session work remains visible in quiescence reports without becoming a
   cached `LazyFailure`.
 - Opaque reflection task values retain `EvaluationTaskHandle`, not a bare task
-  ID. Public join and cancellation validate the handle's session provenance;
-  internal cross-session followers deliberately operate on wait tokens
-  instead.
+  ID. `.task.status`, `.task.value`, and `.task.error` may inspect the
+  protected query from any session in the same runtime without changing
+  ownership or reporting state. Public join and cancellation still validate
+  the handle's session provenance; internal cross-session followers
+  deliberately operate on wait tokens instead.
 - A transaction folds modifiers for its newly reserved tasks before launch.
   In particular, same-transaction cancellation must publish `'canceled`
   without constructing a task machine or exposing runnable work to the shared

@@ -723,12 +723,19 @@ fn task_handle_argument(
         .ok_or_else(|| TaskHalt::new(format!("`.{request}` requires a reflection task handle")))
 }
 
-fn ensure_local_task(context: &EvalContext, handle: &TaskHandleCell) -> Result<(), TaskHalt> {
+fn ensure_runtime_task(context: &EvalContext, handle: &TaskHandleCell) -> Result<(), TaskHalt> {
     if handle.runtime != context.values().runtime_id() {
         Err(TaskHalt::new(
             "task handle belongs to a different evaluation runtime",
         ))
-    } else if !context.owns_task(&handle.task) {
+    } else {
+        Ok(())
+    }
+}
+
+fn ensure_local_task(context: &EvalContext, handle: &TaskHandleCell) -> Result<(), TaskHalt> {
+    ensure_runtime_task(context, handle)?;
+    if !context.owns_task(&handle.task) {
         Err(TaskHalt::new(
             "task handle does not belong to this evaluation session",
         ))
@@ -748,7 +755,7 @@ fn read_task_status<S: TaskSpecialization>(
     request: &str,
 ) -> Result<(Arc<TaskHandleCell>, QueryRead), TaskHalt> {
     let handle = task_handle_argument(context.eval_context(), arguments, request)?;
-    ensure_local_task(context.eval_context(), &handle)?;
+    ensure_runtime_task(context.eval_context(), &handle)?;
     let status = read_query(context, &handle.status)?;
     Ok((handle, status))
 }
@@ -1006,6 +1013,45 @@ mod tests {
         assert!(
             status_weak.upgrade().is_none(),
             "dropping the final opaque handle must release the final query lease"
+        );
+    }
+
+    #[test]
+    fn task_observation_rejects_an_artificial_foreign_runtime_handle() {
+        let context = EvalContext::standalone();
+        let values = context.values().clone();
+        let task = context
+            .schedule_task(|task_context| Ok(Box::new(CompleteTask(task_context.values().unit()))))
+            .expect("foreign-runtime task-handle fixture should schedule");
+        let mut store = crate::reflection::ReflectionStore::new(
+            values.clone(),
+            Arc::new(crate::reflection::ExactConflictAnalysis),
+        );
+        let status = {
+            let mut journal = StoreJournal::new(store.snapshot());
+            let status = journal
+                .reserve_query_with(Value::from_core(
+                    &values,
+                    task_status_query_value(&values, EvaluationTaskStatus::Launched),
+                ))
+                .expect("foreign-runtime task status query should reserve");
+            assert!(matches!(
+                store.try_commit(&journal),
+                crate::reflection::StoreCommitResult::Committed
+            ));
+            status
+        };
+        let handle = TaskHandleCell {
+            runtime: crate::runtime::allocate_evaluation_runtime_id(),
+            task,
+            status,
+        };
+
+        let error = ensure_runtime_task(&context, &handle)
+            .expect_err("an artificial foreign-runtime task handle must be rejected");
+        assert_eq!(
+            error.to_string(),
+            "task handle belongs to a different evaluation runtime"
         );
     }
 }
