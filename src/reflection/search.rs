@@ -208,6 +208,9 @@ impl<S: TaskSpecialization> IsolatedEffectSearch<S> {
             }
             EffectTaskPoll::Failed(error) => IsolatedSearchPoll::Failed(error),
             EffectTaskPoll::Cancelled => IsolatedSearchPoll::Cancelled,
+            EffectTaskPoll::Exit(_) => {
+                unreachable!("isolated effect-search profiles do not expose runtime exit")
+            }
         }
     }
 

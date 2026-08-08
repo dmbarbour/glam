@@ -46,13 +46,14 @@ use crate::eval;
 #[cfg(test)]
 use crate::evaluation::OwnedEvalContext;
 use crate::evaluation::{
-    EvalContext, EvaluationMachinePoll, EvaluationPumpOutcome, EvaluationSession,
-    EvaluationSessionRun, EvaluationTaskBlock, EvaluationTaskId, EvaluationTaskMachine,
-    EvaluationWaitPoll, EvaluationWaitToken, ReflectionTaskLauncher, ReflectionTaskProfile,
-    ReflectionTaskResultPolicy, WorkDependency,
+    EvalContext, EvaluationExitBlock, EvaluationMachinePoll, EvaluationPumpOutcome,
+    EvaluationSession, EvaluationSessionRun, EvaluationTaskBlock, EvaluationTaskId,
+    EvaluationTaskMachine, EvaluationWaitPoll, EvaluationWaitToken, ExitIntent,
+    ReflectionTaskLauncher, ReflectionTaskProfile, ReflectionTaskResultPolicy, WorkDependency,
 };
 use crate::interaction_net::NetBuilder;
 use crate::number::Number;
+use crate::runtime::RuntimeValueRoot;
 
 /// One additional effect constructor contributed by a task specialization.
 pub struct EffectRequestSpec<R> {
@@ -655,6 +656,8 @@ struct Tags {
     reset: Key,
     shift: Key,
     resume: Key,
+    exit_success: Key,
+    exit_error: Key,
     continuation_state: Key,
 }
 
@@ -683,6 +686,8 @@ impl Tags {
             reset: tag("reset"),
             shift: tag("shift"),
             resume: tag("resume"),
+            exit_success: tag("exit_success"),
+            exit_error: tag("exit_error"),
             // The key is private, but its value deliberately travels with
             // whole-user-state get/set operations.
             continuation_state: Key::abstract_global_path([
@@ -710,6 +715,7 @@ struct EffectTask<S: TaskSpecialization> {
     search: SearchPolicy<Branch<S>, IsolatedSearchBranch<S>>,
     execution: TaskExecution<S>,
     blocked: Option<BlockedExecution<S>>,
+    exit: Option<TaskExitBlock>,
     terminal: Option<TaskTerminal>,
 }
 
@@ -767,12 +773,31 @@ impl<S: TaskSpecialization> EffectTask<S> {
         eval_context: EvalContext,
         retain_all: bool,
     ) -> Result<Self, TaskHalt> {
+        Self::new_in_context_with_capabilities(
+            effect,
+            specialization,
+            host,
+            eval_context,
+            retain_all,
+            false,
+        )
+    }
+
+    fn new_in_context_with_capabilities(
+        effect: Value,
+        specialization: S,
+        host: Arc<S::Host>,
+        eval_context: EvalContext,
+        retain_all: bool,
+        exposes_exit: bool,
+    ) -> Result<Self, TaskHalt> {
         let eval_context = eval_context.for_effect_task();
         let tags = Tags::new();
         let (api, specialized_requests) = effect_api(
             &tags,
             specialization.requests(),
             specialization.exposes_shared_heap(),
+            exposes_exit,
         )?;
         let id = eval_context
             .task_id()
@@ -807,8 +832,26 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 cuts: Vec::new(),
             },
             blocked: None,
+            exit: None,
             terminal: None,
         })
+    }
+
+    #[cfg(test)]
+    fn new_exit_in_context(
+        effect: Value,
+        specialization: S,
+        host: Arc<S::Host>,
+        eval_context: EvalContext,
+    ) -> Result<Self, TaskHalt> {
+        Self::new_in_context_with_capabilities(
+            effect,
+            specialization,
+            host,
+            eval_context,
+            false,
+            true,
+        )
     }
 
     fn completed_search(&self) -> Option<Arc<[IsolatedSearchBranch<S>]>> {
@@ -1039,6 +1082,9 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 EffectTaskPoll::Complete(value) => return Ok(TaskOutcome::Complete(value)),
                 EffectTaskPoll::Failed(error) => return Err(error),
                 EffectTaskPoll::Cancelled => return Ok(TaskOutcome::Cancelled),
+                EffectTaskPoll::Exit(_) => {
+                    unreachable!("direct effect-run profiles do not expose runtime exit")
+                }
             }
         }
     }
@@ -1046,6 +1092,9 @@ impl<S: TaskSpecialization> EffectTask<S> {
     fn poll(&mut self, steps: usize) -> EffectTaskPoll {
         if let Some(terminal) = &self.terminal {
             return terminal.poll();
+        }
+        if let Some(exit) = &self.exit {
+            return EffectTaskPoll::Exit(exit.clone());
         }
         if let Some(blocked) = self.poll_blocked() {
             return blocked;
@@ -1062,6 +1111,10 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 Ok(MachineStep::Terminal(terminal)) => {
                     self.finish(terminal);
                     return self.terminal.as_ref().expect("terminal set above").poll();
+                }
+                Ok(MachineStep::Exit(exit)) => {
+                    self.exit = Some(exit.clone());
+                    return EffectTaskPoll::Exit(exit);
                 }
                 Err(error) => {
                     if let Some(wait) = error.blocked_on() {
@@ -1535,6 +1588,24 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     branch,
                     scope_depth,
                 }
+            }
+            Request::ExitSuccess => {
+                let observed_generation = self.retry_wake().map(|retry| retry.observed_generation);
+                return Ok(MachineStep::Exit(TaskExitBlock {
+                    intent: ExitIntent::Success,
+                    observed_generation,
+                }));
+            }
+            Request::ExitError(message) => {
+                let message = evaluate(&self.eval_context, message)?;
+                let observed_generation = self.retry_wake().map(|retry| retry.observed_generation);
+                return Ok(MachineStep::Exit(TaskExitBlock {
+                    intent: ExitIntent::Error(RuntimeValueRoot::new(
+                        self.eval_context.values(),
+                        message,
+                    )),
+                    observed_generation,
+                }));
             }
             Request::Fix(function) => {
                 let root = Arc::new(FixRoot {
@@ -2295,6 +2366,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         };
         self.eval_context.fail_local_promises(unfinished_failure);
         self.blocked = None;
+        self.exit = None;
         self.terminal = Some(terminal);
     }
 
@@ -2349,6 +2421,10 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for ValueEffectTask<S> {
                     error: blocked.error,
                 })
             }
+            EffectTaskPoll::Exit(exit) => EvaluationMachinePoll::Exit(EvaluationExitBlock {
+                intent: exit.intent,
+                observed_epoch: exit.observed_generation.map(|_| observed_epoch),
+            }),
             EffectTaskPoll::Complete(value) => EvaluationMachinePoll::Complete(value.into_core()),
             EffectTaskPoll::Failed(error) => EvaluationMachinePoll::Failed(error.into_failure()),
             EffectTaskPoll::Cancelled => EvaluationMachinePoll::Cancelled,
@@ -2372,6 +2448,10 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for UnitEffectTask<S> {
                     error: blocked.error,
                 })
             }
+            EffectTaskPoll::Exit(exit) => EvaluationMachinePoll::Exit(EvaluationExitBlock {
+                intent: exit.intent,
+                observed_epoch: exit.observed_generation.map(|_| observed_epoch),
+            }),
             EffectTaskPoll::Complete(value)
                 if value.as_core() == &self.0.eval_context.values().unit() =>
             {
@@ -2579,6 +2659,7 @@ impl<S: TaskSpecialization> CutFrame<S> {
 enum MachineStep<S: TaskSpecialization> {
     Continue(MachineWork<S>),
     Blocked(BlockedExecution<S>),
+    Exit(TaskExitBlock),
     Terminal(TaskTerminal),
 }
 
@@ -2660,9 +2741,16 @@ struct TaskBlock {
     error: Option<Arc<EvaluationFailure>>,
 }
 
+#[derive(Clone)]
+struct TaskExitBlock {
+    intent: ExitIntent,
+    observed_generation: Option<u64>,
+}
+
 enum EffectTaskPoll {
     Yielded,
     Blocked(TaskBlock),
+    Exit(TaskExitBlock),
     Complete(PublicValue),
     Failed(TaskHalt),
     Cancelled,
@@ -2919,6 +3007,8 @@ enum Request<R> {
     Reset(Value, Value),
     Shift(Value, Value),
     Resume(EvaluationTaskId, u64, Value),
+    ExitSuccess,
+    ExitError(Value),
     Specialized(R, Vec<PublicValue>),
 }
 
@@ -3005,6 +3095,12 @@ fn parse_request<R: Clone>(
         2,
         |[key, function]: [Value; 2]| Request::Shift(key, function)
     );
+    args!(&tags.exit_success, 0, |[]: [Value; 0]| {
+        Request::ExitSuccess
+    });
+    args!(&tags.exit_error, 1, |[message]: [Value; 1]| {
+        Request::ExitError(message)
+    });
     if let Some(arguments) = parse(&tags.resume)? {
         let [task_id, continuation_id, value]: [Value; 3] = arguments
             .try_into()
@@ -3148,6 +3244,7 @@ fn effect_api<R: Clone>(
     tags: &Tags,
     specs: Vec<EffectRequestSpec<R>>,
     expose_shared_heap: bool,
+    expose_exit: bool,
 ) -> Result<(Value, Vec<SpecializedRequest<R>>), TaskHalt> {
     let entry = |name: &str, value| (Key::atom_from_text(name), value);
     let heap_api = Value::Dict(
@@ -3208,6 +3305,24 @@ fn effect_api<R: Clone>(
     ];
     if expose_shared_heap {
         entries.push(entry("heap", heap_api));
+    }
+    if expose_exit {
+        entries.push(entry(
+            "exit",
+            Value::Dict(
+                [
+                    entry("success", nullary_request(tags.exit_success.clone())),
+                    entry(
+                        "error",
+                        request_function(tags.exit_error.clone(), 1, Vec::new(), false),
+                    ),
+                ]
+                .into_iter()
+                .fold(Dict::new_sync(), |dict, (key, value)| {
+                    dict.insert(key, value)
+                }),
+            ),
+        ));
     }
     let mut api = entries
         .into_iter()
@@ -4632,9 +4747,159 @@ mod tests {
                 EffectTaskPoll::Blocked(_) => panic!("finite task unexpectedly blocked"),
                 EffectTaskPoll::Failed(error) => panic!("finite task failed: {error}"),
                 EffectTaskPoll::Cancelled => panic!("finite task was cancelled"),
+                EffectTaskPoll::Exit(_) => panic!("finite task unexpectedly voted to exit"),
             }
         };
         assert_eq!(assembler.to_binary(&value).unwrap(), b"AB".as_slice());
+    }
+
+    fn poll_machine_exit(machine: &mut dyn EvaluationTaskMachine) -> EvaluationExitBlock {
+        loop {
+            match machine.poll(256) {
+                EvaluationMachinePoll::Yielded => {}
+                EvaluationMachinePoll::Exit(exit) => return exit,
+                EvaluationMachinePoll::Blocked(_) => {
+                    panic!("exit fixture unexpectedly blocked")
+                }
+                EvaluationMachinePoll::Complete(_) => {
+                    panic!("exit fixture unexpectedly completed")
+                }
+                EvaluationMachinePoll::Failed(error) => {
+                    panic!("exit fixture failed: {error}")
+                }
+                EvaluationMachinePoll::Cancelled => {
+                    panic!("exit fixture was cancelled")
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn internal_exit_success_projects_through_both_scheduled_effect_wrappers() {
+        let (assembler, effect) = compile_effect(".exit.success");
+
+        for require_unit in [false, true] {
+            let (context, owner) = EvalContext::isolated(assembler.core_values()).into_parts();
+            let task = EffectTask::new_exit_in_context(
+                effect.as_core().clone(),
+                TestEffects,
+                Arc::new(TestHost::with_values(assembler.core_values())),
+                context,
+            )
+            .expect("internal exit task should initialize");
+            let mut machine: Box<dyn EvaluationTaskMachine> = if require_unit {
+                Box::new(UnitEffectTask(task))
+            } else {
+                Box::new(ValueEffectTask(task))
+            };
+
+            let exit = poll_machine_exit(machine.as_mut());
+            assert_eq!(exit.intent, ExitIntent::Success);
+            assert_eq!(exit.observed_epoch, None);
+            assert!(matches!(
+                machine.poll(1),
+                EvaluationMachinePoll::Exit(EvaluationExitBlock {
+                    intent: ExitIntent::Success,
+                    observed_epoch: None,
+                })
+            ));
+            drop(owner);
+        }
+    }
+
+    #[test]
+    fn internal_exit_error_forces_and_roots_its_message() {
+        let (assembler, effect) =
+            compile_effect(".exit.error ((\\message -> message) {msg:{text:\"stop\"}, detail:7})");
+        let (context, owner) = EvalContext::isolated(assembler.core_values()).into_parts();
+        let task = EffectTask::new_exit_in_context(
+            effect.as_core().clone(),
+            TestEffects,
+            Arc::new(TestHost::with_values(assembler.core_values())),
+            context,
+        )
+        .expect("internal exit task should initialize");
+        let mut machine = ValueEffectTask(task);
+
+        let exit = poll_machine_exit(&mut machine);
+        let ExitIntent::Error(message) = exit.intent else {
+            panic!("error exit should retain its message")
+        };
+        assert_eq!(message.runtime_id(), assembler.core_values().runtime_id());
+        assert!(matches!(message.as_core(), Value::Dict(_)));
+        let message = PublicValue::from_core(&assembler.core_values(), message.into_core());
+        assert_eq!(
+            assembler
+                .to_binary(&assembler.get(&message, "msg.text").unwrap())
+                .unwrap(),
+            b"stop".as_slice()
+        );
+        drop(owner);
+    }
+
+    #[test]
+    fn internal_exit_error_message_failure_is_an_ordinary_task_failure() {
+        let (assembler, effect) =
+            compile_effect(".exit.error (anno 'error {msg:{text:\"exit message failed\"}})");
+        let (context, owner) = EvalContext::isolated(assembler.core_values()).into_parts();
+        let mut task = EffectTask::new_exit_in_context(
+            effect.as_core().clone(),
+            TestEffects,
+            Arc::new(TestHost::with_values(assembler.core_values())),
+            context,
+        )
+        .expect("internal exit task should initialize");
+
+        loop {
+            match task.poll(256) {
+                EffectTaskPoll::Yielded => {}
+                EffectTaskPoll::Failed(_) => break,
+                EffectTaskPoll::Blocked(_) => {
+                    panic!("failed exit message unexpectedly blocked")
+                }
+                EffectTaskPoll::Complete(_) => {
+                    panic!("failed exit message unexpectedly completed")
+                }
+                EffectTaskPoll::Cancelled => {
+                    panic!("failed exit message was cancelled")
+                }
+                EffectTaskPoll::Exit(_) => {
+                    panic!("failed exit message produced an exit vote")
+                }
+            }
+        }
+        drop(owner);
+    }
+
+    #[test]
+    fn direct_effect_profiles_do_not_expose_exit() {
+        let (assembler, effect) = compile_effect(".exit.success");
+        let normal = EffectTask::new(
+            &assembler.core_values(),
+            effect.as_core().clone(),
+            TestEffects,
+            Arc::new(TestHost::with_values(assembler.core_values())),
+        )
+        .expect("ordinary effect task should initialize");
+        let Value::Dict(normal_api) = &normal.api else {
+            panic!("effect API should be a dictionary")
+        };
+        assert!(normal_api.get(&Key::atom_from_text("exit")).is_none());
+
+        let (context, owner) = EvalContext::isolated(assembler.core_values()).into_parts();
+        let internal = EffectTask::new_exit_in_context(
+            effect.as_core().clone(),
+            TestEffects,
+            Arc::new(TestHost::with_values(assembler.core_values())),
+            context,
+        )
+        .expect("internal exit task should initialize");
+        let Value::Dict(internal_api) = &internal.api else {
+            panic!("effect API should be a dictionary")
+        };
+        assert!(internal_api.get(&Key::atom_from_text("exit")).is_some());
+        assert!(run_standard_test(&assembler, &effect).is_err());
+        drop(owner);
     }
 
     #[test]
@@ -6143,6 +6408,7 @@ mod tests {
                 EffectTaskPoll::Blocked(_) => panic!("changed observation did not retry the cut"),
                 EffectTaskPoll::Failed(error) => panic!("retryable task failed: {error}"),
                 EffectTaskPoll::Cancelled => panic!("retryable task was cancelled"),
+                EffectTaskPoll::Exit(_) => panic!("retryable task unexpectedly voted to exit"),
             }
         };
         assert_eq!(
@@ -6296,6 +6562,7 @@ mod tests {
             ),
             EffectTaskPoll::Failed(error) => panic!("annotation dependency failed: {error}"),
             EffectTaskPoll::Cancelled => panic!("annotation dependency was cancelled"),
+            EffectTaskPoll::Exit(_) => panic!("annotation dependency unexpectedly voted to exit"),
         };
         let wait = blocked
             .lazy
@@ -6310,6 +6577,7 @@ mod tests {
                 EffectTaskPoll::Blocked(_) => panic!("completed dependency remained blocked"),
                 EffectTaskPoll::Failed(error) => panic!("resumed task failed: {error}"),
                 EffectTaskPoll::Cancelled => panic!("resumed task was cancelled"),
+                EffectTaskPoll::Exit(_) => panic!("resumed task unexpectedly voted to exit"),
             }
         };
         assert_eq!(assembler.to_binary(&value).unwrap(), b"done".as_slice());
@@ -6357,6 +6625,7 @@ mod tests {
                 EffectTaskPoll::Blocked(_) => panic!("changed observation did not restart cut"),
                 EffectTaskPoll::Failed(error) => panic!("restarted cut failed: {error}"),
                 EffectTaskPoll::Cancelled => panic!("restarted cut was cancelled"),
+                EffectTaskPoll::Exit(_) => panic!("restarted cut unexpectedly voted to exit"),
             }
         };
         assert_eq!(

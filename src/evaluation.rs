@@ -586,9 +586,28 @@ impl PendingTaskPolicy {
     }
 }
 
+/// A coordinator-facing request to terminalize one effect machine when the
+/// runtime client accepts a stable readiness snapshot.
+///
+/// Exit is deliberately distinct from ordinary completion or failure. Until
+/// settlement, it produces neither a task result nor a failure-ledger entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ExitIntent {
+    Success,
+    Error(RuntimeValueRoot),
+}
+
+/// The specialization-independent portion of one preterminal exit vote.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EvaluationExitBlock {
+    pub(crate) intent: ExitIntent,
+    pub(crate) observed_epoch: Option<RuntimeObservationEpoch>,
+}
+
 pub(crate) enum EvaluationMachinePoll {
     Yielded,
     Blocked(EvaluationTaskBlock),
+    Exit(EvaluationExitBlock),
     Complete(Value),
     Failed(Arc<EvaluationFailure>),
     Cancelled,
@@ -2263,6 +2282,10 @@ fn release_reflection_task(
     let (work_poll, terminal_state) = match poll {
         EvaluationMachinePoll::Yielded => (ReflectionWorkPoll::Yielded, None),
         EvaluationMachinePoll::Blocked(block) => (ReflectionWorkPoll::Blocked(block), None),
+        EvaluationMachinePoll::Exit(exit) => {
+            drop(exit);
+            unreachable!("coordinator work cannot publish an exit vote without ExitWaiting")
+        }
         EvaluationMachinePoll::Complete(value) => (
             ReflectionWorkPoll::Terminal,
             Some(EvaluationTaskState::Complete(
@@ -2341,6 +2364,10 @@ fn release_deferred_task(
     let (work_poll, terminal) = match poll {
         EvaluationMachinePoll::Yielded => (DeferredWorkPoll::Yielded, None),
         EvaluationMachinePoll::Blocked(block) => (DeferredWorkPoll::Blocked(block), None),
+        EvaluationMachinePoll::Exit(exit) => {
+            drop(exit);
+            unreachable!("deferred work cannot publish a runtime exit vote")
+        }
         EvaluationMachinePoll::Complete(value) => (
             DeferredWorkPoll::Terminal,
             Some(EvaluationWaitTerminal::Complete(
