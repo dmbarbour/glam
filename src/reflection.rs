@@ -715,7 +715,7 @@ struct EffectTask<S: TaskSpecialization> {
     search: SearchPolicy<Branch<S>, IsolatedSearchBranch<S>>,
     execution: TaskExecution<S>,
     blocked: Option<BlockedExecution<S>>,
-    exit: Option<TaskExitBlock>,
+    exit: Option<TaskExitState<S>>,
     terminal: Option<TaskTerminal>,
 }
 
@@ -1093,8 +1093,8 @@ impl<S: TaskSpecialization> EffectTask<S> {
         if let Some(terminal) = &self.terminal {
             return terminal.poll();
         }
-        if let Some(exit) = &self.exit {
-            return EffectTaskPoll::Exit(exit.clone());
+        if let Some(poll) = self.poll_exit() {
+            return poll;
         }
         if let Some(blocked) = self.poll_blocked() {
             return blocked;
@@ -1112,9 +1112,11 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     self.finish(terminal);
                     return self.terminal.as_ref().expect("terminal set above").poll();
                 }
-                Ok(MachineStep::Exit(exit)) => {
-                    self.exit = Some(exit.clone());
-                    return EffectTaskPoll::Exit(exit);
+                Ok(MachineStep::Exit(intent)) => {
+                    let exit = self.prepare_exit(intent);
+                    let poll = exit.poll.clone();
+                    self.exit = Some(exit);
+                    return EffectTaskPoll::Exit(poll);
                 }
                 Err(error) => {
                     if let Some(wait) = error.blocked_on() {
@@ -1590,22 +1592,14 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 }
             }
             Request::ExitSuccess => {
-                let observed_generation = self.retry_wake().map(|retry| retry.observed_generation);
-                return Ok(MachineStep::Exit(TaskExitBlock {
-                    intent: ExitIntent::Success,
-                    observed_generation,
-                }));
+                return Ok(MachineStep::Exit(ExitIntent::Success));
             }
             Request::ExitError(message) => {
                 let message = evaluate(&self.eval_context, message)?;
-                let observed_generation = self.retry_wake().map(|retry| retry.observed_generation);
-                return Ok(MachineStep::Exit(TaskExitBlock {
-                    intent: ExitIntent::Error(RuntimeValueRoot::new(
-                        self.eval_context.values(),
-                        message,
-                    )),
-                    observed_generation,
-                }));
+                return Ok(MachineStep::Exit(ExitIntent::Error(RuntimeValueRoot::new(
+                    self.eval_context.values(),
+                    message,
+                ))));
             }
             Request::Fix(function) => {
                 let root = Arc::new(FixRoot {
@@ -2304,6 +2298,70 @@ impl<S: TaskSpecialization> EffectTask<S> {
         }
     }
 
+    fn poll_exit(&mut self) -> Option<EffectTaskPoll> {
+        let exit = self.exit.as_ref()?;
+        let changed = exit
+            .restart
+            .as_ref()
+            .is_some_and(|retry| self.host.snapshot().generation() != retry.observed_generation);
+        if !changed {
+            return Some(EffectTaskPoll::Exit(exit.poll.clone()));
+        }
+
+        let retry = self
+            .exit
+            .take()
+            .and_then(|exit| exit.restart)
+            .expect("a changed exit observation must retain its restart capsule");
+        self.apply_wake(retry.action);
+        None
+    }
+
+    fn prepare_exit(&mut self, intent: ExitIntent) -> TaskExitState<S> {
+        let restart = self.retry_wake();
+        let poll = TaskExitBlock {
+            intent,
+            observed_generation: restart.as_ref().map(|restart| restart.observed_generation),
+        };
+        self.discard_exit_attempt(restart.as_ref());
+        TaskExitState { poll, restart }
+    }
+
+    /// Retains only the control checkpoint named by `restart`. Every active
+    /// branch, queued alternative, failed attempt, isolated result, and cloned
+    /// transaction is dropped here so its pending task reservations and
+    /// buffered host effects cannot survive the exit vote.
+    fn discard_exit_attempt(&mut self, restart: Option<&RetryWake<S>>) {
+        self.search.discard_progress();
+        match restart.map(|restart| &restart.action) {
+            Some(WakeAction::RestartCut(index)) => {
+                assert_eq!(
+                    *index, 0,
+                    "the transaction-owning retry cut must be the outermost active cut"
+                );
+                let mut frame = self
+                    .execution
+                    .cuts
+                    .get(*index)
+                    .cloned()
+                    .expect("exit retry must retain its cut checkpoint");
+                frame.outer.transaction = None;
+                frame.alternatives.clear();
+                frame.retry = None;
+                frame.observed_failure = false;
+                self.execution.cuts.clear();
+                self.execution.cuts.push(frame);
+            }
+            Some(WakeAction::ReplaceWork(_)) | Some(WakeAction::RestartSearch) | None => {
+                self.execution.cuts.clear()
+            }
+        }
+        self.execution.work = MachineWork::Outcome {
+            outcome: BranchOutcome::Cancelled,
+            scope_depth: 0,
+        };
+    }
+
     fn blocked_poll(&self) -> EffectTaskPoll {
         let blocked = self
             .blocked
@@ -2659,7 +2717,7 @@ impl<S: TaskSpecialization> CutFrame<S> {
 enum MachineStep<S: TaskSpecialization> {
     Continue(MachineWork<S>),
     Blocked(BlockedExecution<S>),
-    Exit(TaskExitBlock),
+    Exit(ExitIntent),
     Terminal(TaskTerminal),
 }
 
@@ -2745,6 +2803,11 @@ struct TaskBlock {
 struct TaskExitBlock {
     intent: ExitIntent,
     observed_generation: Option<u64>,
+}
+
+struct TaskExitState<S: TaskSpecialization> {
+    poll: TaskExitBlock,
+    restart: Option<RetryWake<S>>,
 }
 
 enum EffectTaskPoll {
@@ -4868,6 +4931,114 @@ mod tests {
                 }
             }
         }
+        drop(owner);
+    }
+
+    #[test]
+    fn permanent_exit_discards_every_speculative_cut_resource() {
+        let (assembler, effect) = compile_effect(
+            ".cut ((.heap.set ['discarded] 1) =>> (.write_stderr \"discarded\") =>> (.log 'error {msg:{text:\"discarded\"}}) =>> .task.new (.r \"child\") >>= (\\_child -> .alt (.fail) ((.exit.success) =>> .write_stderr \"after exit\")))",
+        );
+        let host = Arc::new(TestHost::with_values(assembler.core_values()));
+        let owned = EvalContext::isolated(assembler.core_values());
+        let builds = Arc::new(AtomicUsize::new(0));
+        let launcher: Arc<dyn ReflectionTaskLauncher> = Arc::new(CountingLauncher {
+            inner: task_launcher(TestEffects, host.clone()),
+            builds: builds.clone(),
+        });
+        owned
+            .install_reflection_launcher(launcher)
+            .expect("fresh exit fixture should accept its task profile");
+        let (context, owner) = owned.into_parts();
+        let observer = context.clone();
+        let task = EffectTask::new_exit_in_context(
+            effect.as_core().clone(),
+            TestEffects,
+            host.clone(),
+            context,
+        )
+        .expect("internal exit task should initialize");
+        let mut machine = ValueEffectTask(task);
+
+        let exit = poll_machine_exit(&mut machine);
+        assert_eq!(exit.intent, ExitIntent::Success);
+        assert_eq!(exit.observed_epoch, None);
+        assert!(assembler.get(&host.heap(), "discarded").is_err());
+        assert!(host.diagnostics().is_empty());
+        assert!(host.stderr().is_empty());
+        assert_eq!(builds.load(Ordering::Acquire), 0);
+        assert_eq!(
+            observer.reflection_task_count(),
+            0,
+            "dropping every journal clone must retire its reserved child task"
+        );
+        drop(owner);
+    }
+
+    #[test]
+    fn retryable_exit_restarts_with_a_fresh_transaction_after_disturbance() {
+        let (assembler, effect) = compile_effect(
+            ".cut (.heap.get ['ready] >>= (\\ready -> (.heap.set ['attempt] \"committed\") =>> (.write_stderr \"once\") =>> (.log 'warn {msg:{text:\"once\"}}) =>> .alt ((ready == 1) =>> .r \"done\") (.exit.success)))",
+        );
+        let host = Arc::new(TestHost::with_values(assembler.core_values()));
+        let (context, owner) = EvalContext::isolated(assembler.core_values()).into_parts();
+        let task = EffectTask::new_exit_in_context(
+            effect.as_core().clone(),
+            TestEffects,
+            host.clone(),
+            context,
+        )
+        .expect("internal exit task should initialize");
+        let mut machine = ValueEffectTask(task);
+
+        let first = poll_machine_exit(&mut machine);
+        assert_eq!(first.intent, ExitIntent::Success);
+        assert!(first.observed_epoch.is_some());
+        assert!(assembler.get(&host.heap(), "attempt").is_err());
+        assert!(host.stderr().is_empty());
+        assert!(host.diagnostics().is_empty());
+        assert!(matches!(
+            machine.poll(256),
+            EvaluationMachinePoll::Exit(EvaluationExitBlock {
+                intent: ExitIntent::Success,
+                observed_epoch: Some(_),
+            })
+        ));
+
+        let (_, disturb) =
+            compile_effect_with_runtime(&assembler.evaluation_runtime(), ".heap.set ['ready] 1");
+        assert!(matches!(
+            run_log_test(&assembler, &disturb, host.clone()).unwrap(),
+            TaskOutcome::Complete(_)
+        ));
+
+        let value = loop {
+            match machine.poll(256) {
+                EvaluationMachinePoll::Yielded => {}
+                EvaluationMachinePoll::Complete(value) => break value,
+                EvaluationMachinePoll::Blocked(_) => {
+                    panic!("disturbed exit retry unexpectedly blocked")
+                }
+                EvaluationMachinePoll::Exit(_) => {
+                    panic!("disturbed exit did not restart its transaction")
+                }
+                EvaluationMachinePoll::Failed(error) => {
+                    panic!("disturbed exit retry failed: {error}")
+                }
+                EvaluationMachinePoll::Cancelled => {
+                    panic!("disturbed exit retry was cancelled")
+                }
+            }
+        };
+        assert_eq!(
+            assembler
+                .to_binary(&PublicValue::from_core(&assembler.core_values(), value))
+                .unwrap(),
+            b"done".as_slice()
+        );
+        assert!(assembler.get(&host.heap(), "attempt").is_ok());
+        assert_eq!(host.stderr(), [Bytes::from_static(b"once")]);
+        assert_eq!(host.diagnostics().len(), 1);
         drop(owner);
     }
 

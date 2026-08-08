@@ -66,6 +66,17 @@ impl<B, R> SearchPolicy<B, R> {
             Self::RetainAll(search) => search.completed.clone(),
         }
     }
+
+    /// Drops every branch-local result and alternative while retaining the
+    /// immutable root needed to restart an isolated search.
+    pub(super) fn discard_progress(&mut self) {
+        let Self::RetainAll(search) = self else {
+            return;
+        };
+        search.alternatives.clear();
+        search.results.clear();
+        search.completed = None;
+    }
 }
 
 impl<B: Clone, R> SearchPolicy<B, R> {
