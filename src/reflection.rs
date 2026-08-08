@@ -5475,7 +5475,7 @@ mod tests {
     }
 
     #[test]
-    fn task_join_and_acknowledgement_remain_owner_session_operations() {
+    fn task_acknowledgement_remains_an_owner_session_operation() {
         let (assembler, spawn) = compile_effect(".task.new (.r ())");
         let host = Arc::new(TestHost::with_values(assembler.core_values()));
         let (first_context, first_task) =
@@ -5486,32 +5486,164 @@ mod tests {
             panic!("first session should return a task handle")
         };
 
-        for operation in ["join", "ack_error"] {
-            let (_, inspect) = compile_effect_with_runtime(
-                &assembler.evaluation_runtime(),
-                &format!("\\task -> .task.{operation} task"),
-            );
-            let inspect = assembler
+        let (_, acknowledge) = compile_effect_with_runtime(
+            &assembler.evaluation_runtime(),
+            "\\task -> .task.ack_error task",
+        );
+        let acknowledge = assembler
+            .apply(
+                &acknowledge,
+                [PublicValue::from_core(&assembler.core_values(), handle)],
+            )
+            .expect("non-owner task acknowledgement should apply");
+        let (second_context, second_task) =
+            schedule_composed_test_task(&assembler, &acknowledge, host);
+        assert!(matches!(
+            pump_composed_test_task(&second_context, &second_task),
+            EvaluationWaitPoll::Failed(error)
+                if error.to_string() == "task handle does not belong to this evaluation session"
+        ));
+    }
+
+    #[test]
+    fn task_join_accepts_same_runtime_handles_across_all_terminal_states() {
+        let (assembler, publish) = compile_effect(
+            ".task.new (.cut (.heap.get ['join_ready] >>= (\\ready -> (ready == \"ready\") =>> .r \"pending result\"))) >>= (\\pending -> .task.new (.cut (.heap.get ['never] >>= (\\_ -> .fail))) >>= (\\abandoned -> .task.new (.r \"complete result\") >>= (\\complete -> .task.new (.fail) >>= (\\failed -> .task.new (.r ()) >>= (\\canceled -> .task.cancel canceled =>> .heap.set ['join_tasks] { pending:pending, abandoned:abandoned, complete:complete, failed:failed, canceled:canceled })))))",
+        );
+        let host = Arc::new(TestHost::with_values(assembler.core_values()));
+        let (owner, publish_task) = schedule_composed_test_task(&assembler, &publish, host.clone());
+        assert!(matches!(
+            pump_composed_test_task(&owner, &publish_task),
+            EvaluationWaitPoll::Complete(_)
+        ));
+
+        let EvaluationSessionRun::Deadlocked(initial_owner_report) = owner.run_until_quiescent()
+        else {
+            panic!("the two blocked children should leave their owner session deadlocked")
+        };
+        assert_eq!(initial_owner_report.failures.size(), 1);
+        assert_eq!(initial_owner_report.unfinished.len(), 2);
+
+        let (_, read_handles) =
+            compile_effect_with_runtime(&assembler.evaluation_runtime(), ".heap.get ['join_tasks]");
+        let (handle_reader, read_handles_task) =
+            schedule_composed_test_task(&assembler, &read_handles, host.clone());
+        let EvaluationWaitPoll::Complete(handles) =
+            pump_composed_test_task(&handle_reader, &read_handles_task)
+        else {
+            panic!("a same-runtime observer should read the published task handles")
+        };
+        let Value::Dict(handles) = eval::eval_value(&handle_reader, &handles)
+            .expect("the published task-handle dictionary should evaluate")
+        else {
+            panic!("the task-handle fixture should publish a dictionary")
+        };
+        let handle = |name: &str| {
+            eval::eval_value(
+                &handle_reader,
+                handles
+                    .get(&Key::atom_from_text(name))
+                    .unwrap_or_else(|| panic!("task-handle fixture should define {name}")),
+            )
+            .unwrap_or_else(|error| panic!("task handle {name} should evaluate: {error}"))
+        };
+        let (_, join) = compile_effect_with_runtime(
+            &assembler.evaluation_runtime(),
+            "\\task -> .task.join task",
+        );
+        let join = |task: Value| {
+            assembler
                 .apply(
-                    &inspect,
-                    [PublicValue::from_core(
-                        &assembler.core_values(),
-                        handle.clone(),
-                    )],
+                    &join,
+                    [PublicValue::from_core(&assembler.core_values(), task)],
                 )
-                .expect("non-owner task inspection should apply");
-            let (second_context, second_task) =
-                schedule_composed_test_task(&assembler, &inspect, host.clone());
-            assert!(
-                matches!(
-                    pump_composed_test_task(&second_context, &second_task),
-                    EvaluationWaitPoll::Failed(error)
-                        if error.to_string()
-                            == "task handle does not belong to this evaluation session"
-                ),
-                "task.{operation} should remain owner-scoped until its later checkpoint"
-            );
-        }
+                .expect("task.join should apply to a task handle")
+        };
+
+        let join_complete = join(handle("complete"));
+        let (complete_observer, complete_join) =
+            schedule_composed_test_task(&assembler, &join_complete, host.clone());
+        let EvaluationWaitPoll::Complete(complete_result) =
+            pump_composed_test_task(&complete_observer, &complete_join)
+        else {
+            panic!("a same-runtime observer should join a completed task")
+        };
+        assert_eq!(complete_result, Value::binary_from_text("complete result"));
+
+        let join_failed = join(handle("failed"));
+        let (failed_observer, failed_join) =
+            schedule_composed_test_task(&assembler, &join_failed, host.clone());
+        assert!(matches!(
+            pump_composed_test_task(&failed_observer, &failed_join),
+            EvaluationWaitPoll::Failed(error)
+                if error.to_string().contains("failed permanently")
+        ));
+        assert_eq!(
+            owner.task_registry_counts().unacknowledged_failures,
+            0,
+            "propagating the child failure must acknowledge its producer-owner ledger"
+        );
+        assert_eq!(
+            failed_observer
+                .task_registry_counts()
+                .unacknowledged_failures,
+            1,
+            "the failed joining task must enter only the observer's ledger"
+        );
+
+        let join_canceled = join(handle("canceled"));
+        let (canceled_observer, canceled_join) =
+            schedule_composed_test_task(&assembler, &join_canceled, host.clone());
+        assert!(matches!(
+            pump_composed_test_task(&canceled_observer, &canceled_join),
+            EvaluationWaitPoll::Failed(error)
+                if error.to_string() == "joined reflection task was cancelled"
+        ));
+
+        let join_pending = join(handle("pending"));
+        let (pending_observer, pending_join) =
+            schedule_composed_test_task(&assembler, &join_pending, host.clone());
+        assert_eq!(
+            pending_observer.pump_wait(pending_join.wait(), 16_384),
+            crate::evaluation::EvaluationPumpOutcome::NoProgress,
+            "a same-runtime join must remain blocked while its exact child wait is pending"
+        );
+        assert!(matches!(
+            pending_observer.poll_reflection_task(&pending_join),
+            EvaluationWaitPoll::Pending(_)
+        ));
+
+        let (_, release_pending) = compile_effect_with_runtime(
+            &assembler.evaluation_runtime(),
+            ".heap.set ['join_ready] \"ready\"",
+        );
+        let (release_context, release_task) =
+            schedule_composed_test_task(&assembler, &release_pending, host.clone());
+        assert!(matches!(
+            pump_composed_test_task(&release_context, &release_task),
+            EvaluationWaitPoll::Complete(_)
+        ));
+        let EvaluationWaitPoll::Complete(pending_result) =
+            pump_composed_test_task(&pending_observer, &pending_join)
+        else {
+            panic!("the same-runtime join should resume when its child completes")
+        };
+        assert_eq!(pending_result, Value::binary_from_text("pending result"));
+
+        let join_abandoned = join(handle("abandoned"));
+        let (abandoned_observer, abandoned_join) =
+            schedule_composed_test_task(&assembler, &join_abandoned, host);
+        assert_eq!(
+            abandoned_observer.pump_wait(abandoned_join.wait(), 16_384),
+            crate::evaluation::EvaluationPumpOutcome::NoProgress
+        );
+        drop(owner);
+        assert!(matches!(
+            pump_composed_test_task(&abandoned_observer, &abandoned_join),
+            EvaluationWaitPoll::Failed(error)
+                if error.to_string()
+                    == "joined reflection task was abandoned when its evaluation session closed"
+        ));
     }
 
     #[test]

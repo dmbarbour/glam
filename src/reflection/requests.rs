@@ -442,11 +442,7 @@ where
         }
         ReflectionRequest::TaskJoin => {
             let handle = task_handle_argument(context.eval_context(), arguments, "task.join")?;
-            if !context.eval_context().owns_task(&handle.task) {
-                return Err(TaskHalt::new(
-                    "task handle does not belong to this evaluation session",
-                ));
-            }
+            ensure_runtime_task(context.eval_context(), &handle)?;
             match context.eval_context().poll_reflection_task(&handle.task) {
                 EvaluationWaitPoll::Pending(wait) => Err(TaskHalt::blocked(wait)),
                 EvaluationWaitPoll::Complete(value) => Ok(RequestResult::Return(Value::from_core(
@@ -454,6 +450,7 @@ where
                     value,
                 ))),
                 EvaluationWaitPoll::Failed(error) => {
+                    handle.task.acknowledge_propagated_failure();
                     Err(TaskHalt::failure(error)
                         .with_core_context(task_join_context(handle.task.id())))
                 }
