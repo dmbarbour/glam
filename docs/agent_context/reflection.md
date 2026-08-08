@@ -156,10 +156,11 @@ and control flow.
   tasks and ends only when all tasks are terminal or one stable pass proves
   deadlock. Failures, known wait dependencies, and retryably blocked errors
   remain in its report. A reported `ReasoningFailure` is an opaque capability
-  bound to its originating assembler session:
-  `Assembler::acknowledge_reasoning_failure` is idempotent, accepts assembler
-  clones, currently rejects non-owner sessions, and removes only the
-  reporting-ledger entry. It does not alter the task's terminal result.
+  bound to its originating evaluation runtime:
+  `Assembler::acknowledge_reasoning_failure` is idempotent, accepts any
+  assembler view of that runtime, rejects other runtimes, and removes only the
+  producer-owner reporting-ledger entry. It does not alter the task's terminal
+  result.
 
 ## Front-End and Logger Integration
 

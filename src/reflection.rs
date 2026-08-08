@@ -5475,20 +5475,22 @@ mod tests {
     }
 
     #[test]
-    fn task_acknowledgement_remains_an_owner_session_operation() {
-        let (assembler, spawn) = compile_effect(".task.new (.r ())");
+    fn task_acknowledgement_routes_across_sessions_to_the_producer_ledger() {
+        let (assembler, spawn) = compile_effect(".task.new (.fail)");
         let host = Arc::new(TestHost::with_values(assembler.core_values()));
-        let (first_context, first_task) =
-            schedule_composed_test_task(&assembler, &spawn, host.clone());
-        let EvaluationWaitPoll::Complete(handle) =
-            pump_composed_test_task(&first_context, &first_task)
+        let (owner, first_task) = schedule_composed_test_task(&assembler, &spawn, host.clone());
+        let EvaluationWaitPoll::Complete(handle) = pump_composed_test_task(&owner, &first_task)
         else {
             panic!("first session should return a task handle")
         };
+        let EvaluationSessionRun::Complete(report) = owner.run_until_quiescent() else {
+            panic!("the producer should drain its failed child")
+        };
+        assert_eq!(report.failures.size(), 1);
 
         let (_, acknowledge) = compile_effect_with_runtime(
             &assembler.evaluation_runtime(),
-            "\\task -> .task.ack_error task",
+            "\\task -> .cut (.task.ack_error task)",
         );
         let acknowledge = assembler
             .apply(
@@ -5500,9 +5502,20 @@ mod tests {
             schedule_composed_test_task(&assembler, &acknowledge, host);
         assert!(matches!(
             pump_composed_test_task(&second_context, &second_task),
-            EvaluationWaitPoll::Failed(error)
-                if error.to_string() == "task handle does not belong to this evaluation session"
+            EvaluationWaitPoll::Complete(_)
         ));
+        assert_eq!(
+            owner.task_registry_counts().unacknowledged_failures,
+            0,
+            "cross-session acknowledgement must remove the producer's failure entry"
+        );
+        assert_eq!(
+            second_context
+                .task_registry_counts()
+                .unacknowledged_failures,
+            0,
+            "acknowledgement must not create or remove an observer-ledger entry"
+        );
     }
 
     #[test]
@@ -5705,7 +5718,7 @@ mod tests {
         };
         let (_, cancel_non_owner) = compile_effect_with_runtime(
             &assembler.evaluation_runtime(),
-            "\\task -> .task.cancel task",
+            "\\task -> .cut (.task.cancel task) =>> .task.status task >>= (\\status -> (status == 'canceled) =>> .r ())",
         );
         let cancel_non_owner = assembler
             .apply(
@@ -6666,10 +6679,7 @@ mod tests {
                 .clone();
 
             if cancel {
-                assert_eq!(
-                    context.cancel_reflection_task(&owner_task),
-                    EvaluationTaskCancellation::Requested
-                );
+                assert_eq!(owner_task.cancel(), EvaluationTaskCancellation::Requested);
             } else {
                 context.complete_wait(owner_task.wait());
             }

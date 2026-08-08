@@ -42,8 +42,8 @@ enum ReflectionUpdate {
         task: PendingReflectionTask,
         publisher: TaskStatusPublisher,
     },
-    Cancel(EvalContext, EvaluationTaskHandle),
-    AcknowledgeError(EvalContext, EvaluationTaskHandle),
+    Cancel(EvaluationTaskHandle),
+    AcknowledgeError(EvaluationTaskHandle),
 }
 
 /// Transactional writes and deferred observations for reflection requests.
@@ -73,12 +73,12 @@ impl ReflectionJournal {
         }
         for update in &self.updates {
             match update {
-                ReflectionUpdate::Cancel(_, task) => {
+                ReflectionUpdate::Cancel(task) => {
                     if let Some(policy) = pending_policies.get_mut(&task.id()) {
                         policy.cancel();
                     }
                 }
-                ReflectionUpdate::AcknowledgeError(_, task) => {
+                ReflectionUpdate::AcknowledgeError(task) => {
                     if let Some(policy) = pending_policies.get_mut(&task.id()) {
                         policy.acknowledge_error();
                     }
@@ -94,14 +94,14 @@ impl ReflectionJournal {
                         .get(&task.handle().id())
                         .expect("every pending launch must have a policy"),
                 ),
-                ReflectionUpdate::Cancel(context, task) => {
+                ReflectionUpdate::Cancel(task) => {
                     if !pending_policies.contains_key(&task.id()) {
-                        context.cancel_reflection_task(task);
+                        task.cancel();
                     }
                 }
-                ReflectionUpdate::AcknowledgeError(context, task) => {
+                ReflectionUpdate::AcknowledgeError(task) => {
                     if !pending_policies.contains_key(&task.id()) {
-                        context.acknowledge_reflection_task_error(task);
+                        task.acknowledge_failure();
                     }
                 }
             }
@@ -511,34 +511,34 @@ where
         }
         ReflectionRequest::TaskAcknowledgeError => {
             let handle = task_handle_argument(context.eval_context(), arguments, "task.ack_error")?;
-            ensure_local_task(context.eval_context(), &handle)?;
-            let eval_context = context.eval_context().clone();
-            if let Some(mut transaction) = context.transaction() {
-                transaction.parts().1.reflection_journal().updates.push(
-                    ReflectionUpdate::AcknowledgeError(eval_context, handle.task.clone()),
-                );
-            } else {
-                let acknowledged = eval_context.acknowledge_reflection_task_error(&handle.task);
-                debug_assert!(acknowledged, "task locality was checked above");
-                context.committed();
-            }
-            Ok(RequestResult::ReturnUnit)
-        }
-        ReflectionRequest::TaskCancel => {
-            let handle = task_handle_argument(context.eval_context(), arguments, "task.cancel")?;
-            let eval_context = context.eval_context().clone();
+            ensure_runtime_task(context.eval_context(), &handle)?;
             if let Some(mut transaction) = context.transaction() {
                 transaction
                     .parts()
                     .1
                     .reflection_journal()
                     .updates
-                    .push(ReflectionUpdate::Cancel(eval_context, handle.task.clone()));
+                    .push(ReflectionUpdate::AcknowledgeError(handle.task.clone()));
             } else {
-                match eval_context.cancel_reflection_task(&handle.task) {
+                handle.task.acknowledge_failure();
+                context.committed();
+            }
+            Ok(RequestResult::ReturnUnit)
+        }
+        ReflectionRequest::TaskCancel => {
+            let handle = task_handle_argument(context.eval_context(), arguments, "task.cancel")?;
+            ensure_runtime_task(context.eval_context(), &handle)?;
+            if let Some(mut transaction) = context.transaction() {
+                transaction
+                    .parts()
+                    .1
+                    .reflection_journal()
+                    .updates
+                    .push(ReflectionUpdate::Cancel(handle.task.clone()));
+            } else {
+                match handle.task.cancel() {
                     EvaluationTaskCancellation::Requested => context.committed(),
-                    EvaluationTaskCancellation::Late
-                    | EvaluationTaskCancellation::NotOwnerSession => {}
+                    EvaluationTaskCancellation::Late => {}
                 }
             }
             Ok(RequestResult::ReturnUnit)
@@ -724,17 +724,6 @@ fn ensure_runtime_task(context: &EvalContext, handle: &TaskHandleCell) -> Result
     if handle.runtime != context.values().runtime_id() {
         Err(TaskHalt::new(
             "task handle belongs to a different evaluation runtime",
-        ))
-    } else {
-        Ok(())
-    }
-}
-
-fn ensure_local_task(context: &EvalContext, handle: &TaskHandleCell) -> Result<(), TaskHalt> {
-    ensure_runtime_task(context, handle)?;
-    if !context.owns_task(&handle.task) {
-        Err(TaskHalt::new(
-            "task handle does not belong to this evaluation session",
         ))
     } else {
         Ok(())
@@ -1014,7 +1003,7 @@ mod tests {
     }
 
     #[test]
-    fn task_observation_rejects_an_artificial_foreign_runtime_handle() {
+    fn task_requests_reject_an_artificial_foreign_runtime_handle_before_dispatch() {
         let context = EvalContext::standalone();
         let values = context.values().clone();
         let task = context

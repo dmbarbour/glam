@@ -514,9 +514,41 @@ impl EvaluationTaskHandle {
         self.acknowledge_failure();
     }
 
-    fn acknowledge_failure(&self) {
+    /// Acknowledges any present or future failure in this task's immutable
+    /// producer-owner ledger bucket.
+    pub(crate) fn acknowledge_failure(&self) {
         if let Some(coordinator) = self.coordinator.upgrade() {
+            debug_assert_eq!(coordinator.runtime_id(), self.runtime_id());
             coordinator.acknowledge_task_failure(self.owner_session, self.id);
+        }
+    }
+
+    /// Requests cancellation through this task's runtime work record.
+    pub(crate) fn cancel(&self) -> EvaluationTaskCancellation {
+        if self.wait.terminal_poll().is_some() {
+            return EvaluationTaskCancellation::Late;
+        }
+        let Some(coordinator) = self.coordinator.upgrade() else {
+            return EvaluationTaskCancellation::Late;
+        };
+        debug_assert_eq!(coordinator.runtime_id(), self.runtime_id());
+        match coordinator.request_reflection_cancellation(self.work) {
+            ReflectionCancellation::Requested => EvaluationTaskCancellation::Requested,
+            ReflectionCancellation::Late => EvaluationTaskCancellation::Late,
+            ReflectionCancellation::Terminalize => {
+                settle_task_work(
+                    &coordinator,
+                    self.work,
+                    EvaluationTaskState::Cancelled,
+                    evaluation_failure("reflection fixpoint producer was cancelled"),
+                );
+                let mut machine = coordinator.retire_reflection(self.work);
+                if let Some(machine) = &mut machine {
+                    machine.cancel();
+                }
+                drop(machine);
+                EvaluationTaskCancellation::Requested
+            }
         }
     }
 }
@@ -546,7 +578,6 @@ pub(crate) enum EvaluationWaitPoll {
 pub(crate) enum EvaluationTaskCancellation {
     Requested,
     Late,
-    NotOwnerSession,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -1775,58 +1806,13 @@ impl EvalContext {
         })
     }
 
-    pub(crate) fn owns_task(&self, task: &EvaluationTaskHandle) -> bool {
-        task.session_id() == self.session.id
-    }
-
-    pub(crate) fn cancel_reflection_task(
+    pub(crate) fn acknowledge_task_failure(
         &self,
-        task: &EvaluationTaskHandle,
-    ) -> EvaluationTaskCancellation {
-        if !self.owns_task(task) {
-            return EvaluationTaskCancellation::NotOwnerSession;
-        }
-        if task.wait.terminal_poll().is_some() {
-            return EvaluationTaskCancellation::Late;
-        }
-        let Some(coordinator) = self.coordinator() else {
-            return EvaluationTaskCancellation::Late;
-        };
-        match coordinator.request_reflection_cancellation(task.work) {
-            ReflectionCancellation::Requested => EvaluationTaskCancellation::Requested,
-            ReflectionCancellation::Late => EvaluationTaskCancellation::Late,
-            ReflectionCancellation::Terminalize => {
-                settle_task_work(
-                    &coordinator,
-                    task.work,
-                    EvaluationTaskState::Cancelled,
-                    evaluation_failure("reflection fixpoint producer was cancelled"),
-                );
-                let mut machine = coordinator.retire_reflection(task.work);
-                if let Some(machine) = &mut machine {
-                    machine.cancel();
-                }
-                drop(machine);
-                EvaluationTaskCancellation::Requested
-            }
-        }
-    }
-
-    /// Acknowledges any present or future failure of a local reflection task.
-    ///
-    /// Acknowledgement affects reasoning reports only. The task's terminal
-    /// result and transactional status query remain unchanged.
-    pub(crate) fn acknowledge_reflection_task_error(&self, task: &EvaluationTaskHandle) -> bool {
-        if !self.owns_task(task) {
-            return false;
-        }
-        task.acknowledge_failure();
-        true
-    }
-
-    pub(crate) fn acknowledge_task_failure(&self, task: EvaluationTaskId) {
+        owner: EvaluationSessionId,
+        task: EvaluationTaskId,
+    ) {
         if let Some(coordinator) = self.coordinator() {
-            coordinator.acknowledge_task_failure(self.session.id, task);
+            coordinator.acknowledge_task_failure(owner, task);
         }
     }
 
@@ -2734,6 +2720,33 @@ mod tests {
     }
 
     #[test]
+    fn task_handle_cancellation_is_harmless_after_owner_closure() {
+        let (coordinator, _executor) =
+            test_execution_resources(0).expect("test execution resources should build");
+        let owner = EvaluationSession::shared(&coordinator);
+        let context = EvalContext::new(&owner);
+        let task = context
+            .schedule_task(|_| Ok(Box::new(AlwaysBlocked)))
+            .expect("blocked task should schedule");
+        assert_eq!(
+            context.pump_wait(task.wait(), 256),
+            EvaluationPumpOutcome::NoProgress
+        );
+
+        drop(context);
+        drop(owner);
+        assert_eq!(
+            task.wait.terminal_poll(),
+            Some(EvaluationWaitPoll::Abandoned)
+        );
+        assert_eq!(
+            task.cancel(),
+            EvaluationTaskCancellation::Late,
+            "owner closure must win atomically over a later cancellation request"
+        );
+    }
+
+    #[test]
     fn running_machine_finishes_its_quantum_after_owner_drop_without_retaining_the_owner() {
         let (coordinator, _executor) =
             test_execution_resources(1).expect("test execution resources should build");
@@ -3448,10 +3461,7 @@ mod tests {
             );
             assert_eq!(wait.exact_subscription_count(), 1);
         }
-        assert_eq!(
-            context.cancel_reflection_task(&cancelled),
-            EvaluationTaskCancellation::Requested
-        );
+        assert_eq!(cancelled.cancel(), EvaluationTaskCancellation::Requested);
         assert_eq!(cancelled.wait().exact_subscription_count(), 0);
 
         let EvaluationSessionRun::Complete(report) = context.run_until_quiescent() else {
@@ -3634,10 +3644,7 @@ mod tests {
             let cancelled = owner
                 .schedule_task(|_| Ok(Box::new(Complete)))
                 .expect("cancelled task should schedule");
-            assert_eq!(
-                owner.cancel_reflection_task(&cancelled),
-                EvaluationTaskCancellation::Requested
-            );
+            assert_eq!(cancelled.cancel(), EvaluationTaskCancellation::Requested);
             assert!(matches!(
                 owner.run_until_quiescent(),
                 EvaluationSessionRun::Complete(_)
@@ -3752,10 +3759,7 @@ mod tests {
             !coordinator.task_has_status_publisher(task.id()),
             "a task without a public handle should not allocate a status publisher"
         );
-        assert_eq!(
-            context.cancel_reflection_task(&task),
-            EvaluationTaskCancellation::Requested
-        );
+        assert_eq!(task.cancel(), EvaluationTaskCancellation::Requested);
     }
 
     #[test]
@@ -3947,10 +3951,7 @@ mod tests {
             .expect_err("the unresolved task promise should block its follower");
         assert!(blocked.blocked_on().is_some());
         assert_eq!(promise.exact_subscription_count(), 1);
-        assert_eq!(
-            owner.cancel_reflection_task(&owner_task),
-            EvaluationTaskCancellation::Requested
-        );
+        assert_eq!(owner_task.cancel(), EvaluationTaskCancellation::Requested);
         assert_eq!(promise.exact_subscription_count(), 0);
         assert!(
             crate::eval::eval_value(&observer, &Value::Lazy(lazy))
@@ -4004,10 +4005,7 @@ mod tests {
             EvaluationWaitPoll::Complete(value) if value == context.values().unit()
         ));
 
-        assert_eq!(
-            context.cancel_reflection_task(&task),
-            EvaluationTaskCancellation::Requested
-        );
+        assert_eq!(task.cancel(), EvaluationTaskCancellation::Requested);
         assert_eq!(
             context.poll_reflection_task(&task),
             EvaluationWaitPoll::Cancelled
@@ -4051,10 +4049,7 @@ mod tests {
             let cancellation = context
                 .schedule_task(|_| Ok(Box::new(Complete)))
                 .expect("cancelled reflection task should schedule");
-            assert_eq!(
-                context.cancel_reflection_task(&cancellation),
-                EvaluationTaskCancellation::Requested
-            );
+            assert_eq!(cancellation.cancel(), EvaluationTaskCancellation::Requested);
             cancelled.push(cancellation);
 
             let lazy = LazyValue::deferred(
@@ -4140,7 +4135,7 @@ mod tests {
         ));
 
         for task in &failed {
-            assert!(context.acknowledge_reflection_task_error(task));
+            task.acknowledge_failure();
         }
         assert_eq!(
             context.task_registry_counts().unacknowledged_failures,
@@ -4560,24 +4555,18 @@ mod tests {
                 }))
             })
             .expect("cancellable task should schedule");
-        assert_eq!(
-            context.cancel_reflection_task(&task),
-            EvaluationTaskCancellation::Requested
-        );
+        assert_eq!(task.cancel(), EvaluationTaskCancellation::Requested);
         assert!(cancelled.load(Ordering::Acquire));
         assert_eq!(
             context.poll_reflection_task(&task),
             EvaluationWaitPoll::Cancelled
         );
-        assert_eq!(
-            context.cancel_reflection_task(&task),
-            EvaluationTaskCancellation::Late
-        );
+        assert_eq!(task.cancel(), EvaluationTaskCancellation::Late);
 
-        let non_owner = fixture.context();
         assert_eq!(
-            non_owner.cancel_reflection_task(&task),
-            EvaluationTaskCancellation::NotOwnerSession
+            task.cancel(),
+            EvaluationTaskCancellation::Late,
+            "terminal cancellation requests must remain harmless"
         );
     }
 
@@ -4625,10 +4614,7 @@ mod tests {
             .recv_timeout(Duration::from_secs(2))
             .expect("worker should claim the task");
 
-        assert_eq!(
-            context.cancel_reflection_task(&task),
-            EvaluationTaskCancellation::Requested
-        );
+        assert_eq!(task.cancel(), EvaluationTaskCancellation::Requested);
         assert!(matches!(
             context.poll_reflection_task(&task),
             EvaluationWaitPoll::Pending(_)
@@ -4682,7 +4668,7 @@ mod tests {
         let context = EvalContext::standalone();
 
         let reserved = context.reserve_task().expect("task should reserve");
-        assert!(context.acknowledge_reflection_task_error(&reserved));
+        reserved.acknowledge_failure();
         assert!(
             context
                 .coordinator()
@@ -4698,17 +4684,14 @@ mod tests {
             context.pump_wait(blocked.wait(), 256),
             EvaluationPumpOutcome::NoProgress
         );
-        assert!(context.acknowledge_reflection_task_error(&blocked));
+        blocked.acknowledge_failure();
         assert!(
             context
                 .coordinator()
                 .expect("blocked task must retain its coordinator")
                 .task_failure_is_acknowledged(blocked.id())
         );
-        assert_eq!(
-            context.cancel_reflection_task(&blocked),
-            EvaluationTaskCancellation::Requested
-        );
+        assert_eq!(blocked.cancel(), EvaluationTaskCancellation::Requested);
 
         let (started_sender, started_receiver) = mpsc::channel();
         let (release_sender, release_receiver) = mpsc::channel();
@@ -4728,7 +4711,7 @@ mod tests {
         started_receiver
             .recv_timeout(Duration::from_secs(2))
             .expect("worker should claim the running task");
-        assert!(context.acknowledge_reflection_task_error(&running));
+        running.acknowledge_failure();
         release_sender
             .send(())
             .expect("running task should still be waiting");
@@ -4754,8 +4737,8 @@ mod tests {
         };
         assert_eq!(report.failures.size(), 1);
         assert!(report.failures.contains_key(&failed.id()));
-        assert!(context.acknowledge_reflection_task_error(&failed));
-        assert!(context.acknowledge_reflection_task_error(&failed));
+        failed.acknowledge_failure();
+        failed.acknowledge_failure();
         for _ in 0..2 {
             let EvaluationSessionRun::Complete(report) = context.run_until_quiescent() else {
                 panic!("acknowledged task should remain terminal")
@@ -4777,7 +4760,7 @@ mod tests {
             context.pump_wait(successful.wait(), 256),
             EvaluationPumpOutcome::TargetReady
         );
-        assert!(context.acknowledge_reflection_task_error(&successful));
+        successful.acknowledge_failure();
         assert!(matches!(
             context.poll_reflection_task(&successful),
             EvaluationWaitPoll::Complete(_)
@@ -4786,11 +4769,8 @@ mod tests {
         let cancelled = context
             .schedule_task(|_| Ok(Box::new(Complete)))
             .expect("cancelled task should schedule");
-        assert_eq!(
-            context.cancel_reflection_task(&cancelled),
-            EvaluationTaskCancellation::Requested
-        );
-        assert!(context.acknowledge_reflection_task_error(&cancelled));
+        assert_eq!(cancelled.cancel(), EvaluationTaskCancellation::Requested);
+        cancelled.acknowledge_failure();
         assert_eq!(
             context.poll_reflection_task(&cancelled),
             EvaluationWaitPoll::Cancelled
@@ -4861,7 +4841,7 @@ mod tests {
                 .is_some_and(|failures| failures.contains_key(&second_task_id))
         );
 
-        first_context.acknowledge_task_failure(first_task_id);
+        first_context.acknowledge_task_failure(first_owner_id, first_task_id);
         assert!(
             first_snapshot.contains_key(&first_task_id),
             "persistent report snapshots must remain valid after later acknowledgement"
@@ -4880,7 +4860,7 @@ mod tests {
 
         drop(second_task);
         drop(second_owner);
-        second_context.acknowledge_task_failure(second_task_id);
+        second_context.acknowledge_task_failure(second_owner_id, second_task_id);
         assert!(coordinator.failure_ledger_snapshot().is_empty());
     }
 

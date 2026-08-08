@@ -211,7 +211,7 @@ An unacknowledged failure also leaves one minimal entry in its producer
 owner's runtime-ledger bucket until `.task.ack_error` removes it. Propagated
 failure acknowledgement follows the handle's reporting identity directly to
 that bucket instead of upgrading the former owner session. Rust clients receive
-the corresponding opaque, session-bound `ReasoningFailure` from
+the corresponding opaque, runtime-bound `ReasoningFailure` from
 `Assembler::drain_reasoning` and may remove the same entry with
 `Assembler::acknowledge_reasoning_failure`. Acknowledgement through either
 surface leaves the terminal result unchanged.
@@ -356,16 +356,16 @@ producer failure.
 
 ## Reflection Task Handles
 
-An opaque reflection task value retains its `EvaluationTaskHandle`: the task
-ID, session provenance, and wait token are one lifetime-bearing capability.
-Join polls that wait directly. Cancellation first validates that the handle
-belongs to the caller's evaluation session, then updates the record addressed
-by the same wait token. Transactional status, value, and error observations
-remain query-backed and therefore keep their existing snapshot semantics.
-Any session in the same runtime may make those read-only observations; they
-do not change the task's captured profile, demand scope, reporting owner, or
-failure ledger. Runtime provenance is the capability boundary, while join and
-control remain owner-session operations until their dedicated transitions.
+An opaque reflection task value retains its `EvaluationTaskHandle`: runtime,
+task, producer-owner, work, and wait identity form one lifetime-bearing
+capability. Join polls that wait directly. Cancellation routes to the work
+record named by the handle, and acknowledgement routes to the immutable
+producer-owner failure-ledger bucket. Transactional status, value, and error
+observations remain query-backed and therefore keep their existing snapshot
+semantics. Any session in the same runtime may observe, join, cancel, or
+acknowledge the task; none of those operations changes its captured profile,
+demand scope, or reporting owner. Runtime provenance is the capability
+boundary.
 
 Task creation reserves a non-runnable record. At transaction commit, all
 modifiers for tasks created by that same journal are folded into one

@@ -3449,6 +3449,7 @@ pub enum ReasoningStatus {
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct ReasoningFailure {
+    runtime: EvaluationRuntimeId,
     task: EvaluationTaskId,
     diagnostic: Diagnostic,
     session: EvaluationSessionId,
@@ -4149,6 +4150,7 @@ impl Assembler {
     /// limit. A runnable infinite task therefore keeps this call running.
     pub fn drain_reasoning(&self) -> ReasoningReport {
         let context = self.eval_context();
+        let runtime = context.values().runtime_id();
         let session = context.session_id();
         let values = context.values().clone();
         let run = context.run_until_quiescent();
@@ -4163,6 +4165,7 @@ impl Assembler {
                 .failures
                 .iter()
                 .map(|(task, error)| ReasoningFailure {
+                    runtime,
                     task: *task,
                     diagnostic: reasoning_diagnostic(&values, error),
                     session,
@@ -4198,16 +4201,17 @@ impl Assembler {
     ///
     /// Acknowledgement removes the failure from later reasoning reports but
     /// does not change the task's terminal result. Repeated acknowledgement is
-    /// harmless. A report from another assembler reasoning session is rejected
-    /// even when both assemblers share the same execution runtime.
+    /// harmless. Any assembler view of the same evaluation runtime may
+    /// acknowledge the producer's failure; a report from another runtime is
+    /// rejected.
     pub fn acknowledge_reasoning_failure(&self, failure: &ReasoningFailure) -> Result<(), Error> {
         let context = self.eval_context();
-        if context.session_id() != failure.session {
+        if context.values().runtime_id() != failure.runtime {
             return Err(Error::new(
-                "reasoning failure belongs to a different assembler session",
+                "reasoning failure belongs to a different evaluation runtime",
             ));
         }
-        context.acknowledge_task_failure(failure.task);
+        context.acknowledge_task_failure(failure.session, failure.task);
         Ok(())
     }
 
@@ -6549,16 +6553,20 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_failure_acknowledgement_is_idempotent_and_session_bound() {
+    fn reasoning_failure_acknowledgement_is_idempotent_and_runtime_bound() {
         let runtime = EvaluationRuntime::new(0).expect("dormant runtime should build");
         let assembler = Assembler::builder()
             .evaluation_runtime(runtime.clone())
             .build()
             .expect("assembler should build");
-        let foreign = Assembler::builder()
+        let peer = Assembler::builder()
             .evaluation_runtime(runtime)
             .build()
-            .expect("foreign assembler should build");
+            .expect("same-runtime peer assembler should build");
+        let foreign = Assembler::builder()
+            .evaluation_runtime(EvaluationRuntime::new(0).expect("foreign runtime should build"))
+            .build()
+            .expect("foreign-runtime assembler should build");
         let task = assembler
             .eval_context()
             .schedule_task(|_| Ok(Box::new(FailedReasoningTask)))
@@ -6575,18 +6583,16 @@ mod tests {
 
         let error = foreign
             .acknowledge_reasoning_failure(&failure)
-            .expect_err("a foreign assembler must reject the acknowledgement capability");
-        assert!(error.to_string().contains("different assembler session"));
+            .expect_err("a foreign runtime must reject the acknowledgement capability");
+        assert!(error.to_string().contains("different evaluation runtime"));
         assert_eq!(
             assembler.drain_reasoning().failures(),
             std::slice::from_ref(&failure),
-            "foreign acknowledgement must not alter the originating ledger"
+            "foreign-runtime acknowledgement must not alter the originating ledger"
         );
 
-        assembler
-            .clone()
-            .acknowledge_reasoning_failure(&failure)
-            .expect("an assembler clone should share the originating session");
+        peer.acknowledge_reasoning_failure(&failure)
+            .expect("a same-runtime assembler should route to the producer ledger");
         assembler
             .acknowledge_reasoning_failure(&failure)
             .expect("repeated acknowledgement should be harmless");
