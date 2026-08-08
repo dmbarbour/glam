@@ -685,8 +685,11 @@ enum EvaluationTaskState {
 struct ReflectionTaskReportingRecord {
     id: EvaluationTaskId,
     work: EvaluationWorkId,
+}
+
+pub(super) struct TaskStatusReporting {
     published_status: EvaluationTaskStatus,
-    status_sinks: Vec<Arc<dyn EvaluationTaskStatusSink>>,
+    status_sink: Option<Arc<dyn EvaluationTaskStatusSink>>,
 }
 
 fn evaluation_task_state(terminal: EvaluationWaitTerminal) -> EvaluationTaskState {
@@ -720,9 +723,17 @@ fn settle_task_work(
     ))
 }
 
-struct TaskStatusUpdate {
+fn task_status_transition(
+    coordinator: &EvaluationWorkCoordinator,
+    work: EvaluationWorkId,
+    state: &EvaluationTaskState,
+) -> Option<TaskStatusUpdate> {
+    coordinator.update_reflection_status(work, task_status(state))
+}
+
+pub(super) struct TaskStatusUpdate {
     status: EvaluationTaskStatus,
-    sinks: Vec<Arc<dyn EvaluationTaskStatusSink>>,
+    sink: Arc<dyn EvaluationTaskStatusSink>,
 }
 
 fn task_status(state: &EvaluationTaskState) -> EvaluationTaskStatus {
@@ -734,11 +745,11 @@ fn task_status(state: &EvaluationTaskState) -> EvaluationTaskStatus {
     }
 }
 
-fn task_status_update(
-    record: &mut ReflectionTaskReportingRecord,
+pub(super) fn task_status_update(
+    record: &mut TaskStatusReporting,
     status: EvaluationTaskStatus,
 ) -> Option<TaskStatusUpdate> {
-    if record.status_sinks.is_empty() {
+    if record.status_sink.is_none() {
         record.published_status = status;
         return None;
     }
@@ -752,22 +763,27 @@ fn task_status_update(
             | EvaluationTaskStatus::Cancelled
             | EvaluationTaskStatus::Abandoned
     );
-    let sinks = if terminal {
-        std::mem::take(&mut record.status_sinks)
+    let sink = if terminal {
+        record
+            .status_sink
+            .take()
+            .expect("terminal status update must retain its publisher")
     } else {
-        record.status_sinks.clone()
+        record
+            .status_sink
+            .as_ref()
+            .expect("nonterminal status update must retain its publisher")
+            .clone()
     };
     record.published_status = status.clone();
-    Some(TaskStatusUpdate { status, sinks })
+    Some(TaskStatusUpdate { status, sink })
 }
 
 fn publish_task_status(update: Option<TaskStatusUpdate>) {
     let Some(update) = update else {
         return;
     };
-    for sink in update.sinks {
-        sink.update(update.status.clone());
-    }
+    update.sink.update(update.status);
 }
 
 #[derive(Clone)]
@@ -789,7 +805,7 @@ impl PendingReflectionTask {
 
     pub(crate) fn commit(
         &self,
-        status: Arc<dyn EvaluationTaskStatusSink>,
+        publisher: Arc<dyn EvaluationTaskStatusSink>,
         policy: PendingTaskPolicy,
     ) {
         if self.inner.activated.swap(true, Ordering::AcqRel) {
@@ -802,14 +818,14 @@ impl PendingReflectionTask {
                     self.inner.effect.as_core().clone(),
                     ReflectionTaskResultPolicy::ReturnValue,
                     self.inner.context.task_profile.clone(),
-                    Some(status),
+                    Some(publisher),
                     policy.acknowledge_error,
                 );
             }
             InitialTaskDisposition::Cancel => self
                 .inner
                 .context
-                .cancel_pending_reflection_task(&self.inner.handle, status),
+                .cancel_pending_reflection_task(&self.inner.handle, publisher),
         }
     }
 }
@@ -833,10 +849,11 @@ type RuntimeFailureLedger = RedBlackTreeMapSync<EvaluationSessionId, TaskFailure
 
 /// Transitional task reporting state for one demand session.
 ///
-/// This store contains published status and status sinks only. Executable
-/// machines and failure acknowledgement policy belong to coordinator work
-/// records. The coordinator retains the store while an indexed reflection
-/// task still has a reporting tail, without recovering the external
+/// This store contains only the task/wait indexes still used by the serial
+/// pump and retirement paths. Executable machines, failure acknowledgement,
+/// and protected status publication belong to coordinator work records. The
+/// coordinator retains the store while an indexed reflection task still has
+/// that transitional lookup tail, without recovering the external
 /// [`EvaluationSession`] owner lease.
 pub(super) struct SessionTaskReportingStore {
     id: EvaluationSessionId,
@@ -858,39 +875,6 @@ impl SessionTaskReportingStore {
     fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Acquire)
     }
-}
-
-struct ReflectionTaskTransition {
-    retired: Option<ReflectionTaskReportingRecord>,
-    status: Option<TaskStatusUpdate>,
-}
-
-fn transition_reflection_task(
-    tasks: &mut SessionTaskReportingState,
-    wait: &EvaluationWaitToken,
-    state: EvaluationTaskState,
-) -> ReflectionTaskTransition {
-    let status = {
-        let record = tasks
-            .reflection
-            .get_mut(wait)
-            .expect("transitioned reflection task must remain registered");
-        task_status_update(record, task_status(&state))
-    };
-    let retired = Some(retire_reflection_task(tasks, wait));
-    ReflectionTaskTransition { retired, status }
-}
-
-fn update_reflection_task_status(
-    tasks: &mut SessionTaskReportingState,
-    wait: &EvaluationWaitToken,
-    status: EvaluationTaskStatus,
-) -> Option<TaskStatusUpdate> {
-    let record = tasks
-        .reflection
-        .get_mut(wait)
-        .expect("active reflection task must remain registered");
-    task_status_update(record, status)
 }
 
 fn retire_reflection_task(
@@ -1072,7 +1056,13 @@ impl Drop for EvaluationSession {
                 );
             })
             .collect::<Vec<_>>();
-        let (reflection, statuses) = {
+        let statuses = abandoning
+            .iter()
+            .filter_map(|(work, (_, _, state))| {
+                task_status_transition(&self.coordinator, *work, state)
+            })
+            .collect::<Vec<_>>();
+        let reflection = {
             let mut tasks = self
                 .reporting
                 .state
@@ -1081,13 +1071,12 @@ impl Drop for EvaluationSession {
 
             let reflection_waits = tasks.reflection.keys().cloned().collect::<Vec<_>>();
             let mut reflection = Vec::with_capacity(reflection_waits.len());
-            let mut statuses = Vec::new();
             for wait in reflection_waits {
                 let record = tasks
                     .reflection
                     .get(&wait)
                     .expect("collected reflection wait must remain registered");
-                let Some((task, cancel, state)) = abandoning.get(&record.work).cloned() else {
+                let Some((task, cancel, _state)) = abandoning.get(&record.work).cloned() else {
                     // Another operation owns this record's terminal tail. A
                     // running claim retains its detached machine until it
                     // settles and retires the work. In either case the
@@ -1097,30 +1086,22 @@ impl Drop for EvaluationSession {
                 };
                 assert_eq!(record.id, task);
                 let work = record.work;
-                let transition = transition_reflection_task(&mut tasks, &wait, state);
-                reflection.push((
-                    work,
-                    cancel,
-                    transition
-                        .retired
-                        .expect("session shutdown must retire a reflection task"),
-                ));
-                statuses.extend(transition.status);
+                retire_reflection_task(&mut tasks, &wait);
+                reflection.push((work, cancel));
             }
 
-            (reflection, statuses)
+            reflection
         };
 
         for status in statuses {
             publish_task_status(Some(status));
         }
-        for (work, cancel, record) in reflection {
+        for (work, cancel) in reflection {
             let mut machine = self.coordinator.retire_reflection(work);
             if cancel && let Some(machine) = &mut machine {
                 machine.cancel();
             }
             drop(machine);
-            drop(record);
         }
         for work in abandoning_deferred {
             self.coordinator.retire_deferred(work.id);
@@ -1721,15 +1702,9 @@ impl EvalContext {
             .state
             .lock()
             .expect("evaluation task registry was poisoned");
-        let replaced = tasks.reflection.insert(
-            wait.clone(),
-            ReflectionTaskReportingRecord {
-                id,
-                work,
-                published_status: EvaluationTaskStatus::Launched,
-                status_sinks: Vec::new(),
-            },
-        );
+        let replaced = tasks
+            .reflection
+            .insert(wait.clone(), ReflectionTaskReportingRecord { id, work });
         let replaced_id = tasks.reflection_by_id.insert(id, wait.clone());
         assert!(
             replaced.is_none() && replaced_id.is_none(),
@@ -1756,15 +1731,9 @@ impl EvalContext {
             .state
             .lock()
             .expect("evaluation task registry was poisoned");
-        let replaced = tasks.reflection.insert(
-            wait.clone(),
-            ReflectionTaskReportingRecord {
-                id,
-                work,
-                published_status: EvaluationTaskStatus::Launched,
-                status_sinks: Vec::new(),
-            },
-        );
+        let replaced = tasks
+            .reflection
+            .insert(wait.clone(), ReflectionTaskReportingRecord { id, work });
         let replaced_id = tasks.reflection_by_id.insert(id, wait.clone());
         assert!(
             replaced.is_none() && replaced_id.is_none(),
@@ -1790,6 +1759,11 @@ impl EvalContext {
         };
         if error_acknowledged {
             coordinator.acknowledge_task_failure(handle.session_id(), handle.id());
+        }
+        if let Some(status_sink) = status_sink
+            && !coordinator.attach_reflection_status_sink(handle.work, status_sink)
+        {
+            return;
         }
         let result = task_profile
             .launcher()
@@ -1821,9 +1795,6 @@ impl EvalContext {
                         return;
                     };
                     assert_eq!(record.work, handle.work);
-                    if let Some(status_sink) = status_sink {
-                        record.status_sinks.push(status_sink);
-                    }
                 }
                 if coordinator
                     .install_reflection_machine(handle.work, machine)
@@ -1845,9 +1816,6 @@ impl EvalContext {
                         return;
                     };
                     assert_eq!(record.work, handle.work);
-                    if let Some(status_sink) = status_sink {
-                        record.status_sinks.push(status_sink);
-                    }
                 }
                 if coordinator.terminalize_reserved_reflection(handle.work) {
                     let state = settle_task_work(
@@ -1856,16 +1824,16 @@ impl EvalContext {
                         EvaluationTaskState::Failed(error),
                         promise_failure,
                     );
-                    let transition = {
+                    let status = task_status_transition(&coordinator, handle.work, &state);
+                    {
                         let mut tasks = reporting
                             .state
                             .lock()
                             .expect("evaluation task registry was poisoned");
-                        transition_reflection_task(&mut tasks, &handle.wait, state)
-                    };
-                    publish_task_status(transition.status);
+                        retire_reflection_task(&mut tasks, &handle.wait);
+                    }
+                    publish_task_status(status);
                     drop(coordinator.retire_reflection(handle.work));
-                    drop(transition.retired);
                 }
             }
         }
@@ -1885,13 +1853,9 @@ impl EvalContext {
             .state
             .lock()
             .expect("evaluation task registry was poisoned");
-        let retired = if tasks.reflection.contains_key(&handle.wait) {
-            Some(retire_reflection_task(&mut tasks, &handle.wait))
-        } else {
-            None
-        };
-        drop(tasks);
-        drop(retired);
+        if tasks.reflection.contains_key(&handle.wait) {
+            retire_reflection_task(&mut tasks, &handle.wait);
+        }
     }
 
     fn cancel_pending_reflection_task(
@@ -1905,18 +1869,10 @@ impl EvalContext {
         let Some(reporting) = self.session.reporting_store() else {
             return;
         };
-        {
-            let mut tasks = reporting
-                .state
-                .lock()
-                .expect("evaluation task registry was poisoned");
-            let record = tasks
-                .reflection
-                .get_mut(&handle.wait)
-                .expect("a committed pending task must remain reserved");
-            assert_eq!(record.work, handle.work);
-            record.status_sinks.push(status_sink);
-        }
+        assert!(
+            coordinator.attach_reflection_status_sink(handle.work, status_sink),
+            "a committed pending task must remain reserved"
+        );
         let cancellation = coordinator.request_reflection_cancellation(handle.work);
         assert_eq!(
             cancellation,
@@ -1929,16 +1885,16 @@ impl EvalContext {
             EvaluationTaskState::Cancelled,
             evaluation_failure("reflection fixpoint producer was cancelled"),
         );
-        let transition = {
+        let status = task_status_transition(&coordinator, handle.work, &state);
+        {
             let mut tasks = reporting
                 .state
                 .lock()
                 .expect("evaluation task registry was poisoned");
-            transition_reflection_task(&mut tasks, &handle.wait, state)
-        };
-        publish_task_status(transition.status);
+            retire_reflection_task(&mut tasks, &handle.wait);
+        }
+        publish_task_status(status);
         drop(coordinator.retire_reflection(handle.work));
-        drop(transition.retired);
     }
 
     pub(crate) fn reserve_reflection_task(
@@ -1998,15 +1954,9 @@ impl EvalContext {
             .state
             .lock()
             .expect("evaluation task registry was poisoned");
-        let replaced = tasks.reflection.insert(
-            wait.clone(),
-            ReflectionTaskReportingRecord {
-                id,
-                work,
-                published_status: EvaluationTaskStatus::Launched,
-                status_sinks: Vec::new(),
-            },
-        );
+        let replaced = tasks
+            .reflection
+            .insert(wait.clone(), ReflectionTaskReportingRecord { id, work });
         let replaced_id = tasks.reflection_by_id.insert(id, wait.clone());
         assert!(
             replaced.is_none() && replaced_id.is_none(),
@@ -2049,7 +1999,8 @@ impl EvalContext {
                     EvaluationTaskState::Cancelled,
                     evaluation_failure("reflection fixpoint producer was cancelled"),
                 );
-                let transition = {
+                let status = task_status_transition(&coordinator, task.work, &state);
+                let retired = {
                     let mut tasks = reporting
                         .state
                         .lock()
@@ -2057,18 +2008,15 @@ impl EvalContext {
                     if !tasks.reflection.contains_key(&task.wait) {
                         return EvaluationTaskCancellation::Late;
                     }
-                    transition_reflection_task(&mut tasks, &task.wait, state)
+                    retire_reflection_task(&mut tasks, &task.wait)
                 };
-                let retired = transition
-                    .retired
-                    .expect("terminal cancellation must retire its task record");
+                debug_assert_eq!(retired.work, task.work);
                 let mut machine = coordinator.retire_reflection(task.work);
                 if let Some(machine) = &mut machine {
                     machine.cancel();
                 }
-                publish_task_status(transition.status);
+                publish_task_status(status);
                 drop(machine);
-                drop(retired);
                 EvaluationTaskCancellation::Requested
             }
         }
@@ -2177,15 +2125,15 @@ impl EvalContext {
             EvaluationTaskState::Complete(RuntimeValueRoot::new(&self.session.values, value)),
             evaluation_failure("reflection task completed without fulfilling its fixpoint"),
         );
+        let status = task_status_transition(&coordinator, work, &state);
         let mut tasks = reporting
             .state
             .lock()
             .expect("evaluation task registry was poisoned");
-        let transition = transition_reflection_task(&mut tasks, &wait, state);
+        retire_reflection_task(&mut tasks, &wait);
         drop(tasks);
-        publish_task_status(transition.status);
+        publish_task_status(status);
         drop(coordinator.retire_reflection(work));
-        drop(transition.retired);
         while matches!(
             self.pump_wait(&target, 256),
             EvaluationPumpOutcome::BudgetExhausted
@@ -2229,15 +2177,15 @@ impl EvalContext {
             EvaluationTaskState::Failed(failure.clone()),
             failure,
         );
+        let status = task_status_transition(&coordinator, work, &state);
         let mut tasks = reporting
             .state
             .lock()
             .expect("evaluation task registry was poisoned");
-        let transition = transition_reflection_task(&mut tasks, &wait, state);
+        retire_reflection_task(&mut tasks, &wait);
         drop(tasks);
-        publish_task_status(transition.status);
+        publish_task_status(status);
         drop(coordinator.retire_reflection(work));
-        drop(transition.retired);
         while matches!(
             self.pump_wait(&target, 256),
             EvaluationPumpOutcome::BudgetExhausted
@@ -2671,21 +2619,14 @@ fn release_reflection_task(
     let mut release = coordinator.release_reflection(claimed, work_poll);
     if !release.terminal {
         debug_assert!(release.machine.is_none());
-        let status = {
-            let mut tasks = reporting
-                .state
-                .lock()
-                .expect("evaluation task reporting store was poisoned");
-            update_reflection_task_status(
-                &mut tasks,
-                &wait,
-                if release.remains_blocked {
-                    EvaluationTaskStatus::Blocked
-                } else {
-                    EvaluationTaskStatus::Launched
-                },
-            )
-        };
+        let status = coordinator.update_reflection_status(
+            work,
+            if release.remains_blocked {
+                EvaluationTaskStatus::Blocked
+            } else {
+                EvaluationTaskStatus::Launched
+            },
+        );
         return (release.made_progress, release.remains_blocked, None, status);
     }
 
@@ -2709,16 +2650,14 @@ fn release_reflection_task(
         }
     };
     let state = settle_task_work(coordinator, work, state, promise_failure);
-    let transition = {
+    let status = task_status_transition(coordinator, work, &state);
+    let retired = {
         let mut tasks = reporting
             .state
             .lock()
             .expect("evaluation task reporting store was poisoned");
-        transition_reflection_task(&mut tasks, &wait, state)
+        retire_reflection_task(&mut tasks, &wait)
     };
-    let retired = transition
-        .retired
-        .expect("terminal reflection transition must retire its reporting record");
     assert_eq!(retired.work, work);
     let machine = release
         .machine
@@ -2736,8 +2675,7 @@ fn release_reflection_task(
             retirement,
         }
     });
-    drop(retired);
-    (release.made_progress, false, released, transition.status)
+    (release.made_progress, false, released, status)
 }
 
 fn release_deferred_task(
@@ -3954,18 +3892,12 @@ mod tests {
                 task.wait().subscribe_test_work(),
                 CompletionSubscriptionOutcome::Pending
             );
-            owner
-                .session
-                .reporting_store()
-                .expect("scheduled task must retain its reporting store")
-                .state
-                .lock()
-                .expect("evaluation task registry was poisoned")
-                .reflection
-                .get_mut(task.wait())
-                .expect("scheduled task must remain registered")
-                .status_sinks
-                .push(statuses.clone());
+            assert!(
+                owner
+                    .coordinator()
+                    .expect("scheduled task must retain its coordinator")
+                    .attach_reflection_status_sink(task.work, statuses.clone())
+            );
             task
         };
         let observer = fixture.context();
@@ -3982,6 +3914,25 @@ mod tests {
                 .expect("recorded task statuses were poisoned")
                 .as_slice(),
             [EvaluationTaskStatus::Abandoned]
+        );
+    }
+
+    #[test]
+    fn internal_reflection_tasks_do_not_manufacture_status_queries() {
+        let context = EvalContext::standalone();
+        let task = context
+            .schedule_task(|_| Ok(Box::new(AlwaysBlocked)))
+            .expect("internal task should schedule");
+        let coordinator = context
+            .coordinator()
+            .expect("internal task should retain its coordinator");
+        assert!(
+            !coordinator.task_has_status_sink(task.id()),
+            "a task without a public handle should not allocate a status publisher"
+        );
+        assert_eq!(
+            context.cancel_reflection_task(&task),
+            EvaluationTaskCancellation::Requested
         );
     }
 

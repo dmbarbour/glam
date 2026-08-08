@@ -114,14 +114,6 @@ impl ReflectionServices for CliHost {
     fn emit_diagnostic(&self, _diagnostic: Diagnostic) {
         // CLI `.log` is always journaled by the isolated outer search.
     }
-
-    fn update_query(
-        &self,
-        _handle: &Arc<crate::reflection::EvaluationQueryHandle>,
-        _result: Value,
-    ) {
-        unreachable!("the CLI effect API does not expose task queries")
-    }
 }
 
 impl TaskHost<CliEffects> for CliHost {

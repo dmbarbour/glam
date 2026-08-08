@@ -40,24 +40,21 @@ pub enum ReflectionRequest {
 enum ReflectionUpdate {
     Launch {
         task: PendingReflectionTask,
-        status: Arc<dyn EvaluationTaskStatusSink>,
+        publisher: Arc<dyn EvaluationTaskStatusSink>,
     },
     Cancel(EvalContext, EvaluationTaskHandle),
     AcknowledgeError(EvalContext, EvaluationTaskHandle),
 }
 
-struct TaskStatusQuery<H: ?Sized> {
-    host: Arc<H>,
+struct TaskStatusPublisher {
+    writer: Arc<dyn ReflectionQueryWriter>,
     handle: Arc<EvaluationQueryHandle>,
     values: CoreValueFactory,
 }
 
-impl<H> EvaluationTaskStatusSink for TaskStatusQuery<H>
-where
-    H: ReflectionServices + ?Sized,
-{
+impl EvaluationTaskStatusSink for TaskStatusPublisher {
     fn update(&self, status: EvaluationTaskStatus) {
-        self.host.update_query(
+        self.writer.update_query(
             &self.handle,
             Value::from_core(&self.values, task_status_query_value(&self.values, status)),
         );
@@ -106,8 +103,8 @@ impl ReflectionJournal {
         }
         for update in &self.updates {
             match update {
-                ReflectionUpdate::Launch { task, status } => task.commit(
-                    status.clone(),
+                ReflectionUpdate::Launch { task, publisher } => task.commit(
+                    publisher.clone(),
                     *pending_policies
                         .get(&task.handle().id())
                         .expect("every pending launch must have a policy"),
@@ -142,7 +139,21 @@ impl ReflectionTransaction for ReflectionJournal {
 pub trait ReflectionServices: Send + Sync {
     fn emit_diagnostic(&self, diagnostic: Diagnostic);
 
+    /// Returns the runtime-owned writer for protected asynchronous queries.
+    ///
+    /// Full reflection hosts return a writer which does not retain their
+    /// role-specific environment, diagnostics, launcher, or demand lease.
+    /// Restricted effect profiles which expose no query-producing operation
+    /// may leave this unavailable.
     #[doc(hidden)]
+    fn query_writer(&self) -> Option<Arc<dyn ReflectionQueryWriter>> {
+        None
+    }
+}
+
+/// Narrow runtime capability for completing protected asynchronous queries.
+#[doc(hidden)]
+pub trait ReflectionQueryWriter: Send + Sync {
     fn update_query(&self, handle: &Arc<EvaluationQueryHandle>, result: Value);
 }
 
@@ -335,7 +346,9 @@ where
                 .try_into()
                 .map_err(|_| TaskHalt::new("`.task.new` received the wrong number of arguments"))?;
             let eval_context = context.eval_context().clone();
-            let host = context.host_arc();
+            let query_writer = context.host().query_writer().ok_or_else(|| {
+                TaskHalt::new("current reflection host does not support task status queries")
+            })?;
             let effect = effect.into_core();
             let handle =
                 if let Some(mut transaction) = context.transaction() {
@@ -357,15 +370,15 @@ where
                         task: pending.handle().clone(),
                         status: result.clone(),
                     });
-                    let status = Arc::new(TaskStatusQuery {
-                        host,
+                    let publisher = Arc::new(TaskStatusPublisher {
+                        writer: query_writer,
                         handle: result,
                         values: eval_context.values().clone(),
                     });
                     transaction.parts().1.reflection_journal().updates.push(
                         ReflectionUpdate::Launch {
                             task: pending,
-                            status,
+                            publisher,
                         },
                     );
                     handle
@@ -389,8 +402,8 @@ where
                         task: pending.handle().clone(),
                         status: result.clone(),
                     });
-                    let status = Arc::new(TaskStatusQuery {
-                        host,
+                    let publisher = Arc::new(TaskStatusPublisher {
+                        writer: query_writer,
                         handle: result,
                         values: eval_context.values().clone(),
                     });
@@ -400,7 +413,7 @@ where
                         .updates
                         .push(ReflectionUpdate::Launch {
                             task: pending,
-                            status,
+                            publisher,
                         });
                     match context.host().commit(TaskCommit::new(
                         store,
@@ -797,6 +810,31 @@ fn severity_matches(value: &CoreValue, name: &str, canonical: &Key) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    struct TestQueryWriter {
+        store: Arc<Mutex<crate::reflection::ReflectionStore>>,
+        updates: Arc<Mutex<Vec<Value>>>,
+    }
+
+    struct TestRoleHost {
+        writer: Arc<dyn ReflectionQueryWriter>,
+    }
+
+    impl ReflectionQueryWriter for TestQueryWriter {
+        fn update_query(&self, handle: &Arc<EvaluationQueryHandle>, result: Value) {
+            self.updates
+                .lock()
+                .expect("test query updates were poisoned")
+                .push(result.clone());
+            assert!(
+                self.store
+                    .lock()
+                    .expect("test query store was poisoned")
+                    .update_query(handle, result)
+            );
+        }
+    }
 
     #[test]
     fn abandoned_task_status_has_a_distinct_round_trip() {
@@ -811,5 +849,61 @@ mod tests {
             tagged_task_state(&values, &encoded).expect("abandoned status should decode"),
             TaggedTaskState::Abandoned
         ));
+    }
+
+    #[test]
+    fn task_status_publisher_does_not_retain_its_role_host() {
+        let values = crate::core::test_value_factory();
+        let store = Arc::new(Mutex::new(crate::reflection::ReflectionStore::new(
+            values.clone(),
+            Arc::new(crate::reflection::ExactConflictAnalysis),
+        )));
+        let handle = {
+            let mut store = store.lock().expect("test query store was poisoned");
+            let mut journal = StoreJournal::new(store.snapshot());
+            let handle = journal
+                .reserve_query_with(Value::from_core(
+                    &values,
+                    task_status_query_value(&values, EvaluationTaskStatus::Launched),
+                ))
+                .expect("test status query should reserve");
+            assert!(matches!(
+                store.try_commit(&journal),
+                crate::reflection::StoreCommitResult::Committed
+            ));
+            handle
+        };
+
+        let updates = Arc::new(Mutex::new(Vec::new()));
+        let role_host = Arc::new(TestRoleHost {
+            writer: Arc::new(TestQueryWriter {
+                store: store.clone(),
+                updates: updates.clone(),
+            }),
+        });
+        let role_host_weak = Arc::downgrade(&role_host);
+        let publisher = TaskStatusPublisher {
+            writer: role_host.writer.clone(),
+            handle: handle.clone(),
+            values: values.clone(),
+        };
+        drop(role_host);
+        assert!(
+            role_host_weak.upgrade().is_none(),
+            "the status publisher must not retain its originating role host"
+        );
+
+        publisher.update(EvaluationTaskStatus::Blocked);
+        let query = store
+            .lock()
+            .expect("test query store was poisoned")
+            .snapshot()
+            .poll_query(&handle);
+        let EvaluationQueryPoll::State { .. } = query else {
+            panic!("status publisher should retain its query domain")
+        };
+        let updates = updates.lock().expect("test query updates were poisoned");
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].as_core(), &values.key_value(&keys::BLOCKED));
     }
 }

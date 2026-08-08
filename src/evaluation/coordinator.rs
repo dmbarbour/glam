@@ -15,8 +15,10 @@ use crate::runtime::{
 
 use super::{
     EvaluationDemandState, EvaluationFailure, EvaluationMachinePoll, EvaluationSession,
-    EvaluationSessionId, EvaluationTaskId, EvaluationTaskMachine, EvaluationWaitTerminal,
-    EvaluationWaitToken, RuntimeFailureLedger, SessionTaskReportingStore, TaskFailureLedger,
+    EvaluationSessionId, EvaluationTaskId, EvaluationTaskMachine, EvaluationTaskStatus,
+    EvaluationTaskStatusSink, EvaluationWaitTerminal, EvaluationWaitToken, RuntimeFailureLedger,
+    SessionTaskReportingStore, TaskFailureLedger, TaskStatusReporting, TaskStatusUpdate,
+    task_status_update,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -543,6 +545,7 @@ struct TaskFailureReporting {
 struct ReflectionWork {
     task: EvaluationTaskId,
     failure_reporting: TaskFailureReporting,
+    status_reporting: TaskStatusReporting,
     wait: EvaluationWaitToken,
     machine: Option<Box<dyn EvaluationTaskMachine>>,
     block: Option<EvaluationTaskBlock>,
@@ -953,6 +956,23 @@ impl EvaluationWorkCoordinator {
             .is_some_and(|record| reflection_work(record).failure_reporting.acknowledged)
     }
 
+    #[cfg(test)]
+    pub(super) fn task_has_status_sink(&self, task: EvaluationTaskId) -> bool {
+        let state = self
+            .state
+            .lock()
+            .expect("evaluation work coordinator was poisoned");
+        let Some(work) = state.reflection_by_task.get(&task) else {
+            return false;
+        };
+        state.work.get(work).is_some_and(|record| {
+            reflection_work(record)
+                .status_reporting
+                .status_sink
+                .is_some()
+        })
+    }
+
     /// Acknowledges a task failure in its immutable producer-owner bucket.
     ///
     /// If the task is still active, this also records the timing-independent
@@ -994,6 +1014,54 @@ impl EvaluationWorkCoordinator {
         if changed {
             self.work_available.notify_all();
         }
+    }
+
+    /// Attaches the one protected-query publisher created by a committed
+    /// public `.task.new` operation.
+    pub(super) fn attach_reflection_status_sink(
+        &self,
+        work: EvaluationWorkId,
+        sink: Arc<dyn EvaluationTaskStatusSink>,
+    ) -> bool {
+        let _mutation = self.admission.mutation_guard();
+        let mut state = self
+            .state
+            .lock()
+            .expect("evaluation work coordinator was poisoned");
+        let Some(record) = state.work.get_mut(&work) else {
+            return false;
+        };
+        let reflection = reflection_work_mut(record);
+        assert!(
+            reflection.status_reporting.status_sink.is_none(),
+            "a reflection task may expose only one status query"
+        );
+        reflection.status_reporting.status_sink = Some(sink);
+        true
+    }
+
+    /// Advances one task's protected-query status without retaining its role
+    /// host in the coordinator record. The returned update is delivered only
+    /// after coordinator state and mutation admission have been released.
+    pub(super) fn update_reflection_status(
+        &self,
+        work: EvaluationWorkId,
+        status: EvaluationTaskStatus,
+    ) -> Option<TaskStatusUpdate> {
+        let mutation = self.admission.mutation_guard();
+        let update = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            let record = state
+                .work
+                .get_mut(&work)
+                .expect("reported reflection work must remain registered");
+            task_status_update(&mut reflection_work_mut(record).status_reporting, status)
+        };
+        drop(mutation);
+        update
     }
 
     #[cfg(test)]
@@ -1564,6 +1632,10 @@ impl EvaluationWorkCoordinator {
                     failure_reporting: TaskFailureReporting {
                         owner_session: session.id,
                         acknowledged: false,
+                    },
+                    status_reporting: TaskStatusReporting {
+                        published_status: EvaluationTaskStatus::Launched,
+                        status_sink: None,
                     },
                     wait: wait.clone(),
                     machine: None,

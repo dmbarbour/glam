@@ -41,9 +41,10 @@ use crate::interaction_net::{NetBuildError, NetBuilder as CoreNetBuilder, Port a
 use crate::number::Number;
 use crate::reflection::{
     CommitResult, ConflictAddress, ConflictAnalysisStrategy, ConflictObservationIndex,
-    ExactConflictAnalysis, HostSnapshot, ReasoningSessionId, ReflectionEffects, ReflectionServices,
-    ReflectionStore, RuntimeInputEndpointId, RuntimeInputSequence, TaskCommit, TaskEnvironment,
-    TaskHost, VolumeId, task_launcher, volume_effects,
+    ExactConflictAnalysis, HostSnapshot, ReasoningSessionId, ReflectionEffects,
+    ReflectionQueryWriter, ReflectionServices, ReflectionStore, RuntimeInputEndpointId,
+    RuntimeInputSequence, TaskCommit, TaskEnvironment, TaskHost, VolumeId, task_launcher,
+    volume_effects,
 };
 use crate::runtime::{
     EvaluationRuntimeId, RuntimeIds, RuntimeMutationAdmission, RuntimeMutationGuard,
@@ -1449,10 +1450,15 @@ impl ReflectionServices for AssemblerReflectionHost {
         self.diagnostics.publish_local(diagnostic);
     }
 
+    fn query_writer(&self) -> Option<Arc<dyn ReflectionQueryWriter>> {
+        Some(self.resources.clone())
+    }
+}
+
+impl ReflectionQueryWriter for RuntimeSharedResources {
     fn update_query(&self, handle: &Arc<crate::reflection::EvaluationQueryHandle>, result: Value) {
-        self.resources
-            .update_query(handle, result)
-            .expect("reflection query results belong to the host runtime");
+        RuntimeSharedResources::update_query(self, handle, result)
+            .expect("reflection query results belong to the runtime");
     }
 }
 

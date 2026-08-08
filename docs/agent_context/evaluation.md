@@ -83,10 +83,13 @@ control-flow overview.
   likewise take machines during the authoritative coordinator transition.
   Machine cancellation/destruction and captured-value release happen only
   after coordinator/component locks and mutation admission are released. The
-  session reporting store retains only published-status state, never
-  executable machines or failure policy. A raced source snapshot may register
-  one redundant producer; it must observe the canonical cache and retire
-  harmlessly. Every
+  session reporting store retains only transitional task/wait lookup and
+  retirement indexes, never executable machines, failure policy, or protected
+  status publication. Current task status and the optional protected-query
+  publisher reside in the coordinator work record. That publisher retains a
+  narrow runtime query writer, not its role host or owner lease. A raced source
+  snapshot may register one redundant producer; it must observe the canonical
+  cache and retire harmlessly. Every
   scheduler wait token shares a lock-free terminal cell plus a weak exact-work
   subscription set. Terminal state is published and producer indexes retire
   through the owning coordinator/store transition; exact subscribers detach

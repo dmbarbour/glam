@@ -14,10 +14,10 @@ use glam::cli::{
     format_parse_summary, parse_worker_count, route_completion,
 };
 use glam::reflection::{
-    CommitResult, EffectRequestSpec, EffectRun, HostSnapshot, ReflectionJournal, ReflectionRequest,
-    ReflectionServices, ReflectionTransaction, RequestContext, RequestResult, TaskCommit,
-    TaskEnvironment, TaskHost, TaskOutcome, TaskSpecialization, handle_reflection_request,
-    reflection_request_specs,
+    CommitResult, EffectRequestSpec, EffectRun, HostSnapshot, ReflectionJournal,
+    ReflectionQueryWriter, ReflectionRequest, ReflectionServices, ReflectionTransaction,
+    RequestContext, RequestResult, TaskCommit, TaskEnvironment, TaskHost, TaskOutcome,
+    TaskSpecialization, handle_reflection_request, reflection_request_specs,
 };
 use glam::{
     Assembler, Diagnostic, DiagnosticBus, DiagnosticEvent, DiagnosticIngress, DiagnosticSubscriber,
@@ -1370,10 +1370,8 @@ impl ReflectionServices for LoggerTaskHost {
         }
     }
 
-    fn update_query(&self, handle: &Arc<glam::reflection::EvaluationQueryHandle>, result: Value) {
-        self.resources
-            .update_query(handle, result)
-            .expect("logger query results belong to the logger runtime");
+    fn query_writer(&self) -> Option<Arc<dyn ReflectionQueryWriter>> {
+        Some(self.resources.clone())
     }
 }
 

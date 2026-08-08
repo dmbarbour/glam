@@ -14,8 +14,8 @@ pub use search::{
 };
 
 pub use requests::{
-    ReflectionHost, ReflectionJournal, ReflectionRequest, ReflectionServices,
-    ReflectionTransaction, handle_reflection_request, reflection_request_specs,
+    ReflectionHost, ReflectionJournal, ReflectionQueryWriter, ReflectionRequest,
+    ReflectionServices, ReflectionTransaction, handle_reflection_request, reflection_request_specs,
 };
 pub(crate) use requests::{environment_log_request_specs, parse_severity, prepare_message};
 pub use store::{
@@ -2850,10 +2850,6 @@ impl<'a, S: TaskSpecialization> RequestContext<'a, S> {
         self.host.as_ref()
     }
 
-    pub(crate) fn host_arc(&self) -> Arc<S::Host> {
-        self.host.clone()
-    }
-
     pub fn transaction(&mut self) -> Option<TransactionContext<'_, S>> {
         self.transaction
             .as_deref_mut()
@@ -3767,7 +3763,11 @@ mod tests {
     #[derive(Default)]
     struct TestHost {
         reasoning_session: Option<ReasoningSessionId>,
-        state: Mutex<TestHostState>,
+        state: Arc<Mutex<TestHostState>>,
+    }
+
+    struct TestQueryWriter {
+        state: Arc<Mutex<TestHostState>>,
     }
 
     struct TestHostState {
@@ -3805,43 +3805,43 @@ mod tests {
         fn with_diagnostics(values: CoreValueFactory, diagnostics: Vec<Diagnostic>) -> Self {
             Self {
                 reasoning_session: None,
-                state: Mutex::new(TestHostState {
+                state: Arc::new(Mutex::new(TestHostState {
                     store: ReflectionStore::new(values, Arc::new(ExactConflictAnalysis)),
                     diagnostics,
                     ..TestHostState::default()
-                }),
+                })),
             }
         }
 
         fn with_wake_diagnostic(values: CoreValueFactory, diagnostic: Diagnostic) -> Self {
             Self {
                 reasoning_session: None,
-                state: Mutex::new(TestHostState {
+                state: Arc::new(Mutex::new(TestHostState {
                     store: ReflectionStore::new(values, Arc::new(ExactConflictAnalysis)),
                     wake_diagnostic: Some(diagnostic),
                     ..TestHostState::default()
-                }),
+                })),
             }
         }
 
         fn with_wake_heap(values: CoreValueFactory, heap: PublicValue) -> Self {
             Self {
                 reasoning_session: None,
-                state: Mutex::new(TestHostState {
+                state: Arc::new(Mutex::new(TestHostState {
                     store: ReflectionStore::new(values, Arc::new(ExactConflictAnalysis)),
                     wake_heap: Some(heap),
                     ..TestHostState::default()
-                }),
+                })),
             }
         }
 
         fn with_values(values: CoreValueFactory) -> Self {
             Self {
                 reasoning_session: None,
-                state: Mutex::new(TestHostState {
+                state: Arc::new(Mutex::new(TestHostState {
                     store: ReflectionStore::new(values, Arc::new(ExactConflictAnalysis)),
                     ..TestHostState::default()
-                }),
+                })),
             }
         }
 
@@ -3957,6 +3957,14 @@ mod tests {
             TestHost::emit_diagnostic(self, diagnostic);
         }
 
+        fn query_writer(&self) -> Option<Arc<dyn ReflectionQueryWriter>> {
+            Some(Arc::new(TestQueryWriter {
+                state: self.state.clone(),
+            }))
+        }
+    }
+
+    impl ReflectionQueryWriter for TestQueryWriter {
         fn update_query(&self, handle: &Arc<EvaluationQueryHandle>, result: PublicValue) {
             let updated = {
                 let mut state = self.state.lock().unwrap();
@@ -3967,7 +3975,10 @@ mod tests {
                 updated
             };
             if updated {
-                self.publish_runtime_observation();
+                let coordinator = self.state.lock().unwrap().store.values().work_coordinator();
+                if let Some(coordinator) = coordinator {
+                    coordinator.publish_runtime_observation();
+                }
             }
         }
     }
