@@ -18,6 +18,7 @@ use std::ops::Deref;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 
+use bytes::Bytes;
 use rpds::RedBlackTreeMapSync;
 
 use crate::core::{
@@ -627,18 +628,216 @@ pub(crate) trait EvaluationTaskMachine: Send {
 /// One sealed pure operation retained by runtime-owned client demand.
 ///
 /// Variants are deliberately explicit rather than type-erased callbacks so
-/// runtime roots and retry behavior remain auditable. Composite operations
-/// will extend this enum in Phase 10B.1c.
+/// runtime roots, traversal cursors, and retry behavior remain auditable.
 #[derive(Debug)]
 pub(crate) enum ClientDemandOperation {
     DemandWhnf(RuntimeValueRoot),
+    WalkPath(ClientPathDemand),
+    ExtractBinary(ClientBinaryDemand),
 }
 
 impl ClientDemandOperation {
     fn runtime_id(&self) -> EvaluationRuntimeId {
         match self {
             Self::DemandWhnf(value) => value.runtime_id(),
+            Self::WalkPath(demand) => demand.current.runtime_id(),
+            Self::ExtractBinary(demand) => demand.runtime_id(),
         }
+    }
+
+    fn poll(&mut self, context: &EvalContext) -> coordinator::ClientDemandPoll {
+        match self {
+            Self::DemandWhnf(value) => match crate::eval::eval_value(context, value.as_core()) {
+                Ok(value) => coordinator::ClientDemandPoll::Complete(RuntimeValueRoot::new(
+                    context.values(),
+                    value,
+                )),
+                Err(halt) => client_demand_halt_poll(halt),
+            },
+            Self::WalkPath(demand) => match demand.poll(context) {
+                Ok(value) => coordinator::ClientDemandPoll::PathComplete(value),
+                Err(halt) => client_demand_halt_poll(halt),
+            },
+            Self::ExtractBinary(demand) => match demand.poll(context) {
+                Ok(output) => coordinator::ClientDemandPoll::BinaryComplete(output),
+                Err(halt) => client_demand_halt_poll(halt),
+            },
+        }
+    }
+
+    #[cfg(test)]
+    fn completed_binary_prefix_len(&self) -> Option<usize> {
+        match self {
+            Self::ExtractBinary(demand) => Some(demand.completed_prefix_len()),
+            Self::DemandWhnf(_) | Self::WalkPath(_) => None,
+        }
+    }
+
+    #[cfg(test)]
+    fn completed_path_parts(&self) -> Option<usize> {
+        match self {
+            Self::WalkPath(demand) => Some(demand.next_part),
+            Self::ExtractBinary(demand) => demand.path.as_ref().map(|path| path.next_part),
+            Self::DemandWhnf(_) => None,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct ClientPathDemand {
+    current: RuntimeValueRoot,
+    parts: Arc<[crate::core::Key]>,
+    next_part: usize,
+    path: Arc<str>,
+}
+
+impl ClientPathDemand {
+    fn new(values: &CoreValueFactory, root: Value, path: Arc<str>) -> Self {
+        let parts = path
+            .split('.')
+            .map(crate::core::Key::atom_from_text)
+            .collect::<Vec<_>>();
+        Self {
+            current: RuntimeValueRoot::new(values, root),
+            parts: Arc::from(parts),
+            next_part: 0,
+            path,
+        }
+    }
+
+    fn poll(
+        &mut self,
+        context: &EvalContext,
+    ) -> Result<Option<RuntimeValueRoot>, crate::core::EvaluationHalt> {
+        while let Some(part) = self.parts.get(self.next_part) {
+            let current = crate::eval::eval_value(context, self.current.as_core())
+                .map_err(|halt| halt.with_context(client_path_context(&self.path)))?;
+            let Value::Dict(dict) = current else {
+                return Ok(None);
+            };
+            let Some(next) = dict.get(part) else {
+                return Ok(None);
+            };
+            self.current = RuntimeValueRoot::new(context.values(), next.clone());
+            self.next_part += 1;
+        }
+        Ok(Some(self.current.clone()))
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct ClientBinaryDemand {
+    path: Option<ClientPathDemand>,
+    current: Option<RuntimeValueRoot>,
+    remaining: Option<crate::core::List>,
+    bytes: Vec<u8>,
+    label: Arc<str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ClientBinaryOutput {
+    Bytes(Bytes),
+    Invalid(Arc<str>),
+}
+
+impl ClientBinaryDemand {
+    fn direct(values: &CoreValueFactory, value: Value, label: Arc<str>) -> Self {
+        Self {
+            path: None,
+            current: Some(RuntimeValueRoot::new(values, value)),
+            remaining: None,
+            bytes: Vec::new(),
+            label,
+        }
+    }
+
+    fn at_path(values: &CoreValueFactory, root: Value, path: Arc<str>) -> Self {
+        Self {
+            path: Some(ClientPathDemand::new(values, root, path.clone())),
+            current: None,
+            remaining: None,
+            bytes: Vec::new(),
+            label: path,
+        }
+    }
+
+    fn runtime_id(&self) -> EvaluationRuntimeId {
+        self.path
+            .as_ref()
+            .map(|path| path.current.runtime_id())
+            .or_else(|| self.current.as_ref().map(RuntimeValueRoot::runtime_id))
+            .expect("binary client demand must retain a rooted input")
+    }
+
+    fn poll(
+        &mut self,
+        context: &EvalContext,
+    ) -> Result<ClientBinaryOutput, crate::core::EvaluationHalt> {
+        if let Some(path) = &mut self.path {
+            let Some(value) = path.poll(context)? else {
+                return Ok(ClientBinaryOutput::Invalid(Arc::from(format!(
+                    "module did not define `{}`",
+                    self.label,
+                ))));
+            };
+            self.current = Some(value);
+            self.path = None;
+        }
+
+        if let Some(current) = self.current.as_ref() {
+            let value = crate::eval::eval_value(context, current.as_core()).map_err(|halt| {
+                halt.with_context(crate::eval::evaluation_context_frame("binary_extraction"))
+            })?;
+            self.current = None;
+            match value {
+                Value::Binary(bytes) => return Ok(ClientBinaryOutput::Bytes(bytes)),
+                Value::List(list) => self.remaining = Some(list),
+                _ => {
+                    return Ok(ClientBinaryOutput::Invalid(Arc::from(format!(
+                        "`{}` is not binary text data",
+                        self.label
+                    ))));
+                }
+            }
+        }
+
+        loop {
+            let remaining = self
+                .remaining
+                .as_ref()
+                .expect("binary list demand must retain its unconsumed suffix");
+            let item = crate::eval::pop_list_front(context, remaining).map_err(|halt| {
+                halt.with_context(crate::eval::evaluation_context_frame("binary_extraction"))
+            })?;
+            let Some((item, tail)) = item else {
+                self.remaining = None;
+                return Ok(ClientBinaryOutput::Bytes(Bytes::from(std::mem::take(
+                    &mut self.bytes,
+                ))));
+            };
+            let item = crate::eval::eval_value(context, &item).map_err(|halt| {
+                halt.with_context(crate::eval::evaluation_context_frame("binary_extraction"))
+            })?;
+            let Value::Number(number) = item else {
+                return Err(crate::core::EvaluationHalt::new(format!(
+                    "`{}` requires list items to be byte integers, got {item:?}",
+                    self.label
+                )));
+            };
+            let byte = number.to_u8_if_integer().ok_or_else(|| {
+                crate::core::EvaluationHalt::new(format!(
+                    "`{}` cannot encode number `{number}` as a byte",
+                    self.label
+                ))
+            })?;
+            self.bytes.push(byte);
+            self.remaining = Some(tail);
+        }
+    }
+
+    #[cfg(test)]
+    fn completed_prefix_len(&self) -> usize {
+        self.bytes.len()
     }
 }
 
@@ -652,6 +851,8 @@ impl ClientDemandOperation {
 )]
 pub(crate) enum ClientDemandResult {
     Complete(RuntimeValueRoot),
+    PathComplete(Option<RuntimeValueRoot>),
+    BinaryComplete(ClientBinaryOutput),
     Failed(Arc<EvaluationFailure>),
     Abandoned,
     Killed(Arc<EvaluationFailure>),
@@ -740,7 +941,7 @@ pub(crate) struct ClientDemandHandle {
     not(test),
     expect(
         dead_code,
-        reason = "Phase 10B.1a installs the internal handle before 10B.1b migrates synchronous clients"
+        reason = "retained async handle controls remain internal until a public runtime-client API is selected"
     )
 )]
 impl ClientDemandHandle {
@@ -1508,16 +1709,23 @@ impl EvalContext {
         &self,
         value: RuntimeValueRoot,
     ) -> Result<ClientDemandHandle, Arc<str>> {
+        self.admit_client_demand(ClientDemandOperation::DemandWhnf(value))
+    }
+
+    fn admit_client_demand(
+        &self,
+        operation: ClientDemandOperation,
+    ) -> Result<ClientDemandHandle, Arc<str>> {
         let coordinator = self.coordinator_for_admission()?;
-        if value.runtime_id() != coordinator.runtime_id() {
+        if operation.runtime_id() != coordinator.runtime_id() {
             return Err(Arc::from(
-                "client demand value belongs to another evaluation runtime",
+                "client demand operation belongs to another evaluation runtime",
             ));
         }
         let cell = ClientDemandResultCell::new();
         let work = coordinator.admit_client_demand(
             self.session.clone(),
-            ClientDemandOperation::DemandWhnf(value),
+            operation,
             ClientDemandSink::new(cell.clone()),
         )?;
         Ok(ClientDemandHandle {
@@ -1533,16 +1741,105 @@ impl EvalContext {
         &self,
         value: &Value,
     ) -> Result<Value, crate::core::EvaluationHalt> {
+        let handle = self
+            .demand_whnf(RuntimeValueRoot::new(self.values(), value.clone()))
+            .map_err(|error| crate::core::EvaluationHalt::new(error.as_ref()))?;
+        match self.drive_client_demand(handle)? {
+            ClientDemandResult::Complete(value) => Ok(value.into_core()),
+            ClientDemandResult::PathComplete(_)
+            | ClientDemandResult::BinaryComplete(_)
+            | ClientDemandResult::Abandoned => unreachable!(
+                "WHNF client demand must return a value or a propagated evaluation failure"
+            ),
+            ClientDemandResult::Failed(_) | ClientDemandResult::Killed(_) => {
+                unreachable!("client failures are returned by drive_client_demand")
+            }
+        }
+    }
+
+    pub(crate) fn evaluate_path(
+        &self,
+        root: &Value,
+        path: Arc<str>,
+    ) -> Result<Option<Value>, crate::core::EvaluationHalt> {
+        let operation = ClientDemandOperation::WalkPath(ClientPathDemand::new(
+            self.values(),
+            root.clone(),
+            path,
+        ));
+        let handle = self
+            .admit_client_demand(operation)
+            .map_err(|error| crate::core::EvaluationHalt::new(error.as_ref()))?;
+        match self.drive_client_demand(handle)? {
+            ClientDemandResult::PathComplete(value) => Ok(value.map(RuntimeValueRoot::into_core)),
+            ClientDemandResult::Complete(_)
+            | ClientDemandResult::BinaryComplete(_)
+            | ClientDemandResult::Abandoned => unreachable!(
+                "path client demand must return a path result or propagated evaluation failure"
+            ),
+            ClientDemandResult::Failed(_) | ClientDemandResult::Killed(_) => {
+                unreachable!("client failures are returned by drive_client_demand")
+            }
+        }
+    }
+
+    pub(crate) fn evaluate_binary(
+        &self,
+        value: &Value,
+        label: Arc<str>,
+    ) -> Result<ClientBinaryOutput, crate::core::EvaluationHalt> {
+        let operation = ClientDemandOperation::ExtractBinary(ClientBinaryDemand::direct(
+            self.values(),
+            value.clone(),
+            label,
+        ));
+        self.evaluate_binary_operation(operation)
+    }
+
+    pub(crate) fn evaluate_binary_at(
+        &self,
+        root: &Value,
+        path: Arc<str>,
+    ) -> Result<ClientBinaryOutput, crate::core::EvaluationHalt> {
+        let operation = ClientDemandOperation::ExtractBinary(ClientBinaryDemand::at_path(
+            self.values(),
+            root.clone(),
+            path,
+        ));
+        self.evaluate_binary_operation(operation)
+    }
+
+    fn evaluate_binary_operation(
+        &self,
+        operation: ClientDemandOperation,
+    ) -> Result<ClientBinaryOutput, crate::core::EvaluationHalt> {
+        let handle = self
+            .admit_client_demand(operation)
+            .map_err(|error| crate::core::EvaluationHalt::new(error.as_ref()))?;
+        match self.drive_client_demand(handle)? {
+            ClientDemandResult::BinaryComplete(bytes) => Ok(bytes),
+            ClientDemandResult::Complete(_)
+            | ClientDemandResult::PathComplete(_)
+            | ClientDemandResult::Abandoned => unreachable!(
+                "binary client demand must return bytes or a propagated evaluation failure"
+            ),
+            ClientDemandResult::Failed(_) | ClientDemandResult::Killed(_) => {
+                unreachable!("client failures are returned by drive_client_demand")
+            }
+        }
+    }
+
+    fn drive_client_demand(
+        &self,
+        mut handle: ClientDemandHandle,
+    ) -> Result<ClientDemandResult, crate::core::EvaluationHalt> {
         let coordinator = self
             .coordinator_for_admission()
-            .map_err(|error| crate::core::EvaluationHalt::new(error.as_ref()))?;
-        let mut handle = self
-            .demand_whnf(RuntimeValueRoot::new(self.values(), value.clone()))
             .map_err(|error| crate::core::EvaluationHalt::new(error.as_ref()))?;
 
         loop {
             if let Some(result) = handle.poll() {
-                return client_demand_result(result);
+                return terminal_client_demand_result(result);
             }
             if let Some(claimed) = coordinator.claim_client_demand(handle.work) {
                 coordinator.poll_claimed_client_demand(claimed);
@@ -1554,7 +1851,7 @@ impl EvalContext {
                 // Retirement removes the coordinator record before publishing
                 // its sink. Waiting on the cell closes that intentionally
                 // tiny handoff without racing a completion notification.
-                return client_demand_result(handle.wait());
+                return terminal_client_demand_result(handle.wait());
             };
             match snapshot {
                 ClientDemandSnapshot::Queued => continue,
@@ -2250,16 +2547,38 @@ impl EvalContext {
     }
 }
 
-fn client_demand_result(result: ClientDemandResult) -> Result<Value, crate::core::EvaluationHalt> {
+fn terminal_client_demand_result(
+    result: ClientDemandResult,
+) -> Result<ClientDemandResult, crate::core::EvaluationHalt> {
     match result {
-        ClientDemandResult::Complete(value) => Ok(value.into_core()),
         ClientDemandResult::Failed(failure) | ClientDemandResult::Killed(failure) => {
             Err(crate::core::EvaluationHalt::failure(failure))
         }
         ClientDemandResult::Abandoned => Err(crate::core::EvaluationHalt::new(
             "client evaluation demand was abandoned",
         )),
+        complete => Ok(complete),
     }
+}
+
+fn client_demand_halt_poll(halt: crate::core::EvaluationHalt) -> coordinator::ClientDemandPoll {
+    if let Some(wait) = halt.blocked_on() {
+        coordinator::ClientDemandPoll::Blocked(WorkDependency::Wait(wait.0))
+    } else if let Some(promise) = halt.unassigned_promise() {
+        coordinator::ClientDemandPoll::Blocked(WorkDependency::Promise(promise.clone()))
+    } else {
+        coordinator::ClientDemandPoll::Failed(halt.into_permanent_failure())
+    }
+}
+
+fn client_path_context(path: &str) -> Value {
+    crate::eval::evaluation_context_frame_with_args(
+        "path_lookup",
+        crate::core::Dict::new_sync().insert(
+            (*crate::core::keys::PATH).clone(),
+            Value::binary_from_text(path),
+        ),
+    )
 }
 
 fn client_demand_halt(dependency: WorkDependency) -> crate::core::EvaluationHalt {
@@ -2816,7 +3135,7 @@ impl EvaluationWorkCoordinator {
         }
     }
 
-    fn poll_claimed_client_demand(self: &Arc<Self>, claimed: coordinator::ClaimedClientDemand) {
+    fn poll_claimed_client_demand(self: &Arc<Self>, mut claimed: coordinator::ClaimedClientDemand) {
         let poll = claimed.poll();
         self.release_client_demand(claimed, poll);
     }
@@ -3165,6 +3484,143 @@ mod tests {
             already_complete.wait(),
             ClientDemandResult::Complete(value) if value.as_core() == &context.values().unit()
         ));
+    }
+
+    #[test]
+    fn client_path_demand_retains_its_intermediate_cursor_across_a_wake() {
+        let fixture = SameRuntimeFixture::new();
+        let context = fixture.context();
+        let coordinator = context.coordinator().expect("coordinator should be live");
+        let intermediate = PromisedValue::new(context.values(), "path intermediate");
+        let root = Value::Dict(crate::core::Dict::new_sync().insert(
+            crate::core::Key::atom_from_text("outer"),
+            Value::Promised(intermediate.clone()),
+        ));
+        let handle = context
+            .admit_client_demand(ClientDemandOperation::WalkPath(ClientPathDemand::new(
+                context.values(),
+                root,
+                Arc::from("outer.member"),
+            )))
+            .expect("path demand should be admitted");
+
+        assert!(poll_one_runtime_work(&coordinator));
+        assert_eq!(coordinator.client_path_parts(handle.work()), Some(1));
+        let expected = Value::Number(31.into());
+        intermediate
+            .set(Value::Dict(crate::core::Dict::new_sync().insert(
+                crate::core::Key::atom_from_text("member"),
+                expected.clone(),
+            )))
+            .expect("intermediate path promise should resolve once");
+        assert!(poll_one_runtime_work(&coordinator));
+        assert!(matches!(
+            handle.poll(),
+            Some(ClientDemandResult::PathComplete(Some(value))) if value.as_core() == &expected
+        ));
+    }
+
+    #[test]
+    fn client_binary_demand_retains_completed_prefixes_across_lazy_chunks() {
+        let fixture = SameRuntimeFixture::new();
+        let context = fixture.context();
+        let coordinator = context.coordinator().expect("coordinator should be live");
+        let first_chunk = PromisedValue::new(context.values(), "first binary chunk");
+        let second_chunk = PromisedValue::new(context.values(), "second binary chunk");
+        let tail = crate::core::List::concat(
+            crate::core::List::from_bytes(Bytes::from_static(&[4])),
+            crate::core::List::from_thunk(crate::core::ListThunk::Promised(second_chunk.clone())),
+        );
+        let list = crate::core::List::concat(
+            crate::core::List::from_bytes(Bytes::from_static(&[1])),
+            crate::core::List::concat(
+                crate::core::List::from_thunk(crate::core::ListThunk::Promised(
+                    first_chunk.clone(),
+                )),
+                tail,
+            ),
+        );
+        let handle = context
+            .admit_client_demand(ClientDemandOperation::ExtractBinary(
+                ClientBinaryDemand::direct(context.values(), Value::List(list), Arc::from("value")),
+            ))
+            .expect("binary demand should be admitted");
+
+        assert!(poll_one_runtime_work(&coordinator));
+        assert_eq!(coordinator.client_binary_prefix_len(handle.work()), Some(1));
+        first_chunk
+            .set(Value::Binary(Bytes::from_static(&[2, 3])))
+            .expect("first chunk should resolve once");
+        assert!(poll_one_runtime_work(&coordinator));
+        assert_eq!(coordinator.client_binary_prefix_len(handle.work()), Some(4));
+        second_chunk
+            .set(Value::Binary(Bytes::from_static(&[5])))
+            .expect("second chunk should resolve once");
+        assert!(poll_one_runtime_work(&coordinator));
+        assert_eq!(
+            handle.poll(),
+            Some(ClientDemandResult::BinaryComplete(
+                ClientBinaryOutput::Bytes(Bytes::from_static(&[1, 2, 3, 4, 5,]))
+            ))
+        );
+    }
+
+    #[test]
+    fn client_binary_demand_retains_a_blocked_top_level_root() {
+        let fixture = SameRuntimeFixture::new();
+        let context = fixture.context();
+        let coordinator = context.coordinator().expect("coordinator should be live");
+        let promise = PromisedValue::new(context.values(), "top-level binary input");
+        let handle = context
+            .admit_client_demand(ClientDemandOperation::ExtractBinary(
+                ClientBinaryDemand::direct(
+                    context.values(),
+                    Value::Promised(promise.clone()),
+                    Arc::from("value"),
+                ),
+            ))
+            .expect("binary demand should be admitted");
+
+        assert!(poll_one_runtime_work(&coordinator));
+        assert!(handle.poll().is_none());
+        promise
+            .set(Value::Binary(Bytes::from_static(b"ready")))
+            .expect("binary input should resolve once");
+        assert!(poll_one_runtime_work(&coordinator));
+        assert_eq!(
+            handle.poll(),
+            Some(ClientDemandResult::BinaryComplete(
+                ClientBinaryOutput::Bytes(Bytes::from_static(b"ready"))
+            ))
+        );
+    }
+
+    #[test]
+    fn composite_client_demands_preserve_binary_errors_and_asm_result_shape() {
+        let fixture = SameRuntimeFixture::new();
+        let context = fixture.context();
+        let invalid = Value::List(crate::core::List::from_values(vec![Value::Number(
+            256.into(),
+        )]));
+        let error = context
+            .evaluate_binary(&invalid, Arc::from("value"))
+            .expect_err("a non-byte list item must remain an evaluation failure");
+        assert!(error.to_string().contains("cannot encode number `256`"));
+
+        let expected = Bytes::from_static(b"assembled");
+        let root = Value::Dict(crate::core::Dict::new_sync().insert(
+            crate::core::Key::atom_from_text("asm"),
+            Value::Dict(crate::core::Dict::new_sync().insert(
+                crate::core::Key::atom_from_text("result"),
+                Value::Binary(expected.clone()),
+            )),
+        ));
+        assert_eq!(
+            context
+                .evaluate_binary_at(&root, Arc::from("asm.result"))
+                .expect("asm.result should use the path-plus-binary operation"),
+            ClientBinaryOutput::Bytes(expected)
+        );
     }
 
     #[test]

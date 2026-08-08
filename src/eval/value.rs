@@ -608,7 +608,7 @@ pub(super) fn force_list_thunk(
     }
 }
 
-pub(super) fn pop_list_front(
+pub(crate) fn pop_list_front(
     context: &EvalContext,
     list: &List,
 ) -> Result<Option<(Value, List)>, EvaluationHalt> {

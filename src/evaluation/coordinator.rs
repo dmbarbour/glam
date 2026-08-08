@@ -16,10 +16,11 @@ use crate::runtime::{
 #[cfg(test)]
 use super::EvaluationSession;
 use super::{
-    ClientDemandOperation, ClientDemandResult, ClientDemandSink, EvaluationDemandState,
-    EvaluationExitBlock, EvaluationFailure, EvaluationMachinePoll, EvaluationSessionId,
-    EvaluationTaskId, EvaluationTaskMachine, EvaluationTaskStatus, EvaluationWaitTerminal,
-    EvaluationWaitToken, ExitIntent, RuntimeFailureLedger, TaskFailureLedger, TaskStatusPublisher,
+    ClientBinaryOutput, ClientDemandOperation, ClientDemandResult, ClientDemandSink,
+    EvaluationDemandState, EvaluationExitBlock, EvaluationFailure, EvaluationMachinePoll,
+    EvaluationSessionId, EvaluationTaskId, EvaluationTaskMachine, EvaluationTaskStatus,
+    EvaluationWaitTerminal, EvaluationWaitToken, ExitIntent, RuntimeFailureLedger,
+    TaskFailureLedger, TaskStatusPublisher,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -740,6 +741,8 @@ pub(super) struct ClaimedClientDemand {
 
 pub(super) enum ClientDemandPoll {
     Complete(RuntimeValueRoot),
+    PathComplete(Option<RuntimeValueRoot>),
+    BinaryComplete(ClientBinaryOutput),
     Failed(Arc<EvaluationFailure>),
     Blocked(WorkDependency),
 }
@@ -949,29 +952,13 @@ impl ClaimedSparkWork {
 }
 
 impl ClaimedClientDemand {
-    pub(super) fn poll(&self) -> ClientDemandPoll {
+    pub(super) fn poll(&mut self) -> ClientDemandPoll {
         let context = super::EvalContext::for_client_demand(self.demand.clone());
         let operation = self
             .operation
-            .as_ref()
+            .as_mut()
             .expect("claimed client demand must retain its operation");
-        let result = match operation {
-            ClientDemandOperation::DemandWhnf(value) => {
-                crate::eval::eval_value(&context, value.as_core())
-            }
-        };
-        match result {
-            Ok(value) => ClientDemandPoll::Complete(RuntimeValueRoot::new(context.values(), value)),
-            Err(halt) => {
-                if let Some(wait) = halt.blocked_on() {
-                    ClientDemandPoll::Blocked(WorkDependency::Wait(wait.0))
-                } else if let Some(promise) = halt.unassigned_promise() {
-                    ClientDemandPoll::Blocked(WorkDependency::Promise(promise.clone()))
-                } else {
-                    ClientDemandPoll::Failed(halt.into_permanent_failure())
-                }
-            }
-        }
+        operation.poll(&context)
     }
 }
 
@@ -1992,6 +1979,20 @@ impl EvaluationWorkCoordinator {
                             ClientDemandResult::Complete(value),
                         ))
                     }
+                    ClientDemandPoll::PathComplete(value) => Some(detach_client_demand(
+                        &mut state,
+                        claimed.id,
+                        claimed.operation.take(),
+                        claimed.prior_subscription.take(),
+                        ClientDemandResult::PathComplete(value),
+                    )),
+                    ClientDemandPoll::BinaryComplete(bytes) => Some(detach_client_demand(
+                        &mut state,
+                        claimed.id,
+                        claimed.operation.take(),
+                        claimed.prior_subscription.take(),
+                        ClientDemandResult::BinaryComplete(bytes),
+                    )),
                     ClientDemandPoll::Failed(failure) => Some(detach_client_demand(
                         &mut state,
                         claimed.id,
@@ -3523,6 +3524,32 @@ impl EvaluationWorkCoordinator {
             .values()
             .filter(|record| matches!(record.kind, WorkKind::ClientDemand(_)))
             .count()
+    }
+
+    #[cfg(test)]
+    pub(super) fn client_binary_prefix_len(&self, id: EvaluationWorkId) -> Option<usize> {
+        let state = self
+            .state
+            .lock()
+            .expect("evaluation work coordinator was poisoned");
+        let record = state.work.get(&id)?;
+        let WorkKind::ClientDemand(client) = &record.kind else {
+            return None;
+        };
+        client.operation.as_ref()?.completed_binary_prefix_len()
+    }
+
+    #[cfg(test)]
+    pub(super) fn client_path_parts(&self, id: EvaluationWorkId) -> Option<usize> {
+        let state = self
+            .state
+            .lock()
+            .expect("evaluation work coordinator was poisoned");
+        let record = state.work.get(&id)?;
+        let WorkKind::ClientDemand(client) = &record.kind else {
+            return None;
+        };
+        client.operation.as_ref()?.completed_path_parts()
     }
 
     pub(super) fn wait_for_change(&self, observed_generation: u64) {

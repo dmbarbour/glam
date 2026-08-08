@@ -26,15 +26,15 @@ use crate::compiler::{
 use crate::core::Value as CoreValue;
 use crate::core::{
     Builtin, CoreValueFactory, Dict, EvaluationFailure, EvaluationHalt, Key, List, NetValue,
-    PromisedValue, keys,
+    PromisedValue,
 };
 use crate::core_net::CoreSpecialization;
 use crate::diagnostic::{CompilationInvocationId, CompilationTrace, Severity};
 use crate::eval;
 use crate::evaluation::{
-    EvalContext, EvaluationExecutor, EvaluationSession, EvaluationSessionId, EvaluationSessionRun,
-    EvaluationTaskId, EvaluationUnfinishedState, EvaluationWorkCoordinator, ReflectionTaskProfile,
-    RuntimeObservationEpoch, RuntimeObservationState,
+    ClientBinaryOutput, EvalContext, EvaluationExecutor, EvaluationSession, EvaluationSessionId,
+    EvaluationSessionRun, EvaluationTaskId, EvaluationUnfinishedState, EvaluationWorkCoordinator,
+    ReflectionTaskProfile, RuntimeObservationEpoch, RuntimeObservationState,
 };
 use crate::g_syntax::compile_source;
 use crate::interaction_net::{NetBuildError, NetBuilder as CoreNetBuilder, Port as CorePort};
@@ -3408,10 +3408,14 @@ fn net_build_error(error: NetBuildError) -> Error {
     Error::new(format!("invalid interaction net: {error}"))
 }
 
+#[cfg(test)]
 fn path_lookup_context(path: &str) -> CoreValue {
     eval::evaluation_context_frame_with_args(
         "path_lookup",
-        Dict::new_sync().insert((*keys::PATH).clone(), CoreValue::binary_from_text(path)),
+        Dict::new_sync().insert(
+            (*crate::core::keys::PATH).clone(),
+            CoreValue::binary_from_text(path),
+        ),
     )
 }
 
@@ -4343,8 +4347,11 @@ impl Assembler {
     pub fn get(&self, root: &Value, path: &str) -> Result<Value, Error> {
         root.require_runtime(self.reasoning.runtime.id())?;
         let values = self.core_values();
-        self.core_value_at_path(root.as_core(), path)
+        self.eval_context()
+            .evaluate_path(root.as_core(), Arc::from(path))
+            .map_err(|error| self.evaluation_error(error))?
             .map(|value| Value::from_core(&values, value))
+            .ok_or_else(|| Error::new(format!("module did not define `{path}`")))
     }
 
     /// Returns a value at an atom path, distinguishing an absent path from a
@@ -4352,13 +4359,22 @@ impl Assembler {
     pub fn get_optional(&self, root: &Value, path: &str) -> Result<Option<Value>, Error> {
         root.require_runtime(self.reasoning.runtime.id())?;
         let values = self.core_values();
-        self.core_value_at_path_optional(root.as_core(), path)
+        self.eval_context()
+            .evaluate_path(root.as_core(), Arc::from(path))
             .map(|value| value.map(|value| Value::from_core(&values, value)))
+            .map_err(|error| self.evaluation_error(error))
     }
 
     pub fn to_binary(&self, value: &Value) -> Result<Bytes, Error> {
         value.require_runtime(self.reasoning.runtime.id())?;
-        self.core_value_bytes(value.as_core(), "value")
+        match self
+            .eval_context()
+            .evaluate_binary(value.as_core(), Arc::from("value"))
+            .map_err(|error| self.evaluation_error(error))?
+        {
+            ClientBinaryOutput::Bytes(bytes) => Ok(bytes),
+            ClientBinaryOutput::Invalid(message) => Err(Error::new(message)),
+        }
     }
 
     /// Extracts a byte range from compact binary data or a byte-valued list.
@@ -4370,8 +4386,14 @@ impl Assembler {
 
     pub fn binary_at(&self, root: &Value, path: &str) -> Result<Bytes, Error> {
         root.require_runtime(self.reasoning.runtime.id())?;
-        self.core_value_at_path(root.as_core(), path)
-            .and_then(|value| self.core_value_bytes(&value, path))
+        match self
+            .eval_context()
+            .evaluate_binary_at(root.as_core(), Arc::from(path))
+            .map_err(|error| self.evaluation_error(error))?
+        {
+            ClientBinaryOutput::Bytes(bytes) => Ok(bytes),
+            ClientBinaryOutput::Invalid(message) => Err(Error::new(message)),
+        }
     }
 
     fn build_module(
@@ -4667,63 +4689,6 @@ impl Assembler {
             .set(definitions.clone())
             .expect("CompileContext.final_defs future must be unassigned");
         definitions.clone()
-    }
-
-    fn core_value_at_path(&self, root: &CoreValue, path: &str) -> Result<CoreValue, Error> {
-        self.core_value_at_path_optional(root, path)?
-            .ok_or_else(|| Error::new(format!("module did not define `{path}`")))
-    }
-
-    fn core_value_at_path_optional(
-        &self,
-        root: &CoreValue,
-        path: &str,
-    ) -> Result<Option<CoreValue>, Error> {
-        let mut current = root.clone();
-        let context = self.eval_context();
-
-        for part in path.split('.') {
-            let current_value = eval::eval_value(&context, &current).map_err(|error| {
-                self.evaluation_error(error.with_context(path_lookup_context(path)))
-            })?;
-            let CoreValue::Dict(dict) = current_value else {
-                return Ok(None);
-            };
-            let Some(next) = dict.get(&Key::atom_from_text(part)) else {
-                return Ok(None);
-            };
-            current = next.clone();
-        }
-
-        Ok(Some(current))
-    }
-
-    fn core_value_bytes(&self, value: &CoreValue, label: &str) -> Result<Bytes, Error> {
-        match value {
-            CoreValue::Binary(bytes) => Ok(bytes.clone()),
-            CoreValue::List(list) => {
-                { eval::list_output_bytes_for(&self.eval_context(), list, &format!("`{label}`")) }
-                    .map(Bytes::from)
-                    .map_err(|error| self.evaluation_error(error))
-            }
-            CoreValue::Lazy(_) | CoreValue::Promised(_) => {
-                let value = eval::eval_value(&self.eval_context(), value).map_err(|error| {
-                    self.evaluation_error(
-                        error.with_context(eval::evaluation_context_frame("binary_extraction")),
-                    )
-                })?;
-                self.core_value_bytes(&value, label)
-            }
-            CoreValue::Atom(_)
-            | CoreValue::Dict(_)
-            | CoreValue::Number(_)
-            | CoreValue::Function(_)
-            | CoreValue::Net(_)
-            | CoreValue::Builtin(_)
-            | CoreValue::PartialBuiltin(_)
-            | CoreValue::Metadata(_)
-            | CoreValue::Opaque(_) => Err(Error::new(format!("`{label}` is not binary text data"))),
-        }
     }
 
     fn core_value_binary_slice(
@@ -5187,6 +5152,22 @@ mod tests {
                 .expect("an absent path should not be an evaluation failure")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn composite_client_mismatches_remain_plain_host_errors() {
+        let assembler = Assembler::new();
+        let missing = assembler
+            .binary_at(&assembler.values().empty_record(), "missing")
+            .expect_err("missing binary path should fail");
+        assert_eq!(missing.to_string(), "module did not define `missing`");
+        assert!(missing.structured_diagnostic().is_none());
+
+        let invalid = assembler
+            .to_binary(&assembler.values().integer(42))
+            .expect_err("a number is not binary text data");
+        assert_eq!(invalid.to_string(), "`value` is not binary text data");
+        assert!(invalid.structured_diagnostic().is_none());
     }
 
     #[test]
