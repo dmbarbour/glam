@@ -3882,10 +3882,32 @@ fn detach_spark(state: &mut WorkCoordinatorState, id: EvaluationWorkId) -> Optio
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Barrier, OnceLock};
+    use std::sync::{Arc, Barrier, OnceLock};
     use std::thread;
 
     use super::*;
+
+    /// Real external ownership beside the machine-facing demand record.
+    ///
+    /// Coordinator tests intentionally bypass `EvalContext`, but should still
+    /// make the production ownership boundary explicit instead of treating an
+    /// `EvaluationSession` owner as if it were demand state.
+    struct TestDemand {
+        owner: Arc<EvaluationSession>,
+        demand: Arc<EvaluationDemandState>,
+    }
+
+    impl TestDemand {
+        fn new(coordinator: &Arc<EvaluationWorkCoordinator>) -> Self {
+            let owner = EvaluationSession::shared(coordinator);
+            let demand = owner.demand.clone();
+            Self { owner, demand }
+        }
+
+        fn context(&self) -> super::super::EvalContext {
+            super::super::EvalContext::new(&self.owner)
+        }
+    }
 
     #[test]
     fn observation_epochs_are_nonzero_and_option_niche_optimized() {
@@ -3952,8 +3974,8 @@ mod tests {
     fn promise_dependency_projects_only_a_task_owned_producer_wait() {
         let (coordinator, _executor) = super::super::test_execution_resources(0)
             .expect("test execution resources should build");
-        let session = EvaluationSession::shared(&coordinator);
-        let context = super::super::EvalContext::new(&session).for_effect_task();
+        let session = TestDemand::new(&coordinator);
+        let context = session.context().for_effect_task();
         let resolver_owned = PromisedValue::new(context.values(), "resolver-owned promise");
         let task_owned = PromisedValue::fixpoint(&context, "task-owned promise")
             .expect("the local task should own its promise");
@@ -4218,12 +4240,12 @@ mod tests {
     fn claimed_test_spark() -> (
         Arc<EvaluationWorkCoordinator>,
         Arc<super::super::EvaluationExecutor>,
-        Arc<EvaluationSession>,
+        TestDemand,
         ClaimedSparkWork,
     ) {
         let (coordinator, executor) = super::super::test_execution_resources(0)
             .expect("test execution resources should build");
-        let session = EvaluationSession::shared(&coordinator);
+        let session = TestDemand::new(&coordinator);
         coordinator.executor_started(1);
         coordinator.submit_spark(session.demand.clone(), crate::core::keys::unit_value());
         let CoordinatorSelection::Spark(claimed) = coordinator.select() else {
@@ -4284,14 +4306,14 @@ mod tests {
 
     fn reserve_ready_test_reflection(
         coordinator: &EvaluationWorkCoordinator,
-        session: &Arc<EvaluationSession>,
+        session: &TestDemand,
     ) -> (EvaluationTaskId, EvaluationWorkId) {
-        let task = super::super::allocate_task_id(&session.values)
+        let task = super::super::allocate_task_id(&session.demand.values)
             .expect("reflection task identity should allocate");
         let wait = super::super::allocate_wait_token(&session.demand, task)
             .expect("reflection wait identity should allocate");
         let work = coordinator
-            .reserve_reflection(session, task, wait)
+            .reserve_reflection(&session.demand, task, wait)
             .expect("open test session should reserve reflection work");
         activate_test_reflection(coordinator, work);
         (task, work)
@@ -4399,8 +4421,8 @@ mod tests {
     fn task_completion_during_subscription_cannot_lose_the_wake() {
         let (coordinator, _executor) = super::super::test_execution_resources(0)
             .expect("test execution resources should build");
-        let session = EvaluationSession::shared(&coordinator);
-        let session_id = session.id;
+        let session = TestDemand::new(&coordinator);
+        let session_id = session.demand.id;
         let (_, work) = reserve_ready_test_reflection(&coordinator, &session);
         let claimed = claim_ready_test_reflection(&coordinator, session_id);
         let source = TestCompletionSource::new(&coordinator);
@@ -4437,7 +4459,7 @@ mod tests {
 
         assert_eq!(source.subscriber_count(), 0);
         assert_eq!(coordinator.ready_task_count(), 1);
-        let claimed = claim_ready_test_reflection(&coordinator, session.id);
+        let claimed = claim_ready_test_reflection(&coordinator, session.demand.id);
         assert!(
             coordinator
                 .release_reflection(claimed, ReflectionWorkPoll::Terminal)
@@ -4488,8 +4510,8 @@ mod tests {
     fn static_producer_obligations_are_taken_once() {
         let (coordinator, _executor) = super::super::test_execution_resources(0)
             .expect("test execution resources should build");
-        let session = EvaluationSession::shared(&coordinator);
-        let task = super::super::allocate_task_id(&session.values)
+        let session = TestDemand::new(&coordinator);
+        let task = super::super::allocate_task_id(&session.demand.values)
             .expect("obligation task identity should allocate");
         let wait = super::super::allocate_wait_token(&session.demand, task)
             .expect("obligation wait identity should allocate");
@@ -4503,7 +4525,7 @@ mod tests {
         assert_eq!(publisher.wait, wait);
         assert!(reflection.take_producer().is_none());
 
-        let lazy = LazyValue::deferred(&session.values, "static obligation", |_| {
+        let lazy = LazyValue::deferred(&session.demand.values, "static obligation", |_| {
             panic!("static obligation test never evaluates its synthetic lazy")
         });
         let producer = DeferredProducer::Lazy(lazy);
@@ -4524,13 +4546,13 @@ mod tests {
     fn terminal_settlement_publishes_once_before_reporting_retirement() {
         let (coordinator, _executor) = super::super::test_execution_resources(0)
             .expect("test execution resources should build");
-        let session = EvaluationSession::shared(&coordinator);
-        let task = super::super::allocate_task_id(&session.values)
+        let session = TestDemand::new(&coordinator);
+        let task = super::super::allocate_task_id(&session.demand.values)
             .expect("settlement task identity should allocate");
         let wait = super::super::allocate_wait_token(&session.demand, task)
             .expect("settlement wait identity should allocate");
         let work = coordinator
-            .reserve_reflection(&session, task, wait.clone())
+            .reserve_reflection(&session.demand, task, wait.clone())
             .expect("open test session should reserve reflection work");
         activate_test_reflection(&coordinator, work);
         assert!(coordinator.terminalize_reflection(work));
@@ -4546,7 +4568,9 @@ mod tests {
             Some(super::super::EvaluationWaitPoll::Cancelled)
         );
         assert!(matches!(
-            coordinator.reflection_snapshots(session.id).as_slice(),
+            coordinator
+                .reflection_snapshots(session.demand.id)
+                .as_slice(),
             [ReflectionWorkSnapshot {
                 state: ReflectionWorkState::Terminalizing,
                 ..
@@ -4554,15 +4578,19 @@ mod tests {
         ));
 
         drop(coordinator.retire_reflection(work));
-        assert!(coordinator.reflection_snapshots(session.id).is_empty());
+        assert!(
+            coordinator
+                .reflection_snapshots(session.demand.id)
+                .is_empty()
+        );
     }
 
     #[test]
     fn session_close_does_not_steal_an_already_terminalizing_claims_settlement() {
         let (coordinator, _executor) = super::super::test_execution_resources(0)
             .expect("test execution resources should build");
-        let session = EvaluationSession::shared(&coordinator);
-        let session_id = session.id;
+        let session = TestDemand::new(&coordinator);
+        let session_id = session.demand.id;
         let (_, work) = reserve_ready_test_reflection(&coordinator, &session);
         let claimed = claim_ready_test_reflection(&coordinator, session_id);
 
@@ -4585,8 +4613,8 @@ mod tests {
     fn session_close_preserves_an_earlier_running_task_cancellation() {
         let (coordinator, _executor) = super::super::test_execution_resources(0)
             .expect("test execution resources should build");
-        let session = EvaluationSession::shared(&coordinator);
-        let session_id = session.id;
+        let session = TestDemand::new(&coordinator);
+        let session_id = session.demand.id;
         let (_, work) = reserve_ready_test_reflection(&coordinator, &session);
         let claimed = claim_ready_test_reflection(&coordinator, session_id);
 
@@ -4752,8 +4780,8 @@ mod tests {
         let (coordinator, _executor, _session, claimed) = claimed_test_spark();
         let (foreign_coordinator, _foreign_executor) = super::super::test_execution_resources(0)
             .expect("foreign execution resources should build");
-        let foreign_session = EvaluationSession::shared(&foreign_coordinator);
-        let producer = super::super::allocate_task_id(&foreign_session.values)
+        let foreign_session = TestDemand::new(&foreign_coordinator);
+        let producer = super::super::allocate_task_id(&foreign_session.demand.values)
             .expect("foreign producer identity should allocate");
         let wait = super::super::allocate_wait_token(&foreign_session.demand, producer)
             .expect("foreign wait identity should allocate");
@@ -4771,13 +4799,13 @@ mod tests {
     fn coordinator_selects_exact_ready_work_without_a_session_queue() {
         let (coordinator, _executor) = super::super::test_execution_resources(0)
             .expect("test execution resources should build");
-        let session = EvaluationSession::shared(&coordinator);
-        let task = super::super::allocate_task_id(&session.values)
+        let session = TestDemand::new(&coordinator);
+        let task = super::super::allocate_task_id(&session.demand.values)
             .expect("reflection task identity should allocate");
         let wait = super::super::allocate_wait_token(&session.demand, task)
             .expect("reflection wait identity should allocate");
         let work = coordinator
-            .reserve_reflection(&session, task, wait)
+            .reserve_reflection(&session.demand, task, wait)
             .expect("open test session should reserve reflection work");
         activate_test_reflection(&coordinator, work);
 
@@ -4801,18 +4829,18 @@ mod tests {
     fn serial_ready_selection_filters_exact_work_by_demand_session() {
         let (coordinator, _executor) = super::super::test_execution_resources(0)
             .expect("test execution resources should build");
-        let left = EvaluationSession::shared(&coordinator);
-        let right = EvaluationSession::shared(&coordinator);
+        let left = TestDemand::new(&coordinator);
+        let right = TestDemand::new(&coordinator);
         let (_, left_work) = reserve_ready_test_reflection(&coordinator, &left);
         let (right_task, right_work) = reserve_ready_test_reflection(&coordinator, &right);
 
-        let right_claim = claim_ready_test_reflection(&coordinator, right.id);
+        let right_claim = claim_ready_test_reflection(&coordinator, right.demand.id);
         assert_eq!(right_claim.task(), right_task);
         let release = coordinator.release_reflection(right_claim, ReflectionWorkPoll::Terminal);
         assert!(release.terminal);
         settle_test_reflection(&coordinator, right_work);
 
-        let left_claim = claim_ready_test_reflection(&coordinator, left.id);
+        let left_claim = claim_ready_test_reflection(&coordinator, left.demand.id);
         let release = coordinator.release_reflection(left_claim, ReflectionWorkPoll::Terminal);
         assert!(release.terminal);
         settle_test_reflection(&coordinator, left_work);
@@ -4822,16 +4850,16 @@ mod tests {
     fn coordinator_owns_the_reflection_lifecycle() {
         let (coordinator, _executor) = super::super::test_execution_resources(0)
             .expect("test execution resources should build");
-        let session = EvaluationSession::shared(&coordinator);
-        let task = super::super::allocate_task_id(&session.values)
+        let session = TestDemand::new(&coordinator);
+        let task = super::super::allocate_task_id(&session.demand.values)
             .expect("reflection task identity should allocate");
         let wait = super::super::allocate_wait_token(&session.demand, task)
             .expect("reflection wait identity should allocate");
         let work = coordinator
-            .reserve_reflection(&session, task, wait)
+            .reserve_reflection(&session.demand, task, wait)
             .expect("open test session should reserve reflection work");
         assert_eq!(
-            coordinator.reflection_snapshots(session.id),
+            coordinator.reflection_snapshots(session.demand.id),
             vec![ReflectionWorkSnapshot {
                 task,
                 state: ReflectionWorkState::Reserved,
@@ -4840,7 +4868,9 @@ mod tests {
 
         activate_test_reflection(&coordinator, work);
         assert!(matches!(
-            coordinator.reflection_snapshots(session.id).as_slice(),
+            coordinator
+                .reflection_snapshots(session.demand.id)
+                .as_slice(),
             [ReflectionWorkSnapshot {
                 state: ReflectionWorkState::Queued,
                 ..
@@ -4848,7 +4878,7 @@ mod tests {
         ));
 
         let ClaimedTaskWork::Reflection(claimed) = coordinator
-            .claim_ready_task_for_session(session.id)
+            .claim_ready_task_for_session(session.demand.id)
             .expect("queued reflection work should be claimable")
         else {
             panic!("queued reflection work should preserve its kind")
@@ -4859,7 +4889,9 @@ mod tests {
             "a running reflection work record must grant only one machine claim"
         );
         assert!(matches!(
-            coordinator.reflection_snapshots(session.id).as_slice(),
+            coordinator
+                .reflection_snapshots(session.demand.id)
+                .as_slice(),
             [ReflectionWorkSnapshot {
                 state: ReflectionWorkState::Running,
                 ..
@@ -4878,7 +4910,7 @@ mod tests {
         assert!(release.remains_blocked);
         assert!(!release.terminal);
         assert_eq!(
-            coordinator.reflection_snapshots(session.id),
+            coordinator.reflection_snapshots(session.demand.id),
             vec![ReflectionWorkSnapshot {
                 task,
                 state: ReflectionWorkState::Blocked(block),
@@ -4886,18 +4918,24 @@ mod tests {
         );
 
         assert!(publish_test_observation(&coordinator) > observed);
-        let claimed = claim_ready_test_reflection(&coordinator, session.id);
+        let claimed = claim_ready_test_reflection(&coordinator, session.demand.id);
         let release = coordinator.release_reflection(claimed, ReflectionWorkPoll::Terminal);
         assert!(release.terminal);
         assert!(matches!(
-            coordinator.reflection_snapshots(session.id).as_slice(),
+            coordinator
+                .reflection_snapshots(session.demand.id)
+                .as_slice(),
             [ReflectionWorkSnapshot {
                 state: ReflectionWorkState::Terminalizing,
                 ..
             }]
         ));
         settle_test_reflection(&coordinator, work);
-        assert!(coordinator.reflection_snapshots(session.id).is_empty());
+        assert!(
+            coordinator
+                .reflection_snapshots(session.demand.id)
+                .is_empty()
+        );
     }
 
     #[test]
@@ -4922,10 +4960,10 @@ mod tests {
     fn observation_published_before_block_registration_requeues_on_recheck() {
         let (coordinator, _executor) = super::super::test_execution_resources(0)
             .expect("test execution resources should build");
-        let session = EvaluationSession::shared(&coordinator);
+        let session = TestDemand::new(&coordinator);
         let observed = coordinator.observations.current();
         let (_, work) = reserve_ready_test_reflection(&coordinator, &session);
-        let claimed = claim_ready_test_reflection(&coordinator, session.id);
+        let claimed = claim_ready_test_reflection(&coordinator, session.demand.id);
 
         assert!(publish_test_observation(&coordinator) > observed);
         let release = coordinator.release_reflection(
@@ -4940,7 +4978,7 @@ mod tests {
         assert!(!release.remains_blocked);
         assert_eq!(coordinator.ready_task_count(), 1);
 
-        let claimed = claim_ready_test_reflection(&coordinator, session.id);
+        let claimed = claim_ready_test_reflection(&coordinator, session.demand.id);
         assert!(
             coordinator
                 .release_reflection(claimed, ReflectionWorkPoll::Terminal)
@@ -4953,18 +4991,18 @@ mod tests {
     fn exact_wait_completion_requeues_only_its_cross_session_task() {
         let (coordinator, _executor) = super::super::test_execution_resources(0)
             .expect("test execution resources should build");
-        let producer = EvaluationSession::shared(&coordinator);
-        let observer = EvaluationSession::shared(&coordinator);
-        let dependency_task = super::super::allocate_task_id(&producer.values)
+        let producer = TestDemand::new(&coordinator);
+        let observer = TestDemand::new(&coordinator);
+        let dependency_task = super::super::allocate_task_id(&producer.demand.values)
             .expect("dependency task identity should allocate");
         let dependency = super::super::allocate_wait_token(&producer.demand, dependency_task)
             .expect("dependency wait identity should allocate");
-        let unrelated_task = super::super::allocate_task_id(&producer.values)
+        let unrelated_task = super::super::allocate_task_id(&producer.demand.values)
             .expect("unrelated task identity should allocate");
         let unrelated = super::super::allocate_wait_token(&producer.demand, unrelated_task)
             .expect("unrelated wait identity should allocate");
         let (_, work) = reserve_ready_test_reflection(&coordinator, &observer);
-        let claimed = claim_ready_test_reflection(&coordinator, observer.id);
+        let claimed = claim_ready_test_reflection(&coordinator, observer.demand.id);
 
         let release = coordinator.release_reflection(
             claimed,
@@ -4979,20 +5017,20 @@ mod tests {
         assert_eq!(coordinator.ready_task_count(), 0);
 
         unrelated.publish_terminal(EvaluationWaitTerminal::Complete(RuntimeValueRoot::new(
-            &producer.values,
+            &producer.demand.values,
             crate::core::keys::unit_value(),
         )));
         unrelated.notify_terminal();
         assert_eq!(coordinator.ready_task_count(), 0);
         dependency.publish_terminal(EvaluationWaitTerminal::Complete(RuntimeValueRoot::new(
-            &producer.values,
+            &producer.demand.values,
             crate::core::keys::unit_value(),
         )));
         dependency.notify_terminal();
         assert_eq!(dependency.exact_subscription_count(), 0);
         assert_eq!(coordinator.ready_task_count(), 1);
 
-        let claimed = claim_ready_test_reflection(&coordinator, observer.id);
+        let claimed = claim_ready_test_reflection(&coordinator, observer.demand.id);
         assert!(
             coordinator
                 .release_reflection(claimed, ReflectionWorkPoll::Terminal)
@@ -5005,17 +5043,17 @@ mod tests {
     fn a_task_reblocked_on_another_wait_ignores_its_prior_terminal_source() {
         let (coordinator, _executor) = super::super::test_execution_resources(0)
             .expect("test execution resources should build");
-        let session = EvaluationSession::shared(&coordinator);
-        let task_a = super::super::allocate_task_id(&session.values)
+        let session = TestDemand::new(&coordinator);
+        let task_a = super::super::allocate_task_id(&session.demand.values)
             .expect("wait A task identity should allocate");
         let wait_a = super::super::allocate_wait_token(&session.demand, task_a)
             .expect("wait A identity should allocate");
-        let task_b = super::super::allocate_task_id(&session.values)
+        let task_b = super::super::allocate_task_id(&session.demand.values)
             .expect("wait B task identity should allocate");
         let wait_b = super::super::allocate_wait_token(&session.demand, task_b)
             .expect("wait B identity should allocate");
         let (_, work) = reserve_ready_test_reflection(&coordinator, &session);
-        let claimed = claim_ready_test_reflection(&coordinator, session.id);
+        let claimed = claim_ready_test_reflection(&coordinator, session.demand.id);
 
         assert!(
             coordinator
@@ -5031,14 +5069,14 @@ mod tests {
         );
         assert_eq!(wait_a.exact_subscription_count(), 1);
         wait_a.publish_terminal(EvaluationWaitTerminal::Complete(RuntimeValueRoot::new(
-            &session.values,
+            &session.demand.values,
             crate::core::keys::unit_value(),
         )));
         wait_a.notify_terminal();
         assert_eq!(wait_a.exact_subscription_count(), 0);
         assert_eq!(coordinator.ready_task_count(), 1);
 
-        let claimed = claim_ready_test_reflection(&coordinator, session.id);
+        let claimed = claim_ready_test_reflection(&coordinator, session.demand.id);
         assert!(
             coordinator
                 .release_reflection(
@@ -5059,13 +5097,13 @@ mod tests {
         wait_a.notify_terminal();
         assert_eq!(coordinator.ready_task_count(), 0);
         wait_b.publish_terminal(EvaluationWaitTerminal::Complete(RuntimeValueRoot::new(
-            &session.values,
+            &session.demand.values,
             crate::core::keys::unit_value(),
         )));
         wait_b.notify_terminal();
         assert_eq!(coordinator.ready_task_count(), 1);
 
-        let claimed = claim_ready_test_reflection(&coordinator, session.id);
+        let claimed = claim_ready_test_reflection(&coordinator, session.demand.id);
         assert!(
             coordinator
                 .release_reflection(claimed, ReflectionWorkPoll::Terminal)
@@ -5079,14 +5117,14 @@ mod tests {
         for exact_wins in [true, false] {
             let (coordinator, _executor) = super::super::test_execution_resources(0)
                 .expect("test execution resources should build");
-            let session = EvaluationSession::shared(&coordinator);
+            let session = TestDemand::new(&coordinator);
             let observed = coordinator.observations.current();
-            let dependency_task = super::super::allocate_task_id(&session.values)
+            let dependency_task = super::super::allocate_task_id(&session.demand.values)
                 .expect("dependency task identity should allocate");
             let dependency = super::super::allocate_wait_token(&session.demand, dependency_task)
                 .expect("dependency wait identity should allocate");
             let (_, work) = reserve_ready_test_reflection(&coordinator, &session);
-            let claimed = claim_ready_test_reflection(&coordinator, session.id);
+            let claimed = claim_ready_test_reflection(&coordinator, session.demand.id);
 
             assert!(
                 coordinator
@@ -5104,7 +5142,7 @@ mod tests {
 
             let complete = || {
                 dependency.publish_terminal(EvaluationWaitTerminal::Complete(
-                    RuntimeValueRoot::new(&session.values, crate::core::keys::unit_value()),
+                    RuntimeValueRoot::new(&session.demand.values, crate::core::keys::unit_value()),
                 ));
                 dependency.notify_terminal();
             };
@@ -5118,7 +5156,7 @@ mod tests {
             assert_eq!(dependency.exact_subscription_count(), 0);
             assert_eq!(coordinator.ready_task_count(), 1);
 
-            let claimed = claim_ready_test_reflection(&coordinator, session.id);
+            let claimed = claim_ready_test_reflection(&coordinator, session.demand.id);
             assert!(
                 coordinator
                     .release_reflection(claimed, ReflectionWorkPoll::Terminal)
@@ -5132,13 +5170,13 @@ mod tests {
     fn retired_task_makes_a_late_exact_wait_wake_harmless() {
         let (coordinator, _executor) = super::super::test_execution_resources(0)
             .expect("test execution resources should build");
-        let session = EvaluationSession::shared(&coordinator);
-        let dependency_task = super::super::allocate_task_id(&session.values)
+        let session = TestDemand::new(&coordinator);
+        let dependency_task = super::super::allocate_task_id(&session.demand.values)
             .expect("dependency task identity should allocate");
         let dependency = super::super::allocate_wait_token(&session.demand, dependency_task)
             .expect("dependency wait identity should allocate");
         let (_, work) = reserve_ready_test_reflection(&coordinator, &session);
-        let claimed = claim_ready_test_reflection(&coordinator, session.id);
+        let claimed = claim_ready_test_reflection(&coordinator, session.demand.id);
 
         assert!(
             coordinator
@@ -5160,7 +5198,7 @@ mod tests {
         assert_eq!(dependency.exact_subscription_count(), 1);
 
         dependency.publish_terminal(EvaluationWaitTerminal::Complete(RuntimeValueRoot::new(
-            &session.values,
+            &session.demand.values,
             crate::core::keys::unit_value(),
         )));
         dependency.notify_terminal();
@@ -5172,11 +5210,11 @@ mod tests {
     fn observation_published_after_block_registration_requeues_exact_work() {
         let (coordinator, _executor) = super::super::test_execution_resources(0)
             .expect("test execution resources should build");
-        let session = EvaluationSession::shared(&coordinator);
+        let session = TestDemand::new(&coordinator);
         let observed = coordinator.observations.current();
         let (_, work) = reserve_ready_test_reflection(&coordinator, &session);
-        let claimed = claim_ready_test_reflection(&coordinator, session.id);
-        let dependency_task = super::super::allocate_task_id(&session.values)
+        let claimed = claim_ready_test_reflection(&coordinator, session.demand.id);
+        let dependency_task = super::super::allocate_task_id(&session.demand.values)
             .expect("dependency task identity should allocate");
         let dependency = super::super::allocate_wait_token(&session.demand, dependency_task)
             .expect("dependency wait identity should allocate");
@@ -5192,7 +5230,7 @@ mod tests {
         assert!(release.remains_blocked);
         assert_eq!(coordinator.ready_task_count(), 0);
         assert!(matches!(
-            coordinator.reflection_snapshots(session.id).as_slice(),
+            coordinator.reflection_snapshots(session.demand.id).as_slice(),
             [ReflectionWorkSnapshot {
                 state: ReflectionWorkState::Blocked(EvaluationTaskBlock {
                     dependency: Some(WorkDependency::Wait(wait)),
@@ -5205,7 +5243,7 @@ mod tests {
 
         publish_test_observation(&coordinator);
         assert_eq!(coordinator.ready_task_count(), 1);
-        let claimed = claim_ready_test_reflection(&coordinator, session.id);
+        let claimed = claim_ready_test_reflection(&coordinator, session.demand.id);
         assert!(
             coordinator
                 .release_reflection(claimed, ReflectionWorkPoll::Terminal)
@@ -5218,10 +5256,10 @@ mod tests {
     fn observation_published_during_registration_is_caught_by_recheck() {
         let (coordinator, _executor) = super::super::test_execution_resources(0)
             .expect("test execution resources should build");
-        let session = EvaluationSession::shared(&coordinator);
+        let session = TestDemand::new(&coordinator);
         let observed = coordinator.observations.current();
         let (_, work) = reserve_ready_test_reflection(&coordinator, &session);
-        let claimed = claim_ready_test_reflection(&coordinator, session.id);
+        let claimed = claim_ready_test_reflection(&coordinator, session.demand.id);
         let mut epoch = coordinator
             .observations
             .epoch
@@ -5262,7 +5300,7 @@ mod tests {
         assert!(release.made_progress);
         assert!(!release.remains_blocked);
         assert_eq!(coordinator.ready_task_count(), 1);
-        let claimed = claim_ready_test_reflection(&coordinator, session.id);
+        let claimed = claim_ready_test_reflection(&coordinator, session.demand.id);
         assert!(
             coordinator
                 .release_reflection(claimed, ReflectionWorkPoll::Terminal)
@@ -5275,13 +5313,13 @@ mod tests {
     fn coordinator_cancels_reflection_reservations_without_polling() {
         let (coordinator, _executor) = super::super::test_execution_resources(0)
             .expect("test execution resources should build");
-        let session = EvaluationSession::shared(&coordinator);
-        let task = super::super::allocate_task_id(&session.values)
+        let session = TestDemand::new(&coordinator);
+        let task = super::super::allocate_task_id(&session.demand.values)
             .expect("reflection task identity should allocate");
         let wait = super::super::allocate_wait_token(&session.demand, task)
             .expect("reflection wait identity should allocate");
         let work = coordinator
-            .reserve_reflection(&session, task, wait)
+            .reserve_reflection(&session.demand, task, wait)
             .expect("open test session should reserve reflection work");
 
         assert_eq!(
@@ -5289,7 +5327,9 @@ mod tests {
             ReflectionCancellation::Terminalize
         );
         assert!(matches!(
-            coordinator.reflection_snapshots(session.id).as_slice(),
+            coordinator
+                .reflection_snapshots(session.demand.id)
+                .as_slice(),
             [ReflectionWorkSnapshot {
                 state: ReflectionWorkState::Terminalizing,
                 ..
@@ -5306,15 +5346,15 @@ mod tests {
     fn coordinator_fairness_alternates_ready_tasks_and_sparks() {
         let (coordinator, _executor) = super::super::test_execution_resources(0)
             .expect("test execution resources should build");
-        let session = EvaluationSession::shared(&coordinator);
+        let session = TestDemand::new(&coordinator);
         coordinator.executor_started(1);
         coordinator.submit_spark(session.demand.clone(), crate::core::keys::unit_value());
-        let task = super::super::allocate_task_id(&session.values)
+        let task = super::super::allocate_task_id(&session.demand.values)
             .expect("reflection task identity should allocate");
         let wait = super::super::allocate_wait_token(&session.demand, task)
             .expect("reflection wait identity should allocate");
         let work = coordinator
-            .reserve_reflection(&session, task, wait)
+            .reserve_reflection(&session.demand, task, wait)
             .expect("open test session should reserve reflection work");
         activate_test_reflection(&coordinator, work);
 
@@ -5339,7 +5379,7 @@ mod tests {
     fn queued_sparks_are_abandoned_when_their_demand_session_closes() {
         let (coordinator, _executor) = super::super::test_execution_resources(0)
             .expect("test execution resources should build");
-        let session = EvaluationSession::shared(&coordinator);
+        let session = TestDemand::new(&coordinator);
         coordinator.executor_started(1);
         coordinator.submit_spark(session.demand.clone(), crate::core::keys::unit_value());
         let [work] = coordinator
@@ -5366,17 +5406,19 @@ mod tests {
     fn coordinator_owns_dormant_deferred_promotion_and_release() {
         let (coordinator, _executor) = super::super::test_execution_resources(0)
             .expect("test execution resources should build");
-        let session = EvaluationSession::shared(&coordinator);
-        let task = super::super::allocate_task_id(&session.values)
+        let session = TestDemand::new(&coordinator);
+        let task = super::super::allocate_task_id(&session.demand.values)
             .expect("deferred task identity should allocate");
         let wait = super::super::allocate_wait_token(&session.demand, task)
             .expect("deferred wait identity should allocate");
-        let lazy = LazyValue::deferred(&session.values, "coordinator deferred lifecycle", |_| {
-            panic!("coordinator lifecycle test never evaluates its synthetic lazy")
-        });
+        let lazy = LazyValue::deferred(
+            &session.demand.values,
+            "coordinator deferred lifecycle",
+            |_| panic!("coordinator lifecycle test never evaluates its synthetic lazy"),
+        );
         let DeferredWorkReservation::New(work) = coordinator
             .reserve_deferred(
-                &session,
+                &session.demand,
                 task,
                 wait.clone(),
                 DeferredProducer::Lazy(lazy),
@@ -5389,23 +5431,23 @@ mod tests {
 
         assert!(
             coordinator
-                .claim_ready_task_for_session(session.id)
+                .claim_ready_task_for_session(session.demand.id)
                 .is_none()
         );
         assert!(coordinator.promote_deferred_wait(&wait));
         assert!(coordinator.activate_deferred(work));
         let ClaimedTaskWork::Deferred(claimed) = coordinator
-            .claim_ready_task_for_session(session.id)
+            .claim_ready_task_for_session(session.demand.id)
             .expect("demand observed during installation should queue the producer")
         else {
             panic!("queued deferred work should preserve its kind")
         };
-        let dependency_task = super::super::allocate_task_id(&session.values)
+        let dependency_task = super::super::allocate_task_id(&session.demand.values)
             .expect("dependency task identity should allocate");
         let dependency = super::super::allocate_wait_token(&session.demand, dependency_task)
             .expect("dependency wait identity should allocate");
         dependency.publish_terminal(super::super::EvaluationWaitTerminal::Complete(
-            RuntimeValueRoot::new(&session.values, crate::core::keys::unit_value()),
+            RuntimeValueRoot::new(&session.demand.values, crate::core::keys::unit_value()),
         ));
         let release = coordinator.release_deferred(
             claimed,
@@ -5419,7 +5461,7 @@ mod tests {
         assert!(!release.terminal);
 
         let ClaimedTaskWork::Deferred(claimed) = coordinator
-            .claim_ready_task_for_session(session.id)
+            .claim_ready_task_for_session(session.demand.id)
             .expect("a terminal dependency should immediately requeue the producer")
         else {
             panic!("the requeued producer should preserve its deferred kind")
@@ -5428,7 +5470,7 @@ mod tests {
         assert!(release.made_progress);
         assert!(!release.remains_blocked);
         let ClaimedTaskWork::Deferred(claimed) = coordinator
-            .claim_ready_task_for_session(session.id)
+            .claim_ready_task_for_session(session.demand.id)
             .expect("a yielded queued demand should remain ready")
         else {
             panic!("the yielded producer should preserve its deferred kind")
@@ -5442,18 +5484,20 @@ mod tests {
     fn deferred_claim_excludes_competitors_and_releases_its_machine_outside_runtime_locks() {
         let (coordinator, _executor) = super::super::test_execution_resources(0)
             .expect("test execution resources should build");
-        let session = EvaluationSession::shared(&coordinator);
-        let task = super::super::allocate_task_id(&session.values)
+        let session = TestDemand::new(&coordinator);
+        let task = super::super::allocate_task_id(&session.demand.values)
             .expect("deferred task identity should allocate");
         let wait = super::super::allocate_wait_token(&session.demand, task)
             .expect("deferred wait identity should allocate");
-        let lazy = LazyValue::deferred(&session.values, "coordinator machine ownership", |_| {
-            panic!("coordinator ownership test never evaluates its synthetic lazy")
-        });
+        let lazy = LazyValue::deferred(
+            &session.demand.values,
+            "coordinator machine ownership",
+            |_| panic!("coordinator ownership test never evaluates its synthetic lazy"),
+        );
         let dropped_without_runtime_locks = Arc::new(AtomicBool::new(false));
         let DeferredWorkReservation::New(work) = coordinator
             .reserve_deferred(
-                &session,
+                &session.demand,
                 task,
                 wait.clone(),
                 DeferredProducer::Lazy(lazy),
@@ -5469,14 +5513,14 @@ mod tests {
         assert!(coordinator.activate_deferred(work));
         assert!(coordinator.promote_deferred_wait(&wait));
         let ClaimedTaskWork::Deferred(claimed) = coordinator
-            .claim_ready_task_for_session(session.id)
+            .claim_ready_task_for_session(session.demand.id)
             .expect("promoted deferred work should be claimable")
         else {
             panic!("claimed work should preserve its deferred kind")
         };
         assert!(
             coordinator
-                .claim_ready_task_for_session(session.id)
+                .claim_ready_task_for_session(session.demand.id)
                 .is_none(),
             "a detached deferred machine must exclude a competing claim"
         );
@@ -5501,21 +5545,21 @@ mod tests {
     fn outer_block_promotes_one_canonical_deferred_producer() {
         let (coordinator, _executor) = super::super::test_execution_resources(0)
             .expect("test execution resources should build");
-        let producer_session = EvaluationSession::shared(&coordinator);
-        let observer_session = EvaluationSession::shared(&coordinator);
-        let producer_task = super::super::allocate_task_id(&producer_session.values)
+        let producer_session = TestDemand::new(&coordinator);
+        let observer_session = TestDemand::new(&coordinator);
+        let producer_task = super::super::allocate_task_id(&producer_session.demand.values)
             .expect("producer task identity should allocate");
         let producer_wait =
             super::super::allocate_wait_token(&producer_session.demand, producer_task)
                 .expect("producer wait identity should allocate");
         let lazy = LazyValue::deferred(
-            &producer_session.values,
+            &producer_session.demand.values,
             "cross-session canonical producer",
             |_| panic!("coordinator promotion test does not evaluate its lazy"),
         );
         let DeferredWorkReservation::New(producer_work) = coordinator
             .reserve_deferred(
-                &producer_session,
+                &producer_session.demand,
                 producer_task,
                 producer_wait.clone(),
                 DeferredProducer::Lazy(lazy.clone()),
@@ -5527,14 +5571,14 @@ mod tests {
         };
         assert!(coordinator.activate_deferred(producer_work));
 
-        let duplicate_task = super::super::allocate_task_id(&observer_session.values)
+        let duplicate_task = super::super::allocate_task_id(&observer_session.demand.values)
             .expect("duplicate task identity should allocate");
         let duplicate_wait =
             super::super::allocate_wait_token(&observer_session.demand, duplicate_task)
                 .expect("duplicate wait identity should allocate");
         let DeferredWorkReservation::Existing(canonical_wait) = coordinator
             .reserve_deferred(
-                &observer_session,
+                &observer_session.demand,
                 duplicate_task,
                 duplicate_wait,
                 DeferredProducer::Lazy(lazy),
@@ -5546,17 +5590,17 @@ mod tests {
         };
         assert_eq!(canonical_wait, producer_wait);
 
-        let observer_task = super::super::allocate_task_id(&observer_session.values)
+        let observer_task = super::super::allocate_task_id(&observer_session.demand.values)
             .expect("observer task identity should allocate");
         let observer_wait =
             super::super::allocate_wait_token(&observer_session.demand, observer_task)
                 .expect("observer wait identity should allocate");
         let observer_work = coordinator
-            .reserve_reflection(&observer_session, observer_task, observer_wait)
+            .reserve_reflection(&observer_session.demand, observer_task, observer_wait)
             .expect("open observer session should reserve reflection work");
         activate_test_reflection(&coordinator, observer_work);
         let ClaimedTaskWork::Reflection(claimed) = coordinator
-            .claim_ready_task_for_session(observer_session.id)
+            .claim_ready_task_for_session(observer_session.demand.id)
             .expect("observer reflection work should be ready")
         else {
             panic!("observer work should preserve its reflection kind")
@@ -5571,7 +5615,7 @@ mod tests {
         );
         assert!(release.remains_blocked);
         let ClaimedTaskWork::Deferred(producer) = coordinator
-            .claim_ready_task_for_session(producer_session.id)
+            .claim_ready_task_for_session(producer_session.demand.id)
             .expect("publishing the outer dependency should promote its dormant producer")
         else {
             panic!("promoted producer should preserve its deferred kind")
@@ -5587,13 +5631,13 @@ mod tests {
     fn dropping_executor_does_not_discard_coordinator_session_state() {
         let (coordinator, executor) = super::super::test_execution_resources(0)
             .expect("test execution resources should build");
-        let session = EvaluationSession::shared(&coordinator);
-        let task = super::super::allocate_task_id(&session.values)
+        let session = TestDemand::new(&coordinator);
+        let task = super::super::allocate_task_id(&session.demand.values)
             .expect("reflection task identity should allocate");
         let wait = super::super::allocate_wait_token(&session.demand, task)
             .expect("reflection wait identity should allocate");
         let work = coordinator
-            .reserve_reflection(&session, task, wait)
+            .reserve_reflection(&session.demand, task, wait)
             .expect("open test session should reserve reflection work");
         activate_test_reflection(&coordinator, work);
         drop(executor);

@@ -955,18 +955,6 @@ impl fmt::Debug for EvaluationSession {
     }
 }
 
-// Coordinator unit tests frequently inspect the demand record directly. Keep
-// their concise fixture syntax without exposing the owner as a demand facade
-// in production code.
-#[cfg(test)]
-impl Deref for EvaluationSession {
-    type Target = EvaluationDemandState;
-
-    fn deref(&self) -> &Self::Target {
-        &self.demand
-    }
-}
-
 impl Drop for EvaluationSession {
     fn drop(&mut self) {
         self.demand.closed.store(true, Ordering::Release);
@@ -2519,7 +2507,7 @@ mod tests {
                 .runtime
                 .new_evaluation_session()
                 .expect("same-runtime test session should build");
-            debug_assert_eq!(session.values.runtime_id(), self.runtime.id());
+            debug_assert_eq!(session.demand.values.runtime_id(), self.runtime.id());
             OwnedEvalContext::new(session)
         }
     }
@@ -2677,7 +2665,7 @@ mod tests {
             test_execution_resources(0).expect("test execution resources should build");
         let owner = EvaluationSession::shared(&coordinator);
         let owner_weak = Arc::downgrade(&owner);
-        let owner_id = owner.id;
+        let owner_id = owner.demand.id;
         let context = EvalContext::new(&owner);
         let demand_weak = Arc::downgrade(&context.session);
         let task = context
@@ -5489,7 +5477,7 @@ mod tests {
         let observer_session = EvaluationSession::shared(&coordinator);
         let observer = EvalContext::patient_with_task_profile(
             &observer_session,
-            observer_session.default_reflection_profile.clone(),
+            observer_session.demand.default_reflection_profile.clone(),
         );
         assert_eq!(
             crate::eval::eval_value(&observer, &Value::Lazy(lazy)),
@@ -5511,7 +5499,7 @@ mod tests {
         };
         assert_eq!(coordinator.spark_work_counts(), (0, 1, 0));
 
-        let closed_session = session.id;
+        let closed_session = session.demand.id;
         drop(session);
         assert!(context.session.is_closed());
         let repeated = coordinator.close_session(closed_session);
