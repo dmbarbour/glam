@@ -3789,6 +3789,29 @@ mod tests {
         }
     }
 
+    struct ExitCapableLauncher {
+        host: Arc<TestHost>,
+    }
+
+    impl ReflectionTaskLauncher for ExitCapableLauncher {
+        fn build(
+            &self,
+            context: EvalContext,
+            effect: Value,
+            result_policy: ReflectionTaskResultPolicy,
+        ) -> Result<Box<dyn EvaluationTaskMachine>, Arc<EvaluationFailure>> {
+            let task =
+                EffectTask::new_exit_in_context(effect, TestEffects, self.host.clone(), context)
+                    .map_err(TaskHalt::into_failure)?;
+            Ok(match result_policy {
+                ReflectionTaskResultPolicy::RequireUnit => Box::new(UnitEffectTask(
+                    task.asserting_unit_result(Arc::from("reflection annotation result")),
+                )),
+                ReflectionTaskResultPolicy::ReturnValue => Box::new(ValueEffectTask(task)),
+            })
+        }
+    }
+
     #[derive(Clone)]
     enum TestRequest {
         Reflection(ReflectionRequest),
@@ -5193,6 +5216,26 @@ mod tests {
         (context, task)
     }
 
+    fn schedule_exit_child_test_task(
+        assembler: &Assembler,
+        effect: &PublicValue,
+        host: Arc<TestHost>,
+    ) -> (OwnedEvalContext, EvaluationTaskHandle) {
+        let context = EvalContext::isolated(assembler.core_values());
+        context
+            .install_reflection_launcher(Arc::new(ExitCapableLauncher { host: host.clone() }))
+            .expect("fresh test session should accept an exit-capable launcher");
+        let effect = effect.as_core().clone();
+        let task = context
+            .schedule_task(move |task_context| {
+                EffectTask::new_in_context(effect, TestEffects, host, task_context)
+                    .map(|task| Box::new(ValueEffectTask(task)) as Box<dyn EvaluationTaskMachine>)
+                    .map_err(|error| Arc::from(error.to_string()))
+            })
+            .expect("test task should schedule");
+        (context, task)
+    }
+
     fn pump_composed_test_task(
         context: &EvalContext,
         task: &EvaluationTaskHandle,
@@ -6110,6 +6153,29 @@ mod tests {
             context.poll_reflection_task(&task),
             EvaluationWaitPoll::Pending(_)
         ));
+    }
+
+    #[test]
+    fn join_does_not_advance_an_alternative_while_the_child_waits_to_exit() {
+        let (assembler, effect) = compile_effect(
+            ".task.new (.exit.success) >>= (\\task -> .cut (.alt (.task.join task) (.r \"fallback\")))",
+        );
+        let host = Arc::new(TestHost::with_values(assembler.core_values()));
+        let (context, task) = schedule_exit_child_test_task(&assembler, &effect, host);
+
+        assert_eq!(
+            context.pump_wait(task.wait(), 16_384),
+            crate::evaluation::EvaluationPumpOutcome::NoProgress
+        );
+        assert!(matches!(
+            context.poll_reflection_task(&task),
+            EvaluationWaitPoll::Pending(_)
+        ));
+        let EvaluationSessionRun::Deadlocked(report) = context.run_until_quiescent() else {
+            panic!("the parent and exit-waiting child should remain unfinished")
+        };
+        assert!(report.failures.is_empty());
+        assert_eq!(report.unfinished.len(), 2);
     }
 
     #[test]

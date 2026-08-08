@@ -28,8 +28,6 @@ use crate::runtime::{EvaluationRuntimeId, RuntimeMutationGuard, RuntimeValueRoot
 
 mod coordinator;
 mod executor;
-#[cfg(test)]
-use coordinator::test_wake_registration;
 use coordinator::{
     ClaimedDeferredWork, ClaimedReflectionWork, ClaimedTaskWork, DeferredLazyCycleMember,
     DeferredProducer, DeferredWorkPoll, DeferredWorkReservation, EvaluationWorkId,
@@ -40,6 +38,8 @@ pub(crate) use coordinator::{
     EvaluationWorkCoordinator, RuntimeObservationEpoch, RuntimeObservationState, WakeRegistration,
     WorkDependency,
 };
+#[cfg(test)]
+use coordinator::{ReflectionWorkSnapshot, test_wake_registration};
 pub(crate) use executor::EvaluationExecutor;
 
 #[cfg(test)]
@@ -1985,6 +1985,7 @@ fn test_reflection_dependency(
 const TASK_POLL_QUANTUM: usize = 64;
 
 enum ReleasedTaskMachine {
+    DropOnly(Box<dyn EvaluationTaskMachine>),
     Drop {
         machine: Box<dyn EvaluationTaskMachine>,
         retirement: WorkRetirement,
@@ -2003,6 +2004,10 @@ enum WorkRetirement {
 impl ReleasedTaskMachine {
     fn finish(self) {
         let retirement = match self {
+            Self::DropOnly(machine) => {
+                drop(machine);
+                return;
+            }
             Self::Drop {
                 machine,
                 retirement,
@@ -2118,15 +2123,20 @@ impl EvaluationDemandState {
         let mut unfinished = Vec::new();
         let mut has_live_cross_session_dependency = false;
         for snapshot in snapshots {
-            let (state, block) = match &snapshot.state {
-                ReflectionWorkState::Dormant => (EvaluationUnfinishedState::Dormant, None),
-                ReflectionWorkState::Reserved => (EvaluationUnfinishedState::Reserved, None),
-                ReflectionWorkState::Queued => (EvaluationUnfinishedState::Queued, None),
-                ReflectionWorkState::Running => (EvaluationUnfinishedState::Running, None),
+            let (state, block, exit) = match &snapshot.state {
+                ReflectionWorkState::Dormant => (EvaluationUnfinishedState::Dormant, None, None),
+                ReflectionWorkState::Reserved => (EvaluationUnfinishedState::Reserved, None, None),
+                ReflectionWorkState::Queued => (EvaluationUnfinishedState::Queued, None, None),
+                ReflectionWorkState::Running => (EvaluationUnfinishedState::Running, None, None),
                 ReflectionWorkState::Blocked(block) => {
-                    (EvaluationUnfinishedState::Blocked, Some(block))
+                    (EvaluationUnfinishedState::Blocked, Some(block), None)
                 }
-                ReflectionWorkState::Terminalizing => (EvaluationUnfinishedState::Running, None),
+                ReflectionWorkState::ExitWaiting(exit) => {
+                    (EvaluationUnfinishedState::Blocked, None, Some(exit))
+                }
+                ReflectionWorkState::Terminalizing => {
+                    (EvaluationUnfinishedState::Running, None, None)
+                }
             };
             let dependency = block
                 .and_then(|block| block.dependency.as_ref())
@@ -2140,7 +2150,9 @@ impl EvaluationDemandState {
                 dependency: dependency.as_ref().map(|dependency| dependency.task),
                 dependency_session: dependency.as_ref().map(|dependency| dependency.session),
                 wait: dependency.as_ref().map(|dependency| dependency.wait),
-                observed_epoch: block.and_then(|block| block.observed_epoch),
+                observed_epoch: block
+                    .and_then(|block| block.observed_epoch)
+                    .or_else(|| exit.and_then(|exit| exit.observed_epoch)),
                 error: block.and_then(|block| block.error.clone()),
             });
         }
@@ -2282,10 +2294,7 @@ fn release_reflection_task(
     let (work_poll, terminal_state) = match poll {
         EvaluationMachinePoll::Yielded => (ReflectionWorkPoll::Yielded, None),
         EvaluationMachinePoll::Blocked(block) => (ReflectionWorkPoll::Blocked(block), None),
-        EvaluationMachinePoll::Exit(exit) => {
-            drop(exit);
-            unreachable!("coordinator work cannot publish an exit vote without ExitWaiting")
-        }
+        EvaluationMachinePoll::Exit(exit) => (ReflectionWorkPoll::Exit(exit), None),
         EvaluationMachinePoll::Complete(value) => (
             ReflectionWorkPoll::Terminal,
             Some(EvaluationTaskState::Complete(
@@ -2304,16 +2313,20 @@ fn release_reflection_task(
 
     let mut release = coordinator.release_reflection(claimed, work_poll);
     if !release.terminal {
-        debug_assert!(release.machine.is_none());
-        coordinator.update_reflection_status(
-            work,
-            if release.remains_blocked {
-                EvaluationTaskStatus::Blocked
-            } else {
-                EvaluationTaskStatus::Launched
-            },
-        );
-        return (release.made_progress, release.remains_blocked, None);
+        if !release.exit_waiting {
+            debug_assert!(release.machine.is_none());
+            coordinator.update_reflection_status(
+                work,
+                if release.remains_blocked {
+                    EvaluationTaskStatus::Blocked
+                } else {
+                    EvaluationTaskStatus::Launched
+                },
+            );
+            return (release.made_progress, release.remains_blocked, None);
+        }
+        let released = release.machine.take().map(ReleasedTaskMachine::DropOnly);
+        return (release.made_progress, release.remains_blocked, released);
     }
 
     let state = if release.cancel {
@@ -2882,6 +2895,32 @@ mod tests {
         }
     }
 
+    struct ExitVote(EvaluationExitBlock);
+
+    impl EvaluationTaskMachine for ExitVote {
+        fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+            EvaluationMachinePoll::Exit(self.0.clone())
+        }
+    }
+
+    struct ExitUntilObservation {
+        context: EvalContext,
+        observed: RuntimeObservationEpoch,
+    }
+
+    impl EvaluationTaskMachine for ExitUntilObservation {
+        fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+            if self.context.current_observation_epoch() == self.observed {
+                EvaluationMachinePoll::Exit(EvaluationExitBlock {
+                    intent: ExitIntent::Success,
+                    observed_epoch: Some(self.observed),
+                })
+            } else {
+                EvaluationMachinePoll::Complete(crate::core::keys::unit_value())
+            }
+        }
+    }
+
     #[derive(Default)]
     struct RecordedStatuses(Mutex<Vec<EvaluationTaskStatus>>);
 
@@ -2899,6 +2938,147 @@ mod tests {
                 })
             })
         }
+    }
+
+    #[test]
+    fn exit_wait_does_not_publish_task_status_or_failure() {
+        let fixture = SameRuntimeFixture::new();
+        let context = fixture.context();
+        let coordinator = context
+            .coordinator()
+            .expect("test task must retain its coordinator");
+        let message = RuntimeValueRoot::new(context.values(), crate::core::keys::unit_value());
+        let task = context
+            .schedule_task(move |_| {
+                Ok(Box::new(ExitVote(EvaluationExitBlock {
+                    intent: ExitIntent::Error(message),
+                    observed_epoch: None,
+                })))
+            })
+            .expect("exit-voting task should schedule");
+        let statuses = Arc::new(RecordedStatuses::default());
+        assert!(
+            coordinator.attach_reflection_status_publisher(
+                task.work,
+                RecordedStatuses::publisher(&statuses),
+            )
+        );
+
+        let EvaluationSessionRun::Deadlocked(report) = context.run_until_quiescent() else {
+            panic!("a permanent exit vote should remain unfinished")
+        };
+        assert!(report.failures.is_empty());
+        assert_eq!(report.unfinished.len(), 1);
+        assert_eq!(
+            report.unfinished[0].state,
+            EvaluationUnfinishedState::Blocked
+        );
+        assert!(report.unfinished[0].error.is_none());
+        assert!(statuses.0.lock().unwrap().is_empty());
+        assert!(matches!(
+            context.poll_reflection_task(&task),
+            EvaluationWaitPoll::Pending(_)
+        ));
+        assert!(coordinator.failure_snapshot(context.session.id).is_empty());
+
+        task.acknowledge_failure();
+        assert!(coordinator.failure_snapshot(context.session.id).is_empty());
+        assert!(matches!(
+            coordinator
+                .reflection_snapshots(context.session.id)
+                .as_slice(),
+            [ReflectionWorkSnapshot {
+                state: ReflectionWorkState::ExitWaiting(EvaluationExitBlock {
+                    intent: ExitIntent::Error(_),
+                    observed_epoch: None,
+                }),
+                ..
+            }]
+        ));
+
+        assert_eq!(task.cancel(), EvaluationTaskCancellation::Requested);
+    }
+
+    #[test]
+    fn retryable_exit_wake_skips_intermediate_task_statuses() {
+        let fixture = SameRuntimeFixture::new();
+        let context = fixture.context();
+        let coordinator = context
+            .coordinator()
+            .expect("test task must retain its coordinator");
+        let observed = context.current_observation_epoch();
+        let task = context
+            .schedule_task(|task_context| {
+                Ok(Box::new(ExitUntilObservation {
+                    context: task_context,
+                    observed,
+                }))
+            })
+            .expect("retryable exit task should schedule");
+        let statuses = Arc::new(RecordedStatuses::default());
+        assert!(
+            coordinator.attach_reflection_status_publisher(
+                task.work,
+                RecordedStatuses::publisher(&statuses),
+            )
+        );
+
+        assert!(matches!(
+            context.run_until_quiescent(),
+            EvaluationSessionRun::Deadlocked(_)
+        ));
+        assert!(statuses.0.lock().unwrap().is_empty());
+
+        coordinator.publish_runtime_observation();
+        let EvaluationSessionRun::Complete(report) = context.run_until_quiescent() else {
+            panic!("observation wake should resume and complete the exit voter")
+        };
+        assert!(report.failures.is_empty());
+        assert!(report.unfinished.is_empty());
+        assert!(matches!(
+            statuses.0.lock().unwrap().as_slice(),
+            [EvaluationTaskStatus::Complete(_)]
+        ));
+    }
+
+    #[test]
+    fn task_join_dependency_remains_pending_for_exit_waiting_child() {
+        let fixture = SameRuntimeFixture::new();
+        let context = fixture.context();
+        let child = context
+            .schedule_task(|_| {
+                Ok(Box::new(ExitVote(EvaluationExitBlock {
+                    intent: ExitIntent::Success,
+                    observed_epoch: None,
+                })))
+            })
+            .expect("exit-voting child should schedule");
+        let child_wait = child.wait().clone();
+        let parent = context
+            .schedule_task(move |task_context| {
+                Ok(Box::new(Await {
+                    context: task_context,
+                    dependency: child_wait,
+                }))
+            })
+            .expect("joining parent should schedule");
+
+        let EvaluationSessionRun::Deadlocked(report) = context.run_until_quiescent() else {
+            panic!("a join on an exit-waiting child must remain pending")
+        };
+        assert!(report.failures.is_empty());
+        assert_eq!(report.unfinished.len(), 2);
+        assert!(matches!(
+            context.poll_reflection_task(&child),
+            EvaluationWaitPoll::Pending(_)
+        ));
+        assert!(matches!(
+            context.poll_reflection_task(&parent),
+            EvaluationWaitPoll::Pending(_)
+        ));
+
+        assert_eq!(child.cancel(), EvaluationTaskCancellation::Requested);
+        let _ = context.run_until_quiescent();
     }
 
     struct Await {

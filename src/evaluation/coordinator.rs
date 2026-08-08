@@ -16,9 +16,10 @@ use crate::runtime::{
 #[cfg(test)]
 use super::EvaluationSession;
 use super::{
-    EvaluationDemandState, EvaluationFailure, EvaluationMachinePoll, EvaluationSessionId,
-    EvaluationTaskId, EvaluationTaskMachine, EvaluationTaskStatus, EvaluationWaitTerminal,
-    EvaluationWaitToken, RuntimeFailureLedger, TaskFailureLedger, TaskStatusPublisher,
+    EvaluationDemandState, EvaluationExitBlock, EvaluationFailure, EvaluationMachinePoll,
+    EvaluationSessionId, EvaluationTaskId, EvaluationTaskMachine, EvaluationTaskStatus,
+    EvaluationWaitTerminal, EvaluationWaitToken, ExitIntent, RuntimeFailureLedger,
+    TaskFailureLedger, TaskStatusPublisher,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -477,6 +478,7 @@ enum WorkState {
     Queued,
     Running,
     Blocked,
+    ExitWaiting,
     Terminalizing,
 }
 
@@ -606,6 +608,7 @@ struct ReflectionWork {
     wait: EvaluationWaitToken,
     machine: Option<Box<dyn EvaluationTaskMachine>>,
     block: Option<EvaluationTaskBlock>,
+    exit: Option<EvaluationExitBlock>,
 }
 
 #[derive(Clone)]
@@ -752,12 +755,14 @@ impl ClaimedReflectionWork {
 pub(super) enum ReflectionWorkPoll {
     Yielded,
     Blocked(EvaluationTaskBlock),
+    Exit(EvaluationExitBlock),
     Terminal,
 }
 
 pub(super) struct ReflectionWorkRelease {
     pub(super) made_progress: bool,
     pub(super) remains_blocked: bool,
+    pub(super) exit_waiting: bool,
     pub(super) terminal: bool,
     pub(super) cancel: bool,
     pub(super) abandoned: bool,
@@ -771,6 +776,7 @@ pub(super) enum ReflectionWorkState {
     Queued,
     Running,
     Blocked(EvaluationTaskBlock),
+    ExitWaiting(EvaluationExitBlock),
     Terminalizing,
 }
 
@@ -1680,6 +1686,7 @@ impl EvaluationWorkCoordinator {
                     wait: wait.clone(),
                     machine: None,
                     block: None,
+                    exit: None,
                 }),
             };
             assert!(state.work.insert(id, record).is_none());
@@ -1868,7 +1875,8 @@ impl EvaluationWorkCoordinator {
                 WorkState::Dormant
                 | WorkState::Reserved
                 | WorkState::Queued
-                | WorkState::Blocked => {
+                | WorkState::Blocked
+                | WorkState::ExitWaiting => {
                     record
                         .control
                         .close_reason
@@ -1988,23 +1996,39 @@ impl EvaluationWorkCoordinator {
                     ),
                 )
             };
-            let (state_after, block, made_progress, remains_blocked, terminal) = if cancel
-                || abandoned
-            {
-                (WorkState::Terminalizing, None, true, false, true)
-            } else {
-                match poll {
-                    ReflectionWorkPoll::Yielded => (WorkState::Queued, None, true, false, false),
-                    ReflectionWorkPoll::Blocked(block) => {
-                        let unchanged = prior_block.as_ref() == Some(&block);
-                        (WorkState::Blocked, Some(block), !unchanged, true, false)
+            let (state_after, block, exit, made_progress, remains_blocked, terminal) =
+                if cancel || abandoned {
+                    (WorkState::Terminalizing, None, None, true, false, true)
+                } else {
+                    match poll {
+                        ReflectionWorkPoll::Yielded => {
+                            (WorkState::Queued, None, None, true, false, false)
+                        }
+                        ReflectionWorkPoll::Blocked(block) => {
+                            let unchanged = prior_block.as_ref() == Some(&block);
+                            (
+                                WorkState::Blocked,
+                                Some(block),
+                                None,
+                                !unchanged,
+                                true,
+                                false,
+                            )
+                        }
+                        ReflectionWorkPoll::Exit(exit) => {
+                            (WorkState::ExitWaiting, None, Some(exit), true, true, false)
+                        }
+                        ReflectionWorkPoll::Terminal => {
+                            (WorkState::Terminalizing, None, None, true, false, true)
+                        }
                     }
-                    ReflectionWorkPoll::Terminal => {
-                        (WorkState::Terminalizing, None, true, false, true)
-                    }
-                }
-            };
-            if !terminal {
+                };
+            let exit_waiting = exit.is_some();
+            let retain_machine = !terminal
+                && exit
+                    .as_ref()
+                    .is_none_or(|exit| exit.observed_epoch.is_some());
+            if retain_machine {
                 let record = state
                     .work
                     .get_mut(&id)
@@ -2016,12 +2040,18 @@ impl EvaluationWorkCoordinator {
             let exact_subscription = if let Some(block) = block {
                 assert!(matches!(state_after, WorkState::Blocked));
                 publish_task_block_locked(&mut state, self.runtime, id, block)
+            } else if let Some(exit) = exit {
+                assert!(matches!(state_after, WorkState::ExitWaiting));
+                publish_reflection_exit_locked(&mut state, self.runtime, id, exit);
+                None
             } else {
                 let record = state
                     .work
                     .get_mut(&id)
                     .expect("claimed reflection work must remain registered");
-                reflection_work_mut(record).block = None;
+                let reflection = reflection_work_mut(record);
+                reflection.block = None;
+                reflection.exit = None;
                 record.state = state_after;
                 state.observation_waiters.remove(&id);
                 None
@@ -2049,6 +2079,7 @@ impl EvaluationWorkCoordinator {
                 ReflectionWorkRelease {
                     made_progress,
                     remains_blocked,
+                    exit_waiting,
                     terminal,
                     cancel,
                     abandoned,
@@ -2752,11 +2783,7 @@ impl EvaluationWorkCoordinator {
             .reflection_by_task
             .get(&task)
             .or_else(|| state.deferred_by_task.get(&task))?;
-        state
-            .work
-            .get(id)
-            .and_then(task_block)
-            .and_then(|block| block.observed_epoch)
+        state.work.get(id).and_then(task_observation_epoch)
     }
 
     pub(super) fn task_is_claimable(&self, task: EvaluationTaskId) -> bool {
@@ -3129,7 +3156,10 @@ impl EvaluationWorkCoordinator {
                 WorkState::Queued => queued += 1,
                 WorkState::Running => running += 1,
                 WorkState::Blocked => blocked += 1,
-                WorkState::Dormant | WorkState::Reserved | WorkState::Terminalizing => {}
+                WorkState::Dormant
+                | WorkState::Reserved
+                | WorkState::ExitWaiting
+                | WorkState::Terminalizing => {}
             }
         }
         (queued, running, blocked)
@@ -3215,6 +3245,16 @@ fn task_block(record: &WorkRecord) -> Option<&EvaluationTaskBlock> {
     }
 }
 
+fn task_observation_epoch(record: &WorkRecord) -> Option<RuntimeObservationEpoch> {
+    match (&record.state, &record.kind) {
+        (WorkState::Blocked, _) => task_block(record).and_then(|block| block.observed_epoch),
+        (WorkState::ExitWaiting, WorkKind::Reflection(work)) => {
+            work.exit.as_ref().and_then(|exit| exit.observed_epoch)
+        }
+        _ => None,
+    }
+}
+
 fn work_dependency(record: &WorkRecord) -> Option<&WorkDependency> {
     match &record.kind {
         WorkKind::Spark(work) => work.dependency.as_ref(),
@@ -3278,6 +3318,54 @@ fn publish_task_block_locked(
     dependency.map(|dependency| (dependency, registration))
 }
 
+fn publish_reflection_exit_locked(
+    state: &mut WorkCoordinatorState,
+    runtime: EvaluationRuntimeId,
+    id: EvaluationWorkId,
+    exit: EvaluationExitBlock,
+) {
+    if let ExitIntent::Error(error) = &exit.intent {
+        debug_assert_eq!(
+            error.runtime_id(),
+            runtime,
+            "exit error values must belong to the coordinator runtime"
+        );
+    }
+    state.observation_waiters.remove(&id);
+    let observed_epoch = exit.observed_epoch;
+    let record = state
+        .work
+        .get_mut(&id)
+        .expect("exiting reflection work must remain registered");
+    assert!(matches!(record.state, WorkState::Running));
+    record.subscription_epoch = record
+        .subscription_epoch
+        .checked_add(1)
+        .expect("evaluation work subscription epochs exhausted");
+    let registration = WakeRegistration {
+        work: id,
+        subscription_epoch: record.subscription_epoch,
+    };
+    let reflection = reflection_work_mut(record);
+    reflection.block = None;
+    reflection.exit = Some(exit);
+    assert_eq!(
+        reflection.machine.is_some(),
+        observed_epoch.is_some(),
+        "only retryable exit waits retain their sanitized machine"
+    );
+    record.state = WorkState::ExitWaiting;
+    if let Some(observed_epoch) = observed_epoch {
+        state.observation_waiters.insert(
+            id,
+            ObservationRegistration {
+                wake: registration,
+                observed_epoch,
+            },
+        );
+    }
+}
+
 fn queue_current_observation(
     state: &mut WorkCoordinatorState,
     registration: ObservationRegistration,
@@ -3285,10 +3373,9 @@ fn queue_current_observation(
 ) -> bool {
     let id = registration.wake.work;
     let valid = state.work.get(&id).is_some_and(|record| {
-        matches!(record.state, WorkState::Blocked)
+        matches!(record.state, WorkState::Blocked | WorkState::ExitWaiting)
             && record.subscription_epoch == registration.wake.subscription_epoch
-            && task_block(record)
-                .and_then(|block| block.observed_epoch)
+            && task_observation_epoch(record)
                 .is_some_and(|observed| observed == registration.observed_epoch)
     });
     if !valid {
@@ -3305,6 +3392,14 @@ fn queue_current_observation(
         .work
         .get_mut(&id)
         .expect("validated observation work must remain registered");
+    if matches!(record.state, WorkState::ExitWaiting) {
+        let reflection = reflection_work_mut(record);
+        assert!(
+            reflection.machine.is_some(),
+            "retryable exit work must retain its sanitized machine"
+        );
+        reflection.exit = None;
+    }
     record.state = WorkState::Queued;
     queue_task(state, id);
     true
@@ -3486,6 +3581,12 @@ fn reflection_state(record: &WorkRecord) -> ReflectionWorkState {
                 .block
                 .clone()
                 .expect("blocked reflection work must retain its block"),
+        ),
+        WorkState::ExitWaiting => ReflectionWorkState::ExitWaiting(
+            reflection_work(record)
+                .exit
+                .clone()
+                .expect("exit-waiting reflection work must retain its exit summary"),
         ),
         WorkState::Terminalizing => ReflectionWorkState::Terminalizing,
     }
@@ -5243,6 +5344,126 @@ mod tests {
 
         publish_test_observation(&coordinator);
         assert_eq!(coordinator.ready_task_count(), 1);
+        let claimed = claim_ready_test_reflection(&coordinator, session.demand.id);
+        assert!(
+            coordinator
+                .release_reflection(claimed, ReflectionWorkPoll::Terminal)
+                .terminal
+        );
+        settle_test_reflection(&coordinator, work);
+    }
+
+    #[test]
+    fn permanent_exit_wait_retains_only_its_summary_and_obligations() {
+        let (coordinator, _executor) = super::super::test_execution_resources(0)
+            .expect("test execution resources should build");
+        let session = TestDemand::new(&coordinator);
+        let (task, work) = reserve_ready_test_reflection(&coordinator, &session);
+        let claimed = claim_ready_test_reflection(&coordinator, session.demand.id);
+        let message =
+            RuntimeValueRoot::new(&session.demand.values, crate::core::keys::unit_value());
+
+        let mut release = coordinator.release_reflection(
+            claimed,
+            ReflectionWorkPoll::Exit(EvaluationExitBlock {
+                intent: ExitIntent::Error(message.clone()),
+                observed_epoch: None,
+            }),
+        );
+        assert!(release.exit_waiting);
+        assert!(release.remains_blocked);
+        assert!(!release.terminal);
+        assert!(release.machine.is_some());
+        {
+            let state = coordinator
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            let record = state
+                .work
+                .get(&work)
+                .expect("exit-waiting work must remain registered");
+            let reflection = reflection_work(record);
+            assert!(matches!(record.state, WorkState::ExitWaiting));
+            assert!(reflection.machine.is_none());
+            assert!(reflection.block.is_none());
+            assert_eq!(
+                reflection.exit,
+                Some(EvaluationExitBlock {
+                    intent: ExitIntent::Error(message),
+                    observed_epoch: None,
+                })
+            );
+            assert!(record.obligations.producer.is_some());
+            assert!(!state.observation_waiters.contains_key(&work));
+            assert!(state.failures.is_empty());
+        }
+        drop(release.machine.take());
+
+        coordinator.acknowledge_task_failure(session.demand.id, task);
+        assert!(coordinator.failure_ledger_snapshot().is_empty());
+        assert!(matches!(
+            coordinator
+                .reflection_snapshots(session.demand.id)
+                .as_slice(),
+            [ReflectionWorkSnapshot {
+                state: ReflectionWorkState::ExitWaiting(EvaluationExitBlock {
+                    intent: ExitIntent::Error(_),
+                    observed_epoch: None,
+                }),
+                ..
+            }]
+        ));
+
+        assert_eq!(
+            coordinator.request_reflection_cancellation(work),
+            ReflectionCancellation::Terminalize
+        );
+        settle_test_reflection(&coordinator, work);
+    }
+
+    #[test]
+    fn retryable_exit_wait_requeues_after_runtime_observation() {
+        let (coordinator, _executor) = super::super::test_execution_resources(0)
+            .expect("test execution resources should build");
+        let session = TestDemand::new(&coordinator);
+        let observed = coordinator.current_observation_epoch();
+        let (_, work) = reserve_ready_test_reflection(&coordinator, &session);
+        let claimed = claim_ready_test_reflection(&coordinator, session.demand.id);
+
+        let release = coordinator.release_reflection(
+            claimed,
+            ReflectionWorkPoll::Exit(EvaluationExitBlock {
+                intent: ExitIntent::Success,
+                observed_epoch: Some(observed),
+            }),
+        );
+        assert!(release.exit_waiting);
+        assert!(release.remains_blocked);
+        assert!(release.machine.is_none());
+        assert!(matches!(
+            coordinator.reflection_snapshots(session.demand.id).as_slice(),
+            [ReflectionWorkSnapshot {
+                state: ReflectionWorkState::ExitWaiting(EvaluationExitBlock {
+                    intent: ExitIntent::Success,
+                    observed_epoch: Some(epoch),
+                }),
+                ..
+            }] if *epoch == observed
+        ));
+
+        publish_test_observation(&coordinator);
+        assert_eq!(coordinator.ready_task_count(), 1);
+        assert!(matches!(
+            coordinator
+                .reflection_snapshots(session.demand.id)
+                .as_slice(),
+            [ReflectionWorkSnapshot {
+                state: ReflectionWorkState::Queued,
+                ..
+            }]
+        ));
+
         let claimed = claim_ready_test_reflection(&coordinator, session.demand.id);
         assert!(
             coordinator
