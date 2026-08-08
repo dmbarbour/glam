@@ -13,11 +13,12 @@ use crate::runtime::{
     RuntimeValueRoot,
 };
 
+#[cfg(test)]
+use super::EvaluationSession;
 use super::{
-    EvaluationDemandState, EvaluationFailure, EvaluationMachinePoll, EvaluationSession,
-    EvaluationSessionId, EvaluationTaskId, EvaluationTaskMachine, EvaluationTaskStatus,
-    EvaluationWaitTerminal, EvaluationWaitToken, RuntimeFailureLedger, TaskFailureLedger,
-    TaskStatusPublisher,
+    EvaluationDemandState, EvaluationFailure, EvaluationMachinePoll, EvaluationSessionId,
+    EvaluationTaskId, EvaluationTaskMachine, EvaluationTaskStatus, EvaluationWaitTerminal,
+    EvaluationWaitToken, RuntimeFailureLedger, TaskFailureLedger, TaskStatusPublisher,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1146,12 +1147,12 @@ impl EvaluationWorkCoordinator {
         self.admission.mutation_guard()
     }
 
-    pub(super) fn register_session(&self, session: &Arc<EvaluationSession>) {
-        debug_assert_eq!(session.values.runtime_id(), self.runtime);
+    pub(super) fn register_demand(&self, demand: &Arc<EvaluationDemandState>) {
+        debug_assert_eq!(demand.values.runtime_id(), self.runtime);
         self.publish_transition(|state| {
             let replaced = state
                 .demand_sessions
-                .insert(session.id, Arc::downgrade(&session.demand));
+                .insert(demand.id, Arc::downgrade(demand));
             assert!(
                 replaced.is_none(),
                 "evaluation session identities must be unique within a runtime"
@@ -4287,7 +4288,7 @@ mod tests {
     ) -> (EvaluationTaskId, EvaluationWorkId) {
         let task = super::super::allocate_task_id(&session.values)
             .expect("reflection task identity should allocate");
-        let wait = super::super::allocate_wait_token(session, task)
+        let wait = super::super::allocate_wait_token(&session.demand, task)
             .expect("reflection wait identity should allocate");
         let work = coordinator
             .reserve_reflection(session, task, wait)
@@ -4490,7 +4491,7 @@ mod tests {
         let session = EvaluationSession::shared(&coordinator);
         let task = super::super::allocate_task_id(&session.values)
             .expect("obligation task identity should allocate");
-        let wait = super::super::allocate_wait_token(&session, task)
+        let wait = super::super::allocate_wait_token(&session.demand, task)
             .expect("obligation wait identity should allocate");
 
         let mut reflection = SettlementObligations::reflection_task(wait.clone());
@@ -4526,7 +4527,7 @@ mod tests {
         let session = EvaluationSession::shared(&coordinator);
         let task = super::super::allocate_task_id(&session.values)
             .expect("settlement task identity should allocate");
-        let wait = super::super::allocate_wait_token(&session, task)
+        let wait = super::super::allocate_wait_token(&session.demand, task)
             .expect("settlement wait identity should allocate");
         let work = coordinator
             .reserve_reflection(&session, task, wait.clone())
@@ -4754,7 +4755,7 @@ mod tests {
         let foreign_session = EvaluationSession::shared(&foreign_coordinator);
         let producer = super::super::allocate_task_id(&foreign_session.values)
             .expect("foreign producer identity should allocate");
-        let wait = super::super::allocate_wait_token(&foreign_session, producer)
+        let wait = super::super::allocate_wait_token(&foreign_session.demand, producer)
             .expect("foreign wait identity should allocate");
 
         coordinator.release_spark(
@@ -4773,7 +4774,7 @@ mod tests {
         let session = EvaluationSession::shared(&coordinator);
         let task = super::super::allocate_task_id(&session.values)
             .expect("reflection task identity should allocate");
-        let wait = super::super::allocate_wait_token(&session, task)
+        let wait = super::super::allocate_wait_token(&session.demand, task)
             .expect("reflection wait identity should allocate");
         let work = coordinator
             .reserve_reflection(&session, task, wait)
@@ -4824,7 +4825,7 @@ mod tests {
         let session = EvaluationSession::shared(&coordinator);
         let task = super::super::allocate_task_id(&session.values)
             .expect("reflection task identity should allocate");
-        let wait = super::super::allocate_wait_token(&session, task)
+        let wait = super::super::allocate_wait_token(&session.demand, task)
             .expect("reflection wait identity should allocate");
         let work = coordinator
             .reserve_reflection(&session, task, wait)
@@ -4956,11 +4957,11 @@ mod tests {
         let observer = EvaluationSession::shared(&coordinator);
         let dependency_task = super::super::allocate_task_id(&producer.values)
             .expect("dependency task identity should allocate");
-        let dependency = super::super::allocate_wait_token(&producer, dependency_task)
+        let dependency = super::super::allocate_wait_token(&producer.demand, dependency_task)
             .expect("dependency wait identity should allocate");
         let unrelated_task = super::super::allocate_task_id(&producer.values)
             .expect("unrelated task identity should allocate");
-        let unrelated = super::super::allocate_wait_token(&producer, unrelated_task)
+        let unrelated = super::super::allocate_wait_token(&producer.demand, unrelated_task)
             .expect("unrelated wait identity should allocate");
         let (_, work) = reserve_ready_test_reflection(&coordinator, &observer);
         let claimed = claim_ready_test_reflection(&coordinator, observer.id);
@@ -5007,11 +5008,11 @@ mod tests {
         let session = EvaluationSession::shared(&coordinator);
         let task_a = super::super::allocate_task_id(&session.values)
             .expect("wait A task identity should allocate");
-        let wait_a = super::super::allocate_wait_token(&session, task_a)
+        let wait_a = super::super::allocate_wait_token(&session.demand, task_a)
             .expect("wait A identity should allocate");
         let task_b = super::super::allocate_task_id(&session.values)
             .expect("wait B task identity should allocate");
-        let wait_b = super::super::allocate_wait_token(&session, task_b)
+        let wait_b = super::super::allocate_wait_token(&session.demand, task_b)
             .expect("wait B identity should allocate");
         let (_, work) = reserve_ready_test_reflection(&coordinator, &session);
         let claimed = claim_ready_test_reflection(&coordinator, session.id);
@@ -5082,7 +5083,7 @@ mod tests {
             let observed = coordinator.observations.current();
             let dependency_task = super::super::allocate_task_id(&session.values)
                 .expect("dependency task identity should allocate");
-            let dependency = super::super::allocate_wait_token(&session, dependency_task)
+            let dependency = super::super::allocate_wait_token(&session.demand, dependency_task)
                 .expect("dependency wait identity should allocate");
             let (_, work) = reserve_ready_test_reflection(&coordinator, &session);
             let claimed = claim_ready_test_reflection(&coordinator, session.id);
@@ -5134,7 +5135,7 @@ mod tests {
         let session = EvaluationSession::shared(&coordinator);
         let dependency_task = super::super::allocate_task_id(&session.values)
             .expect("dependency task identity should allocate");
-        let dependency = super::super::allocate_wait_token(&session, dependency_task)
+        let dependency = super::super::allocate_wait_token(&session.demand, dependency_task)
             .expect("dependency wait identity should allocate");
         let (_, work) = reserve_ready_test_reflection(&coordinator, &session);
         let claimed = claim_ready_test_reflection(&coordinator, session.id);
@@ -5177,7 +5178,7 @@ mod tests {
         let claimed = claim_ready_test_reflection(&coordinator, session.id);
         let dependency_task = super::super::allocate_task_id(&session.values)
             .expect("dependency task identity should allocate");
-        let dependency = super::super::allocate_wait_token(&session, dependency_task)
+        let dependency = super::super::allocate_wait_token(&session.demand, dependency_task)
             .expect("dependency wait identity should allocate");
 
         let release = coordinator.release_reflection(
@@ -5277,7 +5278,7 @@ mod tests {
         let session = EvaluationSession::shared(&coordinator);
         let task = super::super::allocate_task_id(&session.values)
             .expect("reflection task identity should allocate");
-        let wait = super::super::allocate_wait_token(&session, task)
+        let wait = super::super::allocate_wait_token(&session.demand, task)
             .expect("reflection wait identity should allocate");
         let work = coordinator
             .reserve_reflection(&session, task, wait)
@@ -5310,7 +5311,7 @@ mod tests {
         coordinator.submit_spark(session.demand.clone(), crate::core::keys::unit_value());
         let task = super::super::allocate_task_id(&session.values)
             .expect("reflection task identity should allocate");
-        let wait = super::super::allocate_wait_token(&session, task)
+        let wait = super::super::allocate_wait_token(&session.demand, task)
             .expect("reflection wait identity should allocate");
         let work = coordinator
             .reserve_reflection(&session, task, wait)
@@ -5368,7 +5369,7 @@ mod tests {
         let session = EvaluationSession::shared(&coordinator);
         let task = super::super::allocate_task_id(&session.values)
             .expect("deferred task identity should allocate");
-        let wait = super::super::allocate_wait_token(&session, task)
+        let wait = super::super::allocate_wait_token(&session.demand, task)
             .expect("deferred wait identity should allocate");
         let lazy = LazyValue::deferred(&session.values, "coordinator deferred lifecycle", |_| {
             panic!("coordinator lifecycle test never evaluates its synthetic lazy")
@@ -5401,7 +5402,7 @@ mod tests {
         };
         let dependency_task = super::super::allocate_task_id(&session.values)
             .expect("dependency task identity should allocate");
-        let dependency = super::super::allocate_wait_token(&session, dependency_task)
+        let dependency = super::super::allocate_wait_token(&session.demand, dependency_task)
             .expect("dependency wait identity should allocate");
         dependency.publish_terminal(super::super::EvaluationWaitTerminal::Complete(
             RuntimeValueRoot::new(&session.values, crate::core::keys::unit_value()),
@@ -5444,7 +5445,7 @@ mod tests {
         let session = EvaluationSession::shared(&coordinator);
         let task = super::super::allocate_task_id(&session.values)
             .expect("deferred task identity should allocate");
-        let wait = super::super::allocate_wait_token(&session, task)
+        let wait = super::super::allocate_wait_token(&session.demand, task)
             .expect("deferred wait identity should allocate");
         let lazy = LazyValue::deferred(&session.values, "coordinator machine ownership", |_| {
             panic!("coordinator ownership test never evaluates its synthetic lazy")
@@ -5504,8 +5505,9 @@ mod tests {
         let observer_session = EvaluationSession::shared(&coordinator);
         let producer_task = super::super::allocate_task_id(&producer_session.values)
             .expect("producer task identity should allocate");
-        let producer_wait = super::super::allocate_wait_token(&producer_session, producer_task)
-            .expect("producer wait identity should allocate");
+        let producer_wait =
+            super::super::allocate_wait_token(&producer_session.demand, producer_task)
+                .expect("producer wait identity should allocate");
         let lazy = LazyValue::deferred(
             &producer_session.values,
             "cross-session canonical producer",
@@ -5527,8 +5529,9 @@ mod tests {
 
         let duplicate_task = super::super::allocate_task_id(&observer_session.values)
             .expect("duplicate task identity should allocate");
-        let duplicate_wait = super::super::allocate_wait_token(&observer_session, duplicate_task)
-            .expect("duplicate wait identity should allocate");
+        let duplicate_wait =
+            super::super::allocate_wait_token(&observer_session.demand, duplicate_task)
+                .expect("duplicate wait identity should allocate");
         let DeferredWorkReservation::Existing(canonical_wait) = coordinator
             .reserve_deferred(
                 &observer_session,
@@ -5545,8 +5548,9 @@ mod tests {
 
         let observer_task = super::super::allocate_task_id(&observer_session.values)
             .expect("observer task identity should allocate");
-        let observer_wait = super::super::allocate_wait_token(&observer_session, observer_task)
-            .expect("observer wait identity should allocate");
+        let observer_wait =
+            super::super::allocate_wait_token(&observer_session.demand, observer_task)
+                .expect("observer wait identity should allocate");
         let observer_work = coordinator
             .reserve_reflection(&observer_session, observer_task, observer_wait)
             .expect("open observer session should reserve reflection work");
@@ -5586,7 +5590,7 @@ mod tests {
         let session = EvaluationSession::shared(&coordinator);
         let task = super::super::allocate_task_id(&session.values)
             .expect("reflection task identity should allocate");
-        let wait = super::super::allocate_wait_token(&session, task)
+        let wait = super::super::allocate_wait_token(&session.demand, task)
             .expect("reflection wait identity should allocate");
         let work = coordinator
             .reserve_reflection(&session, task, wait)

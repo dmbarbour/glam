@@ -34,8 +34,9 @@ control-flow overview.
   representation. Diagnostic normalization and object/viewer mixins also
   retain this halt until the public `Error` boundary; they must not stringify
   a failure merely because they operate on diagnostics.
-- Computed lazy work is owned by demand-driven `EvaluationSession` task
-  records. Contending observers receive the task's stable wait token; they do
+- Computed lazy work is owned by runtime-coordinator deferred-work records
+  indexed by demand session. Contending observers receive the task's stable
+  wait token; they do
   not wait on a lazy-specific condition variable. A pump distinguishes a
   producer claimed by another thread (`Busy`) from stable quiescence
   (`NoProgress`). Cooperative and scheduled contexts return the wait, while
@@ -266,8 +267,10 @@ control-flow overview.
   its work generation, worker waiting, and stable spark records.
   `EvaluationExecutor` owns worker activation and shutdown; workers retain only
   a weak coordinator attachment. Active reflection/deferred records and their
-  claimable machines are coordinator-owned; session state retains reporting
-  policy only.
+  claimable machines, reporting policy, and failure ledgers are
+  coordinator-owned. Machine contexts retain only `EvaluationDemandState`;
+  serial pumping and reporting use its weak coordinator route and never
+  recover the external owner lease.
 - Every published spark blockage advances a checked, non-wrapping subscription
   epoch. Parked indexes and one-shot subscriber cells retain only the work ID
   and that epoch. A coordinator wake must still match `Blocked`, the epoch, and

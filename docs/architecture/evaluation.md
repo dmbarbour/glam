@@ -34,15 +34,18 @@ protected status publication, and the persistent failure ledger reside
 directly in coordinator state. The ledger is a persistent map from
 owner session to that owner's task/failure map, so owner closure does not erase
 an unacknowledged failure and a session report cheaply clones only its bucket.
-Dropping
-the final owner marks their shared closed flag, then performs one guarded
-coordinator closure transition across every record indexed by that demand ID.
+Dropping the final owner marks their shared closed flag, then performs one
+guarded coordinator closure transition across every record indexed by that
+demand ID.
 Queued and blocked work terminalizes immediately; running work retains its
 first close reason and exclusive machine claim until release. Task producer
 obligations settle before dependencies retired with parked sparks are
 abandoned, so one closure cannot release the same reusable claim twice. Direct
 isolated evaluation uses an explicit owner/context wrapper instead of hiding
-the lease in `EvalContext`.
+the lease in `EvalContext`. Serial pumping and report construction belong to
+`EvaluationDemandState`: they upgrade only its weak coordinator route, select
+work by demand ID, and return the closed report if the external lease has
+already ended. No machine-visible context can recover that lease.
 
 The runtime-owned `EvaluationWorkCoordinator` owns session registration, one
 runtime-wide ready-task queue, worker fairness, its work generation, the

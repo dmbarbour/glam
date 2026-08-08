@@ -82,27 +82,10 @@ fn allocate_task_id(values: &CoreValueFactory) -> Result<EvaluationTaskId, Arc<s
     values.ids().evaluation_task().map(EvaluationTaskId)
 }
 
-trait DemandStateRef {
-    fn demand_state(&self) -> &Arc<EvaluationDemandState>;
-}
-
-impl DemandStateRef for Arc<EvaluationDemandState> {
-    fn demand_state(&self) -> &Arc<EvaluationDemandState> {
-        self
-    }
-}
-
-impl DemandStateRef for Arc<EvaluationSession> {
-    fn demand_state(&self) -> &Arc<EvaluationDemandState> {
-        &self.demand
-    }
-}
-
 fn allocate_wait_token(
-    session: &impl DemandStateRef,
+    session: &Arc<EvaluationDemandState>,
     producer: EvaluationTaskId,
 ) -> Result<EvaluationWaitToken, Arc<str>> {
-    let session = session.demand_state();
     let id = session.values.ids().evaluation_wait()?;
     Ok(EvaluationWaitToken(Arc::new(EvaluationWaitState {
         id,
@@ -964,14 +947,6 @@ pub(crate) struct EvaluationSession {
     coordinator: Arc<EvaluationWorkCoordinator>,
 }
 
-impl Deref for EvaluationSession {
-    type Target = EvaluationDemandState;
-
-    fn deref(&self) -> &Self::Target {
-        &self.demand
-    }
-}
-
 impl fmt::Debug for EvaluationSession {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -980,10 +955,22 @@ impl fmt::Debug for EvaluationSession {
     }
 }
 
+// Coordinator unit tests frequently inspect the demand record directly. Keep
+// their concise fixture syntax without exposing the owner as a demand facade
+// in production code.
+#[cfg(test)]
+impl Deref for EvaluationSession {
+    type Target = EvaluationDemandState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.demand
+    }
+}
+
 impl Drop for EvaluationSession {
     fn drop(&mut self) {
         self.demand.closed.store(true, Ordering::Release);
-        let mut closing = self.coordinator.close_session(self.id);
+        let mut closing = self.coordinator.close_session(self.demand.id);
         for work in std::mem::take(&mut closing.reflection) {
             let failure = evaluation_failure(if work.cancel {
                 format!(
@@ -1079,7 +1066,7 @@ impl EvaluationSession {
             values.work_coordinator_or_attach(candidate)
         });
         let session = Self::with_execution_resources(coordinator.clone(), values);
-        coordinator.register_session(&session);
+        coordinator.register_demand(&session.demand);
         session
     }
 
@@ -1087,7 +1074,7 @@ impl EvaluationSession {
     pub(crate) fn shared(coordinator: &Arc<EvaluationWorkCoordinator>) -> Arc<Self> {
         let session =
             Self::with_execution_resources(coordinator.clone(), coordinator.test_values());
-        coordinator.register_session(&session);
+        coordinator.register_demand(&session.demand);
         session
     }
 
@@ -1102,7 +1089,7 @@ impl EvaluationSession {
             default_reflection_profile,
             true,
         );
-        coordinator.register_session(&session);
+        coordinator.register_demand(&session.demand);
         session
     }
 }
@@ -1114,7 +1101,6 @@ impl EvaluationSession {
 #[derive(Debug, Clone)]
 pub(crate) struct EvalContext {
     session: Arc<EvaluationDemandState>,
-    owner: Weak<EvaluationSession>,
     task_profile: Arc<ReflectionTaskProfile>,
     task: Arc<OnceLock<Result<EvaluationTaskId, Arc<str>>>>,
     local_promise_owner: Option<Arc<LocalPromiseOwner>>,
@@ -1164,10 +1150,9 @@ impl EvalContext {
     }
 
     pub(crate) fn new(session: &Arc<EvaluationSession>) -> Self {
-        let task_profile = session.default_reflection_profile.clone();
+        let task_profile = session.demand.default_reflection_profile.clone();
         Self {
             session: session.demand.clone(),
-            owner: Arc::downgrade(session),
             task_profile,
             task: Arc::new(OnceLock::new()),
             local_promise_owner: None,
@@ -1181,7 +1166,6 @@ impl EvalContext {
         let task_profile = session.default_reflection_profile.clone();
         Self {
             session,
-            owner: Weak::new(),
             task_profile,
             task: Arc::new(OnceLock::new()),
             local_promise_owner: None,
@@ -1197,7 +1181,6 @@ impl EvalContext {
     ) -> Self {
         Self {
             session: session.demand.clone(),
-            owner: Arc::downgrade(session),
             task_profile,
             task: Arc::new(OnceLock::new()),
             local_promise_owner: None,
@@ -1219,7 +1202,6 @@ impl EvalContext {
 
     fn for_task(
         session: Arc<EvaluationDemandState>,
-        owner: Weak<EvaluationSession>,
         id: EvaluationTaskId,
         task_profile: Arc<ReflectionTaskProfile>,
     ) -> Self {
@@ -1228,7 +1210,6 @@ impl EvalContext {
             .expect("fresh task identity cell must be empty");
         Self {
             session,
-            owner,
             task_profile,
             task,
             local_promise_owner: None,
@@ -1240,7 +1221,6 @@ impl EvalContext {
 
     fn for_deferred_task(
         session: Arc<EvaluationDemandState>,
-        owner: Weak<EvaluationSession>,
         id: EvaluationTaskId,
         originating_task: Option<EvaluationTaskId>,
         task_profile: Arc<ReflectionTaskProfile>,
@@ -1250,7 +1230,6 @@ impl EvalContext {
             .expect("fresh deferred task identity cell must be empty");
         Self {
             session,
-            owner,
             task_profile,
             task,
             local_promise_owner: None,
@@ -1417,7 +1396,6 @@ impl EvalContext {
             .or_else(|| self.task.get().and_then(|task| task.as_ref().ok()).copied());
         let machine = build(Self::for_deferred_task(
             self.session.clone(),
-            self.owner.clone(),
             id,
             originating_task,
             self.task_profile.clone(),
@@ -1452,7 +1430,6 @@ impl EvalContext {
     pub(crate) fn with_new_task(&self) -> Result<Self, Arc<str>> {
         let context = Self {
             session: self.session.clone(),
-            owner: self.owner.clone(),
             task_profile: self.task_profile.clone(),
             task: Arc::new(OnceLock::new()),
             local_promise_owner: None,
@@ -1573,12 +1550,7 @@ impl EvalContext {
         let coordinator = self.coordinator_for_admission()?;
         let id = allocate_task_id(self.values())?;
         let wait = allocate_wait_token(&self.session, id)?;
-        let context = Self::for_task(
-            self.session.clone(),
-            self.owner.clone(),
-            id,
-            self.task_profile.clone(),
-        );
+        let context = Self::for_task(self.session.clone(), id, self.task_profile.clone());
         let work = coordinator.reserve_reflection(&self.session, id, wait.clone())?;
         let machine = match build(context) {
             Ok(machine) => machine,
@@ -1660,12 +1632,7 @@ impl EvalContext {
             })
             .and_then(|launcher| {
                 launcher.build(
-                    Self::for_task(
-                        self.session.clone(),
-                        self.owner.clone(),
-                        handle.id,
-                        task_profile.clone(),
-                    ),
+                    Self::for_task(self.session.clone(), handle.id, task_profile.clone()),
                     effect,
                     result_policy,
                 )
@@ -1859,10 +1826,7 @@ impl EvalContext {
     /// Runs every executable task until all are terminal or one complete pass
     /// leaves every unfinished task unchanged.
     pub(crate) fn run_until_quiescent(&self) -> EvaluationSessionRun {
-        self.owner.upgrade().map_or_else(
-            || self.session.closed_run_report(),
-            |owner| owner.run_until_quiescent(),
-        )
+        self.session.run_until_quiescent()
     }
 
     #[cfg(test)]
@@ -2101,24 +2065,33 @@ impl ClaimedTask {
     }
 }
 
-impl EvaluationSession {
+impl EvaluationDemandState {
     fn run_until_quiescent(&self) -> EvaluationSessionRun {
+        if self.is_closed() {
+            return self.closed_run_report();
+        }
+        let Some(coordinator) = self.coordinator() else {
+            return self.closed_run_report();
+        };
         loop {
             let mut claimed = loop {
-                if let Some(claimed) = self.claim_ready_task() {
+                if self.is_closed() {
+                    return self.closed_run_report();
+                }
+                if let Some(claimed) = self.claim_ready_task(&coordinator) {
                     break claimed;
                 }
-                let generation = self.coordinator.work_generation();
-                if self.task_is_running() {
-                    self.coordinator.wait_for_change(generation);
+                let generation = coordinator.work_generation();
+                if self.task_is_running(&coordinator) {
+                    coordinator.wait_for_change(generation);
                     continue;
                 }
-                if self.coordinator.work_generation() != generation
-                    && self.coordinator.session_has_ready_task(self.id)
+                if coordinator.work_generation() != generation
+                    && coordinator.session_has_ready_task(self.id)
                 {
                     continue;
                 }
-                return self.session_run_report();
+                return self.session_run_report(&coordinator);
             };
 
             let poll = claimed.poll(TASK_POLL_QUANTUM);
@@ -2129,9 +2102,12 @@ impl EvaluationSession {
         }
     }
 
-    fn session_run_report(&self) -> EvaluationSessionRun {
-        let snapshots = self.coordinator.reflection_snapshots(self.id);
-        let failures = self.coordinator.failure_snapshot(self.id);
+    fn session_run_report(&self, coordinator: &EvaluationWorkCoordinator) -> EvaluationSessionRun {
+        if self.is_closed() {
+            return self.closed_run_report();
+        }
+        let snapshots = coordinator.reflection_snapshots(self.id);
+        let failures = coordinator.failure_snapshot(self.id);
         let mut unfinished = Vec::new();
         let mut has_live_cross_session_dependency = false;
         for snapshot in snapshots {
@@ -2147,7 +2123,7 @@ impl EvaluationSession {
             };
             let dependency = block
                 .and_then(|block| block.dependency.as_ref())
-                .and_then(|dependency| self.reported_dependency(dependency));
+                .and_then(|dependency| self.reported_dependency(coordinator, dependency));
             has_live_cross_session_dependency |= dependency
                 .as_ref()
                 .is_some_and(|dependency| dependency.live_cross_session);
@@ -2165,6 +2141,9 @@ impl EvaluationSession {
             failures,
             unfinished,
         };
+        if self.is_closed() {
+            return self.closed_run_report();
+        }
         if report.unfinished.is_empty() {
             EvaluationSessionRun::Complete(report)
         } else if has_live_cross_session_dependency {
@@ -2174,7 +2153,11 @@ impl EvaluationSession {
         }
     }
 
-    fn reported_dependency(&self, initial: &WorkDependency) -> Option<ReportedDependency> {
+    fn reported_dependency(
+        &self,
+        coordinator: &EvaluationWorkCoordinator,
+        initial: &WorkDependency,
+    ) -> Option<ReportedDependency> {
         let mut wait = initial.producer_wait()?.clone();
         let mut seen = HashSet::new();
         loop {
@@ -2184,12 +2167,10 @@ impl EvaluationSession {
                     session: wait.owner_id(),
                     wait: wait.get(),
                     live_cross_session: wait.owner_id() != self.id
-                        && self.coordinator().is_some_and(|coordinator| {
-                            coordinator.demand_session_is_open(wait.owner_id())
-                        }),
+                        && coordinator.demand_session_is_open(wait.owner_id()),
                 });
             }
-            let Some(next) = self.task_dependency(wait.producer()) else {
+            let Some(next) = coordinator.task_dependency(wait.producer()) else {
                 return Some(ReportedDependency {
                     task: wait.producer(),
                     session: wait.owner_id(),
@@ -2495,18 +2476,17 @@ impl EvaluationWorkCoordinator {
     }
 }
 
-impl EvaluationSession {
-    fn claim_ready_task(&self) -> Option<ClaimedTask> {
-        let work = self.coordinator.claim_ready_task_for_session(self.id)?;
-        Some(ClaimedTask::new(self.coordinator.clone(), work))
+impl EvaluationDemandState {
+    fn claim_ready_task(
+        &self,
+        coordinator: &Arc<EvaluationWorkCoordinator>,
+    ) -> Option<ClaimedTask> {
+        let work = coordinator.claim_ready_task_for_session(self.id)?;
+        Some(ClaimedTask::new(coordinator.clone(), work))
     }
 
-    fn task_dependency(&self, id: EvaluationTaskId) -> Option<WorkDependency> {
-        self.coordinator.task_dependency(id)
-    }
-
-    fn task_is_running(&self) -> bool {
-        self.coordinator.session_machine_is_busy(self.id)
+    fn task_is_running(&self, coordinator: &EvaluationWorkCoordinator) -> bool {
+        coordinator.session_machine_is_busy(self.id)
     }
 }
 
@@ -2609,6 +2589,24 @@ mod tests {
     }
 
     #[test]
+    fn owned_context_retains_its_direct_client_lease() {
+        let (coordinator, _executor) =
+            test_execution_resources(0).expect("test execution resources should build");
+        let owner = EvaluationSession::shared(&coordinator);
+        let owner_weak = Arc::downgrade(&owner);
+        let context = OwnedEvalContext::new(owner.clone());
+
+        drop(owner);
+        assert!(owner_weak.upgrade().is_some());
+        assert!(!context.session.is_closed());
+        assert_eq!(coordinator.registered_session_count(), 1);
+
+        drop(context);
+        assert!(owner_weak.upgrade().is_none());
+        assert_eq!(coordinator.registered_session_count(), 0);
+    }
+
+    #[test]
     fn guarded_work_admission_rejects_a_closed_demand_without_an_owner_lease() {
         let (coordinator, _executor) =
             test_execution_resources(0).expect("test execution resources should build");
@@ -2666,6 +2664,10 @@ mod tests {
             context.poll_reflection_task(&task),
             EvaluationWaitPoll::Abandoned
         ));
+        let EvaluationSessionRun::Complete(report) = context.run_until_quiescent() else {
+            panic!("a closed demand must report completion without recovering its owner");
+        };
+        assert!(report.unfinished.is_empty());
         assert_eq!(coordinator.registered_session_count(), 0);
     }
 

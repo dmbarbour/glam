@@ -1204,8 +1204,8 @@ pub(crate) type DeferredComputation =
 /// A lazy reflection task which either gates a target or returns its result.
 ///
 /// The payload is boxed so adding reflection does not enlarge every
-/// `LazySource`. Task execution state remains in `EvaluationSession`; this
-/// cell only remembers which task the first observer started.
+/// `LazySource`. Task execution state belongs to the runtime work coordinator;
+/// this cell only remembers which task the first observer started.
 pub(crate) struct ReflectionComputation {
     effect: Value,
     completion: ReflectionCompletion,

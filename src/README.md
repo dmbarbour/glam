@@ -48,7 +48,7 @@ not define future language semantics or collect subsystem invariants.
 | `core_net.rs` | Core data/operator specialization of generic interaction nets |
 | `interaction_net/model.rs`, `builder.rs` | Generic identities, agents, specialization protocol, and checked construction |
 | `interaction_net/runtime/` | Mutable graph, active-pair rewrites, cursors, and runtime tests |
-| `evaluation.rs`, `evaluation/coordinator.rs`, `evaluation/executor.rs` | Demand-owner leases, reporting-only task state, coordinator-owned reflection/deferred/spark work, coordination, and worker lifecycle |
+| `evaluation.rs`, `evaluation/coordinator.rs`, `evaluation/executor.rs` | Demand-owner leases and machine-safe demand state, coordinator-owned reflection/deferred/spark work, reporting, coordination, and worker lifecycle |
 | `eval/value.rs`, `application.rs`, `operator.rs`, `net.rs` | Value forcing, application, operator staging, and net driving |
 | `eval/builtins/` | Builtin implementations split by semantic family |
 | `eval/builtins/net/construction.rs` | Lazy `interaction_net` effect search, branch-local construction journals, opaque port capabilities, and checked replay |
@@ -256,8 +256,10 @@ promises remain scheduler control states rather than errors.
 state. It strongly retains the coordinator so its final drop can close the
 demand domain. `EvalContext` retains the separate `EvaluationDemandState`,
 whose explicit closed flag gates new admissions and whose coordinator route is
-weak. Isolated direct clients use a small owner/context wrapper; scheduled
-machine contexts never retain their own owner lease. Both reflection and
+weak. Serial pumping and report construction operate through that demand state
+and never recover the owner wrapper. Isolated direct clients use a small
+owner/context wrapper; scheduled machine contexts never retain their own owner
+lease. Both reflection and
 deferred machines reside in coordinator work records while claimable; a
 running claim detaches the machine exclusively, and release either restores it
 before requeueing/blocking or carries it out for terminal destruction. There
@@ -277,8 +279,9 @@ closure, while final handle drop queues status-query retirement through
 ordinary reflection-store maintenance.
 The query-backed `.task.status`, `.task.value`, and `.task.error` operations
 are readable from any session in that runtime. Observation changes neither
-the task profile nor demand/reporting ownership; join and task control remain
-owner-scoped until their separate lifecycle checkpoints.
+the task profile nor demand/reporting ownership; join, cancellation, and
+failure acknowledgement route through the handle to the producer's
+same-runtime coordinator records.
 Final owner drop closes all coordinator records for the demand ID in one
 guarded transition. Non-running work terminalizes immediately; running work
 keeps its first close reason until release. Machine contexts and stable spark
