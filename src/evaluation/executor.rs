@@ -171,6 +171,13 @@ fn evaluation_worker(inner: Arc<EvaluationExecutorInner>) {
                 drop(context);
                 coordinator.release_spark(claimed, poll);
             }
+            CoordinatorSelection::ClientDemand(claimed) => {
+                if inner.stopping.load(Ordering::Acquire) {
+                    coordinator.requeue_unpolled_client_demand(claimed);
+                    return;
+                }
+                coordinator.poll_claimed_client_demand(claimed);
+            }
             CoordinatorSelection::None => {
                 if inner.stopping.load(Ordering::Acquire) {
                     return;

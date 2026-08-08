@@ -16,7 +16,7 @@ use std::hash::{Hash, Hasher};
 use std::num::NonZeroU64;
 use std::ops::Deref;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 
 use rpds::RedBlackTreeMapSync;
 
@@ -236,6 +236,10 @@ impl EvaluationWaitToken {
         self.0
             .completion
             .subscribe(runtime, registration, || self.0.terminal.get().is_some())
+    }
+
+    pub(crate) fn unsubscribe_work(&self, registration: WakeRegistration) -> bool {
+        self.0.completion.unsubscribe(registration)
     }
 
     #[cfg(test)]
@@ -617,6 +621,188 @@ pub(crate) trait EvaluationTaskMachine: Send {
     fn poll(&mut self, step_budget: usize) -> EvaluationMachinePoll;
 
     fn cancel(&mut self) {}
+}
+
+/// One sealed pure operation retained by runtime-owned client demand.
+///
+/// Variants are deliberately explicit rather than type-erased callbacks so
+/// runtime roots and retry behavior remain auditable. Composite operations
+/// will extend this enum in Phase 10B.1c.
+#[derive(Debug)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "Phase 10B.1a installs runtime demand ownership before 10B.1b migrates public callers"
+    )
+)]
+pub(crate) enum ClientDemandOperation {
+    DemandWhnf(RuntimeValueRoot),
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "Phase 10B.1a installs runtime demand ownership before 10B.1b migrates public callers"
+    )
+)]
+impl ClientDemandOperation {
+    fn runtime_id(&self) -> EvaluationRuntimeId {
+        match self {
+            Self::DemandWhnf(value) => value.runtime_id(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "forced client disposition is exercised internally until runtime settlement uses it"
+    )
+)]
+pub(crate) enum ClientDemandResult {
+    Complete(RuntimeValueRoot),
+    Failed(Arc<EvaluationFailure>),
+    Abandoned,
+    Killed(Arc<EvaluationFailure>),
+}
+
+struct ClientDemandResultCell {
+    result: Mutex<Option<ClientDemandResult>>,
+    changed: Condvar,
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "Phase 10B.1a installs the result cell before 10B.1b migrates synchronous clients"
+    )
+)]
+impl ClientDemandResultCell {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            result: Mutex::new(None),
+            changed: Condvar::new(),
+        })
+    }
+
+    fn publish(&self, result: ClientDemandResult) -> bool {
+        let mut current = self
+            .result
+            .lock()
+            .expect("client demand result cell was poisoned");
+        if current.is_some() {
+            return false;
+        }
+        *current = Some(result);
+        drop(current);
+        self.changed.notify_all();
+        true
+    }
+
+    fn poll(&self) -> Option<ClientDemandResult> {
+        self.result
+            .lock()
+            .expect("client demand result cell was poisoned")
+            .clone()
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct ClientDemandSink {
+    cell: Arc<ClientDemandResultCell>,
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "Phase 10B.1a installs result ownership before 10B.1b migrates synchronous clients"
+    )
+)]
+impl ClientDemandSink {
+    fn new(cell: Arc<ClientDemandResultCell>) -> Self {
+        Self { cell }
+    }
+
+    pub(super) fn publish(&self, result: ClientDemandResult) -> bool {
+        self.cell.publish(result)
+    }
+}
+
+/// Rust-side ownership of one asynchronous pure evaluator demand.
+///
+/// Dropping or explicitly abandoning this handle retires only its consumer
+/// registration. The independently owned lazy/promise producer remains
+/// available to other consumers.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "Phase 10B.1a installs the internal handle before 10B.1b migrates synchronous clients"
+    )
+)]
+pub(crate) struct ClientDemandHandle {
+    runtime: EvaluationRuntimeId,
+    work: EvaluationWorkId,
+    coordinator: Weak<EvaluationWorkCoordinator>,
+    cell: Arc<ClientDemandResultCell>,
+    active: bool,
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "Phase 10B.1a installs the internal handle before 10B.1b migrates synchronous clients"
+    )
+)]
+impl ClientDemandHandle {
+    pub(crate) fn runtime_id(&self) -> EvaluationRuntimeId {
+        self.runtime
+    }
+
+    pub(crate) fn poll(&self) -> Option<ClientDemandResult> {
+        self.cell.poll()
+    }
+
+    pub(crate) fn abandon(mut self) {
+        self.abandon_inner();
+    }
+
+    fn abandon_inner(&mut self) {
+        if !self.active {
+            return;
+        }
+        self.active = false;
+        let retired = self
+            .coordinator
+            .upgrade()
+            .is_some_and(|coordinator| coordinator.abandon_client_demand(self.work));
+        if !retired {
+            let _ = self.cell.publish(ClientDemandResult::Abandoned);
+        }
+    }
+
+    #[cfg(test)]
+    fn result_cell(&self) -> Weak<ClientDemandResultCell> {
+        Arc::downgrade(&self.cell)
+    }
+
+    #[cfg(test)]
+    fn work(&self) -> EvaluationWorkId {
+        self.work
+    }
+}
+
+impl Drop for ClientDemandHandle {
+    fn drop(&mut self) {
+        self.abandon_inner();
+    }
 }
 
 #[cfg(test)]
@@ -1182,6 +1368,22 @@ impl EvalContext {
         }
     }
 
+    fn for_client_demand(session: Arc<EvaluationDemandState>) -> Self {
+        let task_profile = session.default_reflection_profile.clone();
+        Self {
+            session,
+            task_profile,
+            task: Arc::new(OnceLock::new()),
+            local_promise_owner: None,
+            // A client demand is coordinator-owned and must return a blocked
+            // poll instead of retaining this Rust stack while its producer
+            // waits.
+            scheduled_task: true,
+            waits_for_claimed_tasks: false,
+            originating_task: None,
+        }
+    }
+
     pub(crate) fn with_task_profile(
         session: &Arc<EvaluationSession>,
         task_profile: Arc<ReflectionTaskProfile>,
@@ -1302,6 +1504,38 @@ impl EvalContext {
         {
             coordinator.submit_spark(self.session.clone(), value);
         }
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Phase 10B.1a installs admission before 10B.1b migrates synchronous clients"
+        )
+    )]
+    pub(crate) fn demand_whnf(
+        &self,
+        value: RuntimeValueRoot,
+    ) -> Result<ClientDemandHandle, Arc<str>> {
+        let coordinator = self.coordinator_for_admission()?;
+        if value.runtime_id() != coordinator.runtime_id() {
+            return Err(Arc::from(
+                "client demand value belongs to another evaluation runtime",
+            ));
+        }
+        let cell = ClientDemandResultCell::new();
+        let work = coordinator.admit_client_demand(
+            self.session.clone(),
+            ClientDemandOperation::DemandWhnf(value),
+            ClientDemandSink::new(cell.clone()),
+        )?;
+        Ok(ClientDemandHandle {
+            runtime: coordinator.runtime_id(),
+            work,
+            coordinator: Arc::downgrade(&coordinator),
+            cell,
+            active: true,
+        })
     }
 
     pub(crate) fn runs_scheduled_task(&self) -> bool {
@@ -2502,6 +2736,11 @@ impl EvaluationWorkCoordinator {
             machine.finish();
         }
     }
+
+    fn poll_claimed_client_demand(self: &Arc<Self>, claimed: coordinator::ClaimedClientDemand) {
+        let poll = claimed.poll();
+        self.release_client_demand(claimed, poll);
+    }
 }
 
 impl EvaluationDemandState {
@@ -2550,6 +2789,225 @@ mod tests {
             debug_assert_eq!(session.demand.values.runtime_id(), self.runtime.id());
             OwnedEvalContext::new(session)
         }
+    }
+
+    fn poll_one_runtime_work(coordinator: &Arc<EvaluationWorkCoordinator>) -> bool {
+        match coordinator.select() {
+            coordinator::CoordinatorSelection::ClientDemand(claimed) => {
+                coordinator.poll_claimed_client_demand(claimed);
+                true
+            }
+            coordinator::CoordinatorSelection::Task(work) => {
+                coordinator.poll_claimed_task(work);
+                true
+            }
+            coordinator::CoordinatorSelection::Spark(_) => {
+                panic!("client demand tests must not manufacture spark work")
+            }
+            coordinator::CoordinatorSelection::None => false,
+        }
+    }
+
+    fn poll_runtime_until(
+        coordinator: &Arc<EvaluationWorkCoordinator>,
+        mut complete: impl FnMut() -> bool,
+    ) {
+        for _ in 0..64 {
+            if complete() {
+                return;
+            }
+            assert!(
+                poll_one_runtime_work(coordinator),
+                "runtime became idle before the expected client result"
+            );
+        }
+        panic!("runtime did not produce the expected client result");
+    }
+
+    #[test]
+    fn client_demand_completes_whnf_into_its_result_cell() {
+        let fixture = SameRuntimeFixture::new();
+        let context = fixture.context();
+        let coordinator = context.coordinator().expect("coordinator should be live");
+        let expected = Value::Number(42.into());
+        let handle = context
+            .demand_whnf(RuntimeValueRoot::new(context.values(), expected.clone()))
+            .expect("same-runtime client demand should be admitted");
+
+        assert_eq!(handle.runtime_id(), fixture.runtime.id());
+        assert!(handle.poll().is_none());
+        assert!(poll_one_runtime_work(&coordinator));
+        assert!(matches!(
+            handle.poll(),
+            Some(ClientDemandResult::Complete(value)) if value.as_core() == &expected
+        ));
+    }
+
+    #[test]
+    fn client_demand_exactly_restarts_after_promise_assignment() {
+        let fixture = SameRuntimeFixture::new();
+        let context = fixture.context();
+        let coordinator = context.coordinator().expect("coordinator should be live");
+        let promise = PromisedValue::new(context.values(), "client input");
+        let handle = context
+            .demand_whnf(RuntimeValueRoot::new(
+                context.values(),
+                Value::Promised(promise.clone()),
+            ))
+            .expect("promise demand should be admitted");
+
+        assert!(poll_one_runtime_work(&coordinator));
+        assert!(handle.poll().is_none());
+        assert_eq!(promise.exact_subscription_count(), 1);
+
+        let expected = Value::Number(7.into());
+        promise
+            .set(expected.clone())
+            .expect("host promise should resolve once");
+        assert_eq!(promise.exact_subscription_count(), 0);
+        assert!(poll_one_runtime_work(&coordinator));
+        assert!(matches!(
+            handle.poll(),
+            Some(ClientDemandResult::Complete(value)) if value.as_core() == &expected
+        ));
+    }
+
+    #[test]
+    fn abandoning_one_client_demand_preserves_another_exact_consumer() {
+        let fixture = SameRuntimeFixture::new();
+        let context = fixture.context();
+        let coordinator = context.coordinator().expect("coordinator should be live");
+        let promise = PromisedValue::new(context.values(), "shared client input");
+        let root = RuntimeValueRoot::new(context.values(), Value::Promised(promise.clone()));
+        let abandoned = context
+            .demand_whnf(root.clone())
+            .expect("first demand should be admitted");
+        let survivor = context
+            .demand_whnf(root)
+            .expect("second demand should be admitted");
+
+        assert!(poll_one_runtime_work(&coordinator));
+        assert!(poll_one_runtime_work(&coordinator));
+        assert_eq!(promise.exact_subscription_count(), 2);
+        abandoned.abandon();
+        assert_eq!(promise.exact_subscription_count(), 1);
+        assert!(promise.assignment().is_none());
+
+        let expected = Value::Number(11.into());
+        promise
+            .set(expected.clone())
+            .expect("abandoning a consumer must not poison its producer");
+        assert!(poll_one_runtime_work(&coordinator));
+        assert!(matches!(
+            survivor.poll(),
+            Some(ClientDemandResult::Complete(value)) if value.as_core() == &expected
+        ));
+    }
+
+    #[test]
+    fn client_demand_can_follow_a_lazy_producer_owned_by_another_session() {
+        let fixture = SameRuntimeFixture::new();
+        let owner = fixture.context();
+        let observer = fixture.context();
+        let coordinator = owner.coordinator().expect("coordinator should be live");
+        let promise = PromisedValue::new(owner.values(), "cross-session lazy input");
+        let lazy = LazyValue::deferred(owner.values(), "cross-session client lazy", {
+            let promise = promise.clone();
+            move |context| crate::eval::eval_value(context, &Value::Promised(promise.clone()))
+        });
+        let root = RuntimeValueRoot::new(owner.values(), Value::Lazy(lazy.clone()));
+        let owner_demand = owner
+            .demand_whnf(root.clone())
+            .expect("owner demand should be admitted");
+
+        assert!(poll_one_runtime_work(&coordinator));
+        assert!(owner_demand.poll().is_none());
+        assert_eq!(promise.exact_subscription_count(), 1);
+
+        let observer_demand = observer
+            .demand_whnf(root)
+            .expect("same-runtime observer should admit the shared value");
+        assert!(poll_one_runtime_work(&coordinator));
+        assert!(observer_demand.poll().is_none());
+        assert_eq!(
+            promise.exact_subscription_count(),
+            1,
+            "both clients should share the one lazy producer"
+        );
+
+        let expected = Value::Number(19.into());
+        promise
+            .set(expected.clone())
+            .expect("cross-session input should resolve once");
+        poll_runtime_until(&coordinator, || {
+            owner_demand.poll().is_some() && observer_demand.poll().is_some()
+        });
+        for result in [owner_demand.poll(), observer_demand.poll()] {
+            assert!(matches!(
+                result,
+                Some(ClientDemandResult::Complete(value)) if value.as_core() == &expected
+            ));
+        }
+        assert!(lazy.cached().is_some_and(|result| result.is_ok()));
+    }
+
+    #[test]
+    fn client_demand_result_cell_releases_after_terminal_handle_drop() {
+        let fixture = SameRuntimeFixture::new();
+        let context = fixture.context();
+        let coordinator = context.coordinator().expect("coordinator should be live");
+        let handle = context
+            .demand_whnf(RuntimeValueRoot::new(
+                context.values(),
+                context.values().unit(),
+            ))
+            .expect("unit demand should be admitted");
+        let result_cell = handle.result_cell();
+
+        assert!(poll_one_runtime_work(&coordinator));
+        assert!(result_cell.upgrade().is_some());
+        drop(handle);
+        assert!(result_cell.upgrade().is_none());
+    }
+
+    #[test]
+    fn client_demand_owner_close_and_forced_kill_answer_once() {
+        let fixture = SameRuntimeFixture::new();
+        let (closed_handle, closed_promise) = {
+            let owner = fixture.context();
+            let promise = PromisedValue::new(owner.values(), "closing client input");
+            let handle = owner
+                .demand_whnf(RuntimeValueRoot::new(
+                    owner.values(),
+                    Value::Promised(promise.clone()),
+                ))
+                .expect("closing demand should be admitted");
+            let coordinator = owner.coordinator().expect("coordinator should be live");
+            assert!(poll_one_runtime_work(&coordinator));
+            assert_eq!(promise.exact_subscription_count(), 1);
+            (handle, promise)
+        };
+        assert_eq!(closed_promise.exact_subscription_count(), 0);
+        assert_eq!(closed_handle.poll(), Some(ClientDemandResult::Abandoned));
+
+        let context = fixture.context();
+        let coordinator = context.coordinator().expect("coordinator should be live");
+        let promise = PromisedValue::new(context.values(), "killed client input");
+        let handle = context
+            .demand_whnf(RuntimeValueRoot::new(
+                context.values(),
+                Value::Promised(promise.clone()),
+            ))
+            .expect("killable demand should be admitted");
+        assert!(poll_one_runtime_work(&coordinator));
+        let failure = Arc::new(EvaluationFailure::message("forced client disposition"));
+        assert!(coordinator.kill_client_demand(handle.work(), failure.clone()));
+        assert!(!coordinator.kill_client_demand(handle.work(), failure.clone()));
+        assert_eq!(promise.exact_subscription_count(), 0);
+        assert!(matches!(
+            handle.poll(),
+            Some(ClientDemandResult::Killed(actual)) if Arc::ptr_eq(&actual, &failure)
+        ));
     }
 
     #[test]
@@ -5441,6 +5899,9 @@ mod tests {
                 coordinator::CoordinatorSelection::Spark(claimed) => return claimed,
                 coordinator::CoordinatorSelection::Task(work) => {
                     coordinator.requeue_unpolled_task(work);
+                }
+                coordinator::CoordinatorSelection::ClientDemand(claimed) => {
+                    coordinator.requeue_unpolled_client_demand(claimed);
                 }
                 coordinator::CoordinatorSelection::None => {
                     panic!("the submitted spark should be claimable")

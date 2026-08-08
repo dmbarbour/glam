@@ -16,10 +16,10 @@ use crate::runtime::{
 #[cfg(test)]
 use super::EvaluationSession;
 use super::{
-    EvaluationDemandState, EvaluationExitBlock, EvaluationFailure, EvaluationMachinePoll,
-    EvaluationSessionId, EvaluationTaskId, EvaluationTaskMachine, EvaluationTaskStatus,
-    EvaluationWaitTerminal, EvaluationWaitToken, ExitIntent, RuntimeFailureLedger,
-    TaskFailureLedger, TaskStatusPublisher,
+    ClientDemandOperation, ClientDemandResult, ClientDemandSink, EvaluationDemandState,
+    EvaluationExitBlock, EvaluationFailure, EvaluationMachinePoll, EvaluationSessionId,
+    EvaluationTaskId, EvaluationTaskMachine, EvaluationTaskStatus, EvaluationWaitTerminal,
+    EvaluationWaitToken, ExitIntent, RuntimeFailureLedger, TaskFailureLedger, TaskStatusPublisher,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -319,6 +319,21 @@ impl CompletionSubscriptions {
         CompletionSubscriptionOutcome::Pending
     }
 
+    pub(crate) fn unsubscribe(&self, registration: WakeRegistration) -> bool {
+        let mut registrations = self
+            .registrations
+            .lock()
+            .expect("completion subscriber set was poisoned");
+        let Some(index) = registrations
+            .iter()
+            .position(|candidate| *candidate == registration)
+        else {
+            return false;
+        };
+        registrations.swap_remove(index);
+        true
+    }
+
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.registrations
@@ -343,6 +358,14 @@ struct WorkControl {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WorkCloseReason {
     ExplicitCancellation,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Phase 10B.1a installs client abandonment before 10B.1b migrates public callers"
+        )
+    )]
+    ClientDemandAbandoned,
     DemandSessionClosed,
     ExecutorShutdown,
 }
@@ -413,6 +436,7 @@ fn terminal_task_status(terminal: &EvaluationWaitTerminal) -> EvaluationTaskStat
 struct SettlementObligations {
     producer: Option<ProducerSettlementObligation>,
     owned_promises: Vec<TaskOwnedPromiseObligation>,
+    client_sink: Option<ClientDemandSink>,
 }
 
 #[derive(Clone)]
@@ -429,6 +453,7 @@ impl SettlementObligations {
                 TaskTerminalPublisher::new(wait),
             )),
             owned_promises: Vec::new(),
+            client_sink: None,
         }
     }
 
@@ -436,11 +461,31 @@ impl SettlementObligations {
         Self {
             producer: Some(ProducerSettlementObligation::DeferredClaim { wait, producer }),
             owned_promises: Vec::new(),
+            client_sink: None,
+        }
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Phase 10B.1a installs client obligations before 10B.1b migrates public callers"
+        )
+    )]
+    fn client_demand(sink: ClientDemandSink) -> Self {
+        Self {
+            producer: None,
+            owned_promises: Vec::new(),
+            client_sink: Some(sink),
         }
     }
 
     fn take_producer(&mut self) -> Option<ProducerSettlementObligation> {
         self.producer.take()
+    }
+
+    fn take_client_sink(&mut self) -> Option<ClientDemandSink> {
+        self.client_sink.take()
     }
 
     fn task_publisher_mut(&mut self) -> Option<&mut TaskTerminalPublisher> {
@@ -467,7 +512,7 @@ impl SettlementObligations {
     }
 
     fn is_empty(&self) -> bool {
-        self.producer.is_none() && self.owned_promises.is_empty()
+        self.producer.is_none() && self.owned_promises.is_empty() && self.client_sink.is_none()
     }
 }
 
@@ -551,6 +596,15 @@ impl WorkDependency {
         }
     }
 
+    fn unsubscribe_work(&self, registration: WakeRegistration) -> bool {
+        match self {
+            Self::Wait(wait) => wait.unsubscribe_work(registration),
+            Self::Promise(promise) => promise.unsubscribe_work(registration),
+            #[cfg(test)]
+            Self::Test(_) => false,
+        }
+    }
+
     fn abandon(self) {
         match self {
             Self::Wait(wait) => wait.abandon_deferred_producer(),
@@ -597,6 +651,23 @@ struct SparkWork {
     dependency: Option<WorkDependency>,
 }
 
+struct ClientDemandSubscription {
+    dependency: WorkDependency,
+    registration: WakeRegistration,
+}
+
+impl ClientDemandSubscription {
+    fn unsubscribe(self) {
+        let _ = self.dependency.unsubscribe_work(self.registration);
+    }
+}
+
+struct ClientDemandWork {
+    demand: Arc<EvaluationDemandState>,
+    operation: Option<ClientDemandOperation>,
+    subscription: Option<ClientDemandSubscription>,
+}
+
 struct TaskFailureReporting {
     owner_session: EvaluationSessionId,
     acknowledged: bool,
@@ -639,6 +710,14 @@ enum WorkKind {
     Spark(SparkWork),
     Reflection(ReflectionWork),
     Deferred(DeferredWork),
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Phase 10B.1a installs client work before 10B.1b migrates public callers"
+        )
+    )]
+    ClientDemand(ClientDemandWork),
 }
 
 struct WorkRecord {
@@ -662,6 +741,36 @@ pub(super) struct ClaimedSparkWork {
     demand_session: EvaluationSessionId,
     demand: SparkDemand,
     prior_dependency: Option<WorkDependency>,
+}
+
+pub(super) struct ClaimedClientDemand {
+    id: EvaluationWorkId,
+    demand: Arc<EvaluationDemandState>,
+    operation: Option<ClientDemandOperation>,
+    prior_subscription: Option<ClientDemandSubscription>,
+}
+
+pub(super) enum ClientDemandPoll {
+    Complete(RuntimeValueRoot),
+    Failed(Arc<EvaluationFailure>),
+    Blocked(WorkDependency),
+}
+
+struct ClientDemandRetirement {
+    sink: ClientDemandSink,
+    operation: ClientDemandOperation,
+    subscription: Option<ClientDemandSubscription>,
+    result: ClientDemandResult,
+}
+
+impl ClientDemandRetirement {
+    fn finish(self) {
+        if let Some(subscription) = self.subscription {
+            subscription.unsubscribe();
+        }
+        let _ = self.sink.publish(self.result);
+        drop(self.operation);
+    }
 }
 
 pub(super) struct ClaimedReflectionWork {
@@ -803,6 +912,7 @@ pub(super) struct SessionClosureWork {
     pub(super) reflection: Vec<AbandonedReflectionWork>,
     pub(super) deferred: Vec<AbandonedDeferredWork>,
     retired_sparks: Vec<SparkRetirement>,
+    client_demands: Vec<ClientDemandRetirement>,
 }
 
 impl SessionClosureWork {
@@ -812,14 +922,22 @@ impl SessionClosureWork {
         }
     }
 
+    fn finish_client_demands(&mut self) {
+        for record in self.client_demands.drain(..) {
+            record.finish();
+        }
+    }
+
     pub(super) fn finish(mut self) {
         self.finish_sparks();
+        self.finish_client_demands();
     }
 }
 
 impl Drop for SessionClosureWork {
     fn drop(&mut self) {
         self.finish_sparks();
+        self.finish_client_demands();
     }
 }
 
@@ -830,6 +948,33 @@ impl ClaimedSparkWork {
 
     pub(super) fn value(&self) -> &RuntimeValueRoot {
         &self.demand.value
+    }
+}
+
+impl ClaimedClientDemand {
+    pub(super) fn poll(&self) -> ClientDemandPoll {
+        let context = super::EvalContext::for_client_demand(self.demand.clone());
+        let operation = self
+            .operation
+            .as_ref()
+            .expect("claimed client demand must retain its operation");
+        let result = match operation {
+            ClientDemandOperation::DemandWhnf(value) => {
+                crate::eval::eval_value(&context, value.as_core())
+            }
+        };
+        match result {
+            Ok(value) => ClientDemandPoll::Complete(RuntimeValueRoot::new(context.values(), value)),
+            Err(halt) => {
+                if let Some(wait) = halt.blocked_on() {
+                    ClientDemandPoll::Blocked(WorkDependency::Wait(wait.0))
+                } else if let Some(promise) = halt.unassigned_promise() {
+                    ClientDemandPoll::Blocked(WorkDependency::Promise(promise.clone()))
+                } else {
+                    ClientDemandPoll::Failed(halt.into_permanent_failure())
+                }
+            }
+        }
     }
 }
 
@@ -863,6 +1008,8 @@ struct WorkCoordinatorState {
     ready_task_set: HashSet<EvaluationWorkId>,
     ready_sparks: VecDeque<EvaluationWorkId>,
     ready_spark_set: HashSet<EvaluationWorkId>,
+    ready_client_demands: VecDeque<EvaluationWorkId>,
+    ready_client_demand_set: HashSet<EvaluationWorkId>,
     reflection_by_task: std::collections::BTreeMap<EvaluationTaskId, EvaluationWorkId>,
     reflection_by_wait: HashMap<EvaluationWaitToken, EvaluationWorkId>,
     deferred_by_task: std::collections::BTreeMap<EvaluationTaskId, EvaluationWorkId>,
@@ -894,6 +1041,7 @@ pub(crate) struct EvaluationWorkCoordinator {
 pub(super) enum CoordinatorSelection {
     Task(ClaimedTaskWork),
     Spark(ClaimedSparkWork),
+    ClientDemand(ClaimedClientDemand),
     None,
 }
 
@@ -1174,7 +1322,7 @@ impl EvaluationWorkCoordinator {
     /// admission have been released.
     pub(super) fn close_session(&self, session: EvaluationSessionId) -> SessionClosureWork {
         let mutation = self.admission.mutation_guard();
-        let (reflection, deferred, retired_sparks, changed) = {
+        let (reflection, deferred, retired_sparks, client_demands, changed) = {
             let mut state = self
                 .state
                 .lock()
@@ -1190,6 +1338,7 @@ impl EvaluationWorkCoordinator {
             let mut reflection = Vec::new();
             let mut deferred = Vec::new();
             let mut retired_sparks = Vec::new();
+            let mut client_demands = Vec::new();
             let mut changed = false;
             for id in work {
                 let Some(record) = state.work.get(&id) else {
@@ -1259,6 +1408,28 @@ impl EvaluationWorkCoordinator {
                             changed = true;
                         }
                     }
+                    WorkKind::ClientDemand(_) => {
+                        let record = state
+                            .work
+                            .get_mut(&id)
+                            .expect("indexed client demand must remain registered");
+                        if record.control.close_reason.is_none() {
+                            record.control.close_reason =
+                                Some(WorkCloseReason::DemandSessionClosed);
+                            changed = true;
+                        }
+                        if running {
+                            continue;
+                        }
+                        client_demands.push(detach_client_demand(
+                            &mut state,
+                            id,
+                            None,
+                            None,
+                            ClientDemandResult::Abandoned,
+                        ));
+                        changed = true;
+                    }
                 }
             }
             changed |= prune_closed_session_registration(&mut state, session);
@@ -1269,6 +1440,7 @@ impl EvaluationWorkCoordinator {
                 reflection,
                 deferred,
                 retired_sparks,
+                client_demands,
                 state.work_generation != initial_generation,
             )
         };
@@ -1280,7 +1452,61 @@ impl EvaluationWorkCoordinator {
             reflection,
             deferred,
             retired_sparks,
+            client_demands,
         }
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Phase 10B.1a installs admission before 10B.1b migrates public callers"
+        )
+    )]
+    pub(super) fn admit_client_demand(
+        &self,
+        demand: Arc<EvaluationDemandState>,
+        operation: ClientDemandOperation,
+        sink: ClientDemandSink,
+    ) -> Result<EvaluationWorkId, Arc<str>> {
+        debug_assert_eq!(demand.values.runtime_id(), self.runtime);
+        if operation.runtime_id() != self.runtime {
+            return Err(Arc::from(
+                "client demand operation belongs to another evaluation runtime",
+            ));
+        }
+        let id = EvaluationWorkId(self.ids.evaluation_work());
+        let mutation = self.admission.mutation_guard();
+        {
+            let mut state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            if demand_session_is_closed(&state, demand.id) {
+                return Err(Arc::from("evaluation demand session is closed"));
+            }
+            let session = demand.id;
+            let record = WorkRecord {
+                id,
+                demand_session: session,
+                subscription_epoch: 0,
+                control: WorkControl::default(),
+                obligations: SettlementObligations::client_demand(sink),
+                state: WorkState::Queued,
+                kind: WorkKind::ClientDemand(ClientDemandWork {
+                    demand,
+                    operation: Some(operation),
+                    subscription: None,
+                }),
+            };
+            assert!(state.work.insert(id, record).is_none());
+            state.work_by_session.entry(session).or_default().insert(id);
+            queue_client_demand(&mut state, id);
+            state.work_generation = state.work_generation.wrapping_add(1);
+        }
+        drop(mutation);
+        self.work_available.notify_one();
+        Ok(id)
     }
 
     pub(super) fn submit_spark(&self, session: Arc<EvaluationDemandState>, value: Value) {
@@ -1412,23 +1638,35 @@ impl EvaluationWorkCoordinator {
             let initial_generation = state.work_generation;
             let had_ready_task = !state.ready_tasks.is_empty();
             let had_ready_spark = !state.ready_sparks.is_empty();
-            let selection = if state.prefer_spark {
-                claim_ready_spark(&mut state)
-                    .map(CoordinatorSelection::Spark)
-                    .or_else(|| claim_ready_task(&mut state, None).map(CoordinatorSelection::Task))
-                    .unwrap_or(CoordinatorSelection::None)
-            } else {
-                claim_ready_task(&mut state, None)
-                    .map(CoordinatorSelection::Task)
-                    .or_else(|| claim_ready_spark(&mut state).map(CoordinatorSelection::Spark))
-                    .unwrap_or(CoordinatorSelection::None)
-            };
+            let had_ready_client = !state.ready_client_demands.is_empty();
+            let selection = claim_ready_client_demand(&mut state)
+                .map(CoordinatorSelection::ClientDemand)
+                .unwrap_or_else(|| {
+                    if state.prefer_spark {
+                        claim_ready_spark(&mut state)
+                            .map(CoordinatorSelection::Spark)
+                            .or_else(|| {
+                                claim_ready_task(&mut state, None).map(CoordinatorSelection::Task)
+                            })
+                            .unwrap_or(CoordinatorSelection::None)
+                    } else {
+                        claim_ready_task(&mut state, None)
+                            .map(CoordinatorSelection::Task)
+                            .or_else(|| {
+                                claim_ready_spark(&mut state).map(CoordinatorSelection::Spark)
+                            })
+                            .unwrap_or(CoordinatorSelection::None)
+                    }
+                });
             match selection {
                 CoordinatorSelection::Task(_) => state.prefer_spark = true,
                 CoordinatorSelection::Spark(_) => state.prefer_spark = false,
-                CoordinatorSelection::None => {}
+                CoordinatorSelection::ClientDemand(_) | CoordinatorSelection::None => {}
             }
-            if !matches!(selection, CoordinatorSelection::None) || had_ready_task || had_ready_spark
+            if !matches!(selection, CoordinatorSelection::None)
+                || had_ready_task
+                || had_ready_spark
+                || had_ready_client
             {
                 state.work_generation = state.work_generation.wrapping_add(1);
             }
@@ -1487,6 +1725,33 @@ impl EvaluationWorkCoordinator {
                 }
             };
             queue_task(&mut state, id);
+            state.work_generation = state.work_generation.wrapping_add(1);
+        }
+        drop(mutation);
+        self.work_available.notify_all();
+    }
+
+    pub(super) fn requeue_unpolled_client_demand(&self, mut claimed: ClaimedClientDemand) {
+        let mutation = self.admission.mutation_guard();
+        {
+            let mut state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            let record = state
+                .work
+                .get_mut(&claimed.id)
+                .expect("unpolled client demand must remain registered");
+            assert!(matches!(record.state, WorkState::Running));
+            let client = client_demand_work_mut(record);
+            assert!(
+                client.operation.is_none(),
+                "running client demand must have detached its operation"
+            );
+            client.operation = claimed.operation.take();
+            client.subscription = claimed.prior_subscription.take();
+            record.state = WorkState::Queued;
+            queue_client_demand(&mut state, claimed.id);
             state.work_generation = state.work_generation.wrapping_add(1);
         }
         drop(mutation);
@@ -1631,6 +1896,204 @@ impl EvaluationWorkCoordinator {
         if let Some(record) = retired {
             record.abandon();
         }
+    }
+
+    pub(super) fn release_client_demand(
+        &self,
+        mut claimed: ClaimedClientDemand,
+        poll: ClientDemandPoll,
+    ) {
+        let mutation = self.admission.mutation_guard();
+        let (retirement, obsolete_subscription, exact_subscription) = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            let close_requested = {
+                let record = state
+                    .work
+                    .get(&claimed.id)
+                    .expect("claimed client demand must remain registered");
+                assert_eq!(record.demand_session, claimed.demand.id);
+                assert!(matches!(record.state, WorkState::Running));
+                assert!(matches!(record.kind, WorkKind::ClientDemand(_)));
+                record.control.close_reason
+            };
+            let mut obsolete_subscription = None;
+            let mut exact_subscription = None;
+            let retirement = if close_requested.is_some() {
+                debug_assert!(matches!(
+                    close_requested,
+                    Some(
+                        WorkCloseReason::ClientDemandAbandoned
+                            | WorkCloseReason::DemandSessionClosed
+                    )
+                ));
+                Some(detach_client_demand(
+                    &mut state,
+                    claimed.id,
+                    claimed.operation.take(),
+                    claimed.prior_subscription.take(),
+                    ClientDemandResult::Abandoned,
+                ))
+            } else {
+                match poll {
+                    ClientDemandPoll::Complete(value) => {
+                        debug_assert_eq!(value.runtime_id(), self.runtime);
+                        Some(detach_client_demand(
+                            &mut state,
+                            claimed.id,
+                            claimed.operation.take(),
+                            claimed.prior_subscription.take(),
+                            ClientDemandResult::Complete(value),
+                        ))
+                    }
+                    ClientDemandPoll::Failed(failure) => Some(detach_client_demand(
+                        &mut state,
+                        claimed.id,
+                        claimed.operation.take(),
+                        claimed.prior_subscription.take(),
+                        ClientDemandResult::Failed(failure),
+                    )),
+                    ClientDemandPoll::Blocked(dependency)
+                        if dependency.runtime_id() != self.runtime =>
+                    {
+                        Some(detach_client_demand(
+                            &mut state,
+                            claimed.id,
+                            claimed.operation.take(),
+                            claimed.prior_subscription.take(),
+                            ClientDemandResult::Failed(Arc::new(EvaluationFailure::message(
+                                "client demand blocked on another evaluation runtime",
+                            ))),
+                        ))
+                    }
+                    ClientDemandPoll::Blocked(dependency) => {
+                        obsolete_subscription = claimed.prior_subscription.take();
+                        let record = state
+                            .work
+                            .get_mut(&claimed.id)
+                            .expect("blocked client demand must remain registered");
+                        record.subscription_epoch = record
+                            .subscription_epoch
+                            .checked_add(1)
+                            .expect("evaluation work subscription epochs exhausted");
+                        let registration = WakeRegistration {
+                            work: claimed.id,
+                            subscription_epoch: record.subscription_epoch,
+                        };
+                        let client = client_demand_work_mut(record);
+                        assert!(client.operation.is_none());
+                        client.operation = claimed.operation.take();
+                        client.subscription = Some(ClientDemandSubscription {
+                            dependency: dependency.clone(),
+                            registration,
+                        });
+                        record.state = WorkState::Blocked;
+                        exact_subscription = Some((dependency.clone(), registration));
+                        if let Some(wait) = dependency.producer_wait() {
+                            promote_deferred_wait_locked(&mut state, wait);
+                        }
+                        None
+                    }
+                }
+            };
+            state.work_generation = state.work_generation.wrapping_add(1);
+            (retirement, obsolete_subscription, exact_subscription)
+        };
+        if let Some(subscription) = obsolete_subscription {
+            subscription.unsubscribe();
+        }
+        let woke = exact_subscription.is_some_and(|(dependency, registration)| {
+            self.subscribe_dependency_guarded(&mutation, dependency, registration)
+        });
+        if let Some(retirement) = retirement {
+            retirement.finish();
+        }
+        drop(mutation);
+        self.work_available.notify_all();
+        self.notify_dependency_wake(woke);
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Phase 10B.1a installs abandonment before 10B.1b migrates public callers"
+        )
+    )]
+    pub(super) fn abandon_client_demand(&self, id: EvaluationWorkId) -> bool {
+        let mutation = self.admission.mutation_guard();
+        let (accepted, retirement) = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            let Some(record) = state.work.get_mut(&id) else {
+                return false;
+            };
+            if !matches!(record.kind, WorkKind::ClientDemand(_)) {
+                return false;
+            }
+            if matches!(record.state, WorkState::Terminalizing) {
+                return true;
+            }
+            if matches!(record.state, WorkState::Running) {
+                record
+                    .control
+                    .close_reason
+                    .get_or_insert(WorkCloseReason::ClientDemandAbandoned);
+                state.work_generation = state.work_generation.wrapping_add(1);
+                (true, None)
+            } else {
+                let retirement =
+                    detach_client_demand(&mut state, id, None, None, ClientDemandResult::Abandoned);
+                state.work_generation = state.work_generation.wrapping_add(1);
+                (true, Some(retirement))
+            }
+        };
+        if let Some(retirement) = retirement {
+            retirement.finish();
+        }
+        drop(mutation);
+        self.work_available.notify_all();
+        accepted
+    }
+
+    #[cfg(test)]
+    pub(super) fn kill_client_demand(
+        &self,
+        id: EvaluationWorkId,
+        failure: Arc<EvaluationFailure>,
+    ) -> bool {
+        let mutation = self.admission.mutation_guard();
+        let retirement = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            let Some(record) = state.work.get(&id) else {
+                return false;
+            };
+            if !matches!(record.kind, WorkKind::ClientDemand(_))
+                || matches!(record.state, WorkState::Running | WorkState::Terminalizing)
+            {
+                return false;
+            }
+            let retirement = detach_client_demand(
+                &mut state,
+                id,
+                None,
+                None,
+                ClientDemandResult::Killed(failure),
+            );
+            state.work_generation = state.work_generation.wrapping_add(1);
+            retirement
+        };
+        retirement.finish();
+        drop(mutation);
+        self.work_available.notify_all();
+        true
     }
 
     pub(super) fn reserve_reflection(
@@ -1943,7 +2406,7 @@ impl EvaluationWorkCoordinator {
                 WorkKind::Deferred(_) => {
                     claim_deferred(&mut state, id, false).map(ClaimedTaskWork::Deferred)
                 }
-                WorkKind::Spark(_) => None,
+                WorkKind::Spark(_) | WorkKind::ClientDemand(_) => None,
             }?;
             state.work_generation = state.work_generation.wrapping_add(1);
             Some(work)
@@ -2766,7 +3229,7 @@ impl EvaluationWorkCoordinator {
         match &record.kind {
             WorkKind::Reflection(work) => work.block.as_ref(),
             WorkKind::Deferred(work) => work.block.as_ref(),
-            WorkKind::Spark(_) => None,
+            WorkKind::Spark(_) | WorkKind::ClientDemand(_) => None,
         }
         .and_then(|block| block.dependency.clone())
     }
@@ -3182,6 +3645,7 @@ fn spark_work(record: &WorkRecord) -> &SparkWork {
         WorkKind::Spark(work) => work,
         WorkKind::Reflection(_) => panic!("reflection work cannot be used as a spark"),
         WorkKind::Deferred(_) => panic!("deferred work cannot be used as a spark"),
+        WorkKind::ClientDemand(_) => panic!("client demand cannot be used as a spark"),
     }
 }
 
@@ -3190,6 +3654,7 @@ fn spark_work_mut(record: &mut WorkRecord) -> &mut SparkWork {
         WorkKind::Spark(work) => work,
         WorkKind::Reflection(_) => panic!("reflection work cannot be used as a spark"),
         WorkKind::Deferred(_) => panic!("deferred work cannot be used as a spark"),
+        WorkKind::ClientDemand(_) => panic!("client demand cannot be used as a spark"),
     }
 }
 
@@ -3198,6 +3663,9 @@ fn reflection_work(record: &WorkRecord) -> &ReflectionWork {
         WorkKind::Reflection(work) => work,
         WorkKind::Spark(_) => panic!("spark work cannot be used as a reflection task"),
         WorkKind::Deferred(_) => panic!("deferred work cannot be used as a reflection task"),
+        WorkKind::ClientDemand(_) => {
+            panic!("client demand cannot be used as a reflection task")
+        }
     }
 }
 
@@ -3206,6 +3674,9 @@ fn reflection_work_mut(record: &mut WorkRecord) -> &mut ReflectionWork {
         WorkKind::Reflection(work) => work,
         WorkKind::Spark(_) => panic!("spark work cannot be used as a reflection task"),
         WorkKind::Deferred(_) => panic!("deferred work cannot be used as a reflection task"),
+        WorkKind::ClientDemand(_) => {
+            panic!("client demand cannot be used as a reflection task")
+        }
     }
 }
 
@@ -3215,6 +3686,9 @@ fn deferred_work(record: &WorkRecord) -> &DeferredWork {
         WorkKind::Spark(_) => panic!("spark work cannot be used as a deferred producer"),
         WorkKind::Reflection(_) => {
             panic!("reflection work cannot be used as a deferred producer")
+        }
+        WorkKind::ClientDemand(_) => {
+            panic!("client demand cannot be used as a deferred producer")
         }
     }
 }
@@ -3226,6 +3700,20 @@ fn deferred_work_mut(record: &mut WorkRecord) -> &mut DeferredWork {
         WorkKind::Reflection(_) => {
             panic!("reflection work cannot be used as a deferred producer")
         }
+        WorkKind::ClientDemand(_) => {
+            panic!("client demand cannot be used as a deferred producer")
+        }
+    }
+}
+
+fn client_demand_work_mut(record: &mut WorkRecord) -> &mut ClientDemandWork {
+    match &mut record.kind {
+        WorkKind::ClientDemand(work) => work,
+        WorkKind::Spark(_) => panic!("spark work cannot be used as a client demand"),
+        WorkKind::Reflection(_) => {
+            panic!("reflection work cannot be used as a client demand")
+        }
+        WorkKind::Deferred(_) => panic!("deferred work cannot be used as a client demand"),
     }
 }
 
@@ -3233,7 +3721,7 @@ fn task_for_record(record: &WorkRecord) -> Option<EvaluationTaskId> {
     match &record.kind {
         WorkKind::Reflection(work) => Some(work.task),
         WorkKind::Deferred(work) => Some(work.task),
-        WorkKind::Spark(_) => None,
+        WorkKind::Spark(_) | WorkKind::ClientDemand(_) => None,
     }
 }
 
@@ -3241,7 +3729,7 @@ fn task_block(record: &WorkRecord) -> Option<&EvaluationTaskBlock> {
     match &record.kind {
         WorkKind::Reflection(work) => work.block.as_ref(),
         WorkKind::Deferred(work) => work.block.as_ref(),
-        WorkKind::Spark(_) => None,
+        WorkKind::Spark(_) | WorkKind::ClientDemand(_) => None,
     }
 }
 
@@ -3260,6 +3748,10 @@ fn work_dependency(record: &WorkRecord) -> Option<&WorkDependency> {
         WorkKind::Spark(work) => work.dependency.as_ref(),
         WorkKind::Reflection(work) => work.block.as_ref()?.dependency.as_ref(),
         WorkKind::Deferred(work) => work.block.as_ref()?.dependency.as_ref(),
+        WorkKind::ClientDemand(work) => work
+            .subscription
+            .as_ref()
+            .map(|subscription| &subscription.dependency),
     }
 }
 
@@ -3304,6 +3796,7 @@ fn publish_task_block_locked(
         WorkKind::Reflection(work) => work.block = Some(block),
         WorkKind::Deferred(work) => work.block = Some(block),
         WorkKind::Spark(_) => panic!("spark work cannot publish a task block"),
+        WorkKind::ClientDemand(_) => panic!("client demand cannot publish a task block"),
     }
     record.state = WorkState::Blocked;
     if let Some(observed_epoch) = observed_epoch {
@@ -3481,7 +3974,7 @@ fn claim_ready_task(
         let claimed = match &record.kind {
             WorkKind::Reflection(_) => claim_reflection_task(state, id),
             WorkKind::Deferred(_) => claim_deferred(state, id, true).map(ClaimedTaskWork::Deferred),
-            WorkKind::Spark(_) => None,
+            WorkKind::Spark(_) | WorkKind::ClientDemand(_) => None,
         };
         if let Some(claimed) = claimed {
             return Some(claimed);
@@ -3888,12 +4381,24 @@ fn queue_spark(state: &mut WorkCoordinatorState, id: EvaluationWorkId) {
     }
 }
 
+fn queue_client_demand(state: &mut WorkCoordinatorState, id: EvaluationWorkId) {
+    if state.ready_client_demand_set.insert(id) {
+        state.ready_client_demands.push_back(id);
+    }
+}
+
 fn queue_current_registration(
     state: &mut WorkCoordinatorState,
     registration: WakeRegistration,
     source: Option<WorkDependencyKey>,
 ) -> bool {
-    let spark = {
+    enum ReadyQueue {
+        Spark,
+        ClientDemand,
+        Task,
+    }
+
+    let kind = {
         let Some(record) = state.work.get_mut(&registration.work) else {
             return false;
         };
@@ -3906,15 +4411,48 @@ fn queue_current_registration(
             return false;
         }
         record.state = WorkState::Queued;
-        matches!(record.kind, WorkKind::Spark(_))
+        match record.kind {
+            WorkKind::Spark(_) => ReadyQueue::Spark,
+            WorkKind::ClientDemand(_) => ReadyQueue::ClientDemand,
+            WorkKind::Reflection(_) | WorkKind::Deferred(_) => ReadyQueue::Task,
+        }
     };
     state.observation_waiters.remove(&registration.work);
-    if spark {
-        queue_spark(state, registration.work);
-    } else {
-        queue_task(state, registration.work);
+    match kind {
+        ReadyQueue::Spark => queue_spark(state, registration.work),
+        ReadyQueue::ClientDemand => queue_client_demand(state, registration.work),
+        ReadyQueue::Task => queue_task(state, registration.work),
     }
     true
+}
+
+fn claim_ready_client_demand(state: &mut WorkCoordinatorState) -> Option<ClaimedClientDemand> {
+    while let Some(id) = state.ready_client_demands.pop_front() {
+        state.ready_client_demand_set.remove(&id);
+        let Some(record) = state.work.get_mut(&id) else {
+            continue;
+        };
+        if !matches!(record.state, WorkState::Queued)
+            || !matches!(record.kind, WorkKind::ClientDemand(_))
+        {
+            continue;
+        }
+        record.state = WorkState::Running;
+        let client = client_demand_work_mut(record);
+        let demand = client.demand.clone();
+        let operation = client
+            .operation
+            .take()
+            .expect("queued client demand must retain its operation");
+        let prior_subscription = client.subscription.take();
+        return Some(ClaimedClientDemand {
+            id,
+            demand,
+            operation: Some(operation),
+            prior_subscription,
+        });
+    }
+    None
 }
 
 fn claim_ready_spark(state: &mut WorkCoordinatorState) -> Option<ClaimedSparkWork> {
@@ -3978,6 +4516,62 @@ fn detach_spark(state: &mut WorkCoordinatorState, id: EvaluationWorkId) -> Optio
         dependencies: spark.dependency.take().into_iter().collect(),
         _obligations: record.obligations,
     })
+}
+
+fn detach_client_demand(
+    state: &mut WorkCoordinatorState,
+    id: EvaluationWorkId,
+    claimed_operation: Option<ClientDemandOperation>,
+    claimed_subscription: Option<ClientDemandSubscription>,
+    result: ClientDemandResult,
+) -> ClientDemandRetirement {
+    state.ready_client_demand_set.remove(&id);
+    state
+        .ready_client_demands
+        .retain(|candidate| *candidate != id);
+    state.observation_waiters.remove(&id);
+    let mut record = state
+        .work
+        .remove(&id)
+        .expect("retired client demand must remain registered");
+    assert!(
+        !matches!(record.state, WorkState::Running) || claimed_operation.is_some(),
+        "worker-owned client demand requires its claimed operation at retirement"
+    );
+    let WorkKind::ClientDemand(mut client) = record.kind else {
+        panic!("client-demand retirement must contain client work")
+    };
+    let operation = match (claimed_operation, client.operation.take()) {
+        (Some(operation), None) | (None, Some(operation)) => operation,
+        (Some(_), Some(_)) => panic!("client demand operation cannot have two owners"),
+        (None, None) => panic!("client demand retirement must retain its operation"),
+    };
+    let subscription = match (claimed_subscription, client.subscription.take()) {
+        (Some(subscription), None) | (None, Some(subscription)) => Some(subscription),
+        (None, None) => None,
+        (Some(_), Some(_)) => panic!("client demand subscription cannot have two owners"),
+    };
+    let sink = record
+        .obligations
+        .take_client_sink()
+        .expect("client demand must retain its result sink until retirement");
+    assert!(
+        record.obligations.is_empty(),
+        "client demand retirement must consume every settlement obligation"
+    );
+    if let Some(session_work) = state.work_by_session.get_mut(&record.demand_session) {
+        session_work.remove(&id);
+        if session_work.is_empty() {
+            state.work_by_session.remove(&record.demand_session);
+        }
+    }
+    prune_closed_session_registration(state, record.demand_session);
+    ClientDemandRetirement {
+        sink,
+        operation,
+        subscription,
+        result,
+    }
 }
 
 #[cfg(test)]

@@ -722,6 +722,10 @@ impl PromisedValue {
             .subscribe(runtime, registration, || self.0.assignment.get().is_some())
     }
 
+    pub(crate) fn unsubscribe_work(&self, registration: WakeRegistration) -> bool {
+        self.0.completion.unsubscribe(registration)
+    }
+
     #[cfg(test)]
     pub(crate) fn exact_subscription_count(&self) -> usize {
         self.0.completion.len()
