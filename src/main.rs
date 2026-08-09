@@ -749,13 +749,13 @@ fn assemble(
         .inputs(inputs)
         .build()?;
     let context = assembly_result_context(&values)?;
-    assembler
-        .binary_at(module.value(), "asm.result")
-        .map_err(|error| {
-            error
-                .with_context(&values, context)
-                .expect("assembly-result context belongs to the assembler runtime")
-        })
+    let asm = values.access(module.value(), values.atom_from_text("asm"))?;
+    let result = values.access(&asm, values.atom_from_text("result"))?;
+    assembler.to_binary(&result).map_err(|error| {
+        error
+            .with_context(&values, context)
+            .expect("assembly-result context belongs to the assembler runtime")
+    })
 }
 
 fn assembly_result_context(values: &Values) -> Result<Value, Error> {

@@ -28,13 +28,13 @@ use crate::core::{
     Builtin, CoreValueFactory, Dict, EvaluationFailure, EvaluationHalt, Key, List, NetValue,
     PromisedValue,
 };
-use crate::core_net::CoreSpecialization;
+use crate::core_net::{CoreDataKey, CoreSpecialization};
 use crate::diagnostic::{CompilationInvocationId, CompilationTrace, Severity};
 use crate::eval;
 use crate::evaluation::{
-    ClientBinaryOutput, EvalContext, EvaluationExecutor, EvaluationSession, EvaluationSessionId,
-    EvaluationSessionRun, EvaluationTaskId, EvaluationUnfinishedState, EvaluationWorkCoordinator,
-    ReflectionTaskProfile, RuntimeObservationEpoch, RuntimeObservationState,
+    EvalContext, EvaluationExecutor, EvaluationSession, EvaluationSessionId, EvaluationSessionRun,
+    EvaluationTaskId, EvaluationUnfinishedState, EvaluationWorkCoordinator, ReflectionTaskProfile,
+    RuntimeObservationEpoch, RuntimeObservationState,
 };
 use crate::g_syntax::compile_source;
 use crate::interaction_net::{NetBuildError, NetBuilder as CoreNetBuilder, Port as CorePort};
@@ -194,6 +194,39 @@ impl Values {
 
     pub fn empty_record(&self) -> Value {
         self.wrap(CoreValue::Dict(Dict::new_sync()))
+    }
+
+    /// Constructs the ordinary lazy `base.[key]` semantic accessor.
+    ///
+    /// Neither operand is evaluated while constructing the value. Demand on
+    /// the returned value evaluates the key and follows the same dictionary
+    /// access semantics as `.g` source, including returning `{}` for a
+    /// missing key.
+    pub fn access(&self, base: &Value, key: Value) -> Result<Value, Error> {
+        self.require(base)?;
+        self.require(&key)?;
+        Ok(
+            self.wrap(CoreValue::Lazy(crate::core::LazyValue::from_access(
+                &self.core,
+                Arc::from([CoreDataKey::Index]),
+                Arc::from([base.as_core().clone(), key.into_core()]),
+            ))),
+        )
+    }
+
+    /// Constructs the ordinary lazy `anno Annotation Target` semantic value.
+    ///
+    /// Annotation interpretation occurs only when the returned value is
+    /// demanded; this method does not provide a separate host-side annotation
+    /// interpreter.
+    pub fn annotate(&self, annotation: Value, target: Value) -> Result<Value, Error> {
+        self.require(&annotation)?;
+        self.require(&target)?;
+        Ok(self.wrap(CoreValue::builtin_call(
+            &self.core,
+            Builtin::Anno,
+            vec![annotation.into_core(), target.into_core()],
+        )))
     }
 
     pub fn empty_object(&self, name: Value) -> Result<Value, Error> {
@@ -3408,7 +3441,6 @@ fn net_build_error(error: NetBuildError) -> Error {
     Error::new(format!("invalid interaction net: {error}"))
 }
 
-#[cfg(test)]
 fn path_lookup_context(path: &str) -> CoreValue {
     eval::evaluation_context_frame_with_args(
         "path_lookup",
@@ -4344,36 +4376,60 @@ impl Assembler {
     // TODO: add reflection snapshots and event subscriptions here. Reflection
     // producers should feed the same bounded history rather than print.
 
+    /// Demands an ordinary atom-path accessor and rejects an undefined result.
+    ///
+    /// This is a presence-oriented compatibility helper. New code which wants
+    /// ordinary Glam access semantics should compose [`Values::access`]
+    /// directly, where an absent member evaluates to `{}`.
     pub fn get(&self, root: &Value, path: &str) -> Result<Value, Error> {
-        root.require_runtime(self.reasoning.runtime.id())?;
-        let values = self.core_values();
-        self.eval_context()
-            .evaluate_path(root.as_core(), Arc::from(path))
-            .map_err(|error| self.evaluation_error(error))?
-            .map(|value| Value::from_core(&values, value))
+        self.get_optional(root, path)?
             .ok_or_else(|| Error::new(format!("module did not define `{path}`")))
     }
 
     /// Returns a value at an atom path, distinguishing an absent path from a
     /// failure while demanding an intermediate value.
+    ///
+    /// This presence-oriented compatibility helper uses generic WHNF client
+    /// demand for each intermediate container but deliberately leaves the
+    /// final member lazy. New semantic code should construct
+    /// [`Values::access`] instead.
     pub fn get_optional(&self, root: &Value, path: &str) -> Result<Option<Value>, Error> {
         root.require_runtime(self.reasoning.runtime.id())?;
         let values = self.core_values();
-        self.eval_context()
-            .evaluate_path(root.as_core(), Arc::from(path))
-            .map(|value| value.map(|value| Value::from_core(&values, value)))
-            .map_err(|error| self.evaluation_error(error))
+        let mut current = root.as_core().clone();
+        for part in path.split('.') {
+            let evaluated = self
+                .eval_context()
+                .evaluate_whnf(&current)
+                .map_err(|error| {
+                    self.evaluation_error(error.with_context(path_lookup_context(path)))
+                })?;
+            let CoreValue::Dict(dict) = evaluated else {
+                return Ok(None);
+            };
+            let Some(next) = dict.get(&Key::atom_from_text(part)) else {
+                return Ok(None);
+            };
+            current = next.clone();
+        }
+        Ok(Some(Value::from_core(&values, current)))
     }
 
+    /// Applies the ordinary `anno 'binary` semantics and extracts host bytes.
+    ///
+    /// Invalid source values fail as structured evaluation errors produced by
+    /// the annotation; byte extraction itself is the only host-side step.
     pub fn to_binary(&self, value: &Value) -> Result<Bytes, Error> {
         value.require_runtime(self.reasoning.runtime.id())?;
-        match self
-            .eval_context()
-            .evaluate_binary(value.as_core(), Arc::from("value"))
-            .map_err(|error| self.evaluation_error(error))?
-        {
-            ClientBinaryOutput::Bytes(bytes) => Ok(bytes),
-            ClientBinaryOutput::Invalid(message) => Err(Error::new(message)),
+        let values = self.values();
+        let binary = values.annotate(values.atom_from_text("binary"), value.clone())?;
+        let evaluated = self.evaluate(&binary)?;
+        match evaluated.as_core() {
+            CoreValue::Binary(bytes) => Ok(bytes.clone()),
+            other => Err(self.evaluation_error(EvaluationHalt::new(format!(
+                "`binary` annotation returned {}, expected Binary",
+                other.diagnostic_kind_name()
+            )))),
         }
     }
 
@@ -4382,18 +4438,6 @@ impl Assembler {
     pub fn binary_slice(&self, value: &Value, range: Range<usize>) -> Result<Bytes, Error> {
         value.require_runtime(self.reasoning.runtime.id())?;
         self.core_value_binary_slice(value.as_core(), range, "value")
-    }
-
-    pub fn binary_at(&self, root: &Value, path: &str) -> Result<Bytes, Error> {
-        root.require_runtime(self.reasoning.runtime.id())?;
-        match self
-            .eval_context()
-            .evaluate_binary_at(root.as_core(), Arc::from(path))
-            .map_err(|error| self.evaluation_error(error))?
-        {
-            ClientBinaryOutput::Bytes(bytes) => Ok(bytes),
-            ClientBinaryOutput::Invalid(message) => Err(Error::new(message)),
-        }
     }
 
     fn build_module(
@@ -4817,6 +4861,19 @@ mod tests {
 
     struct FailedReasoningTask;
 
+    fn access_path(assembler: &Assembler, root: &Value, path: &str) -> Result<Value, Error> {
+        let values = assembler.values();
+        let mut value = root.clone();
+        for part in path.split('.') {
+            value = values.access(&value, values.atom_from_text(part))?;
+        }
+        Ok(value)
+    }
+
+    fn binary_at(assembler: &Assembler, root: &Value, path: &str) -> Result<Bytes, Error> {
+        assembler.to_binary(&access_path(assembler, root, path)?)
+    }
+
     impl EvaluationTaskMachine for FailedReasoningTask {
         fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
             EvaluationMachinePoll::Failed(Arc::new(crate::core::EvaluationFailure::message(
@@ -4973,6 +5030,22 @@ mod tests {
         assert!(values.empty_object(foreign_value.clone()).is_err());
         assert!(
             values
+                .access(&values.empty_record(), foreign_value.clone())
+                .is_err()
+        );
+        assert!(values.access(&foreign_value, values.text("key")).is_err());
+        assert!(
+            values
+                .annotate(foreign_value.clone(), values.empty_record())
+                .is_err()
+        );
+        assert!(
+            values
+                .annotate(values.atom_from_text("binary"), foreign_value.clone())
+                .is_err()
+        );
+        assert!(
+            values
                 .after_reflection(foreign_value.clone(), values.text("target"))
                 .is_err()
         );
@@ -5003,7 +5076,7 @@ mod tests {
         assert!(assembler.get_optional(&foreign_value, "member").is_err());
         assert!(assembler.to_binary(&foreign_value).is_err());
         assert!(assembler.binary_slice(&foreign_value, 0..1).is_err());
-        assert!(assembler.binary_at(&foreign_value, "member").is_err());
+        assert!(access_path(&assembler, &foreign_value, "member").is_err());
         assert!(assembler.create_volume(foreign_value.clone()).is_err());
         assert!(
             assembler
@@ -5088,7 +5161,7 @@ mod tests {
     }
 
     #[test]
-    fn binary_observation_contextualizes_a_nested_failure() {
+    fn binary_annotation_preserves_a_nested_failure_context() {
         let assembler = Assembler::new();
         let module = assembler
             .module(["binary_context"])
@@ -5103,16 +5176,15 @@ mod tests {
             .build()
             .expect("binary context fixture should compile");
 
-        let error = assembler
-            .binary_at(module.value(), "result")
+        let error = binary_at(&assembler, module.value(), "result")
             .expect_err("binary observation should demand the failed definition");
 
         assert_eq!(error.to_string(), "original");
-        assert_eq!(
-            diagnostic_contexts(&assembler, &error.diagnostic(&assembler.values()).unwrap())
-                .first()
-                .expect("binary observation should add an outer context"),
-            &eval::evaluation_context_frame("binary_extraction")
+        let contexts =
+            diagnostic_contexts(&assembler, &error.diagnostic(&assembler.values()).unwrap());
+        assert!(
+            contexts.first().and_then(definition_context).is_some(),
+            "semantic binary conversion should preserve the target's source context without a host-only frame"
         );
         assert_eq!(
             assembler
@@ -5155,19 +5227,33 @@ mod tests {
     }
 
     #[test]
-    fn composite_client_mismatches_remain_plain_host_errors() {
+    fn semantic_binary_conversion_preserves_structured_failures() {
         let assembler = Assembler::new();
-        let missing = assembler
-            .binary_at(&assembler.values().empty_record(), "missing")
+        let missing = binary_at(&assembler, &assembler.values().empty_record(), "missing")
             .expect_err("missing binary path should fail");
-        assert_eq!(missing.to_string(), "module did not define `missing`");
-        assert!(missing.structured_diagnostic().is_none());
+        assert!(missing.to_string().contains("requires a list or binary"));
+        assert!(missing.structured_diagnostic().is_some());
 
         let invalid = assembler
             .to_binary(&assembler.values().integer(42))
             .expect_err("a number is not binary text data");
-        assert_eq!(invalid.to_string(), "`value` is not binary text data");
-        assert!(invalid.structured_diagnostic().is_none());
+        assert!(invalid.to_string().contains("requires a list or binary"));
+        assert!(invalid.structured_diagnostic().is_some());
+
+        let invalid_item = assembler
+            .to_binary(
+                &assembler
+                    .values()
+                    .list([assembler.values().integer(256)])
+                    .expect("invalid byte fixture should still be a list"),
+            )
+            .expect_err("an out-of-range list member is not binary text data");
+        assert!(
+            invalid_item
+                .to_string()
+                .contains("cannot encode number `256`")
+        );
+        assert!(invalid_item.structured_diagnostic().is_some());
     }
 
     #[test]
@@ -6907,8 +6993,7 @@ mod tests {
             .expect("reflection annotation fixture should compile");
 
         assert_eq!(
-            assembler
-                .binary_at(module.value(), "result")
+            binary_at(&assembler, module.value(), "result")
                 .expect("winning reflection branch should complete"),
             b"ready".as_slice()
         );

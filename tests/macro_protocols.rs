@@ -1,4 +1,5 @@
-use glam::{Assembler, Value};
+use bytes::Bytes;
+use glam::{Assembler, Error, Value};
 
 fn compile(source: &str, module: &str) -> (Assembler, Value) {
     let assembler = Assembler::default();
@@ -8,6 +9,15 @@ fn compile(source: &str, module: &str) -> (Assembler, Value) {
         .build()
         .unwrap_or_else(|error| panic!("{module} macro protocol should compile: {error:#?}"));
     (assembler, built.into_value())
+}
+
+fn binary_at(assembler: &Assembler, root: &Value, path: &str) -> Result<Bytes, Error> {
+    let values = assembler.values();
+    let mut value = root.clone();
+    for part in path.split('.') {
+        value = values.access(&value, values.atom_from_text(part))?;
+    }
+    assembler.to_binary(&value)
 }
 
 fn assert_protocol_failure(source: &str, module: &str, expected: &str) {
@@ -35,8 +45,7 @@ fn recursive_logic_macro_compiles_nested_rules_and_runs_the_query() {
     let (assembler, module) = compile(include_str!("../samples/contracts/macros/logic.g"), "logic");
 
     assert_eq!(
-        assembler
-            .binary_at(&module, "asm.result")
+        binary_at(&assembler, &module, "asm.result")
             .expect("logic query should produce text solutions"),
         b"bob,carol".as_slice(),
     );
@@ -50,8 +59,7 @@ fn rewrite_rule_macro_replays_balanced_and_anchored_source_fragments() {
     );
 
     assert_eq!(
-        assembler
-            .binary_at(&module, "asm.result")
+        binary_at(&assembler, &module, "asm.result")
             .expect("selected rewrites should preserve groups and layouts"),
         b"rewrite-ok,layout-ok".as_slice(),
     );
@@ -75,20 +83,17 @@ fn packet_macro_compiles_nested_layout_into_a_codec_object() {
     );
 
     assert_eq!(
-        assembler
-            .binary_at(&module, "asm.result")
+        binary_at(&assembler, &module, "asm.result")
             .expect("packet encoder should produce a binary"),
         [1, 0, 2, b'H', b'i', 2, b'O', b'K'].as_slice(),
     );
     assert_eq!(
-        assembler
-            .binary_at(&module, "decoded_payload")
+        binary_at(&assembler, &module, "decoded_payload")
             .expect("packet decoder should recover the payload"),
         b"Hi".as_slice(),
     );
     assert_eq!(
-        assembler
-            .binary_at(&module, "decoded_variant")
+        binary_at(&assembler, &module, "decoded_variant")
             .expect("packet decoder should recover the selected variant"),
         b"OK".as_slice(),
     );

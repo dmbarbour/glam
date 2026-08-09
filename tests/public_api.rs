@@ -28,6 +28,19 @@ fn dictionary(values: &glam::Values, entries: impl IntoIterator<Item = (Value, V
         .expect("test dictionary should be local and keyable")
 }
 
+fn access_path(assembler: &Assembler, root: &Value, path: &str) -> Result<Value, glam::Error> {
+    let values = assembler.values();
+    let mut value = root.clone();
+    for part in path.split('.') {
+        value = values.access(&value, values.atom_from_text(part))?;
+    }
+    Ok(value)
+}
+
+fn binary_at(assembler: &Assembler, root: &Value, path: &str) -> Result<Bytes, glam::Error> {
+    assembler.to_binary(&access_path(assembler, root, path)?)
+}
+
 type DiagnosticEvents = Arc<Mutex<Vec<DiagnosticEvent>>>;
 
 fn collecting_builder() -> (AssemblerBuilder, DiagnosticEvents) {
@@ -100,10 +113,50 @@ fn public_api_builds_a_script_module_and_extracts_binary_data() {
 
     assert_eq!(module.diagnostics(), []);
     assert_eq!(
-        assembler
-            .binary_at(module.value(), "asm.result")
-            .expect("asm.result should be binary"),
+        binary_at(&assembler, module.value(), "asm.result").expect("asm.result should be binary"),
         b"Hello, library!".as_slice()
+    );
+}
+
+#[test]
+fn public_values_construct_semantic_access_and_annotations() {
+    let assembler = Assembler::default();
+    let values = assembler.values();
+    let static_record = record(&values, [("member", list(&values, [values.integer(65)]))]);
+    let static_access = values
+        .access(&static_record, values.atom_from_text("member"))
+        .expect("static accessor should be constructed lazily");
+    assert_eq!(
+        assembler
+            .to_binary(&static_access)
+            .expect("binary annotation should normalize the selected list"),
+        b"A".as_slice()
+    );
+
+    let dynamic_key = values.text("selected");
+    let dynamic_dict = dictionary(&values, [(dynamic_key.clone(), values.text("dynamic"))]);
+    let dynamic_access = values
+        .access(&dynamic_dict, dynamic_key)
+        .expect("computed accessor should retain its key expression");
+    assert_eq!(
+        assembler
+            .to_binary(&dynamic_access)
+            .expect("computed accessor should select its binary member"),
+        b"dynamic".as_slice()
+    );
+
+    let annotated = values
+        .annotate(
+            values.atom_from_text("binary"),
+            list(&values, [values.integer(66)]),
+        )
+        .expect("generic annotation should be constructed lazily");
+    assert_eq!(
+        assembler
+            .evaluate(&annotated)
+            .expect("binary annotation should evaluate")
+            .as_binary(),
+        Some(b"B".as_slice())
     );
 }
 
@@ -125,8 +178,7 @@ fn public_evaluation_errors_preserve_their_structured_diagnostic() {
         .build()
         .expect("structured failure fixture should build lazily");
 
-    let error = assembler
-        .binary_at(module.value(), "asm.result")
+    let error = binary_at(&assembler, module.value(), "asm.result")
         .expect_err("observing asm.result should raise its structured failure");
 
     assert_eq!(error.to_string(), "structured failure");
@@ -334,8 +386,7 @@ fn public_reasoning_report_exposes_retryable_blocked_errors() {
         .build()
         .expect("reflection fixture should compile");
     assert_eq!(
-        assembler
-            .binary_at(module.value(), "value")
+        binary_at(&assembler, module.value(), "value")
             .expect("ordinary value should schedule reflection"),
         b"value".as_slice()
     );
@@ -540,8 +591,7 @@ fn revoked_volume_get_exposes_a_lazy_error_through_reflection_eval() {
 
     let diagnostics = take_diagnostics(&diagnostics);
     assert_eq!(diagnostics.len(), 1);
-    let message = assembler
-        .binary_at(diagnostics[0].emission(), "msg.text")
+    let message = binary_at(&assembler, diagnostics[0].emission(), "msg.text")
         .expect("lazy diagnostic text should be observable");
     assert!(String::from_utf8_lossy(&message).contains("has been revoked"));
 }
@@ -898,20 +948,17 @@ fn assembler_owns_an_authoritative_reflection_environment() {
     let environment = assembler.reflection_environment();
 
     assert_eq!(
-        assembler
-            .binary_at(&environment, "glam.version")
+        binary_at(&assembler, &environment, "glam.version")
             .expect("assembler should inject its real version"),
         b"0.1.0".as_slice()
     );
     assert_eq!(
-        assembler
-            .binary_at(&environment, "glam.implementation.name")
+        binary_at(&assembler, &environment, "glam.implementation.name")
             .expect("assembler should identify its implementation"),
         b"rust-bootstrap".as_slice()
     );
     assert_eq!(
-        assembler
-            .binary_at(&environment, "glam.implementation.version")
+        binary_at(&assembler, &environment, "glam.implementation.version")
             .expect("assembler should expose its implementation version"),
         env!("CARGO_PKG_VERSION").as_bytes()
     );
@@ -922,8 +969,7 @@ fn assembler_owns_an_authoritative_reflection_environment() {
         values.atom_from_text("assembler")
     );
     assert_eq!(
-        assembler
-            .binary_at(&environment, "client.name")
+        binary_at(&assembler, &environment, "client.name")
             .expect("client environment fields should remain visible"),
         b"embedded".as_slice()
     );
@@ -971,9 +1017,7 @@ fn public_evaluation_leaves_automatic_reflection_tasks_for_explicit_drain() {
         .build()
         .expect("reflection module should build");
     assert_eq!(
-        assembler
-            .binary_at(module.value(), "value")
-            .expect("ordinary value should evaluate"),
+        binary_at(&assembler, module.value(), "value").expect("ordinary value should evaluate"),
         b"value".as_slice()
     );
     assert!(take_diagnostics(&diagnostics).is_empty());
@@ -1029,8 +1073,7 @@ fn replacing_retained_diagnostic_subscriber_preserves_scheduled_reasoning() {
         .build()
         .expect("reflection module should build");
     assert_eq!(
-        assembler
-            .binary_at(module.value(), "value")
+        binary_at(&assembler, module.value(), "value")
             .expect("ordinary value should schedule automatic reflection"),
         b"value".as_slice()
     );
@@ -1076,8 +1119,7 @@ fn public_api_can_load_sources_and_binaries_from_a_custom_host() {
         .expect("virtual module should build");
 
     assert_eq!(
-        assembler
-            .binary_at(module.value(), "asm.result")
+        binary_at(&assembler, module.value(), "asm.result")
             .expect("virtual binary import should evaluate"),
         b"virtual bytes".as_slice()
     );
@@ -1104,7 +1146,7 @@ fn public_api_can_load_from_an_artifact_source_system() {
         .expect("artifact source should build");
 
     assert_eq!(
-        assembler.binary_at(module.value(), "asm.result").unwrap(),
+        binary_at(&assembler, module.value(), "asm.result").unwrap(),
         b"artifact bytes".as_slice()
     );
 }
@@ -1190,8 +1232,7 @@ fn top_level_file_inputs_may_be_absolute() {
         .build()
         .expect("top-level callers may supply an absolute source path");
     assert_eq!(
-        assembler
-            .binary_at(module.value(), "asm.result")
+        binary_at(&assembler, module.value(), "asm.result")
             .expect("absolute-path module should assemble"),
         b"absolute".as_slice()
     );
@@ -1316,8 +1357,7 @@ fn imported_source_diagnostics_include_the_import_chain() {
         .build()
         .expect("the lazy imported source is not observed during module construction");
 
-    let error = assembler
-        .binary_at(module.value(), "asm.result")
+    let error = binary_at(&assembler, module.value(), "asm.result")
         .expect_err("observing the imported definition should compile and reject child.g");
     let diagnostic = error
         .diagnostic(&assembler.values())
@@ -1341,8 +1381,7 @@ fn imported_source_diagnostics_include_the_import_chain() {
         String::from_utf8_lossy(&child_source)
     );
 
-    assembler
-        .binary_at(module.value(), "asm.result")
+    binary_at(&assembler, module.value(), "asm.result")
         .expect_err("the cached imported failure should remain observable");
     let diagnostics = take_diagnostics(&diagnostics);
     assert_eq!(
@@ -1389,8 +1428,7 @@ fn missing_module_and_binary_imports_retain_requesting_origin() {
             .build()
             .expect("missing imports should remain lazy until observed");
 
-        let error = assembler
-            .binary_at(module.value(), "asm.result")
+        let error = binary_at(&assembler, module.value(), "asm.result")
             .expect_err("observing the missing import should fail");
         let diagnostic = error
             .diagnostic(&assembler.values())
