@@ -2847,6 +2847,23 @@ fn poison_lazy_cycle(
 }
 
 impl EvaluationWorkCoordinator {
+    pub(crate) fn poll_runtime_work(self: &Arc<Self>) -> bool {
+        match self.select_runtime_pump() {
+            coordinator::CoordinatorSelection::ClientDemand(claimed) => {
+                self.poll_claimed_client_demand(claimed);
+                true
+            }
+            coordinator::CoordinatorSelection::Task(work) => {
+                self.poll_claimed_task(work);
+                true
+            }
+            coordinator::CoordinatorSelection::Spark(_) => {
+                unreachable!("the runtime pump must not claim best-effort spark work")
+            }
+            coordinator::CoordinatorSelection::None => false,
+        }
+    }
+
     fn poll_claimed_task(self: &Arc<Self>, work: ClaimedTaskWork) {
         let mut claimed = ClaimedTask::new(self.clone(), work);
         let poll = claimed.poll(TASK_POLL_QUANTUM);
@@ -3990,6 +4007,24 @@ mod tests {
             if let Some(signal) = self.0.take() {
                 signal.send(()).expect("test receiver should remain open");
             }
+            EvaluationMachinePoll::Complete(crate::core::keys::unit_value())
+        }
+    }
+
+    struct SpawnSignal {
+        target: EvalContext,
+        signal: Option<mpsc::Sender<()>>,
+    }
+
+    impl EvaluationTaskMachine for SpawnSignal {
+        fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+            let signal = self
+                .signal
+                .take()
+                .expect("spawning test task must be polled only once");
+            self.target
+                .schedule_task(move |_| Ok(Box::new(Signal(Some(signal)))))
+                .expect("runtime pump should permit cross-session task admission");
             EvaluationMachinePoll::Complete(crate::core::keys::unit_value())
         }
     }
@@ -6123,6 +6158,214 @@ mod tests {
             0,
             "a zero-worker executor must discard sparks before retaining work"
         );
+    }
+
+    #[test]
+    fn runtime_pump_follows_new_work_into_another_session() {
+        let fixture = SameRuntimeFixture::new();
+        let source = fixture.context();
+        let target = fixture.context();
+        let (signal, observed) = mpsc::channel();
+        let target_context = EvalContext::clone(&target);
+        let parent = source
+            .schedule_task(move |_| {
+                Ok(Box::new(SpawnSignal {
+                    target: target_context,
+                    signal: Some(signal),
+                }))
+            })
+            .expect("cross-session spawning task should schedule");
+
+        fixture.runtime.pump_until_stable();
+
+        observed
+            .recv_timeout(Duration::from_secs(2))
+            .expect("runtime pump should execute the newly admitted target-session task");
+        assert!(matches!(
+            source.poll_reflection_task(&parent),
+            EvaluationWaitPoll::Complete(_)
+        ));
+        assert_eq!(
+            source
+                .coordinator()
+                .expect("coordinator should remain live")
+                .ready_task_count(),
+            0
+        );
+    }
+
+    #[test]
+    fn runtime_pump_parks_while_a_worker_owns_progress() {
+        let fixture = SameRuntimeFixture::new();
+        fixture
+            .runtime
+            .activate_workers(1)
+            .expect("test worker should activate");
+        let context = fixture.context();
+        let (started, worker_started) = mpsc::channel();
+        let (release, worker_release) = mpsc::channel();
+        context
+            .schedule_task(move |_| {
+                Ok(Box::new(CompleteAfterRelease {
+                    started: Some(started),
+                    release: worker_release,
+                }))
+            })
+            .expect("worker-owned task should schedule");
+        worker_started
+            .recv_timeout(Duration::from_secs(2))
+            .expect("worker should claim the task");
+
+        let runtime = fixture.runtime.clone();
+        let (finished, pump_finished) = mpsc::channel();
+        let pump = std::thread::spawn(move || {
+            runtime.pump_until_stable();
+            finished.send(()).expect("pump receiver should remain live");
+        });
+        assert!(
+            pump_finished
+                .recv_timeout(Duration::from_millis(50))
+                .is_err(),
+            "runtime pump must park rather than report stability or spin past worker-owned work"
+        );
+
+        release.send(()).expect("worker should remain live");
+        pump_finished
+            .recv_timeout(Duration::from_secs(2))
+            .expect("worker release should wake the parked runtime pump");
+        pump.join().expect("runtime pump should finish cleanly");
+    }
+
+    #[test]
+    fn runtime_pump_abandons_queued_and_blocked_sparks() {
+        let fixture = SameRuntimeFixture::new();
+        let context = fixture.context();
+        let coordinator = context.coordinator().expect("coordinator should be live");
+        coordinator.executor_started(1);
+
+        context.spark(Value::Lazy(inert_lazy_for(
+            context.values(),
+            "queued runtime-pump spark",
+        )));
+        assert_eq!(coordinator.spark_work_counts(), (1, 0, 0));
+        fixture.runtime.pump_until_stable();
+        assert_eq!(coordinator.spark_work_counts(), (0, 0, 0));
+
+        let promise = PromisedValue::new(context.values(), "blocked runtime-pump spark");
+        context.spark(Value::Promised(promise.clone()));
+        park_next_spark(&coordinator);
+        assert_eq!(coordinator.spark_work_counts(), (0, 0, 1));
+        fixture.runtime.pump_until_stable();
+        assert_eq!(coordinator.spark_work_counts(), (0, 0, 0));
+        promise
+            .set(context.values().unit())
+            .expect("retired spark dependency may complete harmlessly");
+        assert_eq!(coordinator.retained_spark_count(), 0);
+    }
+
+    #[test]
+    fn runtime_pump_snapshot_is_observational() {
+        let fixture = SameRuntimeFixture::new();
+        let context = fixture.context();
+        let coordinator = context.coordinator().expect("coordinator should be live");
+        coordinator.executor_started(1);
+        context.spark(Value::Lazy(inert_lazy_for(
+            context.values(),
+            "snapshot-retained spark",
+        )));
+        let generation = coordinator.work_generation();
+
+        let snapshot = coordinator.runtime_pump_snapshot();
+
+        assert!(snapshot.abandonable_sparks);
+        assert_eq!(coordinator.work_generation(), generation);
+        assert_eq!(coordinator.spark_work_counts(), (1, 0, 0));
+        assert_eq!(coordinator.abandon_quiescent_sparks(), 1);
+    }
+
+    #[test]
+    fn spark_abandonment_wakes_useful_work_for_another_pump_pass() {
+        let fixture = SameRuntimeFixture::new();
+        let context = fixture.context();
+        let coordinator = context.coordinator().expect("coordinator should be live");
+        coordinator.executor_started(1);
+        let promise = PromisedValue::new(context.values(), "spark-owned deferred wait");
+        let followed = promise.clone();
+        let lazy = LazyValue::deferred(context.values(), "spark-owned lazy claim", move |_| {
+            Ok(Value::Promised(followed.clone()))
+        });
+        let wait = context
+            .lazy_task(&lazy, {
+                let promise = promise.clone();
+                move |_| Box::new(AwaitPromise { promise })
+            })
+            .expect("deferred producer should register");
+        assert!(coordinator.promote_deferred_wait(&wait));
+        let waiter = context
+            .schedule_task({
+                let wait = wait.clone();
+                move |task_context| {
+                    Ok(Box::new(Await {
+                        context: task_context,
+                        dependency: wait,
+                    }))
+                }
+            })
+            .expect("useful waiter should schedule");
+
+        context.spark(Value::Lazy(inert_lazy_for(
+            context.values(),
+            "manually blocked spark",
+        )));
+        let claimed = claim_next_spark(&coordinator);
+        coordinator.release_spark(
+            claimed,
+            coordinator::SparkWorkPoll::Blocked(coordinator::WorkDependency::Wait(wait)),
+        );
+
+        fixture.runtime.pump_until_stable();
+
+        assert!(matches!(
+            context.poll_reflection_task(&waiter),
+            EvaluationWaitPoll::Failed(_)
+        ));
+        assert_eq!(coordinator.spark_work_counts(), (0, 0, 0));
+        assert_eq!(coordinator.ready_task_count(), 0);
+    }
+
+    #[test]
+    fn runtime_pump_does_not_abandon_a_worker_owned_spark() {
+        let fixture = SameRuntimeFixture::new();
+        let context = fixture.context();
+        let coordinator = context.coordinator().expect("coordinator should be live");
+        coordinator.executor_started(1);
+        context.spark(Value::Lazy(inert_lazy_for(
+            context.values(),
+            "worker-owned runtime-pump spark",
+        )));
+        let claimed = claim_next_spark(&coordinator);
+        assert_eq!(coordinator.spark_work_counts(), (0, 1, 0));
+
+        let runtime = fixture.runtime.clone();
+        let (finished, pump_finished) = mpsc::channel();
+        let pump = std::thread::spawn(move || {
+            runtime.pump_until_stable();
+            finished.send(()).expect("pump receiver should remain live");
+        });
+        assert!(
+            pump_finished
+                .recv_timeout(Duration::from_millis(50))
+                .is_err(),
+            "running spark must keep runtime pumping active"
+        );
+        assert_eq!(coordinator.spark_work_counts(), (0, 1, 0));
+
+        coordinator.release_spark(claimed, coordinator::SparkWorkPoll::Complete);
+        pump_finished
+            .recv_timeout(Duration::from_secs(2))
+            .expect("returning spark worker should wake the pump");
+        pump.join().expect("runtime pump should finish cleanly");
+        assert_eq!(coordinator.spark_work_counts(), (0, 0, 0));
     }
 
     fn wait_for_spark_work_counts(

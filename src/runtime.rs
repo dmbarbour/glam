@@ -6,7 +6,7 @@
 
 use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, Condvar, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::core::{CoreValueFactory, Value};
 
@@ -43,21 +43,29 @@ pub(crate) fn allocate_evaluation_runtime_id() -> EvaluationRuntimeId {
 /// transition. Component locks are still acquired and released separately.
 pub(crate) struct RuntimeMutationAdmission {
     gate: RwLock<()>,
+    activity: Arc<RuntimeActivityState>,
 }
 
 impl RuntimeMutationAdmission {
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
             gate: RwLock::new(()),
+            activity: RuntimeActivityState::new(),
         })
+    }
+
+    pub(crate) fn activity(&self) -> Arc<RuntimeActivityState> {
+        self.activity.clone()
     }
 
     pub(crate) fn mutation_guard(&self) -> RuntimeMutationGuard<'_> {
         RuntimeMutationGuard {
-            _guard: self
-                .gate
-                .read()
-                .expect("runtime settlement gate should not be poisoned"),
+            guard: Some(
+                self.gate
+                    .read()
+                    .expect("runtime settlement gate should not be poisoned"),
+            ),
+            activity: &self.activity,
         }
     }
 
@@ -70,11 +78,86 @@ impl RuntimeMutationAdmission {
 }
 
 pub(crate) struct RuntimeMutationGuard<'a> {
-    _guard: RwLockReadGuard<'a, ()>,
+    guard: Option<RwLockReadGuard<'a, ()>>,
+    activity: &'a RuntimeActivityState,
 }
 
 pub(crate) struct RuntimeSettlementGuard<'a> {
     _guard: RwLockWriteGuard<'a, ()>,
+}
+
+impl Drop for RuntimeMutationGuard<'_> {
+    fn drop(&mut self) {
+        drop(self.guard.take());
+        // This is deliberately conservative: the activity generation is only
+        // a parking aid, so an unchanged guarded pass may produce a harmless
+        // extra wake. Semantic observation and readiness use their own
+        // authoritative generations.
+        self.activity.advance();
+    }
+}
+
+/// Non-authoritative notification state used only to park a runtime pump.
+///
+/// Every guarded runtime transition advances this generation after releasing
+/// the admission lock. A waiter snapshots it after its own guarded inspection,
+/// rechecks authoritative state, then sleeps only while the snapshot remains
+/// current. Transactions and readiness must never validate this generation.
+pub(crate) struct RuntimeActivityState {
+    generation: Mutex<u64>,
+    changed: Condvar,
+    #[cfg(test)]
+    waits: AtomicU64,
+}
+
+impl RuntimeActivityState {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            generation: Mutex::new(0),
+            changed: Condvar::new(),
+            #[cfg(test)]
+            waits: AtomicU64::new(0),
+        })
+    }
+
+    pub(crate) fn current(&self) -> u64 {
+        *self
+            .generation
+            .lock()
+            .expect("runtime activity mutex should not be poisoned")
+    }
+
+    fn advance(&self) {
+        let mut generation = self
+            .generation
+            .lock()
+            .expect("runtime activity mutex should not be poisoned");
+        *generation = generation
+            .checked_add(1)
+            .expect("runtime activity generations exhausted");
+        drop(generation);
+        self.changed.notify_all();
+    }
+
+    pub(crate) fn wait_for_change(&self, observed: u64) {
+        #[cfg(test)]
+        self.waits.fetch_add(1, Ordering::Relaxed);
+        let mut generation = self
+            .generation
+            .lock()
+            .expect("runtime activity mutex should not be poisoned");
+        while *generation == observed {
+            generation = self
+                .changed
+                .wait(generation)
+                .expect("runtime activity mutex should not be poisoned");
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn wait_count(&self) -> u64 {
+        self.waits.load(Ordering::Relaxed)
+    }
 }
 
 /// One runtime-owned root whose recursive evaluator representation remains

@@ -1026,6 +1026,13 @@ pub(super) enum CoordinatorSelection {
     None,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RuntimePumpSnapshot {
+    pub(crate) useful_ready: bool,
+    pub(crate) progress_owned: bool,
+    pub(crate) abandonable_sparks: bool,
+}
+
 impl fmt::Debug for EvaluationWorkCoordinator {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let state = self
@@ -1651,6 +1658,103 @@ impl EvaluationWorkCoordinator {
             self.work_available.notify_all();
         }
         selection
+    }
+
+    /// Claims one lifecycle-bearing work item for the host runtime pump.
+    ///
+    /// Unlike worker selection, this deliberately ignores sparks. Sparks are
+    /// best-effort hints which only workers execute; the host pump normalizes
+    /// any unclaimed spark records separately once useful work is quiescent.
+    pub(super) fn select_runtime_pump(&self) -> CoordinatorSelection {
+        let mutation = self.admission.mutation_guard();
+        let (selection, changed) = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            let initial_generation = state.work_generation;
+            let had_ready_task = !state.ready_tasks.is_empty();
+            let had_ready_client = !state.ready_client_demands.is_empty();
+            let selection = claim_ready_client_demand(&mut state)
+                .map(CoordinatorSelection::ClientDemand)
+                .or_else(|| claim_ready_task(&mut state, None).map(CoordinatorSelection::Task))
+                .unwrap_or(CoordinatorSelection::None);
+            if !matches!(selection, CoordinatorSelection::None)
+                || had_ready_task
+                || had_ready_client
+            {
+                state.work_generation = state.work_generation.wrapping_add(1);
+            }
+            (selection, state.work_generation != initial_generation)
+        };
+        drop(mutation);
+        if changed {
+            self.work_available.notify_all();
+        }
+        selection
+    }
+
+    /// Inspects scheduler activity while the caller holds settlement
+    /// admission exclusively. This method itself is observational.
+    pub(crate) fn runtime_pump_snapshot(&self) -> RuntimePumpSnapshot {
+        let state = self
+            .state
+            .lock()
+            .expect("evaluation work coordinator was poisoned");
+        RuntimePumpSnapshot {
+            useful_ready: state.work.values().any(|record| {
+                matches!(
+                    record.kind,
+                    WorkKind::Reflection(_) | WorkKind::Deferred(_) | WorkKind::ClientDemand(_)
+                ) && matches!(record.state, WorkState::Queued)
+            }),
+            progress_owned: state.work.values().any(|record| {
+                matches!(record.state, WorkState::Running | WorkState::Terminalizing)
+            }),
+            abandonable_sparks: state.work.values().any(|record| {
+                matches!(record.kind, WorkKind::Spark(_))
+                    && matches!(record.state, WorkState::Queued | WorkState::Blocked)
+            }),
+        }
+    }
+
+    /// Removes every queued or blocked best-effort spark without touching a
+    /// worker-owned record. Detached dependencies and values are released only
+    /// after coordinator and mutation locks have been dropped.
+    pub(crate) fn abandon_quiescent_sparks(&self) -> usize {
+        let mutation = self.admission.mutation_guard();
+        let retired = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            let ids = state
+                .work
+                .iter()
+                .filter_map(|(id, record)| {
+                    (matches!(record.kind, WorkKind::Spark(_))
+                        && matches!(record.state, WorkState::Queued | WorkState::Blocked))
+                    .then_some(*id)
+                })
+                .collect::<Vec<_>>();
+            let retired = ids
+                .into_iter()
+                .filter_map(|id| detach_spark(&mut state, id))
+                .collect::<Vec<_>>();
+            if !retired.is_empty() {
+                state.work_generation = state.work_generation.wrapping_add(1);
+            }
+            retired
+        };
+        let count = retired.len();
+        drop(mutation);
+        if count != 0 {
+            self.work_available.notify_all();
+        }
+        for record in retired {
+            record.abandon();
+        }
+        count
     }
 
     /// Restores coordinator-claimed task work which was selected but not

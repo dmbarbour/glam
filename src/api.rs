@@ -2711,6 +2711,18 @@ impl RuntimeSharedResources {
             .root()
             .clone()
     }
+
+    fn has_running_delivery(&self) -> bool {
+        self.transactions
+            .state
+            .lock()
+            .expect("runtime transaction mutex should not be poisoned")
+            .events
+            .outputs
+            .records
+            .values()
+            .any(|record| record.state == RuntimeDeliveryState::Running)
+    }
 }
 
 impl EvaluationRuntime {
@@ -2905,6 +2917,48 @@ impl EvaluationRuntime {
         let acknowledged = removed.is_some();
         drop(removed);
         acknowledged
+    }
+
+    /// Pumps useful lifecycle work across every evaluation session until the
+    /// runtime reaches a stable instant.
+    ///
+    /// This transitional internal API does not construct a readiness report.
+    /// It waits for work currently owned by a worker or delivery callback,
+    /// abandons only unclaimed best-effort sparks, and leaves queued external
+    /// output for its host adapter.
+    #[doc(hidden)]
+    pub fn pump_until_stable(&self) {
+        let admission = &self.state.shared_resources.mutation_admission;
+        let activity = admission.activity();
+        loop {
+            if self.state.work.poll_runtime_work() {
+                continue;
+            }
+
+            if self.state.work.abandon_quiescent_sparks() != 0 {
+                // Releasing a spark's lazy claim may make lifecycle work
+                // runnable, so always begin another ordinary pump pass.
+                continue;
+            }
+
+            let observed_activity = activity.current();
+            let Some(settlement) = admission.try_settlement_guard() else {
+                activity.wait_for_change(observed_activity);
+                continue;
+            };
+            let work = self.state.work.runtime_pump_snapshot();
+            let running_delivery = self.state.shared_resources.has_running_delivery();
+            drop(settlement);
+
+            if work.useful_ready || work.abandonable_sparks {
+                continue;
+            }
+            if work.progress_owned || running_delivery {
+                activity.wait_for_change(observed_activity);
+                continue;
+            }
+            return;
+        }
     }
 
     /// Internal activity inspection for the scheduler pump. Retained failures
@@ -5920,6 +5974,56 @@ mod tests {
         waiter.join().expect("broad observer should wake cleanly");
     }
 
+    #[test]
+    fn runtime_pump_waits_for_in_flight_mutation_admission() {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let activity = runtime.state.shared_resources.mutation_admission.activity();
+        let mutation = runtime.mutation_guard();
+        let pumping_runtime = runtime.clone();
+        let (finished, observed) = std::sync::mpsc::channel();
+        let pump = std::thread::spawn(move || {
+            pumping_runtime.pump_until_stable();
+            finished.send(()).expect("pump receiver should remain live");
+        });
+
+        assert!(
+            observed
+                .recv_timeout(std::time::Duration::from_millis(50))
+                .is_err(),
+            "an in-flight guarded publication must prevent a stable pump result"
+        );
+        drop(mutation);
+        observed
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("releasing mutation admission should wake the runtime pump");
+        pump.join().expect("runtime pump should finish cleanly");
+        assert!(
+            activity.wait_count() > 0,
+            "in-flight admission should park the pump on runtime activity"
+        );
+    }
+
+    #[test]
+    fn runtime_activity_cannot_lose_a_wake_before_parking() {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let activity = runtime.state.shared_resources.mutation_admission.activity();
+        let observed = activity.current();
+
+        // Publish after the pump-like snapshot but before its wait call.
+        drop(runtime.mutation_guard());
+        let (finished, wake_observed) = std::sync::mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            activity.wait_for_change(observed);
+            finished.send(()).expect("wake receiver should remain live");
+        });
+        wake_observed
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("a publication between classification and parking must not be lost");
+        waiter
+            .join()
+            .expect("activity waiter should finish cleanly");
+    }
+
     fn decode_test_integer(value: Value) -> Result<i64, Error> {
         value
             .as_number_text()
@@ -5965,6 +6069,63 @@ mod tests {
             crate::reflection::StoreCommitResult::Committed
         );
         assert!(runtime.has_delivery_activity());
+    }
+
+    #[test]
+    fn runtime_pump_waits_for_running_output_delivery() {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let activity = runtime.state.shared_resources.mutation_admission.activity();
+        let release = Arc::new(std::sync::Barrier::new(2));
+        let callback_release = release.clone();
+        let (entered, callback_entered) = std::sync::mpsc::channel();
+        let endpoint = runtime
+            .output_endpoint(decode_test_integer, move |_: i64| {
+                entered
+                    .send(())
+                    .expect("delivery observer should remain live");
+                callback_release.wait();
+                Ok(())
+            })
+            .expect("output endpoint should register");
+        let (store, mut events) = input_transaction(&runtime);
+        events
+            .write(&endpoint.writer(), runtime.values().integer(1))
+            .expect("output intent should reserve a delivery");
+        assert_eq!(
+            runtime.try_commit_transaction(&store, &events),
+            crate::reflection::StoreCommitResult::Committed
+        );
+
+        let delivery = endpoint.delivery();
+        let delivery_thread = std::thread::spawn(move || delivery.deliver_next().unwrap());
+        callback_entered
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("delivery callback should begin");
+
+        let pumping_runtime = runtime.clone();
+        let (finished, pump_finished) = std::sync::mpsc::channel();
+        let pump = std::thread::spawn(move || {
+            pumping_runtime.pump_until_stable();
+            finished.send(()).expect("pump receiver should remain live");
+        });
+        assert!(
+            pump_finished
+                .recv_timeout(std::time::Duration::from_millis(50))
+                .is_err(),
+            "a running delivery must keep the runtime pump parked"
+        );
+
+        release.wait();
+        assert!(delivery_thread.join().unwrap().is_some());
+        pump_finished
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("delivery terminalization should wake the runtime pump");
+        pump.join().expect("runtime pump should finish cleanly");
+        assert!(!runtime.has_delivery_activity());
+        assert!(
+            activity.wait_count() > 0,
+            "running delivery should park the pump rather than busy-polling"
+        );
     }
 
     #[test]
