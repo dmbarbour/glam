@@ -33,8 +33,10 @@ use crate::diagnostic::{CompilationInvocationId, CompilationTrace, Severity};
 use crate::eval;
 use crate::evaluation::{
     EvalContext, EvaluationExecutor, EvaluationSession, EvaluationSessionId, EvaluationSessionRun,
-    EvaluationTaskId, EvaluationUnfinishedState, EvaluationWorkCoordinator, ReflectionTaskProfile,
-    RuntimeObservationEpoch, RuntimeObservationState,
+    EvaluationTaskId, EvaluationUnfinishedState, EvaluationWorkCoordinator, ExitIntent,
+    ReflectionTaskProfile, RuntimeCoordinatorReadiness, RuntimeDeadlockWorkSnapshot,
+    RuntimeDependencySnapshot, RuntimeExitSnapshot, RuntimeObservationEpoch,
+    RuntimeObservationState, RuntimeWorkKindSnapshot, RuntimeWorkStateSnapshot,
 };
 use crate::g_syntax::compile_source;
 use crate::interaction_net::{NetBuildError, NetBuilder as CoreNetBuilder, Port as CorePort};
@@ -1567,6 +1569,327 @@ pub struct EvaluationRuntime {
     default_reflection_profile: Arc<ReflectionTaskProfile>,
 }
 
+/// Stable, observational classification of one runtime instant.
+#[doc(hidden)]
+#[derive(Clone)]
+pub enum RuntimeReadiness {
+    Busy,
+    Ready(QuiescenceSnapshot),
+    Deadlocked(DeadlockSnapshot),
+}
+
+impl fmt::Debug for RuntimeReadiness {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Busy => formatter.write_str("Busy"),
+            Self::Ready(snapshot) => formatter.debug_tuple("Ready").field(snapshot).finish(),
+            Self::Deadlocked(snapshot) => {
+                formatter.debug_tuple("Deadlocked").field(snapshot).finish()
+            }
+        }
+    }
+}
+
+/// Authoritative revisions captured by a readiness probe.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RuntimeReadinessStamp {
+    work_generation: u64,
+    observation_epoch: u64,
+}
+
+impl RuntimeReadinessStamp {
+    pub fn work_generation(&self) -> u64 {
+        self.work_generation
+    }
+
+    pub fn observation_epoch(&self) -> u64 {
+        self.observation_epoch
+    }
+}
+
+/// One task disposition proposed by a stable exit vote.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuntimeDisposition {
+    work_id: u64,
+    session_id: u64,
+    task_id: u64,
+    kind: RuntimeDispositionKind,
+}
+
+impl RuntimeDisposition {
+    pub fn work_id(&self) -> u64 {
+        self.work_id
+    }
+
+    pub fn session_id(&self) -> u64 {
+        self.session_id
+    }
+
+    pub fn task_id(&self) -> u64 {
+        self.task_id
+    }
+
+    pub fn kind(&self) -> &RuntimeDispositionKind {
+        &self.kind
+    }
+}
+
+/// Payload of one proposed runtime disposition.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RuntimeDispositionKind {
+    ExitSuccess,
+    ExitError(Value),
+}
+
+/// Retained evidence that every unfinished participant voted to exit.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct QuiescenceSnapshot {
+    runtime: EvaluationRuntime,
+    stamp: RuntimeReadinessStamp,
+    dispositions: Vec<RuntimeDisposition>,
+    reflection: crate::reflection::StoreSnapshot,
+}
+
+impl fmt::Debug for QuiescenceSnapshot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("QuiescenceSnapshot")
+            .field("runtime", &self.runtime.id())
+            .field("stamp", &self.stamp)
+            .field("dispositions", &self.dispositions)
+            .finish_non_exhaustive()
+    }
+}
+
+impl QuiescenceSnapshot {
+    pub fn runtime_id(&self) -> EvaluationRuntimeId {
+        self.runtime.id()
+    }
+
+    pub fn stamp(&self) -> RuntimeReadinessStamp {
+        self.stamp
+    }
+
+    pub fn dispositions(&self) -> &[RuntimeDisposition] {
+        &self.dispositions
+    }
+
+    pub fn reflection(&self) -> &crate::reflection::StoreSnapshot {
+        &self.reflection
+    }
+}
+
+/// Kind of unfinished work retained in a deadlock report.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuntimeWorkKind {
+    ReflectionTask,
+    DeferredEvaluation,
+    ClientDemand,
+    Spark,
+}
+
+/// Stable non-runnable state retained in a deadlock report.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuntimeWorkState {
+    Dormant,
+    Reserved,
+    Blocked,
+}
+
+/// Producer edge for one blocked runtime participant.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RuntimeDependency {
+    TaskWait {
+        wait_id: u64,
+        task_id: u64,
+        session_id: u64,
+    },
+    Promise {
+        promise_id: u64,
+        producer: Option<RuntimeTaskWait>,
+    },
+    Synthetic {
+        id: u64,
+    },
+}
+
+/// Task-producing wait attached to a promise dependency.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RuntimeTaskWait {
+    wait_id: u64,
+    task_id: u64,
+    session_id: u64,
+}
+
+impl RuntimeTaskWait {
+    pub fn wait_id(&self) -> u64 {
+        self.wait_id
+    }
+
+    pub fn task_id(&self) -> u64 {
+        self.task_id
+    }
+
+    pub fn session_id(&self) -> u64 {
+        self.session_id
+    }
+}
+
+/// One unfinished participant retained by a deadlock snapshot.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuntimeDeadlockWork {
+    work_id: u64,
+    session_id: u64,
+    task_id: Option<u64>,
+    kind: RuntimeWorkKind,
+    state: RuntimeWorkState,
+    dependency: Option<RuntimeDependency>,
+    observed_epoch: Option<u64>,
+}
+
+impl RuntimeDeadlockWork {
+    pub fn work_id(&self) -> u64 {
+        self.work_id
+    }
+
+    pub fn session_id(&self) -> u64 {
+        self.session_id
+    }
+
+    pub fn task_id(&self) -> Option<u64> {
+        self.task_id
+    }
+
+    pub fn kind(&self) -> RuntimeWorkKind {
+        self.kind
+    }
+
+    pub fn state(&self) -> RuntimeWorkState {
+        self.state
+    }
+
+    pub fn dependency(&self) -> Option<&RuntimeDependency> {
+        self.dependency.as_ref()
+    }
+
+    pub fn observed_epoch(&self) -> Option<u64> {
+        self.observed_epoch
+    }
+}
+
+/// Retained stable evidence that at least one participant cannot progress.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct DeadlockSnapshot {
+    runtime: EvaluationRuntime,
+    stamp: RuntimeReadinessStamp,
+    dispositions: Vec<RuntimeDisposition>,
+    unfinished: Vec<RuntimeDeadlockWork>,
+    reflection: crate::reflection::StoreSnapshot,
+}
+
+impl fmt::Debug for DeadlockSnapshot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DeadlockSnapshot")
+            .field("runtime", &self.runtime.id())
+            .field("stamp", &self.stamp)
+            .field("dispositions", &self.dispositions)
+            .field("unfinished", &self.unfinished)
+            .finish_non_exhaustive()
+    }
+}
+
+impl DeadlockSnapshot {
+    pub fn runtime_id(&self) -> EvaluationRuntimeId {
+        self.runtime.id()
+    }
+
+    pub fn stamp(&self) -> RuntimeReadinessStamp {
+        self.stamp
+    }
+
+    pub fn dispositions(&self) -> &[RuntimeDisposition] {
+        &self.dispositions
+    }
+
+    pub fn unfinished(&self) -> &[RuntimeDeadlockWork] {
+        &self.unfinished
+    }
+
+    pub fn reflection(&self) -> &crate::reflection::StoreSnapshot {
+        &self.reflection
+    }
+}
+
+fn runtime_disposition_from_snapshot(snapshot: RuntimeExitSnapshot) -> RuntimeDisposition {
+    RuntimeDisposition {
+        work_id: snapshot.work.get(),
+        session_id: snapshot.session.get(),
+        task_id: snapshot.task.get(),
+        kind: match snapshot.intent {
+            ExitIntent::Success => RuntimeDispositionKind::ExitSuccess,
+            ExitIntent::Error(message) => RuntimeDispositionKind::ExitError(Value(message)),
+        },
+    }
+}
+
+fn runtime_dependency_from_snapshot(snapshot: RuntimeDependencySnapshot) -> RuntimeDependency {
+    match snapshot {
+        RuntimeDependencySnapshot::Wait {
+            wait,
+            producer,
+            session,
+        } => RuntimeDependency::TaskWait {
+            wait_id: wait,
+            task_id: producer.get(),
+            session_id: session.get(),
+        },
+        RuntimeDependencySnapshot::Promise { promise, producer } => RuntimeDependency::Promise {
+            promise_id: promise,
+            producer: producer.map(|(wait_id, task, session)| RuntimeTaskWait {
+                wait_id,
+                task_id: task.get(),
+                session_id: session.get(),
+            }),
+        },
+        #[cfg(test)]
+        RuntimeDependencySnapshot::Test(id) => RuntimeDependency::Synthetic { id },
+    }
+}
+
+fn runtime_deadlock_work_from_snapshot(
+    snapshot: RuntimeDeadlockWorkSnapshot,
+) -> RuntimeDeadlockWork {
+    RuntimeDeadlockWork {
+        work_id: snapshot.work.get(),
+        session_id: snapshot.session.get(),
+        task_id: snapshot.task.map(EvaluationTaskId::get),
+        kind: match snapshot.kind {
+            RuntimeWorkKindSnapshot::ReflectionTask => RuntimeWorkKind::ReflectionTask,
+            RuntimeWorkKindSnapshot::DeferredEvaluation => RuntimeWorkKind::DeferredEvaluation,
+            RuntimeWorkKindSnapshot::ClientDemand => RuntimeWorkKind::ClientDemand,
+            RuntimeWorkKindSnapshot::Spark => RuntimeWorkKind::Spark,
+        },
+        state: match snapshot.state {
+            RuntimeWorkStateSnapshot::Dormant => RuntimeWorkState::Dormant,
+            RuntimeWorkStateSnapshot::Reserved => RuntimeWorkState::Reserved,
+            RuntimeWorkStateSnapshot::Blocked => RuntimeWorkState::Blocked,
+        },
+        dependency: snapshot.dependency.map(runtime_dependency_from_snapshot),
+        observed_epoch: snapshot.observed_epoch.map(RuntimeObservationEpoch::get),
+    }
+}
+
 struct RuntimeState {
     executor: Arc<EvaluationExecutor>,
     work: Arc<EvaluationWorkCoordinator>,
@@ -2958,6 +3281,80 @@ impl EvaluationRuntime {
                 continue;
             }
             return;
+        }
+    }
+
+    /// Observes one stable runtime instant without pumping, abandoning, or
+    /// terminalizing any work.
+    ///
+    /// Call [`Self::pump_until_stable`] first when the client wants queued work
+    /// and best-effort spark normalization to run before classification.
+    #[doc(hidden)]
+    pub fn readiness(&self) -> RuntimeReadiness {
+        let Some(settlement) = self.try_settlement_guard() else {
+            return RuntimeReadiness::Busy;
+        };
+        let coordinator = self.state.work.runtime_readiness_snapshot();
+        if matches!(coordinator, RuntimeCoordinatorReadiness::Busy) {
+            drop(settlement);
+            return RuntimeReadiness::Busy;
+        }
+
+        let reflection = {
+            let state = self
+                .state
+                .shared_resources
+                .transactions
+                .state
+                .lock()
+                .expect("runtime transaction mutex should not be poisoned");
+            if !state.events.outputs.records.is_empty() {
+                drop(state);
+                drop(settlement);
+                return RuntimeReadiness::Busy;
+            }
+            state.reflection.snapshot()
+        };
+        let observation_epoch = self.state.shared_resources.observations.current().get();
+        drop(settlement);
+
+        match coordinator {
+            RuntimeCoordinatorReadiness::Busy => unreachable!("handled above"),
+            RuntimeCoordinatorReadiness::Ready {
+                work_generation,
+                exits,
+            } => RuntimeReadiness::Ready(QuiescenceSnapshot {
+                runtime: self.clone(),
+                stamp: RuntimeReadinessStamp {
+                    work_generation,
+                    observation_epoch,
+                },
+                dispositions: exits
+                    .into_iter()
+                    .map(runtime_disposition_from_snapshot)
+                    .collect(),
+                reflection,
+            }),
+            RuntimeCoordinatorReadiness::Deadlocked {
+                work_generation,
+                exits,
+                unfinished,
+            } => RuntimeReadiness::Deadlocked(DeadlockSnapshot {
+                runtime: self.clone(),
+                stamp: RuntimeReadinessStamp {
+                    work_generation,
+                    observation_epoch,
+                },
+                dispositions: exits
+                    .into_iter()
+                    .map(runtime_disposition_from_snapshot)
+                    .collect(),
+                unfinished: unfinished
+                    .into_iter()
+                    .map(runtime_deadlock_work_from_snapshot)
+                    .collect(),
+                reflection,
+            }),
         }
     }
 
@@ -5979,6 +6376,7 @@ mod tests {
         let runtime = EvaluationRuntime::new(0).expect("runtime should build");
         let activity = runtime.state.shared_resources.mutation_admission.activity();
         let mutation = runtime.mutation_guard();
+        assert!(matches!(runtime.readiness(), RuntimeReadiness::Busy));
         let pumping_runtime = runtime.clone();
         let (finished, observed) = std::sync::mpsc::channel();
         let pump = std::thread::spawn(move || {
@@ -6022,6 +6420,79 @@ mod tests {
         waiter
             .join()
             .expect("activity waiter should finish cleanly");
+    }
+
+    #[test]
+    fn readiness_stamp_tracks_heap_query_and_event_observations() {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let RuntimeReadiness::Ready(initial) = runtime.readiness() else {
+            panic!("new runtime should be ready")
+        };
+
+        let (_, heap_snapshot) = runtime.reflection_snapshot();
+        let mut heap = crate::reflection::StoreJournal::new(heap_snapshot);
+        heap.write(
+            vec![Key::atom_from_text("readiness_root")],
+            runtime.values().text("installed"),
+        );
+        assert_eq!(
+            runtime.commit_reflection(&heap),
+            crate::reflection::StoreCommitResult::Committed
+        );
+        let RuntimeReadiness::Ready(after_heap) = runtime.readiness() else {
+            panic!("heap state without work should remain ready")
+        };
+        assert!(after_heap.stamp().observation_epoch() > initial.stamp().observation_epoch());
+        assert_ne!(after_heap.reflection().root(), initial.reflection().root());
+
+        let input = runtime
+            .input_endpoint(integer_converter(&runtime))
+            .expect("input endpoint should register");
+        input.sender().admit(1).expect("input should admit");
+        let RuntimeReadiness::Ready(after_input) = runtime.readiness() else {
+            panic!("unused buffered input is state rather than activity")
+        };
+        assert!(after_input.stamp().observation_epoch() > after_heap.stamp().observation_epoch());
+        assert_eq!(
+            after_input.reflection().root(),
+            after_heap.reflection().root()
+        );
+
+        let (_, query_snapshot) = runtime.reflection_snapshot();
+        let mut query_reservation = crate::reflection::StoreJournal::new(query_snapshot);
+        let query = query_reservation
+            .reserve_query()
+            .expect("query should reserve");
+        assert_eq!(
+            runtime.commit_reflection(&query_reservation),
+            crate::reflection::StoreCommitResult::Committed
+        );
+        let RuntimeReadiness::Ready(before_query_update) = runtime.readiness() else {
+            panic!("pending protected query is state rather than scheduler work")
+        };
+        runtime
+            .update_query(&query, runtime.values().integer(0))
+            .expect("protected query should update");
+        let RuntimeReadiness::Ready(after_query_update) = runtime.readiness() else {
+            panic!("completed protected query without work should remain ready")
+        };
+        assert!(
+            after_query_update.stamp().observation_epoch()
+                > before_query_update.stamp().observation_epoch()
+        );
+
+        assert_eq!(
+            initial.stamp().work_generation(),
+            after_heap.stamp().work_generation()
+        );
+        assert_eq!(
+            after_heap.stamp().work_generation(),
+            after_input.stamp().work_generation()
+        );
+        assert_eq!(
+            after_input.stamp().work_generation(),
+            after_query_update.stamp().work_generation()
+        );
     }
 
     fn decode_test_integer(value: Value) -> Result<i64, Error> {
@@ -6095,12 +6566,14 @@ mod tests {
             runtime.try_commit_transaction(&store, &events),
             crate::reflection::StoreCommitResult::Committed
         );
+        assert!(matches!(runtime.readiness(), RuntimeReadiness::Busy));
 
         let delivery = endpoint.delivery();
         let delivery_thread = std::thread::spawn(move || delivery.deliver_next().unwrap());
         callback_entered
             .recv_timeout(std::time::Duration::from_secs(2))
             .expect("delivery callback should begin");
+        assert!(matches!(runtime.readiness(), RuntimeReadiness::Busy));
 
         let pumping_runtime = runtime.clone();
         let (finished, pump_finished) = std::sync::mpsc::channel();
@@ -6122,6 +6595,7 @@ mod tests {
             .expect("delivery terminalization should wake the runtime pump");
         pump.join().expect("runtime pump should finish cleanly");
         assert!(!runtime.has_delivery_activity());
+        assert!(matches!(runtime.readiness(), RuntimeReadiness::Ready(_)));
         assert!(
             activity.wait_count() > 0,
             "running delivery should park the pump rather than busy-polling"
@@ -6450,6 +6924,7 @@ mod tests {
         assert!(snapshot.get(decode_id).is_some());
         assert!(snapshot.get(adapter_id).is_some());
         assert!(snapshot.get(panic_id).is_some());
+        assert!(matches!(runtime.readiness(), RuntimeReadiness::Ready(_)));
 
         let (generation, _, _) = runtime.transaction_snapshot();
         assert!(runtime.acknowledge_delivery_failure(adapter_id));

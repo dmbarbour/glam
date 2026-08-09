@@ -36,7 +36,9 @@ use coordinator::{
 };
 pub(crate) use coordinator::{
     CompletionSubscriptionOutcome, CompletionSubscriptions, EvaluationTaskBlock,
-    EvaluationWorkCoordinator, RuntimeObservationEpoch, RuntimeObservationState, WakeRegistration,
+    EvaluationWorkCoordinator, RuntimeCoordinatorReadiness, RuntimeDeadlockWorkSnapshot,
+    RuntimeDependencySnapshot, RuntimeExitSnapshot, RuntimeObservationEpoch,
+    RuntimeObservationState, RuntimeWorkKindSnapshot, RuntimeWorkStateSnapshot, WakeRegistration,
     WorkDependency,
 };
 #[cfg(test)]
@@ -3810,6 +3812,18 @@ mod tests {
             context.poll_reflection_task(&parent),
             EvaluationWaitPoll::Pending(_)
         ));
+        let crate::api::RuntimeReadiness::Deadlocked(snapshot) = fixture.runtime.readiness() else {
+            panic!("strict join on an exit voter should remain a runtime deadlock")
+        };
+        assert_eq!(snapshot.dispositions().len(), 1);
+        assert_eq!(snapshot.dispositions()[0].task_id(), child.id().get());
+        assert_eq!(snapshot.unfinished().len(), 1);
+        assert_eq!(snapshot.unfinished()[0].task_id(), Some(parent.id().get()));
+        assert!(matches!(
+            snapshot.unfinished()[0].dependency(),
+            Some(crate::api::RuntimeDependency::TaskWait { task_id, .. })
+                if *task_id == child.id().get()
+        ));
 
         assert_eq!(child.cancel(), EvaluationTaskCancellation::Requested);
         let _ = context.run_until_quiescent();
@@ -6195,6 +6209,266 @@ mod tests {
     }
 
     #[test]
+    fn runtime_readiness_is_ready_when_no_work_is_retained() {
+        let fixture = SameRuntimeFixture::new();
+
+        let crate::api::RuntimeReadiness::Ready(first) = fixture.runtime.readiness() else {
+            panic!("an idle runtime should be ready")
+        };
+        let crate::api::RuntimeReadiness::Ready(second) = fixture.runtime.readiness() else {
+            panic!("an unchanged runtime should remain ready")
+        };
+
+        assert!(first.dispositions().is_empty());
+        assert_eq!(first.stamp(), second.stamp());
+        assert_eq!(first.reflection().root(), second.reflection().root());
+        assert_eq!(first.runtime_id(), fixture.runtime.id());
+    }
+
+    #[test]
+    fn runtime_readiness_retains_exit_dispositions_without_settling_tasks() {
+        let fixture = SameRuntimeFixture::new();
+        let success_context = fixture.context();
+        let error_context = fixture.context();
+        let success = success_context
+            .schedule_task(|_| {
+                Ok(Box::new(ExitVote(EvaluationExitBlock {
+                    intent: ExitIntent::Success,
+                    observed_epoch: None,
+                })))
+            })
+            .expect("success exit task should schedule");
+        let message = RuntimeValueRoot::new(
+            error_context.values(),
+            Value::binary_from_text("exit message"),
+        );
+        let error = error_context
+            .schedule_task(move |_| {
+                Ok(Box::new(ExitVote(EvaluationExitBlock {
+                    intent: ExitIntent::Error(message),
+                    observed_epoch: None,
+                })))
+            })
+            .expect("error exit task should schedule");
+
+        fixture.runtime.pump_until_stable();
+        let crate::api::RuntimeReadiness::Ready(snapshot) = fixture.runtime.readiness() else {
+            panic!("two stable exit votes should make the runtime ready")
+        };
+
+        assert_eq!(snapshot.dispositions().len(), 2);
+        assert!(snapshot.dispositions().iter().any(|disposition| {
+            disposition.task_id() == success.id().get()
+                && matches!(
+                    disposition.kind(),
+                    crate::api::RuntimeDispositionKind::ExitSuccess
+                )
+        }));
+        assert!(snapshot.dispositions().iter().any(|disposition| {
+            disposition.task_id() == error.id().get()
+                && matches!(
+                    disposition.kind(),
+                    crate::api::RuntimeDispositionKind::ExitError(value)
+                        if value.as_binary() == Some(b"exit message".as_slice())
+                )
+        }));
+        assert!(matches!(
+            success_context.poll_reflection_task(&success),
+            EvaluationWaitPoll::Pending(_)
+        ));
+        assert!(matches!(
+            error_context.poll_reflection_task(&error),
+            EvaluationWaitPoll::Pending(_)
+        ));
+        let crate::api::RuntimeReadiness::Ready(repeated) = fixture.runtime.readiness() else {
+            panic!("observing readiness must not settle exit votes")
+        };
+        assert_eq!(snapshot.stamp(), repeated.stamp());
+        assert_eq!(snapshot.dispositions(), repeated.dispositions());
+    }
+
+    #[test]
+    fn runtime_deadlock_retains_typed_task_and_client_dependencies() {
+        let fixture = SameRuntimeFixture::new();
+        let context = fixture.context();
+        let child = context
+            .schedule_task(|_| Ok(Box::new(AlwaysBlocked)))
+            .expect("blocked child should schedule");
+        let child_wait = child.wait().clone();
+        let parent = context
+            .schedule_task(move |task_context| {
+                Ok(Box::new(Await {
+                    context: task_context,
+                    dependency: child_wait,
+                }))
+            })
+            .expect("strict joining parent should schedule");
+        let promise = PromisedValue::new(context.values(), "deadlocked client promise");
+        let client = context
+            .demand_whnf(RuntimeValueRoot::new(
+                context.values(),
+                Value::Promised(promise.clone()),
+            ))
+            .expect("client demand should admit");
+
+        fixture.runtime.pump_until_stable();
+        let crate::api::RuntimeReadiness::Deadlocked(snapshot) = fixture.runtime.readiness() else {
+            panic!("blocked task, join, and client demand should deadlock")
+        };
+
+        assert!(snapshot.dispositions().is_empty());
+        assert_eq!(snapshot.unfinished().len(), 3);
+        let parent_work = snapshot
+            .unfinished()
+            .iter()
+            .find(|work| work.task_id() == Some(parent.id().get()))
+            .expect("strict join should appear in the deadlock report");
+        assert!(matches!(
+            parent_work.dependency(),
+            Some(crate::api::RuntimeDependency::TaskWait {
+                task_id,
+                session_id,
+                ..
+            }) if *task_id == child.id().get() && *session_id == context.session_id().get()
+        ));
+        let client_work = snapshot
+            .unfinished()
+            .iter()
+            .find(|work| work.kind() == crate::api::RuntimeWorkKind::ClientDemand)
+            .expect("blocked client demand should remain a distinct participant");
+        assert!(matches!(
+            client_work.dependency(),
+            Some(crate::api::RuntimeDependency::Promise {
+                promise_id,
+                producer: None,
+            }) if *promise_id == promise.id().get()
+        ));
+        assert!(snapshot.unfinished().iter().any(|work| {
+            work.task_id() == Some(child.id().get())
+                && work.observed_epoch() == Some(7)
+                && work.state() == crate::api::RuntimeWorkState::Blocked
+        }));
+
+        let retained = snapshot.clone();
+        promise
+            .set(context.values().unit())
+            .expect("host promise should resolve once");
+        assert!(matches!(
+            fixture.runtime.readiness(),
+            crate::api::RuntimeReadiness::Busy
+        ));
+        context.complete_wait(child.wait());
+        fixture.runtime.pump_until_stable();
+        assert!(matches!(
+            fixture.runtime.readiness(),
+            crate::api::RuntimeReadiness::Ready(_)
+        ));
+        assert_eq!(retained.unfinished().len(), 3);
+        assert!(matches!(
+            client.poll(),
+            Some(ClientDemandResult::Complete(_))
+        ));
+    }
+
+    #[test]
+    fn dormant_and_reserved_work_are_reported_as_deadlock_anomalies() {
+        let fixture = SameRuntimeFixture::new();
+        let context = fixture.context();
+        let coordinator = context.coordinator().expect("coordinator should be live");
+        let lazy = inert_lazy_for(context.values(), "dormant readiness producer");
+        context
+            .lazy_task(&lazy, |_| Box::new(Complete))
+            .expect("dormant deferred work should register");
+        let task = allocate_task_id(context.values()).expect("task ID should allocate");
+        let wait = allocate_wait_token(&context.session, task).expect("wait ID should allocate");
+        coordinator
+            .reserve_reflection(&context.session, task, wait)
+            .expect("reserved reflection work should register");
+
+        let crate::api::RuntimeReadiness::Deadlocked(snapshot) = fixture.runtime.readiness() else {
+            panic!("orphaned dormant and reserved records should be visible deadlocks")
+        };
+        assert!(snapshot.unfinished().iter().any(|work| {
+            work.kind() == crate::api::RuntimeWorkKind::DeferredEvaluation
+                && work.state() == crate::api::RuntimeWorkState::Dormant
+        }));
+        assert!(snapshot.unfinished().iter().any(|work| {
+            work.task_id() == Some(task.get())
+                && work.kind() == crate::api::RuntimeWorkKind::ReflectionTask
+                && work.state() == crate::api::RuntimeWorkState::Reserved
+        }));
+    }
+
+    #[test]
+    fn readiness_reports_runnable_and_unclaimed_spark_work_as_busy() {
+        let fixture = SameRuntimeFixture::new();
+        let context = fixture.context();
+        context
+            .schedule_task(|_| Ok(Box::new(Complete)))
+            .expect("queued task should schedule");
+        assert!(matches!(
+            fixture.runtime.readiness(),
+            crate::api::RuntimeReadiness::Busy
+        ));
+        fixture.runtime.pump_until_stable();
+
+        let coordinator = context.coordinator().expect("coordinator should be live");
+        coordinator.executor_started(1);
+        context.spark(Value::Lazy(inert_lazy_for(
+            context.values(),
+            "readiness spark",
+        )));
+        assert!(matches!(
+            fixture.runtime.readiness(),
+            crate::api::RuntimeReadiness::Busy
+        ));
+        assert_eq!(coordinator.spark_work_counts(), (1, 0, 0));
+        fixture.runtime.pump_until_stable();
+        assert_eq!(coordinator.spark_work_counts(), (0, 0, 0));
+    }
+
+    #[test]
+    fn readiness_reports_terminalizing_work_as_busy_without_mutating_it() {
+        let fixture = SameRuntimeFixture::new();
+        let context = fixture.context();
+        let coordinator = context.coordinator().expect("coordinator should be live");
+        context
+            .schedule_task(|_| Ok(Box::new(Complete)))
+            .expect("terminalizing fixture should schedule");
+        let ClaimedTaskWork::Reflection(claimed) = coordinator
+            .claim_ready_task_for_session(context.session_id())
+            .expect("queued reflection work should be claimable")
+        else {
+            panic!("fixture should claim reflection work")
+        };
+        let work = claimed.id();
+        let mut release = coordinator.release_reflection(claimed, ReflectionWorkPoll::Terminal);
+        assert!(release.terminal);
+
+        assert!(matches!(
+            fixture.runtime.readiness(),
+            crate::api::RuntimeReadiness::Busy
+        ));
+        assert!(matches!(
+            coordinator.runtime_readiness_snapshot(),
+            RuntimeCoordinatorReadiness::Busy
+        ));
+
+        settle_task_work(
+            &coordinator,
+            work,
+            EvaluationTaskState::Complete(RuntimeValueRoot::new(
+                context.values(),
+                crate::core::keys::unit_value(),
+            )),
+            evaluation_failure("terminalizing fixture completed without a fixpoint"),
+        );
+        let retired = coordinator.retire_reflection(work);
+        drop(release.machine.take());
+        drop(retired);
+    }
+
+    #[test]
     fn runtime_pump_parks_while_a_worker_owns_progress() {
         let fixture = SameRuntimeFixture::new();
         fixture
@@ -6215,6 +6489,10 @@ mod tests {
         worker_started
             .recv_timeout(Duration::from_secs(2))
             .expect("worker should claim the task");
+        assert!(matches!(
+            fixture.runtime.readiness(),
+            crate::api::RuntimeReadiness::Busy
+        ));
 
         let runtime = fixture.runtime.clone();
         let (finished, pump_finished) = mpsc::channel();
@@ -6345,6 +6623,10 @@ mod tests {
         )));
         let claimed = claim_next_spark(&coordinator);
         assert_eq!(coordinator.spark_work_counts(), (0, 1, 0));
+        assert!(matches!(
+            fixture.runtime.readiness(),
+            crate::api::RuntimeReadiness::Busy
+        ));
 
         let runtime = fixture.runtime.clone();
         let (finished, pump_finished) = mpsc::channel();

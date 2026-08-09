@@ -1033,6 +1033,69 @@ pub(crate) struct RuntimePumpSnapshot {
     pub(crate) abandonable_sparks: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RuntimeCoordinatorReadiness {
+    Busy,
+    Ready {
+        work_generation: u64,
+        exits: Vec<RuntimeExitSnapshot>,
+    },
+    Deadlocked {
+        work_generation: u64,
+        exits: Vec<RuntimeExitSnapshot>,
+        unfinished: Vec<RuntimeDeadlockWorkSnapshot>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RuntimeExitSnapshot {
+    pub(crate) work: EvaluationWorkId,
+    pub(crate) session: EvaluationSessionId,
+    pub(crate) task: EvaluationTaskId,
+    pub(crate) intent: ExitIntent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RuntimeWorkKindSnapshot {
+    ReflectionTask,
+    DeferredEvaluation,
+    ClientDemand,
+    Spark,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RuntimeWorkStateSnapshot {
+    Dormant,
+    Reserved,
+    Blocked,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RuntimeDependencySnapshot {
+    Wait {
+        wait: u64,
+        producer: EvaluationTaskId,
+        session: EvaluationSessionId,
+    },
+    Promise {
+        promise: u64,
+        producer: Option<(u64, EvaluationTaskId, EvaluationSessionId)>,
+    },
+    #[cfg(test)]
+    Test(u64),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RuntimeDeadlockWorkSnapshot {
+    pub(crate) work: EvaluationWorkId,
+    pub(crate) session: EvaluationSessionId,
+    pub(crate) task: Option<EvaluationTaskId>,
+    pub(crate) kind: RuntimeWorkKindSnapshot,
+    pub(crate) state: RuntimeWorkStateSnapshot,
+    pub(crate) dependency: Option<RuntimeDependencySnapshot>,
+    pub(crate) observed_epoch: Option<RuntimeObservationEpoch>,
+}
+
 impl fmt::Debug for EvaluationWorkCoordinator {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let state = self
@@ -1715,6 +1778,77 @@ impl EvaluationWorkCoordinator {
                 matches!(record.kind, WorkKind::Spark(_))
                     && matches!(record.state, WorkState::Queued | WorkState::Blocked)
             }),
+        }
+    }
+
+    /// Classifies all retained work while the caller holds settlement
+    /// admission exclusively. No queue, work record, or generation is changed.
+    pub(crate) fn runtime_readiness_snapshot(&self) -> RuntimeCoordinatorReadiness {
+        let state = self
+            .state
+            .lock()
+            .expect("evaluation work coordinator was poisoned");
+        let mut exits = Vec::new();
+        let mut unfinished = Vec::new();
+
+        for record in state.work.values() {
+            if matches!(
+                record.state,
+                WorkState::Queued | WorkState::Running | WorkState::Terminalizing
+            ) || matches!(record.kind, WorkKind::Spark(_))
+            {
+                return RuntimeCoordinatorReadiness::Busy;
+            }
+
+            if matches!(record.state, WorkState::ExitWaiting) {
+                let reflection = reflection_work(record);
+                exits.push(RuntimeExitSnapshot {
+                    work: record.id,
+                    session: record.demand_session,
+                    task: reflection.task,
+                    intent: reflection
+                        .exit
+                        .as_ref()
+                        .expect("exit-waiting reflection work must retain its exit summary")
+                        .intent
+                        .clone(),
+                });
+                continue;
+            }
+
+            let state_snapshot = match record.state {
+                WorkState::Dormant => RuntimeWorkStateSnapshot::Dormant,
+                WorkState::Reserved => RuntimeWorkStateSnapshot::Reserved,
+                WorkState::Blocked => RuntimeWorkStateSnapshot::Blocked,
+                WorkState::Queued
+                | WorkState::Running
+                | WorkState::ExitWaiting
+                | WorkState::Terminalizing => unreachable!("handled above"),
+            };
+            unfinished.push(RuntimeDeadlockWorkSnapshot {
+                work: record.id,
+                session: record.demand_session,
+                task: task_for_record(record),
+                kind: runtime_work_kind(record),
+                state: state_snapshot,
+                dependency: work_dependency(record).map(runtime_dependency_snapshot),
+                observed_epoch: task_observation_epoch(record),
+            });
+        }
+
+        exits.sort_by_key(|exit| exit.work.get());
+        if unfinished.is_empty() {
+            RuntimeCoordinatorReadiness::Ready {
+                work_generation: state.work_generation,
+                exits,
+            }
+        } else {
+            unfinished.sort_by_key(|work| work.work.get());
+            RuntimeCoordinatorReadiness::Deadlocked {
+                work_generation: state.work_generation,
+                exits,
+                unfinished,
+            }
         }
     }
 
@@ -3940,6 +4074,33 @@ fn task_for_record(record: &WorkRecord) -> Option<EvaluationTaskId> {
         WorkKind::Reflection(work) => Some(work.task),
         WorkKind::Deferred(work) => Some(work.task),
         WorkKind::Spark(_) | WorkKind::ClientDemand(_) => None,
+    }
+}
+
+fn runtime_work_kind(record: &WorkRecord) -> RuntimeWorkKindSnapshot {
+    match record.kind {
+        WorkKind::Reflection(_) => RuntimeWorkKindSnapshot::ReflectionTask,
+        WorkKind::Deferred(_) => RuntimeWorkKindSnapshot::DeferredEvaluation,
+        WorkKind::ClientDemand(_) => RuntimeWorkKindSnapshot::ClientDemand,
+        WorkKind::Spark(_) => RuntimeWorkKindSnapshot::Spark,
+    }
+}
+
+fn runtime_dependency_snapshot(dependency: &WorkDependency) -> RuntimeDependencySnapshot {
+    match dependency {
+        WorkDependency::Wait(wait) => RuntimeDependencySnapshot::Wait {
+            wait: wait.get(),
+            producer: wait.producer(),
+            session: wait.owner_id(),
+        },
+        WorkDependency::Promise(promise) => RuntimeDependencySnapshot::Promise {
+            promise: promise.id().get(),
+            producer: dependency
+                .producer_wait()
+                .map(|wait| (wait.get(), wait.producer(), wait.owner_id())),
+        },
+        #[cfg(test)]
+        WorkDependency::Test(dependency) => RuntimeDependencySnapshot::Test(dependency.id.get()),
     }
 }
 
