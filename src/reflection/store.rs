@@ -723,7 +723,6 @@ impl ReflectionStore {
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn root(&self) -> &PublicValue {
         self.roots
             .get(&self.heap_volume)

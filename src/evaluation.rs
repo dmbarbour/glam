@@ -25,7 +25,7 @@ use crate::core::{
     PromiseCell, PromiseId, PromisedValue, Value,
 };
 use crate::core_net::CoreWaitToken;
-use crate::runtime::{EvaluationRuntimeId, RuntimeMutationGuard, RuntimeValueRoot};
+use crate::runtime::{EvaluationRuntimeId, RuntimeMutationAuthority, RuntimeValueRoot};
 
 mod coordinator;
 mod executor;
@@ -35,11 +35,11 @@ use coordinator::{
     EvaluationWorkId, ReflectionCancellation, ReflectionWorkPoll, ReflectionWorkState,
 };
 pub(crate) use coordinator::{
-    CompletionSubscriptionOutcome, CompletionSubscriptions, EvaluationTaskBlock,
+    CompletionSubscriptionOutcome, CompletionSubscriptions, CompletionWake, EvaluationTaskBlock,
     EvaluationWorkCoordinator, RuntimeCoordinatorReadiness, RuntimeDeadlockWorkSnapshot,
     RuntimeDependencySnapshot, RuntimeExitSnapshot, RuntimeObservationEpoch,
-    RuntimeObservationState, RuntimeWorkKindSnapshot, RuntimeWorkStateSnapshot, WakeRegistration,
-    WorkDependency,
+    RuntimeObservationState, RuntimeWorkKindSnapshot, RuntimeWorkStateSnapshot,
+    ValidatedRuntimeSettlementPlan, WakeRegistration, WorkDependency,
 };
 #[cfg(test)]
 use coordinator::{ReflectionWorkSnapshot, test_wake_registration};
@@ -123,6 +123,8 @@ enum EvaluationWaitTerminal {
     Failed(Arc<EvaluationFailure>),
     Cancelled,
     Abandoned,
+    Exited,
+    Killed(Arc<EvaluationFailure>),
 }
 
 #[derive(Clone)]
@@ -178,7 +180,7 @@ impl EvaluationWaitToken {
     fn publish_terminal_guarded(
         &self,
         coordinator: &Arc<EvaluationWorkCoordinator>,
-        mutation: &crate::runtime::RuntimeMutationGuard<'_>,
+        mutation: &dyn RuntimeMutationAuthority,
         terminal: EvaluationWaitTerminal,
     ) -> (EvaluationWaitTerminal, coordinator::CompletionWake) {
         self.0
@@ -385,7 +387,7 @@ impl PromiseProducerObligation {
     pub(crate) fn publish_assignment_guarded(
         &self,
         coordinator: &Arc<EvaluationWorkCoordinator>,
-        mutation: &crate::runtime::RuntimeMutationGuard<'_>,
+        mutation: &dyn RuntimeMutationAuthority,
         assignment: &PromiseAssignment,
     ) -> PromiseProducerPublication {
         debug_assert_eq!(coordinator.runtime_id(), self.wait.runtime_id());
@@ -422,6 +424,8 @@ impl EvaluationWaitTerminal {
             Self::Failed(error) => EvaluationWaitPoll::Failed(error.clone()),
             Self::Cancelled => EvaluationWaitPoll::Cancelled,
             Self::Abandoned => EvaluationWaitPoll::Abandoned,
+            Self::Exited => EvaluationWaitPoll::Exited,
+            Self::Killed(error) => EvaluationWaitPoll::Killed(error.clone()),
         }
     }
 }
@@ -562,6 +566,8 @@ pub(crate) enum EvaluationWaitPoll {
     Failed(Arc<EvaluationFailure>),
     Cancelled,
     Abandoned,
+    Exited,
+    Killed(Arc<EvaluationFailure>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -891,10 +897,12 @@ pub(crate) enum EvaluationTaskStatus {
     Failed(Arc<EvaluationFailure>),
     Cancelled,
     Abandoned,
+    Exited,
+    Killed(Arc<EvaluationFailure>),
 }
 
 type GuardedTaskStatusPublication =
-    dyn for<'a> Fn(&RuntimeMutationGuard<'a>, EvaluationTaskStatus) -> TaskStatusWake + Send + Sync;
+    dyn Fn(&dyn RuntimeMutationAuthority, EvaluationTaskStatus) -> TaskStatusWake + Send + Sync;
 
 #[derive(Clone)]
 pub(crate) struct TaskStatusPublisher {
@@ -903,7 +911,7 @@ pub(crate) struct TaskStatusPublisher {
 
 impl TaskStatusPublisher {
     pub(crate) fn new(
-        publish: impl for<'a> Fn(&RuntimeMutationGuard<'a>, EvaluationTaskStatus) -> TaskStatusWake
+        publish: impl Fn(&dyn RuntimeMutationAuthority, EvaluationTaskStatus) -> TaskStatusWake
         + Send
         + Sync
         + 'static,
@@ -915,7 +923,7 @@ impl TaskStatusPublisher {
 
     pub(crate) fn publish_guarded(
         &self,
-        mutation: &RuntimeMutationGuard<'_>,
+        mutation: &dyn RuntimeMutationAuthority,
         status: EvaluationTaskStatus,
     ) -> TaskStatusWake {
         (self.publish)(mutation, status)
@@ -1010,6 +1018,8 @@ enum EvaluationTaskState {
     Failed(Arc<EvaluationFailure>),
     Cancelled,
     Abandoned,
+    Exited,
+    Killed(Arc<EvaluationFailure>),
 }
 
 fn evaluation_task_state(terminal: EvaluationWaitTerminal) -> EvaluationTaskState {
@@ -1018,6 +1028,8 @@ fn evaluation_task_state(terminal: EvaluationWaitTerminal) -> EvaluationTaskStat
         EvaluationWaitTerminal::Failed(error) => EvaluationTaskState::Failed(error),
         EvaluationWaitTerminal::Cancelled => EvaluationTaskState::Cancelled,
         EvaluationWaitTerminal::Abandoned => EvaluationTaskState::Abandoned,
+        EvaluationWaitTerminal::Exited => EvaluationTaskState::Exited,
+        EvaluationWaitTerminal::Killed(error) => EvaluationTaskState::Killed(error),
     }
 }
 
@@ -1027,6 +1039,8 @@ fn task_wait_terminal(state: &EvaluationTaskState) -> EvaluationWaitTerminal {
         EvaluationTaskState::Failed(error) => EvaluationWaitTerminal::Failed(error.clone()),
         EvaluationTaskState::Cancelled => EvaluationWaitTerminal::Cancelled,
         EvaluationTaskState::Abandoned => EvaluationWaitTerminal::Abandoned,
+        EvaluationTaskState::Exited => EvaluationWaitTerminal::Exited,
+        EvaluationTaskState::Killed(error) => EvaluationWaitTerminal::Killed(error.clone()),
     }
 }
 
@@ -1091,8 +1105,8 @@ impl Drop for PendingReflectionTaskInner {
     }
 }
 
-type TaskFailureLedger = RedBlackTreeMapSync<EvaluationTaskId, Arc<EvaluationFailure>>;
-type RuntimeFailureLedger = RedBlackTreeMapSync<EvaluationSessionId, TaskFailureLedger>;
+pub(crate) type TaskFailureLedger = RedBlackTreeMapSync<EvaluationTaskId, Arc<EvaluationFailure>>;
+pub(crate) type RuntimeFailureLedger = RedBlackTreeMapSync<EvaluationSessionId, TaskFailureLedger>;
 
 fn promise_assignment_terminal(
     runtime: EvaluationRuntimeId,
@@ -2702,6 +2716,10 @@ fn release_reflection_task(
         EvaluationTaskState::Abandoned => {
             evaluation_failure("reflection fixpoint producer was abandoned")
         }
+        EvaluationTaskState::Exited => {
+            evaluation_failure("reflection fixpoint producer exited without a result")
+        }
+        EvaluationTaskState::Killed(error) => error.clone(),
     };
     settle_task_work(coordinator, work, state, promise_failure);
     let machine = release
@@ -2780,6 +2798,10 @@ fn release_deferred_task(
         EvaluationWaitTerminal::Abandoned => {
             evaluation_failure("evaluation fixpoint producer was abandoned")
         }
+        EvaluationWaitTerminal::Exited => {
+            evaluation_failure("evaluation fixpoint producer exited without a result")
+        }
+        EvaluationWaitTerminal::Killed(error) => error.clone(),
     };
     coordinator.settle_terminal_work(work, terminal, promise_failure);
     let machine = release
@@ -3854,6 +3876,10 @@ mod tests {
                 EvaluationWaitPoll::Abandoned => EvaluationMachinePoll::Failed(evaluation_failure(
                     "waited-on task was abandoned",
                 )),
+                EvaluationWaitPoll::Exited => EvaluationMachinePoll::Failed(evaluation_failure(
+                    "waited-on task exited without a result",
+                )),
+                EvaluationWaitPoll::Killed(error) => EvaluationMachinePoll::Failed(error),
             }
         }
     }
@@ -3905,6 +3931,10 @@ mod tests {
                 EvaluationWaitPoll::Abandoned => EvaluationMachinePoll::Failed(evaluation_failure(
                     "waited-on task was abandoned",
                 )),
+                EvaluationWaitPoll::Exited => EvaluationMachinePoll::Failed(evaluation_failure(
+                    "waited-on task exited without a result",
+                )),
+                EvaluationWaitPoll::Killed(error) => EvaluationMachinePoll::Failed(error),
             }
         }
     }
@@ -6285,6 +6315,194 @@ mod tests {
         };
         assert_eq!(snapshot.stamp(), repeated.stamp());
         assert_eq!(snapshot.dispositions(), repeated.dispositions());
+    }
+
+    #[test]
+    fn quiescence_validation_is_observational_and_rejects_stale_state() {
+        let fixture = SameRuntimeFixture::new();
+        let context = fixture.context();
+        let crate::api::RuntimeReadiness::Ready(snapshot) = fixture.runtime.readiness() else {
+            panic!("idle runtime should produce a ready snapshot")
+        };
+        let generation = context
+            .coordinator()
+            .expect("fixture coordinator should remain live")
+            .work_generation();
+        let validated = snapshot
+            .validate_without_settling()
+            .expect("unchanged readiness should validate");
+        assert_eq!(validated.work_generation, generation);
+        assert!(validated.exits.is_empty());
+        assert_eq!(
+            context
+                .coordinator()
+                .expect("fixture coordinator should remain live")
+                .work_generation(),
+            generation,
+            "validation must not mutate coordinator state"
+        );
+
+        context
+            .schedule_task(|_| Ok(Box::new(Complete)))
+            .expect("new work should schedule");
+        assert_eq!(
+            snapshot.validate_without_settling(),
+            Err(crate::api::RuntimeSettlementError::RuntimeChanged)
+        );
+        assert!(matches!(
+            snapshot.settle_after_validation(&validated),
+            Err(crate::api::RuntimeSettlementError::RuntimeChanged)
+        ));
+    }
+
+    #[test]
+    fn ready_settlement_publishes_exited_once_and_retains_exit_errors() {
+        let fixture = SameRuntimeFixture::new();
+        let success_context = fixture.context();
+        let error_context = fixture.context();
+        let statuses = Arc::new(RecordedStatuses::default());
+        let success = success_context
+            .schedule_task(|_| {
+                Ok(Box::new(ExitVote(EvaluationExitBlock {
+                    intent: ExitIntent::Success,
+                    observed_epoch: None,
+                })))
+            })
+            .expect("success exit task should schedule");
+        assert!(
+            success_context
+                .attach_task_status_publisher(&success, RecordedStatuses::publisher(&statuses),)
+        );
+        let message = RuntimeValueRoot::new(
+            error_context.values(),
+            Value::binary_from_text("retained exit failure"),
+        );
+        let error = error_context
+            .schedule_task(move |_| {
+                Ok(Box::new(ExitVote(EvaluationExitBlock {
+                    intent: ExitIntent::Error(message),
+                    observed_epoch: None,
+                })))
+            })
+            .expect("error exit task should schedule");
+
+        fixture.runtime.pump_until_stable();
+        let crate::api::RuntimeReadiness::Ready(snapshot) = fixture.runtime.readiness() else {
+            panic!("stable exit tasks should be ready")
+        };
+        let report = snapshot.settle().expect("ready snapshot should settle");
+
+        assert_eq!(
+            success_context.poll_reflection_task(&success),
+            EvaluationWaitPoll::Exited
+        );
+        assert_eq!(
+            error_context.poll_reflection_task(&error),
+            EvaluationWaitPoll::Exited
+        );
+        assert_eq!(
+            statuses
+                .0
+                .lock()
+                .expect("recorded statuses were poisoned")
+                .as_slice(),
+            [EvaluationTaskStatus::Exited]
+        );
+        assert_eq!(report.dispositions(), snapshot.dispositions());
+        assert!(report.task_failures().is_empty());
+        assert!(report.dispositions().iter().any(|disposition| {
+            matches!(
+                disposition.kind(),
+                crate::api::RuntimeDispositionKind::ExitError(value)
+                    if value.as_binary() == Some(b"retained exit failure".as_slice())
+            )
+        }));
+        assert!(
+            matches!(
+                snapshot.settle(),
+                Err(crate::api::RuntimeSettlementError::RuntimeChanged)
+            ),
+            "a settled exit obligation must not publish twice"
+        );
+        assert!(matches!(
+            fixture.runtime.readiness(),
+            crate::api::RuntimeReadiness::Ready(_)
+        ));
+    }
+
+    #[test]
+    fn exit_settlement_fails_owned_promises_and_drops_reusable_machine_after_unlock() {
+        struct ExitWithDropCheck {
+            coordinator: Weak<EvaluationWorkCoordinator>,
+            dropped_without_runtime_locks: Arc<AtomicBool>,
+        }
+
+        impl EvaluationTaskMachine for ExitWithDropCheck {
+            fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+                EvaluationMachinePoll::Exit(EvaluationExitBlock {
+                    intent: ExitIntent::Success,
+                    observed_epoch: Some(RuntimeObservationEpoch::from_raw(1)),
+                })
+            }
+        }
+
+        impl Drop for ExitWithDropCheck {
+            fn drop(&mut self) {
+                let unlocked = self
+                    .coordinator
+                    .upgrade()
+                    .is_none_or(|coordinator| coordinator.runtime_locks_are_free());
+                self.dropped_without_runtime_locks
+                    .store(unlocked, Ordering::Release);
+            }
+        }
+
+        let fixture = SameRuntimeFixture::new();
+        let context = fixture.context();
+        let promise_output = Arc::new(Mutex::new(None));
+        let output = promise_output.clone();
+        let dropped_without_runtime_locks = Arc::new(AtomicBool::new(false));
+        let drop_check = dropped_without_runtime_locks.clone();
+        let coordinator = context
+            .coordinator()
+            .expect("coordinator should remain live");
+        let weak_coordinator = Arc::downgrade(&coordinator);
+        let task = context
+            .schedule_task(move |task_context| {
+                let promise = PromisedValue::fixpoint(&task_context, "exit-owned promise")?;
+                *output.lock().expect("promise output was poisoned") = Some(promise);
+                Ok(Box::new(ExitWithDropCheck {
+                    coordinator: weak_coordinator,
+                    dropped_without_runtime_locks: drop_check,
+                }))
+            })
+            .expect("exit promise task should schedule");
+        let promise = promise_output
+            .lock()
+            .expect("promise output was poisoned")
+            .clone()
+            .expect("task construction should expose its promise");
+
+        fixture.runtime.pump_until_stable();
+        let crate::api::RuntimeReadiness::Ready(snapshot) = fixture.runtime.readiness() else {
+            panic!("exit promise task should become ready")
+        };
+        snapshot.settle().expect("exit promise task should settle");
+
+        assert_eq!(
+            context.poll_reflection_task(&task),
+            EvaluationWaitPoll::Exited
+        );
+        let promise_failure = promise
+            .assignment()
+            .expect("settlement should terminalize the owned promise")
+            .expect_err("an unfulfilled exit-owned promise must fail");
+        assert!(
+            promise_failure
+                .to_string()
+                .contains("exited without fulfilling")
+        );
+        assert!(dropped_without_runtime_locks.load(Ordering::Acquire));
     }
 
     #[test]

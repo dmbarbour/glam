@@ -255,7 +255,9 @@ pub(super) fn progress_exact_core_pair(
             crate::evaluation::EvaluationWaitPoll::Complete(_)
             | crate::evaluation::EvaluationWaitPoll::Failed(_)
             | crate::evaluation::EvaluationWaitPoll::Cancelled
-            | crate::evaluation::EvaluationWaitPoll::Abandoned => {
+            | crate::evaluation::EvaluationWaitPoll::Abandoned
+            | crate::evaluation::EvaluationWaitPoll::Exited
+            | crate::evaluation::EvaluationWaitPoll::Killed(_) => {
                 let call = runtime
                     .with(|net| net.call(pair))
                     .expect("blocked core call must remain a Bind >< Data pair");
@@ -271,7 +273,9 @@ pub(super) fn progress_exact_core_pair(
             crate::evaluation::EvaluationWaitPoll::Complete(_)
             | crate::evaluation::EvaluationWaitPoll::Failed(_)
             | crate::evaluation::EvaluationWaitPoll::Cancelled
-            | crate::evaluation::EvaluationWaitPoll::Abandoned => {
+            | crate::evaluation::EvaluationWaitPoll::Abandoned
+            | crate::evaluation::EvaluationWaitPoll::Exited
+            | crate::evaluation::EvaluationWaitPoll::Killed(_) => {
                 let call = runtime
                     .with(|net| net.operator_call(pair))
                     .expect("blocked core operator call must remain an Operator >< Data pair");

@@ -37,6 +37,7 @@ use crate::evaluation::{
     ReflectionTaskProfile, RuntimeCoordinatorReadiness, RuntimeDeadlockWorkSnapshot,
     RuntimeDependencySnapshot, RuntimeExitSnapshot, RuntimeObservationEpoch,
     RuntimeObservationState, RuntimeWorkKindSnapshot, RuntimeWorkStateSnapshot,
+    ValidatedRuntimeSettlementPlan,
 };
 use crate::g_syntax::compile_source;
 use crate::interaction_net::{NetBuildError, NetBuilder as CoreNetBuilder, Port as CorePort};
@@ -1493,7 +1494,7 @@ impl ReflectionServices for AssemblerReflectionHost {
 impl ReflectionQueryWriter for RuntimeSharedResources {
     fn update_query_guarded(
         &self,
-        mutation: ReflectionQueryMutation<'_, '_>,
+        mutation: ReflectionQueryMutation<'_>,
         handle: &Arc<crate::reflection::EvaluationQueryHandle>,
         result: Value,
     ) -> Box<dyn FnOnce() + Send> {
@@ -1652,6 +1653,7 @@ pub struct QuiescenceSnapshot {
     stamp: RuntimeReadinessStamp,
     dispositions: Vec<RuntimeDisposition>,
     reflection: crate::reflection::StoreSnapshot,
+    settlement_exits: Vec<RuntimeExitSnapshot>,
 }
 
 impl fmt::Debug for QuiescenceSnapshot {
@@ -1676,6 +1678,97 @@ impl QuiescenceSnapshot {
 
     pub fn dispositions(&self) -> &[RuntimeDisposition] {
         &self.dispositions
+    }
+
+    pub fn reflection(&self) -> &crate::reflection::StoreSnapshot {
+        &self.reflection
+    }
+
+    /// Revalidates and accepts every proposed exit disposition, then returns
+    /// a retained report of the settled runtime instant.
+    pub fn settle(&self) -> Result<QuiescenceReport, RuntimeSettlementError> {
+        let plan = self.runtime.validate_quiescence_snapshot(self)?;
+        self.runtime.settle_quiescence_snapshot(self, &plan)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn validate_without_settling(
+        &self,
+    ) -> Result<ValidatedRuntimeSettlementPlan, RuntimeSettlementError> {
+        self.runtime.validate_quiescence_snapshot(self)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn settle_after_validation(
+        &self,
+        plan: &ValidatedRuntimeSettlementPlan,
+    ) -> Result<QuiescenceReport, RuntimeSettlementError> {
+        self.runtime.settle_quiescence_snapshot(self, plan)
+    }
+}
+
+/// Failure to accept a readiness snapshot because its runtime changed.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuntimeSettlementError {
+    RuntimeChanged,
+}
+
+impl fmt::Display for RuntimeSettlementError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("runtime changed after its readiness snapshot")
+    }
+}
+
+impl std::error::Error for RuntimeSettlementError {}
+
+/// Retained evidence collected when a stable runtime snapshot is settled.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct QuiescenceReport {
+    runtime: EvaluationRuntime,
+    stamp: RuntimeReadinessStamp,
+    dispositions: Vec<RuntimeDisposition>,
+    task_failures: Vec<ReasoningFailure>,
+    delivery_failures: RuntimeDeliveryFailureSnapshot,
+    reflection: crate::reflection::StoreSnapshot,
+}
+
+impl fmt::Debug for QuiescenceReport {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("QuiescenceReport")
+            .field("runtime", &self.runtime.id())
+            .field("stamp", &self.stamp)
+            .field("dispositions", &self.dispositions)
+            .field("task_failures", &self.task_failures)
+            .field(
+                "delivery_failures",
+                &self.delivery_failures.failures().len(),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+impl QuiescenceReport {
+    pub fn runtime_id(&self) -> EvaluationRuntimeId {
+        self.runtime.id()
+    }
+
+    pub fn stamp(&self) -> RuntimeReadinessStamp {
+        self.stamp
+    }
+
+    pub fn dispositions(&self) -> &[RuntimeDisposition] {
+        &self.dispositions
+    }
+
+    pub fn task_failures(&self) -> &[ReasoningFailure] {
+        &self.task_failures
+    }
+
+    pub fn delivery_failures(&self) -> &RuntimeDeliveryFailureSnapshot {
+        &self.delivery_failures
     }
 
     pub fn reflection(&self) -> &crate::reflection::StoreSnapshot {
@@ -3323,18 +3416,23 @@ impl EvaluationRuntime {
             RuntimeCoordinatorReadiness::Ready {
                 work_generation,
                 exits,
-            } => RuntimeReadiness::Ready(QuiescenceSnapshot {
-                runtime: self.clone(),
-                stamp: RuntimeReadinessStamp {
-                    work_generation,
-                    observation_epoch,
-                },
-                dispositions: exits
-                    .into_iter()
+            } => {
+                let dispositions = exits
+                    .iter()
+                    .cloned()
                     .map(runtime_disposition_from_snapshot)
-                    .collect(),
-                reflection,
-            }),
+                    .collect();
+                RuntimeReadiness::Ready(QuiescenceSnapshot {
+                    runtime: self.clone(),
+                    stamp: RuntimeReadinessStamp {
+                        work_generation,
+                        observation_epoch,
+                    },
+                    dispositions,
+                    reflection,
+                    settlement_exits: exits,
+                })
+            }
             RuntimeCoordinatorReadiness::Deadlocked {
                 work_generation,
                 exits,
@@ -3356,6 +3454,129 @@ impl EvaluationRuntime {
                 reflection,
             }),
         }
+    }
+
+    fn validate_quiescence_snapshot(
+        &self,
+        snapshot: &QuiescenceSnapshot,
+    ) -> Result<ValidatedRuntimeSettlementPlan, RuntimeSettlementError> {
+        let settlement = self.settlement_guard();
+        let validated = self.validate_quiescence_guarded(snapshot);
+        drop(settlement);
+        validated.ok_or(RuntimeSettlementError::RuntimeChanged)
+    }
+
+    fn validate_quiescence_guarded(
+        &self,
+        snapshot: &QuiescenceSnapshot,
+    ) -> Option<ValidatedRuntimeSettlementPlan> {
+        if snapshot.runtime.id() != self.id() {
+            return None;
+        }
+        let state_matches = {
+            let state = self
+                .state
+                .shared_resources
+                .transactions
+                .state
+                .lock()
+                .expect("runtime transaction mutex should not be poisoned");
+            state.events.outputs.records.is_empty()
+                && state.reflection.root() == snapshot.reflection.root()
+        };
+        if !state_matches
+            || self.state.shared_resources.observations.current().get()
+                != snapshot.stamp.observation_epoch
+        {
+            return None;
+        }
+        self.state
+            .work
+            .validate_runtime_settlement(snapshot.stamp.work_generation, &snapshot.settlement_exits)
+    }
+
+    fn settle_quiescence_snapshot(
+        &self,
+        snapshot: &QuiescenceSnapshot,
+        validated: &ValidatedRuntimeSettlementPlan,
+    ) -> Result<QuiescenceReport, RuntimeSettlementError> {
+        let settlement = self.settlement_guard();
+        let Some(current) = self.validate_quiescence_guarded(snapshot) else {
+            drop(settlement);
+            return Err(RuntimeSettlementError::RuntimeChanged);
+        };
+        if &current != validated {
+            drop(settlement);
+            return Err(RuntimeSettlementError::RuntimeChanged);
+        }
+        let Some(release) = self
+            .state
+            .work
+            .publish_exit_settlement(&settlement, validated)
+        else {
+            drop(settlement);
+            return Err(RuntimeSettlementError::RuntimeChanged);
+        };
+
+        let (work_generation, remaining_exits) = match self.state.work.runtime_readiness_snapshot()
+        {
+            RuntimeCoordinatorReadiness::Ready {
+                work_generation,
+                exits,
+            } => (work_generation, exits),
+            RuntimeCoordinatorReadiness::Busy | RuntimeCoordinatorReadiness::Deadlocked { .. } => {
+                unreachable!("exclusive exit settlement must leave no unfinished work")
+            }
+        };
+        assert!(
+            remaining_exits.is_empty(),
+            "settlement must consume every validated exit disposition"
+        );
+        let task_ledger = self.state.work.failure_ledger_snapshot();
+        let (reflection, delivery_failures) = {
+            let state = self
+                .state
+                .shared_resources
+                .transactions
+                .state
+                .lock()
+                .expect("runtime transaction mutex should not be poisoned");
+            (
+                state.reflection.snapshot(),
+                RuntimeDeliveryFailureSnapshot {
+                    runtime: self.id(),
+                    failures: state.events.outputs.failures.clone(),
+                },
+            )
+        };
+        let observation_epoch = self.state.shared_resources.observations.current().get();
+        drop(settlement);
+        release.finish();
+
+        let task_failures = task_ledger
+            .iter()
+            .flat_map(|(session, failures)| {
+                failures
+                    .iter()
+                    .map(move |(task, failure)| ReasoningFailure {
+                        runtime: self.id(),
+                        task: *task,
+                        diagnostic: reasoning_diagnostic(self.values().core(), failure),
+                        session: *session,
+                    })
+            })
+            .collect();
+        Ok(QuiescenceReport {
+            runtime: self.clone(),
+            stamp: RuntimeReadinessStamp {
+                work_generation,
+                observation_epoch,
+            },
+            dispositions: snapshot.dispositions.clone(),
+            task_failures,
+            delivery_failures,
+            reflection,
+        })
     }
 
     /// Internal activity inspection for the scheduler pump. Retained failures
@@ -3426,6 +3647,13 @@ impl EvaluationRuntime {
             .shared_resources
             .mutation_admission
             .try_settlement_guard()
+    }
+
+    fn settlement_guard(&self) -> RuntimeSettlementGuard<'_> {
+        self.state
+            .shared_resources
+            .mutation_admission
+            .settlement_guard()
     }
 
     /// Reports whether exclusive runtime mutation admission can be acquired
@@ -3953,6 +4181,14 @@ impl fmt::Debug for ReasoningFailure {
 }
 
 impl ReasoningFailure {
+    pub fn runtime_id(&self) -> EvaluationRuntimeId {
+        self.runtime
+    }
+
+    pub fn session_id(&self) -> u64 {
+        self.session.get()
+    }
+
     pub fn task_id(&self) -> u64 {
         self.task.get()
     }
@@ -6493,6 +6729,183 @@ mod tests {
             after_input.stamp().work_generation(),
             after_query_update.stamp().work_generation()
         );
+    }
+
+    #[test]
+    fn quiescence_validation_rejects_observation_and_delivery_changes() {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let RuntimeReadiness::Ready(observation_snapshot) = runtime.readiness() else {
+            panic!("new runtime should be ready")
+        };
+        let admission = runtime.mutation_guard();
+        let blocked_snapshot = observation_snapshot.clone();
+        let (started, validation_started) = std::sync::mpsc::channel();
+        let (finished, validation_finished) = std::sync::mpsc::channel();
+        let validator = std::thread::spawn(move || {
+            started
+                .send(())
+                .expect("validation observer should remain live");
+            let result = blocked_snapshot.validate_without_settling();
+            finished
+                .send(result)
+                .expect("validation receiver should remain live");
+        });
+        validation_started
+            .recv()
+            .expect("validator should begin before admission is released");
+        assert!(
+            validation_finished
+                .recv_timeout(std::time::Duration::from_millis(25))
+                .is_err(),
+            "settlement validation should wait for in-flight mutation admission"
+        );
+        drop(admission);
+        validation_finished
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("released admission should unblock validation")
+            .expect("unchanged validation should pass after admission");
+        validator.join().expect("validator should finish cleanly");
+
+        let (_, store_snapshot) = runtime.reflection_snapshot();
+        let mut journal = crate::reflection::StoreJournal::new(store_snapshot);
+        journal.write(
+            vec![Key::atom_from_text("settlement_stale")],
+            runtime.values().integer(1),
+        );
+        assert_eq!(
+            runtime.commit_reflection(&journal),
+            crate::reflection::StoreCommitResult::Committed
+        );
+        assert!(matches!(
+            observation_snapshot.validate_without_settling(),
+            Err(RuntimeSettlementError::RuntimeChanged)
+        ));
+
+        let RuntimeReadiness::Ready(delivery_snapshot) = runtime.readiness() else {
+            panic!("heap state without work should remain ready")
+        };
+        let endpoint = runtime
+            .output_endpoint(decode_test_integer, |_: i64| Ok(()))
+            .expect("output endpoint should register");
+        let (store, mut events) = input_transaction(&runtime);
+        events
+            .write(&endpoint.writer(), runtime.values().integer(2))
+            .expect("delivery should reserve");
+        assert_eq!(
+            runtime.try_commit_transaction(&store, &events),
+            crate::reflection::StoreCommitResult::Committed
+        );
+        assert!(matches!(
+            delivery_snapshot.validate_without_settling(),
+            Err(RuntimeSettlementError::RuntimeChanged)
+        ));
+        assert!(matches!(runtime.readiness(), RuntimeReadiness::Busy));
+        assert!(endpoint.delivery().deliver_next().unwrap().is_some());
+    }
+
+    #[test]
+    fn quiescence_report_snapshots_failures_independently_of_acknowledgement() {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let assembler = Assembler::builder()
+            .evaluation_runtime(runtime.clone())
+            .build()
+            .expect("assembler should seal the runtime profile");
+        let context = assembler.eval_context();
+        let acknowledged_task = context
+            .schedule_task(|_| Ok(Box::new(FailedReasoningTask)))
+            .expect("acknowledged failure task should schedule");
+        let retained_task = context
+            .schedule_task(|_| Ok(Box::new(FailedReasoningTask)))
+            .expect("retained failure task should schedule");
+        runtime.pump_until_stable();
+        acknowledged_task.acknowledge_failure();
+
+        let acknowledged_delivery = runtime
+            .output_endpoint(decode_test_integer, |_: i64| {
+                Err(Error::new("acknowledged delivery failure"))
+            })
+            .expect("acknowledged delivery endpoint should register");
+        let retained_delivery = runtime
+            .output_endpoint(decode_test_integer, |_: i64| {
+                Err(Error::new("retained delivery failure"))
+            })
+            .expect("retained delivery endpoint should register");
+        let (store, mut events) = input_transaction(&runtime);
+        let acknowledged_delivery_id = events
+            .write(&acknowledged_delivery.writer(), runtime.values().integer(1))
+            .expect("acknowledged delivery should reserve");
+        let retained_delivery_id = events
+            .write(&retained_delivery.writer(), runtime.values().integer(2))
+            .expect("retained delivery should reserve");
+        assert_eq!(
+            runtime.try_commit_transaction(&store, &events),
+            crate::reflection::StoreCommitResult::Committed
+        );
+        assert!(matches!(
+            acknowledged_delivery.delivery().deliver_next().unwrap(),
+            Some(RuntimeDeliveryOutcome::Failed(_))
+        ));
+        assert!(matches!(
+            retained_delivery.delivery().deliver_next().unwrap(),
+            Some(RuntimeDeliveryOutcome::Failed(_))
+        ));
+        assert!(runtime.acknowledge_delivery_failure(acknowledged_delivery_id));
+
+        let RuntimeReadiness::Ready(snapshot) = runtime.readiness() else {
+            panic!("retained failures are state rather than activity")
+        };
+        let report = snapshot.settle().expect("stable runtime should settle");
+        assert_eq!(report.task_failures().len(), 1);
+        assert_eq!(
+            report.task_failures()[0].task_id(),
+            retained_task.id().get()
+        );
+        assert_eq!(
+            report.task_failures()[0].session_id(),
+            context.session_id().get()
+        );
+        assert_eq!(
+            report.task_failures()[0].message(),
+            "public reasoning failure"
+        );
+        assert!(
+            report
+                .delivery_failures()
+                .get(acknowledged_delivery_id)
+                .is_none()
+        );
+        assert!(
+            report
+                .delivery_failures()
+                .get(retained_delivery_id)
+                .is_some()
+        );
+
+        retained_task.acknowledge_failure();
+        assert!(runtime.acknowledge_delivery_failure(retained_delivery_id));
+        assert_eq!(report.task_failures().len(), 1);
+        assert!(
+            report
+                .delivery_failures()
+                .get(retained_delivery_id)
+                .is_some(),
+            "a retained report must not track later acknowledgements"
+        );
+
+        context
+            .schedule_task(|_| {
+                struct CompleteTask;
+                impl EvaluationTaskMachine for CompleteTask {
+                    fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+                        EvaluationMachinePoll::Complete(crate::core::keys::unit_value())
+                    }
+                }
+                Ok(Box::new(CompleteTask))
+            })
+            .expect("later work should remain admissible");
+        runtime.pump_until_stable();
+        assert_eq!(report.task_failures().len(), 1);
+        assert_eq!(report.runtime_id(), runtime.id());
     }
 
     fn decode_test_integer(value: Value) -> Result<i64, Error> {

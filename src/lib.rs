@@ -17,16 +17,19 @@ mod source;
 mod text_pattern;
 
 pub use api::{
-    Assembler, AssemblerBuilder, BuiltModule, Diagnostic, DiagnosticBus, DiagnosticCounts,
-    DiagnosticEvent, DiagnosticIngress, DiagnosticSubscriber, DiagnosticSubscription, Error,
-    EvaluationRuntime, ModuleBuilder, ModuleInput, NetBind, NetBuilder, NetCopy, NetPort,
-    PromiseResolver, ReasoningFailure, ReasoningReport, ReasoningStatus, ReasoningTask,
-    ReasoningTaskState, ReasoningVolume, ReflectionEnvironmentBuilder, ReflectionInspector,
+    Assembler, AssemblerBuilder, BuiltModule, DeadlockSnapshot, Diagnostic, DiagnosticBus,
+    DiagnosticCounts, DiagnosticEvent, DiagnosticIngress, DiagnosticSubscriber,
+    DiagnosticSubscription, Error, EvaluationRuntime, ModuleBuilder, ModuleInput, NetBind,
+    NetBuilder, NetCopy, NetPort, PromiseResolver, QuiescenceReport, QuiescenceSnapshot,
+    ReasoningFailure, ReasoningReport, ReasoningStatus, ReasoningTask, ReasoningTaskState,
+    ReasoningVolume, ReflectionEnvironmentBuilder, ReflectionInspector, RuntimeDeadlockWork,
     RuntimeDeliveryFailure, RuntimeDeliveryFailureKind, RuntimeDeliveryFailureSnapshot,
-    RuntimeDeliveryId, RuntimeDeliveryOutcome, RuntimeEventJournal, RuntimeEventSnapshot,
-    RuntimeInputEndpoint, RuntimeInputReader, RuntimeInputSender, RuntimeLoggerSnapshot,
-    RuntimeOutputDelivery, RuntimeOutputEndpoint, RuntimeOutputEndpointId, RuntimeOutputWriter,
-    RuntimeSharedResources, Value, ValueKind, Values,
+    RuntimeDeliveryId, RuntimeDeliveryOutcome, RuntimeDependency, RuntimeDisposition,
+    RuntimeDispositionKind, RuntimeEventJournal, RuntimeEventSnapshot, RuntimeInputEndpoint,
+    RuntimeInputReader, RuntimeInputSender, RuntimeLoggerSnapshot, RuntimeOutputDelivery,
+    RuntimeOutputEndpoint, RuntimeOutputEndpointId, RuntimeOutputWriter, RuntimeReadiness,
+    RuntimeReadinessStamp, RuntimeSettlementError, RuntimeSharedResources, RuntimeTaskWait,
+    RuntimeWorkKind, RuntimeWorkState, Value, ValueKind, Values,
 };
 pub use diagnostic::Severity;
 pub use g_source::{

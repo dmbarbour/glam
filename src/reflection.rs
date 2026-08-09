@@ -2291,7 +2291,9 @@ impl<S: TaskSpecialization> EffectTask<S> {
             EvaluationWaitPoll::Complete(_)
             | EvaluationWaitPoll::Failed(_)
             | EvaluationWaitPoll::Cancelled
-            | EvaluationWaitPoll::Abandoned => {
+            | EvaluationWaitPoll::Abandoned
+            | EvaluationWaitPoll::Exited
+            | EvaluationWaitPoll::Killed(_) => {
                 self.blocked = None;
                 None
             }
@@ -4169,7 +4171,7 @@ mod tests {
     impl ReflectionQueryWriter for TestQueryWriter {
         fn update_query_guarded(
             &self,
-            _mutation: ReflectionQueryMutation<'_, '_>,
+            _mutation: ReflectionQueryMutation<'_>,
             handle: &Arc<EvaluationQueryHandle>,
             result: PublicValue,
         ) -> Box<dyn FnOnce() + Send> {

@@ -359,6 +359,12 @@ fn await_deferred_task(
             )));
         }
         EvaluationWaitPoll::Abandoned => return Ok(None),
+        EvaluationWaitPoll::Exited => {
+            return Err(EvaluationHalt::new(format!(
+                "{kind} producer exited without a result"
+            )));
+        }
+        EvaluationWaitPoll::Killed(error) => return Err(EvaluationHalt::failure(error)),
         EvaluationWaitPoll::Pending(_) => {}
     }
     if context.runs_scheduled_task() {
@@ -375,6 +381,10 @@ fn await_deferred_task(
                     "{kind} evaluation was cancelled"
                 ))),
                 EvaluationWaitPoll::Abandoned => Ok(None),
+                EvaluationWaitPoll::Exited => Err(EvaluationHalt::new(format!(
+                    "{kind} producer exited without a result"
+                ))),
+                EvaluationWaitPoll::Killed(error) => Err(EvaluationHalt::failure(error)),
             },
             EvaluationPumpOutcome::Busy
             | EvaluationPumpOutcome::NoProgress
@@ -406,6 +416,10 @@ fn await_deferred_task(
             "{kind} evaluation was cancelled"
         ))),
         EvaluationWaitPoll::Abandoned => Ok(None),
+        EvaluationWaitPoll::Exited => Err(EvaluationHalt::new(format!(
+            "{kind} producer exited without a result"
+        ))),
+        EvaluationWaitPoll::Killed(error) => Err(EvaluationHalt::failure(error)),
     }
 }
 
@@ -526,6 +540,13 @@ fn eval_reflection_task_source(
             "reflection task was abandoned when its evaluation session closed",
         )
         .with_context(evaluation_context_frame(context_name))),
+        EvaluationWaitPoll::Exited => Err(EvaluationHalt::new(
+            "reflection task exited without producing a result",
+        )
+        .with_context(evaluation_context_frame(context_name))),
+        EvaluationWaitPoll::Killed(error) => {
+            Err(EvaluationHalt::failure(error).with_context(evaluation_context_frame(context_name)))
+        }
     }
 }
 

@@ -75,6 +75,20 @@ impl RuntimeMutationAdmission {
             .ok()
             .map(|guard| RuntimeSettlementGuard { _guard: guard })
     }
+
+    pub(crate) fn settlement_guard(&self) -> RuntimeSettlementGuard<'_> {
+        RuntimeSettlementGuard {
+            _guard: self
+                .gate
+                .write()
+                .expect("runtime settlement gate should not be poisoned"),
+        }
+    }
+
+    /// Wakes runtime clients after an exclusive settlement publication.
+    pub(crate) fn notify_settlement(&self) {
+        self.activity.advance();
+    }
 }
 
 pub(crate) struct RuntimeMutationGuard<'a> {
@@ -85,6 +99,23 @@ pub(crate) struct RuntimeMutationGuard<'a> {
 pub(crate) struct RuntimeSettlementGuard<'a> {
     _guard: RwLockWriteGuard<'a, ()>,
 }
+
+mod mutation_authority {
+    pub trait Sealed {}
+}
+
+/// Proof that the caller owns either shared mutation admission or exclusive
+/// settlement admission for this runtime.
+///
+/// Publication APIs use this sealed trait only as an authority token. They do
+/// not acquire admission themselves, which lets ordinary commits and atomic
+/// settlement share the same terminal-publication paths.
+pub(crate) trait RuntimeMutationAuthority: mutation_authority::Sealed {}
+
+impl mutation_authority::Sealed for RuntimeMutationGuard<'_> {}
+impl RuntimeMutationAuthority for RuntimeMutationGuard<'_> {}
+impl mutation_authority::Sealed for RuntimeSettlementGuard<'_> {}
+impl RuntimeMutationAuthority for RuntimeSettlementGuard<'_> {}
 
 impl Drop for RuntimeMutationGuard<'_> {
     fn drop(&mut self) {

@@ -15,11 +15,11 @@ use rpds::RedBlackTreeMapSync;
 use crate::core_net::{CoreDataKey, CoreRuntimeNet};
 use crate::evaluation::{
     CompletionSubscriptionOutcome, CompletionSubscriptions, EvalContext, EvaluationTaskHandle,
-    EvaluationWorkCoordinator, PromiseProducerObligation, ReflectionTaskResultPolicy,
-    WakeRegistration,
+    EvaluationWorkCoordinator, PromiseProducerObligation, PromiseProducerPublication,
+    ReflectionTaskResultPolicy, WakeRegistration,
 };
 use crate::number::Number;
-use crate::runtime::{EvaluationRuntimeId, RuntimeIds, RuntimeValueRoot};
+use crate::runtime::{EvaluationRuntimeId, RuntimeIds, RuntimeMutationAuthority, RuntimeValueRoot};
 
 mod evaluation_halt;
 pub(crate) mod keys;
@@ -755,19 +755,7 @@ impl PromiseCell {
             && let Some(coordinator) = producer.coordinator()
         {
             let mutation = coordinator.mutation_guard();
-            let published = self
-                .completion
-                .publish_guarded(&coordinator, &mutation, || {
-                    self.assignment.set(assignment)?;
-                    let producer = producer.publish_assignment_guarded(
-                        &coordinator,
-                        &mutation,
-                        self.assignment
-                            .get()
-                            .expect("promise publication must initialize its assignment"),
-                    );
-                    Ok(producer)
-                });
+            let published = self.publish_guarded(&coordinator, &mutation, assignment);
             let (producer, completion) = published?;
             drop(mutation);
             completion.notify();
@@ -789,6 +777,34 @@ impl PromiseCell {
             producer.notify();
         }
         Ok(())
+    }
+
+    pub(crate) fn publish_guarded(
+        &self,
+        coordinator: &Arc<EvaluationWorkCoordinator>,
+        mutation: &dyn RuntimeMutationAuthority,
+        assignment: PromiseAssignment,
+    ) -> Result<
+        (
+            PromiseProducerPublication,
+            crate::evaluation::CompletionWake,
+        ),
+        PromiseAssignment,
+    > {
+        let producer = self
+            .producer
+            .get()
+            .expect("guarded promise publication requires a coordinator producer");
+        self.completion.publish_guarded(coordinator, mutation, || {
+            self.assignment.set(assignment)?;
+            Ok(producer.publish_assignment_guarded(
+                coordinator,
+                mutation,
+                self.assignment
+                    .get()
+                    .expect("promise publication must initialize its assignment"),
+            ))
+        })
     }
 }
 

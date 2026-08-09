@@ -9,8 +9,8 @@ use std::sync::{Arc, Condvar, Mutex, Weak};
 use crate::core::CoreValueFactory;
 use crate::core::{DeferredValueId, LazyValue, PromiseCell, PromiseId, PromisedValue, Value};
 use crate::runtime::{
-    EvaluationRuntimeId, RuntimeIds, RuntimeMutationAdmission, RuntimeMutationGuard,
-    RuntimeValueRoot,
+    EvaluationRuntimeId, RuntimeIds, RuntimeMutationAdmission, RuntimeMutationAuthority,
+    RuntimeMutationGuard, RuntimeValueRoot,
 };
 
 #[cfg(test)]
@@ -20,6 +20,7 @@ use super::{
     EvaluationExitBlock, EvaluationFailure, EvaluationMachinePoll, EvaluationSessionId,
     EvaluationTaskId, EvaluationTaskMachine, EvaluationTaskStatus, EvaluationWaitTerminal,
     EvaluationWaitToken, ExitIntent, RuntimeFailureLedger, TaskFailureLedger, TaskStatusPublisher,
+    TaskStatusWake,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -248,7 +249,7 @@ impl CompletionSubscriptions {
     pub(crate) fn publish_guarded<T, E>(
         &self,
         coordinator: &Arc<EvaluationWorkCoordinator>,
-        mutation: &RuntimeMutationGuard<'_>,
+        mutation: &dyn RuntimeMutationAuthority,
         publish_terminal: impl FnOnce() -> Result<T, E>,
     ) -> Result<(T, CompletionWake), E> {
         debug_assert_eq!(coordinator.runtime, self.runtime);
@@ -417,6 +418,8 @@ fn terminal_task_status(terminal: &EvaluationWaitTerminal) -> EvaluationTaskStat
         EvaluationWaitTerminal::Failed(error) => EvaluationTaskStatus::Failed(error.clone()),
         EvaluationWaitTerminal::Cancelled => EvaluationTaskStatus::Cancelled,
         EvaluationWaitTerminal::Abandoned => EvaluationTaskStatus::Abandoned,
+        EvaluationWaitTerminal::Exited => EvaluationTaskStatus::Exited,
+        EvaluationWaitTerminal::Killed(error) => EvaluationTaskStatus::Killed(error.clone()),
     }
 }
 
@@ -1096,6 +1099,70 @@ pub(crate) struct RuntimeDeadlockWorkSnapshot {
     pub(crate) observed_epoch: Option<RuntimeObservationEpoch>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ValidatedRuntimeSettlementPlan {
+    pub(crate) work_generation: u64,
+    pub(crate) exits: Vec<RuntimeExitSnapshot>,
+}
+
+struct SelectedExitWork {
+    work: EvaluationWorkId,
+    producer: Option<ProducerSettlementObligation>,
+    status_update: Option<(TaskStatusPublisher, EvaluationTaskStatus)>,
+    promises: Vec<TaskOwnedPromiseObligation>,
+    machine: Option<Box<dyn EvaluationTaskMachine>>,
+    exit: EvaluationExitBlock,
+}
+
+/// Resources detached by one successful exit settlement.
+///
+/// All semantic terminal cells are authoritative before this value is
+/// returned. Its notifications and potentially value-owning drops are delayed
+/// until the caller has released exclusive settlement admission.
+pub(crate) struct RuntimeExitSettlement {
+    coordinator: Arc<EvaluationWorkCoordinator>,
+    producers: Vec<ProducerSettlementObligation>,
+    machines: Vec<Box<dyn EvaluationTaskMachine>>,
+    exits: Vec<EvaluationExitBlock>,
+    completion_wakes: Vec<CompletionWake>,
+    status_wakes: Vec<TaskStatusWake>,
+    status_publishers: Vec<TaskStatusPublisher>,
+    promise_publications: Vec<super::PromiseProducerPublication>,
+    promise_failure: Arc<EvaluationFailure>,
+}
+
+impl RuntimeExitSettlement {
+    pub(crate) fn finish(self) {
+        let Self {
+            coordinator,
+            producers,
+            machines,
+            exits,
+            completion_wakes,
+            status_wakes,
+            status_publishers,
+            promise_publications,
+            promise_failure,
+        } = self;
+        for wake in completion_wakes {
+            wake.notify();
+        }
+        for publication in promise_publications {
+            publication.notify();
+        }
+        for wake in status_wakes {
+            wake.notify();
+        }
+        coordinator.work_available.notify_all();
+        coordinator.admission.notify_settlement();
+        drop(producers);
+        drop(machines);
+        drop(exits);
+        drop(status_publishers);
+        drop(promise_failure);
+    }
+}
+
 impl fmt::Debug for EvaluationWorkCoordinator {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let state = self
@@ -1192,8 +1259,7 @@ impl EvaluationWorkCoordinator {
             .unwrap_or_else(TaskFailureLedger::new_sync)
     }
 
-    #[cfg(test)]
-    pub(super) fn failure_ledger_snapshot(&self) -> RuntimeFailureLedger {
+    pub(crate) fn failure_ledger_snapshot(&self) -> RuntimeFailureLedger {
         self.state
             .lock()
             .expect("evaluation work coordinator was poisoned")
@@ -1788,70 +1854,277 @@ impl EvaluationWorkCoordinator {
             .state
             .lock()
             .expect("evaluation work coordinator was poisoned");
-        let mut exits = Vec::new();
-        let mut unfinished = Vec::new();
-
-        for record in state.work.values() {
-            if matches!(
-                record.state,
-                WorkState::Queued | WorkState::Running | WorkState::Terminalizing
-            ) || matches!(record.kind, WorkKind::Spark(_))
-            {
-                return RuntimeCoordinatorReadiness::Busy;
-            }
-
-            if matches!(record.state, WorkState::ExitWaiting) {
-                let reflection = reflection_work(record);
-                exits.push(RuntimeExitSnapshot {
-                    work: record.id,
-                    session: record.demand_session,
-                    task: reflection.task,
-                    intent: reflection
-                        .exit
-                        .as_ref()
-                        .expect("exit-waiting reflection work must retain its exit summary")
-                        .intent
-                        .clone(),
-                });
-                continue;
-            }
-
-            let state_snapshot = match record.state {
-                WorkState::Dormant => RuntimeWorkStateSnapshot::Dormant,
-                WorkState::Reserved => RuntimeWorkStateSnapshot::Reserved,
-                WorkState::Blocked => RuntimeWorkStateSnapshot::Blocked,
-                WorkState::Queued
-                | WorkState::Running
-                | WorkState::ExitWaiting
-                | WorkState::Terminalizing => unreachable!("handled above"),
-            };
-            unfinished.push(RuntimeDeadlockWorkSnapshot {
-                work: record.id,
-                session: record.demand_session,
-                task: task_for_record(record),
-                kind: runtime_work_kind(record),
-                state: state_snapshot,
-                dependency: work_dependency(record).map(runtime_dependency_snapshot),
-                observed_epoch: task_observation_epoch(record),
-            });
-        }
-
-        exits.sort_by_key(|exit| exit.work.get());
-        if unfinished.is_empty() {
-            RuntimeCoordinatorReadiness::Ready {
-                work_generation: state.work_generation,
-                exits,
-            }
-        } else {
-            unfinished.sort_by_key(|work| work.work.get());
-            RuntimeCoordinatorReadiness::Deadlocked {
-                work_generation: state.work_generation,
-                exits,
-                unfinished,
-            }
-        }
+        runtime_readiness_locked(&state)
     }
 
+    /// Revalidates one proposed ready disposition set without changing work.
+    pub(crate) fn validate_runtime_settlement(
+        &self,
+        work_generation: u64,
+        exits: &[RuntimeExitSnapshot],
+    ) -> Option<ValidatedRuntimeSettlementPlan> {
+        let state = self
+            .state
+            .lock()
+            .expect("evaluation work coordinator was poisoned");
+        if !ready_dispositions_match_locked(&state, work_generation, exits) {
+            return None;
+        }
+        Some(ValidatedRuntimeSettlementPlan {
+            work_generation,
+            exits: exits.to_vec(),
+        })
+    }
+
+    /// Revalidates and atomically publishes every exit disposition while the
+    /// caller holds exclusive settlement admission.
+    pub(crate) fn publish_exit_settlement(
+        self: &Arc<Self>,
+        mutation: &dyn RuntimeMutationAuthority,
+        plan: &ValidatedRuntimeSettlementPlan,
+    ) -> Option<RuntimeExitSettlement> {
+        let mut selected = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            if !ready_dispositions_match_locked(&state, plan.work_generation, &plan.exits) {
+                return None;
+            }
+
+            let mut selected = Vec::with_capacity(plan.exits.len());
+            for proposed in &plan.exits {
+                let (producer, status_update, promises, machine, exit) = {
+                    let record = state
+                        .work
+                        .get_mut(&proposed.work)
+                        .expect("validated exit work must remain registered");
+                    assert!(matches!(record.state, WorkState::ExitWaiting));
+                    let reflection = reflection_work_mut(record);
+                    assert_eq!(reflection.task, proposed.task);
+                    let exit = reflection
+                        .exit
+                        .take()
+                        .expect("exit-waiting work must retain its exit summary");
+                    assert_eq!(exit.intent, proposed.intent);
+                    let machine = reflection.machine.take();
+                    let mut producer = record
+                        .obligations
+                        .take_producer()
+                        .expect("exit work must retain its producer obligation");
+                    let status_update = match &mut producer {
+                        ProducerSettlementObligation::ReflectionTask(publisher) => {
+                            publisher.update_status(EvaluationTaskStatus::Exited, true)
+                        }
+                        ProducerSettlementObligation::DeferredClaim { .. } => {
+                            panic!("only reflection work may publish an exit disposition")
+                        }
+                    };
+                    let promises = record.obligations.owned_promises.clone();
+                    record.state = WorkState::Terminalizing;
+                    (producer, status_update, promises, machine, exit)
+                };
+                state.observation_waiters.remove(&proposed.work);
+                selected.push(SelectedExitWork {
+                    work: proposed.work,
+                    producer: Some(producer),
+                    status_update,
+                    promises,
+                    machine,
+                    exit,
+                });
+            }
+            if !selected.is_empty() {
+                state.work_generation = state.work_generation.wrapping_add(1);
+            }
+            selected
+        };
+
+        let promise_failure = Arc::new(EvaluationFailure::message(
+            "reflection task exited without fulfilling its promised value",
+        ));
+        let mut completion_wakes = Vec::new();
+        let mut status_wakes = Vec::new();
+        let mut status_publishers = Vec::new();
+        let mut promise_publications = Vec::new();
+        for selected in &mut selected {
+            let wait = match selected
+                .producer
+                .as_ref()
+                .expect("selected exit must retain its producer")
+            {
+                ProducerSettlementObligation::ReflectionTask(publisher) => &publisher.wait,
+                ProducerSettlementObligation::DeferredClaim { .. } => unreachable!(),
+            };
+            let (_, wake) =
+                wait.publish_terminal_guarded(self, mutation, EvaluationWaitTerminal::Exited);
+            completion_wakes.push(wake);
+            if let Some((publisher, status)) = selected.status_update.take() {
+                debug_assert_eq!(status, EvaluationTaskStatus::Exited);
+                status_wakes.push(publisher.publish_guarded(mutation, status));
+                status_publishers.push(publisher);
+            }
+            for obligation in &selected.promises {
+                if let Some(promise) = obligation.cell.upgrade() {
+                    let publication =
+                        promise.publish_guarded(self, mutation, Err(promise_failure.clone()));
+                    let (producer, completion) = publication.unwrap_or_else(|_| {
+                        panic!("an exit-owned promise must remain unresolved until settlement")
+                    });
+                    promise_publications.push(producer);
+                    completion_wakes.push(completion);
+                } else {
+                    assert!(self.complete_task_promise_guarded(
+                        mutation,
+                        selected.work,
+                        &obligation.wait,
+                        obligation.promise,
+                    ));
+                    let (_, wake) = obligation.wait.publish_terminal_guarded(
+                        self,
+                        mutation,
+                        EvaluationWaitTerminal::Failed(promise_failure.clone()),
+                    );
+                    completion_wakes.push(wake);
+                }
+            }
+        }
+
+        let machines = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            let machines = selected
+                .iter_mut()
+                .filter_map(|selected| {
+                    let record = state
+                        .work
+                        .get(&selected.work)
+                        .expect("settled exit work must remain registered");
+                    assert!(record.obligations.is_empty());
+                    let detached = detach_reflection(&mut state, selected.work, true);
+                    assert!(
+                        detached.is_none(),
+                        "exit settlement must detach any reusable machine before retirement"
+                    );
+                    selected.machine.take()
+                })
+                .collect::<Vec<_>>();
+            if !selected.is_empty() {
+                state.work_generation = state.work_generation.wrapping_add(1);
+            }
+            machines
+        };
+
+        Some(RuntimeExitSettlement {
+            coordinator: self.clone(),
+            producers: selected
+                .iter_mut()
+                .map(|selected| {
+                    selected
+                        .producer
+                        .take()
+                        .expect("settled exit must retain its detached producer")
+                })
+                .collect(),
+            machines,
+            exits: selected.into_iter().map(|selected| selected.exit).collect(),
+            completion_wakes,
+            status_wakes,
+            status_publishers,
+            promise_publications,
+            promise_failure,
+        })
+    }
+}
+
+fn runtime_readiness_locked(state: &WorkCoordinatorState) -> RuntimeCoordinatorReadiness {
+    let mut exits = Vec::new();
+    let mut unfinished = Vec::new();
+
+    for record in state.work.values() {
+        if matches!(
+            record.state,
+            WorkState::Queued | WorkState::Running | WorkState::Terminalizing
+        ) || matches!(record.kind, WorkKind::Spark(_))
+        {
+            return RuntimeCoordinatorReadiness::Busy;
+        }
+
+        if matches!(record.state, WorkState::ExitWaiting) {
+            let reflection = reflection_work(record);
+            exits.push(RuntimeExitSnapshot {
+                work: record.id,
+                session: record.demand_session,
+                task: reflection.task,
+                intent: reflection
+                    .exit
+                    .as_ref()
+                    .expect("exit-waiting reflection work must retain its exit summary")
+                    .intent
+                    .clone(),
+            });
+            continue;
+        }
+
+        let state_snapshot = match record.state {
+            WorkState::Dormant => RuntimeWorkStateSnapshot::Dormant,
+            WorkState::Reserved => RuntimeWorkStateSnapshot::Reserved,
+            WorkState::Blocked => RuntimeWorkStateSnapshot::Blocked,
+            WorkState::Queued
+            | WorkState::Running
+            | WorkState::ExitWaiting
+            | WorkState::Terminalizing => unreachable!("handled above"),
+        };
+        unfinished.push(RuntimeDeadlockWorkSnapshot {
+            work: record.id,
+            session: record.demand_session,
+            task: task_for_record(record),
+            kind: runtime_work_kind(record),
+            state: state_snapshot,
+            dependency: work_dependency(record).map(runtime_dependency_snapshot),
+            observed_epoch: task_observation_epoch(record),
+        });
+    }
+
+    exits.sort_by_key(|exit| exit.work.get());
+    if unfinished.is_empty() {
+        RuntimeCoordinatorReadiness::Ready {
+            work_generation: state.work_generation,
+            exits,
+        }
+    } else {
+        unfinished.sort_by_key(|work| work.work.get());
+        RuntimeCoordinatorReadiness::Deadlocked {
+            work_generation: state.work_generation,
+            exits,
+            unfinished,
+        }
+    }
+}
+
+fn ready_dispositions_match_locked(
+    state: &WorkCoordinatorState,
+    work_generation: u64,
+    exits: &[RuntimeExitSnapshot],
+) -> bool {
+    state.work_generation == work_generation
+        && state.work.len() == exits.len()
+        && exits.iter().all(|expected| {
+            state.work.get(&expected.work).is_some_and(|record| {
+                record.demand_session == expected.session
+                    && matches!(record.state, WorkState::ExitWaiting)
+                    && matches!(&record.kind, WorkKind::Reflection(reflection)
+                    if reflection.task == expected.task
+                        && reflection.exit.as_ref().is_some_and(|exit| {
+                            exit.intent == expected.intent
+                        }))
+            })
+        })
+}
+
+impl EvaluationWorkCoordinator {
     /// Removes every queued or blocked best-effort spark without touching a
     /// worker-owned record. Detached dependencies and values are released only
     /// after coordinator and mutation locks have been dropped.
@@ -3392,7 +3665,7 @@ impl EvaluationWorkCoordinator {
 
     pub(super) fn complete_task_promise_guarded(
         &self,
-        _mutation: &RuntimeMutationGuard<'_>,
+        _mutation: &dyn RuntimeMutationAuthority,
         work: EvaluationWorkId,
         wait: &EvaluationWaitToken,
         promise: PromiseId,
@@ -3762,7 +4035,7 @@ impl EvaluationWorkCoordinator {
 
     fn subscribe_dependency_guarded(
         &self,
-        mutation: &RuntimeMutationGuard<'_>,
+        mutation: &dyn RuntimeMutationAuthority,
         dependency: WorkDependency,
         registration: WakeRegistration,
     ) -> bool {
@@ -3788,7 +4061,7 @@ impl EvaluationWorkCoordinator {
     /// settlement-visible update without nesting component mutexes.
     pub(super) fn wake_dependency_batch_guarded(
         &self,
-        _mutation: &RuntimeMutationGuard<'_>,
+        _mutation: &dyn RuntimeMutationAuthority,
         batch: DependencyWakeBatch,
     ) -> bool {
         let mut state = self
@@ -3816,7 +4089,7 @@ impl EvaluationWorkCoordinator {
     /// runtime mutation admission across epoch publication and this pass.
     pub(crate) fn publish_runtime_observation_guarded(
         &self,
-        _mutation: &RuntimeMutationGuard<'_>,
+        _mutation: &dyn RuntimeMutationAuthority,
         epoch: RuntimeObservationEpoch,
     ) -> bool {
         let mut state = self

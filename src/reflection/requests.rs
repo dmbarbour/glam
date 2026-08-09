@@ -141,7 +141,7 @@ pub trait ReflectionServices: Send + Sync {
 pub trait ReflectionQueryWriter: Send + Sync {
     fn update_query_guarded(
         &self,
-        mutation: ReflectionQueryMutation<'_, '_>,
+        mutation: ReflectionQueryMutation<'_>,
         handle: &Arc<EvaluationQueryHandle>,
         result: Value,
     ) -> Box<dyn FnOnce() + Send>;
@@ -150,16 +150,16 @@ pub trait ReflectionQueryWriter: Send + Sync {
 /// Opaque proof that a protected query update participates in the caller's
 /// current runtime mutation admission.
 #[doc(hidden)]
-pub struct ReflectionQueryMutation<'guard, 'runtime> {
-    mutation: &'guard crate::runtime::RuntimeMutationGuard<'runtime>,
+pub struct ReflectionQueryMutation<'guard> {
+    mutation: &'guard dyn crate::runtime::RuntimeMutationAuthority,
 }
 
-impl<'guard, 'runtime> ReflectionQueryMutation<'guard, 'runtime> {
-    fn new(mutation: &'guard crate::runtime::RuntimeMutationGuard<'runtime>) -> Self {
+impl<'guard> ReflectionQueryMutation<'guard> {
+    fn new(mutation: &'guard dyn crate::runtime::RuntimeMutationAuthority) -> Self {
         Self { mutation }
     }
 
-    pub(crate) fn guard(&self) -> &crate::runtime::RuntimeMutationGuard<'runtime> {
+    pub(crate) fn guard(&self) -> &dyn crate::runtime::RuntimeMutationAuthority {
         self.mutation
     }
 }
@@ -461,6 +461,14 @@ where
                     "joined reflection task was abandoned when its evaluation session closed",
                 )
                 .with_core_context(task_join_context(handle.task.id()))),
+                EvaluationWaitPoll::Exited => Err(TaskHalt::new(
+                    "joined reflection task exited without producing a result",
+                )
+                .with_core_context(task_join_context(handle.task.id()))),
+                EvaluationWaitPoll::Killed(error) => {
+                    Err(TaskHalt::failure(error)
+                        .with_core_context(task_join_context(handle.task.id())))
+                }
             }
         }
         ReflectionRequest::TaskStatus => {
@@ -485,7 +493,9 @@ where
                 }
                 TaggedTaskState::Failed(_)
                 | TaggedTaskState::Cancelled
-                | TaggedTaskState::Abandoned => Ok(RequestResult::Fail),
+                | TaggedTaskState::Abandoned
+                | TaggedTaskState::Exited
+                | TaggedTaskState::Killed => Ok(RequestResult::Fail),
             }
         }
         ReflectionRequest::TaskHalt => {
@@ -504,9 +514,10 @@ where
                     observe_query_change(context, &handle.status, query.generation);
                     Ok(RequestResult::Fail)
                 }
-                TaggedTaskState::Complete(_) | TaggedTaskState::Abandoned => {
-                    Ok(RequestResult::Fail)
-                }
+                TaggedTaskState::Complete(_)
+                | TaggedTaskState::Abandoned
+                | TaggedTaskState::Exited
+                | TaggedTaskState::Killed => Ok(RequestResult::Fail),
             }
         }
         ReflectionRequest::TaskAcknowledgeError => {
@@ -636,6 +647,8 @@ fn task_status_query_value(values: &CoreValueFactory, status: EvaluationTaskStat
         )),
         EvaluationTaskStatus::Cancelled => values.key_value(&keys::CANCELED),
         EvaluationTaskStatus::Abandoned => values.key_value(&keys::ABANDONED),
+        EvaluationTaskStatus::Exited => values.key_value(&keys::EXITED),
+        EvaluationTaskStatus::Killed(_) => values.key_value(&keys::KILLED),
     }
 }
 
@@ -661,6 +674,8 @@ enum TaggedTaskState {
     Failed(Value),
     Cancelled,
     Abandoned,
+    Exited,
+    Killed,
 }
 
 fn tagged_task_state(
@@ -678,6 +693,12 @@ fn tagged_task_state(
     }
     if value.as_core() == &values.key_value(&keys::ABANDONED) {
         return Ok(TaggedTaskState::Abandoned);
+    }
+    if value.as_core() == &values.key_value(&keys::EXITED) {
+        return Ok(TaggedTaskState::Exited);
+    }
+    if value.as_core() == &values.key_value(&keys::KILLED) {
+        return Ok(TaggedTaskState::Killed);
     }
     let CoreValue::Dict(state) = value.as_core() else {
         return Err(TaskHalt::new("reflection task status is malformed"));
@@ -853,7 +874,7 @@ mod tests {
     impl ReflectionQueryWriter for TestQueryWriter {
         fn update_query_guarded(
             &self,
-            _mutation: ReflectionQueryMutation<'_, '_>,
+            _mutation: ReflectionQueryMutation<'_>,
             handle: &Arc<EvaluationQueryHandle>,
             result: Value,
         ) -> Box<dyn FnOnce() + Send> {
@@ -883,6 +904,35 @@ mod tests {
         assert!(matches!(
             tagged_task_state(&values, &encoded).expect("abandoned status should decode"),
             TaggedTaskState::Abandoned
+        ));
+    }
+
+    #[test]
+    fn exited_and_killed_task_statuses_have_distinct_round_trips() {
+        let values = crate::core::test_value_factory();
+        let exited = Value::from_core(
+            &values,
+            task_status_query_value(&values, EvaluationTaskStatus::Exited),
+        );
+        assert_eq!(exited.as_core(), &values.key_value(&keys::EXITED));
+        assert!(matches!(
+            tagged_task_state(&values, &exited).expect("exited status should decode"),
+            TaggedTaskState::Exited
+        ));
+
+        let killed = Value::from_core(
+            &values,
+            task_status_query_value(
+                &values,
+                EvaluationTaskStatus::Killed(Arc::new(crate::core::EvaluationFailure::message(
+                    "killed fixture",
+                ))),
+            ),
+        );
+        assert_eq!(killed.as_core(), &values.key_value(&keys::KILLED));
+        assert!(matches!(
+            tagged_task_state(&values, &killed).expect("killed status should decode"),
+            TaggedTaskState::Killed
         ));
     }
 

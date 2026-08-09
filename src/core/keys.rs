@@ -52,6 +52,8 @@ protocol_key!(LAUNCHED, "launched");
 protocol_key!(BLOCKED, "blocked");
 protocol_key!(CANCELED, "canceled");
 protocol_key!(ABANDONED, "abandoned");
+protocol_key!(EXITED, "exited");
+protocol_key!(KILLED, "killed");
 protocol_key!(LEFT, "left");
 protocol_key!(RIGHT, "right");
 protocol_key!(HEAD, "head");
