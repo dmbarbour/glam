@@ -1609,13 +1609,13 @@ impl RuntimeReadinessStamp {
     }
 }
 
-/// One task disposition proposed by a stable exit vote.
+/// One work disposition proposed by a stable readiness snapshot.
 #[doc(hidden)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeDisposition {
     work_id: u64,
     session_id: u64,
-    task_id: u64,
+    task_id: Option<u64>,
     kind: RuntimeDispositionKind,
 }
 
@@ -1628,7 +1628,7 @@ impl RuntimeDisposition {
         self.session_id
     }
 
-    pub fn task_id(&self) -> u64 {
+    pub fn task_id(&self) -> Option<u64> {
         self.task_id
     }
 
@@ -1643,9 +1643,52 @@ impl RuntimeDisposition {
 pub enum RuntimeDispositionKind {
     ExitSuccess,
     ExitError(Value),
+    Killed(RuntimeKillReason),
 }
 
-/// Retained evidence that every unfinished participant voted to exit.
+/// Host-selected reason for forcefully settling stable unfinished work.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuntimeKillReason {
+    Deadlock,
+}
+
+#[derive(Clone)]
+enum RuntimeSettlementSnapshot {
+    Ready {
+        exits: Vec<RuntimeExitSnapshot>,
+    },
+    KilledDeadlock {
+        exits: Vec<RuntimeExitSnapshot>,
+        unfinished: Vec<RuntimeDeadlockWorkSnapshot>,
+        reason: RuntimeKillReason,
+    },
+}
+
+impl RuntimeSettlementSnapshot {
+    fn exits(&self) -> &[RuntimeExitSnapshot] {
+        match self {
+            Self::Ready { exits } | Self::KilledDeadlock { exits, .. } => exits,
+        }
+    }
+
+    fn kills(&self) -> &[RuntimeDeadlockWorkSnapshot] {
+        match self {
+            Self::Ready { .. } => &[],
+            Self::KilledDeadlock { unfinished, .. } => unfinished,
+        }
+    }
+
+    fn kill_reason(&self) -> Option<RuntimeKillReason> {
+        match self {
+            Self::Ready { .. } => None,
+            Self::KilledDeadlock { reason, .. } => Some(*reason),
+        }
+    }
+}
+
+/// Retained proposal for accepting stable exit votes or forcefully settling a
+/// retained deadlock.
 #[doc(hidden)]
 #[derive(Clone)]
 pub struct QuiescenceSnapshot {
@@ -1653,7 +1696,8 @@ pub struct QuiescenceSnapshot {
     stamp: RuntimeReadinessStamp,
     dispositions: Vec<RuntimeDisposition>,
     reflection: crate::reflection::StoreSnapshot,
-    settlement_exits: Vec<RuntimeExitSnapshot>,
+    settlement: RuntimeSettlementSnapshot,
+    killed_work: Vec<RuntimeDeadlockWork>,
 }
 
 impl fmt::Debug for QuiescenceSnapshot {
@@ -1663,6 +1707,7 @@ impl fmt::Debug for QuiescenceSnapshot {
             .field("runtime", &self.runtime.id())
             .field("stamp", &self.stamp)
             .field("dispositions", &self.dispositions)
+            .field("killed_work", &self.killed_work.len())
             .finish_non_exhaustive()
     }
 }
@@ -1684,8 +1729,8 @@ impl QuiescenceSnapshot {
         &self.reflection
     }
 
-    /// Revalidates and accepts every proposed exit disposition, then returns
-    /// a retained report of the settled runtime instant.
+    /// Revalidates and accepts every proposed disposition, then returns a
+    /// retained report of the settled runtime instant.
     pub fn settle(&self) -> Result<QuiescenceReport, RuntimeSettlementError> {
         let plan = self.runtime.validate_quiescence_snapshot(self)?;
         self.runtime.settle_quiescence_snapshot(self, &plan)
@@ -1732,6 +1777,7 @@ pub struct QuiescenceReport {
     task_failures: Vec<ReasoningFailure>,
     delivery_failures: RuntimeDeliveryFailureSnapshot,
     reflection: crate::reflection::StoreSnapshot,
+    killed_work: Vec<RuntimeDeadlockWork>,
 }
 
 impl fmt::Debug for QuiescenceReport {
@@ -1742,6 +1788,7 @@ impl fmt::Debug for QuiescenceReport {
             .field("stamp", &self.stamp)
             .field("dispositions", &self.dispositions)
             .field("task_failures", &self.task_failures)
+            .field("killed_work", &self.killed_work.len())
             .field(
                 "delivery_failures",
                 &self.delivery_failures.failures().len(),
@@ -1773,6 +1820,11 @@ impl QuiescenceReport {
 
     pub fn reflection(&self) -> &crate::reflection::StoreSnapshot {
         &self.reflection
+    }
+
+    /// Typed blocked work forcefully retired by this settlement.
+    pub fn killed_work(&self) -> &[RuntimeDeadlockWork] {
+        &self.killed_work
     }
 }
 
@@ -1888,6 +1940,8 @@ pub struct DeadlockSnapshot {
     dispositions: Vec<RuntimeDisposition>,
     unfinished: Vec<RuntimeDeadlockWork>,
     reflection: crate::reflection::StoreSnapshot,
+    settlement_exits: Vec<RuntimeExitSnapshot>,
+    settlement_unfinished: Vec<RuntimeDeadlockWorkSnapshot>,
 }
 
 impl fmt::Debug for DeadlockSnapshot {
@@ -1922,18 +1976,70 @@ impl DeadlockSnapshot {
     pub fn reflection(&self) -> &crate::reflection::StoreSnapshot {
         &self.reflection
     }
+
+    /// Derives a forced settlement proposal from this retained deadlock.
+    /// The proposal remains observational until [`QuiescenceSnapshot::settle`]
+    /// revalidates and accepts it.
+    pub fn kill(&self, reason: RuntimeKillReason) -> QuiescenceSnapshot {
+        let mut dispositions = self.dispositions.clone();
+        dispositions.extend(self.unfinished.iter().map(|work| RuntimeDisposition {
+            work_id: work.work_id,
+            session_id: work.session_id,
+            task_id: work.task_id,
+            kind: RuntimeDispositionKind::Killed(reason),
+        }));
+        QuiescenceSnapshot {
+            runtime: self.runtime.clone(),
+            stamp: self.stamp,
+            dispositions,
+            reflection: self.reflection.clone(),
+            settlement: RuntimeSettlementSnapshot::KilledDeadlock {
+                exits: self.settlement_exits.clone(),
+                unfinished: self.settlement_unfinished.clone(),
+                reason,
+            },
+            killed_work: self.unfinished.clone(),
+        }
+    }
 }
 
 fn runtime_disposition_from_snapshot(snapshot: RuntimeExitSnapshot) -> RuntimeDisposition {
     RuntimeDisposition {
         work_id: snapshot.work.get(),
         session_id: snapshot.session.get(),
-        task_id: snapshot.task.get(),
+        task_id: Some(snapshot.task.get()),
         kind: match snapshot.intent {
             ExitIntent::Success => RuntimeDispositionKind::ExitSuccess,
             ExitIntent::Error(message) => RuntimeDispositionKind::ExitError(Value(message)),
         },
     }
+}
+
+fn runtime_killed_failure(
+    values: &CoreValueFactory,
+    reason: RuntimeKillReason,
+) -> Arc<EvaluationFailure> {
+    let reason = match reason {
+        RuntimeKillReason::Deadlock => values.key_value(&Key::atom_from_text("deadlock")),
+    };
+    let args = Dict::new_sync().insert(Key::atom_from_text("reason"), reason);
+    let detail = Dict::new_sync()
+        .insert(
+            Key::atom_from_text("op"),
+            values.key_value(&Key::atom_from_text("kill")),
+        )
+        .insert(Key::atom_from_text("args"), CoreValue::Dict(args));
+    let message = Dict::new_sync()
+        .insert(
+            (*crate::core::keys::TEXT).clone(),
+            CoreValue::binary_from_text("runtime killed work in a deadlocked settlement"),
+        )
+        .insert((*crate::core::keys::SEVERITY).clone(), values.error());
+    Arc::new(EvaluationFailure::emission(CoreValue::Dict(
+        Dict::new_sync()
+            .insert((*crate::core::keys::MSG).clone(), CoreValue::Dict(message))
+            .insert(Key::atom_from_text("runtime"), CoreValue::Dict(detail)),
+    )))
 }
 
 fn runtime_dependency_from_snapshot(snapshot: RuntimeDependencySnapshot) -> RuntimeDependency {
@@ -3430,7 +3536,8 @@ impl EvaluationRuntime {
                     },
                     dispositions,
                     reflection,
-                    settlement_exits: exits,
+                    settlement: RuntimeSettlementSnapshot::Ready { exits },
+                    killed_work: Vec::new(),
                 })
             }
             RuntimeCoordinatorReadiness::Deadlocked {
@@ -3444,14 +3551,18 @@ impl EvaluationRuntime {
                     observation_epoch,
                 },
                 dispositions: exits
-                    .into_iter()
+                    .iter()
+                    .cloned()
                     .map(runtime_disposition_from_snapshot)
                     .collect(),
                 unfinished: unfinished
-                    .into_iter()
+                    .iter()
+                    .cloned()
                     .map(runtime_deadlock_work_from_snapshot)
                     .collect(),
                 reflection,
+                settlement_exits: exits,
+                settlement_unfinished: unfinished,
             }),
         }
     }
@@ -3490,9 +3601,11 @@ impl EvaluationRuntime {
         {
             return None;
         }
-        self.state
-            .work
-            .validate_runtime_settlement(snapshot.stamp.work_generation, &snapshot.settlement_exits)
+        self.state.work.validate_runtime_settlement(
+            snapshot.stamp.work_generation,
+            snapshot.settlement.exits(),
+            snapshot.settlement.kills(),
+        )
     }
 
     fn settle_quiescence_snapshot(
@@ -3509,10 +3622,14 @@ impl EvaluationRuntime {
             drop(settlement);
             return Err(RuntimeSettlementError::RuntimeChanged);
         }
-        let Some(release) = self
-            .state
-            .work
-            .publish_exit_settlement(&settlement, validated)
+        let kill_failure = snapshot
+            .settlement
+            .kill_reason()
+            .map(|reason| runtime_killed_failure(self.values().core(), reason));
+        let Some(release) =
+            self.state
+                .work
+                .publish_runtime_settlement(&settlement, validated, kill_failure)
         else {
             drop(settlement);
             return Err(RuntimeSettlementError::RuntimeChanged);
@@ -3576,6 +3693,7 @@ impl EvaluationRuntime {
             task_failures,
             delivery_failures,
             reflection,
+            killed_work: snapshot.killed_work.clone(),
         })
     }
 

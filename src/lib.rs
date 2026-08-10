@@ -26,10 +26,10 @@ pub use api::{
     RuntimeDeliveryFailure, RuntimeDeliveryFailureKind, RuntimeDeliveryFailureSnapshot,
     RuntimeDeliveryId, RuntimeDeliveryOutcome, RuntimeDependency, RuntimeDisposition,
     RuntimeDispositionKind, RuntimeEventJournal, RuntimeEventSnapshot, RuntimeInputEndpoint,
-    RuntimeInputReader, RuntimeInputSender, RuntimeLoggerSnapshot, RuntimeOutputDelivery,
-    RuntimeOutputEndpoint, RuntimeOutputEndpointId, RuntimeOutputWriter, RuntimeReadiness,
-    RuntimeReadinessStamp, RuntimeSettlementError, RuntimeSharedResources, RuntimeTaskWait,
-    RuntimeWorkKind, RuntimeWorkState, Value, ValueKind, Values,
+    RuntimeInputReader, RuntimeInputSender, RuntimeKillReason, RuntimeLoggerSnapshot,
+    RuntimeOutputDelivery, RuntimeOutputEndpoint, RuntimeOutputEndpointId, RuntimeOutputWriter,
+    RuntimeReadiness, RuntimeReadinessStamp, RuntimeSettlementError, RuntimeSharedResources,
+    RuntimeTaskWait, RuntimeWorkKind, RuntimeWorkState, Value, ValueKind, Values,
 };
 pub use diagnostic::Severity;
 pub use g_source::{

@@ -657,13 +657,6 @@ impl ClientDemandOperation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "forced client disposition is exercised internally until runtime settlement uses it"
-    )
-)]
 pub(crate) enum ClientDemandResult {
     Complete(RuntimeValueRoot),
     Failed(Arc<EvaluationFailure>),
@@ -3838,7 +3831,7 @@ mod tests {
             panic!("strict join on an exit voter should remain a runtime deadlock")
         };
         assert_eq!(snapshot.dispositions().len(), 1);
-        assert_eq!(snapshot.dispositions()[0].task_id(), child.id().get());
+        assert_eq!(snapshot.dispositions()[0].task_id(), Some(child.id().get()));
         assert_eq!(snapshot.unfinished().len(), 1);
         assert_eq!(snapshot.unfinished()[0].task_id(), Some(parent.id().get()));
         assert!(matches!(
@@ -6288,14 +6281,14 @@ mod tests {
 
         assert_eq!(snapshot.dispositions().len(), 2);
         assert!(snapshot.dispositions().iter().any(|disposition| {
-            disposition.task_id() == success.id().get()
+            disposition.task_id() == Some(success.id().get())
                 && matches!(
                     disposition.kind(),
                     crate::api::RuntimeDispositionKind::ExitSuccess
                 )
         }));
         assert!(snapshot.dispositions().iter().any(|disposition| {
-            disposition.task_id() == error.id().get()
+            disposition.task_id() == Some(error.id().get())
                 && matches!(
                     disposition.kind(),
                     crate::api::RuntimeDispositionKind::ExitError(value)
@@ -6427,6 +6420,264 @@ mod tests {
         assert!(matches!(
             fixture.runtime.readiness(),
             crate::api::RuntimeReadiness::Ready(_)
+        ));
+    }
+
+    #[test]
+    fn forced_deadlock_settlement_preserves_exits_and_kills_other_participants() {
+        let fixture = SameRuntimeFixture::new();
+        let context = fixture.context();
+        let child = context
+            .schedule_task(|_| {
+                Ok(Box::new(ExitVote(EvaluationExitBlock {
+                    intent: ExitIntent::Success,
+                    observed_epoch: None,
+                })))
+            })
+            .expect("exit-voting child should schedule");
+        let child_wait = child.wait().clone();
+        let parent = context
+            .schedule_task(move |task_context| {
+                Ok(Box::new(Await {
+                    context: task_context,
+                    dependency: child_wait,
+                }))
+            })
+            .expect("strict parent should schedule");
+        let promise = PromisedValue::new(context.values(), "killed client promise");
+        let client = context
+            .demand_whnf(RuntimeValueRoot::new(
+                context.values(),
+                Value::Promised(promise),
+            ))
+            .expect("client demand should admit");
+
+        fixture.runtime.pump_until_stable();
+        let crate::api::RuntimeReadiness::Deadlocked(deadlock) = fixture.runtime.readiness() else {
+            panic!("strict join and unresolved client demand should deadlock")
+        };
+        let killed_details = deadlock.unfinished().to_vec();
+        let forced = deadlock.kill(crate::api::RuntimeKillReason::Deadlock);
+        assert_eq!(forced.dispositions().len(), 3);
+        assert!(forced.dispositions().iter().any(|disposition| {
+            disposition.task_id() == Some(child.id().get())
+                && matches!(
+                    disposition.kind(),
+                    crate::api::RuntimeDispositionKind::ExitSuccess
+                )
+        }));
+        assert!(forced.dispositions().iter().any(|disposition| {
+            disposition.task_id() == Some(parent.id().get())
+                && matches!(
+                    disposition.kind(),
+                    crate::api::RuntimeDispositionKind::Killed(
+                        crate::api::RuntimeKillReason::Deadlock
+                    )
+                )
+        }));
+        assert!(forced.dispositions().iter().any(|disposition| {
+            disposition.task_id().is_none()
+                && matches!(
+                    disposition.kind(),
+                    crate::api::RuntimeDispositionKind::Killed(
+                        crate::api::RuntimeKillReason::Deadlock
+                    )
+                )
+        }));
+
+        let report = forced
+            .settle()
+            .expect("unchanged forced deadlock should settle");
+        assert_eq!(report.killed_work(), killed_details);
+        assert!(report.task_failures().is_empty());
+        assert_eq!(
+            context.poll_reflection_task(&child),
+            EvaluationWaitPoll::Exited
+        );
+        let EvaluationWaitPoll::Killed(parent_failure) = context.poll_reflection_task(&parent)
+        else {
+            panic!("forced parent should publish a killed terminal")
+        };
+        assert!(matches!(
+            parent_failure.emission_value(),
+            Some(Value::Dict(_))
+        ));
+        assert_eq!(
+            parent_failure.to_string(),
+            "runtime killed work in a deadlocked settlement"
+        );
+        let Some(ClientDemandResult::Killed(client_failure)) = client.poll() else {
+            panic!("forced client demand should receive a killed result")
+        };
+        assert_eq!(client_failure, parent_failure);
+        assert!(matches!(
+            fixture.runtime.readiness(),
+            crate::api::RuntimeReadiness::Ready(_)
+        ));
+
+        let later = context
+            .schedule_task(|_| Ok(Box::new(Complete)))
+            .expect("settlement must not seal the runtime");
+        fixture.runtime.pump_until_stable();
+        assert!(matches!(
+            context.poll_reflection_task(&later),
+            EvaluationWaitPoll::Complete(_)
+        ));
+        assert_eq!(report.killed_work(), killed_details);
+    }
+
+    #[test]
+    fn forced_kill_abandons_a_deferred_lazy_claim_without_poisoning_the_lazy() {
+        let fixture = SameRuntimeFixture::new();
+        let context = fixture.context();
+        let expected = context.values().unit();
+        let lazy = LazyValue::deferred(context.values(), "reclaim after forced kill", {
+            let expected = expected.clone();
+            move |_| Ok(expected.clone())
+        });
+        let wait = context
+            .lazy_task(&lazy, |_| Box::new(AlwaysBlocked))
+            .expect("dormant deferred claim should register");
+
+        let crate::api::RuntimeReadiness::Deadlocked(deadlock) = fixture.runtime.readiness() else {
+            panic!("dormant deferred work should be a stable anomaly")
+        };
+        assert!(deadlock.unfinished().iter().any(|work| {
+            work.kind() == crate::api::RuntimeWorkKind::DeferredEvaluation
+                && work.state() == crate::api::RuntimeWorkState::Dormant
+        }));
+        let report = deadlock
+            .kill(crate::api::RuntimeKillReason::Deadlock)
+            .settle()
+            .expect("dormant deferred work should be killable");
+        assert_eq!(report.killed_work().len(), 1);
+        assert!(matches!(
+            context.poll_wait(&wait),
+            EvaluationWaitPoll::Killed(_)
+        ));
+        assert!(lazy.cached().is_none());
+        assert_deferred_task_retired(&context, &lazy);
+        assert_eq!(
+            crate::eval::eval_value(&context, &Value::Lazy(lazy.clone()))
+                .expect("a later demand should reclaim the lazy source"),
+            expected
+        );
+        assert!(lazy.cached().is_some_and(|result| result.is_ok()));
+    }
+
+    #[test]
+    fn forced_kill_publishes_task_status_and_fails_owned_promises() {
+        struct BlockedWithDropCheck {
+            coordinator: Weak<EvaluationWorkCoordinator>,
+            dropped_without_runtime_locks: Arc<AtomicBool>,
+        }
+
+        impl EvaluationTaskMachine for BlockedWithDropCheck {
+            fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+                EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
+                    dependency: None,
+                    observed_epoch: Some(RuntimeObservationEpoch::from_raw(7)),
+                    error: None,
+                })
+            }
+        }
+
+        impl Drop for BlockedWithDropCheck {
+            fn drop(&mut self) {
+                let unlocked = self
+                    .coordinator
+                    .upgrade()
+                    .is_none_or(|coordinator| coordinator.runtime_locks_are_free());
+                self.dropped_without_runtime_locks
+                    .store(unlocked, Ordering::Release);
+            }
+        }
+
+        let fixture = SameRuntimeFixture::new();
+        let context = fixture.context();
+        let coordinator = context
+            .coordinator()
+            .expect("coordinator should remain live");
+        let dropped_without_runtime_locks = Arc::new(AtomicBool::new(false));
+        let drop_check = dropped_without_runtime_locks.clone();
+        let weak_coordinator = Arc::downgrade(&coordinator);
+        let promise_output = Arc::new(Mutex::new(None));
+        let output = promise_output.clone();
+        let task = context
+            .schedule_task(move |task_context| {
+                let promise = PromisedValue::fixpoint(&task_context, "killed owned promise")?;
+                *output.lock().expect("promise output was poisoned") = Some(promise);
+                Ok(Box::new(BlockedWithDropCheck {
+                    coordinator: weak_coordinator,
+                    dropped_without_runtime_locks: drop_check,
+                }))
+            })
+            .expect("blocked promise owner should schedule");
+        let promise = promise_output
+            .lock()
+            .expect("promise output was poisoned")
+            .clone()
+            .expect("task construction should expose its promise");
+        let statuses = Arc::new(RecordedStatuses::default());
+        assert!(
+            context.attach_task_status_publisher(&task, RecordedStatuses::publisher(&statuses),)
+        );
+
+        fixture.runtime.pump_until_stable();
+        let crate::api::RuntimeReadiness::Deadlocked(deadlock) = fixture.runtime.readiness() else {
+            panic!("blocked promise owner should deadlock")
+        };
+        deadlock
+            .kill(crate::api::RuntimeKillReason::Deadlock)
+            .settle()
+            .expect("blocked promise owner should settle as killed");
+
+        let EvaluationWaitPoll::Killed(task_failure) = context.poll_reflection_task(&task) else {
+            panic!("task wait should expose the killed terminal")
+        };
+        let promise_failure = promise
+            .assignment()
+            .expect("owned promise should receive a terminal assignment")
+            .expect_err("owned promise should fail when its producer is killed");
+        assert_eq!(promise_failure, task_failure);
+        assert!(matches!(
+            statuses
+                .0
+                .lock()
+                .expect("recorded statuses were poisoned")
+                .last(),
+            Some(EvaluationTaskStatus::Killed(failure)) if failure == &task_failure
+        ));
+        assert!(dropped_without_runtime_locks.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn forced_deadlock_settlement_rejects_a_stale_busy_runtime() {
+        let fixture = SameRuntimeFixture::new();
+        let context = fixture.context();
+        let blocked = context
+            .schedule_task(|_| Ok(Box::new(AlwaysBlocked)))
+            .expect("blocked task should schedule");
+        fixture.runtime.pump_until_stable();
+        let crate::api::RuntimeReadiness::Deadlocked(deadlock) = fixture.runtime.readiness() else {
+            panic!("blocked task should deadlock")
+        };
+        let forced = deadlock.kill(crate::api::RuntimeKillReason::Deadlock);
+
+        context
+            .schedule_task(|_| Ok(Box::new(Complete)))
+            .expect("new runnable work should disturb the deadlock");
+        assert!(matches!(
+            fixture.runtime.readiness(),
+            crate::api::RuntimeReadiness::Busy
+        ));
+        assert!(matches!(
+            forced.settle(),
+            Err(crate::api::RuntimeSettlementError::RuntimeChanged)
+        ));
+        assert!(matches!(
+            context.poll_reflection_task(&blocked),
+            EvaluationWaitPoll::Pending(_)
         ));
     }
 
@@ -6594,13 +6845,13 @@ mod tests {
         let context = fixture.context();
         let coordinator = context.coordinator().expect("coordinator should be live");
         let lazy = inert_lazy_for(context.values(), "dormant readiness producer");
-        context
+        let deferred_wait = context
             .lazy_task(&lazy, |_| Box::new(Complete))
             .expect("dormant deferred work should register");
         let task = allocate_task_id(context.values()).expect("task ID should allocate");
         let wait = allocate_wait_token(&context.session, task).expect("wait ID should allocate");
         coordinator
-            .reserve_reflection(&context.session, task, wait)
+            .reserve_reflection(&context.session, task, wait.clone())
             .expect("reserved reflection work should register");
 
         let crate::api::RuntimeReadiness::Deadlocked(snapshot) = fixture.runtime.readiness() else {
@@ -6615,6 +6866,19 @@ mod tests {
                 && work.kind() == crate::api::RuntimeWorkKind::ReflectionTask
                 && work.state() == crate::api::RuntimeWorkState::Reserved
         }));
+        let report = snapshot
+            .kill(crate::api::RuntimeKillReason::Deadlock)
+            .settle()
+            .expect("anomalous dormant and reserved work should be forcefully settleable");
+        assert_eq!(report.killed_work().len(), 2);
+        assert!(matches!(
+            context.poll_wait(&deferred_wait),
+            EvaluationWaitPoll::Killed(_)
+        ));
+        assert!(matches!(
+            context.poll_wait(&wait),
+            EvaluationWaitPoll::Killed(_)
+        ));
     }
 
     #[test]
