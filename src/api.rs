@@ -50,8 +50,8 @@ use crate::reflection::{
     task_launcher, volume_effects,
 };
 use crate::runtime::{
-    EvaluationRuntimeId, RuntimeIds, RuntimeMutationAdmission, RuntimeMutationGuard,
-    RuntimeSettlementGuard, RuntimeValueRoot, allocate_evaluation_runtime_id,
+    EvaluationRuntimeId, RuntimeIds, RuntimeMutationAdmission, RuntimeMutationAuthority,
+    RuntimeMutationGuard, RuntimeSettlementGuard, RuntimeValueRoot, allocate_evaluation_runtime_id,
 };
 use crate::source::{
     FileSourceSystem, Host, HostSourceSystem, SourceArtifact, SourceIdentity, SourceSystem,
@@ -1026,11 +1026,16 @@ impl DiagnosticBus {
             return Err(Error::new("diagnostic bus already has a runtime ingress"));
         }
         // Setup holds the bus lock so no publication can obtain a sequence
-        // between the baseline capture and ingress installation. Endpoint
-        // registration invokes no host callback and no runtime path acquires
-        // the bus in the opposite direction.
+        // between the baseline capture and ingress installation. Guarded
+        // publishers acquire runtime admission before returning to this lock,
+        // but only after `state.ingress` is installed below. A publisher that
+        // wins this lock before setup takes the direct path; one that arrives
+        // during setup waits without runtime admission, then observes the
+        // installed ingress. The opposite lock order is therefore unreachable
+        // during the one-time installation.
         let endpoint = runtime.input_endpoint::<Value, _>(Ok)?;
         let (sender, reader) = endpoint.into_parts();
+        register_runtime_diagnostic_route(&runtime.state.shared_resources, sender.id())?;
         let ingress = DiagnosticIngress {
             inner: Arc::new(DiagnosticIngressInner {
                 sender,
@@ -1090,48 +1095,81 @@ impl DiagnosticBus {
         runtime: EvaluationRuntimeId,
         diagnostic: Diagnostic,
     ) -> Result<DiagnosticEvent, Error> {
-        let (event, ingress, subscribers) = {
+        let mut diagnostic = Some(diagnostic);
+        let (ingress, direct) = {
             let mut state = self
                 .inner
                 .state
                 .lock()
                 .expect("diagnostic bus mutex should not be poisoned");
-            match state.runtime {
-                Some(owner) if owner != runtime => {
-                    return Err(Error::new(format!(
-                        "diagnostic bus belongs to evaluation runtime {}, not {}",
-                        owner.get(),
-                        runtime.get()
-                    )));
-                }
-                Some(_) => {}
-                None => state.runtime = Some(runtime),
-            }
-            let sequence = state.counts.next_sequence;
-            state.counts.next_sequence = sequence
-                .checked_add(1)
-                .expect("diagnostic sequence numbers exhausted");
-            let count = match diagnostic.severity() {
-                Severity::Info => &mut state.counts.info,
-                Severity::Warning => &mut state.counts.warnings,
-                Severity::Error => &mut state.counts.errors,
-            };
-            *count = count.checked_add(1).expect("diagnostic count overflow");
-            let event = DiagnosticEvent {
-                sequence,
-                diagnostic: Arc::new(diagnostic),
-            };
+            Self::validate_runtime_locked(&mut state, runtime)?;
             let ingress = state.ingress.as_ref().and_then(Weak::upgrade);
-            let subscribers = state.subscribers.values().cloned().collect::<Vec<_>>();
-            (event, ingress, subscribers)
+            let direct = ingress.is_none().then(|| {
+                Self::record_event_locked(
+                    &mut state,
+                    diagnostic
+                        .take()
+                        .expect("a direct publication still owns its diagnostic"),
+                )
+            });
+            (ingress, direct)
         };
-        if let Some(ingress) = ingress {
-            ingress.receive(event.clone());
-        }
+        let (event, subscribers) = match (ingress, direct) {
+            (Some(ingress), None) => ingress.publish_guarded(
+                &self.inner,
+                runtime,
+                diagnostic
+                    .take()
+                    .expect("an ingress publication still owns its diagnostic"),
+            )?,
+            (None, Some(direct)) => direct,
+            _ => unreachable!("a diagnostic selects exactly one publication route"),
+        };
         for subscriber in subscribers {
             subscriber.receive(event.clone());
         }
         Ok(event)
+    }
+
+    fn validate_runtime_locked(
+        state: &mut DiagnosticBusState,
+        runtime: EvaluationRuntimeId,
+    ) -> Result<(), Error> {
+        match state.runtime {
+            Some(owner) if owner != runtime => Err(Error::new(format!(
+                "diagnostic bus belongs to evaluation runtime {}, not {}",
+                owner.get(),
+                runtime.get()
+            ))),
+            Some(_) => Ok(()),
+            None => {
+                state.runtime = Some(runtime);
+                Ok(())
+            }
+        }
+    }
+
+    fn record_event_locked(
+        state: &mut DiagnosticBusState,
+        diagnostic: Diagnostic,
+    ) -> (DiagnosticEvent, Vec<Arc<dyn DiagnosticSubscriber>>) {
+        let sequence = state.counts.next_sequence;
+        state.counts.next_sequence = sequence
+            .checked_add(1)
+            .expect("diagnostic sequence numbers exhausted");
+        let count = match diagnostic.severity() {
+            Severity::Info => &mut state.counts.info,
+            Severity::Warning => &mut state.counts.warnings,
+            Severity::Error => &mut state.counts.errors,
+        };
+        *count = count.checked_add(1).expect("diagnostic count overflow");
+        (
+            DiagnosticEvent {
+                sequence,
+                diagnostic: Arc::new(diagnostic),
+            },
+            state.subscribers.values().cloned().collect(),
+        )
     }
 
     pub fn counts(&self) -> DiagnosticCounts {
@@ -1188,7 +1226,57 @@ struct DiagnosticIngressInner {
 }
 
 impl DiagnosticIngressInner {
-    fn receive(&self, event: DiagnosticEvent) {
+    fn publish_guarded(
+        &self,
+        bus: &DiagnosticBusInner,
+        runtime: EvaluationRuntimeId,
+        diagnostic: Diagnostic,
+    ) -> Result<(DiagnosticEvent, Vec<Arc<dyn DiagnosticSubscriber>>), Error> {
+        let owner = match self.sender.owner.upgrade() {
+            Some(owner) => owner,
+            None => {
+                let event = {
+                    let mut bus = bus
+                        .state
+                        .lock()
+                        .expect("diagnostic bus mutex should not be poisoned");
+                    DiagnosticBus::validate_runtime_locked(&mut bus, runtime)?;
+                    DiagnosticBus::record_event_locked(&mut bus, diagnostic)
+                };
+                let failure = Error::new(format!(
+                    "evaluation runtime {} for input endpoint {} has been dropped",
+                    self.sender.runtime.get(),
+                    self.sender.endpoint.get()
+                ));
+                self.state
+                    .lock()
+                    .expect("diagnostic ingress mutex should not be poisoned")
+                    .failure = Some(failure);
+                return Ok(event);
+            }
+        };
+        // The shared guard makes bus sequence assignment and ingress route
+        // selection one publication with respect to an exclusive fallback or
+        // rearm boundary. Subscriber callbacks run only after it is dropped.
+        let mutation = owner.mutation_admission.mutation_guard();
+        let (event, subscribers) = {
+            let mut bus = bus
+                .state
+                .lock()
+                .expect("diagnostic bus mutex should not be poisoned");
+            DiagnosticBus::validate_runtime_locked(&mut bus, runtime)?;
+            DiagnosticBus::record_event_locked(&mut bus, diagnostic)
+        };
+        let changed = self.receive_guarded(event.clone(), &owner);
+        let notification = changed.then(|| prepare_runtime_observation(&owner, &mutation));
+        drop(mutation);
+        if let Some(notification) = notification {
+            notification.notify();
+        }
+        Ok((event, subscribers))
+    }
+
+    fn receive_guarded(&self, event: DiagnosticEvent, owner: &Arc<RuntimeSharedResources>) -> bool {
         let sequence = event.sequence();
         let value = match event.diagnostic().transport_value(&self.values) {
             Ok(value) => value,
@@ -1197,7 +1285,7 @@ impl DiagnosticIngressInner {
                     .lock()
                     .expect("diagnostic ingress mutex should not be poisoned")
                     .failure = Some(error);
-                return;
+                return false;
             }
         };
         let prepared = match self.sender.prepare(value) {
@@ -1207,24 +1295,33 @@ impl DiagnosticIngressInner {
                     .lock()
                     .expect("diagnostic ingress mutex should not be poisoned")
                     .failure = Some(error);
-                return;
+                return false;
             }
         };
+        debug_assert!(Arc::ptr_eq(
+            &prepared
+                .owner
+                .upgrade()
+                .expect("guarded diagnostic ingress retains its runtime resources"),
+            owner
+        ));
         let mut state = self
             .state
             .lock()
             .expect("diagnostic ingress mutex should not be poisoned");
         if state.failure.is_some() || sequence < state.next_sequence {
-            return;
+            return false;
         }
         state.pending.insert(sequence, prepared);
+        let mut changed = false;
         loop {
             let next = state.next_sequence;
             let Some(prepared) = state.pending.remove(&next) else {
                 break;
             };
-            match prepared.admit() {
-                Ok(_) => {
+            match route_runtime_diagnostic_guarded(owner, prepared) {
+                Ok(()) => {
+                    changed = true;
                     state.next_sequence = next
                         .checked_add(1)
                         .expect("diagnostic sequence numbers exhausted");
@@ -1235,6 +1332,7 @@ impl DiagnosticIngressInner {
                 }
             }
         }
+        changed
     }
 }
 
@@ -1258,6 +1356,27 @@ impl DiagnosticIngress {
             .expect("diagnostic ingress mutex should not be poisoned")
             .failure
             .clone()
+    }
+
+    /// Selects the output endpoint used when no configured logger lifecycle
+    /// owns this ingress. The endpoint must belong to the same runtime.
+    pub fn set_fallback_output(&self, output: &RuntimeOutputWriter) -> Result<(), Error> {
+        configure_runtime_diagnostic_fallback(&self.inner.sender, output)
+    }
+
+    /// Rearms this ingress for a configured logger lifecycle. Already queued
+    /// fallback obligations retain their route; only later publications enter
+    /// the logger input FIFO.
+    pub fn activate(&self) -> Result<(), Error> {
+        set_runtime_diagnostic_route(&self.inner.sender, RuntimeDiagnosticRouteMode::Active)
+            .map(|_| ())
+    }
+
+    /// Atomically selects fallback and transfers every buffered logger input
+    /// to ordered output obligations. Later publications remain on fallback
+    /// until [`Self::activate`] is called.
+    pub fn fallback(&self) -> Result<usize, Error> {
+        set_runtime_diagnostic_route(&self.inner.sender, RuntimeDiagnosticRouteMode::Fallback)
     }
 }
 
@@ -2177,6 +2296,17 @@ struct RuntimeOutputState {
     failures: RedBlackTreeMapSync<RuntimeDeliveryId, Arc<RuntimeDeliveryFailure>>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuntimeDiagnosticRouteMode {
+    Active,
+    Fallback,
+}
+
+struct RuntimeDiagnosticRoute {
+    fallback: Option<RuntimeOutputEndpointId>,
+    mode: RuntimeDiagnosticRouteMode,
+}
+
 /// Stage of external output delivery which failed after semantic commit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RuntimeDeliveryFailureKind {
@@ -2255,6 +2385,7 @@ pub enum RuntimeDeliveryOutcome {
 struct RuntimeEventState {
     inputs: BTreeMap<RuntimeInputEndpointId, Arc<RuntimeInputBuffer>>,
     outputs: RuntimeOutputState,
+    diagnostic_routes: BTreeMap<RuntimeInputEndpointId, RuntimeDiagnosticRoute>,
     revision: u64,
     latest_changes: BTreeMap<ConflictAddress, u64>,
     strategy: Arc<dyn ConflictAnalysisStrategy>,
@@ -2265,6 +2396,7 @@ impl RuntimeEventState {
         Self {
             inputs: BTreeMap::new(),
             outputs: RuntimeOutputState::default(),
+            diagnostic_routes: BTreeMap::new(),
             revision: 0,
             latest_changes: BTreeMap::new(),
             strategy,
@@ -2371,6 +2503,72 @@ impl RuntimeEventState {
                 .push_back(intent.delivery);
         }
         input_changed || !journal.outputs.is_empty()
+    }
+
+    fn admit_input(
+        &mut self,
+        endpoint: RuntimeInputEndpointId,
+        payload: RuntimeValueRoot,
+    ) -> Result<RuntimeInputSequence, Error> {
+        let input = self.inputs.get_mut(&endpoint).ok_or_else(|| {
+            Error::new(format!(
+                "runtime input endpoint {} is not registered",
+                endpoint.get()
+            ))
+        })?;
+        let input = Arc::make_mut(input);
+        let sequence = input.next_sequence;
+        let next = sequence.checked_next().ok_or_else(|| {
+            Error::new(format!(
+                "input sequence exhausted for endpoint {}",
+                endpoint.get()
+            ))
+        })?;
+        input
+            .admitted
+            .push_back(RuntimeInputRecord { sequence, payload });
+        input.next_sequence = next;
+        self.revision = self.revision.wrapping_add(1);
+        self.latest_changes.insert(
+            ConflictAddress::input_slot(endpoint, sequence),
+            self.revision,
+        );
+        Ok(sequence)
+    }
+
+    fn queue_output(
+        &mut self,
+        endpoint: RuntimeOutputEndpointId,
+        delivery: RuntimeDeliveryId,
+        payload: RuntimeValueRoot,
+    ) -> Result<(), Error> {
+        let ready = self
+            .outputs
+            .ready_by_endpoint
+            .get_mut(&endpoint)
+            .ok_or_else(|| {
+                Error::new(format!(
+                    "runtime output endpoint {} is not registered",
+                    endpoint.get()
+                ))
+            })?;
+        if !self.outputs.accepted.insert(delivery) {
+            return Err(Error::new(format!(
+                "runtime delivery {} was already accepted",
+                delivery.get()
+            )));
+        }
+        let replaced = self.outputs.records.insert(
+            delivery,
+            RuntimeDeliveryRecord {
+                endpoint,
+                payload,
+                state: RuntimeDeliveryState::Queued,
+            },
+        );
+        assert!(replaced.is_none(), "accepted delivery IDs remain unique");
+        ready.push_back(delivery);
+        Ok(())
     }
 }
 
@@ -2841,6 +3039,234 @@ impl RuntimeValueRoot {
     }
 }
 
+fn register_runtime_diagnostic_route(
+    resources: &Arc<RuntimeSharedResources>,
+    endpoint: RuntimeInputEndpointId,
+) -> Result<(), Error> {
+    let _mutation = resources.mutation_admission.mutation_guard();
+    let mut state = resources
+        .transactions
+        .state
+        .lock()
+        .expect("runtime transaction mutex should not be poisoned");
+    if !state.events.inputs.contains_key(&endpoint) {
+        return Err(Error::new(format!(
+            "runtime input endpoint {} is not registered",
+            endpoint.get()
+        )));
+    }
+    if state.events.diagnostic_routes.contains_key(&endpoint) {
+        return Err(Error::new(format!(
+            "runtime input endpoint {} already has a diagnostic route",
+            endpoint.get()
+        )));
+    }
+    state.events.diagnostic_routes.insert(
+        endpoint,
+        RuntimeDiagnosticRoute {
+            fallback: None,
+            mode: RuntimeDiagnosticRouteMode::Active,
+        },
+    );
+    Ok(())
+}
+
+fn configure_runtime_diagnostic_fallback(
+    input: &RuntimeInputSender<Value>,
+    output: &RuntimeOutputWriter,
+) -> Result<(), Error> {
+    let resources = input.owner.upgrade().ok_or_else(|| {
+        Error::new(format!(
+            "evaluation runtime {} for input endpoint {} has been dropped",
+            input.runtime.get(),
+            input.endpoint.get()
+        ))
+    })?;
+    let output_owner = output.validate_runtime(input.runtime)?;
+    if !Arc::ptr_eq(&resources, &output_owner) {
+        return Err(Error::new(
+            "diagnostic input and fallback output do not share one runtime",
+        ));
+    }
+    let settlement = resources.mutation_admission.settlement_guard();
+    {
+        let mut state = resources
+            .transactions
+            .state
+            .lock()
+            .expect("runtime transaction mutex should not be poisoned");
+        if !state
+            .events
+            .outputs
+            .ready_by_endpoint
+            .contains_key(&output.endpoint)
+        {
+            return Err(Error::new(format!(
+                "runtime output endpoint {} is not registered",
+                output.endpoint.get()
+            )));
+        }
+        let route = state
+            .events
+            .diagnostic_routes
+            .get_mut(&input.endpoint)
+            .ok_or_else(|| Error::new("diagnostic ingress route is not registered"))?;
+        match route.fallback {
+            Some(existing) if existing != output.endpoint => {
+                return Err(Error::new(
+                    "diagnostic ingress already has a different fallback output",
+                ));
+            }
+            Some(_) => {}
+            None => route.fallback = Some(output.endpoint),
+        }
+    }
+    drop(settlement);
+    resources.mutation_admission.notify_settlement();
+    Ok(())
+}
+
+fn set_runtime_diagnostic_route(
+    input: &RuntimeInputSender<Value>,
+    mode: RuntimeDiagnosticRouteMode,
+) -> Result<usize, Error> {
+    let resources = input.owner.upgrade().ok_or_else(|| {
+        Error::new(format!(
+            "evaluation runtime {} for input endpoint {} has been dropped",
+            input.runtime.get(),
+            input.endpoint.get()
+        ))
+    })?;
+    let settlement = resources.mutation_admission.settlement_guard();
+    let mut transferred = 0;
+    let mut changed = false;
+    {
+        let mut state = resources
+            .transactions
+            .state
+            .lock()
+            .expect("runtime transaction mutex should not be poisoned");
+        let fallback = {
+            let route = state
+                .events
+                .diagnostic_routes
+                .get(&input.endpoint)
+                .ok_or_else(|| Error::new("diagnostic ingress route is not registered"))?;
+            route.fallback
+        };
+        if mode == RuntimeDiagnosticRouteMode::Fallback {
+            let fallback = fallback.ok_or_else(|| {
+                Error::new("diagnostic ingress has no configured fallback output")
+            })?;
+            if !state
+                .events
+                .outputs
+                .ready_by_endpoint
+                .contains_key(&fallback)
+            {
+                return Err(Error::new(format!(
+                    "runtime output endpoint {} is not registered",
+                    fallback.get()
+                )));
+            }
+            let count = state
+                .events
+                .inputs
+                .get(&input.endpoint)
+                .ok_or_else(|| Error::new("diagnostic ingress input is not registered"))?
+                .admitted
+                .len();
+            let deliveries = (0..count)
+                .map(|_| {
+                    resources.ids.delivery().map_err(Error::new).map(|id| {
+                        RuntimeDeliveryId::from_u64(id.get())
+                            .expect("runtime delivery IDs start at one")
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let (records, consumed) = {
+                let buffered = state
+                    .events
+                    .inputs
+                    .get_mut(&input.endpoint)
+                    .expect("validated diagnostic input remains registered");
+                let buffered = Arc::make_mut(buffered);
+                let records = buffered.admitted.drain(..).collect::<Vec<_>>();
+                let consumed = records
+                    .iter()
+                    .map(|record| ConflictAddress::input_slot(input.endpoint, record.sequence))
+                    .collect::<Vec<_>>();
+                buffered.head_sequence = buffered.next_sequence;
+                (records, consumed)
+            };
+            transferred = records.len();
+            if !consumed.is_empty() {
+                state.events.revision = state.events.revision.wrapping_add(1);
+                let revision = state.events.revision;
+                for address in consumed {
+                    state.events.latest_changes.insert(address, revision);
+                }
+            }
+            for (record, delivery) in records.into_iter().zip(deliveries) {
+                state
+                    .events
+                    .queue_output(fallback, delivery, record.payload)?;
+            }
+            changed = transferred != 0;
+        }
+        state
+            .events
+            .diagnostic_routes
+            .get_mut(&input.endpoint)
+            .expect("validated diagnostic route remains registered")
+            .mode = mode;
+    }
+    let notification = changed.then(|| prepare_runtime_observation(&resources, &settlement));
+    drop(settlement);
+    resources.mutation_admission.notify_settlement();
+    if let Some(notification) = notification {
+        notification.notify();
+    }
+    Ok(transferred)
+}
+
+fn route_runtime_diagnostic_guarded(
+    resources: &Arc<RuntimeSharedResources>,
+    prepared: RuntimePreparedInput,
+) -> Result<(), Error> {
+    debug_assert_eq!(prepared.runtime, resources.id);
+    debug_assert_eq!(prepared.payload.runtime_id(), resources.id);
+    let mut state = resources
+        .transactions
+        .state
+        .lock()
+        .expect("runtime transaction mutex should not be poisoned");
+    let route = state
+        .events
+        .diagnostic_routes
+        .get(&prepared.endpoint)
+        .ok_or_else(|| Error::new("diagnostic ingress route is not registered"))?;
+    match route.mode {
+        RuntimeDiagnosticRouteMode::Active => {
+            state
+                .events
+                .admit_input(prepared.endpoint, prepared.payload)?;
+        }
+        RuntimeDiagnosticRouteMode::Fallback => {
+            let fallback = route.fallback.ok_or_else(|| {
+                Error::new("diagnostic ingress has no configured fallback output")
+            })?;
+            let id = resources.ids.delivery().map_err(Error::new)?;
+            let delivery =
+                RuntimeDeliveryId::from_u64(id.get()).expect("runtime delivery IDs start at one");
+            state
+                .events
+                .queue_output(fallback, delivery, prepared.payload)?;
+        }
+    }
+    Ok(())
+}
+
 fn admit_runtime_input(
     resources: &Arc<RuntimeSharedResources>,
     endpoint: RuntimeInputEndpointId,
@@ -2854,31 +3280,7 @@ fn admit_runtime_input(
             .state
             .lock()
             .expect("runtime transaction mutex should not be poisoned");
-        let input = state.events.inputs.get_mut(&endpoint).ok_or_else(|| {
-            Error::new(format!(
-                "runtime input endpoint {} is not registered",
-                endpoint.get()
-            ))
-        })?;
-        let input = Arc::make_mut(input);
-        let sequence = input.next_sequence;
-        let next = sequence.checked_next().ok_or_else(|| {
-            Error::new(format!(
-                "input sequence exhausted for endpoint {}",
-                endpoint.get()
-            ))
-        })?;
-        input
-            .admitted
-            .push_back(RuntimeInputRecord { sequence, payload });
-        input.next_sequence = next;
-        state.events.revision = state.events.revision.wrapping_add(1);
-        let revision = state.events.revision;
-        state
-            .events
-            .latest_changes
-            .insert(ConflictAddress::input_slot(endpoint, sequence), revision);
-        sequence
+        state.events.admit_input(endpoint, payload)?
     };
     publish_runtime_observation(resources, mutation);
     Ok(sequence)
@@ -3027,20 +3429,44 @@ fn runtime_delivery_failure_snapshot(
     }
 }
 
-fn publish_runtime_observation(
+struct RuntimeObservationNotification {
+    observations: Arc<RuntimeObservationState>,
+    work: Option<Arc<EvaluationWorkCoordinator>>,
+    scheduler_changed: Option<bool>,
+}
+
+impl RuntimeObservationNotification {
+    fn notify(self) {
+        self.observations.notify_all();
+        if let (Some(work), Some(changed)) = (self.work, self.scheduler_changed) {
+            work.notify_runtime_observation(changed);
+        }
+    }
+}
+
+fn prepare_runtime_observation(
     resources: &RuntimeSharedResources,
-    mutation: RuntimeMutationGuard<'_>,
-) {
+    mutation: &dyn RuntimeMutationAuthority,
+) -> RuntimeObservationNotification {
     let epoch = resources.observations.advance();
     let work = resources.work.upgrade();
     let scheduler_changed = work
         .as_ref()
-        .map(|work| work.publish_runtime_observation_guarded(&mutation, epoch));
-    drop(mutation);
-    resources.observations.notify_all();
-    if let (Some(work), Some(changed)) = (work, scheduler_changed) {
-        work.notify_runtime_observation(changed);
+        .map(|work| work.publish_runtime_observation_guarded(mutation, epoch));
+    RuntimeObservationNotification {
+        observations: resources.observations.clone(),
+        work,
+        scheduler_changed,
     }
+}
+
+fn publish_runtime_observation(
+    resources: &RuntimeSharedResources,
+    mutation: RuntimeMutationGuard<'_>,
+) {
+    let notification = prepare_runtime_observation(resources, &mutation);
+    drop(mutation);
+    notification.notify();
 }
 
 impl RuntimeSharedResources {
@@ -8344,6 +8770,179 @@ mod tests {
         assert_eq!(
             runtime.try_commit_transaction(&crate::reflection::StoreJournal::new(store), &journal),
             crate::reflection::StoreCommitResult::Committed
+        );
+    }
+
+    #[test]
+    fn diagnostic_ingress_transfers_buffered_and_later_values_to_fallback() {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let bus = DiagnosticBus::for_runtime(&runtime);
+        let (ingress, reader) = bus
+            .diagnostic_ingress(&runtime)
+            .expect("ingress should attach");
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let callback_values = received.clone();
+        let callback_runtime = runtime.clone();
+        let fallback = runtime
+            .output_endpoint(
+                |value| Diagnostic::from_transport_value(&value),
+                move |diagnostic| {
+                    assert!(
+                        callback_runtime.exclusive_admission_available(),
+                        "fallback rendering must run outside runtime admission"
+                    );
+                    callback_values
+                        .lock()
+                        .expect("fallback collection mutex should not be poisoned")
+                        .push(diagnostic.message().to_owned());
+                    Ok(())
+                },
+            )
+            .expect("fallback output should register");
+        let (writer, delivery) = fallback.into_parts();
+        ingress
+            .set_fallback_output(&writer)
+            .expect("fallback should share the ingress runtime");
+
+        for message in ["buffered one", "buffered two"] {
+            bus.publish_local(Diagnostic::new(&runtime.values(), Severity::Info, message));
+        }
+        assert_eq!(ingress.fallback().expect("fallback should activate"), 2);
+        let (_, _, snapshot) = runtime.transaction_snapshot();
+        assert!(
+            RuntimeEventJournal::new(snapshot)
+                .read(&reader)
+                .expect("transferred input should remain readable as empty")
+                .is_none()
+        );
+        while delivery
+            .deliver_next()
+            .expect("fallback delivery should remain usable")
+            .is_some()
+        {}
+
+        bus.publish_local(Diagnostic::new(
+            &runtime.values(),
+            Severity::Warning,
+            "later fallback",
+        ));
+        let (_, _, snapshot) = runtime.transaction_snapshot();
+        assert!(
+            RuntimeEventJournal::new(snapshot)
+                .read(&reader)
+                .expect("fallback publication should not enter the logger FIFO")
+                .is_none()
+        );
+        assert!(
+            delivery
+                .deliver_next()
+                .expect("later fallback delivery should remain usable")
+                .is_some()
+        );
+        assert!(
+            delivery
+                .deliver_next()
+                .expect("fallback delivery should become empty")
+                .is_none()
+        );
+        assert_eq!(
+            ingress.fallback().expect("fallback should be idempotent"),
+            0
+        );
+        assert_eq!(
+            *received
+                .lock()
+                .expect("fallback collection mutex should not be poisoned"),
+            ["buffered one", "buffered two", "later fallback"]
+        );
+
+        ingress.activate().expect("ingress should rearm");
+        bus.publish_local(Diagnostic::new(
+            &runtime.values(),
+            Severity::Info,
+            "rearmed",
+        ));
+        let (_, _, snapshot) = runtime.transaction_snapshot();
+        let value = RuntimeEventJournal::new(snapshot)
+            .read(&reader)
+            .expect("rearmed input should be readable")
+            .expect("rearmed publication should enter the logger FIFO");
+        assert_eq!(
+            Diagnostic::from_transport_value(&value)
+                .expect("rearmed input should remain a diagnostic")
+                .message(),
+            "rearmed"
+        );
+    }
+
+    #[test]
+    fn diagnostic_publication_racing_fallback_is_delivered_once_in_sequence_order() {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let bus = DiagnosticBus::for_runtime(&runtime);
+        let (ingress, _reader) = bus
+            .diagnostic_ingress(&runtime)
+            .expect("ingress should attach");
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let callback_values = received.clone();
+        let fallback = runtime
+            .output_endpoint(
+                |value| Diagnostic::from_transport_value(&value),
+                move |diagnostic| {
+                    callback_values
+                        .lock()
+                        .expect("fallback collection mutex should not be poisoned")
+                        .push(diagnostic.message().to_owned());
+                    Ok(())
+                },
+            )
+            .expect("fallback output should register");
+        let (writer, delivery) = fallback.into_parts();
+        ingress
+            .set_fallback_output(&writer)
+            .expect("fallback should share the ingress runtime");
+
+        let values = runtime.values();
+        let barrier = Arc::new(std::sync::Barrier::new(49));
+        let publishers = (0..48)
+            .map(|index| {
+                let bus = bus.clone();
+                let values = values.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let message = format!("racing {index}");
+                    let event = bus.publish_local(Diagnostic::new(
+                        &values,
+                        Severity::Info,
+                        message.clone(),
+                    ));
+                    (event.sequence(), message)
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        ingress
+            .fallback()
+            .expect("the route switch may race publications");
+        let published = publishers
+            .into_iter()
+            .map(|publisher| publisher.join().expect("publisher should not panic"))
+            .collect::<BTreeMap<_, _>>();
+        ingress
+            .fallback()
+            .expect("a second pass should transfer any pre-switch admission");
+        while delivery
+            .deliver_next()
+            .expect("fallback delivery should remain usable")
+            .is_some()
+        {}
+
+        assert_eq!(
+            *received
+                .lock()
+                .expect("fallback collection mutex should not be poisoned"),
+            published.values().cloned().collect::<Vec<_>>(),
+            "every racing publication must select exactly one route and preserve bus order"
         );
     }
 

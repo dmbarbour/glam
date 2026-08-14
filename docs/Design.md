@@ -337,6 +337,7 @@ It is very convenient to assume a standard effects API for generic extensions. P
 - `.get Path` - copy data from state; default is empty dict `{}`
 - `.set Path Val` - overwrite data in state; set `{}` to erase key
 - `.reset Key op` - scope for delimited continuations
+  - shall build upon local state to simplify modeling of coroutines
 - `.shift Key fn` - exits corresponding `.reset` with continuation 
   - continuation invalid outside current task in general usage
 
@@ -344,11 +345,14 @@ The `Path` type for `.get/.set` is a list of keys, assuming state is a hierarchi
 
 Tentative, deferred:
 
-- `.env Path` - like `.get` but controlled externally
 - `.scope Mixin Op` - apply mixin to `api` in scope of `Op`
 - `.score Value` - for soft searches of `.alt` paths, preferences
+- `.env Path` - like `.get` but controlled externally
 - `.commit` - drop `.alt` paths except this one, scoped by `.cut`
-- *constraints* - for reasoning and search across problem domains 
+  - it might be feasible to model via shift-reset and cut
+- *constraints* - for reasoning and search across problem domains
+
+Extensibility will greatly benefit from `.scope`, while consistent support for constraints and soft search would greatly enhance adaptability. The argument for `.commit` and `.env` are much weaker. We can easily support `.env` and just have an empty environment by default, so it's low-hanging fruit. We should probably pursue `.scope` early because it will significantly impact early development and integration.
 
 ### Extensible Effects
 

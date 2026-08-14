@@ -550,9 +550,10 @@ fn execute_assembly(mut prepared: PreparedAssembly, command: CommandPlan) -> Exi
     let LoggerRun {
         thread: logger_thread,
         diagnostics: logger_diagnostics,
-        _supervisor: logger_supervisor,
+        supervisor: logger_supervisor,
     } = logger;
     logger_thread.join().expect("logger task should not panic");
+    let _ = logger_supervisor.deliver_fallback();
     drop(logger_supervisor);
     log_host.cancel();
 
@@ -815,7 +816,10 @@ fn load_configuration(assembler: &Assembler) -> Result<LoadedConfiguration, Erro
 fn start_logger(assembler: &Assembler, configuration: &Value, input: Arc<LogHost>) -> LoggerRun {
     let logger = Arc::new(DefaultLogger::new(assembler.clone()));
     let evaluation_runtime = assembler.evaluation_runtime();
-    let supervisor = Arc::new(LoggerSupervisor::new(input.clone()));
+    let fallback_logger = logger.clone();
+    let supervisor = Arc::new(LoggerSupervisor::new(input.clone(), move |diagnostic| {
+        fallback_logger.emit(&diagnostic);
+    }));
     let diagnostics = DiagnosticBus::for_runtime(&evaluation_runtime);
     let subscription = diagnostics.subscribe(logger.clone());
     let host = Arc::new(LoggerTaskHost::new(
@@ -921,13 +925,16 @@ fn start_logger(assembler: &Assembler, configuration: &Value, input: Arc<LogHost
                 }
                 task_supervisor.finish(&installation);
             }
-            input.drain_default(logger.as_ref());
+            // This is deliberately separate from lifecycle terminalization in
+            // this checkpoint. Phase 10D.2b moves the same guarded transition
+            // into the coordinator-owned terminal path.
+            let _ = task_supervisor.fallback_and_deliver();
         })
         .expect("logger thread should start");
     LoggerRun {
         thread,
         diagnostics,
-        _supervisor: supervisor,
+        supervisor,
     }
 }
 
@@ -938,7 +945,7 @@ fn configuration_entry_context(values: &Values, entry: &str) -> Result<Value, Er
 struct LoggerRun {
     thread: thread::JoinHandle<()>,
     diagnostics: DiagnosticBus,
-    _supervisor: Arc<LoggerSupervisor>,
+    supervisor: Arc<LoggerSupervisor>,
 }
 
 #[derive(Clone)]
@@ -1163,6 +1170,7 @@ struct LogHost {
 /// publications keep flowing through the original ingress and bus sequence.
 struct LoggerSupervisor {
     input: Arc<LogHost>,
+    fallback_delivery: RuntimeOutputDelivery<Diagnostic>,
     state: std::sync::Mutex<LoggerSupervisorState>,
 }
 
@@ -1178,9 +1186,28 @@ struct LoggerInstallation {
 }
 
 impl LoggerSupervisor {
-    fn new(input: Arc<LogHost>) -> Self {
+    fn new<F>(input: Arc<LogHost>, fallback: F) -> Self
+    where
+        F: Fn(Diagnostic) + Send + Sync + 'static,
+    {
+        let endpoint = input
+            .runtime
+            .output_endpoint(
+                |value| Diagnostic::from_transport_value(&value),
+                move |diagnostic| {
+                    fallback(diagnostic);
+                    Ok(())
+                },
+            )
+            .expect("default logger output endpoint should be constructible");
+        let (writer, fallback_delivery) = endpoint.into_parts();
+        input
+            .diagnostic_ingress
+            .set_fallback_output(&writer)
+            .expect("default logger output belongs to the logger runtime");
         Self {
             input,
+            fallback_delivery,
             state: std::sync::Mutex::new(LoggerSupervisorState {
                 next_generation: 1,
                 active: None,
@@ -1200,6 +1227,7 @@ impl LoggerSupervisor {
         {
             return Err(Error::new("configured logger lifecycle is still active"));
         }
+        self.input.diagnostic_ingress.activate()?;
         let generation = state.next_generation;
         state.next_generation = generation
             .checked_add(1)
@@ -1223,6 +1251,24 @@ impl LoggerSupervisor {
             .is_some_and(|active| active.generation == installation.generation)
         {
             state.active = None;
+        }
+    }
+
+    fn fallback_and_deliver(&self) -> Result<usize, Error> {
+        let transferred = self.input.diagnostic_ingress.fallback()?;
+        self.deliver_fallback()?;
+        Ok(transferred)
+    }
+
+    fn deliver_fallback(&self) -> Result<(), Error> {
+        loop {
+            match self.fallback_delivery.deliver_next()? {
+                Some(RuntimeDeliveryOutcome::Delivered(_)) => {}
+                Some(RuntimeDeliveryOutcome::Failed(failure)) => {
+                    return Err(failure.error().clone());
+                }
+                None => return Ok(()),
+            }
         }
     }
 
@@ -2766,7 +2812,14 @@ mod tests {
     fn logger_supervisor_rearms_without_replacing_its_diagnostic_ingress() {
         let diagnostics = DiagnosticBus::new();
         let input = Arc::new(LogHost::new(&diagnostics));
-        let supervisor = LoggerSupervisor::new(input.clone());
+        let fallback = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let fallback_values = fallback.clone();
+        let supervisor = LoggerSupervisor::new(input.clone(), move |diagnostic| {
+            fallback_values
+                .lock()
+                .expect("fallback collection mutex should not be poisoned")
+                .push(diagnostic.message().to_owned());
+        });
         let values = input.runtime.values();
 
         let first = supervisor.install().expect("first logger should install");
@@ -2776,14 +2829,19 @@ mod tests {
         );
         let first_event =
             diagnostics.publish_local(Diagnostic::new(&values, Severity::Info, "first lifecycle"));
-        assert_eq!(
-            input
-                .take_diagnostic()
-                .expect("first publication should retain its route")
-                .message(),
-            "first lifecycle"
-        );
         supervisor.finish(&first);
+        assert_eq!(
+            supervisor
+                .fallback_and_deliver()
+                .expect("finished lifecycle should select fallback"),
+            1
+        );
+        assert_eq!(
+            *fallback
+                .lock()
+                .expect("fallback collection mutex should not be poisoned"),
+            ["first lifecycle"]
+        );
 
         let second = supervisor.install().expect("second logger should rearm");
         assert!(second.generation > first.generation);
@@ -2805,7 +2863,7 @@ mod tests {
     fn diagnostic_publication_racing_logger_rearm_is_routed_once() {
         let diagnostics = DiagnosticBus::new();
         let input = Arc::new(LogHost::new(&diagnostics));
-        let supervisor = LoggerSupervisor::new(input.clone());
+        let supervisor = LoggerSupervisor::new(input.clone(), |_| {});
         let first = supervisor.install().expect("first logger should install");
         let values = input.runtime.values();
         let publishing_bus = diagnostics.clone();
@@ -2850,7 +2908,7 @@ mod tests {
         let resources = input.runtime.shared_resources();
         let weak_resources = Arc::downgrade(&resources);
         let weak_input = Arc::downgrade(&input);
-        let supervisor = LoggerSupervisor::new(input.clone());
+        let supervisor = LoggerSupervisor::new(input.clone(), |_| {});
         let installation = supervisor.install().expect("logger should install");
         drop(resources);
         drop(input);
