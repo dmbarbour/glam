@@ -6404,6 +6404,49 @@ mod tests {
     }
 
     #[test]
+    fn runtime_deadlock_readiness_with_error_is_observational() {
+        let fixture = SameRuntimeFixture::new();
+        let context = fixture.context();
+        context
+            .schedule_task(|_| Ok(Box::new(AlwaysBlocked)))
+            .expect("blocked task should schedule");
+        fixture.runtime.pump_until_stable();
+
+        let crate::api::RuntimeReadiness::Deadlocked(first) = fixture.runtime.readiness() else {
+            panic!("retryable task error should produce a stable deadlock")
+        };
+        assert_eq!(first.unfinished().len(), 1);
+        assert_eq!(
+            first.unfinished()[0].blocked_error(),
+            Some("retryable evaluation error")
+        );
+        let generation = context
+            .coordinator()
+            .expect("fixture coordinator should remain live")
+            .work_generation();
+
+        let crate::api::RuntimeReadiness::Deadlocked(second) = fixture.runtime.readiness() else {
+            panic!("observing a deadlock must not disturb blocked work")
+        };
+        assert_eq!(first.stamp(), second.stamp());
+        assert_eq!(second.stamp().work_generation(), generation);
+        assert_eq!(
+            context
+                .coordinator()
+                .expect("fixture coordinator should remain live")
+                .work_generation(),
+            generation,
+            "projecting the blocked diagnostic must not create evaluation work"
+        );
+
+        let report = first
+            .kill(crate::api::RuntimeKillReason::Deadlock)
+            .settle()
+            .expect("an unchanged deadlock snapshot should settle");
+        assert_eq!(report.killed_work().len(), 1);
+    }
+
+    #[test]
     fn runtime_readiness_retains_exit_dispositions_without_settling_tasks() {
         let fixture = SameRuntimeFixture::new();
         let success_context = fixture.context();

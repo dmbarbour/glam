@@ -1908,8 +1908,7 @@ impl QuiescenceSnapshot {
     /// Revalidates and accepts every proposed disposition, then returns a
     /// retained report of the settled runtime instant.
     pub fn settle(&self) -> Result<QuiescenceReport, RuntimeSettlementError> {
-        let plan = self.runtime.validate_quiescence_snapshot(self)?;
-        self.runtime.settle_quiescence_snapshot(self, &plan)
+        self.runtime.settle_quiescence_snapshot(self, None)
     }
 
     #[cfg(test)]
@@ -1924,7 +1923,7 @@ impl QuiescenceSnapshot {
         &self,
         plan: &ValidatedRuntimeSettlementPlan,
     ) -> Result<QuiescenceReport, RuntimeSettlementError> {
-        self.runtime.settle_quiescence_snapshot(self, plan)
+        self.runtime.settle_quiescence_snapshot(self, Some(plan))
     }
 }
 
@@ -2110,6 +2109,7 @@ pub struct RuntimeDeadlockWork {
     dependency: Option<RuntimeDependency>,
     observed_epoch: Option<u64>,
     blocked_diagnostic: Option<Diagnostic>,
+    blocked_failure: Option<Arc<EvaluationFailure>>,
 }
 
 impl RuntimeDeadlockWork {
@@ -2142,15 +2142,32 @@ impl RuntimeDeadlockWork {
     }
 
     /// Retryable evaluation failure retained at the blocked checkpoint, when
-    /// the participant had reached one.
+    /// the participant had reached one and its text is immediately available.
     pub fn blocked_error(&self) -> Option<&str> {
-        self.blocked_diagnostic.as_ref().map(Diagnostic::message)
+        self.blocked_diagnostic.as_ref().and_then(|diagnostic| {
+            let message = diagnostic.message();
+            (message != "<diagnostic has no immediate text view>").then_some(message)
+        })
     }
 
     /// Structured retryable evaluation failure retained at this blocked
     /// checkpoint, when the participant had reached one.
     pub fn blocked_diagnostic(&self) -> Option<&Diagnostic> {
         self.blocked_diagnostic.as_ref()
+    }
+
+    /// Demands a retained blocked failure far enough to project its complete
+    /// diagnostic view. Unlike [`Self::blocked_diagnostic`], this may perform
+    /// evaluation work and is intended for rendering after settlement.
+    #[doc(hidden)]
+    pub fn project_blocked_diagnostic(&self, values: &Values) -> Result<Option<Diagnostic>, Error> {
+        let Some(failure) = self.blocked_failure.as_deref() else {
+            return Ok(None);
+        };
+        if let Some(diagnostic) = &self.blocked_diagnostic {
+            diagnostic.emission.require_runtime(values.runtime)?;
+        }
+        Ok(Some(reasoning_diagnostic(&values.core, failure)))
     }
 }
 
@@ -2292,6 +2309,7 @@ fn runtime_deadlock_work_from_snapshot(
     values: &CoreValueFactory,
     snapshot: RuntimeDeadlockWorkSnapshot,
 ) -> RuntimeDeadlockWork {
+    let blocked_failure = snapshot.blocked_error;
     RuntimeDeadlockWork {
         work_id: snapshot.work.get(),
         session_id: snapshot.session.get(),
@@ -2309,10 +2327,10 @@ fn runtime_deadlock_work_from_snapshot(
         },
         dependency: snapshot.dependency.map(runtime_dependency_from_snapshot),
         observed_epoch: snapshot.observed_epoch.map(RuntimeObservationEpoch::get),
-        blocked_diagnostic: snapshot
-            .blocked_error
+        blocked_diagnostic: blocked_failure
             .as_deref()
-            .map(|error| reasoning_diagnostic(values, error)),
+            .map(|error| blocked_reasoning_diagnostic(values, error)),
+        blocked_failure,
     }
 }
 
@@ -4078,6 +4096,7 @@ impl EvaluationRuntime {
         }
     }
 
+    #[cfg(test)]
     fn validate_quiescence_snapshot(
         &self,
         snapshot: &QuiescenceSnapshot,
@@ -4122,14 +4141,14 @@ impl EvaluationRuntime {
     fn settle_quiescence_snapshot(
         &self,
         snapshot: &QuiescenceSnapshot,
-        validated: &ValidatedRuntimeSettlementPlan,
+        previously_validated: Option<&ValidatedRuntimeSettlementPlan>,
     ) -> Result<QuiescenceReport, RuntimeSettlementError> {
         let settlement = self.settlement_guard();
         let Some(current) = self.validate_quiescence_guarded(snapshot) else {
             drop(settlement);
             return Err(RuntimeSettlementError::RuntimeChanged);
         };
-        if &current != validated {
+        if previously_validated.is_some_and(|validated| validated != &current) {
             drop(settlement);
             return Err(RuntimeSettlementError::RuntimeChanged);
         }
@@ -4140,7 +4159,7 @@ impl EvaluationRuntime {
         let Some(release) =
             self.state
                 .work
-                .publish_runtime_settlement(&settlement, validated, kill_failure)
+                .publish_runtime_settlement(&settlement, &current, kill_failure)
         else {
             drop(settlement);
             return Err(RuntimeSettlementError::RuntimeChanged);
@@ -5945,6 +5964,24 @@ fn reasoning_diagnostic(values: &CoreValueFactory, failure: &EvaluationFailure) 
         Severity::Error,
         Value::from_core(values, eval::failure_diagnostic_value_with(values, failure)),
     )
+}
+
+/// Projects retryable blocked-work failures without demanding their payloads.
+/// Readiness is observational: using the runtime-aware diagnostic projection
+/// here would create an isolated evaluation session and change coordinator
+/// generations merely by inspecting a deadlock.
+fn blocked_reasoning_diagnostic(
+    values: &CoreValueFactory,
+    failure: &EvaluationFailure,
+) -> Diagnostic {
+    let emission = match failure.emission_value() {
+        Some(CoreValue::Binary(message)) => {
+            crate::diagnostic::text_message(None, String::from_utf8_lossy(message))
+        }
+        Some(emission) => emission.clone(),
+        None => crate::diagnostic::text_message(None, failure.to_string()),
+    };
+    Diagnostic::from_emission(Severity::Error, Value::from_core(values, emission))
 }
 
 pub struct ModuleBuilder<'a> {

@@ -445,14 +445,23 @@ fn public_reasoning_report_exposes_retryable_blocked_errors() {
     let diagnostic = blocked
         .blocked_diagnostic()
         .expect("blocked task should expose its diagnostic");
-    assert_eq!(
-        blocked.blocked_error(),
-        Some("structured retryable failure")
-    );
+    assert_eq!(blocked.blocked_error(), None);
     assert_eq!(
         assembler
             .get(diagnostic.emission(), "detail")
             .expect("the retryable diagnostic should retain ad hoc fields")
+            .as_i64(),
+        Some(7)
+    );
+    let projected = blocked
+        .project_blocked_diagnostic(&assembler.values())
+        .expect("blocked diagnostic projection should use the owning runtime")
+        .expect("blocked task should retain its structured failure");
+    assert_eq!(projected.message(), "structured retryable failure");
+    assert_eq!(
+        assembler
+            .get(projected.emission(), "detail")
+            .expect("the projected diagnostic should retain ad hoc fields")
             .as_i64(),
         Some(7)
     );

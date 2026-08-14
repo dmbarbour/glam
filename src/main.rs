@@ -1400,7 +1400,9 @@ fn settled_report_diagnostics(
         );
     }
     for work in selection.killed_work {
-        let blocked_error = work.blocked_error().map(str::to_owned);
+        let blocked_error = work
+            .project_blocked_diagnostic(values)?
+            .map(|diagnostic| diagnostic.message().to_owned());
         let mut args = vec![
             ("work", report_id(values, work.work_id())?),
             ("session", report_id(values, work.session_id())?),
