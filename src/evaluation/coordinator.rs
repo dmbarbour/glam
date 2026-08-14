@@ -1041,6 +1041,8 @@ pub(crate) struct EvaluationWorkCoordinator {
     work_available: Condvar,
     #[cfg(test)]
     test_values: Option<CoreValueFactory>,
+    #[cfg(test)]
+    terminal_publication_probe: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 pub(super) enum CoordinatorSelection {
@@ -1230,6 +1232,8 @@ impl EvaluationWorkCoordinator {
             work_available: Condvar::new(),
             #[cfg(test)]
             test_values: None,
+            #[cfg(test)]
+            terminal_publication_probe: Mutex::new(None),
         })
     }
 
@@ -1246,6 +1250,7 @@ impl EvaluationWorkCoordinator {
             state: Mutex::new(WorkCoordinatorState::default()),
             work_available: Condvar::new(),
             test_values: Some(values.clone()),
+            terminal_publication_probe: Mutex::new(None),
         });
         values.attach_work_coordinator(&coordinator);
         coordinator
@@ -1276,6 +1281,31 @@ impl EvaluationWorkCoordinator {
     #[cfg(test)]
     pub(super) fn runtime_locks_are_free(&self) -> bool {
         self.state.try_lock().is_ok() && self.admission.try_settlement_guard().is_some()
+    }
+
+    #[cfg(test)]
+    pub(super) fn settlement_admission_is_free(&self) -> bool {
+        self.admission.try_settlement_guard().is_some()
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_terminal_publication_probe(&self, probe: impl FnOnce() + Send + 'static) {
+        *self
+            .terminal_publication_probe
+            .lock()
+            .expect("terminal publication probe was poisoned") = Some(Box::new(probe));
+    }
+
+    #[cfg(test)]
+    fn run_terminal_publication_probe(&self) {
+        if let Some(probe) = self
+            .terminal_publication_probe
+            .lock()
+            .expect("terminal publication probe was poisoned")
+            .take()
+        {
+            probe();
+        }
     }
 
     pub(crate) fn current_observation_epoch(&self) -> RuntimeObservationEpoch {
@@ -2764,10 +2794,10 @@ impl EvaluationWorkCoordinator {
         let woke = exact_subscription.is_some_and(|(dependency, registration)| {
             self.subscribe_dependency_guarded(&mutation, dependency, registration)
         });
+        drop(mutation);
         if let Some(retirement) = retirement {
             retirement.finish();
         }
-        drop(mutation);
         self.work_available.notify_all();
         self.notify_dependency_wake(woke);
     }
@@ -2802,10 +2832,10 @@ impl EvaluationWorkCoordinator {
                 (true, Some(retirement))
             }
         };
+        drop(mutation);
         if let Some(retirement) = retirement {
             retirement.finish();
         }
-        drop(mutation);
         self.work_available.notify_all();
         accepted
     }
@@ -2886,8 +2916,8 @@ impl EvaluationWorkCoordinator {
             state.work_generation = state.work_generation.wrapping_add(1);
             (dependency, retirement)
         };
-        retirement.finish();
         drop(mutation);
+        retirement.finish();
         self.work_available.notify_all();
         Some(dependency)
     }
@@ -2922,8 +2952,8 @@ impl EvaluationWorkCoordinator {
             state.work_generation = state.work_generation.wrapping_add(1);
             retirement
         };
-        retirement.finish();
         drop(mutation);
+        retirement.finish();
         self.work_available.notify_all();
         true
     }
@@ -3920,12 +3950,12 @@ impl EvaluationWorkCoordinator {
         promise_failure: Arc<EvaluationFailure>,
     ) -> EvaluationWaitTerminal {
         let mutation = self.admission.mutation_guard();
-        let (producer, status_update) = {
+        let (producer, status_update, promises) = {
             let mut state = self
                 .state
                 .lock()
                 .expect("evaluation work coordinator was poisoned");
-            let (producer, failure, status_update) = {
+            let (producer, failure, status_update, promises) = {
                 let record = state
                     .work
                     .get_mut(&work)
@@ -3953,14 +3983,15 @@ impl EvaluationWorkCoordinator {
                     }
                     ProducerSettlementObligation::DeferredClaim { .. } => Vec::new(),
                 };
-                (producer, failure, status_update)
+                let promises = record.obligations.owned_promises.clone();
+                (producer, failure, status_update, promises)
             };
             if let Some((owner, task, failure)) = failure {
                 insert_task_failure(&mut state.failures, owner, task, failure.clone());
                 insert_task_failure(&mut state.pending_failure_reports, owner, task, failure);
                 state.work_generation = state.work_generation.wrapping_add(1);
             }
-            (producer, status_update)
+            (producer, status_update, promises)
         };
         let wait = match &producer {
             ProducerSettlementObligation::ReflectionTask(publisher) => &publisher.wait,
@@ -3970,23 +4001,41 @@ impl EvaluationWorkCoordinator {
             }
         };
         let (terminal, wake) = wait.publish_terminal_guarded(self, &mutation, terminal);
-        let status_wakes = status_update
-            .into_iter()
-            .map(|(publisher, status)| {
-                debug_assert_eq!(status, terminal_task_status(&terminal));
-                publisher.publish_guarded(&mutation, status)
-            })
-            .collect::<Vec<_>>();
-        drop(mutation);
-
-        // A task-owned promise is assigned synchronously by its owning machine
-        // while this work is Running. Cancellation from another thread only
-        // records a request; terminalization happens when that same poll
-        // releases the machine. Therefore an assignment observed here has
-        // already removed its dynamic obligation. A promise with an
-        // independently usable resolver is resolver-owned instead and must not
-        // enter this inventory.
-        self.fail_task_promises(work, promise_failure);
+        let mut completion_wakes = vec![wake];
+        let mut status_wakes = Vec::with_capacity(status_update.len());
+        let mut status_publishers = Vec::with_capacity(status_update.len());
+        for (publisher, status) in status_update {
+            debug_assert_eq!(status, terminal_task_status(&terminal));
+            status_wakes.push(publisher.publish_guarded(&mutation, status));
+            status_publishers.push(publisher);
+        }
+        let mut promise_publications = Vec::with_capacity(promises.len());
+        for obligation in promises {
+            if let Some(promise) = obligation.cell.upgrade() {
+                let (producer, completion) = promise
+                    .publish_guarded(self, &mutation, Err(promise_failure.clone()))
+                    .unwrap_or_else(|_| {
+                        panic!(
+                            "a terminalizing task-owned promise must remain unresolved until settlement"
+                        )
+                    });
+                promise_publications.push(producer);
+                completion_wakes.push(completion);
+            } else {
+                assert!(self.complete_task_promise_guarded(
+                    &mutation,
+                    work,
+                    &obligation.wait,
+                    obligation.promise,
+                ));
+                let (_, wake) = obligation.wait.publish_terminal_guarded(
+                    self,
+                    &mutation,
+                    EvaluationWaitTerminal::Failed(promise_failure.clone()),
+                );
+                completion_wakes.push(wake);
+            }
+        }
         {
             let state = self
                 .state
@@ -4002,54 +4051,25 @@ impl EvaluationWorkCoordinator {
             );
         }
 
-        // The deferred producer clone, exact wakes, and any values they
-        // release are all disposed after coordinator/component locks and
-        // mutation admission have been released.
+        #[cfg(test)]
+        self.run_terminal_publication_probe();
+        drop(mutation);
+
+        // The deferred producer clone, exact wakes, status publishers, and any
+        // values they release are disposed only after coordinator/component
+        // locks and mutation admission have been released.
         drop(producer);
-        wake.notify();
+        for wake in completion_wakes {
+            wake.notify();
+        }
+        for publication in promise_publications {
+            publication.notify();
+        }
         for status_wake in status_wakes {
             status_wake.notify();
         }
+        drop(status_publishers);
         terminal
-    }
-
-    fn fail_task_promises(
-        self: &Arc<Self>,
-        work: EvaluationWorkId,
-        failure: Arc<EvaluationFailure>,
-    ) {
-        let mutation = self.admission.mutation_guard();
-        let obligations = {
-            let state = self
-                .state
-                .lock()
-                .expect("evaluation work coordinator was poisoned");
-            let Some(record) = state.work.get(&work) else {
-                return;
-            };
-            record.obligations.owned_promises.clone()
-        };
-        drop(mutation);
-        for obligation in obligations {
-            if let Some(promise) = obligation.cell.upgrade() {
-                let _ = promise.fail(failure.clone());
-            } else {
-                let mutation = self.admission.mutation_guard();
-                assert!(self.complete_task_promise_guarded(
-                    &mutation,
-                    work,
-                    &obligation.wait,
-                    obligation.promise,
-                ));
-                let (_, wake) = obligation.wait.publish_terminal_guarded(
-                    self,
-                    &mutation,
-                    EvaluationWaitTerminal::Failed(failure.clone()),
-                );
-                drop(mutation);
-                wake.notify();
-            }
-        }
     }
 
     pub(super) fn task_dependency(&self, task: EvaluationTaskId) -> Option<WorkDependency> {

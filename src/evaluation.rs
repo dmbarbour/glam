@@ -667,6 +667,8 @@ pub(crate) enum ClientDemandResult {
 struct ClientDemandResultCell {
     result: Mutex<Option<ClientDemandResult>>,
     changed: Condvar,
+    #[cfg(test)]
+    publish_probe: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl ClientDemandResultCell {
@@ -674,6 +676,8 @@ impl ClientDemandResultCell {
         Arc::new(Self {
             result: Mutex::new(None),
             changed: Condvar::new(),
+            #[cfg(test)]
+            publish_probe: Mutex::new(None),
         })
     }
 
@@ -687,8 +691,25 @@ impl ClientDemandResultCell {
         }
         *current = Some(result);
         drop(current);
+        #[cfg(test)]
+        if let Some(probe) = self
+            .publish_probe
+            .lock()
+            .expect("client demand publish probe was poisoned")
+            .take()
+        {
+            probe();
+        }
         self.changed.notify_all();
         true
+    }
+
+    #[cfg(test)]
+    fn set_publish_probe(&self, probe: impl FnOnce() + Send + 'static) {
+        *self
+            .publish_probe
+            .lock()
+            .expect("client demand publish probe was poisoned") = Some(Box::new(probe));
     }
 
     fn poll(&self) -> Option<ClientDemandResult> {
@@ -801,6 +822,11 @@ impl ClientDemandHandle {
     #[cfg(test)]
     fn work(&self) -> EvaluationWorkId {
         self.work
+    }
+
+    #[cfg(test)]
+    fn set_publish_probe(&self, probe: impl FnOnce() + Send + 'static) {
+        self.cell.set_publish_probe(probe);
     }
 }
 
@@ -3052,6 +3078,34 @@ mod tests {
         panic!("runtime did not produce the expected client result");
     }
 
+    fn client_demand_publish_lock_probe(
+        coordinator: &Arc<EvaluationWorkCoordinator>,
+        handle: &ClientDemandHandle,
+    ) -> Arc<Mutex<Option<bool>>> {
+        let observed = Arc::new(Mutex::new(None));
+        let weak_coordinator = Arc::downgrade(coordinator);
+        let probe_result = observed.clone();
+        handle.set_publish_probe(move || {
+            let locks_are_free = weak_coordinator
+                .upgrade()
+                .is_none_or(|coordinator| coordinator.runtime_locks_are_free());
+            *probe_result
+                .lock()
+                .expect("client demand lock probe was poisoned") = Some(locks_are_free);
+        });
+        observed
+    }
+
+    fn assert_client_demand_published_after_unlock(observed: &Mutex<Option<bool>>) {
+        assert_eq!(
+            *observed
+                .lock()
+                .expect("client demand lock probe was poisoned"),
+            Some(true),
+            "client demand retirement must publish only after coordinator locks and mutation admission are released"
+        );
+    }
+
     #[test]
     fn client_demand_completes_whnf_into_its_result_cell() {
         let fixture = SameRuntimeFixture::new();
@@ -3069,6 +3123,72 @@ mod tests {
             handle.poll(),
             Some(ClientDemandResult::Complete(value)) if value.as_core() == &expected
         ));
+    }
+
+    #[test]
+    fn client_demand_retirement_publishes_after_runtime_unlock() {
+        let fixture = SameRuntimeFixture::new();
+        let context = fixture.context();
+        let coordinator = context.coordinator().expect("coordinator should be live");
+
+        let completed = context
+            .demand_whnf(RuntimeValueRoot::new(
+                context.values(),
+                context.values().unit(),
+            ))
+            .expect("unit demand should be admitted");
+        let completed_probe = client_demand_publish_lock_probe(&coordinator, &completed);
+        assert!(poll_one_runtime_work(&coordinator));
+        assert_client_demand_published_after_unlock(&completed_probe);
+
+        let abandoned = context
+            .demand_whnf(RuntimeValueRoot::new(
+                context.values(),
+                context.values().unit(),
+            ))
+            .expect("abandoned demand should be admitted");
+        let abandoned_probe = client_demand_publish_lock_probe(&coordinator, &abandoned);
+        abandoned.abandon();
+        assert_client_demand_published_after_unlock(&abandoned_probe);
+
+        let promise = PromisedValue::new(context.values(), "stably blocked client input");
+        let mut blocked = context
+            .demand_whnf(RuntimeValueRoot::new(
+                context.values(),
+                Value::Promised(promise.clone()),
+            ))
+            .expect("promise demand should be admitted");
+        assert!(poll_one_runtime_work(&coordinator));
+        let ClientDemandSnapshot::Blocked {
+            subscription_epoch, ..
+        } = coordinator
+            .client_demand_snapshot(blocked.work())
+            .expect("client demand should remain registered")
+        else {
+            panic!("unassigned promise demand should be stably blocked")
+        };
+        let blocked_probe = client_demand_publish_lock_probe(&coordinator, &blocked);
+        assert!(
+            blocked
+                .abandon_if_stably_blocked(subscription_epoch)
+                .is_some()
+        );
+        assert_client_demand_published_after_unlock(&blocked_probe);
+
+        let promise = PromisedValue::new(context.values(), "killable client input");
+        let killed = context
+            .demand_whnf(RuntimeValueRoot::new(
+                context.values(),
+                Value::Promised(promise),
+            ))
+            .expect("killable demand should be admitted");
+        assert!(poll_one_runtime_work(&coordinator));
+        let killed_probe = client_demand_publish_lock_probe(&coordinator, &killed);
+        assert!(coordinator.kill_client_demand(
+            killed.work(),
+            Arc::new(EvaluationFailure::message("forced client disposition")),
+        ));
+        assert_client_demand_published_after_unlock(&killed_probe);
     }
 
     #[test]
@@ -5120,6 +5240,66 @@ mod tests {
                 .to_string()
                 .contains("was cancelled")
         );
+    }
+
+    #[test]
+    fn task_terminal_surfaces_publish_under_one_mutation_admission() {
+        let fixture = SameRuntimeFixture::new();
+        let context = fixture.context();
+        let coordinator = context.coordinator().expect("coordinator should be live");
+        let (mut promises, owner_task, _owner_context) = context
+            .task_owned_promises([
+                Arc::from("live atomic terminal publication"),
+                Arc::from("dropped atomic terminal publication"),
+            ])
+            .expect("task-owned promises should register");
+        let dropped_promise = promises.pop().expect("dropped promise should exist");
+        let dropped_wait = dropped_promise
+            .task()
+            .expect("task-owned promise should expose its producer")
+            .wait()
+            .clone();
+        drop(dropped_promise);
+        let promise = promises.pop().expect("live promise should exist");
+        let task_wait = owner_task.wait().clone();
+        let observed = Arc::new(Mutex::new(None));
+        let probe_result = observed.clone();
+        let weak_coordinator = Arc::downgrade(&coordinator);
+        let probed_dropped_wait = dropped_wait.clone();
+        coordinator.set_terminal_publication_probe({
+            let promise = promise.clone();
+            move || {
+                let admission_is_held = weak_coordinator
+                    .upgrade()
+                    .is_some_and(|coordinator| !coordinator.settlement_admission_is_free());
+                *probe_result
+                    .lock()
+                    .expect("terminal publication probe result was poisoned") = Some((
+                    task_wait.terminal_poll().is_some(),
+                    promise.assignment().is_some(),
+                    probed_dropped_wait.terminal_poll().is_some(),
+                    admission_is_held,
+                ));
+            }
+        });
+
+        assert_eq!(owner_task.cancel(), EvaluationTaskCancellation::Requested);
+        assert_eq!(
+            *observed
+                .lock()
+                .expect("terminal publication probe result was poisoned"),
+            Some((true, true, true, true)),
+            "task wait, task-owned promise, and mutation admission must expose one atomic terminal surface"
+        );
+        assert!(matches!(
+            context.poll_reflection_task(&owner_task),
+            EvaluationWaitPoll::Cancelled
+        ));
+        assert!(promise.assignment().is_some_and(|result| result.is_err()));
+        assert!(matches!(
+            dropped_wait.terminal_poll(),
+            Some(EvaluationWaitPoll::Failed(_))
+        ));
     }
 
     #[test]
