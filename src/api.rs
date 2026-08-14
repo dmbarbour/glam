@@ -37,17 +37,17 @@ use crate::evaluation::{
     ReflectionTaskProfile, RuntimeCoordinatorReadiness, RuntimeDeadlockWorkSnapshot,
     RuntimeDependencySnapshot, RuntimeExitSnapshot, RuntimeObservationEpoch,
     RuntimeObservationState, RuntimeWorkKindSnapshot, RuntimeWorkStateSnapshot,
-    ValidatedRuntimeSettlementPlan,
+    TaskStatusPublisher, TaskStatusWake, ValidatedRuntimeSettlementPlan,
 };
 use crate::g_syntax::compile_source;
 use crate::interaction_net::{NetBuildError, NetBuilder as CoreNetBuilder, Port as CorePort};
 use crate::number::Number;
 use crate::reflection::{
     CommitResult, ConflictAddress, ConflictAnalysisStrategy, ConflictObservationIndex,
-    ExactConflictAnalysis, HostSnapshot, ReasoningSessionId, ReflectionEffects,
-    ReflectionQueryMutation, ReflectionQueryWriter, ReflectionServices, ReflectionStore,
-    RuntimeInputEndpointId, RuntimeInputSequence, TaskCommit, TaskEnvironment, TaskHost, VolumeId,
-    task_launcher, volume_effects,
+    EffectLifecycleTerminal, ExactConflictAnalysis, HostSnapshot, ReasoningSessionId,
+    ReflectionEffects, ReflectionQueryMutation, ReflectionQueryWriter, ReflectionServices,
+    ReflectionStore, RuntimeInputEndpointId, RuntimeInputSequence, TaskCommit, TaskEnvironment,
+    TaskHost, VolumeId, task_launcher, volume_effects,
 };
 use crate::runtime::{
     EvaluationRuntimeId, RuntimeIds, RuntimeMutationAdmission, RuntimeMutationAuthority,
@@ -1377,6 +1377,64 @@ impl DiagnosticIngress {
     /// until [`Self::activate`] is called.
     pub fn fallback(&self) -> Result<usize, Error> {
         set_runtime_diagnostic_route(&self.inner.sender, RuntimeDiagnosticRouteMode::Fallback)
+    }
+
+    /// Constructs the guarded terminal transition for one coordinator-owned
+    /// logger root. Route selection and buffered-input transfer happen inside
+    /// the root's existing runtime mutation publication; `after` runs only
+    /// after that guard and the logger demand-session lease have been
+    /// released.
+    #[doc(hidden)]
+    pub fn logger_terminal(
+        &self,
+        after: impl Fn() + Send + Sync + 'static,
+    ) -> EffectLifecycleTerminal {
+        let ingress = self.inner.clone();
+        let runtime = ingress.sender.runtime;
+        let after = Arc::new(after);
+        EffectLifecycleTerminal::new(
+            runtime,
+            TaskStatusPublisher::new(move |mutation, _status| {
+                let notification = match ingress.sender.owner.upgrade() {
+                    Some(resources) => match set_runtime_diagnostic_route_guarded(
+                        &resources,
+                        ingress.sender.endpoint,
+                        RuntimeDiagnosticRouteMode::Fallback,
+                        mutation,
+                    ) {
+                        Ok((_transferred, notification)) => notification,
+                        Err(error) => {
+                            ingress
+                                .state
+                                .lock()
+                                .expect("diagnostic ingress mutex should not be poisoned")
+                                .failure = Some(error);
+                            None
+                        }
+                    },
+                    None => {
+                        let failure = Error::new(format!(
+                            "evaluation runtime {} for input endpoint {} has been dropped",
+                            ingress.sender.runtime.get(),
+                            ingress.sender.endpoint.get()
+                        ));
+                        ingress
+                            .state
+                            .lock()
+                            .expect("diagnostic ingress mutex should not be poisoned")
+                            .failure = Some(failure);
+                        None
+                    }
+                };
+                let after = after.clone();
+                TaskStatusWake::new(move || {
+                    if let Some(notification) = notification {
+                        notification.notify();
+                    }
+                    after();
+                })
+            }),
+        )
     }
 }
 
@@ -3138,6 +3196,22 @@ fn set_runtime_diagnostic_route(
         ))
     })?;
     let settlement = resources.mutation_admission.settlement_guard();
+    let (transferred, notification) =
+        set_runtime_diagnostic_route_guarded(&resources, input.endpoint, mode, &settlement)?;
+    drop(settlement);
+    resources.mutation_admission.notify_settlement();
+    if let Some(notification) = notification {
+        notification.notify();
+    }
+    Ok(transferred)
+}
+
+fn set_runtime_diagnostic_route_guarded(
+    resources: &Arc<RuntimeSharedResources>,
+    input: RuntimeInputEndpointId,
+    mode: RuntimeDiagnosticRouteMode,
+    mutation: &dyn RuntimeMutationAuthority,
+) -> Result<(usize, Option<RuntimeObservationNotification>), Error> {
     let mut transferred = 0;
     let mut changed = false;
     {
@@ -3150,7 +3224,7 @@ fn set_runtime_diagnostic_route(
             let route = state
                 .events
                 .diagnostic_routes
-                .get(&input.endpoint)
+                .get(&input)
                 .ok_or_else(|| Error::new("diagnostic ingress route is not registered"))?;
             route.fallback
         };
@@ -3172,7 +3246,7 @@ fn set_runtime_diagnostic_route(
             let count = state
                 .events
                 .inputs
-                .get(&input.endpoint)
+                .get(&input)
                 .ok_or_else(|| Error::new("diagnostic ingress input is not registered"))?
                 .admitted
                 .len();
@@ -3188,13 +3262,13 @@ fn set_runtime_diagnostic_route(
                 let buffered = state
                     .events
                     .inputs
-                    .get_mut(&input.endpoint)
+                    .get_mut(&input)
                     .expect("validated diagnostic input remains registered");
                 let buffered = Arc::make_mut(buffered);
                 let records = buffered.admitted.drain(..).collect::<Vec<_>>();
                 let consumed = records
                     .iter()
-                    .map(|record| ConflictAddress::input_slot(input.endpoint, record.sequence))
+                    .map(|record| ConflictAddress::input_slot(input, record.sequence))
                     .collect::<Vec<_>>();
                 buffered.head_sequence = buffered.next_sequence;
                 (records, consumed)
@@ -3217,17 +3291,12 @@ fn set_runtime_diagnostic_route(
         state
             .events
             .diagnostic_routes
-            .get_mut(&input.endpoint)
+            .get_mut(&input)
             .expect("validated diagnostic route remains registered")
             .mode = mode;
     }
-    let notification = changed.then(|| prepare_runtime_observation(&resources, &settlement));
-    drop(settlement);
-    resources.mutation_admission.notify_settlement();
-    if let Some(notification) = notification {
-        notification.notify();
-    }
-    Ok(transferred)
+    let notification = changed.then(|| prepare_runtime_observation(resources, mutation));
+    Ok((transferred, notification))
 }
 
 fn route_runtime_diagnostic_guarded(

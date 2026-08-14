@@ -460,6 +460,7 @@ impl From<ApiError> for TaskHalt {
 #[derive(Clone)]
 pub struct EffectLifecycle {
     inner: Arc<EffectLifecycleState>,
+    terminal: Option<EffectLifecycleTerminal>,
 }
 
 struct EffectLifecycleState {
@@ -481,6 +482,35 @@ pub enum EffectLifecycleStatus {
     Killed(TaskHalt),
 }
 
+/// Opaque coordinator-terminal policy for one host-owned effect lifecycle.
+///
+/// Construction is supplied by runtime facilities such as a diagnostic
+/// ingress. The guarded transition remains internal; embedding clients can
+/// attach the resulting policy without gaining runtime mutation authority.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct EffectLifecycleTerminal {
+    runtime: crate::runtime::EvaluationRuntimeId,
+    publisher: TaskStatusPublisher,
+}
+
+impl EffectLifecycleTerminal {
+    pub(crate) fn new(
+        runtime: crate::runtime::EvaluationRuntimeId,
+        publisher: TaskStatusPublisher,
+    ) -> Self {
+        Self { runtime, publisher }
+    }
+
+    fn publish_guarded(
+        &self,
+        mutation: &dyn crate::runtime::RuntimeMutationAuthority,
+        status: EvaluationTaskStatus,
+    ) -> TaskStatusWake {
+        self.publisher.publish_guarded(mutation, status)
+    }
+}
+
 impl EffectLifecycleStatus {
     pub fn is_terminal(&self) -> bool {
         !matches!(self, Self::Launched | Self::Blocked)
@@ -494,6 +524,30 @@ impl EffectLifecycle {
                 status: Mutex::new(EffectLifecycleStatus::Launched),
                 changed: Condvar::new(),
             }),
+            terminal: None,
+        }
+    }
+
+    /// Constructs a lifecycle whose terminal publication also performs one
+    /// host-selected guarded transition. This is reserved for
+    /// coordinator-owned roots; direct synchronous effects have no such
+    /// terminal dispatch.
+    #[doc(hidden)]
+    pub fn new_with_terminal(
+        runtime: &EvaluationRuntime,
+        terminal: EffectLifecycleTerminal,
+    ) -> Self {
+        assert_eq!(
+            runtime.id(),
+            terminal.runtime,
+            "effect lifecycle terminal policy belongs to another evaluation runtime"
+        );
+        Self {
+            inner: Arc::new(EffectLifecycleState {
+                status: Mutex::new(EffectLifecycleStatus::Launched),
+                changed: Condvar::new(),
+            }),
+            terminal: Some(terminal),
         }
     }
 
@@ -537,18 +591,44 @@ impl EffectLifecycle {
         status.clone()
     }
 
-    fn publisher(&self) -> TaskStatusPublisher {
+    fn publisher(
+        &self,
+        session: Arc<Mutex<Option<Arc<EvaluationSession>>>>,
+    ) -> TaskStatusPublisher {
         let lifecycle = Arc::downgrade(&self.inner);
-        TaskStatusPublisher::new(move |_mutation, status| {
+        let terminal = self.terminal.clone();
+        TaskStatusPublisher::new(move |mutation, status| {
             let Some(lifecycle) = Weak::upgrade(&lifecycle) else {
                 return TaskStatusWake::new(|| {});
             };
+            let terminal_status = status.clone();
             let status = lifecycle.public_status(status);
+            let is_terminal = status.is_terminal();
+            let terminal_wake = if is_terminal {
+                terminal
+                    .as_ref()
+                    .map(|terminal| terminal.publish_guarded(mutation, terminal_status))
+            } else {
+                None
+            };
             *lifecycle
                 .status
                 .lock()
                 .expect("effect lifecycle mutex should not be poisoned") = status;
-            TaskStatusWake::new(move || lifecycle.changed.notify_all())
+            let session = session.clone();
+            TaskStatusWake::new(move || {
+                lifecycle.changed.notify_all();
+                if is_terminal && terminal_wake.is_some() {
+                    let session = session
+                        .lock()
+                        .expect("scheduled effect session mutex should not be poisoned")
+                        .take();
+                    drop(session);
+                }
+                if let Some(wake) = terminal_wake {
+                    wake.notify();
+                }
+            })
         })
     }
 }
@@ -579,9 +659,20 @@ impl EffectLifecycleState {
 #[doc(hidden)]
 pub struct ScheduledEffectRun {
     context: EvalContext,
-    _session: Arc<EvaluationSession>,
+    session: Arc<Mutex<Option<Arc<EvaluationSession>>>>,
     task: EvaluationTaskHandle,
     stop_requested: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+}
+
+impl Drop for ScheduledEffectRun {
+    fn drop(&mut self) {
+        let session = self
+            .session
+            .lock()
+            .expect("scheduled effect session mutex should not be poisoned")
+            .take();
+        drop(session);
+    }
 }
 
 impl ScheduledEffectRun {
@@ -741,6 +832,26 @@ impl<S: TaskSpecialization> EffectRun<S> {
     /// child `.task.new` operations inherit the same complete task profile.
     #[doc(hidden)]
     pub fn schedule(self, lifecycle: &EffectLifecycle) -> Result<ScheduledEffectRun, TaskHalt> {
+        self.schedule_with_capabilities(lifecycle, false)
+    }
+
+    /// Installs this effect as an exit-capable coordinator root. This is
+    /// reserved for runtime-owned services whose lifecycle participates in
+    /// settlement; ordinary scheduled and synchronous effects do not expose
+    /// the internal exit family.
+    #[doc(hidden)]
+    pub fn schedule_with_exit(
+        self,
+        lifecycle: &EffectLifecycle,
+    ) -> Result<ScheduledEffectRun, TaskHalt> {
+        self.schedule_with_capabilities(lifecycle, true)
+    }
+
+    fn schedule_with_capabilities(
+        self,
+        lifecycle: &EffectLifecycle,
+        exposes_exit: bool,
+    ) -> Result<ScheduledEffectRun, TaskHalt> {
         let Self {
             effect,
             specialization,
@@ -756,23 +867,29 @@ impl<S: TaskSpecialization> EffectRun<S> {
         let runtime = runtime.expect("EffectRun construction always selects an evaluation runtime");
         let session = runtime.new_evaluation_session_with_profile(task_profile)?;
         let context = EvalContext::new(&session);
+        let session = Arc::new(Mutex::new(Some(session)));
         let task = context
-            .schedule_machine(Some(lifecycle.publisher()), move |task_context| {
-                let mut task = EffectTask::new_in_context(
-                    effect.into_core(),
-                    specialization,
-                    host,
-                    task_context,
-                )
-                .map_err(TaskHalt::into_failure)?;
-                if result_policy == EffectResultPolicy::RequireUnit {
-                    task = task.requiring_unit_result();
-                }
-                if let Some(diagnostic_context) = result_assertion_context {
-                    task = task.asserting_unit_result(diagnostic_context);
-                }
-                Ok(Box::new(ValueEffectTask(task)))
-            })
+            .schedule_machine(
+                Some(lifecycle.publisher(session.clone())),
+                move |task_context| {
+                    let mut task = EffectTask::new_in_context_with_capabilities(
+                        effect.into_core(),
+                        specialization,
+                        host,
+                        task_context,
+                        false,
+                        exposes_exit,
+                    )
+                    .map_err(TaskHalt::into_failure)?;
+                    if result_policy == EffectResultPolicy::RequireUnit {
+                        task = task.requiring_unit_result();
+                    }
+                    if let Some(diagnostic_context) = result_assertion_context {
+                        task = task.asserting_unit_result(diagnostic_context);
+                    }
+                    Ok(Box::new(ValueEffectTask(task)))
+                },
+            )
             .map_err(TaskHalt::failure)?;
         // This hidden root has an explicit Rust owner which propagates its
         // failure. It therefore must not also remain in the detached task
@@ -780,7 +897,7 @@ impl<S: TaskSpecialization> EffectRun<S> {
         task.acknowledge_failure();
         Ok(ScheduledEffectRun {
             context,
-            _session: session,
+            session,
             task,
             stop_requested: None,
         })
@@ -4001,7 +4118,7 @@ fn with_reset_stack_value(
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use bytes::Bytes;
 
@@ -5354,6 +5471,17 @@ mod tests {
         };
         assert!(internal_api.get(&Key::atom_from_text("exit")).is_some());
         assert!(run_standard_test(&assembler, &effect).is_err());
+        assert!(
+            EffectRun::new(
+                &assembler.evaluation_runtime(),
+                &effect,
+                TestEffects,
+                Arc::new(TestHost::with_values(assembler.core_values())),
+            )
+            .run()
+            .is_err(),
+            "direct synchronous EffectRun must not expose coordinator exit"
+        );
         drop(owner);
     }
 
@@ -5586,6 +5714,208 @@ mod tests {
         cancelled.cancel();
         assert!(matches!(cancelled.run().unwrap(), TaskOutcome::Cancelled));
         assert_eq!(cancel_lifecycle.status(), EffectLifecycleStatus::Cancelled);
+    }
+
+    fn terminal_test_lifecycle(
+        runtime: &EvaluationRuntime,
+    ) -> (
+        EffectLifecycle,
+        Arc<Mutex<Vec<EvaluationTaskStatus>>>,
+        Arc<AtomicBool>,
+    ) {
+        let statuses = Arc::new(Mutex::new(Vec::new()));
+        let published = statuses.clone();
+        let notified = Arc::new(AtomicBool::new(false));
+        let notified_after_release = notified.clone();
+        let runtime_after_release = runtime.clone();
+        let terminal = EffectLifecycleTerminal::new(
+            runtime.id(),
+            TaskStatusPublisher::new(move |_mutation, status| {
+                published.lock().unwrap().push(status);
+                let notified_after_release = notified_after_release.clone();
+                let runtime_after_release = runtime_after_release.clone();
+                TaskStatusWake::new(move || {
+                    assert!(
+                        runtime_after_release.exclusive_admission_available(),
+                        "terminal wake must run after runtime mutation admission is released"
+                    );
+                    notified_after_release.store(true, Ordering::Release);
+                })
+            }),
+        );
+        (
+            EffectLifecycle::new_with_terminal(runtime, terminal),
+            statuses,
+            notified,
+        )
+    }
+
+    #[test]
+    fn coordinator_terminal_policy_observes_every_root_disposition() {
+        fn recorded_status(
+            statuses: &Arc<Mutex<Vec<EvaluationTaskStatus>>>,
+        ) -> EvaluationTaskStatus {
+            let statuses = statuses.lock().unwrap();
+            assert_eq!(statuses.len(), 1);
+            statuses[0].clone()
+        }
+
+        let (complete_assembler, complete_effect) = compile_effect(".r ()");
+        let complete_runtime = complete_assembler.evaluation_runtime();
+        let (complete_lifecycle, complete_statuses, complete_notified) =
+            terminal_test_lifecycle(&complete_runtime);
+        let complete = EffectRun::new(
+            &complete_runtime,
+            &complete_effect,
+            TestEffects,
+            Arc::new(TestHost::with_values(complete_assembler.core_values())),
+        )
+        .schedule(&complete_lifecycle)
+        .unwrap();
+        assert!(matches!(complete.run().unwrap(), TaskOutcome::Complete(_)));
+        assert!(matches!(
+            recorded_status(&complete_statuses),
+            EvaluationTaskStatus::Complete(_)
+        ));
+        assert!(complete_notified.load(Ordering::Acquire));
+
+        let (failed_assembler, failed_effect) = compile_effect(".fail");
+        let failed_runtime = failed_assembler.evaluation_runtime();
+        let (failed_lifecycle, failed_statuses, failed_notified) =
+            terminal_test_lifecycle(&failed_runtime);
+        let failed = EffectRun::new(
+            &failed_runtime,
+            &failed_effect,
+            TestEffects,
+            Arc::new(TestHost::with_values(failed_assembler.core_values())),
+        )
+        .schedule(&failed_lifecycle)
+        .unwrap();
+        assert!(failed.run().is_err());
+        assert!(matches!(
+            recorded_status(&failed_statuses),
+            EvaluationTaskStatus::Failed(_)
+        ));
+        assert!(failed_notified.load(Ordering::Acquire));
+
+        let (cancelled_assembler, cancelled_effect) = compile_effect(".read_log");
+        let cancelled_runtime = cancelled_assembler.evaluation_runtime();
+        let (cancelled_lifecycle, cancelled_statuses, cancelled_notified) =
+            terminal_test_lifecycle(&cancelled_runtime);
+        let cancelled = EffectRun::new(
+            &cancelled_runtime,
+            &cancelled_effect,
+            TestEffects,
+            Arc::new(TestHost::with_values(cancelled_assembler.core_values())),
+        )
+        .schedule(&cancelled_lifecycle)
+        .unwrap();
+        cancelled_runtime.pump_until_stable();
+        cancelled.cancel();
+        assert!(matches!(cancelled.run().unwrap(), TaskOutcome::Cancelled));
+        assert_eq!(
+            recorded_status(&cancelled_statuses),
+            EvaluationTaskStatus::Cancelled
+        );
+        assert!(cancelled_notified.load(Ordering::Acquire));
+
+        let (abandoned_assembler, abandoned_effect) = compile_effect(".read_log");
+        let abandoned_runtime = abandoned_assembler.evaluation_runtime();
+        let (abandoned_lifecycle, abandoned_statuses, abandoned_notified) =
+            terminal_test_lifecycle(&abandoned_runtime);
+        let abandoned = EffectRun::new(
+            &abandoned_runtime,
+            &abandoned_effect,
+            TestEffects,
+            Arc::new(TestHost::with_values(abandoned_assembler.core_values())),
+        )
+        .schedule(&abandoned_lifecycle)
+        .unwrap();
+        abandoned_runtime.pump_until_stable();
+        drop(abandoned);
+        assert_eq!(
+            recorded_status(&abandoned_statuses),
+            EvaluationTaskStatus::Abandoned
+        );
+        assert!(abandoned_notified.load(Ordering::Acquire));
+
+        let (exited_assembler, exited_effect) = compile_effect(".exit.success");
+        let exited_runtime = exited_assembler.evaluation_runtime();
+        let (exited_lifecycle, exited_statuses, exited_notified) =
+            terminal_test_lifecycle(&exited_runtime);
+        let exited = EffectRun::new(
+            &exited_runtime,
+            &exited_effect,
+            TestEffects,
+            Arc::new(TestHost::with_values(exited_assembler.core_values())),
+        )
+        .schedule_with_exit(&exited_lifecycle)
+        .unwrap();
+        exited_runtime.pump_until_stable();
+        let crate::api::RuntimeReadiness::Ready(snapshot) = exited_runtime.readiness() else {
+            panic!("exit-capable root should vote for a ready settlement")
+        };
+        snapshot.settle().expect("exit vote should settle");
+        assert!(exited.run().is_err());
+        assert_eq!(
+            recorded_status(&exited_statuses),
+            EvaluationTaskStatus::Exited
+        );
+        assert!(exited_notified.load(Ordering::Acquire));
+
+        let (killed_assembler, killed_effect) = compile_effect(".read_log");
+        let killed_runtime = killed_assembler.evaluation_runtime();
+        let (killed_lifecycle, killed_statuses, killed_notified) =
+            terminal_test_lifecycle(&killed_runtime);
+        let killed = EffectRun::new(
+            &killed_runtime,
+            &killed_effect,
+            TestEffects,
+            Arc::new(TestHost::with_values(killed_assembler.core_values())),
+        )
+        .schedule(&killed_lifecycle)
+        .unwrap();
+        killed_runtime.pump_until_stable();
+        let crate::api::RuntimeReadiness::Deadlocked(snapshot) = killed_runtime.readiness() else {
+            panic!("blocked root should produce a deadlock snapshot")
+        };
+        snapshot
+            .kill(crate::api::RuntimeKillReason::Deadlock)
+            .settle()
+            .expect("forced deadlock settlement should succeed");
+        assert!(killed.run().is_err());
+        assert!(matches!(
+            recorded_status(&killed_statuses),
+            EvaluationTaskStatus::Killed(_)
+        ));
+        assert!(killed_notified.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn coordinator_terminal_policy_closes_root_descendants_after_publication() {
+        let (assembler, effect) = compile_effect(".task.new (.read_log) >>= (\\_child -> .r ())");
+        let runtime = assembler.evaluation_runtime();
+        let (lifecycle, statuses, notified) = terminal_test_lifecycle(&runtime);
+        let task = EffectRun::new(
+            &runtime,
+            &effect,
+            TestEffects,
+            Arc::new(TestHost::with_values(assembler.core_values())),
+        )
+        .schedule(&lifecycle)
+        .expect("root with a blocked child should schedule");
+
+        assert!(matches!(task.run().unwrap(), TaskOutcome::Complete(_)));
+        assert!(matches!(
+            statuses.lock().unwrap().as_slice(),
+            [EvaluationTaskStatus::Complete(_)]
+        ));
+        assert!(notified.load(Ordering::Acquire));
+        runtime.pump_until_stable();
+        let crate::api::RuntimeReadiness::Ready(snapshot) = runtime.readiness() else {
+            panic!("closing the logger demand session should abandon its blocked child")
+        };
+        assert!(snapshot.dispositions().is_empty());
     }
 
     #[test]

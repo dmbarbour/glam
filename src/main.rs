@@ -864,7 +864,7 @@ fn start_logger(assembler: &Assembler, configuration: &Value, input: Arc<LogHost
         )
         .asserting_unit_result("configured logger result")
         .requiring_unit_result()
-        .schedule(&installation.lifecycle)
+        .schedule_with_exit(&installation.lifecycle)
         {
             Ok(task) => Some((
                 installation,
@@ -924,11 +924,9 @@ fn start_logger(assembler: &Assembler, configuration: &Value, input: Arc<LogHost
                     }
                 }
                 task_supervisor.finish(&installation);
+            } else {
+                let _ = task_supervisor.fallback_and_deliver();
             }
-            // This is deliberately separate from lifecycle terminalization in
-            // this checkpoint. Phase 10D.2b moves the same guarded transition
-            // into the coordinator-owned terminal path.
-            let _ = task_supervisor.fallback_and_deliver();
         })
         .expect("logger thread should start");
     LoggerRun {
@@ -1232,9 +1230,13 @@ impl LoggerSupervisor {
         state.next_generation = generation
             .checked_add(1)
             .expect("logger lifecycle generations exhausted");
+        let fallback_delivery = self.fallback_delivery.clone();
+        let terminal = self.input.diagnostic_ingress.logger_terminal(move || {
+            let _ = deliver_fallback_output(&fallback_delivery);
+        });
         let installation = LoggerInstallation {
             generation,
-            lifecycle: EffectLifecycle::new(&self.input.runtime),
+            lifecycle: EffectLifecycle::new_with_terminal(&self.input.runtime, terminal),
         };
         state.active = Some(installation.clone());
         Ok(installation)
@@ -1261,15 +1263,7 @@ impl LoggerSupervisor {
     }
 
     fn deliver_fallback(&self) -> Result<(), Error> {
-        loop {
-            match self.fallback_delivery.deliver_next()? {
-                Some(RuntimeDeliveryOutcome::Delivered(_)) => {}
-                Some(RuntimeDeliveryOutcome::Failed(failure)) => {
-                    return Err(failure.error().clone());
-                }
-                None => return Ok(()),
-            }
-        }
+        deliver_fallback_output(&self.fallback_delivery)
     }
 
     #[cfg(test)]
@@ -1280,6 +1274,20 @@ impl LoggerSupervisor {
             .active
             .as_ref()
             .map(|active| active.lifecycle.status())
+    }
+}
+
+fn deliver_fallback_output(
+    fallback_delivery: &RuntimeOutputDelivery<Diagnostic>,
+) -> Result<(), Error> {
+    loop {
+        match fallback_delivery.deliver_next()? {
+            Some(RuntimeDeliveryOutcome::Delivered(_)) => {}
+            Some(RuntimeDeliveryOutcome::Failed(failure)) => {
+                return Err(failure.error().clone());
+            }
+            None => return Ok(()),
+        }
     }
 }
 
@@ -2857,6 +2865,95 @@ mod tests {
         );
         input.close_input();
         assert!(input.take_diagnostic().is_none());
+    }
+
+    #[test]
+    fn logger_exit_vote_retries_new_input_before_terminal_fallback() {
+        let diagnostics = DiagnosticBus::new();
+        let input = Arc::new(LogHost::new(&diagnostics));
+        let assembler = Assembler::builder()
+            .evaluation_runtime(input.runtime.clone())
+            .build()
+            .expect("logger retry assembler should build");
+        let module = assembler
+            .module(["logger_exit_retry"])
+            .script(
+                "g",
+                concat!(
+                    "language g0\n",
+                    "import 'std\n",
+                    "refl.effect = .cut (.alt ",
+                    "(.read_log >>= (\\_message -> .r ())) ",
+                    "(.exit.success))\n",
+                ),
+            )
+            .build()
+            .expect("logger retry fixture should compile");
+        let effect = assembler
+            .get(module.value(), "refl.effect")
+            .expect("logger retry fixture should define its effect");
+        let fallback = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let fallback_values = fallback.clone();
+        let supervisor = LoggerSupervisor::new(input.clone(), move |diagnostic| {
+            fallback_values
+                .lock()
+                .expect("fallback collection mutex should not be poisoned")
+                .push(diagnostic.message().to_owned());
+        });
+        let installation = supervisor.install().expect("logger should install");
+        let host = Arc::new(LoggerTaskHost::new(
+            input.clone(),
+            DiagnosticBus::for_runtime(&input.runtime),
+            assembler.reflection_environment_for_role("logger"),
+        ));
+        let task = EffectRun::new(
+            &input.runtime,
+            &effect,
+            MainEffects::new(assembler.clone()),
+            host,
+        )
+        .schedule_with_exit(&installation.lifecycle)
+        .expect("logger root should enter coordinator work");
+
+        input.runtime.pump_until_stable();
+        assert!(
+            matches!(input.runtime.readiness(), glam::RuntimeReadiness::Ready(_)),
+            "the retryable exit should be ready for settlement before disturbance"
+        );
+        diagnostics.publish_local(Diagnostic::new(
+            &input.runtime.values(),
+            Severity::Info,
+            "arrived before settlement",
+        ));
+
+        assert!(matches!(task.run().unwrap(), TaskOutcome::Complete(_)));
+        assert!(matches!(
+            installation.lifecycle.status(),
+            glam::reflection::EffectLifecycleStatus::Complete(_)
+        ));
+        assert!(
+            fallback
+                .lock()
+                .expect("fallback collection mutex should not be poisoned")
+                .is_empty(),
+            "the disturbed logger must consume the pre-settlement diagnostic"
+        );
+
+        diagnostics.publish_local(Diagnostic::new(
+            &input.runtime.values(),
+            Severity::Info,
+            "after terminalization",
+        ));
+        supervisor
+            .deliver_fallback()
+            .expect("terminal route should deliver later diagnostics");
+        assert_eq!(
+            *fallback
+                .lock()
+                .expect("fallback collection mutex should not be poisoned"),
+            ["after terminalization"]
+        );
+        supervisor.finish(&installation);
     }
 
     #[test]

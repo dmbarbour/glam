@@ -953,7 +953,7 @@ fn configured_logger_error_diagnostic_fails_the_batch() {
 }
 
 #[test]
-fn configured_logger_drains_unjoined_child_tasks_to_its_output() {
+fn configured_logger_abandons_unjoined_child_tasks_when_its_root_returns() {
     let dir = unique_temp_dir("glam-conf-log-child-drain");
     fs::create_dir_all(&dir)
         .unwrap_or_else(|err| panic!("failed to create {}: {err}", dir.display()));
@@ -978,11 +978,14 @@ fn configured_logger_drains_unjoined_child_tasks_to_its_output() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(output.stdout, b"ok");
-    assert!(String::from_utf8_lossy(&output.stderr).contains("warning: DETACHED CHILD"));
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains("warning: DETACHED CHILD"),
+        "a logger root return must close rather than drain detached descendants"
+    );
 }
 
 #[test]
-fn configured_logger_reports_an_unjoined_child_failure() {
+fn configured_logger_abandons_an_unjoined_child_failure_when_its_root_returns() {
     let dir = unique_temp_dir("glam-conf-log-child-failure");
     fs::create_dir_all(&dir)
         .unwrap_or_else(|err| panic!("failed to create {}: {err}", dir.display()));
@@ -1000,14 +1003,16 @@ fn configured_logger_reports_an_unjoined_child_failure() {
         .output()
         .expect("failed to run glam");
 
-    assert!(!output.status.success());
+    assert!(
+        output.status.success(),
+        "an unjoined child is abandoned when the logger root returns: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(output.stdout, b"ok");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("task")
-            && stderr.contains("failed")
-            && stderr.contains("conf: entry `log`"),
-        "child failure was not reported:\n{stderr}"
+        !stderr.contains("reflection task failed permanently"),
+        "an abandoned child must not publish a task failure:\n{stderr}"
     );
 }
 

@@ -345,14 +345,14 @@ The `Path` type for `.get/.set` is a list of keys, assuming state is a hierarchi
 
 Tentative, deferred:
 
-- `.scope Mixin Op` - apply mixin to `api` in scope of `Op`
+- `.with Mixin Op` - apply mixin to `api` in scope of `Op`
 - `.score Value` - for soft searches of `.alt` paths, preferences
 - `.env Path` - like `.get` but controlled externally
 - `.commit` - drop `.alt` paths except this one, scoped by `.cut`
   - it might be feasible to model via shift-reset and cut
 - *constraints* - for reasoning and search across problem domains
 
-Extensibility will greatly benefit from `.scope`, while consistent support for constraints and soft search would greatly enhance adaptability. The argument for `.commit` and `.env` are much weaker. We can easily support `.env` and just have an empty environment by default, so it's low-hanging fruit. We should probably pursue `.scope` early because it will significantly impact early development and integration.
+Extensibility will greatly benefit from `.with`, while consistent support for constraints and soft search would greatly enhance adaptability. But I'm not sure of the best approach to `.score` (i.e. probably need multiple rubrics with client weighting them, probably must be contingent on final values of constraint vars). And constraint vars need a lot of attention. The argument for `.commit` and `.env` are weaker, but `.env` is easy. We should probably prioritize `.with` early because it will significantly impact early development and integration.
 
 ### Extensible Effects
 
