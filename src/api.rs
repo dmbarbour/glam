@@ -356,6 +356,10 @@ impl Value {
         Self::from_runtime(values.runtime_id(), value)
     }
 
+    pub(crate) fn from_runtime_root(value: RuntimeValueRoot) -> Self {
+        Self(value)
+    }
+
     fn from_runtime(runtime: EvaluationRuntimeId, value: CoreValue) -> Self {
         Self(RuntimeValueRoot::from_runtime(runtime, value))
     }
@@ -3733,6 +3737,22 @@ impl EvaluationRuntime {
             &self.state.work,
             self.state.shared_resources.values.core().clone(),
             self.default_reflection_profile.clone(),
+        ))
+    }
+
+    pub(crate) fn new_evaluation_session_with_profile(
+        &self,
+        profile: Arc<ReflectionTaskProfile>,
+    ) -> Result<Arc<EvaluationSession>, Error> {
+        if !profile.is_sealed() {
+            return Err(Error::new(
+                "evaluation session reflection task profile must be sealed before use",
+            ));
+        }
+        Ok(EvaluationSession::shared_with_default_profile(
+            &self.state.work,
+            self.state.shared_resources.values.core().clone(),
+            profile,
         ))
     }
 

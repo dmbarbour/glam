@@ -376,7 +376,10 @@ struct TaskTerminalPublisher {
     wait: EvaluationWaitToken,
     published_status: EvaluationTaskStatus,
     protected_status: Option<TaskStatusPublisher>,
+    lifecycle_status: Option<TaskStatusPublisher>,
 }
+
+type TaskStatusUpdate = (TaskStatusPublisher, EvaluationTaskStatus);
 
 impl TaskTerminalPublisher {
     fn new(wait: EvaluationWaitToken) -> Self {
@@ -384,6 +387,7 @@ impl TaskTerminalPublisher {
             wait,
             published_status: EvaluationTaskStatus::Launched,
             protected_status: None,
+            lifecycle_status: None,
         }
     }
 
@@ -394,21 +398,37 @@ impl TaskTerminalPublisher {
         );
     }
 
+    fn attach_lifecycle(&mut self, publisher: TaskStatusPublisher) {
+        assert!(
+            self.lifecycle_status.replace(publisher).is_none(),
+            "a reflection task may expose only one host lifecycle publisher"
+        );
+    }
+
     fn update_status(
         &mut self,
         status: EvaluationTaskStatus,
         terminal: bool,
-    ) -> Option<(TaskStatusPublisher, EvaluationTaskStatus)> {
+    ) -> Vec<TaskStatusUpdate> {
         if self.published_status == status {
-            return None;
+            return Vec::new();
         }
         self.published_status = status.clone();
-        let publisher = if terminal {
+        let protected = if terminal {
             self.protected_status.take()
         } else {
             self.protected_status.clone()
-        }?;
-        Some((publisher, status))
+        };
+        let lifecycle = if terminal {
+            self.lifecycle_status.take()
+        } else {
+            self.lifecycle_status.clone()
+        };
+        [protected, lifecycle]
+            .into_iter()
+            .flatten()
+            .map(|publisher| (publisher, status.clone()))
+            .collect()
     }
 }
 
@@ -1109,7 +1129,7 @@ pub(crate) struct ValidatedRuntimeSettlementPlan {
 struct SelectedTaskSettlement {
     work: EvaluationWorkId,
     producer: Option<ProducerSettlementObligation>,
-    status_update: Option<(TaskStatusPublisher, EvaluationTaskStatus)>,
+    status_updates: Vec<TaskStatusUpdate>,
     promises: Vec<TaskOwnedPromiseObligation>,
     machine: Option<Box<dyn EvaluationTaskMachine>>,
     block: Option<EvaluationTaskBlock>,
@@ -1384,6 +1404,29 @@ impl EvaluationWorkCoordinator {
         true
     }
 
+    /// Attaches one host-owned lifecycle publisher without consuming the
+    /// protected `.task.status` publication slot.
+    pub(super) fn attach_reflection_lifecycle_publisher(
+        &self,
+        work: EvaluationWorkId,
+        publisher: TaskStatusPublisher,
+    ) -> bool {
+        let _mutation = self.admission.mutation_guard();
+        let mut state = self
+            .state
+            .lock()
+            .expect("evaluation work coordinator was poisoned");
+        let Some(record) = state.work.get_mut(&work) else {
+            return false;
+        };
+        record
+            .obligations
+            .task_publisher_mut()
+            .expect("lifecycle publishers belong only to reflection tasks")
+            .attach_lifecycle(publisher);
+        true
+    }
+
     /// Advances one task's protected-query status under one runtime mutation
     /// admission without retaining its role host in the coordinator record.
     /// External notification happens only after mutation admission is
@@ -1409,9 +1452,12 @@ impl EvaluationWorkCoordinator {
                 .expect("active reflection work must retain its terminal publisher")
                 .update_status(status, false)
         };
-        let wake = update.map(|(publisher, status)| publisher.publish_guarded(&mutation, status));
+        let wakes = update
+            .into_iter()
+            .map(|(publisher, status)| publisher.publish_guarded(&mutation, status))
+            .collect::<Vec<_>>();
         drop(mutation);
-        if let Some(wake) = wake {
+        for wake in wakes {
             wake.notify();
         }
     }
@@ -1955,7 +2001,7 @@ impl EvaluationWorkCoordinator {
                 selected.push(SelectedTaskSettlement {
                     work: proposed.work,
                     producer: Some(producer),
-                    status_update,
+                    status_updates: status_update,
                     promises,
                     machine,
                     block: None,
@@ -2030,7 +2076,7 @@ impl EvaluationWorkCoordinator {
                         ProducerSettlementObligation::ReflectionTask(publisher) => {
                             publisher.update_status(killed, true)
                         }
-                        ProducerSettlementObligation::DeferredClaim { .. } => None,
+                        ProducerSettlementObligation::DeferredClaim { .. } => Vec::new(),
                     };
                     let promises = record.obligations.owned_promises.clone();
                     record.state = WorkState::Terminalizing;
@@ -2044,7 +2090,7 @@ impl EvaluationWorkCoordinator {
                 selected.push(SelectedTaskSettlement {
                     work: proposed.work,
                     producer: Some(producer),
-                    status_update,
+                    status_updates: status_update,
                     promises,
                     machine,
                     block,
@@ -2075,7 +2121,7 @@ impl EvaluationWorkCoordinator {
             let (_, wake) =
                 wait.publish_terminal_guarded(self, mutation, selected.terminal.clone());
             completion_wakes.push(wake);
-            if let Some((publisher, status)) = selected.status_update.take() {
+            for (publisher, status) in std::mem::take(&mut selected.status_updates) {
                 debug_assert_eq!(status, terminal_task_status(&selected.terminal));
                 status_wakes.push(publisher.publish_guarded(mutation, status));
                 status_publishers.push(publisher);
@@ -3879,7 +3925,7 @@ impl EvaluationWorkCoordinator {
                     ProducerSettlementObligation::ReflectionTask(publisher) => {
                         publisher.update_status(terminal_task_status(&terminal), true)
                     }
-                    ProducerSettlementObligation::DeferredClaim { .. } => None,
+                    ProducerSettlementObligation::DeferredClaim { .. } => Vec::new(),
                 };
                 (producer, failure, status_update)
             };
@@ -3897,10 +3943,13 @@ impl EvaluationWorkCoordinator {
             }
         };
         let (terminal, wake) = wait.publish_terminal_guarded(self, &mutation, terminal);
-        let status_wake = status_update.map(|(publisher, status)| {
-            debug_assert_eq!(status, terminal_task_status(&terminal));
-            publisher.publish_guarded(&mutation, status)
-        });
+        let status_wakes = status_update
+            .into_iter()
+            .map(|(publisher, status)| {
+                debug_assert_eq!(status, terminal_task_status(&terminal));
+                publisher.publish_guarded(&mutation, status)
+            })
+            .collect::<Vec<_>>();
         drop(mutation);
 
         // A task-owned promise is assigned synchronously by its owning machine
@@ -3931,7 +3980,7 @@ impl EvaluationWorkCoordinator {
         // mutation admission have been released.
         drop(producer);
         wake.notify();
-        if let Some(status_wake) = status_wake {
+        for status_wake in status_wakes {
             status_wake.notify();
         }
         terminal

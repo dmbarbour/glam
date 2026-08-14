@@ -14,7 +14,7 @@ use glam::cli::{
     format_parse_summary, parse_worker_count, route_completion,
 };
 use glam::reflection::{
-    CommitResult, EffectRequestSpec, EffectRun, HostSnapshot, ReflectionJournal,
+    CommitResult, EffectLifecycle, EffectRequestSpec, EffectRun, HostSnapshot, ReflectionJournal,
     ReflectionQueryWriter, ReflectionRequest, ReflectionServices, ReflectionTransaction,
     RequestContext, RequestResult, TaskCommit, TaskEnvironment, TaskHost, TaskOutcome,
     TaskSpecialization, handle_reflection_request, reflection_request_specs,
@@ -550,8 +550,10 @@ fn execute_assembly(mut prepared: PreparedAssembly, command: CommandPlan) -> Exi
     let LoggerRun {
         thread: logger_thread,
         diagnostics: logger_diagnostics,
+        _supervisor: logger_supervisor,
     } = logger;
     logger_thread.join().expect("logger task should not panic");
+    drop(logger_supervisor);
     log_host.cancel();
 
     if operation_failed
@@ -813,6 +815,7 @@ fn load_configuration(assembler: &Assembler) -> Result<LoadedConfiguration, Erro
 fn start_logger(assembler: &Assembler, configuration: &Value, input: Arc<LogHost>) -> LoggerRun {
     let logger = Arc::new(DefaultLogger::new(assembler.clone()));
     let evaluation_runtime = assembler.evaluation_runtime();
+    let supervisor = Arc::new(LoggerSupervisor::new(input.clone()));
     let diagnostics = DiagnosticBus::for_runtime(&evaluation_runtime);
     let subscription = diagnostics.subscribe(logger.clone());
     let host = Arc::new(LoggerTaskHost::new(
@@ -840,6 +843,44 @@ fn start_logger(assembler: &Assembler, configuration: &Value, input: Arc<LogHost
     };
     let task_diagnostics = diagnostics.clone();
     let task_values = evaluation_runtime.values();
+    let stop_input = input.clone();
+    let scheduled = custom.and_then(|custom| {
+        let installation = match supervisor.install() {
+            Ok(installation) => installation,
+            Err(error) => {
+                publish_error(&task_diagnostics, &task_values, &error);
+                return None;
+            }
+        };
+        match EffectRun::new(
+            &evaluation_runtime,
+            &custom,
+            MainEffects::new(effect_assembler),
+            host,
+        )
+        .asserting_unit_result("configured logger result")
+        .requiring_unit_result()
+        .schedule(&installation.lifecycle)
+        {
+            Ok(task) => Some((
+                installation,
+                task.with_stop_condition(move || stop_input.stop_requested()),
+            )),
+            Err(error) => {
+                supervisor.finish(&installation);
+                task_diagnostics.publish_local(
+                    error
+                        .with_context(
+                            configuration_entry_context(&task_values, "log")
+                                .expect("configuration context is local"),
+                        )
+                        .diagnostic(&task_values),
+                );
+                None
+            }
+        }
+    });
+    let task_supervisor = supervisor.clone();
     let thread = thread::Builder::new()
         .name("glam-logger".to_owned())
         // The logger evaluates ordinary Glam configuration and therefore
@@ -850,17 +891,8 @@ fn start_logger(assembler: &Assembler, configuration: &Value, input: Arc<LogHost
         .stack_size(8 * 1024 * 1024)
         .spawn(move || {
             let _subscription = subscription;
-            if let Some(custom) = custom {
-                match EffectRun::new(
-                    &evaluation_runtime,
-                    &custom,
-                    MainEffects::new(effect_assembler),
-                    host.clone(),
-                )
-                .asserting_unit_result("configured logger result")
-                .requiring_unit_result()
-                .run()
-                {
+            if let Some((installation, task)) = scheduled {
+                match task.run() {
                     Ok(TaskOutcome::Complete(_)) => {}
                     Ok(TaskOutcome::Cancelled) => {
                         task_diagnostics.publish_local(
@@ -887,6 +919,7 @@ fn start_logger(assembler: &Assembler, configuration: &Value, input: Arc<LogHost
                         );
                     }
                 }
+                task_supervisor.finish(&installation);
             }
             input.drain_default(logger.as_ref());
         })
@@ -894,6 +927,7 @@ fn start_logger(assembler: &Assembler, configuration: &Value, input: Arc<LogHost
     LoggerRun {
         thread,
         diagnostics,
+        _supervisor: supervisor,
     }
 }
 
@@ -904,6 +938,7 @@ fn configuration_entry_context(values: &Values, entry: &str) -> Result<Value, Er
 struct LoggerRun {
     thread: thread::JoinHandle<()>,
     diagnostics: DiagnosticBus,
+    _supervisor: Arc<LoggerSupervisor>,
 }
 
 #[derive(Clone)]
@@ -1123,6 +1158,85 @@ struct LogHost {
     diagnostic_reader: RuntimeInputReader,
 }
 
+/// Host ownership for one long-lived diagnostic ingress and a sequence of
+/// configured logger lifecycles. Rearming changes only the coordinator root;
+/// publications keep flowing through the original ingress and bus sequence.
+struct LoggerSupervisor {
+    input: Arc<LogHost>,
+    state: std::sync::Mutex<LoggerSupervisorState>,
+}
+
+struct LoggerSupervisorState {
+    next_generation: u64,
+    active: Option<LoggerInstallation>,
+}
+
+#[derive(Clone)]
+struct LoggerInstallation {
+    generation: u64,
+    lifecycle: EffectLifecycle,
+}
+
+impl LoggerSupervisor {
+    fn new(input: Arc<LogHost>) -> Self {
+        Self {
+            input,
+            state: std::sync::Mutex::new(LoggerSupervisorState {
+                next_generation: 1,
+                active: None,
+            }),
+        }
+    }
+
+    fn install(&self) -> Result<LoggerInstallation, Error> {
+        let mut state = self
+            .state
+            .lock()
+            .expect("logger supervisor mutex should not be poisoned");
+        if state
+            .active
+            .as_ref()
+            .is_some_and(|active| !active.lifecycle.status().is_terminal())
+        {
+            return Err(Error::new("configured logger lifecycle is still active"));
+        }
+        let generation = state.next_generation;
+        state.next_generation = generation
+            .checked_add(1)
+            .expect("logger lifecycle generations exhausted");
+        let installation = LoggerInstallation {
+            generation,
+            lifecycle: EffectLifecycle::new(&self.input.runtime),
+        };
+        state.active = Some(installation.clone());
+        Ok(installation)
+    }
+
+    fn finish(&self, installation: &LoggerInstallation) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("logger supervisor mutex should not be poisoned");
+        if state
+            .active
+            .as_ref()
+            .is_some_and(|active| active.generation == installation.generation)
+        {
+            state.active = None;
+        }
+    }
+
+    #[cfg(test)]
+    fn active_status(&self) -> Option<glam::reflection::EffectLifecycleStatus> {
+        self.state
+            .lock()
+            .expect("logger supervisor mutex should not be poisoned")
+            .active
+            .as_ref()
+            .map(|active| active.lifecycle.status())
+    }
+}
+
 /// Capabilities and mutable state belonging to the logger's evaluation
 /// session. Incoming assembler diagnostics remain in the runtime input queue;
 /// diagnostics emitted by this session go only to its diagnostic bus.
@@ -1136,28 +1250,6 @@ struct LoggerTaskHost {
     diagnostic_delivery: RuntimeOutputDelivery<Diagnostic>,
     stderr_writer: RuntimeOutputWriter,
     stderr_delivery: RuntimeOutputDelivery<Bytes>,
-    #[cfg(test)]
-    wait_probe: Option<Arc<LoggerWaitProbe>>,
-}
-
-#[cfg(test)]
-struct LoggerWaitProbe {
-    entered: std::sync::mpsc::Sender<u64>,
-    resume: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
-}
-
-#[cfg(test)]
-impl LoggerWaitProbe {
-    fn pause(&self, observed_generation: u64) {
-        self.entered
-            .send(observed_generation)
-            .expect("logger wait probe receiver should remain live");
-        self.resume
-            .lock()
-            .expect("logger wait probe should not be poisoned")
-            .recv()
-            .expect("logger wait probe should be resumed");
-    }
 }
 
 impl LoggerTaskHost {
@@ -1205,15 +1297,7 @@ impl LoggerTaskHost {
             diagnostic_delivery,
             stderr_writer,
             stderr_delivery,
-            #[cfg(test)]
-            wait_probe: None,
         }
-    }
-
-    #[cfg(test)]
-    fn with_wait_probe(mut self, probe: Arc<LoggerWaitProbe>) -> Self {
-        self.wait_probe = Some(probe);
-        self
     }
 
     fn write_diagnostic(&self, diagnostic: Diagnostic) -> Result<(), Error> {
@@ -1308,6 +1392,11 @@ impl LogHost {
 
     fn cancel(&self) {
         self.runtime.cancel_logger();
+    }
+
+    fn stop_requested(&self) -> bool {
+        let (_, _, snapshot) = self.runtime.logger_transaction_snapshot();
+        snapshot.cancelled() || snapshot.input_closed()
     }
 
     fn drain_default(&self, logger: &DefaultLogger) {
@@ -1436,10 +1525,6 @@ impl TaskHost<MainEffects> for LoggerTaskHost {
     }
 
     fn wait_for_change(&self, observed_generation: u64) -> bool {
-        #[cfg(test)]
-        if let Some(probe) = &self.wait_probe {
-            probe.pause(observed_generation);
-        }
         let (generation, _, snapshot) = self.resources.logger_transaction_snapshot();
         if snapshot.cancelled() {
             return false;
@@ -2678,12 +2763,107 @@ mod tests {
     }
 
     #[test]
-    fn closed_logger_wait_can_cancel_a_now_ready_exact_dependency() {
-        // Transitional characterization: `EffectRun` is still a synchronous
-        // Rust-stack demand rather than coordinator work. Once log closure is
-        // its terminal broad observation, it can cancel before reconsidering
-        // an exact dependency made ready at the same boundary. Phase 10B.1's
-        // `ClientDemand` registration replaces this compatibility behavior.
+    fn logger_supervisor_rearms_without_replacing_its_diagnostic_ingress() {
+        let diagnostics = DiagnosticBus::new();
+        let input = Arc::new(LogHost::new(&diagnostics));
+        let supervisor = LoggerSupervisor::new(input.clone());
+        let values = input.runtime.values();
+
+        let first = supervisor.install().expect("first logger should install");
+        assert_eq!(
+            supervisor.active_status(),
+            Some(glam::reflection::EffectLifecycleStatus::Launched)
+        );
+        let first_event =
+            diagnostics.publish_local(Diagnostic::new(&values, Severity::Info, "first lifecycle"));
+        assert_eq!(
+            input
+                .take_diagnostic()
+                .expect("first publication should retain its route")
+                .message(),
+            "first lifecycle"
+        );
+        supervisor.finish(&first);
+
+        let second = supervisor.install().expect("second logger should rearm");
+        assert!(second.generation > first.generation);
+        let second_event =
+            diagnostics.publish_local(Diagnostic::new(&values, Severity::Info, "second lifecycle"));
+        assert_eq!(second_event.sequence(), first_event.sequence() + 1);
+        assert_eq!(
+            input
+                .take_diagnostic()
+                .expect("rearmed publication should use the original ingress")
+                .message(),
+            "second lifecycle"
+        );
+        input.close_input();
+        assert!(input.take_diagnostic().is_none());
+    }
+
+    #[test]
+    fn diagnostic_publication_racing_logger_rearm_is_routed_once() {
+        let diagnostics = DiagnosticBus::new();
+        let input = Arc::new(LogHost::new(&diagnostics));
+        let supervisor = LoggerSupervisor::new(input.clone());
+        let first = supervisor.install().expect("first logger should install");
+        let values = input.runtime.values();
+        let publishing_bus = diagnostics.clone();
+        let publishing_values = values.clone();
+        let (ready, wait) = std::sync::mpsc::channel();
+        let (resume, resumed) = std::sync::mpsc::channel();
+        let publisher = thread::spawn(move || {
+            ready.send(()).expect("rearm test should signal readiness");
+            resumed
+                .recv()
+                .expect("rearm test should resume publication");
+            publishing_bus.publish_local(Diagnostic::new(
+                &publishing_values,
+                Severity::Warning,
+                "publication during rearm",
+            ))
+        });
+        wait.recv()
+            .expect("publisher should reach the rearm barrier");
+        supervisor.finish(&first);
+        let _second = supervisor.install().expect("logger should rearm");
+        resume.send(()).expect("publisher should resume");
+        let event = publisher.join().expect("publisher should not panic");
+
+        assert_eq!(event.sequence(), diagnostics.counts().latest_sequence());
+        assert_eq!(diagnostics.counts().total(), 1);
+        assert_eq!(
+            input
+                .take_diagnostic()
+                .expect("racing publication should remain buffered")
+                .message(),
+            "publication during rearm"
+        );
+        input.close_input();
+        assert!(input.take_diagnostic().is_none());
+    }
+
+    #[test]
+    fn logger_supervisor_teardown_does_not_retain_runtime_resources() {
+        let diagnostics = DiagnosticBus::new();
+        let input = Arc::new(LogHost::new(&diagnostics));
+        let resources = input.runtime.shared_resources();
+        let weak_resources = Arc::downgrade(&resources);
+        let weak_input = Arc::downgrade(&input);
+        let supervisor = LoggerSupervisor::new(input.clone());
+        let installation = supervisor.install().expect("logger should install");
+        drop(resources);
+        drop(input);
+        drop(installation);
+        drop(supervisor);
+        drop(diagnostics);
+
+        assert!(weak_input.upgrade().is_none());
+        assert!(weak_resources.upgrade().is_none());
+    }
+
+    #[test]
+    fn coordinator_logger_reconsiders_exact_dependency_when_log_input_closes() {
         let runtime = EvaluationRuntime::new(0).expect("logger test runtime should build");
         let diagnostics = DiagnosticBus::for_runtime(&runtime);
         let input = Arc::new(LogHost::with_runtime(runtime.clone(), &diagnostics));
@@ -2708,7 +2888,8 @@ mod tests {
                     "language g0\n",
                     "import 'std\n",
                     "refl.effect = .log_status >>= (\\_status -> ",
-                    "((.env ['test,'promise]) == 42) =>> .r ())\n",
+                    ".env ['test,'promise] >>= (\\value -> (value == 42) =>> ",
+                    "((.log 'warn {msg:{text:\"EXACT READY\"}}) =>> .r ())))\n",
                 ),
             )
             .build()
@@ -2717,57 +2898,54 @@ mod tests {
             .get(module.value(), "refl.effect")
             .expect("logger close barrier fixture should define its effect");
 
-        let (entered, waits) = std::sync::mpsc::channel();
-        let (resume, resumed) = std::sync::mpsc::channel();
-        let probe = Arc::new(LoggerWaitProbe {
-            entered,
-            resume: std::sync::Mutex::new(resumed),
-        });
-        let host = Arc::new(
-            LoggerTaskHost::new(
-                input.clone(),
-                DiagnosticBus::new(),
-                assembler.reflection_environment_for_role("logger"),
-            )
-            .with_wait_probe(probe),
-        );
-        let task_runtime = runtime.clone();
-        let task_assembler = assembler.clone();
+        let logger_diagnostics = DiagnosticBus::new();
+        let host = Arc::new(LoggerTaskHost::new(
+            input.clone(),
+            logger_diagnostics.clone(),
+            assembler.reflection_environment_for_role("logger"),
+        ));
+        let lifecycle = EffectLifecycle::new(&runtime);
+        let scheduled =
+            EffectRun::new(&runtime, &effect, MainEffects::new(assembler.clone()), host)
+                .schedule(&lifecycle)
+                .expect("logger root should enter coordinator work")
+                .with_stop_condition({
+                    let input = input.clone();
+                    move || input.stop_requested()
+                });
+        let (finished, result) = std::sync::mpsc::channel();
         let task = thread::spawn(move || {
-            EffectRun::new(
-                &task_runtime,
-                &effect,
-                MainEffects::new(task_assembler),
-                host,
-            )
-            .run()
+            finished
+                .send(scheduled.run())
+                .expect("logger result observer should remain live");
         });
 
-        let open_generation = waits
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .expect("logger should block after observing the open input");
-        input.close_input();
-        resume
-            .send(())
-            .expect("logger should resume after input closure");
-
-        let closed_generation = waits
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .expect("logger should retry and block on the unresolved exact dependency");
-        assert_ne!(open_generation, closed_generation);
+        let mut status = lifecycle.status();
+        while status != glam::reflection::EffectLifecycleStatus::Blocked {
+            status = lifecycle.wait_for_change(&status);
+        }
         resolver
             .take()
             .expect("logger promise resolver should remain live")
             .resolve(runtime.values().integer(42))
             .expect("logger promise should resolve");
-        resume
-            .send(())
-            .expect("logger should resume after exact dependency completion");
+        input.close_input();
 
-        assert!(matches!(
-            task.join().expect("logger task should not panic"),
-            Ok(TaskOutcome::Cancelled)
-        ));
+        let result = result
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap_or_else(|error| {
+                panic!(
+                    "logger did not finish after exact dependency completion: {error}; lifecycle={:?}; readiness={:?}",
+                    lifecycle.status(),
+                    runtime.readiness()
+                )
+            });
+        task.join().expect("logger task should not panic");
+        assert!(
+            matches!(result, Ok(TaskOutcome::Complete(_))),
+            "already-ready exact dependency should complete before logger closure cancellation: {result:?}"
+        );
+        assert_eq!(logger_diagnostics.counts().warnings(), 1);
     }
 
     #[test]

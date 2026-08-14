@@ -1873,23 +1873,31 @@ impl EvalContext {
     }
 
     /// Registers an executable task whose concrete specialization remains
-    /// hidden behind [`EvaluationTaskMachine`]. Construction happens before
-    /// the task registry is locked, so host snapshots and evaluator work may
-    /// safely use this same session.
-    #[cfg(test)]
-    pub(crate) fn schedule_task<F>(&self, build: F) -> Result<EvaluationTaskHandle, Arc<str>>
+    /// hidden behind [`EvaluationTaskMachine`]. Construction happens outside
+    /// the coordinator lock, so host snapshots and evaluator work may safely
+    /// use this same session.
+    pub(crate) fn schedule_machine<F>(
+        &self,
+        lifecycle: Option<TaskStatusPublisher>,
+        build: F,
+    ) -> Result<EvaluationTaskHandle, Arc<EvaluationFailure>>
     where
-        F: FnOnce(EvalContext) -> Result<Box<dyn EvaluationTaskMachine>, Arc<str>>,
+        F: FnOnce(EvalContext) -> Result<Box<dyn EvaluationTaskMachine>, Arc<EvaluationFailure>>,
     {
-        let coordinator = self.coordinator_for_admission()?;
-        let id = allocate_task_id(self.values())?;
-        let wait = allocate_wait_token(&self.session, id)?;
+        let coordinator = self
+            .coordinator_for_admission()
+            .map_err(|error| evaluation_failure(error.as_ref()))?;
+        let id =
+            allocate_task_id(self.values()).map_err(|error| evaluation_failure(error.as_ref()))?;
+        let wait = allocate_wait_token(&self.session, id)
+            .map_err(|error| evaluation_failure(error.as_ref()))?;
         let context = Self::for_task(self.session.clone(), id, self.task_profile.clone());
-        let work = coordinator.reserve_reflection(&self.session, id, wait.clone())?;
+        let work = coordinator
+            .reserve_reflection(&self.session, id, wait.clone())
+            .map_err(|error| evaluation_failure(error.as_ref()))?;
         let machine = match build(context) {
             Ok(machine) => machine,
             Err(error) => {
-                let failure = evaluation_failure(format!("task construction failed: {error}"));
                 // This helper reports construction failure directly to its
                 // Rust caller; it never returns a launched task handle whose
                 // failure would need runtime reporting.
@@ -1900,13 +1908,19 @@ impl EvalContext {
                 );
                 coordinator.settle_terminal_work(
                     work,
-                    EvaluationWaitTerminal::Failed(failure.clone()),
-                    failure,
+                    EvaluationWaitTerminal::Failed(error.clone()),
+                    error.clone(),
                 );
                 drop(coordinator.retire_reflection(work));
                 return Err(error);
             }
         };
+        if let Some(lifecycle) = lifecycle {
+            assert!(
+                coordinator.attach_reflection_lifecycle_publisher(work, lifecycle),
+                "fresh reflection reservation must accept its lifecycle publisher"
+            );
+        }
         coordinator
             .install_reflection_machine(work, machine)
             .unwrap_or_else(|_| panic!("fresh reflection reservation must accept its machine"));
@@ -1921,6 +1935,18 @@ impl EvalContext {
             work,
             wait,
         ))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn schedule_task<F>(&self, build: F) -> Result<EvaluationTaskHandle, Arc<str>>
+    where
+        F: FnOnce(EvalContext) -> Result<Box<dyn EvaluationTaskMachine>, Arc<str>>,
+    {
+        self.schedule_machine(None, |context| {
+            build(context)
+                .map_err(|error| evaluation_failure(format!("task construction failed: {error}")))
+        })
+        .map_err(|error| Arc::from(error.to_string()))
     }
 
     fn reserve_task(&self) -> Result<EvaluationTaskHandle, Arc<str>> {
@@ -2094,6 +2120,30 @@ impl EvalContext {
 
     pub(crate) fn poll_reflection_task(&self, task: &EvaluationTaskHandle) -> EvaluationWaitPoll {
         self.poll_wait(&task.wait)
+    }
+
+    /// Parks a host driver until the coordinator changes after a pending task
+    /// observation. Exact dependency completion and broad runtime observation
+    /// both advance this generation, so the caller need not choose a wake
+    /// source and cannot lose a completion between its poll and park.
+    pub(crate) fn wait_for_task_change(&self, task: &EvaluationTaskHandle) {
+        let Some(coordinator) = self.coordinator() else {
+            return;
+        };
+        let generation = coordinator.work_generation();
+        if matches!(
+            self.poll_reflection_task(task),
+            EvaluationWaitPoll::Pending(_)
+        ) && !coordinator.session_has_ready_task(self.session.id)
+            && coordinator.work_generation() == generation
+        {
+            coordinator.wait_for_change(generation);
+        }
+    }
+
+    pub(crate) fn has_ready_session_task(&self) -> bool {
+        self.coordinator()
+            .is_some_and(|coordinator| coordinator.session_has_ready_task(self.session.id))
     }
 
     #[cfg(test)]

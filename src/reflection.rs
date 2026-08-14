@@ -31,7 +31,7 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fmt;
 use std::num::NonZeroU64;
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex, Weak};
 
 use search::SearchPolicy;
 
@@ -47,9 +47,10 @@ use crate::eval;
 use crate::evaluation::OwnedEvalContext;
 use crate::evaluation::{
     EvalContext, EvaluationExitBlock, EvaluationMachinePoll, EvaluationPumpOutcome,
-    EvaluationSession, EvaluationSessionRun, EvaluationTaskBlock, EvaluationTaskId,
-    EvaluationTaskMachine, EvaluationWaitPoll, EvaluationWaitToken, ExitIntent,
-    ReflectionTaskLauncher, ReflectionTaskProfile, ReflectionTaskResultPolicy, WorkDependency,
+    EvaluationSession, EvaluationSessionRun, EvaluationTaskBlock, EvaluationTaskHandle,
+    EvaluationTaskId, EvaluationTaskMachine, EvaluationTaskStatus, EvaluationWaitPoll,
+    EvaluationWaitToken, ExitIntent, ReflectionTaskLauncher, ReflectionTaskProfile,
+    ReflectionTaskResultPolicy, TaskStatusPublisher, TaskStatusWake, WorkDependency,
 };
 use crate::interaction_net::NetBuilder;
 use crate::number::Number;
@@ -450,6 +451,207 @@ impl From<ApiError> for TaskHalt {
     }
 }
 
+/// Host-owned observation of one coordinator-managed composed effect root.
+///
+/// The coordinator retains only a weak publication route. Dropping this
+/// handle therefore disables lifecycle observation without retaining the
+/// task, its demand session, or its evaluation runtime.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct EffectLifecycle {
+    inner: Arc<EffectLifecycleState>,
+}
+
+struct EffectLifecycleState {
+    status: Mutex<EffectLifecycleStatus>,
+    changed: Condvar,
+}
+
+/// The last committed scheduler status published for a composed effect root.
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EffectLifecycleStatus {
+    Launched,
+    Blocked,
+    Complete(PublicValue),
+    Failed(TaskHalt),
+    Cancelled,
+    Abandoned,
+    Exited,
+    Killed(TaskHalt),
+}
+
+impl EffectLifecycleStatus {
+    pub fn is_terminal(&self) -> bool {
+        !matches!(self, Self::Launched | Self::Blocked)
+    }
+}
+
+impl EffectLifecycle {
+    pub fn new(_runtime: &EvaluationRuntime) -> Self {
+        Self {
+            inner: Arc::new(EffectLifecycleState {
+                status: Mutex::new(EffectLifecycleStatus::Launched),
+                changed: Condvar::new(),
+            }),
+        }
+    }
+
+    pub fn status(&self) -> EffectLifecycleStatus {
+        self.inner
+            .status
+            .lock()
+            .expect("effect lifecycle mutex should not be poisoned")
+            .clone()
+    }
+
+    pub fn wait_for_terminal(&self) -> EffectLifecycleStatus {
+        let mut status = self
+            .inner
+            .status
+            .lock()
+            .expect("effect lifecycle mutex should not be poisoned");
+        while !status.is_terminal() {
+            status = self
+                .inner
+                .changed
+                .wait(status)
+                .expect("effect lifecycle mutex should not be poisoned");
+        }
+        status.clone()
+    }
+
+    pub fn wait_for_change(&self, observed: &EffectLifecycleStatus) -> EffectLifecycleStatus {
+        let mut status = self
+            .inner
+            .status
+            .lock()
+            .expect("effect lifecycle mutex should not be poisoned");
+        while &*status == observed {
+            status = self
+                .inner
+                .changed
+                .wait(status)
+                .expect("effect lifecycle mutex should not be poisoned");
+        }
+        status.clone()
+    }
+
+    fn publisher(&self) -> TaskStatusPublisher {
+        let lifecycle = Arc::downgrade(&self.inner);
+        TaskStatusPublisher::new(move |_mutation, status| {
+            let Some(lifecycle) = Weak::upgrade(&lifecycle) else {
+                return TaskStatusWake::new(|| {});
+            };
+            let status = lifecycle.public_status(status);
+            *lifecycle
+                .status
+                .lock()
+                .expect("effect lifecycle mutex should not be poisoned") = status;
+            TaskStatusWake::new(move || lifecycle.changed.notify_all())
+        })
+    }
+}
+
+impl EffectLifecycleState {
+    fn public_status(&self, status: EvaluationTaskStatus) -> EffectLifecycleStatus {
+        match status {
+            EvaluationTaskStatus::Launched => EffectLifecycleStatus::Launched,
+            EvaluationTaskStatus::Blocked => EffectLifecycleStatus::Blocked,
+            EvaluationTaskStatus::Complete(value) => {
+                EffectLifecycleStatus::Complete(PublicValue::from_runtime_root(value))
+            }
+            EvaluationTaskStatus::Failed(error) => {
+                EffectLifecycleStatus::Failed(TaskHalt::failure(error))
+            }
+            EvaluationTaskStatus::Cancelled => EffectLifecycleStatus::Cancelled,
+            EvaluationTaskStatus::Abandoned => EffectLifecycleStatus::Abandoned,
+            EvaluationTaskStatus::Exited => EffectLifecycleStatus::Exited,
+            EvaluationTaskStatus::Killed(error) => {
+                EffectLifecycleStatus::Killed(TaskHalt::failure(error))
+            }
+        }
+    }
+}
+
+/// A composed effect root retained by the runtime coordinator rather than a
+/// caller's Rust stack.
+#[doc(hidden)]
+pub struct ScheduledEffectRun {
+    context: EvalContext,
+    _session: Arc<EvaluationSession>,
+    task: EvaluationTaskHandle,
+    stop_requested: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+}
+
+impl ScheduledEffectRun {
+    pub fn run(self) -> Result<TaskOutcome, TaskHalt> {
+        loop {
+            let children = self.context.run_until_quiescent();
+            match self.context.poll_reflection_task(&self.task) {
+                EvaluationWaitPoll::Pending(_) => {
+                    if self.context.has_ready_session_task() {
+                        continue;
+                    }
+                    if self
+                        .stop_requested
+                        .as_ref()
+                        .is_some_and(|stop_requested| stop_requested())
+                    {
+                        let _ = self.task.cancel();
+                        continue;
+                    }
+                    self.context.wait_for_task_change(&self.task);
+                }
+                EvaluationWaitPoll::Complete(value) => {
+                    return combine_composed_result(
+                        Ok(TaskOutcome::Complete(PublicValue::from_core(
+                            self.context.values(),
+                            value,
+                        ))),
+                        children,
+                    );
+                }
+                EvaluationWaitPoll::Failed(error) => {
+                    return combine_composed_result(Err(TaskHalt::failure(error)), children);
+                }
+                EvaluationWaitPoll::Cancelled => {
+                    return combine_composed_result(Ok(TaskOutcome::Cancelled), children);
+                }
+                EvaluationWaitPoll::Abandoned => {
+                    return combine_composed_result(
+                        Err(TaskHalt::new("scheduled effect root was abandoned")),
+                        children,
+                    );
+                }
+                EvaluationWaitPoll::Exited => {
+                    return combine_composed_result(
+                        Err(TaskHalt::new(
+                            "scheduled effect root exited without a result",
+                        )),
+                        children,
+                    );
+                }
+                EvaluationWaitPoll::Killed(error) => {
+                    return combine_composed_result(Err(TaskHalt::failure(error)), children);
+                }
+            }
+        }
+    }
+
+    pub fn cancel(&self) {
+        let _ = self.task.cancel();
+    }
+
+    pub fn with_stop_condition(
+        mut self,
+        stop_requested: impl Fn() -> bool + Send + Sync + 'static,
+    ) -> Self {
+        self.stop_requested = Some(Arc::new(stop_requested));
+        self
+    }
+}
+
 /// Configures and synchronously runs one effect task.
 ///
 /// `.task.new` children inherit this task's complete specialization and host
@@ -533,6 +735,56 @@ impl<S: TaskSpecialization> EffectRun<S> {
         }
         run_composed_effect_task(task)
     }
+
+    /// Installs this effect as ordinary coordinator work in a fresh demand
+    /// session. The returned handle retains the hidden task and session lease;
+    /// child `.task.new` operations inherit the same complete task profile.
+    #[doc(hidden)]
+    pub fn schedule(self, lifecycle: &EffectLifecycle) -> Result<ScheduledEffectRun, TaskHalt> {
+        let Self {
+            effect,
+            specialization,
+            host,
+            runtime,
+            result_policy,
+            result_assertion_context,
+        } = self;
+        let task_profile = Arc::new(ReflectionTaskProfile::sealed(task_launcher(
+            specialization.clone(),
+            host.clone(),
+        )));
+        let runtime = runtime.expect("EffectRun construction always selects an evaluation runtime");
+        let session = runtime.new_evaluation_session_with_profile(task_profile)?;
+        let context = EvalContext::new(&session);
+        let task = context
+            .schedule_machine(Some(lifecycle.publisher()), move |task_context| {
+                let mut task = EffectTask::new_in_context(
+                    effect.into_core(),
+                    specialization,
+                    host,
+                    task_context,
+                )
+                .map_err(TaskHalt::into_failure)?;
+                if result_policy == EffectResultPolicy::RequireUnit {
+                    task = task.requiring_unit_result();
+                }
+                if let Some(diagnostic_context) = result_assertion_context {
+                    task = task.asserting_unit_result(diagnostic_context);
+                }
+                Ok(Box::new(ValueEffectTask(task)))
+            })
+            .map_err(TaskHalt::failure)?;
+        // This hidden root has an explicit Rust owner which propagates its
+        // failure. It therefore must not also remain in the detached task
+        // failure ledger.
+        task.acknowledge_failure();
+        Ok(ScheduledEffectRun {
+            context,
+            _session: session,
+            task,
+            stop_requested: None,
+        })
+    }
 }
 
 /// Runs one reflection effect with a statically selected set of extra effects.
@@ -550,6 +802,13 @@ fn run_composed_effect_task<S: TaskSpecialization>(
 ) -> Result<TaskOutcome, TaskHalt> {
     let parent = task.run();
     let children = task.eval_context.run_until_quiescent();
+    combine_composed_result(parent, children)
+}
+
+fn combine_composed_result(
+    parent: Result<TaskOutcome, TaskHalt>,
+    children: EvaluationSessionRun,
+) -> Result<TaskOutcome, TaskHalt> {
     let child_error = composed_child_error(children);
     match (parent, child_error) {
         (Ok(outcome), None) => Ok(outcome),
@@ -5269,6 +5528,106 @@ mod tests {
             TaskOutcome::Complete(_)
         ));
         assert_eq!(host.diagnostics().len(), 1);
+    }
+
+    #[test]
+    fn scheduled_effect_root_completes_with_children_and_publishes_lifecycle() {
+        let (assembler, effect) = compile_effect(
+            ".task.new (.log 'warn { msg:{ text:\"child\" } }) >>= (\\_task -> .r ())",
+        );
+        let runtime = assembler.evaluation_runtime();
+        let host = Arc::new(TestHost::with_values(assembler.core_values()));
+        let lifecycle = EffectLifecycle::new(&runtime);
+        let task = EffectRun::new(&runtime, &effect, TestEffects, host.clone())
+            .requiring_unit_result()
+            .schedule(&lifecycle)
+            .expect("scheduled root should be admitted");
+
+        assert!(matches!(task.run().unwrap(), TaskOutcome::Complete(_)));
+        assert!(matches!(
+            lifecycle.status(),
+            EffectLifecycleStatus::Complete(_)
+        ));
+        assert_eq!(host.diagnostics().len(), 1);
+    }
+
+    #[test]
+    fn scheduled_effect_root_publishes_failure_and_cancellation() {
+        let (failure_assembler, failure_effect) = compile_effect(".fail");
+        let failure_runtime = failure_assembler.evaluation_runtime();
+        let failure_lifecycle = EffectLifecycle::new(&failure_runtime);
+        let failed = EffectRun::new(
+            &failure_runtime,
+            &failure_effect,
+            TestEffects,
+            Arc::new(TestHost::with_values(failure_assembler.core_values())),
+        )
+        .schedule(&failure_lifecycle)
+        .expect("failed root should first be admitted");
+        assert!(failed.run().is_err());
+        assert!(matches!(
+            failure_lifecycle.status(),
+            EffectLifecycleStatus::Failed(_)
+        ));
+
+        let (cancel_assembler, cancel_effect) = compile_effect(".read_log");
+        let cancel_runtime = cancel_assembler.evaluation_runtime();
+        let cancel_lifecycle = EffectLifecycle::new(&cancel_runtime);
+        let cancelled = EffectRun::new(
+            &cancel_runtime,
+            &cancel_effect,
+            TestEffects,
+            Arc::new(TestHost::with_values(cancel_assembler.core_values())),
+        )
+        .schedule(&cancel_lifecycle)
+        .expect("blocked root should be admitted");
+        cancel_runtime.pump_until_stable();
+        assert_eq!(cancel_lifecycle.status(), EffectLifecycleStatus::Blocked);
+        cancelled.cancel();
+        assert!(matches!(cancelled.run().unwrap(), TaskOutcome::Cancelled));
+        assert_eq!(cancel_lifecycle.status(), EffectLifecycleStatus::Cancelled);
+    }
+
+    #[test]
+    fn scheduled_effect_handle_retains_root_after_lifecycle_observer_drops() {
+        let (assembler, effect) = compile_effect(".r 42");
+        let runtime = assembler.evaluation_runtime();
+        let lifecycle = EffectLifecycle::new(&runtime);
+        let task = EffectRun::new(
+            &runtime,
+            &effect,
+            TestEffects,
+            Arc::new(TestHost::with_values(assembler.core_values())),
+        )
+        .schedule(&lifecycle)
+        .expect("scheduled root should be admitted");
+        drop(lifecycle);
+
+        let TaskOutcome::Complete(value) = task.run().unwrap() else {
+            panic!("hidden task handle should retain the coordinator root")
+        };
+        assert_eq!(value.as_i64(), Some(42));
+    }
+
+    #[test]
+    fn dropping_blocked_scheduled_effect_releases_its_session_and_publishes_abandonment() {
+        let (assembler, effect) = compile_effect(".read_log");
+        let runtime = assembler.evaluation_runtime();
+        let lifecycle = EffectLifecycle::new(&runtime);
+        let task = EffectRun::new(
+            &runtime,
+            &effect,
+            TestEffects,
+            Arc::new(TestHost::with_values(assembler.core_values())),
+        )
+        .schedule(&lifecycle)
+        .expect("blocked root should be admitted");
+        runtime.pump_until_stable();
+        assert_eq!(lifecycle.status(), EffectLifecycleStatus::Blocked);
+
+        drop(task);
+
+        assert_eq!(lifecycle.status(), EffectLifecycleStatus::Abandoned);
     }
 
     #[test]
