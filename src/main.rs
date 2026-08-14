@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
@@ -21,10 +22,13 @@ use glam::reflection::{
 };
 use glam::{
     Assembler, Diagnostic, DiagnosticBus, DiagnosticEvent, DiagnosticIngress, DiagnosticSubscriber,
-    Error, EvaluationRuntime, FileSourceSystem, ModuleInput, PromiseResolver, ReasoningReport,
-    ReasoningStatus, ReasoningTaskState, RuntimeDeliveryOutcome, RuntimeEventJournal,
-    RuntimeInputReader, RuntimeLoggerSnapshot, RuntimeOutputDelivery, RuntimeOutputWriter,
-    RuntimeSharedResources, Severity, Value, Values, check_local_manifest, inspect_g_source,
+    Error, EvaluationRuntime, FileSourceSystem, ModuleInput, PromiseResolver, QuiescenceReport,
+    ReasoningReport, ReasoningStatus, ReasoningTaskState, RuntimeDeadlockWork,
+    RuntimeDeliveryFailure, RuntimeDeliveryId, RuntimeDeliveryOutcome, RuntimeDependency,
+    RuntimeDisposition, RuntimeDispositionKind, RuntimeEventJournal, RuntimeInputReader,
+    RuntimeLoggerSnapshot, RuntimeOutputDelivery, RuntimeOutputWriter, RuntimeSharedResources,
+    RuntimeWorkKind, RuntimeWorkState, Severity, Value, Values, check_local_manifest,
+    inspect_g_source,
 };
 
 trait DiagnosticBusLocal {
@@ -906,6 +910,7 @@ fn start_logger(assembler: &Assembler, configuration: &Value, input: Arc<LogHost
                                 "configured logger remained blocked after the log stream closed",
                             )
                             .with_context(
+                                &task_values,
                                 configuration_entry_context(&task_values, "log")
                                     .expect("configuration context is local"),
                             )
@@ -1168,6 +1173,7 @@ struct LogHost {
 /// publications keep flowing through the original ingress and bus sequence.
 struct LoggerSupervisor {
     input: Arc<LogHost>,
+    fallback_writer: RuntimeOutputWriter,
     fallback_delivery: RuntimeOutputDelivery<Diagnostic>,
     state: std::sync::Mutex<LoggerSupervisorState>,
 }
@@ -1175,6 +1181,52 @@ struct LoggerSupervisor {
 struct LoggerSupervisorState {
     next_generation: u64,
     active: Option<LoggerInstallation>,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "settled-report rendering is installed by Phase 10D.4a"
+        )
+    )]
+    rendered_tasks: BTreeSet<(u64, u64)>,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "settled-report rendering is installed by Phase 10D.4a"
+        )
+    )]
+    rendered_deliveries: BTreeSet<RuntimeDeliveryId>,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "settled-report rendering is installed by Phase 10D.4a"
+        )
+    )]
+    rendered_exits: BTreeSet<u64>,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "settled-report rendering is installed by Phase 10D.4a"
+        )
+    )]
+    rendered_kills: BTreeSet<u64>,
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "settled-report rendering is installed by Phase 10D.4a"
+    )
+)]
+struct SettledReportSelection {
+    task_failures: Vec<glam::ReasoningFailure>,
+    delivery_failures: Vec<Arc<RuntimeDeliveryFailure>>,
+    exit_errors: Vec<RuntimeDisposition>,
+    killed_work: Vec<RuntimeDeadlockWork>,
 }
 
 #[derive(Clone)]
@@ -1188,15 +1240,19 @@ impl LoggerSupervisor {
     where
         F: Fn(Diagnostic) + Send + Sync + 'static,
     {
+        Self::new_fallible(input, move |diagnostic| {
+            fallback(diagnostic);
+            Ok(())
+        })
+    }
+
+    fn new_fallible<F>(input: Arc<LogHost>, fallback: F) -> Self
+    where
+        F: Fn(Diagnostic) -> Result<(), Error> + Send + Sync + 'static,
+    {
         let endpoint = input
             .runtime
-            .output_endpoint(
-                |value| Diagnostic::from_transport_value(&value),
-                move |diagnostic| {
-                    fallback(diagnostic);
-                    Ok(())
-                },
-            )
+            .output_endpoint(|value| Diagnostic::from_transport_value(&value), fallback)
             .expect("default logger output endpoint should be constructible");
         let (writer, fallback_delivery) = endpoint.into_parts();
         input
@@ -1205,10 +1261,15 @@ impl LoggerSupervisor {
             .expect("default logger output belongs to the logger runtime");
         Self {
             input,
+            fallback_writer: writer,
             fallback_delivery,
             state: std::sync::Mutex::new(LoggerSupervisorState {
                 next_generation: 1,
                 active: None,
+                rendered_tasks: BTreeSet::new(),
+                rendered_deliveries: BTreeSet::new(),
+                rendered_exits: BTreeSet::new(),
+                rendered_kills: BTreeSet::new(),
             }),
         }
     }
@@ -1266,6 +1327,124 @@ impl LoggerSupervisor {
         deliver_fallback_output(&self.fallback_delivery)
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "settled-report rendering is installed by Phase 10D.4a"
+        )
+    )]
+    fn render_settled_report(&self, report: &QuiescenceReport) -> Result<usize, Error> {
+        if report.runtime_id() != self.input.runtime.id() {
+            return Err(Error::new(format!(
+                "quiescence report belongs to evaluation runtime {}, not {}",
+                report.runtime_id().get(),
+                self.input.runtime.id().get()
+            )));
+        }
+        let selected = self.select_unrendered_report_entries(report);
+        let values = self.input.runtime.values();
+        let diagnostics = settled_report_diagnostics(&values, selected)?;
+        let rendered = diagnostics.len();
+        self.enqueue_fallback_diagnostics(diagnostics)?;
+        self.deliver_fallback()?;
+        Ok(rendered)
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "settled-report rendering is installed by Phase 10D.4a"
+        )
+    )]
+    fn select_unrendered_report_entries(
+        &self,
+        report: &QuiescenceReport,
+    ) -> SettledReportSelection {
+        let mut state = self
+            .state
+            .lock()
+            .expect("logger supervisor mutex should not be poisoned");
+        let task_failures = report
+            .task_failures()
+            .iter()
+            .filter(|failure| {
+                state
+                    .rendered_tasks
+                    .insert((failure.session_id(), failure.task_id()))
+            })
+            .cloned()
+            .collect();
+        let delivery_failures = report
+            .delivery_failures()
+            .failures()
+            .into_iter()
+            .filter(|failure| state.rendered_deliveries.insert(failure.delivery_id()))
+            .filter(|failure| failure.endpoint_id() != self.fallback_delivery.id())
+            .collect();
+        let exit_errors = report
+            .dispositions()
+            .iter()
+            .filter(|disposition| {
+                matches!(disposition.kind(), RuntimeDispositionKind::ExitError(_))
+                    && state.rendered_exits.insert(disposition.work_id())
+            })
+            .cloned()
+            .collect();
+        let killed_work = report
+            .killed_work()
+            .iter()
+            .filter(|work| state.rendered_kills.insert(work.work_id()))
+            .cloned()
+            .collect();
+        SettledReportSelection {
+            task_failures,
+            delivery_failures,
+            exit_errors,
+            killed_work,
+        }
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "settled-report rendering is installed by Phase 10D.4a"
+        )
+    )]
+    fn enqueue_fallback_diagnostics(&self, diagnostics: Vec<Diagnostic>) -> Result<(), Error> {
+        if diagnostics.is_empty() {
+            return Ok(());
+        }
+        let values = self.input.runtime.values();
+        let payloads = diagnostics
+            .into_iter()
+            .map(|diagnostic| diagnostic.transport_value(&values))
+            .collect::<Result<Vec<_>, _>>()?;
+        loop {
+            let (_generation, store, snapshot) = self.input.runtime.transaction_snapshot();
+            let mut events = RuntimeEventJournal::new(snapshot);
+            for payload in &payloads {
+                events.write(&self.fallback_writer, payload.clone())?;
+            }
+            match self
+                .input
+                .runtime
+                .try_commit_transaction(&glam::reflection::StoreJournal::new(store), &events)
+            {
+                glam::reflection::StoreCommitResult::Committed => return Ok(()),
+                glam::reflection::StoreCommitResult::Conflict => {}
+                glam::reflection::StoreCommitResult::MissingVolume(volume) => {
+                    return Err(Error::new(format!(
+                        "reflection volume {} was revoked while reporting runtime settlement",
+                        volume.get()
+                    )));
+                }
+            }
+        }
+    }
+
     #[cfg(test)]
     fn active_status(&self) -> Option<glam::reflection::EffectLifecycleStatus> {
         self.state
@@ -1274,6 +1453,220 @@ impl LoggerSupervisor {
             .active
             .as_ref()
             .map(|active| active.lifecycle.status())
+    }
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "settled-report rendering is installed by Phase 10D.4a"
+    )
+)]
+fn settled_report_diagnostics(
+    values: &Values,
+    selection: SettledReportSelection,
+) -> Result<Vec<Diagnostic>, Error> {
+    let mut diagnostics = Vec::new();
+    for failure in selection.task_failures {
+        let context = runtime_report_context(
+            values,
+            "task_failure",
+            vec![
+                ("session", report_id(values, failure.session_id())?),
+                ("task", report_id(values, failure.task_id())?),
+            ],
+        )?;
+        diagnostics.push(failure.diagnostic().clone().with_context(values, context)?);
+    }
+    for failure in selection.delivery_failures {
+        let context = runtime_report_context(
+            values,
+            "delivery_failure",
+            vec![
+                ("delivery", report_id(values, failure.delivery_id().get())?),
+                ("endpoint", report_id(values, failure.endpoint_id().get())?),
+                (
+                    "kind",
+                    values.atom_from_text(match failure.kind() {
+                        glam::RuntimeDeliveryFailureKind::Decode => "decode",
+                        glam::RuntimeDeliveryFailureKind::Adapter => "adapter",
+                        glam::RuntimeDeliveryFailureKind::Panic => "panic",
+                    }),
+                ),
+            ],
+        )?;
+        diagnostics.push(
+            failure
+                .error()
+                .diagnostic(values)?
+                .with_context(values, context)?,
+        );
+    }
+    for disposition in selection.exit_errors {
+        let RuntimeDispositionKind::ExitError(message) = disposition.kind() else {
+            unreachable!("report selection retains only error exits")
+        };
+        let mut args = vec![
+            ("work", report_id(values, disposition.work_id())?),
+            ("session", report_id(values, disposition.session_id())?),
+        ];
+        if let Some(task) = disposition.task_id() {
+            args.push(("task", report_id(values, task)?));
+        }
+        let context = runtime_report_context(values, "exit_error", args)?;
+        diagnostics.push(
+            Diagnostic::from_emission(Severity::Error, message.clone())
+                .with_context(values, context)?,
+        );
+    }
+    for work in selection.killed_work {
+        let mut args = vec![
+            ("work", report_id(values, work.work_id())?),
+            ("session", report_id(values, work.session_id())?),
+            (
+                "kind",
+                values.atom_from_text(runtime_work_kind_name(work.kind())),
+            ),
+            (
+                "state",
+                values.atom_from_text(runtime_work_state_name(work.state())),
+            ),
+        ];
+        if let Some(task) = work.task_id() {
+            args.push(("task", report_id(values, task)?));
+        }
+        if let Some(epoch) = work.observed_epoch() {
+            args.push(("observed_epoch", report_id(values, epoch)?));
+        }
+        if let Some(dependency) = work.dependency() {
+            args.push(("dependency", runtime_dependency_value(values, dependency)?));
+        }
+        let context = runtime_report_context(values, "killed", args)?;
+        diagnostics.push(
+            Diagnostic::new(
+                values,
+                Severity::Error,
+                format!(
+                    "runtime killed {} work {} in a deadlocked settlement",
+                    runtime_work_kind_name(work.kind()),
+                    work.work_id()
+                ),
+            )
+            .with_context(values, context)?,
+        );
+    }
+    Ok(diagnostics)
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "settled-report rendering is installed by Phase 10D.4a"
+    )
+)]
+fn report_id(values: &Values, id: u64) -> Result<Value, Error> {
+    values.number_from_text(id.to_string())
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "settled-report rendering is installed by Phase 10D.4a"
+    )
+)]
+fn runtime_report_context(
+    values: &Values,
+    operation: &str,
+    args: Vec<(&str, Value)>,
+) -> Result<Value, Error> {
+    values.record([(
+        "runtime",
+        values.record([
+            ("op", values.atom_from_text(operation)),
+            ("args", values.record(args)?),
+        ])?,
+    )])
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "settled-report rendering is installed by Phase 10D.4a"
+    )
+)]
+fn runtime_work_kind_name(kind: RuntimeWorkKind) -> &'static str {
+    match kind {
+        RuntimeWorkKind::ReflectionTask => "reflection_task",
+        RuntimeWorkKind::DeferredEvaluation => "deferred_evaluation",
+        RuntimeWorkKind::ClientDemand => "client_demand",
+        RuntimeWorkKind::Spark => "spark",
+    }
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "settled-report rendering is installed by Phase 10D.4a"
+    )
+)]
+fn runtime_work_state_name(state: RuntimeWorkState) -> &'static str {
+    match state {
+        RuntimeWorkState::Dormant => "dormant",
+        RuntimeWorkState::Reserved => "reserved",
+        RuntimeWorkState::Blocked => "blocked",
+    }
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "settled-report rendering is installed by Phase 10D.4a"
+    )
+)]
+fn runtime_dependency_value(
+    values: &Values,
+    dependency: &RuntimeDependency,
+) -> Result<Value, Error> {
+    match dependency {
+        RuntimeDependency::TaskWait {
+            wait_id,
+            task_id,
+            session_id,
+        } => values.record([(
+            "task_wait",
+            values.record([
+                ("wait", report_id(values, *wait_id)?),
+                ("task", report_id(values, *task_id)?),
+                ("session", report_id(values, *session_id)?),
+            ])?,
+        )]),
+        RuntimeDependency::Promise {
+            promise_id,
+            producer,
+        } => {
+            let mut fields = vec![("promise", report_id(values, *promise_id)?)];
+            if let Some(producer) = producer {
+                fields.push((
+                    "producer",
+                    values.record([
+                        ("wait", report_id(values, producer.wait_id())?),
+                        ("task", report_id(values, producer.task_id())?),
+                        ("session", report_id(values, producer.session_id())?),
+                    ])?,
+                ));
+            }
+            values.record([("promise", values.record(fields)?)])
+        }
+        RuntimeDependency::Synthetic { id } => values.record([(
+            "synthetic",
+            values.record([("id", report_id(values, *id)?)])?,
+        )]),
     }
 }
 
@@ -1966,6 +2359,9 @@ impl DefaultLogger {
         if tag == &values.atom_from_text("task") {
             return self.task_context_summary(payload);
         }
+        if tag == &values.atom_from_text("runtime") {
+            return self.runtime_context_summary(payload);
+        }
         self.context_tag_text(tag)
             .unwrap_or_else(|| diagnostic_value_kind(&self.evaluator.values(), frame).to_owned())
     }
@@ -2026,6 +2422,47 @@ impl DefaultLogger {
             (Some(operation), None) => format!("task: {operation}"),
             (None, Some(id)) => format!("task: task {id}"),
             (None, None) => "task".to_owned(),
+        }
+    }
+
+    fn runtime_context_summary(&self, payload: &Value) -> String {
+        let operation = self
+            .context_field_tag_text(payload, "op")
+            .map(|operation| operation.replace('_', " "));
+        let work = self.context_field_text(payload, "args.work");
+        let session = self.context_field_text(payload, "args.session");
+        let task = self.context_field_text(payload, "args.task");
+        let delivery = self.context_field_text(payload, "args.delivery");
+        let endpoint = self.context_field_text(payload, "args.endpoint");
+        let kind = self
+            .context_field_tag_text(payload, "args.kind")
+            .map(|kind| kind.replace('_', " "));
+
+        let mut details = Vec::new();
+        if let Some(work) = work {
+            details.push(format!("work {work}"));
+        }
+        if let Some(session) = session {
+            details.push(format!("session {session}"));
+        }
+        if let Some(task) = task {
+            details.push(format!("task {task}"));
+        }
+        if let Some(delivery) = delivery {
+            details.push(format!("delivery {delivery}"));
+        }
+        if let Some(endpoint) = endpoint {
+            details.push(format!("endpoint {endpoint}"));
+        }
+        if let Some(kind) = kind {
+            details.push(kind);
+        }
+
+        let operation = operation.unwrap_or_else(|| "event".to_owned());
+        if details.is_empty() {
+            format!("runtime: {operation}")
+        } else {
+            format!("runtime: {operation} ({})", details.join(", "))
         }
     }
 
@@ -2417,6 +2854,41 @@ mod tests {
                                                 ),
                                             )],
                                         ),
+                                        record(
+                                            &values,
+                                            [(
+                                                "runtime",
+                                                record(
+                                                    &values,
+                                                    [
+                                                        (
+                                                            "op",
+                                                            values
+                                                                .atom_from_text("delivery_failure"),
+                                                        ),
+                                                        (
+                                                            "args",
+                                                            record(
+                                                                &values,
+                                                                [
+                                                                    (
+                                                                        "delivery",
+                                                                        values.integer(13),
+                                                                    ),
+                                                                    ("endpoint", values.integer(4)),
+                                                                    (
+                                                                        "kind",
+                                                                        values.atom_from_text(
+                                                                            "adapter",
+                                                                        ),
+                                                                    ),
+                                                                ],
+                                                            ),
+                                                        ),
+                                                    ],
+                                                ),
+                                            )],
+                                        ),
                                     ],
                                 ),
                             ),
@@ -2438,7 +2910,7 @@ mod tests {
         assert_eq!(
             rendered,
             Bytes::from_static(
-                b"error: broken\n    more detail\n  context:\n    eval: binary extraction\n    g: definition `result` on line 7\n    import: request `child.g`\n    asm: result `asm.result`\n    eval: path lookup `conf.env`\n    conf: entry `log`\n    task: join task 12\n"
+                b"error: broken\n    more detail\n  context:\n    eval: binary extraction\n    g: definition `result` on line 7\n    import: request `child.g`\n    asm: result `asm.result`\n    eval: path lookup `conf.env`\n    conf: entry `log`\n    task: join task 12\n    runtime: delivery failure (delivery 13, endpoint 4, adapter)\n"
             )
         );
     }
@@ -2954,6 +3426,371 @@ mod tests {
             ["after terminalization"]
         );
         supervisor.finish(&installation);
+    }
+
+    #[test]
+    fn settled_report_renders_task_and_nonfallback_delivery_failures_once() {
+        let source_diagnostics = DiagnosticBus::new();
+        let input = Arc::new(LogHost::new(&source_diagnostics));
+        let assembler = Assembler::builder()
+            .evaluation_runtime(input.runtime.clone())
+            .build()
+            .expect("reporting assembler should build");
+        let module = assembler
+            .module(["settled_failure_report"])
+            .script(
+                "g",
+                concat!(
+                    "language g0\n",
+                    "import 'std\n",
+                    "refl.effect = .task.new (.fail) >>= (\\_task -> .r ())\n",
+                ),
+            )
+            .build()
+            .expect("failure report fixture should compile");
+        let effect = assembler
+            .get(module.value(), "refl.effect")
+            .expect("failure report fixture should define its effect");
+        let rendered = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let rendered_messages = rendered.clone();
+        let supervisor = LoggerSupervisor::new(input.clone(), move |diagnostic| {
+            rendered_messages
+                .lock()
+                .expect("rendered diagnostic collection should not be poisoned")
+                .push(diagnostic);
+        });
+        supervisor
+            .fallback_and_deliver()
+            .expect("reporting should begin on fallback");
+        let logger_diagnostics = DiagnosticBus::for_runtime(&input.runtime);
+        let host = Arc::new(LoggerTaskHost::new(
+            input.clone(),
+            logger_diagnostics.clone(),
+            assembler.reflection_environment_for_role("logger"),
+        ));
+        let lifecycle = EffectLifecycle::new(&input.runtime);
+        let task = EffectRun::new(
+            &input.runtime,
+            &effect,
+            MainEffects::new(assembler.clone()),
+            host,
+        )
+        .schedule(&lifecycle)
+        .expect("failure-report root should schedule");
+        assert!(task.run().is_err());
+
+        let failed_output = input
+            .runtime
+            .output_endpoint(Ok::<Value, Error>, |_value| {
+                Err(Error::new("nonfallback output adapter failed"))
+            })
+            .expect("failed output endpoint should register");
+        let (_generation, store, snapshot) = input.runtime.transaction_snapshot();
+        let mut events = RuntimeEventJournal::new(snapshot);
+        events
+            .write(&failed_output.writer(), input.runtime.values().integer(1))
+            .expect("failed output intent should buffer");
+        assert_eq!(
+            input
+                .runtime
+                .try_commit_transaction(&glam::reflection::StoreJournal::new(store), &events,),
+            glam::reflection::StoreCommitResult::Committed
+        );
+        assert!(matches!(
+            failed_output.delivery().deliver_next().unwrap(),
+            Some(RuntimeDeliveryOutcome::Failed(_))
+        ));
+
+        input.runtime.pump_until_stable();
+        let glam::RuntimeReadiness::Ready(snapshot) = input.runtime.readiness() else {
+            panic!("terminal failures should be retained state, not active work")
+        };
+        let report = snapshot.settle().expect("failure report should settle");
+        assert_eq!(report.task_failures().len(), 1);
+        assert_eq!(report.delivery_failures().failures().len(), 1);
+        assert_eq!(source_diagnostics.counts().total(), 0);
+        assert_eq!(logger_diagnostics.counts().total(), 0);
+
+        assert_eq!(supervisor.render_settled_report(&report).unwrap(), 2);
+        assert_eq!(supervisor.render_settled_report(&report).unwrap(), 0);
+        let rendered = rendered
+            .lock()
+            .expect("rendered diagnostic collection should not be poisoned");
+        assert_eq!(rendered.len(), 2);
+        assert!(
+            rendered
+                .iter()
+                .any(|diagnostic| diagnostic.message().contains("reflection task failed"))
+        );
+        assert!(rendered.iter().any(|diagnostic| {
+            diagnostic
+                .message()
+                .contains("nonfallback output adapter failed")
+        }));
+        assert!(
+            rendered
+                .iter()
+                .all(|diagnostic| { assembler.get(diagnostic.emission(), "msg.context").is_ok() })
+        );
+        assert_eq!(source_diagnostics.counts().total(), 0);
+        assert_eq!(logger_diagnostics.counts().total(), 0);
+    }
+
+    #[test]
+    fn settled_report_renders_exit_errors_and_killed_work_once() {
+        let diagnostics = DiagnosticBus::new();
+        let input = Arc::new(LogHost::new(&diagnostics));
+        let assembler = Assembler::builder()
+            .evaluation_runtime(input.runtime.clone())
+            .build()
+            .expect("settlement-report assembler should build");
+        let module = assembler
+            .module(["settled_disposition_report"])
+            .script(
+                "g",
+                concat!(
+                    "language g0\n",
+                    "import 'std\n",
+                    "refl.exit = .exit.error {msg:{text:\"settled exit failure\"}}\n",
+                    "refl.blocked = .cut (.read_log)\n",
+                ),
+            )
+            .build()
+            .expect("settlement-report fixture should compile");
+        let exit = assembler
+            .get(module.value(), "refl.exit")
+            .expect("fixture should define its exit effect");
+        let blocked = assembler
+            .get(module.value(), "refl.blocked")
+            .expect("fixture should define its blocked effect");
+        let rendered = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let rendered_diagnostics = rendered.clone();
+        let supervisor = LoggerSupervisor::new(input.clone(), move |diagnostic| {
+            rendered_diagnostics
+                .lock()
+                .expect("rendered diagnostic collection should not be poisoned")
+                .push(diagnostic);
+        });
+        supervisor
+            .fallback_and_deliver()
+            .expect("reporting should begin on fallback");
+        let host = Arc::new(LoggerTaskHost::new(
+            input.clone(),
+            DiagnosticBus::for_runtime(&input.runtime),
+            assembler.reflection_environment_for_role("logger"),
+        ));
+        let exit_lifecycle = EffectLifecycle::new(&input.runtime);
+        let blocked_lifecycle = EffectLifecycle::new(&input.runtime);
+        let _exit_task = EffectRun::new(
+            &input.runtime,
+            &exit,
+            MainEffects::new(assembler.clone()),
+            host.clone(),
+        )
+        .schedule_with_exit(&exit_lifecycle)
+        .expect("exit effect should schedule");
+        let _blocked_task = EffectRun::new(
+            &input.runtime,
+            &blocked,
+            MainEffects::new(assembler.clone()),
+            host,
+        )
+        .schedule(&blocked_lifecycle)
+        .expect("blocked effect should schedule");
+
+        input.runtime.pump_until_stable();
+        let glam::RuntimeReadiness::Deadlocked(snapshot) = input.runtime.readiness() else {
+            panic!("an exit vote plus a blocked reader should retain a deadlock")
+        };
+        let report = snapshot
+            .kill(glam::RuntimeKillReason::Deadlock)
+            .settle()
+            .expect("forced deadlock report should settle");
+        assert!(report.dispositions().iter().any(|disposition| {
+            matches!(disposition.kind(), RuntimeDispositionKind::ExitError(_))
+        }));
+        let exit_message = report
+            .dispositions()
+            .iter()
+            .find_map(|disposition| match disposition.kind() {
+                RuntimeDispositionKind::ExitError(message) => Some(message),
+                _ => None,
+            })
+            .expect("report should retain the exit message");
+        assert_eq!(
+            assembler
+                .get(exit_message, "msg.text")
+                .expect("exit error should retain its structured message")
+                .as_binary(),
+            Some(b"settled exit failure".as_slice())
+        );
+        assert_eq!(report.killed_work().len(), 1);
+
+        assert_eq!(supervisor.render_settled_report(&report).unwrap(), 2);
+        assert_eq!(supervisor.render_settled_report(&report).unwrap(), 0);
+        let rendered = rendered
+            .lock()
+            .expect("rendered diagnostic collection should not be poisoned");
+        assert_eq!(rendered.len(), 2);
+        assert!(
+            rendered
+                .iter()
+                .any(|diagnostic| diagnostic.message() == "settled exit failure"),
+            "rendered messages: {:?}",
+            rendered.iter().map(Diagnostic::message).collect::<Vec<_>>()
+        );
+        assert!(rendered.iter().any(|diagnostic| {
+            diagnostic
+                .message()
+                .contains("runtime killed reflection_task work")
+        }));
+    }
+
+    #[test]
+    fn settled_report_rendering_drains_work_admitted_by_fallback_delivery() {
+        let diagnostics = DiagnosticBus::new();
+        let input = Arc::new(LogHost::new(&diagnostics));
+        let assembler = Assembler::builder()
+            .evaluation_runtime(input.runtime.clone())
+            .build()
+            .expect("reentrant reporting assembler should build");
+        let module = assembler
+            .module(["reentrant_settled_report"])
+            .script(
+                "g",
+                concat!(
+                    "language g0\n",
+                    "import 'std\n",
+                    "refl.effect = .task.new (.fail) >>= (\\_task -> .r ())\n",
+                ),
+            )
+            .build()
+            .expect("reentrant reporting fixture should compile");
+        let effect = assembler
+            .get(module.value(), "refl.effect")
+            .expect("fixture should define its effect");
+        let rendered = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let rendered_messages = rendered.clone();
+        let republished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let callback_republished = republished.clone();
+        let callback_bus = diagnostics.clone();
+        let callback_values = input.runtime.values();
+        let supervisor = LoggerSupervisor::new(input.clone(), move |diagnostic| {
+            rendered_messages
+                .lock()
+                .expect("rendered diagnostic collection should not be poisoned")
+                .push(diagnostic.message().to_owned());
+            if !callback_republished.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                callback_bus.publish_local(Diagnostic::new(
+                    &callback_values,
+                    Severity::Info,
+                    "admitted during fallback delivery",
+                ));
+            }
+        });
+        supervisor
+            .fallback_and_deliver()
+            .expect("reporting should begin on fallback");
+        let host = Arc::new(LoggerTaskHost::new(
+            input.clone(),
+            DiagnosticBus::for_runtime(&input.runtime),
+            assembler.reflection_environment_for_role("logger"),
+        ));
+        let lifecycle = EffectLifecycle::new(&input.runtime);
+        let task = EffectRun::new(
+            &input.runtime,
+            &effect,
+            MainEffects::new(assembler.clone()),
+            host,
+        )
+        .schedule(&lifecycle)
+        .expect("reentrant reporting root should schedule");
+        assert!(task.run().is_err());
+        input.runtime.pump_until_stable();
+        let glam::RuntimeReadiness::Ready(snapshot) = input.runtime.readiness() else {
+            panic!("retained task failure should be ready")
+        };
+        let report = snapshot
+            .settle()
+            .expect("task failure report should settle");
+
+        assert_eq!(supervisor.render_settled_report(&report).unwrap(), 1);
+        assert_eq!(
+            *rendered
+                .lock()
+                .expect("rendered diagnostic collection should not be poisoned"),
+            [
+                "reflection task failed permanently".to_owned(),
+                "admitted during fallback delivery".to_owned(),
+            ]
+        );
+        assert_eq!(diagnostics.counts().total(), 1);
+    }
+
+    #[test]
+    fn fallback_delivery_failure_is_retained_without_recursive_rendering() {
+        let diagnostics = DiagnosticBus::new();
+        let input = Arc::new(LogHost::new(&diagnostics));
+        let fallback_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let callback_calls = fallback_calls.clone();
+        let supervisor = LoggerSupervisor::new_fallible(input.clone(), move |_diagnostic| {
+            callback_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(Error::new("fallback output adapter failed"))
+        });
+        supervisor
+            .fallback_and_deliver()
+            .expect("reporting should begin on fallback");
+
+        let failed_output = input
+            .runtime
+            .output_endpoint(Ok::<Value, Error>, |_value| {
+                Err(Error::new("initial output adapter failed"))
+            })
+            .expect("initial failed output endpoint should register");
+        let (_generation, store, snapshot) = input.runtime.transaction_snapshot();
+        let mut events = RuntimeEventJournal::new(snapshot);
+        events
+            .write(&failed_output.writer(), input.runtime.values().integer(1))
+            .expect("initial failed output intent should buffer");
+        assert_eq!(
+            input
+                .runtime
+                .try_commit_transaction(&glam::reflection::StoreJournal::new(store), &events),
+            glam::reflection::StoreCommitResult::Committed
+        );
+        assert!(matches!(
+            failed_output.delivery().deliver_next().unwrap(),
+            Some(RuntimeDeliveryOutcome::Failed(_))
+        ));
+        let glam::RuntimeReadiness::Ready(snapshot) = input.runtime.readiness() else {
+            panic!("a retained delivery failure should be ready")
+        };
+        let report = snapshot
+            .settle()
+            .expect("initial delivery failure should settle");
+
+        let error = supervisor
+            .render_settled_report(&report)
+            .expect_err("fallback delivery should report its adapter failure");
+        assert_eq!(error.to_string(), "fallback output adapter failed");
+        assert_eq!(fallback_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let glam::RuntimeReadiness::Ready(snapshot) = input.runtime.readiness() else {
+            panic!("failed fallback delivery should remain reportable state")
+        };
+        let repeated = snapshot
+            .settle()
+            .expect("fallback delivery failure should settle");
+        assert_eq!(repeated.delivery_failures().failures().len(), 2);
+        assert_eq!(supervisor.render_settled_report(&repeated).unwrap(), 0);
+        assert_eq!(fallback_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(
+            repeated
+                .delivery_failures()
+                .failures()
+                .iter()
+                .any(|failure| failure.endpoint_id() == supervisor.fallback_delivery.id())
+        );
     }
 
     #[test]

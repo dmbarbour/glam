@@ -65,7 +65,7 @@ impl CliError {
         if let Some(cause) = &self.cause {
             return cause
                 .diagnostic(values)?
-                .with_context(configuration_entry_context(values)?);
+                .with_context(values, configuration_entry_context(values)?);
         }
         let mut entries = vec![(
             "msg",
@@ -85,7 +85,7 @@ impl CliError {
             ));
         }
         Diagnostic::from_emission(Severity::Error, values.record(entries)?)
-            .with_context(configuration_entry_context(values)?)
+            .with_context(values, configuration_entry_context(values)?)
     }
 }
 

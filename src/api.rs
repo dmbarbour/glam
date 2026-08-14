@@ -690,15 +690,17 @@ impl Diagnostic {
     /// Prepends one structured frame describing why this diagnostic was
     /// produced or propagated. The original emission remains otherwise
     /// unchanged.
-    pub fn with_context(self, context: Value) -> Result<Self, Error> {
-        context.require_runtime(self.emission.runtime_id())?;
-        let emission = crate::diagnostic::prepend_context(
+    pub fn with_context(self, values: &Values, context: Value) -> Result<Self, Error> {
+        self.emission.require_runtime(values.runtime)?;
+        context.require_runtime(values.runtime)?;
+        let emission = crate::diagnostic::prepend_contexts_with(
+            &values.core,
             self.emission.as_core().clone(),
-            context.into_core(),
+            &[context.into_core()],
         )
         .unwrap_or_else(|_| self.emission.as_core().clone());
         Ok(Self::from_parts(
-            self.emission.runtime_id(),
+            values.runtime,
             self.source,
             self.severity,
             emission,
@@ -8779,7 +8781,7 @@ mod tests {
         assert!(
             diagnostic
                 .clone()
-                .with_context(foreign.values().text("foreign context"))
+                .with_context(&owner.values(), foreign.values().text("foreign context"))
                 .is_err()
         );
         assert!(diagnostic.transport_value(&foreign.values()).is_err());

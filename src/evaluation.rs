@@ -1621,6 +1621,30 @@ impl EvalContext {
                         }
                     }
 
+                    // A dependency chain may be blocked while another task or
+                    // worker owns the state transition which will disturb it.
+                    // Use the runtime pump's stability boundary before
+                    // abandoning this client demand: run unrelated useful
+                    // lifecycle work, release parked best-effort sparks, and
+                    // wait for worker-owned progress. A client-visible blocked
+                    // halt is valid only after none of those routes remains.
+                    if coordinator.poll_runtime_work() {
+                        continue;
+                    }
+                    if coordinator.abandon_quiescent_sparks() != 0 {
+                        continue;
+                    }
+                    let runtime = coordinator.runtime_pump_snapshot();
+                    if runtime.useful_ready || runtime.abandonable_sparks {
+                        continue;
+                    }
+                    if runtime.progress_owned {
+                        if handle.poll().is_none() && coordinator.work_generation() == generation {
+                            coordinator.wait_for_change(generation);
+                        }
+                        continue;
+                    }
+
                     let Some(dependency) = handle.abandon_if_stably_blocked(subscription_epoch)
                     else {
                         continue;
@@ -3245,6 +3269,62 @@ mod tests {
     }
 
     #[test]
+    fn synchronous_client_demand_waits_for_worker_owned_runtime_progress() {
+        let fixture = SameRuntimeFixture::new();
+        fixture
+            .runtime
+            .activate_workers(1)
+            .expect("test worker should activate");
+        let producer = fixture.context();
+        let consumer = fixture.context();
+        let promise = PromisedValue::new(producer.values(), "worker-resolved client input");
+        let expected = Value::Number(31.into());
+        let (started, worker_started) = mpsc::channel();
+        let (release, worker_release) = mpsc::channel();
+        producer
+            .schedule_task({
+                let promise = promise.clone();
+                let expected = expected.clone();
+                move |_| {
+                    Ok(Box::new(AssignPromiseAfterRelease {
+                        promise,
+                        value: expected,
+                        started: Some(started),
+                        release: worker_release,
+                    }))
+                }
+            })
+            .expect("promise producer should schedule");
+        worker_started
+            .recv_timeout(Duration::from_secs(2))
+            .expect("worker should claim the promise producer");
+
+        let (completed, client_completed) = mpsc::channel();
+        let client = std::thread::spawn(move || {
+            completed
+                .send(consumer.evaluate_whnf(&Value::Promised(promise)))
+                .expect("client result receiver should remain live");
+        });
+        assert!(
+            client_completed
+                .recv_timeout(Duration::from_millis(50))
+                .is_err(),
+            "client demand must not report a stable block while a worker owns progress"
+        );
+        release
+            .send(())
+            .expect("promise producer should remain live");
+        assert_eq!(
+            client_completed
+                .recv_timeout(Duration::from_secs(2))
+                .expect("worker completion should wake client demand")
+                .expect("resolved client demand should succeed"),
+            expected
+        );
+        client.join().expect("client thread should finish cleanly");
+    }
+
+    #[test]
     fn retained_client_handle_waits_across_external_disturbance_without_a_lost_wake() {
         let fixture = SameRuntimeFixture::new();
         let context = fixture.context();
@@ -4131,6 +4211,30 @@ mod tests {
             self.release
                 .recv_timeout(Duration::from_secs(2))
                 .expect("test should release the task");
+            EvaluationMachinePoll::Complete(crate::core::keys::unit_value())
+        }
+    }
+
+    struct AssignPromiseAfterRelease {
+        promise: PromisedValue,
+        value: Value,
+        started: Option<mpsc::Sender<()>>,
+        release: mpsc::Receiver<()>,
+    }
+
+    impl EvaluationTaskMachine for AssignPromiseAfterRelease {
+        fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+            if let Some(started) = self.started.take() {
+                started
+                    .send(())
+                    .expect("test start receiver should remain open");
+            }
+            self.release
+                .recv_timeout(Duration::from_secs(2))
+                .expect("test should release the promise producer");
+            self.promise
+                .set(self.value.clone())
+                .expect("worker should resolve the host promise once");
             EvaluationMachinePoll::Complete(crate::core::keys::unit_value())
         }
     }

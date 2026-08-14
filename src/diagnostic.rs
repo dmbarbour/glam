@@ -239,18 +239,6 @@ pub(crate) fn apply_emission_updates(
     apply_updates(values, message, updates)
 }
 
-/// Prepends one semantic demand frame to the conventional diagnostic context.
-///
-/// Evaluation failures already use outermost-to-innermost ordering. Keeping
-/// host-owned observation frames in that same list lets clients add context
-/// without rewriting the diagnostic's source text.
-pub(crate) fn prepend_context(
-    message: Value,
-    context: Value,
-) -> Result<Value, crate::core::EvaluationHalt> {
-    prepend_contexts(message, &[context])
-}
-
 /// Prepends semantic demand frames while preserving context supplied by the
 /// original diagnostic emission. An empty prefix still normalizes
 /// `msg.context` to a list.
