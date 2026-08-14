@@ -3867,10 +3867,14 @@ ordinary = "ordinary"
         resolved_value_at_path_with_context(&context, &module, &["ordinary"]),
         Value::binary_from_text("ordinary")
     );
-    let report = assembler.drain_reasoning();
-    assert_eq!(report.status(), crate::api::ReasoningStatus::Complete);
-    assert_eq!(report.failures(), []);
-    assert_eq!(report.unfinished(), []);
+    let crate::api::RuntimeReadiness::Ready(snapshot) = assembler.drain_reasoning() else {
+        panic!("successful host choices should leave the runtime ready")
+    };
+    let report = snapshot
+        .settle()
+        .expect("unchanged runtime readiness should settle");
+    assert_eq!(report.task_failures(), []);
+    assert_eq!(report.killed_work(), []);
     assert!(
         take_reflection_diagnostics(&diagnostics).is_empty(),
         "successful host choices must not emit diagnostics"

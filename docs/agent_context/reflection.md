@@ -152,11 +152,13 @@ and control flow.
   cycles within one pump.
 - Ordinary value observation pumps only a demanded producer chain. Unrelated
   reasoning runs through workers or explicit `Assembler::drain_reasoning`.
-- Reasoning drain has no timeout or step limit. It includes newly launched
-  tasks and ends only when all tasks are terminal or one stable pass proves
-  deadlock. Failures, known wait dependencies, and retryably blocked errors
-  remain in its report. A reported `ReasoningFailure` is an opaque capability
-  bound to its originating evaluation runtime:
+- Runtime-wide reasoning drain has no timeout or step limit. It includes newly
+  launched work from every demand session and returns a stable
+  `RuntimeReadiness` snapshot. Ready exit votes require explicit settlement;
+  deadlock snapshots retain known dependencies and structured retryable
+  failures until the client chooses whether to kill them. A settled
+  `ReasoningFailure` is an opaque capability bound to its originating
+  evaluation runtime:
   `Assembler::acknowledge_reasoning_failure` is idempotent, accepts any
   assembler view of that runtime, rejects other runtimes, and removes only the
   producer-owner reporting-ledger entry. It does not alter the task's terminal
@@ -179,13 +181,13 @@ and control flow.
 - The CLI logger's assembler-bus input subscription and its session-local
   diagnostic bus are separate. Logger output cannot feed its own input stream.
   Its `.task.new` children inherit the complete logger profile, including
-  `read_log`, `log_status`, and `write_stderr`.
+  `read_log`, `write_stderr`, and coordinated `.exit.*`.
 - Logger input has a revision distinct from heap revisions and the coarse wake
   generation. Arriving diagnostics do not invalidate heap-only transactions;
   a committed queue read still validates and consumes input atomically with
   its heap journal.
 - Batch execution pumps the whole runtime, then settles coordinated logger exit
   votes or forcefully reports a stable deadlock. The preferred logger loop is
-  `.cut (.alt (.read_log ...) (.exit.success))`; `.log_status` and explicit
-  close/cancel remain a temporary compatibility route. Runtime report failures
-  make the process fail even when fallback rendering also fails.
+  `.cut (.alt (.read_log ...) (.exit.success))`. The diagnostic stream has no
+  semantic close operation. Runtime report failures make the process fail even
+  when fallback rendering also fails.

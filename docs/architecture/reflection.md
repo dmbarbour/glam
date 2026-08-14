@@ -231,17 +231,16 @@ derived from module paths or final object `spec.name`.
 ## CLI Logger Session
 
 Configured `conf.log` is a reflection task in a separate session sharing the
-same executor. Main-only effects expose the incoming diagnostic stream and its
-open/closed state. Committed `.log` from the logger or its children goes to a
-separate logger-session bus with a default-formatting subscriber rather than
-back into that stream.
+same executor. Main-only effects expose the incoming diagnostic stream without
+a semantic open/closed state. Committed `.log` from the logger or its children
+goes to a separate logger-session bus with a default-formatting subscriber
+rather than back into that stream.
 
 The coordinator-owned logger root also receives `.exit.success` and
 `.exit.error`. A conventional loop puts `.exit.success` after `.read_log` as
 the final branch of one `.cut`; an input committed before settlement disturbs
 that vote and retries the read first. Batch `main` settles the vote only when
-the whole runtime is stably ready. The temporary `.log_status` close path
-remains as a compatibility fallback: one stable deadlock closes input, a
-second requests logger cancellation, and only a remaining stable deadlock is
-forcefully killed and reported. Task, delivery, exit, and killed-work reports
-are fatal independently of successful fallback rendering.
+the whole runtime is stably ready. A stable deadlock is forcefully killed and
+reported; there is no close/cancel compatibility path. Task, delivery, exit,
+and killed-work reports are fatal independently of successful fallback
+rendering.

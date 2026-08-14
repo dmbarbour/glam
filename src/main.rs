@@ -22,12 +22,11 @@ use glam::reflection::{
 use glam::{
     Assembler, Diagnostic, DiagnosticBus, DiagnosticEvent, DiagnosticIngress, DiagnosticSubscriber,
     Error, EvaluationRuntime, FileSourceSystem, ModuleInput, PromiseResolver, QuiescenceReport,
-    ReasoningReport, ReasoningStatus, ReasoningTaskState, RuntimeDeadlockWork,
-    RuntimeDeliveryFailure, RuntimeDeliveryOutcome, RuntimeDependency, RuntimeDisposition,
-    RuntimeDispositionKind, RuntimeEventJournal, RuntimeInputReader, RuntimeKillReason,
-    RuntimeLoggerSnapshot, RuntimeOutputDelivery, RuntimeOutputWriter, RuntimeReadiness,
-    RuntimeSharedResources, RuntimeWorkKind, RuntimeWorkState, Severity, Value, Values,
-    check_local_manifest, inspect_g_source,
+    RuntimeDeadlockWork, RuntimeDeliveryFailure, RuntimeDeliveryOutcome, RuntimeDependency,
+    RuntimeDisposition, RuntimeDispositionKind, RuntimeEventJournal, RuntimeEventSnapshot,
+    RuntimeInputReader, RuntimeKillReason, RuntimeOutputDelivery, RuntimeOutputWriter,
+    RuntimeReadiness, RuntimeSharedResources, RuntimeWorkKind, RuntimeWorkState, Severity, Value,
+    Values, check_local_manifest, inspect_g_source,
 };
 
 trait DiagnosticBusLocal {
@@ -432,7 +431,6 @@ fn prepare_assembly(
                 &diagnostics,
                 &assembler.values(),
             );
-            log_host.close_input();
             log_host.drain_default(&DefaultLogger::new(assembler));
             return Err(ExitCode::from(1));
         }
@@ -549,23 +547,14 @@ fn execute_assembly(mut prepared: PreparedAssembly, command: CommandPlan) -> Exi
         diagnostics: logger_diagnostics,
         supervisor: logger_supervisor,
     } = logger;
-    operation_failed |= settle_batch_runtime(
-        &assembler.evaluation_runtime(),
-        &log_host,
-        &logger_supervisor,
-    );
+    operation_failed |= settle_batch_runtime(&assembler.evaluation_runtime(), &logger_supervisor);
 
-    // Keep the compatibility close/cancel bridge through Phase 10D.4b. An
-    // exit-aware logger has already terminalized through settlement; an older
-    // logger may have completed after observing close or cancellation during
-    // the compatibility retries in `settle_batch_runtime`.
     logger_thread.join().expect("logger task should not panic");
     if let Err(error) = logger_supervisor.deliver_fallback() {
         operation_failed = true;
         eprintln!("error: could not drain fallback diagnostics: {error}");
     }
     drop(logger_supervisor);
-    log_host.cancel();
 
     if operation_failed
         || assembler_diagnostics.counts().errors() > 0
@@ -581,20 +570,11 @@ fn execute_assembly(mut prepared: PreparedAssembly, command: CommandPlan) -> Exi
 /// authoritative batch status independently of whether fallback rendering
 /// succeeds.
 ///
-/// The first deadlock closes compatibility input so a logger may finish
-/// through `.log_status`; a second requests cancellation for a logger which
-/// still waits only on `.read_log`. A stable deadlock after those disturbances
-/// is explicitly killed and reported. Rendering may itself admit runtime work,
-/// so each non-empty report is followed by another complete pump/settlement
-/// cycle.
-fn settle_batch_runtime(
-    runtime: &EvaluationRuntime,
-    log_host: &LogHost,
-    supervisor: &LoggerSupervisor,
-) -> bool {
+/// A stable deadlock is explicitly killed and reported. Rendering may itself
+/// admit runtime work, so each non-empty report is followed by another
+/// complete pump/settlement cycle.
+fn settle_batch_runtime(runtime: &EvaluationRuntime, supervisor: &LoggerSupervisor) -> bool {
     let mut failed = false;
-    let mut compatibility_close_sent = false;
-    let mut compatibility_cancel_sent = false;
 
     loop {
         runtime.pump_until_stable();
@@ -605,16 +585,6 @@ fn settle_batch_runtime(
         let snapshot = match runtime.readiness() {
             RuntimeReadiness::Busy => continue,
             RuntimeReadiness::Ready(snapshot) => snapshot,
-            RuntimeReadiness::Deadlocked(_deadlock) if !compatibility_close_sent => {
-                compatibility_close_sent = true;
-                log_host.close_input();
-                continue;
-            }
-            RuntimeReadiness::Deadlocked(_deadlock) if !compatibility_cancel_sent => {
-                compatibility_cancel_sent = true;
-                log_host.cancel();
-                continue;
-            }
             RuntimeReadiness::Deadlocked(deadlock) => deadlock.kill(RuntimeKillReason::Deadlock),
         };
         let mut report = match snapshot.settle() {
@@ -648,16 +618,65 @@ fn settled_report_is_fatal(report: &QuiescenceReport) -> bool {
         || !report.killed_work().is_empty()
 }
 
+/// Settles a batch runtime when no configured logger lifecycle was started.
+/// Runtime reports are committed directly to the assembler diagnostic bus and
+/// are drained by the default logger after this function returns.
+fn settle_batch_runtime_default(
+    runtime: &EvaluationRuntime,
+    diagnostics: &DiagnosticBus,
+    values: &Values,
+) -> bool {
+    let mut failed = false;
+    loop {
+        runtime.pump_until_stable();
+        let snapshot = match runtime.readiness() {
+            RuntimeReadiness::Busy => continue,
+            RuntimeReadiness::Ready(snapshot) => snapshot,
+            RuntimeReadiness::Deadlocked(deadlock) => deadlock.kill(RuntimeKillReason::Deadlock),
+        };
+        let mut report = match snapshot.settle() {
+            Ok(report) => report,
+            Err(_) => continue,
+        };
+        failed |= settled_report_is_fatal(&report);
+        let selection = SettledReportSelection {
+            task_failures: report.pending_task_failure_reports().to_vec(),
+            delivery_failures: report
+                .pending_delivery_failure_reports()
+                .failures()
+                .into_iter()
+                .collect(),
+            exit_errors: report.pending_exit_error_reports().to_vec(),
+            killed_work: report.pending_killed_work_reports().to_vec(),
+        };
+        let rendered = match settled_report_diagnostics(values, selection) {
+            Ok(rendered) => rendered,
+            Err(error) => {
+                eprintln!("error: could not render runtime settlement: {error}");
+                return true;
+            }
+        };
+        let rendered_count = rendered.len();
+        for diagnostic in rendered {
+            diagnostics.publish_local(diagnostic);
+        }
+        report.mark_reports_enqueued();
+        if rendered_count == 0 {
+            return failed;
+        }
+    }
+}
+
 fn finish_without_logger(
     prepared: PreparedAssembly,
     manifest: Option<&Path>,
     operation_failed: bool,
 ) -> ExitCode {
     let diagnostics = prepared.assembler.diagnostic_bus();
-    report_reasoning(
+    let runtime_failed = settle_batch_runtime_default(
+        &prepared.assembler.evaluation_runtime(),
         &diagnostics,
         &prepared.assembler.values(),
-        &prepared.assembler.drain_reasoning(),
     );
     let file_failure = finish_local_files(
         &prepared.local_files,
@@ -665,11 +684,10 @@ fn finish_without_logger(
         &diagnostics,
         &prepared.assembler.values(),
     );
-    prepared.log_host.close_input();
     prepared
         .log_host
         .drain_default(&DefaultLogger::new(prepared.assembler));
-    if operation_failed || file_failure || diagnostics.counts().errors() != 0 {
+    if operation_failed || runtime_failed || file_failure || diagnostics.counts().errors() != 0 {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
@@ -737,78 +755,6 @@ fn configured_cli(arguments: CliArguments, inspection: Option<bool>) -> ExitCode
         return finish_without_logger(prepared, None, failed);
     }
     execute_assembly(prepared, command)
-}
-
-fn report_reasoning(diagnostics: &DiagnosticBus, values: &Values, report: &ReasoningReport) {
-    for failure in report.failures() {
-        diagnostics.publish_local(Diagnostic::new(
-            values,
-            Severity::Error,
-            format!(
-                "reflection task {} failed: {}",
-                failure.task_id(),
-                failure.message()
-            ),
-        ));
-    }
-    let (severity, summary) = match report.status() {
-        ReasoningStatus::Complete => return,
-        ReasoningStatus::Quiescent => (
-            Severity::Warning,
-            "reflection scheduler is quiescent on live cross-session work",
-        ),
-        ReasoningStatus::Deadlocked => (Severity::Error, "reflection scheduler deadlocked"),
-    };
-    if report.unfinished().is_empty() {
-        return;
-    }
-
-    let mut message = format!(
-        "{summary} with {} unfinished task{}",
-        report.unfinished().len(),
-        if report.unfinished().len() == 1 {
-            ""
-        } else {
-            "s"
-        }
-    );
-    for task in report.unfinished() {
-        let mut detail = match task.state() {
-            ReasoningTaskState::Blocked => match (
-                task.waiting_on_task(),
-                task.waiting_on_session(),
-                task.observed_epoch(),
-                task.wait_id(),
-            ) {
-                (Some(dependency), Some(session), Some(epoch), _) => {
-                    format!(
-                        "waits on task {dependency} in evaluation session {session} and shared-state epoch {epoch}"
-                    )
-                }
-                (Some(dependency), Some(session), None, _) => {
-                    format!("waits on task {dependency} in evaluation session {session}")
-                }
-                (Some(dependency), None, Some(epoch), _) => {
-                    format!("waits on task {dependency} and shared-state epoch {epoch}")
-                }
-                (Some(dependency), None, None, _) => format!("waits on task {dependency}"),
-                (None, _, Some(epoch), Some(wait)) => {
-                    format!("waits on token {wait} and shared-state epoch {epoch}")
-                }
-                (None, _, Some(epoch), None) => {
-                    format!("waits on shared-state epoch {epoch}")
-                }
-                (None, _, None, Some(wait)) => format!("waits on token {wait}"),
-                (None, _, None, None) => "is blocked without a wake condition".to_owned(),
-            },
-            state => format!("remains in anomalous {state:?} state"),
-        };
-        if let Some(error) = task.blocked_error() {
-            detail.push_str(&format!("; retained error: {error}"));
-        }
-        message.push_str(&format!("\ntask {} {detail}", task.task_id()));
-    }
-    diagnostics.publish_local(Diagnostic::new(values, severity, message));
 }
 
 fn assemble(
@@ -928,7 +874,6 @@ fn start_logger(assembler: &Assembler, configuration: &Value, input: Arc<LogHost
     };
     let task_diagnostics = diagnostics.clone();
     let task_values = evaluation_runtime.values();
-    let stop_input = input.clone();
     let scheduled = custom.and_then(|custom| {
         let installation = match supervisor.install() {
             Ok(installation) => installation,
@@ -950,12 +895,9 @@ fn start_logger(assembler: &Assembler, configuration: &Value, input: Arc<LogHost
         match run.and_then(|run| {
             run.asserting_unit_result("configured logger result")
                 .requiring_unit_result()
-                .schedule_with_exit(&installation.lifecycle)
+                .schedule(&installation.lifecycle)
         }) {
-            Ok(task) => Some((
-                installation,
-                task.with_stop_condition(move || stop_input.stop_requested()),
-            )),
+            Ok(task) => Some((installation, task)),
             Err(error) => {
                 supervisor.finish(&installation);
                 task_diagnostics.publish_local(
@@ -1047,18 +989,16 @@ impl MainEffects {
 #[derive(Clone)]
 enum MainRequest {
     Reflection(ReflectionRequest),
-    LogStatus,
     ReadLog,
     WriteStderr,
 }
 
-type MainSnapshot = RuntimeLoggerSnapshot;
+type MainSnapshot = RuntimeEventSnapshot;
 
 #[derive(Clone, Default)]
 struct MainJournal {
     reflection: ReflectionJournal,
     events: Option<RuntimeEventJournal>,
-    observed_lifecycle: bool,
 }
 
 impl ReflectionTransaction for MainJournal {
@@ -1073,7 +1013,7 @@ fn event_journal<'a>(
 ) -> &'a mut RuntimeEventJournal {
     journal
         .events
-        .get_or_insert_with(|| RuntimeEventJournal::new(snapshot.events().clone()))
+        .get_or_insert_with(|| RuntimeEventJournal::new(snapshot.clone()))
 }
 
 impl TaskSpecialization for MainEffects {
@@ -1087,12 +1027,6 @@ impl TaskSpecialization for MainEffects {
             .into_iter()
             .map(|request| request.map_request(MainRequest::Reflection))
             .chain([
-                EffectRequestSpec::new(
-                    "log_status",
-                    ["glam_cli", "v0", "request", "log_status"],
-                    0,
-                    MainRequest::LogStatus,
-                ),
                 EffectRequestSpec::new(
                     "read_log",
                     ["glam_cli", "v0", "request", "read_log"],
@@ -1119,7 +1053,6 @@ impl TaskSpecialization for MainEffects {
             MainRequest::Reflection(request) => {
                 handle_reflection_request(request, arguments, context)
             }
-            MainRequest::LogStatus => log_status(arguments, context),
             MainRequest::ReadLog => read_log(context),
             MainRequest::WriteStderr => {
                 let [value]: [Value; 1] = arguments.try_into().map_err(|_| {
@@ -1151,36 +1084,6 @@ impl TaskSpecialization for MainEffects {
     }
 }
 
-fn log_status(
-    arguments: Vec<Value>,
-    context: &mut RequestContext<'_, MainEffects>,
-) -> Result<RequestResult, glam::reflection::TaskHalt> {
-    if !arguments.is_empty() {
-        return Err(glam::reflection::TaskHalt::new(
-            "`.log_status` received the wrong number of arguments",
-        ));
-    }
-    let (generation, input_closed) = if let Some(generation) = context.transaction_generation() {
-        let mut transaction = context
-            .transaction()
-            .expect("checked active reflection transaction");
-        let (snapshot, journal) = transaction.parts();
-        journal.observed_lifecycle = true;
-        (generation, snapshot.input_closed())
-    } else {
-        let snapshot = <LoggerTaskHost as TaskHost<MainEffects>>::snapshot(context.host());
-        (snapshot.generation(), snapshot.extra().input_closed())
-    };
-    context.observe_host_generation(generation);
-    Ok(RequestResult::Return(
-        context
-            .host()
-            .resources
-            .values()
-            .atom_from_text(if input_closed { "closed" } else { "open" }),
-    ))
-}
-
 fn read_log(
     context: &mut RequestContext<'_, MainEffects>,
 ) -> Result<RequestResult, glam::reflection::TaskHalt> {
@@ -1200,9 +1103,6 @@ fn read_log(
                 .map(RequestResult::Return)
                 .map_err(glam::reflection::TaskHalt::from);
         }
-        if snapshot.cancelled() {
-            return Ok(RequestResult::Cancelled);
-        }
         // Queue reads observe only the host snapshot. Journaled writes remain
         // invisible until commit, just as writes from concurrent tasks do.
         return Ok(RequestResult::Fail);
@@ -1211,16 +1111,12 @@ fn read_log(
     loop {
         let snapshot = <LoggerTaskHost as TaskHost<MainEffects>>::snapshot(context.host());
         context.observe_host_generation(snapshot.generation());
-        let mut events = RuntimeEventJournal::new(snapshot.extra().events().clone());
+        let mut events = RuntimeEventJournal::new(snapshot.extra().clone());
         let Some(value) = events
             .read(&diagnostic_reader)
             .map_err(glam::reflection::TaskHalt::from)?
         else {
-            return Ok(if snapshot.extra().cancelled() {
-                RequestResult::Cancelled
-            } else {
-                RequestResult::Fail
-            });
+            return Ok(RequestResult::Fail);
         };
         let value = Diagnostic::from_transport_value(&value)
             .and_then(|diagnostic| diagnostic.enrich(&context.host().resources.values()))
@@ -1231,7 +1127,6 @@ fn read_log(
             MainJournal {
                 reflection: ReflectionJournal::default(),
                 events: Some(events),
-                observed_lifecycle: false,
             },
         );
         match <LoggerTaskHost as TaskHost<MainEffects>>::commit(context.host(), commit) {
@@ -1702,18 +1597,16 @@ impl LoggerTaskHost {
     }
 
     fn write_diagnostic(&self, diagnostic: Diagnostic) -> Result<(), Error> {
-        let (_generation, store, snapshot) = self.resources.logger_transaction_snapshot();
-        let mut events = RuntimeEventJournal::new(snapshot.events().clone());
+        let (_generation, store, snapshot) = self.resources.transaction_snapshot();
+        let mut events = RuntimeEventJournal::new(snapshot);
         events.write(
             &self.diagnostic_writer,
             diagnostic.transport_value(&self.resources.values())?,
         )?;
-        match self.resources.try_commit_logger_transaction(
-            &glam::reflection::StoreJournal::new(store),
-            &snapshot,
-            false,
-            &events,
-        ) {
+        match self
+            .resources
+            .try_commit_transaction(&glam::reflection::StoreJournal::new(store), &events)
+        {
             glam::reflection::StoreCommitResult::Committed => self.deliver_outputs(),
             glam::reflection::StoreCommitResult::Conflict => Err(Error::new(
                 "logger output conflicted during immediate commit",
@@ -1726,15 +1619,13 @@ impl LoggerTaskHost {
     }
 
     fn write_stderr(&self, bytes: Bytes) -> Result<(), Error> {
-        let (_generation, store, snapshot) = self.resources.logger_transaction_snapshot();
-        let mut events = RuntimeEventJournal::new(snapshot.events().clone());
+        let (_generation, store, snapshot) = self.resources.transaction_snapshot();
+        let mut events = RuntimeEventJournal::new(snapshot);
         events.write(&self.stderr_writer, self.resources.values().binary(bytes))?;
-        match self.resources.try_commit_logger_transaction(
-            &glam::reflection::StoreJournal::new(store),
-            &snapshot,
-            false,
-            &events,
-        ) {
+        match self
+            .resources
+            .try_commit_transaction(&glam::reflection::StoreJournal::new(store), &events)
+        {
             glam::reflection::StoreCommitResult::Committed => self.deliver_outputs(),
             glam::reflection::StoreCommitResult::Conflict => Err(Error::new(
                 "stderr output conflicted during immediate commit",
@@ -1787,19 +1678,6 @@ impl LogHost {
         }
     }
 
-    fn close_input(&self) {
-        self.runtime.close_logger_input();
-    }
-
-    fn cancel(&self) {
-        self.runtime.cancel_logger();
-    }
-
-    fn stop_requested(&self) -> bool {
-        let (_, _, snapshot) = self.runtime.logger_transaction_snapshot();
-        snapshot.cancelled()
-    }
-
     fn drain_default(&self, logger: &DefaultLogger) {
         while let Some(diagnostic) = self.take_diagnostic() {
             logger.emit(&diagnostic);
@@ -1808,18 +1686,16 @@ impl LogHost {
 
     fn take_diagnostic(&self) -> Option<Diagnostic> {
         loop {
-            let (generation, store, snapshot) = self.runtime.logger_transaction_snapshot();
-            let mut events = RuntimeEventJournal::new(snapshot.events().clone());
+            let (_generation, store, snapshot) = self.runtime.transaction_snapshot();
+            let mut events = RuntimeEventJournal::new(snapshot);
             let value = events
                 .read(&self.diagnostic_reader)
                 .expect("logger diagnostic endpoint should match its runtime");
             if let Some(value) = value {
-                match self.runtime.try_commit_logger_transaction(
-                    &glam::reflection::StoreJournal::new(store),
-                    &snapshot,
-                    false,
-                    &events,
-                ) {
+                match self
+                    .runtime
+                    .try_commit_transaction(&glam::reflection::StoreJournal::new(store), &events)
+                {
                     glam::reflection::StoreCommitResult::Committed => {
                         return Some(
                             Diagnostic::from_transport_value(&value)
@@ -1835,10 +1711,7 @@ impl LogHost {
                     }
                 }
             }
-            if snapshot.cancelled() || snapshot.input_closed() {
-                return None;
-            }
-            self.runtime.wait_for_change(generation);
+            return None;
         }
     }
 }
@@ -1867,7 +1740,7 @@ impl ReflectionServices for LoggerTaskHost {
 
 impl TaskHost<MainEffects> for LoggerTaskHost {
     fn snapshot(&self) -> HostSnapshot<MainEffects> {
-        let (generation, store, input) = self.resources.logger_transaction_snapshot();
+        let (generation, store, input) = self.resources.transaction_snapshot();
         HostSnapshot::new(generation, store, input)
     }
 
@@ -1875,7 +1748,7 @@ impl TaskHost<MainEffects> for LoggerTaskHost {
         let (store, snapshot, journal) = commit.into_parts();
         let mut events = journal
             .events
-            .unwrap_or_else(|| RuntimeEventJournal::new(snapshot.events().clone()));
+            .unwrap_or_else(|| RuntimeEventJournal::new(snapshot.clone()));
         for diagnostic in journal.reflection.diagnostics() {
             if let Err(error) = events.write(
                 &self.diagnostic_writer,
@@ -1900,12 +1773,7 @@ impl TaskHost<MainEffects> for LoggerTaskHost {
                 return CommitResult::Closed;
             }
         }
-        match self.resources.try_commit_logger_transaction(
-            &store,
-            &snapshot,
-            journal.observed_lifecycle,
-            &events,
-        ) {
+        match self.resources.try_commit_transaction(&store, &events) {
             glam::reflection::StoreCommitResult::Committed => {}
             glam::reflection::StoreCommitResult::Conflict => {
                 return CommitResult::Conflict;
@@ -1926,16 +1794,7 @@ impl TaskHost<MainEffects> for LoggerTaskHost {
     }
 
     fn wait_for_change(&self, observed_generation: u64) -> bool {
-        let (generation, _, snapshot) = self.resources.logger_transaction_snapshot();
-        if snapshot.cancelled() {
-            return false;
-        }
-        if snapshot.input_closed() {
-            return generation != observed_generation;
-        }
-        self.resources.wait_for_change(observed_generation);
-        let (generation, _, snapshot) = self.resources.logger_transaction_snapshot();
-        !snapshot.cancelled() && (!snapshot.input_closed() || generation != observed_generation)
+        self.resources.wait_for_change(observed_generation)
     }
 }
 
@@ -3210,36 +3069,6 @@ mod tests {
         diagnostics.publish_local(Diagnostic::new(&values, Severity::Error, "retained"));
         assert!(retained.take_diagnostic().is_some());
         assert_eq!(diagnostics.counts().errors(), 2);
-        retained.close_input();
-    }
-
-    #[test]
-    fn logger_wait_retries_an_unseen_stream_closure_once() {
-        let diagnostics = DiagnosticBus::new();
-        let input = Arc::new(LogHost::new(&diagnostics));
-        let assembler = Assembler::builder()
-            .evaluation_runtime(input.runtime.clone())
-            .build()
-            .expect("logger test assembler should build");
-        let host = LoggerTaskHost::new(
-            input.clone(),
-            DiagnosticBus::new(),
-            assembler.reflection_environment_for_role("logger"),
-        );
-        let (open_generation, _, _) = input.runtime.logger_transaction_snapshot();
-
-        input.close_input();
-
-        assert!(<LoggerTaskHost as TaskHost<MainEffects>>::wait_for_change(
-            &host,
-            open_generation
-        ));
-        let (closed_generation, _, snapshot) = input.runtime.logger_transaction_snapshot();
-        assert!(snapshot.input_closed());
-        assert!(!<LoggerTaskHost as TaskHost<MainEffects>>::wait_for_change(
-            &host,
-            closed_generation
-        ));
     }
 
     #[test]
@@ -3289,7 +3118,6 @@ mod tests {
                 .message(),
             "second lifecycle"
         );
-        input.close_input();
         assert!(input.take_diagnostic().is_none());
     }
 
@@ -3338,7 +3166,7 @@ mod tests {
             MainEffects::new(assembler.clone()),
             host,
         )
-        .schedule_with_exit(&installation.lifecycle)
+        .schedule(&installation.lifecycle)
         .expect("logger root should enter coordinator work");
 
         input.runtime.pump_until_stable();
@@ -3541,7 +3369,7 @@ mod tests {
             MainEffects::new(assembler.clone()),
             host.clone(),
         )
-        .schedule_with_exit(&exit_lifecycle)
+        .schedule(&exit_lifecycle)
         .expect("exit effect should schedule");
         let _blocked_task = EffectRun::new(
             &input.runtime,
@@ -3786,7 +3614,7 @@ mod tests {
             Some(RuntimeDeliveryOutcome::Failed(_))
         ));
 
-        assert!(settle_batch_runtime(&input.runtime, &input, &supervisor));
+        assert!(settle_batch_runtime(&input.runtime, &supervisor));
         let failures = input.runtime.delivery_failure_snapshot().failures();
         assert_eq!(failures.len(), 2);
         assert!(failures.iter().any(|failure| {
@@ -3835,7 +3663,6 @@ mod tests {
                 .message(),
             "publication during rearm"
         );
-        input.close_input();
         assert!(input.take_diagnostic().is_none());
     }
 
@@ -3856,92 +3683,6 @@ mod tests {
 
         assert!(weak_input.upgrade().is_none());
         assert!(weak_resources.upgrade().is_none());
-    }
-
-    #[test]
-    fn coordinator_logger_reconsiders_exact_dependency_when_log_input_closes() {
-        let runtime = EvaluationRuntime::new(0).expect("logger test runtime should build");
-        let diagnostics = DiagnosticBus::for_runtime(&runtime);
-        let input = Arc::new(LogHost::with_runtime(runtime.clone(), &diagnostics));
-        let mut resolver = None;
-        let assembler = Assembler::builder()
-            .evaluation_runtime(runtime.clone())
-            .reflection_environment(|environment| {
-                let values = environment.values();
-                let (promise, promise_resolver) = environment.promise("logger wait barrier");
-                resolver = Some(promise_resolver);
-                let test = values.record([("promise", promise)])?;
-                values.record([("test", test)])
-            })
-            .expect("logger test environment should build")
-            .build()
-            .expect("logger test assembler should build");
-        let module = assembler
-            .module(["logger_close_barrier"])
-            .script(
-                "g",
-                concat!(
-                    "language g0\n",
-                    "import 'std\n",
-                    "refl.effect = .log_status >>= (\\_status -> ",
-                    ".env ['test,'promise] >>= (\\value -> (value == 42) =>> ",
-                    "((.log 'warn {msg:{text:\"EXACT READY\"}}) =>> .r ())))\n",
-                ),
-            )
-            .build()
-            .expect("logger close barrier fixture should compile");
-        let effect = assembler
-            .get(module.value(), "refl.effect")
-            .expect("logger close barrier fixture should define its effect");
-
-        let logger_diagnostics = DiagnosticBus::new();
-        let host = Arc::new(LoggerTaskHost::new(
-            input.clone(),
-            logger_diagnostics.clone(),
-            assembler.reflection_environment_for_role("logger"),
-        ));
-        let lifecycle = EffectLifecycle::new(&runtime);
-        let scheduled =
-            EffectRun::new(&runtime, &effect, MainEffects::new(assembler.clone()), host)
-                .schedule(&lifecycle)
-                .expect("logger root should enter coordinator work")
-                .with_stop_condition({
-                    let input = input.clone();
-                    move || input.stop_requested()
-                });
-        let (finished, result) = std::sync::mpsc::channel();
-        let task = thread::spawn(move || {
-            finished
-                .send(scheduled.run())
-                .expect("logger result observer should remain live");
-        });
-
-        let mut status = lifecycle.status();
-        while status != glam::reflection::EffectLifecycleStatus::Blocked {
-            status = lifecycle.wait_for_change(&status);
-        }
-        resolver
-            .take()
-            .expect("logger promise resolver should remain live")
-            .resolve(runtime.values().integer(42))
-            .expect("logger promise should resolve");
-        input.close_input();
-
-        let result = result
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .unwrap_or_else(|error| {
-                panic!(
-                    "logger did not finish after exact dependency completion: {error}; lifecycle={:?}; readiness={:?}",
-                    lifecycle.status(),
-                    runtime.readiness()
-                )
-            });
-        task.join().expect("logger task should not panic");
-        assert!(
-            matches!(result, Ok(TaskOutcome::Complete(_))),
-            "already-ready exact dependency should complete before logger closure cancellation: {result:?}"
-        );
-        assert_eq!(logger_diagnostics.counts().warnings(), 1);
     }
 
     #[test]
@@ -3976,8 +3717,8 @@ mod tests {
             Diagnostic::new(&input.runtime.values(), Severity::Error, "session output"),
         );
 
-        let (_generation, _store, snapshot) = input.runtime.logger_transaction_snapshot();
-        let mut events = RuntimeEventJournal::new(snapshot.events().clone());
+        let (_generation, _store, snapshot) = input.runtime.transaction_snapshot();
+        let mut events = RuntimeEventJournal::new(snapshot);
         assert_eq!(
             events.read(&input.diagnostic_reader).unwrap(),
             None,

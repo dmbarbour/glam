@@ -661,7 +661,6 @@ pub struct ScheduledEffectRun {
     context: EvalContext,
     session: Arc<Mutex<Option<Arc<EvaluationSession>>>>,
     task: EvaluationTaskHandle,
-    stop_requested: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 }
 
 impl Drop for ScheduledEffectRun {
@@ -682,14 +681,6 @@ impl ScheduledEffectRun {
             match self.context.poll_reflection_task(&self.task) {
                 EvaluationWaitPoll::Pending(_) => {
                     if self.context.has_ready_session_task() {
-                        continue;
-                    }
-                    if self
-                        .stop_requested
-                        .as_ref()
-                        .is_some_and(|stop_requested| stop_requested())
-                    {
-                        let _ = self.task.cancel();
                         continue;
                     }
                     self.context.wait_for_task_change(&self.task);
@@ -732,14 +723,6 @@ impl ScheduledEffectRun {
 
     pub fn cancel(&self) {
         let _ = self.task.cancel();
-    }
-
-    pub fn with_stop_condition(
-        mut self,
-        stop_requested: impl Fn() -> bool + Send + Sync + 'static,
-    ) -> Self {
-        self.stop_requested = Some(Arc::new(stop_requested));
-        self
     }
 }
 
@@ -850,30 +833,18 @@ impl<S: TaskSpecialization> EffectRun<S> {
             .map_err(|error| contextualize_task_halt(error, failure_context.as_ref()))
     }
 
-    /// Installs this effect as ordinary coordinator work in a fresh demand
-    /// session. The returned handle retains the hidden task and session lease;
-    /// child `.task.new` operations inherit the same complete task profile.
+    /// Installs this effect as coordinator work in a fresh demand session.
+    /// The returned handle retains the hidden task and session lease; child
+    /// `.task.new` operations inherit the same complete, exit-capable task
+    /// profile.
     #[doc(hidden)]
     pub fn schedule(self, lifecycle: &EffectLifecycle) -> Result<ScheduledEffectRun, TaskHalt> {
-        self.schedule_with_capabilities(lifecycle, false)
-    }
-
-    /// Installs this effect as an exit-capable coordinator root. This is
-    /// reserved for runtime-owned services whose lifecycle participates in
-    /// settlement; ordinary scheduled and synchronous effects do not expose
-    /// the internal exit family.
-    #[doc(hidden)]
-    pub fn schedule_with_exit(
-        self,
-        lifecycle: &EffectLifecycle,
-    ) -> Result<ScheduledEffectRun, TaskHalt> {
-        self.schedule_with_capabilities(lifecycle, true)
+        self.schedule_with_capabilities(lifecycle)
     }
 
     fn schedule_with_capabilities(
         self,
         lifecycle: &EffectLifecycle,
-        exposes_exit: bool,
     ) -> Result<ScheduledEffectRun, TaskHalt> {
         let Self {
             effect,
@@ -884,7 +855,7 @@ impl<S: TaskSpecialization> EffectRun<S> {
             result_assertion_context,
             failure_context,
         } = self;
-        let task_profile = Arc::new(ReflectionTaskProfile::sealed(task_launcher(
+        let task_profile = Arc::new(ReflectionTaskProfile::sealed(coordinator_task_launcher(
             specialization.clone(),
             host.clone(),
         )));
@@ -903,7 +874,7 @@ impl<S: TaskSpecialization> EffectRun<S> {
                         host,
                         task_context,
                         false,
-                        exposes_exit,
+                        true,
                     )
                     .map_err(|error| {
                         let failure = error.into_failure();
@@ -926,19 +897,10 @@ impl<S: TaskSpecialization> EffectRun<S> {
                 },
             )
             .map_err(TaskHalt::failure)?;
-        // Ordinary hidden roots have an explicit Rust owner which propagates
-        // their failure, so they must not also remain in the detached task
-        // failure ledger. An exit-capable runtime service is different: batch
-        // settlement, rather than the thread waiting on this handle, owns its
-        // terminal report and must retain an unacknowledged root failure.
-        if !exposes_exit {
-            task.acknowledge_failure();
-        }
         Ok(ScheduledEffectRun {
             context,
             session,
             task,
-            stop_requested: None,
         })
     }
 }
@@ -1019,15 +981,35 @@ pub(crate) fn task_launcher<S: TaskSpecialization>(
     specialization: S,
     host: Arc<S::Host>,
 ) -> Arc<dyn ReflectionTaskLauncher> {
+    effect_task_launcher(specialization, host, false)
+}
+
+/// Builds a launcher for reflection tasks owned by the runtime coordinator.
+/// Such tasks participate in quiescence settlement and therefore expose the
+/// divergent `.exit.*` coordination family.
+pub(crate) fn coordinator_task_launcher<S: TaskSpecialization>(
+    specialization: S,
+    host: Arc<S::Host>,
+) -> Arc<dyn ReflectionTaskLauncher> {
+    effect_task_launcher(specialization, host, true)
+}
+
+fn effect_task_launcher<S: TaskSpecialization>(
+    specialization: S,
+    host: Arc<S::Host>,
+    exposes_exit: bool,
+) -> Arc<dyn ReflectionTaskLauncher> {
     Arc::new(EffectTaskLauncher {
         specialization,
         host,
+        exposes_exit,
     })
 }
 
 struct EffectTaskLauncher<S: TaskSpecialization> {
     specialization: S,
     host: Arc<S::Host>,
+    exposes_exit: bool,
 }
 
 impl<S: TaskSpecialization> ReflectionTaskLauncher for EffectTaskLauncher<S> {
@@ -1037,11 +1019,13 @@ impl<S: TaskSpecialization> ReflectionTaskLauncher for EffectTaskLauncher<S> {
         effect: Value,
         result_policy: ReflectionTaskResultPolicy,
     ) -> Result<Box<dyn EvaluationTaskMachine>, Arc<EvaluationFailure>> {
-        let task = EffectTask::new_in_context(
+        let task = EffectTask::new_in_context_with_capabilities(
             effect,
             self.specialization.clone(),
             self.host.clone(),
             context,
+            false,
+            self.exposes_exit,
         )
         .map_err(TaskHalt::into_failure)?;
         Ok(match result_policy {
@@ -5920,7 +5904,7 @@ mod tests {
             TestEffects,
             Arc::new(TestHost::with_values(exited_assembler.core_values())),
         )
-        .schedule_with_exit(&exited_lifecycle)
+        .schedule(&exited_lifecycle)
         .unwrap();
         exited_runtime.pump_until_stable();
         let crate::api::RuntimeReadiness::Ready(snapshot) = exited_runtime.readiness() else {

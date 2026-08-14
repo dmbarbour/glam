@@ -1855,6 +1855,7 @@ impl EvalContext {
             .clone()
     }
 
+    #[cfg(test)]
     pub(crate) fn session_id(&self) -> EvaluationSessionId {
         self.session.id
     }

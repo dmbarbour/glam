@@ -33,11 +33,10 @@ use crate::diagnostic::{CompilationInvocationId, CompilationTrace, Severity};
 use crate::eval;
 use crate::evaluation::{
     EvalContext, EvaluationExecutor, EvaluationSession, EvaluationSessionId, EvaluationSessionRun,
-    EvaluationTaskId, EvaluationUnfinishedState, EvaluationWorkCoordinator, ExitIntent,
-    ReflectionTaskProfile, RuntimeCoordinatorReadiness, RuntimeDeadlockWorkSnapshot,
-    RuntimeDependencySnapshot, RuntimeExitSnapshot, RuntimeObservationEpoch,
-    RuntimeObservationState, RuntimeWorkKindSnapshot, RuntimeWorkStateSnapshot,
-    TaskStatusPublisher, TaskStatusWake, ValidatedRuntimeSettlementPlan,
+    EvaluationTaskId, EvaluationWorkCoordinator, ExitIntent, ReflectionTaskProfile,
+    RuntimeCoordinatorReadiness, RuntimeDeadlockWorkSnapshot, RuntimeDependencySnapshot,
+    RuntimeExitSnapshot, RuntimeObservationEpoch, RuntimeObservationState, RuntimeWorkKindSnapshot,
+    RuntimeWorkStateSnapshot, TaskStatusPublisher, TaskStatusWake, ValidatedRuntimeSettlementPlan,
 };
 use crate::g_syntax::compile_source;
 use crate::interaction_net::{NetBuildError, NetBuilder as CoreNetBuilder, Port as CorePort};
@@ -47,7 +46,7 @@ use crate::reflection::{
     EffectLifecycleTerminal, ExactConflictAnalysis, HostSnapshot, ReasoningSessionId,
     ReflectionEffects, ReflectionQueryMutation, ReflectionQueryWriter, ReflectionServices,
     ReflectionStore, RuntimeInputEndpointId, RuntimeInputSequence, TaskCommit, TaskEnvironment,
-    TaskHost, VolumeId, task_launcher, volume_effects,
+    TaskHost, VolumeId, coordinator_task_launcher, volume_effects,
 };
 use crate::runtime::{
     EvaluationRuntimeId, RuntimeIds, RuntimeMutationAdmission, RuntimeMutationAuthority,
@@ -1513,7 +1512,7 @@ impl CompilationExecution {
             &reasoning.environment(),
             "macro",
         ))?;
-        let task_profile = Arc::new(ReflectionTaskProfile::sealed(task_launcher(
+        let task_profile = Arc::new(ReflectionTaskProfile::sealed(coordinator_task_launcher(
             ReflectionEffects,
             host.clone(),
         )));
@@ -1754,7 +1753,6 @@ pub struct EvaluationRuntime {
 }
 
 /// Stable, observational classification of one runtime instant.
-#[doc(hidden)]
 #[derive(Clone)]
 pub enum RuntimeReadiness {
     Busy,
@@ -1775,7 +1773,6 @@ impl fmt::Debug for RuntimeReadiness {
 }
 
 /// Authoritative revisions captured by a readiness probe.
-#[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RuntimeReadinessStamp {
     work_generation: u64,
@@ -1793,7 +1790,6 @@ impl RuntimeReadinessStamp {
 }
 
 /// One work disposition proposed by a stable readiness snapshot.
-#[doc(hidden)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeDisposition {
     work_id: u64,
@@ -1821,7 +1817,6 @@ impl RuntimeDisposition {
 }
 
 /// Payload of one proposed runtime disposition.
-#[doc(hidden)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RuntimeDispositionKind {
     ExitSuccess,
@@ -1830,7 +1825,6 @@ pub enum RuntimeDispositionKind {
 }
 
 /// Host-selected reason for forcefully settling stable unfinished work.
-#[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RuntimeKillReason {
     Deadlock,
@@ -1872,7 +1866,6 @@ impl RuntimeSettlementSnapshot {
 
 /// Retained proposal for accepting stable exit votes or forcefully settling a
 /// retained deadlock.
-#[doc(hidden)]
 #[derive(Clone)]
 pub struct QuiescenceSnapshot {
     runtime: EvaluationRuntime,
@@ -1936,7 +1929,6 @@ impl QuiescenceSnapshot {
 }
 
 /// Failure to accept a readiness snapshot because its runtime changed.
-#[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RuntimeSettlementError {
     RuntimeChanged,
@@ -1951,7 +1943,6 @@ impl fmt::Display for RuntimeSettlementError {
 impl std::error::Error for RuntimeSettlementError {}
 
 /// Retained evidence collected when a stable runtime snapshot is settled.
-#[doc(hidden)]
 pub struct QuiescenceReport {
     runtime: EvaluationRuntime,
     stamp: RuntimeReadinessStamp,
@@ -2053,7 +2044,6 @@ impl QuiescenceReport {
 }
 
 /// Kind of unfinished work retained in a deadlock report.
-#[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RuntimeWorkKind {
     ReflectionTask,
@@ -2063,7 +2053,6 @@ pub enum RuntimeWorkKind {
 }
 
 /// Stable non-runnable state retained in a deadlock report.
-#[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RuntimeWorkState {
     Dormant,
@@ -2072,7 +2061,6 @@ pub enum RuntimeWorkState {
 }
 
 /// Producer edge for one blocked runtime participant.
-#[doc(hidden)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RuntimeDependency {
     TaskWait {
@@ -2090,7 +2078,6 @@ pub enum RuntimeDependency {
 }
 
 /// Task-producing wait attached to a promise dependency.
-#[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RuntimeTaskWait {
     wait_id: u64,
@@ -2113,7 +2100,6 @@ impl RuntimeTaskWait {
 }
 
 /// One unfinished participant retained by a deadlock snapshot.
-#[doc(hidden)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeDeadlockWork {
     work_id: u64,
@@ -2123,7 +2109,7 @@ pub struct RuntimeDeadlockWork {
     state: RuntimeWorkState,
     dependency: Option<RuntimeDependency>,
     observed_epoch: Option<u64>,
-    blocked_error: Option<Arc<str>>,
+    blocked_diagnostic: Option<Diagnostic>,
 }
 
 impl RuntimeDeadlockWork {
@@ -2158,12 +2144,17 @@ impl RuntimeDeadlockWork {
     /// Retryable evaluation failure retained at the blocked checkpoint, when
     /// the participant had reached one.
     pub fn blocked_error(&self) -> Option<&str> {
-        self.blocked_error.as_deref()
+        self.blocked_diagnostic.as_ref().map(Diagnostic::message)
+    }
+
+    /// Structured retryable evaluation failure retained at this blocked
+    /// checkpoint, when the participant had reached one.
+    pub fn blocked_diagnostic(&self) -> Option<&Diagnostic> {
+        self.blocked_diagnostic.as_ref()
     }
 }
 
 /// Retained stable evidence that at least one participant cannot progress.
-#[doc(hidden)]
 #[derive(Clone)]
 pub struct DeadlockSnapshot {
     runtime: EvaluationRuntime,
@@ -2298,6 +2289,7 @@ fn runtime_dependency_from_snapshot(snapshot: RuntimeDependencySnapshot) -> Runt
 }
 
 fn runtime_deadlock_work_from_snapshot(
+    values: &CoreValueFactory,
     snapshot: RuntimeDeadlockWorkSnapshot,
 ) -> RuntimeDeadlockWork {
     RuntimeDeadlockWork {
@@ -2317,10 +2309,10 @@ fn runtime_deadlock_work_from_snapshot(
         },
         dependency: snapshot.dependency.map(runtime_dependency_from_snapshot),
         observed_epoch: snapshot.observed_epoch.map(RuntimeObservationEpoch::get),
-        blocked_error: snapshot
+        blocked_diagnostic: snapshot
             .blocked_error
             .as_deref()
-            .map(|error| Arc::from(error.to_string())),
+            .map(|error| reasoning_diagnostic(values, error)),
     }
 }
 
@@ -2354,7 +2346,6 @@ struct RuntimeTransactionState {
 struct RuntimeTransactionData {
     reflection: ReflectionStore,
     events: RuntimeEventState,
-    logger_lifecycle: RuntimeLoggerLifecycleState,
 }
 
 #[derive(Clone)]
@@ -3093,41 +3084,6 @@ fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> &str {
         .unwrap_or("non-string panic payload")
 }
 
-#[derive(Default)]
-struct RuntimeLoggerLifecycleState {
-    revision: u64,
-    input_closed: bool,
-    cancelled: bool,
-}
-
-/// Temporary logger lifecycle state retained until coordinated runtime
-/// settlement replaces explicit close and cancellation in Phase 10D.
-#[doc(hidden)]
-#[derive(Clone)]
-pub struct RuntimeLoggerSnapshot {
-    events: RuntimeEventSnapshot,
-    input_closed: bool,
-    cancelled: bool,
-    lifecycle_revision: u64,
-}
-
-impl RuntimeLoggerSnapshot {
-    #[doc(hidden)]
-    pub fn events(&self) -> &RuntimeEventSnapshot {
-        &self.events
-    }
-
-    #[doc(hidden)]
-    pub fn input_closed(&self) -> bool {
-        self.input_closed
-    }
-
-    #[doc(hidden)]
-    pub fn cancelled(&self) -> bool {
-        self.cancelled
-    }
-}
-
 #[derive(Clone)]
 struct RuntimeValueFactory {
     runtime: EvaluationRuntimeId,
@@ -3641,6 +3597,61 @@ impl RuntimeSharedResources {
         (generation, store)
     }
 
+    #[doc(hidden)]
+    pub fn transaction_snapshot(
+        &self,
+    ) -> (u64, crate::reflection::StoreSnapshot, RuntimeEventSnapshot) {
+        // Reading the epoch first prevents a waiter from retaining a new epoch
+        // beside stale transactional state.
+        let generation = self.observations.current().get();
+        let state = self
+            .transactions
+            .state
+            .lock()
+            .expect("runtime transaction mutex should not be poisoned");
+        (
+            generation,
+            state.reflection.snapshot(),
+            state.events.snapshot(self.id),
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn try_commit_transaction(
+        &self,
+        store: &crate::reflection::StoreJournal,
+        events: &RuntimeEventJournal,
+    ) -> crate::reflection::StoreCommitResult {
+        if events.runtime != self.id {
+            return crate::reflection::StoreCommitResult::Conflict;
+        }
+        let mutation = self.mutation_guard();
+        let (result, changed) = {
+            let mut state = self
+                .transactions
+                .state
+                .lock()
+                .expect("runtime transaction mutex should not be poisoned");
+            let result = state.reflection.validate(store);
+            if !matches!(result, crate::reflection::StoreCommitResult::Committed) {
+                return result;
+            }
+            if !state.events.validate(events) {
+                return crate::reflection::StoreCommitResult::Conflict;
+            }
+            let reflection_changed = state.reflection.commit_validated(store);
+            let event_changed = state.events.commit_validated(events);
+            (
+                crate::reflection::StoreCommitResult::Committed,
+                reflection_changed || event_changed,
+            )
+        };
+        if changed {
+            self.publish_observation(mutation);
+        }
+        result
+    }
+
     fn commit_reflection(
         &self,
         journal: &crate::reflection::StoreJournal,
@@ -3721,67 +3732,6 @@ impl RuntimeSharedResources {
         true
     }
 
-    #[doc(hidden)]
-    pub fn logger_transaction_snapshot(
-        &self,
-    ) -> (u64, crate::reflection::StoreSnapshot, RuntimeLoggerSnapshot) {
-        let generation = self.observations.current().get();
-        let state = self
-            .transactions
-            .state
-            .lock()
-            .expect("runtime transaction mutex should not be poisoned");
-        (
-            generation,
-            state.reflection.snapshot(),
-            RuntimeLoggerSnapshot {
-                events: state.events.snapshot(self.id),
-                input_closed: state.logger_lifecycle.input_closed,
-                cancelled: state.logger_lifecycle.cancelled,
-                lifecycle_revision: state.logger_lifecycle.revision,
-            },
-        )
-    }
-
-    #[doc(hidden)]
-    pub fn try_commit_logger_transaction(
-        &self,
-        store: &crate::reflection::StoreJournal,
-        snapshot: &RuntimeLoggerSnapshot,
-        observed_lifecycle: bool,
-        events: &RuntimeEventJournal,
-    ) -> crate::reflection::StoreCommitResult {
-        if events.runtime != self.id || snapshot.events.runtime != self.id {
-            return crate::reflection::StoreCommitResult::Conflict;
-        }
-        let mutation = self.mutation_guard();
-        let (result, changed) = {
-            let mut state = self
-                .transactions
-                .state
-                .lock()
-                .expect("runtime transaction mutex should not be poisoned");
-            if observed_lifecycle && state.logger_lifecycle.revision != snapshot.lifecycle_revision
-            {
-                return crate::reflection::StoreCommitResult::Conflict;
-            }
-            let result = state.reflection.validate(store);
-            if !matches!(result, crate::reflection::StoreCommitResult::Committed) {
-                return result;
-            }
-            if !state.events.validate(events) {
-                return crate::reflection::StoreCommitResult::Conflict;
-            }
-            let reflection_changed = state.reflection.commit_validated(store);
-            let event_changed = state.events.commit_validated(events);
-            (result, reflection_changed || event_changed)
-        };
-        if changed {
-            self.publish_observation(mutation);
-        }
-        result
-    }
-
     #[cfg(test)]
     fn reflection_root(&self) -> Value {
         self.transactions
@@ -3842,7 +3792,6 @@ impl EvaluationRuntime {
                 state: Mutex::new(RuntimeTransactionData {
                     reflection: ReflectionStore::new(values.core().clone(), conflict_analysis),
                     events: RuntimeEventState::new(event_conflict_analysis),
-                    logger_lifecycle: RuntimeLoggerLifecycleState::default(),
                 }),
             },
             observations,
@@ -4008,11 +3957,10 @@ impl EvaluationRuntime {
     /// Pumps useful lifecycle work across every evaluation session until the
     /// runtime reaches a stable instant.
     ///
-    /// This transitional internal API does not construct a readiness report.
-    /// It waits for work currently owned by a worker or delivery callback,
+    /// This operation does not construct or commit a readiness report. It
+    /// waits for work currently owned by a worker or delivery callback,
     /// abandons only unclaimed best-effort sparks, and leaves queued external
     /// output for its host adapter.
-    #[doc(hidden)]
     pub fn pump_until_stable(&self) {
         let admission = &self.state.shared_resources.mutation_admission;
         let activity = admission.activity();
@@ -4052,7 +4000,6 @@ impl EvaluationRuntime {
     ///
     /// Call [`Self::pump_until_stable`] first when the client wants queued work
     /// and best-effort spark normalization to run before classification.
-    #[doc(hidden)]
     pub fn readiness(&self) -> RuntimeReadiness {
         let Some(settlement) = self.try_settlement_guard() else {
             return RuntimeReadiness::Busy;
@@ -4122,7 +4069,7 @@ impl EvaluationRuntime {
                 unfinished: unfinished
                     .iter()
                     .cloned()
-                    .map(runtime_deadlock_work_from_snapshot)
+                    .map(|work| runtime_deadlock_work_from_snapshot(self.values().core(), work))
                     .collect(),
                 reflection,
                 settlement_exits: exits,
@@ -4406,21 +4353,7 @@ impl EvaluationRuntime {
     pub fn transaction_snapshot(
         &self,
     ) -> (u64, crate::reflection::StoreSnapshot, RuntimeEventSnapshot) {
-        // As with `reflection_snapshot`, reading the epoch first prevents a
-        // waiter from retaining a new epoch beside stale transactional state.
-        let generation = self.state.shared_resources.observations.current().get();
-        let state = self
-            .state
-            .shared_resources
-            .transactions
-            .state
-            .lock()
-            .expect("runtime transaction mutex should not be poisoned");
-        (
-            generation,
-            state.reflection.snapshot(),
-            state.events.snapshot(self.id()),
-        )
+        self.state.shared_resources.transaction_snapshot()
     }
 
     /// Atomically validates and applies one reflection-store journal and its
@@ -4431,36 +4364,9 @@ impl EvaluationRuntime {
         store: &crate::reflection::StoreJournal,
         events: &RuntimeEventJournal,
     ) -> crate::reflection::StoreCommitResult {
-        if events.runtime != self.id() {
-            return crate::reflection::StoreCommitResult::Conflict;
-        }
-        let mutation = self.mutation_guard();
-        let (result, changed) = {
-            let mut state = self
-                .state
-                .shared_resources
-                .transactions
-                .state
-                .lock()
-                .expect("runtime transaction mutex should not be poisoned");
-            let result = state.reflection.validate(store);
-            if !matches!(result, crate::reflection::StoreCommitResult::Committed) {
-                return result;
-            }
-            if !state.events.validate(events) {
-                return crate::reflection::StoreCommitResult::Conflict;
-            }
-            let reflection_changed = state.reflection.commit_validated(store);
-            let event_changed = state.events.commit_validated(events);
-            (
-                crate::reflection::StoreCommitResult::Committed,
-                reflection_changed || event_changed,
-            )
-        };
-        if changed {
-            self.publish_observation(mutation);
-        }
-        result
+        self.state
+            .shared_resources
+            .try_commit_transaction(store, events)
     }
 
     #[doc(hidden)]
@@ -4480,77 +4386,11 @@ impl EvaluationRuntime {
         self.state.shared_resources.update_query(handle, result)
     }
 
-    fn publish_observation(&self, mutation: RuntimeMutationGuard<'_>) {
-        publish_runtime_observation(&self.state.shared_resources, mutation);
-    }
-
     #[doc(hidden)]
     pub fn wait_for_change(&self, observed_generation: u64) -> bool {
         self.state
             .shared_resources
             .wait_for_change(observed_generation)
-    }
-
-    /// Captures the reflection store, generic events, and temporary logger
-    /// lifecycle flags under one transaction lock.
-    #[doc(hidden)]
-    pub fn logger_transaction_snapshot(
-        &self,
-    ) -> (u64, crate::reflection::StoreSnapshot, RuntimeLoggerSnapshot) {
-        self.state.shared_resources.logger_transaction_snapshot()
-    }
-
-    /// Atomically validates and applies one logger transaction across the
-    /// reflection store and generic event endpoints. Lifecycle validation is
-    /// included only when `.log_status` observed the close state.
-    #[doc(hidden)]
-    pub fn try_commit_logger_transaction(
-        &self,
-        store: &crate::reflection::StoreJournal,
-        snapshot: &RuntimeLoggerSnapshot,
-        observed_lifecycle: bool,
-        events: &RuntimeEventJournal,
-    ) -> crate::reflection::StoreCommitResult {
-        self.state.shared_resources.try_commit_logger_transaction(
-            store,
-            snapshot,
-            observed_lifecycle,
-            events,
-        )
-    }
-
-    #[doc(hidden)]
-    pub fn close_logger_input(&self) {
-        let mutation = self.mutation_guard();
-        {
-            let mut state = self
-                .state
-                .shared_resources
-                .transactions
-                .state
-                .lock()
-                .expect("runtime transaction mutex should not be poisoned");
-            state.logger_lifecycle.input_closed = true;
-            state.logger_lifecycle.revision = state.logger_lifecycle.revision.wrapping_add(1);
-        }
-        self.publish_observation(mutation);
-    }
-
-    #[doc(hidden)]
-    pub fn cancel_logger(&self) {
-        let mutation = self.mutation_guard();
-        {
-            let mut state = self
-                .state
-                .shared_resources
-                .transactions
-                .state
-                .lock()
-                .expect("runtime transaction mutex should not be poisoned");
-            state.logger_lifecycle.cancelled = true;
-            state.logger_lifecycle.revision = state.logger_lifecycle.revision.wrapping_add(1);
-        }
-        self.publish_observation(mutation);
     }
 
     #[cfg(test)]
@@ -4600,7 +4440,6 @@ pub(crate) fn compiler_test_runtime() -> EvaluationRuntime {
                 state: Mutex::new(RuntimeTransactionData {
                     reflection: ReflectionStore::new(core, Arc::new(ExactConflictAnalysis)),
                     events: RuntimeEventState::new(Arc::new(ExactConflictAnalysis)),
-                    logger_lifecycle: RuntimeLoggerLifecycleState::default(),
                 }),
             },
             observations,
@@ -4636,7 +4475,7 @@ impl ReasoningSession {
         diagnostics: DiagnosticBus,
         runtime: EvaluationRuntime,
     ) -> Result<Self, Error> {
-        let task_profile = Arc::new(ReflectionTaskProfile::sealed(task_launcher(
+        let task_profile = Arc::new(ReflectionTaskProfile::sealed(coordinator_task_launcher(
             ReflectionEffects,
             host.clone(),
         )));
@@ -4861,38 +4700,6 @@ fn path_lookup_context(path: &str) -> CoreValue {
     )
 }
 
-/// Result of running every currently scheduled reflection task to a terminal
-/// state or to a stable quiescent pass.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReasoningReport {
-    status: ReasoningStatus,
-    failures: Vec<ReasoningFailure>,
-    unfinished: Vec<ReasoningTask>,
-}
-
-impl ReasoningReport {
-    pub fn status(&self) -> ReasoningStatus {
-        self.status
-    }
-
-    pub fn failures(&self) -> &[ReasoningFailure] {
-        &self.failures
-    }
-
-    pub fn unfinished(&self) -> &[ReasoningTask] {
-        &self.unfinished
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReasoningStatus {
-    Complete,
-    /// Stable local quiescence while another live demand session in the same
-    /// runtime may still satisfy an unfinished dependency.
-    Quiescent,
-    Deadlocked,
-}
-
 #[derive(Clone, PartialEq, Eq)]
 pub struct ReasoningFailure {
     runtime: EvaluationRuntimeId,
@@ -4933,66 +4740,6 @@ impl ReasoningFailure {
     pub fn diagnostic(&self) -> &Diagnostic {
         &self.diagnostic
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReasoningTask {
-    task_id: u64,
-    state: ReasoningTaskState,
-    waiting_on_task: Option<u64>,
-    waiting_on_session: Option<u64>,
-    wait_id: Option<u64>,
-    observed_epoch: Option<u64>,
-    blocked_diagnostic: Option<Diagnostic>,
-}
-
-impl ReasoningTask {
-    pub fn task_id(&self) -> u64 {
-        self.task_id
-    }
-
-    pub fn state(&self) -> ReasoningTaskState {
-        self.state
-    }
-
-    pub fn waiting_on_task(&self) -> Option<u64> {
-        self.waiting_on_task
-    }
-
-    /// The evaluation session that owns `waiting_on_task`.
-    pub fn waiting_on_session(&self) -> Option<u64> {
-        self.waiting_on_session
-    }
-
-    pub fn wait_id(&self) -> Option<u64> {
-        self.wait_id
-    }
-
-    pub fn observed_epoch(&self) -> Option<u64> {
-        self.observed_epoch
-    }
-
-    /// The evaluation error retained while this task waits for an observed
-    /// state change that can retry its current reasoning checkpoint.
-    pub fn blocked_error(&self) -> Option<&str> {
-        self.blocked_diagnostic.as_ref().map(Diagnostic::message)
-    }
-
-    /// The structured evaluation failure retained while this task waits for
-    /// an observed state change that can retry its current reasoning
-    /// checkpoint.
-    pub fn blocked_diagnostic(&self) -> Option<&Diagnostic> {
-        self.blocked_diagnostic.as_ref()
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReasoningTaskState {
-    Dormant,
-    Reserved,
-    Queued,
-    Running,
-    Blocked,
 }
 
 fn authoritative_reflection_environment(
@@ -5452,10 +5199,12 @@ impl AssemblerBuilder {
         };
         self.host.seal_environment(environment)?;
         if !self.runtime.has_default_reflection_profile() {
-            match self.runtime.seal_default_reflection_profile(task_launcher(
-                ReflectionEffects,
-                self.host.clone(),
-            )) {
+            match self
+                .runtime
+                .seal_default_reflection_profile(coordinator_task_launcher(
+                    ReflectionEffects,
+                    self.host.clone(),
+                )) {
                 Ok(()) => {}
                 Err(error) if self.runtime.has_default_reflection_profile() => {
                     // Another builder sealed the same dormant runtime first.
@@ -5612,58 +5361,22 @@ impl Assembler {
         self.reasoning.runtime.allocate_cli_invocation_id()
     }
 
-    /// Runs scheduled reflection reasoning without imposing a step or time
-    /// limit. A runnable infinite task therefore keeps this call running.
-    pub fn drain_reasoning(&self) -> ReasoningReport {
-        let context = self.eval_context();
-        let runtime = context.values().runtime_id();
-        let session = context.session_id();
-        let values = context.values().clone();
-        let run = context.run_until_quiescent();
-        let (status, report) = match run {
-            EvaluationSessionRun::Complete(report) => (ReasoningStatus::Complete, report),
-            EvaluationSessionRun::Quiescent(report) => (ReasoningStatus::Quiescent, report),
-            EvaluationSessionRun::Deadlocked(report) => (ReasoningStatus::Deadlocked, report),
-        };
-        ReasoningReport {
-            status,
-            failures: report
-                .failures
-                .iter()
-                .map(|(task, error)| ReasoningFailure {
-                    runtime,
-                    task: *task,
-                    diagnostic: reasoning_diagnostic(&values, error),
-                    session,
-                })
-                .collect(),
-            unfinished: report
-                .unfinished
-                .into_iter()
-                .map(|task| ReasoningTask {
-                    task_id: task.task.get(),
-                    state: match task.state {
-                        EvaluationUnfinishedState::Dormant => ReasoningTaskState::Dormant,
-                        EvaluationUnfinishedState::Reserved => ReasoningTaskState::Reserved,
-                        EvaluationUnfinishedState::Queued => ReasoningTaskState::Queued,
-                        EvaluationUnfinishedState::Running => ReasoningTaskState::Running,
-                        EvaluationUnfinishedState::Blocked => ReasoningTaskState::Blocked,
-                    },
-                    waiting_on_task: task.dependency.map(|task| task.get()),
-                    waiting_on_session: task.dependency_session.map(|session| session.get()),
-                    wait_id: task.wait,
-                    observed_epoch: task.observed_epoch.map(RuntimeObservationEpoch::get),
-                    blocked_diagnostic: task
-                        .error
-                        .as_deref()
-                        .map(|error| reasoning_diagnostic(&values, error)),
-                })
-                .collect(),
-        }
+    /// Pumps useful work across every evaluation session in this assembler's
+    /// runtime until it reaches a stable instant, then returns an
+    /// observational readiness snapshot.
+    ///
+    /// This method imposes no step or time limit. A runnable infinite task
+    /// therefore keeps it running forever. The returned snapshot is not
+    /// committed: clients explicitly settle ready exit votes or choose
+    /// whether to kill a deadlock.
+    pub fn drain_reasoning(&self) -> RuntimeReadiness {
+        let runtime = self.evaluation_runtime();
+        runtime.pump_until_stable();
+        runtime.readiness()
     }
 
-    /// Acknowledges a failed task previously returned by
-    /// [`Self::drain_reasoning`].
+    /// Acknowledges a failed task retained by a settled
+    /// [`QuiescenceReport`].
     ///
     /// Acknowledgement removes the failure from later reasoning reports but
     /// does not change the task's terminal result. Repeated acknowledgement is
@@ -8288,7 +8001,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_combines_reflection_and_logger_event_commit() {
+    fn runtime_combines_reflection_and_event_commit() {
         let runtime = EvaluationRuntime::new(0).expect("runtime should build");
         let assembler = Assembler::builder()
             .evaluation_runtime(runtime.clone())
@@ -8297,31 +8010,31 @@ mod tests {
         let input = runtime
             .input_endpoint(integer_converter(&runtime))
             .expect("input endpoint should register");
-        let (initial_generation, store, snapshot) = runtime.logger_transaction_snapshot();
+        let (initial_generation, store, snapshot) = runtime.transaction_snapshot();
         let mut stale = crate::reflection::StoreJournal::new(store);
         stale.write(
             vec![Key::atom_from_text("atomic")],
             runtime.values().text("stale"),
         );
-        let mut stale_events = RuntimeEventJournal::new(snapshot.events().clone());
+        let mut stale_events = RuntimeEventJournal::new(snapshot);
         assert_eq!(stale_events.read(&input.reader()).unwrap(), None);
         input.sender().admit(7).expect("input should be admitted");
-        let (input_generation, _, _) = runtime.logger_transaction_snapshot();
+        let (input_generation, _, _) = runtime.transaction_snapshot();
         assert_ne!(input_generation, initial_generation);
 
         assert_eq!(
-            runtime.try_commit_logger_transaction(&stale, &snapshot, false, &stale_events),
+            runtime.try_commit_transaction(&stale, &stale_events),
             crate::reflection::StoreCommitResult::Conflict
         );
         assert!(assembler.get(&runtime.reflection_root(), "atomic").is_err());
 
-        let (_, store, snapshot) = runtime.logger_transaction_snapshot();
+        let (_, store, snapshot) = runtime.transaction_snapshot();
         let mut committed = crate::reflection::StoreJournal::new(store);
         committed.write(
             vec![Key::atom_from_text("atomic")],
             runtime.values().text("committed"),
         );
-        let mut events = RuntimeEventJournal::new(snapshot.events().clone());
+        let mut events = RuntimeEventJournal::new(snapshot);
         assert_eq!(
             events
                 .read(&input.reader())
@@ -8330,12 +8043,12 @@ mod tests {
             Some(7)
         );
         assert_eq!(
-            runtime.try_commit_logger_transaction(&committed, &snapshot, false, &events),
+            runtime.try_commit_transaction(&committed, &events),
             crate::reflection::StoreCommitResult::Committed
         );
-        let (committed_generation, _, snapshot) = runtime.logger_transaction_snapshot();
+        let (committed_generation, _, snapshot) = runtime.transaction_snapshot();
         assert_ne!(committed_generation, input_generation);
-        let mut empty = RuntimeEventJournal::new(snapshot.events().clone());
+        let mut empty = RuntimeEventJournal::new(snapshot);
         assert_eq!(empty.read(&input.reader()).unwrap(), None);
         assert_eq!(
             assembler
@@ -8462,9 +8175,18 @@ mod tests {
             .schedule_task(|_| Ok(Box::new(FailedReasoningTask)))
             .expect("failing task should schedule");
 
-        let report = assembler.drain_reasoning();
-        assert_eq!(report.status(), ReasoningStatus::Complete);
-        let [failure] = report.failures() else {
+        let settle = || match assembler.drain_reasoning() {
+            RuntimeReadiness::Ready(snapshot) => snapshot
+                .settle()
+                .expect("unchanged runtime readiness should settle"),
+            RuntimeReadiness::Busy => panic!("draining should reach a stable instant"),
+            RuntimeReadiness::Deadlocked(deadlock) => panic!(
+                "failing task unexpectedly deadlocked with {} unfinished work items",
+                deadlock.unfinished().len()
+            ),
+        };
+        let report = settle();
+        let [failure] = report.task_failures() else {
             panic!("drain should report exactly one task failure")
         };
         assert_eq!(failure.task_id(), task.id().get());
@@ -8476,7 +8198,7 @@ mod tests {
             .expect_err("a foreign runtime must reject the acknowledgement capability");
         assert!(error.to_string().contains("different evaluation runtime"));
         assert_eq!(
-            assembler.drain_reasoning().failures(),
+            settle().task_failures(),
             std::slice::from_ref(&failure),
             "foreign-runtime acknowledgement must not alter the originating ledger"
         );
@@ -8486,7 +8208,7 @@ mod tests {
         assembler
             .acknowledge_reasoning_failure(&failure)
             .expect("repeated acknowledgement should be harmless");
-        assert!(assembler.drain_reasoning().failures().is_empty());
+        assert!(settle().task_failures().is_empty());
         assert!(matches!(
             assembler.eval_context().poll_reflection_task(&task),
             EvaluationWaitPoll::Failed(error)
@@ -8607,7 +8329,10 @@ mod tests {
             .unwrap();
 
         let error = runtime
-            .seal_default_reflection_profile(task_launcher(ReflectionEffects, replacement))
+            .seal_default_reflection_profile(coordinator_task_launcher(
+                ReflectionEffects,
+                replacement,
+            ))
             .expect_err("a sealed runtime profile must reject replacement");
         assert!(error.to_string().contains("already sealed"));
 
@@ -8638,7 +8363,7 @@ mod tests {
                 .0,
         )
         .unwrap();
-        let profile = Arc::new(ReflectionTaskProfile::sealed(task_launcher(
+        let profile = Arc::new(ReflectionTaskProfile::sealed(coordinator_task_launcher(
             ReflectionEffects,
             host.clone(),
         )));

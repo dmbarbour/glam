@@ -6,8 +6,8 @@ use bytes::Bytes;
 use glam::{
     Assembler, AssemblerBuilder, CONTENT_DIGEST_ALGORITHM, ContentDigest, Diagnostic,
     DiagnosticEvent, EvaluationRuntime, Host, HostError, ImportResolver, ModuleInput,
-    ReasoningStatus, RelativeSourcePath, Severity, SourceArtifact, SourceError, SourceIdentity,
-    SourceSystem, Value, ValueKind,
+    QuiescenceReport, RelativeSourcePath, RuntimeDispositionKind, RuntimeReadiness, Severity,
+    SourceArtifact, SourceError, SourceIdentity, SourceSystem, Value, ValueKind,
 };
 
 fn record<I, S>(values: &glam::Values, entries: I) -> Value
@@ -39,6 +39,19 @@ fn access_path(assembler: &Assembler, root: &Value, path: &str) -> Result<Value,
 
 fn binary_at(assembler: &Assembler, root: &Value, path: &str) -> Result<Bytes, glam::Error> {
     assembler.to_binary(&access_path(assembler, root, path)?)
+}
+
+fn settle_ready_reasoning(assembler: &Assembler) -> QuiescenceReport {
+    match assembler.drain_reasoning() {
+        RuntimeReadiness::Ready(snapshot) => snapshot
+            .settle()
+            .expect("unchanged runtime readiness should settle"),
+        RuntimeReadiness::Busy => panic!("draining should return a stable readiness snapshot"),
+        RuntimeReadiness::Deadlocked(deadlock) => panic!(
+            "reasoning unexpectedly deadlocked with {} unfinished work items",
+            deadlock.unfinished().len()
+        ),
+    }
 }
 
 type DiagnosticEvents = Arc<Mutex<Vec<DiagnosticEvent>>>;
@@ -208,11 +221,42 @@ fn public_evaluation_errors_preserve_their_structured_diagnostic() {
 
 #[test]
 fn public_api_reports_an_empty_reasoning_session_as_complete() {
-    let report = Assembler::default().drain_reasoning();
+    let assembler = Assembler::default();
+    let report = settle_ready_reasoning(&assembler);
 
-    assert_eq!(report.status(), ReasoningStatus::Complete);
-    assert!(report.failures().is_empty());
-    assert!(report.unfinished().is_empty());
+    assert!(report.task_failures().is_empty());
+    assert!(report.killed_work().is_empty());
+}
+
+#[test]
+fn public_runtime_profile_exposes_exit_to_scheduled_reflection() {
+    let assembler = Assembler::default();
+    let module = assembler
+        .module(["public_exit"])
+        .script("g", "language g0\nrefl.exit = .exit.success\nvalue = ()\n")
+        .build()
+        .expect("reflection exit fixture should compile");
+    assembler
+        .evaluate(
+            &assembler
+                .get(module.value(), "value")
+                .expect("fixture should define its ordinary value"),
+        )
+        .expect("ordinary demand should schedule automatic reflection");
+
+    let RuntimeReadiness::Ready(snapshot) = assembler.drain_reasoning() else {
+        panic!("an exit vote should make the runtime ready for settlement")
+    };
+    assert!(
+        snapshot.dispositions().iter().any(|disposition| {
+            matches!(disposition.kind(), RuntimeDispositionKind::ExitSuccess)
+        })
+    );
+    let report = snapshot
+        .settle()
+        .expect("unchanged exit readiness should settle");
+    assert!(report.task_failures().is_empty());
+    assert!(report.killed_work().is_empty());
 }
 
 #[test]
@@ -351,23 +395,22 @@ fn public_promise_completion_resumes_blocked_reasoning_in_its_session() {
         )
         .expect("ordinary demand should schedule automatic reflection");
 
-    let blocked = assembler.drain_reasoning();
-    assert_ne!(
-        blocked.status(),
-        ReasoningStatus::Complete,
-        "the unresolved host promise should block its reflection task"
+    let RuntimeReadiness::Deadlocked(blocked) = assembler.drain_reasoning() else {
+        panic!("the unresolved host promise should deadlock its reflection task")
+    };
+    assert!(
+        !blocked.unfinished().is_empty(),
+        "runtime-wide readiness should retain the promise-dependent work"
     );
-    assert_eq!(blocked.unfinished().len(), 1);
 
     resolver
         .take()
         .expect("resolver should escape environment construction")
         .resolve(values.text("ready"))
         .expect("host completion should succeed");
-    let resumed = assembler.drain_reasoning();
-    assert_eq!(resumed.status(), ReasoningStatus::Complete);
-    assert!(resumed.failures().is_empty());
-    assert!(resumed.unfinished().is_empty());
+    let resumed = settle_ready_reasoning(&assembler);
+    assert!(resumed.task_failures().is_empty());
+    assert!(resumed.killed_work().is_empty());
 
     let diagnostics = take_diagnostics(&diagnostics);
     assert_eq!(diagnostics.len(), 1);
@@ -391,9 +434,9 @@ fn public_reasoning_report_exposes_retryable_blocked_errors() {
         b"value".as_slice()
     );
 
-    let first = assembler.drain_reasoning();
-    assert_eq!(first.status(), ReasoningStatus::Deadlocked);
-    assert!(first.failures().is_empty());
+    let RuntimeReadiness::Deadlocked(first) = assembler.drain_reasoning() else {
+        panic!("retryable failure should leave the runtime deadlocked")
+    };
     let blocked = first
         .unfinished()
         .iter()
@@ -414,7 +457,9 @@ fn public_reasoning_report_exposes_retryable_blocked_errors() {
         Some(7)
     );
 
-    let second = assembler.drain_reasoning();
+    let RuntimeReadiness::Deadlocked(second) = assembler.drain_reasoning() else {
+        panic!("an unchanged retryable failure should remain deadlocked")
+    };
     let repeated = second
         .unfinished()
         .iter()
@@ -1022,8 +1067,8 @@ fn public_evaluation_leaves_automatic_reflection_tasks_for_explicit_drain() {
     );
     assert!(take_diagnostics(&diagnostics).is_empty());
 
-    let report = assembler.drain_reasoning();
-    assert_eq!(report.status(), ReasoningStatus::Complete);
+    let report = settle_ready_reasoning(&assembler);
+    assert!(report.task_failures().is_empty());
 
     let diagnostics = take_diagnostics(&diagnostics);
     assert_eq!(diagnostics.len(), 1);
@@ -1086,9 +1131,10 @@ fn replacing_retained_diagnostic_subscriber_preserves_scheduled_reasoning() {
             .expect("callback collection mutex should not be poisoned")
             .push(event);
     });
-    assert_eq!(
-        assembler.drain_reasoning().status(),
-        ReasoningStatus::Complete
+    assert!(
+        settle_ready_reasoning(&assembler)
+            .task_failures()
+            .is_empty()
     );
 
     let received = received

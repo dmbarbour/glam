@@ -214,8 +214,8 @@ An unacknowledged failure also leaves one minimal entry in its producer
 owner's runtime-ledger bucket until `.task.ack_error` removes it. Propagated
 failure acknowledgement follows the handle's reporting identity directly to
 that bucket instead of upgrading the former owner session. Rust clients receive
-the corresponding opaque, runtime-bound `ReasoningFailure` from
-`Assembler::drain_reasoning` and may remove the same entry with
+the corresponding opaque, runtime-bound `ReasoningFailure` from a settled
+`QuiescenceReport` and may remove the same entry with
 `Assembler::acknowledge_reasoning_failure`. Acknowledgement through either
 surface leaves the terminal result unchanged.
 

@@ -869,7 +869,7 @@ fn configured_logger_requires_a_unit_result() {
 }
 
 #[test]
-fn configured_logger_can_finish_when_the_log_stream_closes() {
+fn configured_logger_rejects_removed_log_status() {
     let dir = unique_temp_dir("glam-conf-log-status");
     fs::create_dir_all(&dir)
         .unwrap_or_else(|err| panic!("failed to create {}: {err}", dir.display()));
@@ -887,14 +887,9 @@ fn configured_logger_can_finish_when_the_log_stream_closes() {
         .output()
         .expect("failed to run glam");
 
-    assert!(
-        output.status.success(),
-        "stdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(!output.status.success());
     assert_eq!(output.stdout, b"ok");
-    assert!(output.stderr.is_empty());
+    assert!(!output.stderr.is_empty());
 }
 
 #[test]
@@ -943,7 +938,7 @@ fn configured_logger_does_not_read_its_own_log_output() {
     let config = dir.join("conf.g");
     fs::write(
         &config,
-        "language g0\nobject conf.env\nconf.log = (.log 'warn { msg:{ text:\"LOGGER OUTPUT\" } }) =>> .cut (.alt (.read_log >>= (\\_message -> .log 'error { msg:{ text:\"READ OWN OUTPUT\" } })) (.log_status >>= (\\status -> (status == 'closed) =>> .r ())))\n",
+        "language g0\nobject conf.env\nconf.log = (.log 'warn { msg:{ text:\"LOGGER OUTPUT\" } }) =>> .cut (.alt (.read_log >>= (\\_message -> .log 'error { msg:{ text:\"READ OWN OUTPUT\" } })) (.exit.success))\n",
     )
     .unwrap_or_else(|err| panic!("failed to write {}: {err}", config.display()));
 
@@ -1055,7 +1050,7 @@ fn configured_logger_abandons_an_unjoined_child_failure_when_its_root_returns() 
 }
 
 #[test]
-fn configured_logger_must_observe_stream_closure_when_waiting_for_input() {
+fn configured_logger_without_an_exit_vote_is_killed_as_deadlocked() {
     let dir = unique_temp_dir("glam-conf-log-close-deadlock");
     fs::create_dir_all(&dir)
         .unwrap_or_else(|err| panic!("failed to create {}: {err}", dir.display()));
@@ -1076,8 +1071,7 @@ fn configured_logger_must_observe_stream_closure_when_waiting_for_input() {
     assert!(!output.status.success());
     assert_eq!(output.stdout, b"ok");
     assert!(
-        String::from_utf8_lossy(&output.stderr)
-            .contains("configured logger remained blocked after the log stream closed")
+        String::from_utf8_lossy(&output.stderr).contains("runtime killed reflection_task work")
     );
 }
 

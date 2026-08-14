@@ -146,8 +146,9 @@ conf.log = .fix \loop ->
 ```
 
 The exit vote remains retryable until the whole runtime settles; a diagnostic
-arriving first makes `.read_log` run instead. `.log_status` remains available
-temporarily for older configurations which finish after an explicit close.
+arriving first makes `.read_log` run instead. The diagnostic stream is not
+semantically closed; a logger terminates by participating in coordinated
+runtime exit.
 
 The remaining sections focus on `conf.cli`.
 
