@@ -8,10 +8,11 @@ map, not the eventual assembler contract.
 `api::Assembler` is the primary embedding facade. `AssemblerBuilder` selects
 one immutable `SourceSystem`, an evaluation runtime, diagnostic subscriptions,
 and reasoning configuration before creating exactly one internal
-`ReasoningSession`. That session groups the immutable reflection
-environment, reflection host/heap, diagnostic bus, task scheduler, and its
-attachment to the shared evaluation runtime. Clients
-choose module paths and inputs; the library does not assign special meaning to
+`ReasoningSession`. That session groups the immutable reflection environment,
+role-specific host and diagnostic bus, and one evaluation demand-owner lease.
+The selected `EvaluationRuntime` owns the shared reflection heap, protected
+volumes, work coordinator, and executor attachment. Clients choose module
+paths and inputs; the library does not assign special meaning to
 `configuration` or `assembly`.
 
 Executable and IDE clients are privileged reflection observers. Ordinary
@@ -61,13 +62,14 @@ to enrich that provenance into `msg.origin`.
 `CompilationExecution` is narrower than `Assembler` or `ReasoningSession`. It
 supplies the lookup context plus one dedicated macro demand session shared by
 all source inputs and recursive imports in the build. Macro reflection uses a
-separate task registry and diagnostic bus, but belongs to the assembler's
-`EvaluationRuntime` and therefore shares its reflection heap, protected
-volumes, query domain, observation epoch, and executor. Its diagnostic events
-are bridged into build diagnostics with a `macro` reasoning origin, but the two
-buses retain independent sequence numbers and severity counts. Compilation
-drains detached macro reflection children without a timeout; terminal failures
-and stable deadlocks fail the build.
+separate diagnostic bus and demand-owner lease, but its tasks enter the same
+runtime coordinator as assembler and logger work. It therefore shares the
+reflection heap, protected volumes, query domain, observation epoch, and
+executor. Its diagnostic events are bridged into build diagnostics with a
+`macro` reasoning origin, but the two buses retain independent sequence
+numbers and severity counts. Compilation drains detached macro reflection
+children without a timeout; terminal failures and stable deadlocks fail the
+build.
 
 ## Diagnostics and Logging
 

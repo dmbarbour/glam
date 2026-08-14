@@ -1155,6 +1155,42 @@ fn command_line_workers_override_glam_workers() {
 }
 
 #[test]
+fn ordinary_result_is_identical_across_worker_counts() {
+    let source = "language g0\n\
+import 'std\n\
+background = \"worker-\" ++ \"parity\"\n\
+asm.result = spark background background\n";
+    let mut outputs = Vec::new();
+
+    for worker_count in [0, 1, 4] {
+        let output = glam_command()
+            .arg("--workers")
+            .arg(worker_count.to_string())
+            .arg("--script.g")
+            .arg(source)
+            .output()
+            .expect("worker-parity assembly should run");
+        assert!(
+            output.status.success(),
+            "assembly failed with {worker_count} workers:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            output.stderr.is_empty(),
+            "worker-parity assembly emitted diagnostics with {worker_count} workers:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        outputs.push(output.stdout);
+    }
+
+    assert_eq!(outputs[0], b"worker-parity");
+    assert!(
+        outputs.windows(2).all(|pair| pair[0] == pair[1]),
+        "ordinary output must not depend on worker scheduling: {outputs:?}"
+    );
+}
+
+#[test]
 fn configured_bare_cli_rewrites_and_executes_in_the_prepared_session() {
     let directory = unique_temp_dir("glam-configured-cli");
     fs::create_dir_all(&directory).expect("configured CLI directory should be created");

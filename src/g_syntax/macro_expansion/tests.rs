@@ -206,7 +206,7 @@ fn unstarted_reflection_gate_runs_inside_the_macro_session() {
 }
 
 #[test]
-fn assembler_owned_reflection_gate_is_foreign_to_macro_execution() {
+fn assembler_claimed_reflection_gate_is_unavailable_to_macro_session() {
     let (assembler, reflection) = compile_effects(".cut (.heap.get '.missing >>= (\\_ -> .fail))");
     let execution = assembler.test_compilation_execution();
     let gate = Value::reflection_gate(
@@ -220,8 +220,12 @@ fn assembler_owned_reflection_gate_is_foreign_to_macro_execution() {
     let macro_effect = PublicValue::from_core(&assembler.core_values(), return_effect(gate));
 
     let error = run(&execution, &macro_effect, Value::Dict(Dict::new_sync()))
-        .expect_err("macro execution must not migrate a foreign gate");
-    assert!(error.message().contains("foreign or unavailable"));
+        .expect_err("macro execution must not migrate a gate claimed by another demand session");
+    assert!(
+        error
+            .message()
+            .contains("unavailable to the macro demand session")
+    );
 }
 
 #[test]

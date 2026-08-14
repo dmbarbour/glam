@@ -578,7 +578,7 @@ fn force_macro_lookup_value(
                     | EvaluationPumpOutcome::BudgetExhausted => {}
                     EvaluationPumpOutcome::NoProgress => {
                         return Err(
-                            "macro lookup is waiting on a foreign or unavailable lazy producer"
+                            "macro lookup is waiting on a lazy producer unavailable to the macro demand session"
                                 .to_owned(),
                         );
                     }

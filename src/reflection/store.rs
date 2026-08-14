@@ -54,7 +54,7 @@ impl ConflictPath {
     }
 }
 
-/// One shared-state partition within a reasoning session.
+/// One shared-state partition within an evaluation runtime's reflection store.
 ///
 /// IDs are allocated monotonically by the store and are never reused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]

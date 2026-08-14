@@ -4160,6 +4160,26 @@ mod tests {
         }
     }
 
+    struct RecordPollOrder {
+        label: u8,
+        polls: Arc<Mutex<Vec<u8>>>,
+        yield_once: bool,
+    }
+
+    impl EvaluationTaskMachine for RecordPollOrder {
+        fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+            self.polls
+                .lock()
+                .expect("task-order trace was poisoned")
+                .push(self.label);
+            if std::mem::take(&mut self.yield_once) {
+                EvaluationMachinePoll::Yielded
+            } else {
+                EvaluationMachinePoll::Complete(crate::core::keys::unit_value())
+            }
+        }
+    }
+
     struct Fail;
 
     impl EvaluationTaskMachine for Fail {
@@ -5802,6 +5822,140 @@ mod tests {
             report.failures.is_empty(),
             "the machine's discarded failure must not enter the reporting ledger"
         );
+    }
+
+    #[test]
+    fn executor_shutdown_preserves_worker_owned_cancellation_and_task_promise() {
+        let (coordinator, executor) =
+            test_execution_resources(1).expect("test executor should start");
+        let session = EvaluationSession::shared(&coordinator);
+        let context = EvalContext::new(&session);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let (promise_sender, promise_receiver) = mpsc::channel();
+        let (started_sender, started_receiver) = mpsc::channel();
+        let (release_sender, release_receiver) = mpsc::channel();
+        let task = context
+            .schedule_task({
+                let cancelled = cancelled.clone();
+                move |task_context| {
+                    let promise = PromisedValue::fixpoint(
+                        &task_context,
+                        "promise owned across executor shutdown",
+                    )?;
+                    promise_sender
+                        .send(promise)
+                        .expect("shutdown test must receive its task-owned promise");
+                    Ok(Box::new(CancellableAfterRelease {
+                        started: Some(started_sender),
+                        release: release_receiver,
+                        cancelled,
+                    }))
+                }
+            })
+            .expect("worker-owned shutdown task should schedule");
+        let promise = promise_receiver
+            .recv()
+            .expect("task construction should publish its promise");
+        let promise_wait = promise
+            .task()
+            .expect("task-owned promise should retain producer provenance")
+            .wait()
+            .clone();
+        started_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("a real worker should claim the task");
+
+        assert_eq!(task.cancel(), EvaluationTaskCancellation::Requested);
+        drop(executor);
+        assert!(matches!(
+            context.poll_reflection_task(&task),
+            EvaluationWaitPoll::Pending(_)
+        ));
+        assert!(promise.assignment().is_none());
+        assert!(
+            !cancelled.load(Ordering::Acquire),
+            "executor shutdown must not steal the worker-owned machine"
+        );
+
+        release_sender
+            .send(())
+            .expect("the detached worker should finish its quantum");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while matches!(
+            context.poll_reflection_task(&task),
+            EvaluationWaitPoll::Pending(_)
+        ) && Instant::now() < deadline
+        {
+            std::thread::yield_now();
+        }
+        while !cancelled.load(Ordering::Acquire) && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+
+        assert!(cancelled.load(Ordering::Acquire));
+        assert_eq!(
+            context.poll_reflection_task(&task),
+            EvaluationWaitPoll::Cancelled
+        );
+        let promise_failure = promise
+            .assignment()
+            .expect("returning worker must settle its task-owned promise")
+            .expect_err("cancellation must fail the unresolved promise");
+        assert!(promise_failure.to_string().contains("was cancelled"));
+        assert!(matches!(
+            context.poll_wait(&promise_wait),
+            EvaluationWaitPoll::Failed(wait_failure)
+                if Arc::ptr_eq(&promise_failure, &wait_failure)
+        ));
+        assert_eq!(context.task_registry_counts().reflection_active, 0);
+    }
+
+    #[test]
+    fn serial_ready_tasks_preserve_same_session_fifo_order_across_requeue() {
+        let fixture = SameRuntimeFixture::new();
+        let first = fixture.context();
+        let other = fixture.context();
+        let coordinator = first.coordinator().expect("coordinator should be live");
+        let polls = Arc::new(Mutex::new(Vec::new()));
+        let schedule = |context: &EvalContext, label, yield_once| {
+            let polls = polls.clone();
+            context
+                .schedule_task(move |_| {
+                    Ok(Box::new(RecordPollOrder {
+                        label,
+                        polls,
+                        yield_once,
+                    }))
+                })
+                .expect("ordered reflection task should schedule")
+        };
+
+        let _first = schedule(&first, 1, true);
+        let other_task = schedule(&other, 9, false);
+        let _second = schedule(&first, 2, false);
+        let _third = schedule(&first, 3, false);
+        coordinator.executor_started(1);
+        first.spark(first.values().unit());
+
+        let EvaluationSessionRun::Complete(report) = first.run_until_quiescent() else {
+            panic!("the first session's ordered tasks should complete")
+        };
+        assert!(report.failures.is_empty());
+        assert_eq!(*polls.lock().unwrap(), [1, 2, 3, 1]);
+        assert!(matches!(
+            other.poll_reflection_task(&other_task),
+            EvaluationWaitPoll::Pending(_)
+        ));
+
+        let EvaluationSessionRun::Complete(report) = other.run_until_quiescent() else {
+            panic!("the unrelated session's task should remain independently runnable")
+        };
+        assert!(report.failures.is_empty());
+        assert_eq!(*polls.lock().unwrap(), [1, 2, 3, 1, 9]);
+
+        fixture.runtime.pump_until_stable();
+        coordinator.executor_stopped();
+        assert_eq!(coordinator.retained_spark_count(), 0);
     }
 
     #[test]

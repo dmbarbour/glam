@@ -141,9 +141,10 @@ source diagnostic bus has one ordered runtime ingress backed by a generic
 input endpoint; `.read_log` consumes that FIFO through the ordinary event
 journal. Logger `.log` and `.write_stderr` calls become runtime-rooted output
 intents and reach their bus or OS adapter only after combined store/event
-commit. The explicit close/cancel flags remain a temporary lifecycle shim
-until runtime settlement replaces them; the logger environment and output
-diagnostic bus remain role-specific.
+commit. The logger root participates in runtime readiness and settlement: it
+votes to exit when its input is quiescent, retries if new input disturbs that
+vote, and switches its stable ingress to fallback after settlement. The logger
+environment and output diagnostic bus remain role-specific.
 For a bare command, the CLI first loads configuration with a dormant runtime,
 runs `conf.cli` as an isolated all-results search, resolves the promised
 canonical argument environment, and only then activates the selected worker

@@ -123,7 +123,7 @@ pub(in crate::g_syntax) fn run_macro_effect(
                     EvaluationPumpOutcome::NoProgress => {
                         return Err(macro_error(
                             values,
-                            "macro effect is waiting on a foreign or unavailable lazy producer",
+                            "macro effect is waiting on a lazy producer unavailable to the macro demand session",
                         ));
                     }
                 }
@@ -233,7 +233,7 @@ fn force_result(
                     EvaluationPumpOutcome::NoProgress => {
                         return Err(macro_error(
                             execution.macro_context().values(),
-                            "macro result is waiting on a foreign or unavailable lazy producer",
+                            "macro result is waiting on a lazy producer unavailable to the macro demand session",
                         ));
                     }
                 }
