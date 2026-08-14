@@ -1006,6 +1006,7 @@ impl SparkRetirement {
 struct WorkCoordinatorState {
     demand_sessions: HashMap<EvaluationSessionId, Weak<EvaluationDemandState>>,
     failures: RuntimeFailureLedger,
+    pending_failure_reports: RuntimeFailureLedger,
     work: HashMap<EvaluationWorkId, WorkRecord>,
     work_by_session: HashMap<EvaluationSessionId, HashSet<EvaluationWorkId>>,
     ready_tasks: VecDeque<EvaluationWorkId>,
@@ -1292,12 +1293,34 @@ impl EvaluationWorkCoordinator {
             .unwrap_or_else(TaskFailureLedger::new_sync)
     }
 
+    #[cfg(test)]
     pub(crate) fn failure_ledger_snapshot(&self) -> RuntimeFailureLedger {
         self.state
             .lock()
             .expect("evaluation work coordinator was poisoned")
             .failures
             .clone()
+    }
+
+    /// Captures the persistent failure ledger and commits every not-yet-
+    /// reported failure to the current settlement report.
+    ///
+    /// The persistent ledger remains authoritative until explicit
+    /// acknowledgement. Only the separate reporting obligations move into the
+    /// report, so later settlements do not ask a presentation layer to
+    /// remember which failures it has already rendered.
+    pub(crate) fn failure_ledgers_for_settlement(
+        &self,
+    ) -> (RuntimeFailureLedger, RuntimeFailureLedger) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("evaluation work coordinator was poisoned");
+        let pending = std::mem::replace(
+            &mut state.pending_failure_reports,
+            RuntimeFailureLedger::new_sync(),
+        );
+        (state.failures.clone(), pending)
     }
 
     #[cfg(test)]
@@ -1371,6 +1394,7 @@ impl EvaluationWorkCoordinator {
                 }
             }
             changed |= remove_task_failure(&mut state.failures, owner, task);
+            remove_task_failure(&mut state.pending_failure_reports, owner, task);
             if changed {
                 state.work_generation = state.work_generation.wrapping_add(1);
             }
@@ -3932,7 +3956,8 @@ impl EvaluationWorkCoordinator {
                 (producer, failure, status_update)
             };
             if let Some((owner, task, failure)) = failure {
-                insert_task_failure(&mut state.failures, owner, task, failure);
+                insert_task_failure(&mut state.failures, owner, task, failure.clone());
+                insert_task_failure(&mut state.pending_failure_reports, owner, task, failure);
                 state.work_generation = state.work_generation.wrapping_add(1);
             }
             (producer, status_update)

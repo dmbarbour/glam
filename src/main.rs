@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
@@ -24,11 +23,11 @@ use glam::{
     Assembler, Diagnostic, DiagnosticBus, DiagnosticEvent, DiagnosticIngress, DiagnosticSubscriber,
     Error, EvaluationRuntime, FileSourceSystem, ModuleInput, PromiseResolver, QuiescenceReport,
     ReasoningReport, ReasoningStatus, ReasoningTaskState, RuntimeDeadlockWork,
-    RuntimeDeliveryFailure, RuntimeDeliveryId, RuntimeDeliveryOutcome, RuntimeDependency,
-    RuntimeDisposition, RuntimeDispositionKind, RuntimeEventJournal, RuntimeInputReader,
-    RuntimeKillReason, RuntimeLoggerSnapshot, RuntimeOutputDelivery, RuntimeOutputWriter,
-    RuntimeReadiness, RuntimeSharedResources, RuntimeWorkKind, RuntimeWorkState, Severity, Value,
-    Values, check_local_manifest, inspect_g_source,
+    RuntimeDeliveryFailure, RuntimeDeliveryOutcome, RuntimeDependency, RuntimeDisposition,
+    RuntimeDispositionKind, RuntimeEventJournal, RuntimeInputReader, RuntimeKillReason,
+    RuntimeLoggerSnapshot, RuntimeOutputDelivery, RuntimeOutputWriter, RuntimeReadiness,
+    RuntimeSharedResources, RuntimeWorkKind, RuntimeWorkState, Severity, Value, Values,
+    check_local_manifest, inspect_g_source,
 };
 
 trait DiagnosticBusLocal {
@@ -618,13 +617,13 @@ fn settle_batch_runtime(
             }
             RuntimeReadiness::Deadlocked(deadlock) => deadlock.kill(RuntimeKillReason::Deadlock),
         };
-        let report = match snapshot.settle() {
+        let mut report = match snapshot.settle() {
             Ok(report) => report,
             Err(_) => continue,
         };
 
         failed |= settled_report_is_fatal(&report);
-        match supervisor.render_settled_report(&report) {
+        match supervisor.render_settled_report(&mut report) {
             Ok(0) => return failed,
             Ok(_) => {}
             Err(error) => {
@@ -1271,10 +1270,6 @@ struct LoggerSupervisor {
 struct LoggerSupervisorState {
     next_generation: u64,
     active: Option<LoggerInstallation>,
-    rendered_tasks: BTreeSet<(u64, u64)>,
-    rendered_deliveries: BTreeSet<RuntimeDeliveryId>,
-    rendered_exits: BTreeSet<u64>,
-    rendered_kills: BTreeSet<u64>,
 }
 
 struct SettledReportSelection {
@@ -1321,10 +1316,6 @@ impl LoggerSupervisor {
             state: std::sync::Mutex::new(LoggerSupervisorState {
                 next_generation: 1,
                 active: None,
-                rendered_tasks: BTreeSet::new(),
-                rendered_deliveries: BTreeSet::new(),
-                rendered_exits: BTreeSet::new(),
-                rendered_kills: BTreeSet::new(),
             }),
         }
     }
@@ -1382,7 +1373,7 @@ impl LoggerSupervisor {
         deliver_fallback_output(&self.fallback_delivery)
     }
 
-    fn render_settled_report(&self, report: &QuiescenceReport) -> Result<usize, Error> {
+    fn render_settled_report(&self, report: &mut QuiescenceReport) -> Result<usize, Error> {
         if report.runtime_id() != self.input.runtime.id() {
             return Err(Error::new(format!(
                 "quiescence report belongs to evaluation runtime {}, not {}",
@@ -1390,61 +1381,27 @@ impl LoggerSupervisor {
                 self.input.runtime.id().get()
             )));
         }
-        let selected = self.select_unrendered_report_entries(report);
+        let selected = SettledReportSelection {
+            task_failures: report.pending_task_failure_reports().to_vec(),
+            delivery_failures: report
+                .pending_delivery_failure_reports()
+                .failures()
+                .into_iter()
+                .filter(|failure| failure.endpoint_id() != self.fallback_delivery.id())
+                .collect(),
+            exit_errors: report.pending_exit_error_reports().to_vec(),
+            killed_work: report.pending_killed_work_reports().to_vec(),
+        };
         let values = self.input.runtime.values();
         let diagnostics = settled_report_diagnostics(&values, selected)?;
         let rendered = diagnostics.len();
         self.enqueue_fallback_diagnostics(diagnostics)?;
+        // Enqueue is the report transport's transactional commitment point.
+        // Delivery may still fail, but replaying an accepted outbox batch would
+        // duplicate externally visible output.
+        report.mark_reports_enqueued();
         self.deliver_fallback()?;
         Ok(rendered)
-    }
-
-    fn select_unrendered_report_entries(
-        &self,
-        report: &QuiescenceReport,
-    ) -> SettledReportSelection {
-        let mut state = self
-            .state
-            .lock()
-            .expect("logger supervisor mutex should not be poisoned");
-        let task_failures = report
-            .task_failures()
-            .iter()
-            .filter(|failure| {
-                state
-                    .rendered_tasks
-                    .insert((failure.session_id(), failure.task_id()))
-            })
-            .cloned()
-            .collect();
-        let delivery_failures = report
-            .delivery_failures()
-            .failures()
-            .into_iter()
-            .filter(|failure| state.rendered_deliveries.insert(failure.delivery_id()))
-            .filter(|failure| failure.endpoint_id() != self.fallback_delivery.id())
-            .collect();
-        let exit_errors = report
-            .dispositions()
-            .iter()
-            .filter(|disposition| {
-                matches!(disposition.kind(), RuntimeDispositionKind::ExitError(_))
-                    && state.rendered_exits.insert(disposition.work_id())
-            })
-            .cloned()
-            .collect();
-        let killed_work = report
-            .killed_work()
-            .iter()
-            .filter(|work| state.rendered_kills.insert(work.work_id()))
-            .cloned()
-            .collect();
-        SettledReportSelection {
-            task_failures,
-            delivery_failures,
-            exit_errors,
-            killed_work,
-        }
     }
 
     fn enqueue_fallback_diagnostics(&self, diagnostics: Vec<Diagnostic>) -> Result<(), Error> {
@@ -3502,14 +3459,14 @@ mod tests {
         let glam::RuntimeReadiness::Ready(snapshot) = input.runtime.readiness() else {
             panic!("terminal failures should be retained state, not active work")
         };
-        let report = snapshot.settle().expect("failure report should settle");
+        let mut report = snapshot.settle().expect("failure report should settle");
         assert_eq!(report.task_failures().len(), 1);
         assert_eq!(report.delivery_failures().failures().len(), 1);
         assert_eq!(source_diagnostics.counts().total(), 0);
         assert_eq!(logger_diagnostics.counts().total(), 0);
 
-        assert_eq!(supervisor.render_settled_report(&report).unwrap(), 2);
-        assert_eq!(supervisor.render_settled_report(&report).unwrap(), 0);
+        assert_eq!(supervisor.render_settled_report(&mut report).unwrap(), 2);
+        assert_eq!(supervisor.render_settled_report(&mut report).unwrap(), 0);
         let rendered = rendered
             .lock()
             .expect("rendered diagnostic collection should not be poisoned");
@@ -3599,7 +3556,7 @@ mod tests {
         let glam::RuntimeReadiness::Deadlocked(snapshot) = input.runtime.readiness() else {
             panic!("an exit vote plus a blocked reader should retain a deadlock")
         };
-        let report = snapshot
+        let mut report = snapshot
             .kill(glam::RuntimeKillReason::Deadlock)
             .settle()
             .expect("forced deadlock report should settle");
@@ -3623,8 +3580,8 @@ mod tests {
         );
         assert_eq!(report.killed_work().len(), 1);
 
-        assert_eq!(supervisor.render_settled_report(&report).unwrap(), 2);
-        assert_eq!(supervisor.render_settled_report(&report).unwrap(), 0);
+        assert_eq!(supervisor.render_settled_report(&mut report).unwrap(), 2);
+        assert_eq!(supervisor.render_settled_report(&mut report).unwrap(), 0);
         let rendered = rendered
             .lock()
             .expect("rendered diagnostic collection should not be poisoned");
@@ -3707,11 +3664,11 @@ mod tests {
         let glam::RuntimeReadiness::Ready(snapshot) = input.runtime.readiness() else {
             panic!("retained task failure should be ready")
         };
-        let report = snapshot
+        let mut report = snapshot
             .settle()
             .expect("task failure report should settle");
 
-        assert_eq!(supervisor.render_settled_report(&report).unwrap(), 1);
+        assert_eq!(supervisor.render_settled_report(&mut report).unwrap(), 1);
         assert_eq!(
             *rendered
                 .lock()
@@ -3762,24 +3719,30 @@ mod tests {
         let glam::RuntimeReadiness::Ready(snapshot) = input.runtime.readiness() else {
             panic!("a retained delivery failure should be ready")
         };
-        let report = snapshot
+        let mut report = snapshot
             .settle()
             .expect("initial delivery failure should settle");
 
         let error = supervisor
-            .render_settled_report(&report)
+            .render_settled_report(&mut report)
             .expect_err("fallback delivery should report its adapter failure");
         assert_eq!(error.to_string(), "fallback output adapter failed");
+        assert_eq!(fallback_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            supervisor.render_settled_report(&mut report).unwrap(),
+            0,
+            "accepted fallback output must not be replayed after adapter failure"
+        );
         assert_eq!(fallback_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
 
         let glam::RuntimeReadiness::Ready(snapshot) = input.runtime.readiness() else {
             panic!("failed fallback delivery should remain reportable state")
         };
-        let repeated = snapshot
+        let mut repeated = snapshot
             .settle()
             .expect("fallback delivery failure should settle");
         assert_eq!(repeated.delivery_failures().failures().len(), 2);
-        assert_eq!(supervisor.render_settled_report(&repeated).unwrap(), 0);
+        assert_eq!(supervisor.render_settled_report(&mut repeated).unwrap(), 0);
         assert_eq!(fallback_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert!(
             repeated

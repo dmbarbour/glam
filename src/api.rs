@@ -1952,7 +1952,6 @@ impl std::error::Error for RuntimeSettlementError {}
 
 /// Retained evidence collected when a stable runtime snapshot is settled.
 #[doc(hidden)]
-#[derive(Clone)]
 pub struct QuiescenceReport {
     runtime: EvaluationRuntime,
     stamp: RuntimeReadinessStamp,
@@ -1961,6 +1960,10 @@ pub struct QuiescenceReport {
     delivery_failures: RuntimeDeliveryFailureSnapshot,
     reflection: crate::reflection::StoreSnapshot,
     killed_work: Vec<RuntimeDeadlockWork>,
+    pending_task_failure_reports: Vec<ReasoningFailure>,
+    pending_delivery_failure_reports: RuntimeDeliveryFailureSnapshot,
+    pending_exit_error_reports: Vec<RuntimeDisposition>,
+    pending_killed_work_reports: Vec<RuntimeDeadlockWork>,
 }
 
 impl fmt::Debug for QuiescenceReport {
@@ -2008,6 +2011,44 @@ impl QuiescenceReport {
     /// Typed blocked work forcefully retired by this settlement.
     pub fn killed_work(&self) -> &[RuntimeDeadlockWork] {
         &self.killed_work
+    }
+
+    /// Task failures whose reporting responsibility was committed to this
+    /// settlement rather than an earlier one.
+    #[doc(hidden)]
+    pub fn pending_task_failure_reports(&self) -> &[ReasoningFailure] {
+        &self.pending_task_failure_reports
+    }
+
+    /// Delivery failures whose reporting responsibility was committed to this
+    /// settlement rather than an earlier one.
+    #[doc(hidden)]
+    pub fn pending_delivery_failure_reports(&self) -> &RuntimeDeliveryFailureSnapshot {
+        &self.pending_delivery_failure_reports
+    }
+
+    /// Error exits created by this settlement and not yet committed to report
+    /// transport.
+    #[doc(hidden)]
+    pub fn pending_exit_error_reports(&self) -> &[RuntimeDisposition] {
+        &self.pending_exit_error_reports
+    }
+
+    /// Killed-work records created by this settlement and not yet committed to
+    /// report transport.
+    #[doc(hidden)]
+    pub fn pending_killed_work_reports(&self) -> &[RuntimeDeadlockWork] {
+        &self.pending_killed_work_reports
+    }
+
+    /// Records that every pending report entry was accepted by the selected
+    /// transport. Persistent failure ledgers are unaffected.
+    #[doc(hidden)]
+    pub fn mark_reports_enqueued(&mut self) {
+        self.pending_task_failure_reports.clear();
+        self.pending_delivery_failure_reports.failures = RedBlackTreeMapSync::new_sync();
+        self.pending_exit_error_reports.clear();
+        self.pending_killed_work_reports.clear();
     }
 }
 
@@ -2365,6 +2406,7 @@ struct RuntimeOutputState {
     ready_by_endpoint:
         BTreeMap<RuntimeOutputEndpointId, std::collections::VecDeque<RuntimeDeliveryId>>,
     failures: RedBlackTreeMapSync<RuntimeDeliveryId, Arc<RuntimeDeliveryFailure>>,
+    pending_failure_reports: RedBlackTreeMapSync<RuntimeDeliveryId, Arc<RuntimeDeliveryFailure>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3475,6 +3517,11 @@ fn terminalize_runtime_delivery(
                     .outputs
                     .failures
                     .insert_mut(delivery, failure.clone());
+                state
+                    .events
+                    .outputs
+                    .pending_failure_reports
+                    .insert_mut(delivery, failure.clone());
             }
             retired
         };
@@ -3944,6 +3991,11 @@ impl EvaluationRuntime {
             let removed = state.events.outputs.failures.get(&delivery).cloned();
             if removed.is_some() {
                 state.events.outputs.failures.remove_mut(&delivery);
+                state
+                    .events
+                    .outputs
+                    .pending_failure_reports
+                    .remove_mut(&delivery);
             }
             removed
         };
@@ -4161,20 +4213,28 @@ impl EvaluationRuntime {
             remaining_exits.is_empty(),
             "settlement must consume every validated exit disposition"
         );
-        let task_ledger = self.state.work.failure_ledger_snapshot();
-        let (reflection, delivery_failures) = {
-            let state = self
+        let (task_ledger, pending_task_reports) = self.state.work.failure_ledgers_for_settlement();
+        let (reflection, delivery_failures, pending_delivery_reports) = {
+            let mut state = self
                 .state
                 .shared_resources
                 .transactions
                 .state
                 .lock()
                 .expect("runtime transaction mutex should not be poisoned");
+            let pending_delivery_reports = std::mem::replace(
+                &mut state.events.outputs.pending_failure_reports,
+                RedBlackTreeMapSync::new_sync(),
+            );
             (
                 state.reflection.snapshot(),
                 RuntimeDeliveryFailureSnapshot {
                     runtime: self.id(),
                     failures: state.events.outputs.failures.clone(),
+                },
+                RuntimeDeliveryFailureSnapshot {
+                    runtime: self.id(),
+                    failures: pending_delivery_reports,
                 },
             )
         };
@@ -4195,6 +4255,27 @@ impl EvaluationRuntime {
                     })
             })
             .collect();
+        let pending_task_failure_reports = pending_task_reports
+            .iter()
+            .flat_map(|(session, failures)| {
+                failures
+                    .iter()
+                    .map(move |(task, failure)| ReasoningFailure {
+                        runtime: self.id(),
+                        task: *task,
+                        diagnostic: reasoning_diagnostic(self.values().core(), failure),
+                        session: *session,
+                    })
+            })
+            .collect();
+        let pending_exit_error_reports = snapshot
+            .dispositions
+            .iter()
+            .filter(|disposition| {
+                matches!(disposition.kind(), RuntimeDispositionKind::ExitError(_))
+            })
+            .cloned()
+            .collect();
         Ok(QuiescenceReport {
             runtime: self.clone(),
             stamp: RuntimeReadinessStamp {
@@ -4206,6 +4287,10 @@ impl EvaluationRuntime {
             delivery_failures,
             reflection,
             killed_work: snapshot.killed_work.clone(),
+            pending_task_failure_reports,
+            pending_delivery_failure_reports: pending_delivery_reports,
+            pending_exit_error_reports,
+            pending_killed_work_reports: snapshot.killed_work.clone(),
         })
     }
 
@@ -7502,6 +7587,7 @@ mod tests {
         };
         let report = snapshot.settle().expect("stable runtime should settle");
         assert_eq!(report.task_failures().len(), 1);
+        assert_eq!(report.pending_task_failure_reports().len(), 1);
         assert_eq!(
             report.task_failures()[0].task_id(),
             retained_task.id().get()
@@ -7526,6 +7612,35 @@ mod tests {
                 .get(retained_delivery_id)
                 .is_some()
         );
+        assert!(
+            report
+                .pending_delivery_failure_reports()
+                .get(acknowledged_delivery_id)
+                .is_none()
+        );
+        assert!(
+            report
+                .pending_delivery_failure_reports()
+                .get(retained_delivery_id)
+                .is_some()
+        );
+
+        let RuntimeReadiness::Ready(snapshot) = runtime.readiness() else {
+            panic!("retained failures should remain stable reporting state")
+        };
+        let repeated = snapshot
+            .settle()
+            .expect("repeated stable runtime should settle");
+        assert_eq!(repeated.task_failures().len(), 1);
+        assert!(repeated.pending_task_failure_reports().is_empty());
+        assert!(
+            repeated
+                .delivery_failures()
+                .get(retained_delivery_id)
+                .is_some(),
+            "settlement must not acknowledge the persistent failure"
+        );
+        assert!(repeated.pending_delivery_failure_reports().is_empty());
 
         retained_task.acknowledge_failure();
         assert!(runtime.acknowledge_delivery_failure(retained_delivery_id));
