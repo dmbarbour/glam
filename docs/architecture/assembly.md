@@ -150,18 +150,20 @@ construct one dormant assembler and compile configuration
   -> activate the selected worker count exactly once
   -> compile assembly
   -> evaluate and write valid asm.result bytes
-  -> drain assembler reflection reasoning
-  -> emit task-failure or deadlock diagnostics
   -> recheck observed local files and write optional manifest
-  -> seal diagnostic input
-  -> finish or fail conf.log
-  -> exit nonzero if any error diagnostic was committed
+  -> pump all runtime work to a stable readiness or deadlock
+  -> settle exit votes, or explicitly kill and settle a stable deadlock
+  -> render retained task, delivery, exit, and killed-work reports via fallback
+  -> repump if rendering admitted work, then drain fallback output
+  -> finish conf.log and read assembler/logger bus counts independently
+  -> exit nonzero for result/report failure or either bus's error count
 ```
 
 Valid stdout may therefore accompany a failing exit status when reasoning or
-diagnostics report an error. Main checks the assembler and logger bus error
-counts independently; both are independent of queue retention, reads, and
-rendering.
+diagnostics report an error. Retained runtime failures establish failure before
+rendering, so a failed fallback adapter cannot turn an unsuccessful batch into
+a successful one. Main checks the assembler and logger bus error counts
+independently; both are independent of queue retention, reads, and rendering.
 
 Standalone `--parse` inspects one built-in `.g` source through the narrow
 library report without constructing an assembler or loading imports. Its

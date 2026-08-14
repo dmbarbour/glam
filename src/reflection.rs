@@ -755,6 +755,7 @@ pub struct EffectRun<S: TaskSpecialization> {
     runtime: Option<EvaluationRuntime>,
     result_policy: EffectResultPolicy,
     result_assertion_context: Option<Arc<str>>,
+    failure_context: Option<PublicValue>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -777,6 +778,7 @@ impl<S: TaskSpecialization> EffectRun<S> {
             runtime: Some(runtime.clone()),
             result_policy: EffectResultPolicy::Return,
             result_assertion_context: None,
+            failure_context: None,
         }
     }
 
@@ -797,6 +799,24 @@ impl<S: TaskSpecialization> EffectRun<S> {
         self
     }
 
+    /// Prepends one semantic context frame to a permanent failure from the
+    /// complete effect run, including failures reached after effect dispatch.
+    pub fn contextualizing_failures(mut self, context: PublicValue) -> Result<Self, TaskHalt> {
+        let runtime = self
+            .runtime
+            .as_ref()
+            .expect("EffectRun construction always selects an evaluation runtime");
+        if context.runtime_id() != runtime.id() {
+            return Err(TaskHalt::new(format!(
+                "effect failure context belongs to evaluation runtime {}, not {}",
+                context.runtime_id().get(),
+                runtime.id().get()
+            )));
+        }
+        self.failure_context = Some(context);
+        Ok(self)
+    }
+
     pub fn run(self) -> Result<TaskOutcome, TaskHalt> {
         let Self {
             effect,
@@ -805,6 +825,7 @@ impl<S: TaskSpecialization> EffectRun<S> {
             runtime,
             result_policy,
             result_assertion_context,
+            failure_context,
         } = self;
         let task_profile = Arc::new(ReflectionTaskProfile::sealed(task_launcher(
             specialization.clone(),
@@ -817,7 +838,8 @@ impl<S: TaskSpecialization> EffectRun<S> {
             specialization,
             host,
             EvalContext::with_task_profile(&session, task_profile),
-        )?;
+        )
+        .map_err(|error| contextualize_task_halt(error, failure_context.as_ref()))?;
         if result_policy == EffectResultPolicy::RequireUnit {
             task = task.requiring_unit_result();
         }
@@ -825,6 +847,7 @@ impl<S: TaskSpecialization> EffectRun<S> {
             task = task.asserting_unit_result(diagnostic_context);
         }
         run_composed_effect_task(task)
+            .map_err(|error| contextualize_task_halt(error, failure_context.as_ref()))
     }
 
     /// Installs this effect as ordinary coordinator work in a fresh demand
@@ -859,6 +882,7 @@ impl<S: TaskSpecialization> EffectRun<S> {
             runtime,
             result_policy,
             result_assertion_context,
+            failure_context,
         } = self;
         let task_profile = Arc::new(ReflectionTaskProfile::sealed(task_launcher(
             specialization.clone(),
@@ -868,6 +892,7 @@ impl<S: TaskSpecialization> EffectRun<S> {
         let session = runtime.new_evaluation_session_with_profile(task_profile)?;
         let context = EvalContext::new(&session);
         let session = Arc::new(Mutex::new(Some(session)));
+        let failure_context = failure_context.map(PublicValue::into_core);
         let task = context
             .schedule_machine(
                 Some(lifecycle.publisher(session.clone())),
@@ -880,27 +905,48 @@ impl<S: TaskSpecialization> EffectRun<S> {
                         false,
                         exposes_exit,
                     )
-                    .map_err(TaskHalt::into_failure)?;
+                    .map_err(|error| {
+                        let failure = error.into_failure();
+                        match &failure_context {
+                            Some(context) => Arc::new(failure.with_context(context.clone())),
+                            None => failure,
+                        }
+                    })?;
                     if result_policy == EffectResultPolicy::RequireUnit {
                         task = task.requiring_unit_result();
                     }
                     if let Some(diagnostic_context) = result_assertion_context {
                         task = task.asserting_unit_result(diagnostic_context);
                     }
-                    Ok(Box::new(ValueEffectTask(task)))
+                    Ok(match failure_context {
+                        Some(context) => Box::new(ContextualValueEffectTask { task, context })
+                            as Box<dyn EvaluationTaskMachine>,
+                        None => Box::new(ValueEffectTask(task)) as Box<dyn EvaluationTaskMachine>,
+                    })
                 },
             )
             .map_err(TaskHalt::failure)?;
-        // This hidden root has an explicit Rust owner which propagates its
-        // failure. It therefore must not also remain in the detached task
-        // failure ledger.
-        task.acknowledge_failure();
+        // Ordinary hidden roots have an explicit Rust owner which propagates
+        // their failure, so they must not also remain in the detached task
+        // failure ledger. An exit-capable runtime service is different: batch
+        // settlement, rather than the thread waiting on this handle, owns its
+        // terminal report and must retain an unacknowledged root failure.
+        if !exposes_exit {
+            task.acknowledge_failure();
+        }
         Ok(ScheduledEffectRun {
             context,
             session,
             task,
             stop_requested: None,
         })
+    }
+}
+
+fn contextualize_task_halt(error: TaskHalt, context: Option<&PublicValue>) -> TaskHalt {
+    match context {
+        Some(context) => error.with_core_context(context.as_core().clone()),
+        None => error,
     }
 }
 
@@ -2845,30 +2891,55 @@ struct UnitEffectTask<S: TaskSpecialization>(EffectTask<S>);
 
 struct ValueEffectTask<S: TaskSpecialization>(EffectTask<S>);
 
+struct ContextualValueEffectTask<S: TaskSpecialization> {
+    task: EffectTask<S>,
+    context: Value,
+}
+
 impl<S: TaskSpecialization> EvaluationTaskMachine for ValueEffectTask<S> {
     fn poll(&mut self, step_budget: usize) -> EvaluationMachinePoll {
-        let observed_epoch = self.0.eval_context.current_observation_epoch();
-        match self.0.poll(step_budget) {
-            EffectTaskPoll::Yielded => EvaluationMachinePoll::Yielded,
-            EffectTaskPoll::Blocked(blocked) => {
-                EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
-                    dependency: blocked.lazy.map(WorkDependency::Wait),
-                    observed_epoch: blocked.observed_generation.map(|_| observed_epoch),
-                    error: blocked.error,
-                })
-            }
-            EffectTaskPoll::Exit(exit) => EvaluationMachinePoll::Exit(EvaluationExitBlock {
-                intent: exit.intent,
-                observed_epoch: exit.observed_generation.map(|_| observed_epoch),
-            }),
-            EffectTaskPoll::Complete(value) => EvaluationMachinePoll::Complete(value.into_core()),
-            EffectTaskPoll::Failed(error) => EvaluationMachinePoll::Failed(error.into_failure()),
-            EffectTaskPoll::Cancelled => EvaluationMachinePoll::Cancelled,
-        }
+        poll_value_effect_task(&mut self.0, step_budget)
     }
 
     fn cancel(&mut self) {
         self.0.finish(TaskTerminal::Cancelled);
+    }
+}
+
+impl<S: TaskSpecialization> EvaluationTaskMachine for ContextualValueEffectTask<S> {
+    fn poll(&mut self, step_budget: usize) -> EvaluationMachinePoll {
+        match poll_value_effect_task(&mut self.task, step_budget) {
+            EvaluationMachinePoll::Failed(error) => {
+                EvaluationMachinePoll::Failed(Arc::new(error.with_context(self.context.clone())))
+            }
+            poll => poll,
+        }
+    }
+
+    fn cancel(&mut self) {
+        self.task.finish(TaskTerminal::Cancelled);
+    }
+}
+
+fn poll_value_effect_task<S: TaskSpecialization>(
+    task: &mut EffectTask<S>,
+    step_budget: usize,
+) -> EvaluationMachinePoll {
+    let observed_epoch = task.eval_context.current_observation_epoch();
+    match task.poll(step_budget) {
+        EffectTaskPoll::Yielded => EvaluationMachinePoll::Yielded,
+        EffectTaskPoll::Blocked(blocked) => EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
+            dependency: blocked.lazy.map(WorkDependency::Wait),
+            observed_epoch: blocked.observed_generation.map(|_| observed_epoch),
+            error: blocked.error,
+        }),
+        EffectTaskPoll::Exit(exit) => EvaluationMachinePoll::Exit(EvaluationExitBlock {
+            intent: exit.intent,
+            observed_epoch: exit.observed_generation.map(|_| observed_epoch),
+        }),
+        EffectTaskPoll::Complete(value) => EvaluationMachinePoll::Complete(value.into_core()),
+        EffectTaskPoll::Failed(error) => EvaluationMachinePoll::Failed(error.into_failure()),
+        EffectTaskPoll::Cancelled => EvaluationMachinePoll::Cancelled,
     }
 }
 

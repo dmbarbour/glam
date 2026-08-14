@@ -898,6 +898,44 @@ fn configured_logger_can_finish_when_the_log_stream_closes() {
 }
 
 #[test]
+fn configured_logger_can_drain_until_coordinated_exit() {
+    let dir = unique_temp_dir("glam-conf-log-exit");
+    fs::create_dir_all(&dir)
+        .unwrap_or_else(|err| panic!("failed to create {}: {err}", dir.display()));
+    let config = dir.join("conf.g");
+    fs::write(
+        &config,
+        concat!(
+            "language g0\n",
+            "object conf.env\n",
+            "conf.log = .fix (\\loop -> .cut (.alt ",
+            "(.read_log >>= (\\message -> ",
+            "(.write_stderr (message.msg.text ++ [10])) =>> loop)) ",
+            "(.exit.success)))\n",
+        ),
+    )
+    .unwrap_or_else(|err| panic!("failed to write {}: {err}", config.display()));
+
+    let output = glam_command()
+        .env("GLAM_CONF", &config)
+        .arg("--script.g")
+        .arg(
+            "language g0\nrefl.message = .log 'warn {msg:{text:\"DRAINED\"}}\nasm.result = \"ok\"\n",
+        )
+        .output()
+        .expect("failed to run glam");
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"ok");
+    assert_eq!(output.stderr, b"warning: DRAINED\n");
+}
+
+#[test]
 fn configured_logger_does_not_read_its_own_log_output() {
     let dir = unique_temp_dir("glam-conf-log-separate-output");
     fs::create_dir_all(&dir)

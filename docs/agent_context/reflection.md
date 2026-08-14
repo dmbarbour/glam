@@ -177,14 +177,15 @@ and control flow.
   for final `refl.*`, launches named tasks in order, requires unit from each,
   and stores ordered `{key,task}` records.
 - The CLI logger's assembler-bus input subscription and its session-local
-  diagnostic bus are separate. Logger output cannot reopen or feed a sealed
-  input stream. Its children inherit `.log`, but not `read_log`, `log_status`,
-  or `write_stderr`.
+  diagnostic bus are separate. Logger output cannot feed its own input stream.
+  Its `.task.new` children inherit the complete logger profile, including
+  `read_log`, `log_status`, and `write_stderr`.
 - Logger input has a revision distinct from heap revisions and the coarse wake
   generation. Arriving diagnostics do not invalidate heap-only transactions;
   a committed queue read still validates and consumes input atomically with
   its heap journal.
-- Batch execution seals diagnostics only after assembler reasoning drains. A
-  logger waiting on an empty input must observe `.log_status` and finish after
-  closure. Logger failure falls back to the default formatter and makes the
-  process fail.
+- Batch execution pumps the whole runtime, then settles coordinated logger exit
+  votes or forcefully reports a stable deadlock. The preferred logger loop is
+  `.cut (.alt (.read_log ...) (.exit.success))`; `.log_status` and explicit
+  close/cancel remain a temporary compatibility route. Runtime report failures
+  make the process fail even when fallback rendering also fails.

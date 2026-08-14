@@ -147,8 +147,10 @@ diagnostic bus remain role-specific.
 For a bare command, the CLI first loads configuration with a dormant runtime,
 runs `conf.cli` as an isolated all-results search, resolves the promised
 canonical argument environment, and only then activates the selected worker
-count. It then extracts `asm.result`, drains reflection reasoning, finalizes
-local file tracking, and closes configured logging. See the
+count. It then extracts `asm.result`, finalizes local file tracking, pumps the
+complete runtime to readiness, settles
+coordinated logger exit or a force-killed deadlock, and renders retained reports
+through fallback. See the
 [assembly flow](../docs/architecture/assembly.md) for ordering and failure
 behavior.
 

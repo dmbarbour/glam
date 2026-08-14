@@ -133,6 +133,22 @@ The conventional exported values are:
 | `conf.log` | The configured diagnostic logger. |
 | `conf.completion_script.NAME` | An optional completion adapter generator named `NAME`. |
 
+`conf.log` is an effect. A logger which drains the complete batch stream places
+its coordinated exit after the empty-read alternative:
+
+```g
+conf.log = .fix \loop ->
+  .cut (.alt
+    (.read_log >>= \message ->
+      .write_stderr (message.msg.text ++ [10]) =>>
+      loop)
+    (.exit.success))
+```
+
+The exit vote remains retryable until the whole runtime settles; a diagnostic
+arriving first makes `.read_log` run instead. `.log_status` remains available
+temporarily for older configurations which finish after an explicit close.
+
 The remaining sections focus on `conf.cli`.
 
 ## Configured bare commands

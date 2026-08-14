@@ -236,7 +236,12 @@ open/closed state. Committed `.log` from the logger or its children goes to a
 separate logger-session bus with a default-formatting subscriber rather than
 back into that stream.
 
-After assembly reasoning drains, `main` seals the input and lets the logger
-finish its own task tree. A logger may use `.log_status` to stop once the queue
-is empty and closed. Stable child deadlock, task failure, or a non-unit logger
-result fails configured logging and activates the fallback path.
+The coordinator-owned logger root also receives `.exit.success` and
+`.exit.error`. A conventional loop puts `.exit.success` after `.read_log` as
+the final branch of one `.cut`; an input committed before settlement disturbs
+that vote and retries the read first. Batch `main` settles the vote only when
+the whole runtime is stably ready. The temporary `.log_status` close path
+remains as a compatibility fallback: one stable deadlock closes input, a
+second requests logger cancellation, and only a remaining stable deadlock is
+forcefully killed and reported. Task, delivery, exit, and killed-work reports
+are fatal independently of successful fallback rendering.

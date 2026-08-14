@@ -1117,6 +1117,7 @@ pub(crate) struct RuntimeDeadlockWorkSnapshot {
     pub(crate) state: RuntimeWorkStateSnapshot,
     pub(crate) dependency: Option<RuntimeDependencySnapshot>,
     pub(crate) observed_epoch: Option<RuntimeObservationEpoch>,
+    pub(crate) blocked_error: Option<Arc<EvaluationFailure>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2272,6 +2273,7 @@ fn runtime_readiness_locked(state: &WorkCoordinatorState) -> RuntimeCoordinatorR
             state: state_snapshot,
             dependency: work_dependency(record).map(runtime_dependency_snapshot),
             observed_epoch: task_observation_epoch(record),
+            blocked_error: task_block(record).and_then(|block| block.error.clone()),
         });
     }
 

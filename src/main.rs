@@ -26,9 +26,9 @@ use glam::{
     ReasoningReport, ReasoningStatus, ReasoningTaskState, RuntimeDeadlockWork,
     RuntimeDeliveryFailure, RuntimeDeliveryId, RuntimeDeliveryOutcome, RuntimeDependency,
     RuntimeDisposition, RuntimeDispositionKind, RuntimeEventJournal, RuntimeInputReader,
-    RuntimeLoggerSnapshot, RuntimeOutputDelivery, RuntimeOutputWriter, RuntimeSharedResources,
-    RuntimeWorkKind, RuntimeWorkState, Severity, Value, Values, check_local_manifest,
-    inspect_g_source,
+    RuntimeKillReason, RuntimeLoggerSnapshot, RuntimeOutputDelivery, RuntimeOutputWriter,
+    RuntimeReadiness, RuntimeSharedResources, RuntimeWorkKind, RuntimeWorkState, Severity, Value,
+    Values, check_local_manifest, inspect_g_source,
 };
 
 trait DiagnosticBusLocal {
@@ -539,25 +539,32 @@ fn execute_assembly(mut prepared: PreparedAssembly, command: CommandPlan) -> Exi
         }
     }
 
-    report_reasoning(
-        &assembler_diagnostics,
-        &assembler.values(),
-        &assembler.drain_reasoning(),
-    );
     operation_failed |= finish_local_files(
         &local_files,
         manifest.as_deref(),
         &assembler_diagnostics,
         &assembler.values(),
     );
-    log_host.close_input();
     let LoggerRun {
         thread: logger_thread,
         diagnostics: logger_diagnostics,
         supervisor: logger_supervisor,
     } = logger;
+    operation_failed |= settle_batch_runtime(
+        &assembler.evaluation_runtime(),
+        &log_host,
+        &logger_supervisor,
+    );
+
+    // Keep the compatibility close/cancel bridge through Phase 10D.4b. An
+    // exit-aware logger has already terminalized through settlement; an older
+    // logger may have completed after observing close or cancellation during
+    // the compatibility retries in `settle_batch_runtime`.
     logger_thread.join().expect("logger task should not panic");
-    let _ = logger_supervisor.deliver_fallback();
+    if let Err(error) = logger_supervisor.deliver_fallback() {
+        operation_failed = true;
+        eprintln!("error: could not drain fallback diagnostics: {error}");
+    }
     drop(logger_supervisor);
     log_host.cancel();
 
@@ -569,6 +576,77 @@ fn execute_assembly(mut prepared: PreparedAssembly, command: CommandPlan) -> Exi
     } else {
         ExitCode::SUCCESS
     }
+}
+
+/// Pumps and settles the complete batch runtime, retaining report failures as
+/// authoritative batch status independently of whether fallback rendering
+/// succeeds.
+///
+/// The first deadlock closes compatibility input so a logger may finish
+/// through `.log_status`; a second requests cancellation for a logger which
+/// still waits only on `.read_log`. A stable deadlock after those disturbances
+/// is explicitly killed and reported. Rendering may itself admit runtime work,
+/// so each non-empty report is followed by another complete pump/settlement
+/// cycle.
+fn settle_batch_runtime(
+    runtime: &EvaluationRuntime,
+    log_host: &LogHost,
+    supervisor: &LoggerSupervisor,
+) -> bool {
+    let mut failed = false;
+    let mut compatibility_close_sent = false;
+    let mut compatibility_cancel_sent = false;
+
+    loop {
+        runtime.pump_until_stable();
+        if let Err(error) = supervisor.deliver_fallback() {
+            failed = true;
+            eprintln!("error: could not drain fallback diagnostics: {error}");
+        }
+        let snapshot = match runtime.readiness() {
+            RuntimeReadiness::Busy => continue,
+            RuntimeReadiness::Ready(snapshot) => snapshot,
+            RuntimeReadiness::Deadlocked(_deadlock) if !compatibility_close_sent => {
+                compatibility_close_sent = true;
+                log_host.close_input();
+                continue;
+            }
+            RuntimeReadiness::Deadlocked(_deadlock) if !compatibility_cancel_sent => {
+                compatibility_cancel_sent = true;
+                log_host.cancel();
+                continue;
+            }
+            RuntimeReadiness::Deadlocked(deadlock) => deadlock.kill(RuntimeKillReason::Deadlock),
+        };
+        let report = match snapshot.settle() {
+            Ok(report) => report,
+            Err(_) => continue,
+        };
+
+        failed |= settled_report_is_fatal(&report);
+        match supervisor.render_settled_report(&report) {
+            Ok(0) => return failed,
+            Ok(_) => {}
+            Err(error) => {
+                // The retained report remains authoritative. In particular, a
+                // fallback-adapter failure becomes a delivery failure in the
+                // next settled report even though this last-resort text cannot
+                // rely on that same adapter.
+                failed = true;
+                eprintln!("error: could not render runtime settlement: {error}");
+            }
+        }
+    }
+}
+
+fn settled_report_is_fatal(report: &QuiescenceReport) -> bool {
+    !report.task_failures().is_empty()
+        || !report.delivery_failures().failures().is_empty()
+        || report
+            .dispositions()
+            .iter()
+            .any(|disposition| matches!(disposition.kind(), RuntimeDispositionKind::ExitError(_)))
+        || !report.killed_work().is_empty()
 }
 
 fn finish_without_logger(
@@ -860,16 +938,21 @@ fn start_logger(assembler: &Assembler, configuration: &Value, input: Arc<LogHost
                 return None;
             }
         };
-        match EffectRun::new(
+        let run = EffectRun::new(
             &evaluation_runtime,
             &custom,
             MainEffects::new(effect_assembler),
             host,
         )
-        .asserting_unit_result("configured logger result")
-        .requiring_unit_result()
-        .schedule_with_exit(&installation.lifecycle)
-        {
+        .contextualizing_failures(
+            configuration_entry_context(&task_values, "log")
+                .expect("configuration context is local"),
+        );
+        match run.and_then(|run| {
+            run.asserting_unit_result("configured logger result")
+                .requiring_unit_result()
+                .schedule_with_exit(&installation.lifecycle)
+        }) {
             Ok(task) => Some((
                 installation,
                 task.with_stop_condition(move || stop_input.stop_requested()),
@@ -918,14 +1001,14 @@ fn start_logger(assembler: &Assembler, configuration: &Value, input: Arc<LogHost
                         );
                     }
                     Err(error) => {
-                        task_diagnostics.publish_local(
-                            error
-                                .with_context(
-                                    configuration_entry_context(&task_values, "log")
-                                        .expect("configuration context is local"),
-                                )
-                                .diagnostic(&task_values),
-                        );
+                        if !matches!(
+                            installation.lifecycle.status(),
+                            glam::reflection::EffectLifecycleStatus::Failed(_)
+                                | glam::reflection::EffectLifecycleStatus::Exited
+                                | glam::reflection::EffectLifecycleStatus::Killed(_)
+                        ) {
+                            task_diagnostics.publish_local(error.diagnostic(&task_values));
+                        }
                     }
                 }
                 task_supervisor.finish(&installation);
@@ -1118,6 +1201,9 @@ fn read_log(
                 .map(RequestResult::Return)
                 .map_err(glam::reflection::TaskHalt::from);
         }
+        if snapshot.cancelled() {
+            return Ok(RequestResult::Cancelled);
+        }
         // Queue reads observe only the host snapshot. Journaled writes remain
         // invisible until commit, just as writes from concurrent tasks do.
         return Ok(RequestResult::Fail);
@@ -1131,7 +1217,11 @@ fn read_log(
             .read(&diagnostic_reader)
             .map_err(glam::reflection::TaskHalt::from)?
         else {
-            return Ok(RequestResult::Fail);
+            return Ok(if snapshot.extra().cancelled() {
+                RequestResult::Cancelled
+            } else {
+                RequestResult::Fail
+            });
         };
         let value = Diagnostic::from_transport_value(&value)
             .and_then(|diagnostic| diagnostic.enrich(&context.host().resources.values()))
@@ -1181,47 +1271,12 @@ struct LoggerSupervisor {
 struct LoggerSupervisorState {
     next_generation: u64,
     active: Option<LoggerInstallation>,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "settled-report rendering is installed by Phase 10D.4a"
-        )
-    )]
     rendered_tasks: BTreeSet<(u64, u64)>,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "settled-report rendering is installed by Phase 10D.4a"
-        )
-    )]
     rendered_deliveries: BTreeSet<RuntimeDeliveryId>,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "settled-report rendering is installed by Phase 10D.4a"
-        )
-    )]
     rendered_exits: BTreeSet<u64>,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "settled-report rendering is installed by Phase 10D.4a"
-        )
-    )]
     rendered_kills: BTreeSet<u64>,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "settled-report rendering is installed by Phase 10D.4a"
-    )
-)]
 struct SettledReportSelection {
     task_failures: Vec<glam::ReasoningFailure>,
     delivery_failures: Vec<Arc<RuntimeDeliveryFailure>>,
@@ -1327,13 +1382,6 @@ impl LoggerSupervisor {
         deliver_fallback_output(&self.fallback_delivery)
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "settled-report rendering is installed by Phase 10D.4a"
-        )
-    )]
     fn render_settled_report(&self, report: &QuiescenceReport) -> Result<usize, Error> {
         if report.runtime_id() != self.input.runtime.id() {
             return Err(Error::new(format!(
@@ -1351,13 +1399,6 @@ impl LoggerSupervisor {
         Ok(rendered)
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "settled-report rendering is installed by Phase 10D.4a"
-        )
-    )]
     fn select_unrendered_report_entries(
         &self,
         report: &QuiescenceReport,
@@ -1406,13 +1447,6 @@ impl LoggerSupervisor {
         }
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "settled-report rendering is installed by Phase 10D.4a"
-        )
-    )]
     fn enqueue_fallback_diagnostics(&self, diagnostics: Vec<Diagnostic>) -> Result<(), Error> {
         if diagnostics.is_empty() {
             return Ok(());
@@ -1456,13 +1490,6 @@ impl LoggerSupervisor {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "settled-report rendering is installed by Phase 10D.4a"
-    )
-)]
 fn settled_report_diagnostics(
     values: &Values,
     selection: SettledReportSelection,
@@ -1521,6 +1548,7 @@ fn settled_report_diagnostics(
         );
     }
     for work in selection.killed_work {
+        let blocked_error = work.blocked_error().map(str::to_owned);
         let mut args = vec![
             ("work", report_id(values, work.work_id())?),
             ("session", report_id(values, work.session_id())?),
@@ -1543,40 +1571,30 @@ fn settled_report_diagnostics(
             args.push(("dependency", runtime_dependency_value(values, dependency)?));
         }
         let context = runtime_report_context(values, "killed", args)?;
-        diagnostics.push(
-            Diagnostic::new(
-                values,
-                Severity::Error,
-                format!(
-                    "runtime killed {} work {} in a deadlocked settlement",
-                    runtime_work_kind_name(work.kind()),
-                    work.work_id()
-                ),
-            )
-            .with_context(values, context)?,
+        let mut message = format!(
+            "{} deadlocked; runtime killed {} work {} in settlement",
+            if work.kind() == RuntimeWorkKind::ReflectionTask {
+                "reflection scheduler"
+            } else {
+                "evaluation runtime"
+            },
+            runtime_work_kind_name(work.kind()),
+            work.work_id()
         );
+        if let Some(blocked) = &blocked_error {
+            message.push_str("; retained error: ");
+            message.push_str(blocked);
+        }
+        diagnostics
+            .push(Diagnostic::new(values, Severity::Error, message).with_context(values, context)?);
     }
     Ok(diagnostics)
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "settled-report rendering is installed by Phase 10D.4a"
-    )
-)]
 fn report_id(values: &Values, id: u64) -> Result<Value, Error> {
     values.number_from_text(id.to_string())
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "settled-report rendering is installed by Phase 10D.4a"
-    )
-)]
 fn runtime_report_context(
     values: &Values,
     operation: &str,
@@ -1591,13 +1609,6 @@ fn runtime_report_context(
     )])
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "settled-report rendering is installed by Phase 10D.4a"
-    )
-)]
 fn runtime_work_kind_name(kind: RuntimeWorkKind) -> &'static str {
     match kind {
         RuntimeWorkKind::ReflectionTask => "reflection_task",
@@ -1607,13 +1618,6 @@ fn runtime_work_kind_name(kind: RuntimeWorkKind) -> &'static str {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "settled-report rendering is installed by Phase 10D.4a"
-    )
-)]
 fn runtime_work_state_name(state: RuntimeWorkState) -> &'static str {
     match state {
         RuntimeWorkState::Dormant => "dormant",
@@ -1622,13 +1626,6 @@ fn runtime_work_state_name(state: RuntimeWorkState) -> &'static str {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "settled-report rendering is installed by Phase 10D.4a"
-    )
-)]
 fn runtime_dependency_value(
     values: &Values,
     dependency: &RuntimeDependency,
@@ -1843,7 +1840,7 @@ impl LogHost {
 
     fn stop_requested(&self) -> bool {
         let (_, _, snapshot) = self.runtime.logger_transaction_snapshot();
-        snapshot.cancelled() || snapshot.input_closed()
+        snapshot.cancelled()
     }
 
     fn drain_default(&self, logger: &DefaultLogger) {
@@ -3791,6 +3788,50 @@ mod tests {
                 .iter()
                 .any(|failure| failure.endpoint_id() == supervisor.fallback_delivery.id())
         );
+    }
+
+    #[test]
+    fn batch_settlement_remains_failed_when_fallback_rendering_fails() {
+        let diagnostics = DiagnosticBus::new();
+        let input = Arc::new(LogHost::new(&diagnostics));
+        let supervisor = LoggerSupervisor::new_fallible(input.clone(), |_diagnostic| {
+            Err(Error::new("fallback renderer failed"))
+        });
+        supervisor
+            .fallback_and_deliver()
+            .expect("empty fallback route should activate");
+
+        let failed_output = input
+            .runtime
+            .output_endpoint(Ok::<Value, Error>, |_value| {
+                Err(Error::new("authoritative adapter failure"))
+            })
+            .expect("failed output endpoint should register");
+        let (_generation, store, snapshot) = input.runtime.transaction_snapshot();
+        let mut events = RuntimeEventJournal::new(snapshot);
+        events
+            .write(&failed_output.writer(), input.runtime.values().integer(1))
+            .expect("failed output intent should buffer");
+        assert_eq!(
+            input
+                .runtime
+                .try_commit_transaction(&glam::reflection::StoreJournal::new(store), &events),
+            glam::reflection::StoreCommitResult::Committed
+        );
+        assert!(matches!(
+            failed_output.delivery().deliver_next().unwrap(),
+            Some(RuntimeDeliveryOutcome::Failed(_))
+        ));
+
+        assert!(settle_batch_runtime(&input.runtime, &input, &supervisor));
+        let failures = input.runtime.delivery_failure_snapshot().failures();
+        assert_eq!(failures.len(), 2);
+        assert!(failures.iter().any(|failure| {
+            failure
+                .error()
+                .to_string()
+                .contains("fallback renderer failed")
+        }));
     }
 
     #[test]

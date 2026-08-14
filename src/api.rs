@@ -2082,6 +2082,7 @@ pub struct RuntimeDeadlockWork {
     state: RuntimeWorkState,
     dependency: Option<RuntimeDependency>,
     observed_epoch: Option<u64>,
+    blocked_error: Option<Arc<str>>,
 }
 
 impl RuntimeDeadlockWork {
@@ -2111,6 +2112,12 @@ impl RuntimeDeadlockWork {
 
     pub fn observed_epoch(&self) -> Option<u64> {
         self.observed_epoch
+    }
+
+    /// Retryable evaluation failure retained at the blocked checkpoint, when
+    /// the participant had reached one.
+    pub fn blocked_error(&self) -> Option<&str> {
+        self.blocked_error.as_deref()
     }
 }
 
@@ -2269,6 +2276,10 @@ fn runtime_deadlock_work_from_snapshot(
         },
         dependency: snapshot.dependency.map(runtime_dependency_from_snapshot),
         observed_epoch: snapshot.observed_epoch.map(RuntimeObservationEpoch::get),
+        blocked_error: snapshot
+            .blocked_error
+            .as_deref()
+            .map(|error| Arc::from(error.to_string())),
     }
 }
 
