@@ -6046,10 +6046,16 @@ mod tests {
                 statuses.lock().unwrap().as_slice(),
                 [EvaluationTaskStatus::Complete(_)]
             ));
-            runtime.pump_until_stable();
             assert!(notified.load(Ordering::Acquire));
-            let crate::api::RuntimeReadiness::Ready(snapshot) = runtime.readiness() else {
-                panic!("a terminal logger root and retained child failure should be ready")
+            let snapshot = loop {
+                runtime.pump_until_stable();
+                match runtime.readiness() {
+                    crate::api::RuntimeReadiness::Busy => continue,
+                    crate::api::RuntimeReadiness::Ready(snapshot) => break snapshot,
+                    readiness @ crate::api::RuntimeReadiness::Deadlocked(_) => panic!(
+                        "a terminal logger root and retained child failure should be ready, got {readiness:?}"
+                    ),
+                }
             };
             assert!(snapshot.dispositions().is_empty());
             let report = snapshot

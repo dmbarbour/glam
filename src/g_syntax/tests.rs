@@ -12,12 +12,12 @@ fn test_assembler() -> &'static crate::api::Assembler {
     &ASSEMBLER
 }
 
-fn test_eval_context() -> crate::evaluation::OwnedEvalContext {
-    let session = test_assembler()
-        .evaluation_runtime()
-        .new_evaluation_session()
-        .expect("compiler test evaluation session should be constructible");
-    crate::evaluation::OwnedEvalContext::new(session)
+fn test_eval_context() -> crate::evaluation::EvalContext {
+    // These tests share the compiler runtime and its cached lazy values. Use
+    // the same patient direct-client context as production Assembler demands
+    // so a producer already claimed by another test thread is awaited rather
+    // than exposed as a retryable machine-level block.
+    test_assembler().eval_context()
 }
 
 fn core_global_access(context: &CompileContext, path: Vec<Key>) -> Value {

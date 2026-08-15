@@ -122,12 +122,39 @@ fn drive_net_interface(
             continue;
         }
 
-        let ((scheduler_is_empty, claimed_pairs), version) =
-            runtime.with_version(|net| (net.active_pairs().len() == 0, net.claimed_pair_count()));
-        if scheduler_is_empty {
+        // Recheck the interface in the same locked observation used to declare
+        // quiescence. Another evaluator may have completed an in-flight claim
+        // after the checks at the top of the loop; observing only the now-empty
+        // scheduler would otherwise misclassify its freshly published data as
+        // a non-data normal form.
+        let ((terminal, scheduler_is_empty, has_in_flight_claims), version) =
+            runtime.with_version(|net| {
+                let terminal = if net.interface_data(interface).is_some() {
+                    Some(NetInterfaceOutcome::Data)
+                } else if net.interface_neighbor(interface).is_some_and(|port| {
+                    port.is_principal()
+                        && matches!(
+                            net.node(port.node()),
+                            Some(crate::interaction_net::RuntimeNode::Bind)
+                        )
+                }) {
+                    Some(NetInterfaceOutcome::Bind)
+                } else {
+                    None
+                };
+                (
+                    terminal,
+                    net.active_pairs().len() == 0,
+                    net.has_in_flight_claims(),
+                )
+            });
+        if let Some(terminal) = terminal {
+            return Ok(terminal);
+        }
+        if scheduler_is_empty && !has_in_flight_claims {
             return Ok(NetInterfaceOutcome::NormalForm);
         }
-        if claimed_pairs != 0 {
+        if has_in_flight_claims {
             runtime.wait_for_change(version);
             continue;
         }

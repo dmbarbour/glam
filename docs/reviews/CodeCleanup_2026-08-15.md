@@ -549,6 +549,29 @@ ordering/concurrency defect, not a deterministic failure introduced by this
 review. It should receive a barrier-based reproduction and a separate fix; a
 later passing parallel run would not by itself close it.
 
+### Verification follow-up: parallel net claim defect resolved
+
+The defect above was subsequently reproduced deterministically. A remote
+cursor claimed directly at a net's exposed interface had no active-pair record,
+so the runtime neither made the claim exclusive nor counted it as in-flight
+work. A concurrent evaluator could therefore observe an empty scheduler and
+declare a non-data normal form while source inspection was still publishing
+the interface result.
+
+The repair records pairless cursor claims explicitly, includes them in
+quiescence, and rechecks the exposed interface under the runtime lock before
+returning normal form. The regression suite now forces the conflicting claim
+order directly. Separate barrier tests also exercise concurrent construction
+and use of the runtime-cached compiler helpers, ruling out the cache's
+deliberately redundant construction as the source of this failure.
+
+Verification after the repair includes five consecutive parallel library-suite
+runs (5,500 tests total), 50 repetitions of the scheduler terminal-policy
+regression, and the complete default suite. All passed, together with
+`cargo fmt --check` and clippy with warnings denied. The original baseline is
+retained above as the review-time observation; the concurrency defect is no
+longer open.
+
 Implementation of any finding should run:
 
 ```sh

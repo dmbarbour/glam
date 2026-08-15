@@ -329,6 +329,11 @@ pub struct RuntimeNet<S: NetSpecialization> {
     next_copy_id: u64,
     copies: HashMap<CopyId, CopyState<S>>,
     cursor_dependencies: HashMap<NodeId, CursorDependency<S>>,
+    // Cursor claims may be rooted directly at an exposed interface and
+    // therefore have no active-pair state to mark as Claimed. Keep every
+    // cross-lock source inspection visible here so another evaluator neither
+    // duplicates the claim nor mistakes the target net for quiescent.
+    claimed_cursors: HashSet<NodeId>,
 
     // Every live principal-principal wire has exactly one authoritative state.
     // External work changes Ready to Claimed while the runtime lock is held,
@@ -378,6 +383,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
             next_copy_id: 0,
             copies: HashMap::new(),
             cursor_dependencies: HashMap::new(),
+            claimed_cursors: HashSet::new(),
             active: BTreeMap::new(),
         };
         for wire in net.wires.iter() {
@@ -398,6 +404,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
             next_copy_id: 0,
             copies: HashMap::new(),
             cursor_dependencies: HashMap::new(),
+            claimed_cursors: HashSet::new(),
             active: BTreeMap::new(),
         }
     }
@@ -406,11 +413,12 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         self.active.keys().copied()
     }
 
-    pub fn claimed_pair_count(&self) -> usize {
-        self.active
-            .values()
-            .filter(|state| matches!(state, ActivePairState::Claimed))
-            .count()
+    pub fn has_in_flight_claims(&self) -> bool {
+        !self.claimed_cursors.is_empty()
+            || self
+                .active
+                .values()
+                .any(|state| matches!(state, ActivePairState::Claimed))
     }
 
     pub fn pair_is_claimed(&self, pair: ActivePairKey) -> bool {

@@ -890,6 +890,37 @@ fn layered_cursor_reports_and_follows_an_exact_dependency() {
 }
 
 #[test]
+fn root_cursor_claim_remains_exclusive_while_source_inspection_is_in_flight() {
+    let mut source = NetBuilder::<&'static str>::new();
+    let data = source.data("value");
+    let source = source.finish(data).instantiate_shared();
+
+    let mut target = RuntimeNet::empty();
+    let root_cursor = target.begin_copy(source);
+    let exposed = target.add_interface(Port::principal(root_cursor));
+
+    assert_eq!(
+        target.demand_interface(exposed),
+        Some(CursorProgress::Claimed)
+    );
+    assert!(
+        target.has_in_flight_claims(),
+        "pairless root work must remain visible to quiescence detection"
+    );
+    assert_eq!(
+        target.demand_interface(exposed),
+        None,
+        "a second evaluator must observe the in-flight root cursor claim"
+    );
+    assert!(matches!(
+        finish_claimed_cursor(&mut target, root_cursor),
+        CursorProgress::Materialized { .. }
+    ));
+    assert!(!target.has_in_flight_claims());
+    assert_eq!(target.interface_data(exposed), Some(&"value"));
+}
+
+#[test]
 fn auxiliary_cursor_drives_the_local_cursor_facing_the_principal() {
     let mut source: RuntimeNet<&'static str> = RuntimeNet::empty();
     let root = source.add_node(RuntimeNode::Bind);

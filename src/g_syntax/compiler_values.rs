@@ -708,6 +708,14 @@ fn build_reflection_annotator(values: &CoreValueFactory, cache: &dyn EffectValue
 mod tests {
     use super::*;
     use crate::number::Number;
+    use std::sync::Barrier;
+
+    fn fresh_test_values() -> CoreValueFactory {
+        CoreValueFactory::new(
+            crate::runtime::allocate_evaluation_runtime_id(),
+            crate::runtime::RuntimeIds::compiler_test_values(),
+        )
+    }
 
     #[test]
     fn closed_compiler_values_are_cached_after_exposing_their_functions() {
@@ -751,6 +759,82 @@ mod tests {
         let _ = effect_value(&compilation, "seq");
         let _ = builtin_module(&compilation, "std");
         assert_eq!(compilation.extension_lookup_count() - before, 1);
+    }
+
+    #[test]
+    fn compiler_cache_construction_is_safe_under_forced_concurrency() {
+        const THREADS: usize = 8;
+
+        let values = fresh_test_values();
+        let barrier = Arc::new(Barrier::new(THREADS));
+        let builders = (0..THREADS)
+            .map(|_| {
+                let values = values.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    values.cached(|| {
+                        barrier.wait();
+                        GCompilerValues::build(&values)
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let cached = builders
+            .into_iter()
+            .map(|builder| {
+                builder
+                    .join()
+                    .expect("compiler cache builder should not panic")
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            cached
+                .iter()
+                .all(|candidate| Arc::ptr_eq(candidate, &cached[0])),
+            "all racing builders must receive the installed compiler bundle"
+        );
+    }
+
+    #[test]
+    fn cached_macro_environment_is_safe_under_forced_concurrency() {
+        const THREADS: usize = 8;
+
+        let values = fresh_test_values();
+        let function = cache(&values).macro_environment.clone();
+        let barrier = Arc::new(Barrier::new(THREADS));
+        let evaluators = (0..THREADS)
+            .map(|index| {
+                let values = values.clone();
+                let function = function.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    let base = Value::Dict(Dict::new_sync().insert(
+                        name_as_key("existing"),
+                        Value::Number(Number::integer(index as i64)),
+                    ));
+                    barrier.wait();
+                    let environment =
+                        apply_closed(&values, function, [base, Value::binary_from_text("g0")]);
+                    evaluate_closed(
+                        &values,
+                        ResolvedExpr::Access {
+                            base: Box::new(ResolvedExpr::Provided(environment)),
+                            path: vec![ResolvedPathPart::Key(name_as_key("language"))],
+                        },
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for evaluator in evaluators {
+            assert_eq!(
+                evaluator
+                    .join()
+                    .expect("cached compiler helper evaluation should not panic"),
+                Value::binary_from_text("g0")
+            );
+        }
     }
 
     #[test]

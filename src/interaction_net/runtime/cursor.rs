@@ -126,6 +126,9 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         cursor: NodeId,
         expected_pair: Option<ActivePairKey>,
     ) -> Option<CursorProgress> {
+        if self.claimed_cursors.contains(&cursor) {
+            return None;
+        }
         let pair = expected_pair.or_else(|| self.active_pair_key(cursor));
         if let Some(expected) = expected_pair {
             assert_eq!(pair, Some(expected));
@@ -140,6 +143,10 @@ impl<S: NetSpecialization> RuntimeNet<S> {
                 _ => return None,
             }
         }
+        assert!(
+            self.claimed_cursors.insert(cursor),
+            "an available cursor claim must be new"
+        );
         self.cursor_dependencies.remove(&cursor);
         Some(CursorProgress::Claimed)
     }
@@ -148,6 +155,9 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         &self,
         cursor: NodeId,
     ) -> Option<CursorClaim<S>> {
+        if !self.claimed_cursors.contains(&cursor) {
+            return None;
+        }
         let pair = self.active_pair_key(cursor);
         if pair.is_some_and(|pair| {
             !self
@@ -326,6 +336,10 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         {
             self.active.remove(&pair);
         }
+        assert!(
+            self.claimed_cursors.remove(&claim.cursor),
+            "finished cursor claim must remain in flight"
+        );
         progress
     }
 
@@ -415,11 +429,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         // A converging frontier may be inspected concurrently from its other
         // end. Leave both frontier records intact until that active-pair claim
         // is released.
-        if self.active_pair_key(peer).is_some_and(|pair| {
-            self.active
-                .get(&pair)
-                .is_some_and(ActivePairState::is_claimed)
-        }) {
+        if self.claimed_cursors.contains(&peer) {
             return CursorProgress::Blocked;
         }
         let copy_finished = {
