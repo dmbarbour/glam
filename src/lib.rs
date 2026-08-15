@@ -27,7 +27,7 @@ pub use api::{
     RuntimeDisposition, RuntimeDispositionKind, RuntimeEventJournal, RuntimeEventSnapshot,
     RuntimeInputEndpoint, RuntimeInputReader, RuntimeInputSender, RuntimeKillReason,
     RuntimeOutputDelivery, RuntimeOutputEndpoint, RuntimeOutputEndpointId, RuntimeOutputWriter,
-    RuntimeReadiness, RuntimeReadinessStamp, RuntimeSettlementError, RuntimeSharedResources,
+    RuntimeReadiness, RuntimeReadinessStamp, RuntimeSettlementError, RuntimeTaskCapability,
     RuntimeTaskWait, RuntimeWorkKind, RuntimeWorkState, Value, ValueKind, Values,
 };
 pub use diagnostic::Severity;

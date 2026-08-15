@@ -807,12 +807,22 @@ impl ReflectionStore {
     /// remain independent of the selected read-analysis strategy.
     #[doc(hidden)]
     pub fn try_commit(&mut self, journal: &StoreJournal) -> StoreCommitResult {
+        self.try_commit_with_change(journal).0
+    }
+
+    /// Validates and commits a journal while preserving whether it changed
+    /// observable store state. Runtime publication uses this distinction to
+    /// avoid disturbing broad observers for a successful no-op validation.
+    pub(crate) fn try_commit_with_change(
+        &mut self,
+        journal: &StoreJournal,
+    ) -> (StoreCommitResult, bool) {
         let validation = self.validate(journal);
         if !matches!(validation, StoreCommitResult::Committed) {
-            return validation;
+            return (validation, false);
         }
-        self.commit_validated(journal);
-        StoreCommitResult::Committed
+        let changed = self.commit_validated(journal);
+        (StoreCommitResult::Committed, changed)
     }
 
     /// Validates a journal without changing the store. The caller must retain

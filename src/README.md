@@ -115,8 +115,11 @@ Lifecycle state owns an acyclic `RuntimeSharedResources` bundle for values,
 transactions, observations, mutation admission, and local IDs; that bundle
 has only a weak coordinator route and retains neither executor nor diagnostic
 ingress policy. Runtime-backed task hosts retain this bundle directly, together
-with their role-specific environment and diagnostic bus; they do not retain or
-reconstruct the public runtime lifecycle state.
+with their role-specific environment and diagnostic bus; external effect hosts
+receive only a constructed `RuntimeTaskCapability` for values, transactional
+endpoint commits, observation waits, and query publication. The raw bundle is
+crate-private, and neither host form retains or reconstructs the public runtime
+lifecycle state.
 The runtime transaction domain also owns registered admitted-input FIFOs.
 Rust hosts create a typed sender plus a runtime-bound transactional reader with
 `EvaluationRuntime::input_endpoint`; conversion occurs before admission, while

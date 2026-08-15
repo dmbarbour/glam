@@ -1803,6 +1803,19 @@ impl EvaluationWorkCoordinator {
             .work_generation
     }
 
+    #[cfg(test)]
+    pub(crate) fn cache_builder_scheduler_snapshot(&self) -> (u64, usize, usize) {
+        let state = self
+            .state
+            .lock()
+            .expect("evaluation work coordinator was poisoned");
+        (
+            state.work_generation,
+            state.demand_sessions.len(),
+            state.work.len(),
+        )
+    }
+
     pub(super) fn session_has_ready_task(&self, session: EvaluationSessionId) -> bool {
         let state = self
             .state
@@ -3036,7 +3049,18 @@ impl EvaluationWorkCoordinator {
 
     pub(super) fn activate_reflection(&self, id: EvaluationWorkId) -> bool {
         let mutation = self.admission.mutation_guard();
-        let activated = {
+        let activated = self.activate_reflection_guarded(id, &mutation);
+        drop(mutation);
+        self.notify_reflection_activation(activated);
+        activated
+    }
+
+    pub(super) fn activate_reflection_guarded(
+        &self,
+        id: EvaluationWorkId,
+        _mutation: &dyn RuntimeMutationAuthority,
+    ) -> bool {
+        {
             let mut state = self
                 .state
                 .lock()
@@ -3054,12 +3078,13 @@ impl EvaluationWorkCoordinator {
             queue_reflection(&mut state, id);
             state.work_generation = state.work_generation.wrapping_add(1);
             true
-        };
-        drop(mutation);
+        }
+    }
+
+    pub(super) fn notify_reflection_activation(&self, activated: bool) {
         if activated {
             self.work_available.notify_all();
         }
-        activated
     }
 
     pub(super) fn terminalize_reserved_reflection(&self, id: EvaluationWorkId) -> bool {

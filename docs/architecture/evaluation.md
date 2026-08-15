@@ -156,11 +156,14 @@ observation epoch, mutation admission, and runtime-local IDs. That bundle has
 only a weak route back to the work coordinator; the executor, coordinator
 ownership, and diagnostic-ingress registry remain in `RuntimeState`. A profile
 launcher retains its role-specific host, while runtime-backed hosts retain only
-the acyclic resource bundle plus their selected environment and diagnostic
-capabilities. A retained profile can therefore keep values, transactions, and
-volumes usable without keeping `RuntimeState`, the executor, or the coordinator
-alive. Keeping the default profile outside `RuntimeState` avoids a direct
-profile ownership cycle while the remaining demand-state transition proceeds.
+an internally composed view of the acyclic resource bundle plus their selected
+environment and diagnostic capabilities. External effect hosts receive the
+narrow `RuntimeTaskCapability`; the raw bundle, volume lifecycle, allocator,
+and mutation admission are not public API. A retained profile can therefore
+keep values, transactions, and volumes usable without keeping `RuntimeState`,
+the executor, or the coordinator alive. Keeping the default profile outside
+`RuntimeState` avoids a direct profile ownership cycle while the remaining
+demand-state transition proceeds.
 
 Lazy values retain computation and a stable identity, not a captured evaluator
 session. The observing `EvalContext` supplies host and scheduling behavior when

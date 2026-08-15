@@ -1233,26 +1233,22 @@ impl DiagnosticIngressInner {
         runtime: EvaluationRuntimeId,
         diagnostic: Diagnostic,
     ) -> Result<(DiagnosticEvent, Vec<Arc<dyn DiagnosticSubscriber>>), Error> {
-        let owner = match self.sender.owner.upgrade() {
+        let prepared = match self.prepare(&diagnostic) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                let event = self.record_failed_publication(bus, runtime, diagnostic, error)?;
+                return Ok(event);
+            }
+        };
+        let owner = match prepared.owner.upgrade() {
             Some(owner) => owner,
             None => {
-                let event = {
-                    let mut bus = bus
-                        .state
-                        .lock()
-                        .expect("diagnostic bus mutex should not be poisoned");
-                    DiagnosticBus::validate_runtime_locked(&mut bus, runtime)?;
-                    DiagnosticBus::record_event_locked(&mut bus, diagnostic)
-                };
-                let failure = Error::new(format!(
+                let error = Error::new(format!(
                     "evaluation runtime {} for input endpoint {} has been dropped",
                     self.sender.runtime.get(),
                     self.sender.endpoint.get()
                 ));
-                self.state
-                    .lock()
-                    .expect("diagnostic ingress mutex should not be poisoned")
-                    .failure = Some(failure);
+                let event = self.record_failed_publication(bus, runtime, diagnostic, error)?;
                 return Ok(event);
             }
         };
@@ -1268,7 +1264,7 @@ impl DiagnosticIngressInner {
             DiagnosticBus::validate_runtime_locked(&mut bus, runtime)?;
             DiagnosticBus::record_event_locked(&mut bus, diagnostic)
         };
-        let changed = self.receive_guarded(event.clone(), &owner);
+        let changed = self.receive_prepared_guarded(event.clone(), prepared, &owner);
         let notification = changed.then(|| prepare_runtime_observation(&owner, &mutation));
         drop(mutation);
         if let Some(notification) = notification {
@@ -1277,28 +1273,40 @@ impl DiagnosticIngressInner {
         Ok((event, subscribers))
     }
 
-    fn receive_guarded(&self, event: DiagnosticEvent, owner: &Arc<RuntimeSharedResources>) -> bool {
+    fn prepare(&self, diagnostic: &Diagnostic) -> Result<RuntimePreparedInput, Error> {
+        let value = diagnostic.transport_value(&self.values)?;
+        self.sender.prepare(value)
+    }
+
+    fn record_failed_publication(
+        &self,
+        bus: &DiagnosticBusInner,
+        runtime: EvaluationRuntimeId,
+        diagnostic: Diagnostic,
+        error: Error,
+    ) -> Result<(DiagnosticEvent, Vec<Arc<dyn DiagnosticSubscriber>>), Error> {
+        let event = {
+            let mut bus = bus
+                .state
+                .lock()
+                .expect("diagnostic bus mutex should not be poisoned");
+            DiagnosticBus::validate_runtime_locked(&mut bus, runtime)?;
+            DiagnosticBus::record_event_locked(&mut bus, diagnostic)
+        };
+        self.state
+            .lock()
+            .expect("diagnostic ingress mutex should not be poisoned")
+            .failure = Some(error);
+        Ok(event)
+    }
+
+    fn receive_prepared_guarded(
+        &self,
+        event: DiagnosticEvent,
+        prepared: RuntimePreparedInput,
+        owner: &Arc<RuntimeSharedResources>,
+    ) -> bool {
         let sequence = event.sequence();
-        let value = match event.diagnostic().transport_value(&self.values) {
-            Ok(value) => value,
-            Err(error) => {
-                self.state
-                    .lock()
-                    .expect("diagnostic ingress mutex should not be poisoned")
-                    .failure = Some(error);
-                return false;
-            }
-        };
-        let prepared = match self.sender.prepare(value) {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                self.state
-                    .lock()
-                    .expect("diagnostic ingress mutex should not be poisoned")
-                    .failure = Some(error);
-                return false;
-            }
-        };
         debug_assert!(Arc::ptr_eq(
             &prepared
                 .owner
@@ -2346,8 +2354,7 @@ struct RuntimeState {
 /// The coordinator route is deliberately weak: retaining these resources must
 /// not retain the runtime scheduler, executor, public runtime wrapper, or
 /// default reflection profile.
-#[doc(hidden)]
-pub struct RuntimeSharedResources {
+pub(crate) struct RuntimeSharedResources {
     id: EvaluationRuntimeId,
     values: RuntimeValueFactory,
     transactions: RuntimeTransactionState,
@@ -3573,13 +3580,11 @@ fn publish_runtime_observation(
 }
 
 impl RuntimeSharedResources {
-    #[doc(hidden)]
-    pub fn id(&self) -> EvaluationRuntimeId {
+    fn id(&self) -> EvaluationRuntimeId {
         self.id
     }
 
-    #[doc(hidden)]
-    pub fn values(&self) -> Values {
+    fn values(&self) -> Values {
         Values {
             runtime: self.id,
             core: self.values.core().clone(),
@@ -3615,8 +3620,7 @@ impl RuntimeSharedResources {
         (generation, store)
     }
 
-    #[doc(hidden)]
-    pub fn transaction_snapshot(
+    fn transaction_snapshot(
         &self,
     ) -> (u64, crate::reflection::StoreSnapshot, RuntimeEventSnapshot) {
         // Reading the epoch first prevents a waiter from retaining a new epoch
@@ -3634,8 +3638,7 @@ impl RuntimeSharedResources {
         )
     }
 
-    #[doc(hidden)]
-    pub fn try_commit_transaction(
+    fn try_commit_transaction(
         &self,
         store: &crate::reflection::StoreJournal,
         events: &RuntimeEventJournal,
@@ -3675,15 +3678,15 @@ impl RuntimeSharedResources {
         journal: &crate::reflection::StoreJournal,
     ) -> crate::reflection::StoreCommitResult {
         let mutation = self.mutation_guard();
-        let result = {
+        let (result, changed) = {
             self.transactions
                 .state
                 .lock()
                 .expect("runtime transaction mutex should not be poisoned")
                 .reflection
-                .try_commit(journal)
+                .try_commit_with_change(journal)
         };
-        if matches!(result, crate::reflection::StoreCommitResult::Committed) {
+        if changed {
             self.publish_observation(mutation);
         }
         result
@@ -3721,8 +3724,8 @@ impl RuntimeSharedResources {
         Ok(value)
     }
 
-    #[doc(hidden)]
-    pub fn update_query(
+    #[cfg(test)]
+    fn update_query(
         &self,
         handle: &Arc<crate::reflection::EvaluationQueryHandle>,
         result: Value,
@@ -3743,8 +3746,7 @@ impl RuntimeSharedResources {
         Ok(())
     }
 
-    #[doc(hidden)]
-    pub fn wait_for_change(&self, observed_generation: u64) -> bool {
+    fn wait_for_change(&self, observed_generation: u64) -> bool {
         self.observations
             .wait_for_change(RuntimeObservationEpoch::from_raw(observed_generation));
         true
@@ -3771,6 +3773,68 @@ impl RuntimeSharedResources {
             .records
             .values()
             .any(|record| record.state == RuntimeDeliveryState::Running)
+    }
+}
+
+/// Runtime-scoped capabilities needed by an external effect-task host.
+///
+/// Construction remains under [`EvaluationRuntime`] control. The capability
+/// deliberately omits raw reflection-store access, volume lifecycle, runtime
+/// identity allocation, and mutation-admission internals.
+///
+/// Raw runtime resources are not part of the embedding API:
+///
+/// ```compile_fail
+/// # let runtime = glam::EvaluationRuntime::new(0).unwrap();
+/// let _resources = runtime.shared_resources();
+/// ```
+#[derive(Clone)]
+pub struct RuntimeTaskCapability {
+    resources: Arc<RuntimeSharedResources>,
+}
+
+impl RuntimeTaskCapability {
+    pub fn runtime_id(&self) -> EvaluationRuntimeId {
+        self.resources.id()
+    }
+
+    pub fn values(&self) -> Values {
+        self.resources.values()
+    }
+
+    pub fn transaction_snapshot(
+        &self,
+    ) -> (u64, crate::reflection::StoreSnapshot, RuntimeEventSnapshot) {
+        self.resources.transaction_snapshot()
+    }
+
+    pub fn try_commit_transaction(
+        &self,
+        store: &crate::reflection::StoreJournal,
+        events: &RuntimeEventJournal,
+    ) -> crate::reflection::StoreCommitResult {
+        self.resources.try_commit_transaction(store, events)
+    }
+
+    #[doc(hidden)]
+    pub fn wait_for_change(&self, observed_generation: u64) -> bool {
+        self.resources.wait_for_change(observed_generation)
+    }
+}
+
+impl ReflectionQueryWriter for RuntimeTaskCapability {
+    fn update_query_guarded(
+        &self,
+        mutation: ReflectionQueryMutation<'_>,
+        handle: &Arc<crate::reflection::EvaluationQueryHandle>,
+        result: Value,
+    ) -> Box<dyn FnOnce() + Send> {
+        <RuntimeSharedResources as ReflectionQueryWriter>::update_query_guarded(
+            self.resources.as_ref(),
+            mutation,
+            handle,
+            result,
+        )
     }
 }
 
@@ -3832,9 +3896,63 @@ impl EvaluationRuntime {
         self.state.shared_resources.id()
     }
 
-    #[doc(hidden)]
-    pub fn shared_resources(&self) -> Arc<RuntimeSharedResources> {
+    /// Publishes activation of a diagnostic consumer and its already prepared
+    /// coordinator root as one settlement-excluded runtime transition.
+    pub(crate) fn activate_diagnostic_consumer(
+        &self,
+        ingress: &DiagnosticIngress,
+        activate: impl FnOnce(&dyn RuntimeMutationAuthority) -> bool,
+    ) -> Result<(), Error> {
+        let resources = &self.state.shared_resources;
+        if ingress.inner.sender.runtime != self.id() {
+            return Err(Error::new(format!(
+                "diagnostic ingress belongs to evaluation runtime {}, not {}",
+                ingress.inner.sender.runtime.get(),
+                self.id().get()
+            )));
+        }
+        let owner = ingress.inner.sender.owner.upgrade().ok_or_else(|| {
+            Error::new(format!(
+                "evaluation runtime {} for diagnostic ingress has been dropped",
+                self.id().get()
+            ))
+        })?;
+        if !Arc::ptr_eq(resources, &owner) {
+            return Err(Error::new(
+                "diagnostic ingress does not belong to this evaluation runtime",
+            ));
+        }
+
+        let settlement = resources.mutation_admission.settlement_guard();
+        let (_transferred, notification) = set_runtime_diagnostic_route_guarded(
+            resources,
+            ingress.inner.sender.endpoint,
+            RuntimeDiagnosticRouteMode::Active,
+            &settlement,
+        )?;
+        assert!(
+            activate(&settlement),
+            "fresh diagnostic consumer reservation must activate"
+        );
+        drop(settlement);
+        resources.mutation_admission.notify_settlement();
+        if let Some(notification) = notification {
+            notification.notify();
+        }
+        Ok(())
+    }
+
+    pub(crate) fn shared_resources(&self) -> Arc<RuntimeSharedResources> {
         self.state.shared_resources.clone()
+    }
+
+    /// Constructs the narrow runtime capability used by a custom effect-task
+    /// host. Clones retain runtime-local values and transactional endpoint
+    /// state, but not the runtime coordinator or executor lifecycle.
+    pub fn task_capability(&self) -> Arc<RuntimeTaskCapability> {
+        Arc::new(RuntimeTaskCapability {
+            resources: self.state.shared_resources.clone(),
+        })
     }
 
     pub fn worker_threads(&self) -> usize {
@@ -4361,15 +4479,15 @@ impl EvaluationRuntime {
         self.try_settlement_guard().is_some()
     }
 
-    #[doc(hidden)]
-    pub fn reflection_snapshot(&self) -> (u64, crate::reflection::StoreSnapshot) {
+    #[cfg(test)]
+    fn reflection_snapshot(&self) -> (u64, crate::reflection::StoreSnapshot) {
         self.state.shared_resources.reflection_snapshot()
     }
 
     /// Captures the reflection store and admitted-input state under the same
     /// transactional-state lock.
-    #[doc(hidden)]
-    pub fn transaction_snapshot(
+    #[cfg(test)]
+    fn transaction_snapshot(
         &self,
     ) -> (u64, crate::reflection::StoreSnapshot, RuntimeEventSnapshot) {
         self.state.shared_resources.transaction_snapshot()
@@ -4377,8 +4495,8 @@ impl EvaluationRuntime {
 
     /// Atomically validates and applies one reflection-store journal and its
     /// admitted-input claims. Neither side is applied if either conflicts.
-    #[doc(hidden)]
-    pub fn try_commit_transaction(
+    #[cfg(test)]
+    fn try_commit_transaction(
         &self,
         store: &crate::reflection::StoreJournal,
         events: &RuntimeEventJournal,
@@ -4388,16 +4506,16 @@ impl EvaluationRuntime {
             .try_commit_transaction(store, events)
     }
 
-    #[doc(hidden)]
-    pub fn commit_reflection(
+    #[cfg(test)]
+    fn commit_reflection(
         &self,
         journal: &crate::reflection::StoreJournal,
     ) -> crate::reflection::StoreCommitResult {
         self.state.shared_resources.commit_reflection(journal)
     }
 
-    #[doc(hidden)]
-    pub fn update_query(
+    #[cfg(test)]
+    fn update_query(
         &self,
         handle: &Arc<crate::reflection::EvaluationQueryHandle>,
         result: Value,
@@ -4405,8 +4523,8 @@ impl EvaluationRuntime {
         self.state.shared_resources.update_query(handle, result)
     }
 
-    #[doc(hidden)]
-    pub fn wait_for_change(&self, observed_generation: u64) -> bool {
+    #[cfg(test)]
+    fn wait_for_change(&self, observed_generation: u64) -> bool {
         self.state
             .shared_resources
             .wait_for_change(observed_generation)
@@ -6026,6 +6144,7 @@ mod tests {
     use super::*;
     use crate::core::{LazyValue, OpaqueValue, keys};
     use crate::evaluation::{EvaluationMachinePoll, EvaluationTaskMachine, EvaluationWaitPoll};
+    use crate::reflection::{StoreCommitResult, StoreJournal};
 
     struct FailedReasoningTask;
 
@@ -8136,6 +8255,74 @@ mod tests {
     }
 
     #[test]
+    fn empty_reflection_commit_preserves_epoch_and_does_not_wake_broad_observers() {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let (generation, store) = runtime.reflection_snapshot();
+        let waiting_runtime = runtime.clone();
+        let (started, waiting) = std::sync::mpsc::channel();
+        let (awake, observed) = std::sync::mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            started.send(()).expect("waiter should announce startup");
+            let changed = waiting_runtime.wait_for_change(generation);
+            awake
+                .send(changed)
+                .expect("test should still receive the wake result");
+        });
+        waiting.recv().expect("broad waiter should start");
+
+        let empty = crate::reflection::StoreJournal::new(store);
+        assert_eq!(
+            runtime.commit_reflection(&empty),
+            crate::reflection::StoreCommitResult::Committed
+        );
+        assert_eq!(runtime.reflection_snapshot().0, generation);
+        assert!(
+            observed
+                .recv_timeout(std::time::Duration::from_millis(50))
+                .is_err(),
+            "a successful no-op commit must not wake a broad observer"
+        );
+
+        let (_, store) = runtime.reflection_snapshot();
+        let mut changed = crate::reflection::StoreJournal::new(store);
+        changed.write(
+            vec![Key::atom_from_text("real_change")],
+            runtime.values().integer(1),
+        );
+        assert_eq!(
+            runtime.commit_reflection(&changed),
+            crate::reflection::StoreCommitResult::Committed
+        );
+        assert!(
+            observed
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("a real store change should wake the observer")
+        );
+        waiter.join().expect("observer thread should finish");
+    }
+
+    #[test]
+    fn empty_reflection_commit_publishes_queued_query_retirement() {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let (_, store) = runtime.reflection_snapshot();
+        let mut reservation = crate::reflection::StoreJournal::new(store);
+        let query = reservation.reserve_query().expect("query should reserve");
+        assert_eq!(
+            runtime.commit_reflection(&reservation),
+            crate::reflection::StoreCommitResult::Committed
+        );
+        drop(query);
+
+        let (before_retirement, store) = runtime.reflection_snapshot();
+        let maintenance = crate::reflection::StoreJournal::new(store);
+        assert_eq!(
+            runtime.commit_reflection(&maintenance),
+            crate::reflection::StoreCommitResult::Committed
+        );
+        assert!(runtime.reflection_snapshot().0 > before_retirement);
+    }
+
+    #[test]
     fn coordinator_transitions_do_not_advance_the_semantic_observation_epoch() {
         let runtime = EvaluationRuntime::new(0).expect("runtime should build");
         let (before, _) = runtime.reflection_snapshot();
@@ -8454,6 +8641,23 @@ mod tests {
     }
 
     #[test]
+    fn closed_runtime_cache_builders_do_not_register_scheduler_demand() {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let before = runtime.state.work.cache_builder_scheduler_snapshot();
+        let values = runtime.state.shared_resources.values.core();
+
+        crate::g_syntax::initialize_cached_compiler_values(values);
+        let formatter = crate::g_syntax::default_diagnostic_formatter(values);
+
+        assert!(matches!(formatter, CoreValue::Function(_)));
+        assert_eq!(
+            runtime.state.work.cache_builder_scheduler_snapshot(),
+            before,
+            "closed cache construction must not alter runtime work generation, demand registrations, or work records"
+        );
+    }
+
+    #[test]
     fn builder_selects_runtime_before_exposing_runtime_bound_state() {
         let mut builder = Assembler::builder();
         let initial = builder.runtime.values().empty_record();
@@ -8657,6 +8861,150 @@ mod tests {
             .is_err()
         );
         assert_eq!(bus.counts().total(), 0);
+    }
+
+    #[test]
+    fn diagnostic_ingress_preparation_failure_still_counts_the_bus_publication() {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let values = runtime.values();
+        let bus = DiagnosticBus::for_runtime(&runtime);
+        let (ingress, _reader) = bus
+            .diagnostic_ingress(&runtime)
+            .expect("diagnostic ingress should attach");
+        drop(runtime);
+
+        let event = bus.publish_local(Diagnostic::new(
+            &values,
+            Severity::Error,
+            "publication outlived its runtime",
+        ));
+
+        assert_eq!(event.sequence(), 1);
+        assert_eq!(bus.counts().errors(), 1);
+        assert!(
+            ingress
+                .failure()
+                .expect("transport failure should remain observable")
+                .to_string()
+                .contains("has been dropped")
+        );
+    }
+
+    #[test]
+    fn diagnostic_consumer_activation_hides_route_root_intermediate_state() {
+        struct CompleteTask;
+
+        impl EvaluationTaskMachine for CompleteTask {
+            fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+                EvaluationMachinePoll::Complete(crate::core::keys::unit_value())
+            }
+        }
+
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let _assembler = Assembler::builder()
+            .evaluation_runtime(runtime.clone())
+            .build()
+            .expect("runtime reflection profile should seal");
+        let bus = DiagnosticBus::for_runtime(&runtime);
+        let (ingress, reader) = bus
+            .diagnostic_ingress(&runtime)
+            .expect("diagnostic ingress should attach");
+        let fallback = runtime
+            .output_endpoint(Ok::<Value, Error>, |_value| Ok(()))
+            .expect("fallback endpoint should register");
+        ingress
+            .set_fallback_output(&fallback.writer())
+            .expect("fallback endpoint should belong to the ingress runtime");
+        ingress
+            .fallback()
+            .expect("diagnostic route should begin on fallback");
+
+        let session = runtime
+            .new_evaluation_session()
+            .expect("diagnostic consumer session should open");
+        let context = EvalContext::new(&session);
+        let prepared = context
+            .prepare_machine(None, |_| Ok(Box::new(CompleteTask)))
+            .expect("diagnostic consumer should prepare");
+
+        let activation_runtime = runtime.clone();
+        let activation_ingress = ingress.clone();
+        let (inside, inside_wait) = std::sync::mpsc::channel();
+        let (release, release_wait) = std::sync::mpsc::channel();
+        let activation = std::thread::spawn(move || {
+            activation_runtime
+                .activate_diagnostic_consumer(&activation_ingress, |mutation| {
+                    inside
+                        .send(())
+                        .expect("activation should expose its deterministic barrier");
+                    release_wait
+                        .recv()
+                        .expect("activation barrier should be released");
+                    prepared.activate_guarded(mutation)
+                })
+                .expect("diagnostic consumer activation should commit");
+            prepared.finish_guarded_activation(true);
+            prepared.into_handle()
+        });
+        inside_wait
+            .recv()
+            .expect("activation should reach the route/root barrier");
+
+        assert!(
+            matches!(runtime.readiness(), RuntimeReadiness::Busy),
+            "readiness must conservatively hide the active route before its root"
+        );
+        let publishing_bus = bus.clone();
+        let publishing_values = runtime.values();
+        let (publication_started, publication_start_wait) = std::sync::mpsc::channel();
+        let (publication_done, publication_wait) = std::sync::mpsc::channel();
+        let publisher = std::thread::spawn(move || {
+            publication_started
+                .send(())
+                .expect("publisher start should be received");
+            publication_done
+                .send(publishing_bus.publish_local(Diagnostic::new(
+                    &publishing_values,
+                    Severity::Info,
+                    "after atomic activation",
+                )))
+                .expect("publication result should be received");
+        });
+        publication_start_wait
+            .recv()
+            .expect("publisher should reach the guarded publication");
+        assert!(
+            publication_wait
+                .recv_timeout(std::time::Duration::from_millis(50))
+                .is_err(),
+            "publishers must not route input through the intermediate state"
+        );
+
+        release
+            .send(())
+            .expect("activation barrier should be releasable");
+        let _task = activation.join().expect("activation should not panic");
+        publication_wait
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("publication should resume after activation");
+        publisher.join().expect("publisher should not panic");
+
+        let (_, store, events) = runtime.transaction_snapshot();
+        let mut journal = RuntimeEventJournal::new(events);
+        let admitted = journal
+            .read(&reader)
+            .expect("diagnostic input should be readable")
+            .expect("post-activation diagnostic should enter the input FIFO");
+        assert_eq!(
+            Diagnostic::from_transport_value(&admitted)
+                .expect("input should retain a diagnostic envelope")
+                .message(),
+            "after atomic activation"
+        );
+        assert_eq!(
+            runtime.try_commit_transaction(&StoreJournal::new(store), &journal),
+            StoreCommitResult::Committed
+        );
     }
 
     #[test]

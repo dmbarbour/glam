@@ -61,6 +61,12 @@ pub(crate) fn default_diagnostic_formatter(values: &CoreValueFactory) -> Value {
     diagnostic_formatter::value(values)
 }
 
+#[cfg(test)]
+pub(crate) fn initialize_cached_compiler_values(values: &CoreValueFactory) {
+    let _ = compiler_values::builtin_module(values, "std")
+        .expect("the cached g compiler must provide `std`");
+}
+
 impl Diagnostic {
     fn warn(line: usize, message: impl Into<String>) -> Self {
         Self {

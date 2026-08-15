@@ -25,7 +25,7 @@ use glam::{
     RuntimeDeadlockWork, RuntimeDeliveryFailure, RuntimeDeliveryOutcome, RuntimeDependency,
     RuntimeDisposition, RuntimeDispositionKind, RuntimeEventJournal, RuntimeEventSnapshot,
     RuntimeInputReader, RuntimeKillReason, RuntimeOutputDelivery, RuntimeOutputWriter,
-    RuntimeReadiness, RuntimeSharedResources, RuntimeWorkKind, RuntimeWorkState, Severity, Value,
+    RuntimeReadiness, RuntimeTaskCapability, RuntimeWorkKind, RuntimeWorkState, Severity, Value,
     Values, check_local_manifest, inspect_g_source,
 };
 
@@ -895,7 +895,7 @@ fn start_logger(assembler: &Assembler, configuration: &Value, input: Arc<LogHost
         match run.and_then(|run| {
             run.asserting_unit_result("configured logger result")
                 .requiring_unit_result()
-                .schedule(&installation.lifecycle)
+                .schedule_diagnostic_consumer(&installation.lifecycle, &input.diagnostic_ingress)
         }) {
             Ok(task) => Some((installation, task)),
             Err(error) => {
@@ -1148,6 +1148,7 @@ fn read_log(
 
 struct LogHost {
     runtime: EvaluationRuntime,
+    task_capability: Arc<RuntimeTaskCapability>,
     diagnostic_ingress: DiagnosticIngress,
     diagnostic_reader: RuntimeInputReader,
 }
@@ -1227,7 +1228,6 @@ impl LoggerSupervisor {
         {
             return Err(Error::new("configured logger lifecycle is still active"));
         }
-        self.input.diagnostic_ingress.activate()?;
         let generation = state.next_generation;
         state.next_generation = generation
             .checked_add(1)
@@ -1309,14 +1309,14 @@ impl LoggerSupervisor {
             .map(|diagnostic| diagnostic.transport_value(&values))
             .collect::<Result<Vec<_>, _>>()?;
         loop {
-            let (_generation, store, snapshot) = self.input.runtime.transaction_snapshot();
+            let (_generation, store, snapshot) = self.input.task_capability.transaction_snapshot();
             let mut events = RuntimeEventJournal::new(snapshot);
             for payload in &payloads {
                 events.write(&self.fallback_writer, payload.clone())?;
             }
             match self
                 .input
-                .runtime
+                .task_capability
                 .try_commit_transaction(&glam::reflection::StoreJournal::new(store), &events)
             {
                 glam::reflection::StoreCommitResult::Committed => return Ok(()),
@@ -1539,7 +1539,7 @@ fn deliver_fallback_output(
 /// session. Incoming assembler diagnostics remain in the runtime input queue;
 /// diagnostics emitted by this session go only to its diagnostic bus.
 struct LoggerTaskHost {
-    resources: Arc<RuntimeSharedResources>,
+    resources: Arc<RuntimeTaskCapability>,
     _diagnostic_ingress: DiagnosticIngress,
     diagnostic_reader: RuntimeInputReader,
     diagnostics: DiagnosticBus,
@@ -1586,7 +1586,7 @@ impl LoggerTaskHost {
         let (diagnostic_writer, diagnostic_delivery) = diagnostic_output.into_parts();
         let (stderr_writer, stderr_delivery) = stderr_output.into_parts();
         Self {
-            resources: input.runtime.shared_resources(),
+            resources: input.task_capability.clone(),
             _diagnostic_ingress: input.diagnostic_ingress.clone(),
             diagnostic_reader: input.diagnostic_reader.clone(),
             diagnostics,
@@ -1670,11 +1670,13 @@ impl LogHost {
     }
 
     fn with_runtime(runtime: EvaluationRuntime, diagnostics: &DiagnosticBus) -> Self {
+        let task_capability = runtime.task_capability();
         let (ingress, diagnostic_reader) = diagnostics
             .diagnostic_ingress(&runtime)
             .expect("logger diagnostic ingress should be constructible");
         Self {
             runtime,
+            task_capability,
             diagnostic_ingress: ingress,
             diagnostic_reader,
         }
@@ -1688,14 +1690,14 @@ impl LogHost {
 
     fn take_diagnostic(&self) -> Option<Diagnostic> {
         loop {
-            let (_generation, store, snapshot) = self.runtime.transaction_snapshot();
+            let (_generation, store, snapshot) = self.task_capability.transaction_snapshot();
             let mut events = RuntimeEventJournal::new(snapshot);
             let value = events
                 .read(&self.diagnostic_reader)
                 .expect("logger diagnostic endpoint should match its runtime");
             if let Some(value) = value {
                 match self
-                    .runtime
+                    .task_capability
                     .try_commit_transaction(&glam::reflection::StoreJournal::new(store), &events)
                 {
                     glam::reflection::StoreCommitResult::Committed => {
@@ -3110,6 +3112,13 @@ mod tests {
 
         let second = supervisor.install().expect("second logger should rearm");
         assert!(second.generation > first.generation);
+        // Production rearm couples this transition to coordinator-root
+        // activation. This test isolates the ingress identity across two
+        // supervisor generations.
+        input
+            .diagnostic_ingress
+            .activate()
+            .expect("original ingress should rearm");
         let second_event =
             diagnostics.publish_local(Diagnostic::new(&values, Severity::Info, "second lifecycle"));
         assert_eq!(second_event.sequence(), first_event.sequence() + 1);
@@ -3168,7 +3177,7 @@ mod tests {
             MainEffects::new(assembler.clone()),
             host,
         )
-        .schedule(&installation.lifecycle)
+        .schedule_diagnostic_consumer(&installation.lifecycle, &input.diagnostic_ingress)
         .expect("logger root should enter coordinator work");
 
         input.runtime.pump_until_stable();
@@ -3265,7 +3274,7 @@ mod tests {
             MainEffects::new(assembler.clone()),
             host.clone(),
         )
-        .schedule(&installation.lifecycle)
+        .schedule_diagnostic_consumer(&installation.lifecycle, &input.diagnostic_ingress)
         .expect("recursive logger root should enter coordinator work");
         input.runtime.pump_until_stable();
         assert!(matches!(
@@ -3282,7 +3291,7 @@ mod tests {
             Severity::Info,
             "queued before first poll",
         ));
-        let (_generation, _store, input_snapshot) = input.runtime.transaction_snapshot();
+        let (_generation, _store, input_snapshot) = input.task_capability.transaction_snapshot();
         let mut input_probe = RuntimeEventJournal::new(input_snapshot);
         assert!(
             input_probe
@@ -3380,14 +3389,14 @@ mod tests {
                 Err(Error::new("nonfallback output adapter failed"))
             })
             .expect("failed output endpoint should register");
-        let (_generation, store, snapshot) = input.runtime.transaction_snapshot();
+        let (_generation, store, snapshot) = input.task_capability.transaction_snapshot();
         let mut events = RuntimeEventJournal::new(snapshot);
         events
             .write(&failed_output.writer(), input.runtime.values().integer(1))
             .expect("failed output intent should buffer");
         assert_eq!(
             input
-                .runtime
+                .task_capability
                 .try_commit_transaction(&glam::reflection::StoreJournal::new(store), &events,),
             glam::reflection::StoreCommitResult::Committed
         );
@@ -3642,14 +3651,14 @@ mod tests {
                 Err(Error::new("initial output adapter failed"))
             })
             .expect("initial failed output endpoint should register");
-        let (_generation, store, snapshot) = input.runtime.transaction_snapshot();
+        let (_generation, store, snapshot) = input.task_capability.transaction_snapshot();
         let mut events = RuntimeEventJournal::new(snapshot);
         events
             .write(&failed_output.writer(), input.runtime.values().integer(1))
             .expect("initial failed output intent should buffer");
         assert_eq!(
             input
-                .runtime
+                .task_capability
                 .try_commit_transaction(&glam::reflection::StoreJournal::new(store), &events),
             glam::reflection::StoreCommitResult::Committed
         );
@@ -3711,14 +3720,14 @@ mod tests {
                 Err(Error::new("authoritative adapter failure"))
             })
             .expect("failed output endpoint should register");
-        let (_generation, store, snapshot) = input.runtime.transaction_snapshot();
+        let (_generation, store, snapshot) = input.task_capability.transaction_snapshot();
         let mut events = RuntimeEventJournal::new(snapshot);
         events
             .write(&failed_output.writer(), input.runtime.values().integer(1))
             .expect("failed output intent should buffer");
         assert_eq!(
             input
-                .runtime
+                .task_capability
                 .try_commit_transaction(&glam::reflection::StoreJournal::new(store), &events),
             glam::reflection::StoreCommitResult::Committed
         );
@@ -3739,7 +3748,7 @@ mod tests {
     }
 
     #[test]
-    fn diagnostic_publication_racing_logger_rearm_is_routed_once() {
+    fn diagnostic_publication_racing_ingress_rearm_is_routed_once() {
         let diagnostics = DiagnosticBus::new();
         let input = Arc::new(LogHost::new(&diagnostics));
         let supervisor = LoggerSupervisor::new(input.clone(), |_| {});
@@ -3764,6 +3773,10 @@ mod tests {
             .expect("publisher should reach the rearm barrier");
         supervisor.finish(&first);
         let _second = supervisor.install().expect("logger should rearm");
+        input
+            .diagnostic_ingress
+            .activate()
+            .expect("ingress should rearm");
         resume.send(()).expect("publisher should resume");
         let event = publisher.join().expect("publisher should not panic");
 
@@ -3783,19 +3796,17 @@ mod tests {
     fn logger_supervisor_teardown_does_not_retain_runtime_resources() {
         let diagnostics = DiagnosticBus::new();
         let input = Arc::new(LogHost::new(&diagnostics));
-        let resources = input.runtime.shared_resources();
-        let weak_resources = Arc::downgrade(&resources);
+        let weak_capability = Arc::downgrade(&input.task_capability);
         let weak_input = Arc::downgrade(&input);
         let supervisor = LoggerSupervisor::new(input.clone(), |_| {});
         let installation = supervisor.install().expect("logger should install");
-        drop(resources);
         drop(input);
         drop(installation);
         drop(supervisor);
         drop(diagnostics);
 
         assert!(weak_input.upgrade().is_none());
-        assert!(weak_resources.upgrade().is_none());
+        assert!(weak_capability.upgrade().is_none());
     }
 
     #[test]
@@ -3830,7 +3841,7 @@ mod tests {
             Diagnostic::new(&input.runtime.values(), Severity::Error, "session output"),
         );
 
-        let (_generation, _store, snapshot) = input.runtime.transaction_snapshot();
+        let (_generation, _store, snapshot) = input.task_capability.transaction_snapshot();
         let mut events = RuntimeEventJournal::new(snapshot);
         assert_eq!(
             events.read(&input.diagnostic_reader).unwrap(),

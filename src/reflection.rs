@@ -35,7 +35,10 @@ use std::sync::{Arc, Condvar, Mutex, Weak};
 
 use search::SearchPolicy;
 
-use crate::api::{Diagnostic, Error as ApiError, EvaluationRuntime, Value as PublicValue, Values};
+use crate::api::{
+    Diagnostic, DiagnosticIngress, Error as ApiError, EvaluationRuntime, Value as PublicValue,
+    Values,
+};
 use crate::core::{
     Atom, Builtin, CoreValueFactory, Dict, EvaluationFailure, EvaluationHalt, FunctionValue, Key,
     LazyValue, List, NetValue, PromisedValue, Value, keys,
@@ -49,8 +52,9 @@ use crate::evaluation::{
     EvalContext, EvaluationExitBlock, EvaluationMachinePoll, EvaluationPumpOutcome,
     EvaluationSession, EvaluationSessionRun, EvaluationTaskBlock, EvaluationTaskHandle,
     EvaluationTaskId, EvaluationTaskMachine, EvaluationTaskStatus, EvaluationWaitPoll,
-    EvaluationWaitToken, ExitIntent, ReflectionTaskLauncher, ReflectionTaskProfile,
-    ReflectionTaskResultPolicy, TaskStatusPublisher, TaskStatusWake, WorkDependency,
+    EvaluationWaitToken, ExitIntent, PreparedEvaluationTask, ReflectionTaskLauncher,
+    ReflectionTaskProfile, ReflectionTaskResultPolicy, TaskStatusPublisher, TaskStatusWake,
+    WorkDependency,
 };
 use crate::interaction_net::NetBuilder;
 use crate::number::Number;
@@ -839,12 +843,24 @@ impl<S: TaskSpecialization> EffectRun<S> {
     /// profile.
     #[doc(hidden)]
     pub fn schedule(self, lifecycle: &EffectLifecycle) -> Result<ScheduledEffectRun, TaskHalt> {
-        self.schedule_with_capabilities(lifecycle)
+        self.schedule_with_capabilities(lifecycle, None)
+    }
+
+    /// Installs this effect as the consumer of a runtime diagnostic ingress.
+    /// Route activation and coordinator-root activation are settlement-atomic.
+    #[doc(hidden)]
+    pub fn schedule_diagnostic_consumer(
+        self,
+        lifecycle: &EffectLifecycle,
+        ingress: &DiagnosticIngress,
+    ) -> Result<ScheduledEffectRun, TaskHalt> {
+        self.schedule_with_capabilities(lifecycle, Some(ingress))
     }
 
     fn schedule_with_capabilities(
         self,
         lifecycle: &EffectLifecycle,
+        diagnostic_ingress: Option<&DiagnosticIngress>,
     ) -> Result<ScheduledEffectRun, TaskHalt> {
         let Self {
             effect,
@@ -864,8 +880,8 @@ impl<S: TaskSpecialization> EffectRun<S> {
         let context = EvalContext::new(&session);
         let session = Arc::new(Mutex::new(Some(session)));
         let failure_context = failure_context.map(PublicValue::into_core);
-        let task = context
-            .schedule_machine(
+        let prepared = context
+            .prepare_machine(
                 Some(lifecycle.publisher(session.clone())),
                 move |task_context| {
                     let mut task = EffectTask::new_in_context_with_capabilities(
@@ -897,6 +913,18 @@ impl<S: TaskSpecialization> EffectRun<S> {
                 },
             )
             .map_err(TaskHalt::failure)?;
+        let task = match diagnostic_ingress {
+            Some(ingress) => {
+                runtime
+                    .activate_diagnostic_consumer(ingress, |mutation| {
+                        prepared.activate_guarded(mutation)
+                    })
+                    .map_err(|error| TaskHalt::new(error.to_string()))?;
+                prepared.finish_guarded_activation(true);
+                prepared.into_handle()
+            }
+            None => PreparedEvaluationTask::activate(prepared),
+        };
         Ok(ScheduledEffectRun {
             context,
             session,

@@ -103,7 +103,7 @@ fn build(values: &CoreValueFactory) -> Value {
 fn evaluate_closed(values: &CoreValueFactory, expression: ResolvedExpr<Value>) -> Value {
     let value = lower_resolved_expr(values, expression);
     crate::eval::eval_value(
-        &crate::evaluation::EvalContext::isolated(values.clone()),
+        &crate::evaluation::EvalContext::private_closed(values.clone()),
         &value,
     )
     .expect("default diagnostic formatter must be a closed function")

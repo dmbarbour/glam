@@ -547,6 +547,37 @@ impl EvaluationTaskHandle {
     }
 }
 
+/// A fully constructed reflection task retained in the coordinator's
+/// `Reserved` state. Host integration may publish another runtime fact under
+/// the same admission authority before making this task runnable.
+pub(crate) struct PreparedEvaluationTask {
+    coordinator: Arc<EvaluationWorkCoordinator>,
+    handle: EvaluationTaskHandle,
+}
+
+impl PreparedEvaluationTask {
+    pub(crate) fn activate(self) -> EvaluationTaskHandle {
+        assert!(
+            self.coordinator.activate_reflection(self.handle.work),
+            "fresh reflection reservation must activate"
+        );
+        self.handle
+    }
+
+    pub(crate) fn activate_guarded(&self, mutation: &dyn RuntimeMutationAuthority) -> bool {
+        self.coordinator
+            .activate_reflection_guarded(self.handle.work, mutation)
+    }
+
+    pub(crate) fn finish_guarded_activation(&self, activated: bool) {
+        self.coordinator.notify_reflection_activation(activated);
+    }
+
+    pub(crate) fn into_handle(self) -> EvaluationTaskHandle {
+        self.handle
+    }
+}
+
 impl fmt::Debug for EvaluationTaskHandle {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -1302,6 +1333,22 @@ impl EvaluationSession {
         session
     }
 
+    /// Creates an evaluator owner on a private coordinator which is never
+    /// attached to the runtime value factory. Closed bootstrap construction
+    /// can reduce ordinary lazy applications without publishing demand or
+    /// work into the runtime scheduler being initialized.
+    fn private_closed(values: CoreValueFactory) -> Arc<Self> {
+        let coordinator = EvaluationWorkCoordinator::new(
+            values.runtime_id(),
+            values.ids().clone(),
+            crate::runtime::RuntimeMutationAdmission::new(),
+            RuntimeObservationState::new(),
+        );
+        let session = Self::with_execution_resources(coordinator.clone(), values);
+        coordinator.register_demand(&session.demand);
+        session
+    }
+
     #[cfg(test)]
     pub(crate) fn shared(coordinator: &Arc<EvaluationWorkCoordinator>) -> Arc<Self> {
         let session =
@@ -1514,6 +1561,13 @@ impl EvalContext {
     /// tests; production task services use a runtime-registered session.
     pub(crate) fn isolated(values: CoreValueFactory) -> OwnedEvalContext {
         OwnedEvalContext::new(EvaluationSession::isolated(values))
+    }
+
+    /// Creates a closed bootstrap evaluator whose private scheduler cannot
+    /// affect runtime readiness or launch work through the runtime's sealed
+    /// reflection profile.
+    pub(crate) fn private_closed(values: CoreValueFactory) -> OwnedEvalContext {
+        OwnedEvalContext::new(EvaluationSession::private_closed(values))
     }
 
     /// Gives a directly driven effect task a private promise inventory.
@@ -1927,11 +1981,29 @@ impl EvalContext {
     /// hidden behind [`EvaluationTaskMachine`]. Construction happens outside
     /// the coordinator lock, so host snapshots and evaluator work may safely
     /// use this same session.
+    #[cfg(test)]
     pub(crate) fn schedule_machine<F>(
         &self,
         lifecycle: Option<TaskStatusPublisher>,
         build: F,
     ) -> Result<EvaluationTaskHandle, Arc<EvaluationFailure>>
+    where
+        F: FnOnce(EvalContext) -> Result<Box<dyn EvaluationTaskMachine>, Arc<EvaluationFailure>>,
+    {
+        self.prepare_machine(lifecycle, build)
+            .map(PreparedEvaluationTask::activate)
+    }
+
+    /// Constructs a coordinator-owned task without making it runnable.
+    ///
+    /// The returned reservation is already a complete runtime root. A host
+    /// may use guarded activation to publish another runtime transition in
+    /// the same settlement-exclusion interval before exposing either fact.
+    pub(crate) fn prepare_machine<F>(
+        &self,
+        lifecycle: Option<TaskStatusPublisher>,
+        build: F,
+    ) -> Result<PreparedEvaluationTask, Arc<EvaluationFailure>>
     where
         F: FnOnce(EvalContext) -> Result<Box<dyn EvaluationTaskMachine>, Arc<EvaluationFailure>>,
     {
@@ -1975,17 +2047,10 @@ impl EvalContext {
         coordinator
             .install_reflection_machine(work, machine)
             .unwrap_or_else(|_| panic!("fresh reflection reservation must accept its machine"));
-        assert!(
-            coordinator.activate_reflection(work),
-            "fresh reflection reservation must activate"
-        );
-        Ok(EvaluationTaskHandle::new(
-            &coordinator,
-            self.session.id,
-            id,
-            work,
-            wait,
-        ))
+        Ok(PreparedEvaluationTask {
+            handle: EvaluationTaskHandle::new(&coordinator, self.session.id, id, work, wait),
+            coordinator,
+        })
     }
 
     #[cfg(test)]
