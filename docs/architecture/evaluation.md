@@ -4,6 +4,9 @@ This document follows ordinary value evaluation through sessions, lazy work,
 interaction nets, and background workers. Detailed hazards live in
 [`../agent_context/evaluation.md`](../agent_context/evaluation.md) and
 [`../agent_context/interaction_nets.md`](../agent_context/interaction_nets.md).
+Reflection-machine semantics live in [`reflection.md`](reflection.md);
+structured failure transport and rendering live in
+[`diagnostics.md`](diagnostics.md).
 
 In evaluation lifecycle terminology, **foreign** means another
 `EvaluationRuntime`. An owner session, observer session, non-owner session, or
@@ -270,7 +273,7 @@ through a promise or reflection task remains an ordinary wait.
 ```text
 ordinary value demand
   -> non-lazy data, FunctionValue, or Value::Net is already WHNF
-  -> LazyValue work is claimed, computed, and memoized through its session task
+  -> LazyValue work is claimed, computed, and memoized through one coordinator producer
   -> PromisedValue reads one raw assignment, then follows a deferred assignment
 
 arity bridge
@@ -280,7 +283,7 @@ arity bridge
 apply(function, arguments)
   -> builtin or partial-builtin staging
   -> shared FunctionValue curried stage
-  -> temporary dictionary-applicability compatibility
+  -> legacy dictionary-applicability path
 
 interaction-net call
   -> Bind >< Data(Value::Net)
@@ -315,13 +318,14 @@ the caller.
 
 ## Lazy Producers
 
-Computed fixpoints are immutable lazy sources; their ordinary session lazy task
-is the sole production owner and wait source. Strict recursive observation is
-diagnosed by the common lazy dependency graph, while guarded recursion can
-finish at a constructor. Same-session observers share a stable token if
-production suspends. Task-owned reflection fixpoints retain their direct owner
-check. Assignment-style `PromisedValue` cells hold a raw one-write assignment
-rather than a computed result cache.
+Computed fixpoints are immutable lazy sources. Demand installs one canonical
+runtime-coordinator producer and wait source; every same-runtime observer
+shares it. Strict recursive observation is diagnosed by the common lazy
+dependency graph, while guarded recursion can finish at a constructor. If the
+producer's demand owner closes, another session may reclaim the reusable lazy
+without poisoning its result cell. Task-owned reflection fixpoints retain
+their direct owner check. Assignment-style `PromisedValue` cells hold a raw
+one-write assignment rather than a computed result cache.
 Direct observation before assignment fails without filling the cell. An
 enclosing lazy task instead records a scheduler-visible promise dependency and
 stays uncached, so later assignment can satisfy a new demand. Assigned promises
@@ -351,14 +355,13 @@ registration does not keep its demand session alive.
 Reflection annotations are also lazy producers. Constructing a gate demands
 neither its effect nor its target. Demand on the gate registers or resumes the
 effect task; after checking that it returned unit, the same demand continues
-into the target. Blocking remains session task state rather than a cached lazy
-error. If another session owns a still-pending gate task, the observer records
-a cross-session dependency and polls it once per quiescence pass without
-driving its owner. Both sessions belong to the same runtime; another runtime
-would reject the containing value before evaluation. Reports retain the
-producing session and task IDs; clients decide when to poll again. Terminal
-cross-session results remain observable, while a dropped owner is a permanent
-producer failure.
+into the target. Blocking remains coordinator task state rather than a cached
+lazy error. If another session owns a still-pending gate task, the observer
+records its exact same-runtime dependency and may pump that producer without
+changing its owner or task profile. Another runtime rejects the containing
+value before evaluation. Reports retain the producing session and task IDs;
+terminal results and explicit abandonment remain observable after the active
+work record retires.
 
 ## Reflection Task Handles
 
@@ -425,13 +428,14 @@ rules.
 
 ## Shared Executor
 
-Related assembler, logger, and future IDE sessions register with one
-`EvaluationExecutor`. Its fixed worker pool alternates between ready reflection
-sessions and optional spark work. The serial pump remains available for exact
-foreground dependencies and explicit batch draining. It selects by demand ID
-through the coordinator and does not require the external session owner lease;
-an ownerless spark context can therefore finish a deferred follower within the
-same demand instead of restarting from its original value.
+One `EvaluationRuntime` owns its attached `EvaluationExecutor`; assembler,
+logger, macro, and future IDE demand sessions share that runtime rather than
+registering independent worker pools. The fixed workers claim coordinator-owned
+ready reflection/deferred work or optional sparks. The serial pump remains
+available for exact foreground dependencies and explicit batch draining. It
+selects by demand ID through the coordinator and does not require the external
+session owner lease; an ownerless spark context can therefore finish a deferred
+follower within the same demand instead of restarting from its original value.
 
 Demand on `seq A B` demands `A` to weak-head normal form before transferring
 that demand to `B`. Demand on `spark A B` records the same demand as

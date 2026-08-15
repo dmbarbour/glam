@@ -17,8 +17,10 @@ and control flow.
 - `TaskSpecialization` adds a request family, private tags, and transactional
   host data. Reusable request families map their request enum into a host
   specialization rather than depending on it directly.
-- Spawned `.task.new` children receive only `ReflectionEffects`, even when the
-  parent has logger-only capabilities.
+- Spawned `.task.new` children inherit their parent's complete task profile,
+  including specialization requests, immutable environment, diagnostic
+  destination, and host resources. Annotation tasks begin with the runtime
+  default profile, so their children inherit that default.
 - `.env Path` reads the active task host's immutable reasoning environment
   using `.get` path and missing-as-`{}` conventions. There is no reflection
   write. The assembler reserves and replaces the complete `glam` subtree and
@@ -52,11 +54,11 @@ and control flow.
   widened dependency local. Earlier observations remain. The conflict-analysis
   strategy may only conservatively summarize reads and must never redefine
   edit semantics.
-- The heap is an ordinary store volume whose ID and owner are retained by the
-  reasoning host. Protected client volumes use the same journal and atomic
-  commit, but `.heap.*` can never address them. Exact and fingerprint conflict
-  analysis includes `VolumeId`; the coarse strategy may conflict across
-  volumes.
+- The heap is an ordinary volume whose ID and root are retained by the
+  runtime reflection store. Protected client volumes use the same journal and
+  atomic commit, but `.heap.*` can never address them. Exact and fingerprint
+  conflict analysis includes `VolumeId`; the coarse strategy may conflict
+  across volumes.
 - A protected capability value carries evaluation-runtime provenance and a
   request containing `VolumeId` plus operation. Any reasoning or demand
   session in that runtime may use a capability explicitly supplied to it;
@@ -68,9 +70,9 @@ and control flow.
   whole-volume revocation is serialized with commit and returns the final
   unforced root; dropping its Rust owner has no effect.
 - `AssemblerBuilder` owns an unsealed reasoning host. Its environment closure
-  may create volumes tied to the future session ID, but no task or evaluation
-  context exists until `build()` seals the environment and installs the
-  launcher. Draft volume creation never wakes waiters.
+  may create runtime-bound volumes before any task or evaluation context
+  exists. `build()` seals the environment and installs the launcher. Draft
+  volume creation never wakes waiters.
 - Heap effects impose no dictionary schema. Root replacement accepts any
   value, and nested updates or accesses return ordinary lazy errors when their
   eventual structure is invalid. `.eval` is the explicit way to observe such
@@ -119,16 +121,17 @@ and control flow.
   transactionally while it is nonterminal, and fail permanently for the other
   terminal outcome; an abandoned task has neither payload. Observation through
   those operations never adds the join frame.
-- `.task.cancel` is an unconditional best-effort, commit-ordered request; late
-  and non-owner-session cancellation are harmless no-ops. Losing branches
-  discard cancellation requests.
+- `.task.cancel` is an unconditional best-effort, commit-ordered request. Any
+  session in the same runtime may invoke it; a foreign-runtime handle is
+  rejected at the value boundary. Late cancellation is a harmless no-op and
+  losing branches discard the request.
 - `.task.ack_error` is a timing-independent, commit-ordered modifier for a
-  local handle. It suppresses the task's present or future failure from
+  same-runtime handle. It suppresses the task's present or future failure from
   reasoning reports but never mutates `.task.status`, `.task.error`, or
   `.task.join`. Same-transaction acknowledgement is installed before launch;
   losing branches discard it. Repeated acknowledgement and acknowledgement of
   success or cancellation are harmless.
-- `.eval` demands WHNF and returns `ok:WHNF` or provisional `err:Text`. A raw
+- `.eval` demands WHNF and returns `ok:WHNF` or `err:Diagnostic`. A raw
   opaque `Value::Net` is already WHNF and is returned unchanged; only an
   explicit net-arity bridge observes its interface. A pending evaluator
   dependency suspends the request. `.eval` does not isolate or roll back
@@ -146,10 +149,11 @@ and control flow.
   observations provide a retry checkpoint; it never becomes effect `.fail`.
   When both changed state and a dependency could resume a task, state change
   restarts the saved transaction/retry boundary first.
-- `EvaluationSession` claims a machine under its mutex, polls outside the
-  mutex, then restores its state. It prioritizes known producers and otherwise
-  polls ready work in bounded FIFO order. A visited set prevents dependency
-  cycles within one pump.
+- The runtime coordinator owns each reflection machine while claimable. A
+  claim takes the machine and marks its work record running under the
+  coordinator lock; polling happens outside the lock; release restores it
+  before requeueing/blocking or returns it for terminal destruction. There is
+  no session-side machine registry.
 - Ordinary value observation pumps only a demanded producer chain. Unrelated
   reasoning runs through workers or explicit `Assembler::drain_reasoning`.
 - Runtime-wide reasoning drain has no timeout or step limit. It includes newly
@@ -178,16 +182,10 @@ and control flow.
   The scanner waits
   for final `refl.*`, launches named tasks in order, requires unit from each,
   and stores ordered `{key,task}` records.
-- The CLI logger's assembler-bus input subscription and its session-local
-  diagnostic bus are separate. Logger output cannot feed its own input stream.
-  Its `.task.new` children inherit the complete logger profile, including
-  `read_log`, `write_stderr`, and coordinated `.exit.*`.
-- Logger input has a revision distinct from heap revisions and the coarse wake
-  generation. Arriving diagnostics do not invalidate heap-only transactions;
-  a committed queue read still validates and consumes input atomically with
-  its heap journal.
-- Batch execution pumps the whole runtime, then settles coordinated logger exit
-  votes or forcefully reports a stable deadlock. The preferred logger loop is
-  `.cut (.alt (.read_log ...) (.exit.success))`. The diagnostic stream has no
-  semantic close operation. Runtime report failures make the process fail even
-  when fallback rendering also fails.
+- The CLI logger's assembler-bus input and its session-local diagnostic bus are
+  separate. Logger output cannot feed its own input stream, and logger children
+  inherit `read_log`, `write_stderr`, and coordinated exit operations.
+- Logger input claims and heap edits share one atomic runtime commit without
+  sharing conflict addresses. See
+  [`diagnostics.md`](diagnostics.md) for ingress, output, and rendering
+  invariants and [`assembly.md`](assembly.md) for settlement and exit policy.

@@ -1,7 +1,9 @@
 # Assembly and CLI Flow
 
 This document describes the current Rust bootstrap. It is an implementation
-map, not the eventual assembler contract.
+map, not the eventual assembler contract. Built-in compiler internals live in
+[`front_end.md`](front_end.md); structured diagnostics and configured logging
+live in [`diagnostics.md`](diagnostics.md).
 
 ## Library Boundary
 
@@ -54,74 +56,25 @@ names, performs loads through artifact-carried relative resolvers, and builds
 the import chain. Inline scripts have no resolver and therefore cannot import.
 
 Each source compilation receives a local invocation ID. Diagnostic envelopes
-retain a compact root-to-parent chain of relative requests, namespace
-extensions, tagged source identities, and the digest of every artifact's exact
-bytes, without retaining module values or environments. Observers choose when
-to enrich that provenance into `msg.origin`.
-
-`CompilationExecution` is narrower than `Assembler` or `ReasoningSession`. It
-supplies the lookup context plus one dedicated macro demand session shared by
-all source inputs and recursive imports in the build. Macro reflection uses a
-separate diagnostic bus and demand-owner lease, but its tasks enter the same
-runtime coordinator as assembler and logger work. It therefore shares the
-reflection heap, protected volumes, query domain, observation epoch, and
-executor. Its diagnostic events are bridged into build diagnostics with a
-`macro` reasoning origin, but the two buses retain independent sequence
-numbers and severity counts. Compilation drains detached macro reflection
-children without a timeout; terminal failures and stable deadlocks fail the
-build.
+retain compact source/import provenance without retaining module values or
+environments. `CompilationExecution` shares import lookup and one macro demand
+session across all inputs and recursive imports in the build. See the
+[front-end architecture](front_end.md) for parsing, macro staging, lowering,
+and compiler-value caching, and the [diagnostic architecture](diagnostics.md)
+for provenance and macro-bus bridging.
 
 ## Diagnostics and Logging
 
-Each reasoning session owns a non-buffering `DiagnosticBus`. Publishing a
-committed envelope assigns a session-local sequence number, increments a
-coherent severity counter, and sends the immutable event to the subscribers
-present at that point. Subscribers own all buffering, dropping, rendering,
-forwarding, and indexing policy. Changing an assembler's default subscription
-does not rebuild its reasoning session.
+`Assembler` is silent by default and owns neither buffering nor rendering.
+Batch `main` installs a runtime diagnostic ingress, optionally runs `conf.log`
+as a separate demand session, and retains independent assembler and logger bus
+counts. The logger reads transactionally, buffers output in runtime outboxes,
+and votes to exit only after input is quiescent. Returning non-unit is an error.
 
-`Assembler` does not render diagnostics. Before compiling configuration, the
-CLI binds the assembler bus to its runtime and installs one ordered diagnostic
-ingress backed by a generic runtime input endpoint. Bootstrap messages are
-therefore observable by `conf.log` without placing a typed diagnostic queue in
-runtime state. The embedding facade itself is silent by default and owns no
-retention policy. FIFO consumption does not change the bus's authoritative
-counters.
-
-If configured, `conf.log` runs in its own evaluation session and owns a
-separate diagnostic bus, while sharing the assembler's executor. It reads the
-assembler bus's runtime FIFO through main-only effects. Its own `.log` writes
-and `.write_stderr` calls are buffered output intents: commit installs them in
-runtime outboxes, then lock-free delivery publishes to the logger bus or writes
-the OS stream. The logger bus's default subscriber enriches messages with
-terminal `viewer` context and applies the cached closed Glam formatter. Logger
-output therefore cannot feed back into assembler input, and abandoned choices
-cannot leak diagnostics or bytes. Formatter failure falls back to a minimal
-Rust renderer.
-
-The default subscriber projects conventional context frames through the
-public reflection inspector and stores the selected wording and indentation in
-`viewer.context_lines`. A frame with a defined `msg` interface instead enters
-the same pipeline recursively: main applies a depth-adjusted copy of its
-terminal viewer metadata to the complete dictionary or object, recursively
-builds that message's context lines, and invokes the same cached formatter.
-Nested messages are not republished and do not affect severity counts. The
-cached Glam formatter joins the viewer lines; it does not inspect
-`msg.context`, choose presentation terminology, or perform the recursion.
-Main supplies presentation-only `viewer.header` as the complete textual prefix
-(location, severity wording, punctuation, trailing space, and any terminal
-escapes) separately from authoritative `msg.severity`.
-
-Loader failures use a dedicated
-`import:{request:{file:Text}, origin?:Origin, source?:Source}` context
-frame. The `g` tag remains reserved for locations and definitions supplied by
-the built-in `.g` front end. Because the assembler constructs import frames
-after crossing the compiler capability boundary, their origins are projected
-data rather than opaque handles.
-
-The logger is wrapped with the native equivalent of `(=>> .r ())`; returning a
-non-unit result is an error. A logger failure produces a synthetic diagnostic,
-then remaining messages use the default path.
+Diagnostic structure, provenance, ingress activation, transactional output,
+viewer enrichment, the cached Glam formatter, and fallback delivery are owned
+by [`diagnostics.md`](diagnostics.md). This assembly flow owns only their place
+in batch ordering and final exit policy.
 
 ## Local Files and Manifest
 

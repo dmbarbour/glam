@@ -28,10 +28,13 @@ choice rather than another core value kind. An absent `spec.name` is
 semantically the anonymous name `{}`, consistent with ordinary dictionary
 normalization.
 
-Ordinary dictionaries participate as anonymous object specifications through
-`ObjectSpec`: their dictionary content becomes a mixin, their name is empty,
-and they have no dependencies. This is bootstrap compatibility, not a final
-persistent-dictionary design.
+Plain dictionaries are not objects and cannot appear directly as object
+parents. `object_from_dict` explicitly converts one into an instantiated
+anonymous object whose dictionary content becomes a definitions mixin, whose
+name is empty, and which has no dependencies. It accepts `{}` and rejects an
+existing object. The internal `ObjectSpec` builtin extracts a defined
+dictionary-valued `spec` from an object; it does not perform implicit
+dictionary conversion.
 
 ## Dependency Order
 
@@ -116,10 +119,10 @@ updates from accidentally treating runtime metadata as a user definition.
   object API.
 - Direct manipulation of `spec` is not yet protected as a full language-level
   abstraction.
-- Dictionary/object compatibility uses the current eager dictionary
+- Object definition mixins and `with` still use the current eager dictionary
   representation and will need review when persistent lazy dictionaries land.
 - Final-self is an immutable computed-fixpoint source beneath an ordinary lazy
-  value. Its session lazy task owns production; recursive self-demand forms a
-  lazy cycle, while same-session observers share its wait if production blocks.
-  Module final definitions still use a separate fail-fast `Promised` assignment
-  hole.
+  value. Demand installs one canonical runtime-coordinator producer; recursive
+  self-demand forms a lazy cycle, while same-runtime observers share its wait
+  if production blocks. Module final definitions still use a separate
+  fail-fast `Promised` assignment hole.

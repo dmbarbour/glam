@@ -41,8 +41,10 @@ control-flow overview.
   producer claimed by another thread (`Busy`) from stable quiescence
   (`NoProgress`). Cooperative and scheduled contexts return the wait, while
   synchronous assembler contexts wait on the session condition variable and
-  retry. Lazy tasks participate in exact dependency pumping but never enter
-  the background-ready queue.
+  retry. Deferred producers begin dormant. Publishing an exact dependency on
+  one promotes that canonical producer into the runtime ready queue, where a
+  serial pump or worker may claim it; construction alone does not advertise
+  background work.
 - A blocked lazy or assigned-promise task records an edge only when its wait is
   produced by another deferred-value task. The resulting functional graph is
   checked on every edge change. Cycles containing only computed lazies are
@@ -58,8 +60,8 @@ control-flow overview.
 - A raw `Value::Net` is a valid non-lazy cached result. Reaching it does not
   inspect its exposed interface. `LazySource::NetComputation` is the internal
   arity-zero bridge, while `FunctionValue` staging supplies the positive-arity
-  bridge. `import 'std` exposes the provisional `net_arity` builtin for both
-  forms, alongside `seq` and `spark`. A permanent failure while the zero-arity
+  bridge. `import 'std` exposes `net_arity` for both forms, alongside `seq` and
+  `spark`. A permanent failure while the zero-arity
   bridge demands data gains `eval:{op:'net_computation}`; raw net observation
   does not.
 - Lazy and promise identities are runtime-local nonzero IDs. Values may cross
@@ -169,11 +171,12 @@ control-flow overview.
 ## Promises and Fixpoints
 
 - Ordinary `fix` and object-self knots use immutable computed-fixpoint sources
-  beneath ordinary `LazyValue`s. The session lazy task is their only producer
-  owner and wait source. Strict recursive demand becomes an ordinary lazy
-  dependency cycle; guarded self-reference beneath a completed constructor
-  reaches WHNF. Same-session observers share the lazy task, while another
-  session may duplicate pure work against the shared result cell.
+  beneath ordinary `LazyValue`s. One runtime-coordinator deferred record is
+  the canonical producer and wait source for a demanded lazy. Strict recursive
+  demand becomes an ordinary lazy dependency cycle; guarded self-reference
+  beneath a completed constructor reaches WHNF. Same-runtime observers share
+  that producer. If its owning demand session closes, another session may
+  reclaim the reusable lazy without poisoning its shared result cell.
 - Task-owned reflection fixpoint promises retain their separate rule: direct
   observation by their owning reflection task is an error, while other tasks
   wait for the owner's assignment. Assignment or explicit failure retires the
@@ -206,7 +209,8 @@ control-flow overview.
   Projection preserves its ad hoc fields and existing `msg.context`, prepending
   later evaluator-owned demand frames rather than replacing client context.
 - Reflection annotations are lazy gates. Construction demands neither effect
-  nor target. Demand on a gate waits for its session-owned task, requires
+  nor target. Demand on a gate waits for its demand-session-owned coordinator
+  task, requires
   canonical unit, and then transfers the same demand to the target. Waits are
   not cached as lazy failures.
 - `refl` and `meta_refl` select the runtime's once-sealed default task profile,
@@ -228,22 +232,20 @@ control-flow overview.
   including when demand transfers through an observer in another session of
   the same runtime. If nobody observes the failure, it remains unacknowledged
   and is reported during reasoning drain.
-- A gate's first observer owns its task. Another session may poll but must not
-  drive that task: pending work becomes a cross-session dependency in the
-  local lazy-task record, while a terminal result transfers demand to the
-  target. Both sessions are in the same runtime; another runtime rejects the
-  value before demand. Wait tokens retain stable runtime, session, and
-  producer IDs but no owner reference; coordinator registration determines
-  live cross-session work, and exhaustive closure publication makes a dropped
-  owner terminal. Live
-  cross-session work remains visible in quiescence reports without becoming a
-  cached `LazyFailure`.
+- A gate's first observer establishes its demand owner and task profile.
+  Same-runtime observers follow its exact coordinator dependency and may help
+  pump that producer without changing ownership or profile; terminal success
+  transfers demand to the target. Another runtime rejects the value before
+  demand. Wait tokens retain stable scalar runtime, owner-session, and producer
+  IDs but no owner lease; coordinator registration and exhaustive closure
+  publication make unavailable or dropped producers explicit without caching
+  a retryable condition as `LazyFailure`.
 - Opaque reflection task values retain `EvaluationTaskHandle`, not a bare task
   ID. `.task.status`, `.task.value`, and `.task.error` may inspect the
   protected query from any session in the same runtime without changing
-  ownership or reporting state. Public join and cancellation still validate
-  the handle's session provenance; internal cross-session followers
-  deliberately operate on wait tokens instead.
+  ownership or reporting state. Join, cancellation, and acknowledgement
+  validate runtime provenance and route to the producer's coordinator records;
+  exact internal followers operate on wait tokens.
 - A transaction folds modifiers for its newly reserved tasks before launch.
   In particular, same-transaction cancellation must publish `'canceled`
   without constructing a task machine or exposing runnable work to the shared
@@ -257,11 +259,14 @@ control-flow overview.
 
 ## Sessions and Workers
 
-- `Assembler` clones share an `EvaluationSession`. Replacing an assembler's
-  host, sink, environment, or executor creates a session consistent with the
-  new configuration.
-- Demand-driven deferred tasks are stored per session and keyed by stable lazy
-  or promise IDs; do not enlarge every value with mutable scheduler state.
+- `Assembler` clones share one internal reasoning session selected by
+  `AssemblerBuilder`. Source, runtime, environment, diagnostic, and executor
+  policy is fixed before construction rather than replaced by fluent
+  assembler mutation.
+- Demand-driven reflection and deferred tasks live in runtime-coordinator work
+  records indexed by demand owner and stable value/task identities; do not
+  enlarge every value with mutable scheduler state or recreate a session-side
+  registry.
 - One runtime-owned `EvaluationWorkCoordinator` registers related assembler,
   logger, and future IDE sessions and owns ready-session selection, fairness,
   its work generation, worker waiting, and stable spark records.
@@ -307,7 +312,8 @@ control-flow overview.
 - Claimed interaction-net pairs are live work, not quiescence. An observer must
   wait for that runtime's generation to change before deciding the net is
   blocked or complete.
-- A stable pass containing a live cross-session task dependency is quiescent,
-  not a proven deadlock. The client may poll the reported session/task later.
-  The bootstrap does not spin or pump the producer's session, and
-  cross-session cycle diagnosis remains future work.
+- Runtime readiness covers all demand sessions in the runtime. Runnable or
+  claimed producer work is `Busy`; a stable set in which every unfinished
+  record is blocked is a typed deadlock snapshot. Pure deferred-value cycles
+  are diagnosed earlier by the strict dependency graph, while cycles through
+  promises or reflection tasks remain ordinary deadlock candidates.

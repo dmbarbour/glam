@@ -3,7 +3,9 @@
 Reflection tasks interpret freer-monad effects outside pure value and
 interaction-net semantics. This note describes the current implementation;
 [`../agent_context/reflection.md`](../agent_context/reflection.md) contains the
-regression-sensitive rules.
+regression-sensitive rules. Runtime work ownership lives in
+[`evaluation.md`](evaluation.md), while diagnostic transport and configured
+logger lifecycle live in [`diagnostics.md`](diagnostics.md).
 
 ## Specialization Layers
 
@@ -38,7 +40,7 @@ effect value
   -> drive until request or result
   -> dispatch request through TaskHost
   -> deliver success, failure, or suspension
-  -> preserve frames and return task state to EvaluationSession
+  -> preserve frames in the coordinator-owned work record
 ```
 
 Standard effects include `r`, `seq`, `alt`, `fail`, `cut`, `fix`, indexed
@@ -79,16 +81,16 @@ and evaluation errors. A dependency becoming terminal reruns the unchanged
 operation that observed it. A non-blocking evaluation error remains retryably
 blocked only when an existing state observation can rewind its checkpoint; it
 does not advance `.alt`. The scheduler receives only the dependency token,
-coarse retry generation, and retained diagnostic text.
+coarse retry generation, and retained structured evaluation failure.
 
 `reflection/store.rs` owns a persistent map of shared volumes independently of
 host wake state. Transactions record volume-qualified hierarchical read paths
 and one ordered edit overlay; commits rebase edits onto the current persistent
 roots. The store retains exact changed addresses. Blind sets and rewrites,
 including overlapping parent and child paths, serialize in commit order while
-their target volume exists. A session-selected
-`Arc<dyn ConflictAnalysisStrategy>` controls only how reads are summarized:
-the bootstrap supplies exact, conservative fingerprint, and fully coarse
+their target volume exists. The runtime-selected
+`Arc<dyn ConflictAnalysisStrategy>` controls only how reads are summarized.
+The bootstrap supplies exact, conservative fingerprint, and fully coarse
 strategies. `EvaluationRuntime` fixes the strategy at construction; an
 assembler which attaches that runtime cannot replace it.
 
@@ -104,13 +106,11 @@ updaters therefore remain latent evaluator errors, which `.eval` can observe
 as data.
 
 The runtime transaction lock makes reflection-store and generic event changes
-atomic. The logger reads its ordered diagnostic input endpoint and buffers
-diagnostic or stderr output in the same event journal as its heap edits. A
-failed validation therefore cannot partially edit the heap, consume a
-diagnostic, or leak output from an abandoned choice. The outer runtime mutation
+atomic. A failed validation cannot partially edit the heap, consume admitted
+input, or leak buffered output from an abandoned choice. The outer mutation
 gate spans authoritative publication through the broad observation-epoch
-advance; diagnostic subscribers, condition-variable notification, decoding,
-and stderr delivery run only after it is released.
+advance; wakes, callbacks, decoding, and value destruction run after release.
+The diagnostic architecture owns the logger-specific ingress and outbox flow.
 
 ## Protected Client Volumes
 
@@ -131,7 +131,7 @@ makes construction fail.
 returns a Rust owner handle. The handle exposes one closed Glam
 `{get,set,rewrite}` capability value. Possession is authority: the functions
 are not members of the ordinary reflection API, while `.heap.*` remains rooted
-to the session's private heap volume.
+to the runtime's shared heap volume.
 
 The capability value carries its evaluation-runtime provenance and embeds the
 runtime-local `VolumeId` plus its operation. Possession authorizes use from any
@@ -142,9 +142,9 @@ The owner explicitly revokes the complete volume and recovers its final
 unforced value. Volume IDs are never reused. A missing `get` returns a latent
 error value; blind sets and rewrites still enter the journal but fail
 permanently at commit, so they cannot recreate a revoked volume. Revocation is
-serialized with commits under the host lock and records a root change, causing
-transactions that read the old volume to retry. Dropping the Rust owner does
-not revoke it.
+serialized with commits through runtime transaction state and mutation
+admission. It records a root change, causing transactions that read the old
+volume to retry. Dropping the Rust owner does not revoke it.
 
 ## Reusable Reflection Requests
 
@@ -156,7 +156,7 @@ not revoke it.
   publishes it through the session's diagnostic bus only after commit.
 - `.dict_items Dict` returns ordered `{key,value}` records.
 - `.eval Value` demands weak-head normal form and returns `ok:WHNF` or
-  `err:Text`. A raw opaque `Value::Net` is already WHNF and is returned
+  `err:Diagnostic`. A raw opaque `Value::Net` is already WHNF and is returned
   unchanged; only an explicit net-arity bridge observes its interface.
 - `.task.new Effect` reserves an opaque child handle plus a private status
   query; launch is commit-ordered inside a transaction. The status query is
@@ -175,8 +175,9 @@ not revoke it.
   transactionally acknowledges
   present or future failure reporting without changing any of those
   observations; it is valid before launch, while running, and after
-  termination. A terminal failure otherwise remains in the session's
-  reporting ledger even though its active scheduler record has retired.
+  termination. A terminal failure otherwise remains in the coordinator ledger
+  bucket for its producer owner even though its active scheduler record has
+  retired.
   `.task.cancel` journals a best-effort cancellation request.
   Same-transaction modifiers are folded into the reserved task before launch,
   so cancellation can bypass machine construction and acknowledgement can
@@ -192,30 +193,19 @@ reflection API.
 
 ## Session Scheduling
 
-`EvaluationSession` stores type-erased reflection and deferred machine slots
-plus minimal lookup indexes. The runtime coordinator owns each task's
-reservation or dormancy, queued, running, blocked, control, and
-terminalization state. It marks work running before the session detaches the
-corresponding machine; release restores a retained machine before the
-coordinator makes it claimable again. Neither mutex is held while acquiring
-the other. A direct serial demand may claim dormant deferred work without
-publishing it to workers; an outer blocked task promotes its known producer to
-the ready queue. Exact lazy wait tokens still let the serial pump prioritize a
-known producer chain. Runtime semantic-state changes wake retry checkpoints
-through a coordinator-owned broad index keyed by work ID, subscription epoch,
-and `RuntimeObservationEpoch`; path journals still decide
-whether an optimistic heap commit must retry. Workers claim exact ready work
-directly from the runtime queue, while serial pumps filter that queue by demand
-session. An exact serial demand may claim one producer installed by another
-same-runtime session, but the claim detaches and returns the machine through
-its registered owner; general ready work remains session-filtered.
+`EvaluationSession` is the external demand-owner lease; it does not store a
+task registry. The runtime coordinator owns reflection work records, their
+machines while not exclusively claimed, task/wait indexes, terminal
+publication, acknowledgement, dependencies, and failure ledgers. Claims take a
+machine from one record, poll outside the coordinator lock, and restore or
+terminalize it before the record becomes claimable again.
 
-Foreground evaluation pumps only tasks needed by the lazy value it is trying
-to observe. Shared workers may opportunistically poll any ready task. Explicit
-reasoning drain continues without a time or step limit, includes newly spawned
-tasks, and returns either terminal results or a structured stable-deadlock
-report. Unfinished-task reports preserve retryably blocked evaluation errors
-for library clients and CLI diagnostics without treating them as wake sources.
+Foreground demand follows exact producer chains. Workers may opportunistically
+claim ready work, and explicit runtime drain includes newly spawned tasks
+without a timeout or step budget. Exact subscriptions and broad observation
+epochs are coordinator mechanisms described authoritatively in
+[`evaluation.md`](evaluation.md); reflection-store read journals independently
+decide whether an optimistic transaction conflicts.
 
 ## Sources of Tasks
 
@@ -230,17 +220,12 @@ derived from module paths or final object `spec.name`.
 
 ## CLI Logger Session
 
-Configured `conf.log` is a reflection task in a separate session sharing the
-same executor. Main-only effects expose the incoming diagnostic stream without
-a semantic open/closed state. Committed `.log` from the logger or its children
-goes to a separate logger-session bus with a default-formatting subscriber
-rather than back into that stream.
+Configured `conf.log` is a reflection task with a broader specialization.
+Main-only requests read admitted diagnostics, buffer stderr or diagnostic
+output, and coordinate `.exit.success`/`.exit.error`. Children inherit those
+capabilities. The input stream has no close request and logger output uses a
+separate bus, so it cannot feed its own input.
 
-The coordinator-owned logger root also receives `.exit.success` and
-`.exit.error`. A conventional loop puts `.exit.success` after `.read_log` as
-the final branch of one `.cut`; an input committed before settlement disturbs
-that vote and retries the read first. Batch `main` settles the vote only when
-the whole runtime is stably ready. A stable deadlock is forcefully killed and
-reported; there is no close/cancel compatibility path. Task, delivery, exit,
-and killed-work reports are fatal independently of successful fallback
-rendering.
+See [`diagnostics.md`](diagnostics.md) for route activation, transactional
+transport, fallback, and rendering, and [`assembly.md`](assembly.md) for
+settlement and process exit.

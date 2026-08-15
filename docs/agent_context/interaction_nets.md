@@ -186,11 +186,11 @@ the explicit zero-arity bridge and must produce `Data` when observed.
 `FunctionValue` staging is the positive-arity bridge: partial application only
 attaches arguments and never inspects the intermediate interface. Saturation
 must produce `Data`; an early `Data` is left to ordinary interaction rules and
-may become stuck as later arguments are attached. The provisional source form
-for both bridges is `net_arity N Net` and is available through `import 'std`.
+may become stuck as later arguments are attached. The source form for both
+bridges is `net_arity N Net` through `import 'std`.
 The same module provides the ordinary `interaction_net` construction builtin;
-the bootstrap currently writes its effect programs with explicit `>>=` and
-`=>>` while `do` notation remains future syntax.
+source programs may use either explicit `>>=`/`=>>` or the built-in front
+end's `do` notation, which lowers away before net construction runs.
 
 Shared runtime mutation increments a condition-variable generation. If one
 observer encounters an active pair already claimed by another evaluator, it
@@ -208,5 +208,5 @@ frontier.
 - Direct fan histories remain potentially large.
 - Stuck pairs are retained for inspection but reflection does not yet expose
   them.
-- Dictionary applicability remains a compatibility path pending a persistent
-  lazy dictionary design.
+- Dictionary applicability remains supported. Revisit that path when the
+  persistent lazy dictionary design changes the representation.

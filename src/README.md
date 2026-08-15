@@ -1,12 +1,14 @@
 # Bootstrap Implementation Map
 
 This is the navigation and dataflow map for the current Rust bootstrap. It does
-not define future language semantics or collect subsystem invariants.
+not define language semantics or collect subsystem invariants.
 
-- Current control flow:
+- Current architecture:
   [`assembly`](../docs/architecture/assembly.md),
-  [`evaluation`](../docs/architecture/evaluation.md), and
-  [`reflection`](../docs/architecture/reflection.md).
+  [`front end`](../docs/architecture/front_end.md),
+  [`evaluation`](../docs/architecture/evaluation.md),
+  [`reflection`](../docs/architecture/reflection.md), and
+  [`diagnostics`](../docs/architecture/diagnostics.md).
 - Regression-sensitive rules: [`AgentContext.md`](../docs/AgentContext.md) and
   its focused notes.
 - Target design: [`DistilledDesign.md`](../docs/DistilledDesign.md).
@@ -15,355 +17,114 @@ not define future language semantics or collect subsystem invariants.
 
 | Path | Responsibility |
 | --- | --- |
-| `main.rs` | Executes typed top-level commands, chooses configuration/assembly roots, owns logger policy, process I/O, and exit status |
-| `cli.rs`, `cli/model.rs` | Public CLI facade plus validated bootstrap/configured command and argument models |
-| `cli/bootstrap.rs`, `cli/output.rs` | OS-string bootstrap dispatch, standalone-option validation, help text, and inspection/completion formatting |
-| `cli/configured.rs`, `cli/search.rs` | `conf.cli` lookup, isolated all-results execution, branch validation, and semantic-plan selection |
-| `cli/effects.rs`, `cli/host.rs` | Serial CLI reader/writer effect specialization and immutable invocation host |
-| `cli/completion.rs`, `cli/basic.rs` | Optional-cursor completion requests, candidates/frontiers, lexical routing, and bootstrap-option completion |
-| `cli/path.rs`, `cli/adapters.rs` | Shared filesystem completion plus replaceable minimal Bash/Zsh bindings over the shell-neutral protocol |
-| `cli/token.rs`, `cli/token/` | Restricted nested token-effect search plus literal, remaining-span, Unicode-scalar, end, and capture-free Glam text-pattern readers |
-| `source.rs` | Immutable source artifacts, identities and digests, relative resolvers, host compatibility, and tracked local files |
-| `lib.rs`, `api.rs` | Embedding facade: staged assembler construction, opaque values, privileged reflection inspection, internal reasoning-session ownership, modules, evaluation, diagnostics, extraction, and checked nets |
-| `g_source.rs` | Narrow non-evaluating `.g` inspection report, including deferred macro-bearing declarations; no syntax tree or lowering context escapes |
-| `compiler.rs` | Per-source capabilities, hidden artifact/import provenance, loaders, namespace qualification, and diagnostic emission |
-| `g_syntax.rs` | Private built-in `.g` front-end facade |
-| `g_syntax/parser/source.rs` | UTF-8 entry point, one lexical pass, staged expansion/non-evaluating inspection streams, source-wide validation, declaration orchestration, and recovery |
-| `g_syntax/parser/lexical.rs` | Authoritative spanned tokens, eagerly parsed numeric/text data, delimiter groups, indentation facts, and declaration ranges |
-| `g_syntax/parser/logical.rs` | Logical token/payload arenas, local generated-text classification, structural reindexing, and parser-token materialization |
-| `g_syntax/parser/input.rs` | Checked token-range views, group-aware iteration, mapped Chumsky input, token predicates, and parser diagnostics |
-| `g_syntax/parser/layout.rs`, `expression_context.rs` | Delimiter-depth lines, inferred layout blocks, continuation floors, exact expression extents, and yielded boundaries |
-| `g_syntax/parser/expression.rs`, `structural.rs`, `do_expr.rs`, `conditional.rs` | Ordinary precedence grammar, structural/postfix resumption, `let`/object/`with` forms, do statements, pure `if`/`match`, host `try` variants, and hierarchical choice trees |
-| `g_syntax/parser/declaration.rs`, `declaration/simple.rs` | Top-level and recursive object-body declarations, including simple language/import/abstract/unique forms |
-| `g_syntax/keywords.rs` | Language-version-owned `g0` reserved words and their syntactic roles |
-| `g_syntax/resolve/`, `resolved.rs`, `analysis.rs`, `name_analysis.rs` | Lexical resolution, affine semantic IR, local-use warnings, and file-wide local/global shadow checks |
-| `g_syntax/compiler_values.rs` | Shared closed helpers and built-in modules owned by the g compiler |
-| `g_syntax/macro_expansion/` | Restricted macro-effect API, branch journals, immutable invocation hosts, and isolated all-results execution |
-| `g_syntax/module_lowering/` | Imports, definitions, objects, and module fixpoint orchestration |
-| `g_syntax/net_lowering.rs` | Resolved functions and applications to closed interaction nets |
-| `g_syntax/diagnostic_formatter.rs` | Cached closed Glam default `Diagnostic -> Bytes` formatter |
-| `text_pattern.rs` | Versioned capture-free text-pattern grammar and replaceable matching backend shared by source-facing effects |
-| `core.rs`, `core/` | Syntax-independent values, functions, computed lazies, named promises, dictionaries, keys, and builtin IDs |
-| `core/evaluation_halt.rs` | Typed demand halts: permanent structured failure versus retryable wait or unassigned promise |
-| `core_net.rs` | Core data/operator specialization of generic interaction nets |
-| `interaction_net/model.rs`, `builder.rs` | Generic identities, agents, specialization protocol, and checked construction |
-| `interaction_net/runtime/` | Mutable graph, active-pair rewrites, cursors, and runtime tests |
-| `evaluation.rs`, `evaluation/coordinator.rs`, `evaluation/executor.rs` | Demand-owner leases and machine-safe demand state, coordinator-owned reflection/deferred/spark work, reporting, coordination, and worker lifecycle |
-| `eval/value.rs`, `application.rs`, `operator.rs`, `net.rs` | Value forcing, application, operator staging, and net driving |
-| `eval/builtins/` | Builtin implementations split by semantic family |
-| `eval/builtins/net/construction.rs` | Lazy `interaction_net` effect search, branch-local construction journals, opaque port capabilities, and checked replay |
-| `eval/sequence.rs` | Lazy list-to-binary observation and ranged extraction |
-| `list.rs`, `number.rs` | Compact persistent list ropes and exact-number boundary |
-| `diagnostic.rs`, `api.rs` diagnostic facade | Diagnostic values, enrichment metadata, session buses, subscriptions, and severity counts |
-| `reflection.rs`, `reflection/requests.rs`, `reflection/search.rs` | Persistent freer-effect machine, task API, transactions, request helpers, and isolated all-results policy |
-| `reflection/store.rs` | Persistent shared/private volumes, journaled ordered edit rebasing, asynchronous query state, and pluggable read-conflict analysis |
+| `main.rs` | Typed command execution, logger supervision, process I/O, exit policy |
+| `cli.rs`, `cli/model.rs` | Public CLI facade and validated command models |
+| `cli/bootstrap.rs`, `cli/output.rs` | Bootstrap dispatch, validation, help, output formatting |
+| `cli/configured.rs`, `cli/search.rs` | `conf.cli` search and semantic-plan selection |
+| `cli/effects.rs`, `cli/host.rs` | Serial CLI effect specialization and invocation host |
+| `cli/completion.rs`, `cli/basic.rs` | Completion model, frontiers, and bootstrap completion |
+| `cli/path.rs`, `cli/adapters.rs` | Filesystem completion and minimal shell adapters |
+| `cli/token.rs`, `cli/token/` | Restricted nested token-effect parsing |
+| `source.rs` | Source artifacts, digests, relative resolvers, tracked local files |
+| `lib.rs`, `api.rs` | Embedding facade, runtime construction, modules, diagnostics, extraction |
+| `g_source.rs` | Non-evaluating public `.g` inspection summary |
+| `compiler.rs` | Per-source compiler capabilities and hidden provenance |
+| `g_syntax.rs` | Private built-in `.g` compiler facade |
+| `g_syntax/parser/source.rs` | Staged source parsing, macro expansion, declaration orchestration |
+| `g_syntax/parser/lexical.rs`, `logical.rs`, `input.rs` | Shared lexical structure and parser-token views |
+| `g_syntax/parser/layout.rs`, `expression_context.rs` | Layout ownership, floors, and expression boundaries |
+| `g_syntax/parser/expression.rs`, `structural.rs`, `do_expr.rs`, `conditional.rs` | Expression and structural syntax |
+| `g_syntax/parser/declaration.rs`, `declaration/` | Top-level and recursive declarations |
+| `g_syntax/keywords.rs` | Language-version keyword ownership |
+| `g_syntax/resolve/`, `resolved.rs`, `analysis.rs`, `name_analysis.rs` | Resolution, affine IR, and source analysis |
+| `g_syntax/compiler_values.rs` | Runtime-cached closed compiler helpers and modules |
+| `g_syntax/macro_expansion/` | Macro effect API, journals, and isolated search |
+| `g_syntax/module_lowering/` | Imports, definitions, objects, module fixpoint |
+| `g_syntax/net_lowering.rs` | Resolved functions and applications to closed nets |
+| `g_syntax/diagnostic_formatter.rs` | Cached Glam `Diagnostic -> Bytes` formatter |
+| `text_pattern.rs` | Shared capture-free text-pattern language |
+| `core.rs`, `core/` | Syntax-independent values, lazies, promises, functions, keys, builtins |
+| `core_net.rs` | Core specialization of generic interaction nets |
+| `interaction_net/model.rs`, `builder.rs` | Generic topology and checked construction |
+| `interaction_net/runtime/` | Mutable graph, active-pair reduction, logical copies |
+| `evaluation.rs`, `evaluation/coordinator.rs`, `evaluation/executor.rs` | Demand ownership, runtime work records, workers |
+| `eval/value.rs`, `application.rs`, `operator.rs`, `net.rs` | Value forcing and semantic execution |
+| `eval/builtins/` | Builtin implementations by semantic family |
+| `eval/builtins/net/construction.rs` | Source interaction-net construction search |
+| `eval/sequence.rs` | Lazy sequence and binary extraction |
+| `list.rs`, `number.rs` | Persistent list ropes and exact numbers |
+| `diagnostic.rs`, `api.rs` diagnostic facade | Diagnostic values, buses, ingress, enrichment |
+| `reflection.rs`, `reflection/requests.rs`, `reflection/search.rs` | Persistent effect machine, requests, isolated search |
+| `reflection/store.rs` | Journaled volumes, conflict analysis, query state |
+| `runtime.rs` | Runtime identity, mutation admission, activity accounting |
 
 `interaction_net.rs`, `eval.rs`, and `g_syntax.rs` are facades over their
-submodules rather than homes for another implementation layer.
+submodules rather than additional implementation layers.
 
-## End-to-End Assembly
+## Principal Dataflows
+
+### Assembly
 
 ```text
 main or embedding client
-  -> AssemblerBuilder fixes SourceSystem + reasoning resources
-  -> Assembler + ModuleBuilder
-  -> one CompilationExecution for the complete top-level build
-  -> SourceSystem supplies immutable SourceArtifact
-  -> artifact supplies bytes + identity + digest + relative resolver
-  -> CompileContext supplies source-scoped capabilities + opaque origin
-  -> selected front end parses, resolves, and lowers
-  -> closed module Value
-  -> explicit evaluation/extraction
+  -> AssemblerBuilder fixes SourceSystem + EvaluationRuntime + reasoning policy
+  -> ModuleBuilder creates one CompilationExecution
+  -> SourceArtifact bytes + CompileContext capabilities
+  -> selected front end produces closed module Value
+  -> explicit evaluation / reflection inspection / extraction
+  -> runtime readiness, settlement, diagnostics, process result
 ```
 
-Imports re-enter the same assembler session and compilation execution through
-artifact-installed relative resolvers. The compilation execution owns a
-separate macro demand session whose tasks and diagnostic counts do not alias
-assembler reasoning. Both sessions belong to one `EvaluationRuntime`, and
-therefore share its work coordinator, executor, reflection heap,
-protected-volume namespace, query domain, fixed conflict-analysis strategy,
-and immutable default reflection-task profile. `refl` and `meta_refl`
-annotations always use that
-runtime default, independent of the demand session which first observes them.
-By contrast, `.task.new` inherits its parent's complete role profile, including
-the effect specialization, environment, diagnostic destination, and host
-resources.
-The runtime also owns every evaluator identity allocator except the global
-`EvaluationRuntimeId`. Sessions, tasks, waits, deferred values, reasoning
-sessions, CLI invocations, endpoints, and deliveries therefore use IDs that
-are unique only within their runtime. Runtime and assembler construction expose
-a `Values` factory so identity-bearing values are never created in an
-unscoped domain. Public `Value`s are runtime-tagged roots and cannot cross this
-boundary: composite construction and every consuming facade validate the tag
-before exposing the recursive core representation. Runtime-owned promise
-assignments, task and wait terminals, pending reflection work, and stable
-queued or blocked spark records retain the same internal root wrapper.
-Production evaluation likewise has no standalone session or context
-constructor; isolated work still receives the selected runtime's core factory.
-That factory weakly names the runtime's one live work coordinator, so isolated
-contexts reuse its scheduling domain and exact completion sources cannot wake
-a detached coordinator. An expired weak binding may be replaced without
-letting escaped values retain the old coordinator.
-The runtime cache owns canonical protocol values, the initial metadata carrier,
-and complete type-indexed compiler bundles. Attachments are
-built outside synchronization and publish one completed winner; each
-`CompileContext` keeps a compilation-local lookup view without duplicating the
-runtime bundle. Process-global protocol keys remain immutable descriptions,
-but no production static retains a constructed value. The public runtime owns
-its lifecycle state and sealed default reflection profile as sibling roots.
-Lifecycle state owns an acyclic `RuntimeSharedResources` bundle for values,
-transactions, observations, mutation admission, and local IDs; that bundle
-has only a weak coordinator route and retains neither executor nor diagnostic
-ingress policy. Runtime-backed task hosts retain this bundle directly, together
-with their role-specific environment and diagnostic bus; external effect hosts
-receive only a constructed `RuntimeTaskCapability` for values, transactional
-endpoint commits, observation waits, and query publication. The raw bundle is
-crate-private, and neither host form retains or reconstructs the public runtime
-lifecycle state.
-The runtime transaction domain also owns registered admitted-input FIFOs.
-Rust hosts create a typed sender plus a runtime-bound transactional reader with
-`EvaluationRuntime::input_endpoint`; conversion occurs before admission, while
-the authoritative buffer and transaction journal retain only runtime roots.
-Reads claim FIFO prefixes optimistically, including precise observations of
-the next empty slot, and combined store/event commit prevents either the heap
-edit or input consumption from being applied alone. Input-slot conflicts reuse
-the runtime's configured conflict-analysis strategy without manufacturing
-dummy heap values.
-The same event journal buffers output intents as runtime roots. It reserves a
-non-reused delivery ID before commit, then atomically installs an identified
-`Queued` outbox record only after store and input validation succeed. A typed
-delivery handle claims one endpoint head as `Running`, releases every runtime
-guard, decodes and invokes the host callback, and terminally removes the
-record. Endpoint queues preserve commit order while independent endpoints may
-deliver concurrently. Decode errors, callback errors, and caught panics remain
-in a persistent Rust-layer failure snapshot until explicitly acknowledged;
-queued or running records count as delivery activity, while retained failures
-and unused input do not.
-The configured logger attaches another demand host to that same runtime. Its
-source diagnostic bus has one ordered runtime ingress backed by a generic
-input endpoint; `.read_log` consumes that FIFO through the ordinary event
-journal. Logger `.log` and `.write_stderr` calls become runtime-rooted output
-intents and reach their bus or OS adapter only after combined store/event
-commit. The logger root participates in runtime readiness and settlement: it
-votes to exit when its input is quiescent, retries if new input disturbs that
-vote, and switches its stable ingress to fallback after settlement. The logger
-environment and output diagnostic bus remain role-specific.
-For a bare command, the CLI first loads configuration with a dormant runtime,
-runs `conf.cli` as an isolated all-results search, resolves the promised
-canonical argument environment, and only then activates the selected worker
-count. It then extracts `asm.result`, finalizes local file tracking, pumps the
-complete runtime to readiness, settles
-coordinated logger exit or a force-killed deadlock, and renders retained reports
-through fallback. See the
-[assembly flow](../docs/architecture/assembly.md) for ordering and failure
-behavior.
+See [`architecture/assembly.md`](../docs/architecture/assembly.md) for client
+ordering and [`architecture/diagnostics.md`](../docs/architecture/diagnostics.md)
+for logger and fallback flow.
 
-The same configured interpreter has a non-committing completion mode. It
-preserves an optional active argument's prefix and suffix plus later arguments,
-retains only evidence at the furthest argument/token frontier, and validates
-complete candidates by replaying ordinary isolated parsing. Bootstrap and
-configured completion share that request/result model. `--completions v0`
-accepts a count-framed OS-argument request and emits only NUL-terminated whole
-argument replacements. `.case` scopes lazy structured explanations around
-configured branches; failed frontier evidence and completion results retain
-those values without changing raw choice semantics. `.read.token` delegates
-one UTF-8 argument to a second restricted all-results effect machine; its
-ordinary result resumes the enclosing CLI continuation once per token
-alternative.
-
-## Front-End Dataflow
+### Built-in front end
 
 ```text
-raw source bytes
-  -> UTF-8 validation
-  -> one lexer-owned token/group/declaration structure
-  -> source-wide floor and delimiter-layout diagnostics
-  -> declaration token ranges
-  -> for each declaration in source order
-       -> contextual expression parse
-            -> complete hard range, or
-            -> exact dedent boundary resumed by postfix/infix grammar
-       -> resolver-owned BindingId locals and ResolvedExpr<Value>
-       -> module lowering or net lowering
-  -> retained declarations feed language-position and file-wide name analysis
-  -> closed Value / FunctionCode / NetValue
+source bytes
+  -> one lexical token/group/declaration structure
+  -> staged macro expansion and declaration parsing
+  -> lexical and namespace resolution
+  -> affine ResolvedExpr<Value>
+  -> direct semantic value / interaction-net lowering
+  -> closed module definitions
 ```
 
-Syntax and sugar end in `g_syntax`. `ResolvedExpr<Value>` is moved through a
-single lowering; no syntax or core expression tree survives into evaluation.
-`StagedSourceParser` and `ModuleLowerer` alternate parsing and lowering over
-the one lexical result; the batch parser/lowerer path is test-only
-compatibility coverage. Module lowering owns declaration order and the open
-module fixpoint. At that staged seam, each macro-bearing original declaration
-captures one prior namespace and environment, expands its finite original
-invocation worklist right-to-left, and only then enters ordinary parsing.
-Macro cursors reuse `LayoutView` for bounded child layouts; output journals
-materialize abstract anchors relative to the invocation floor. A macro may own
-the first member of a hanging `do`, `let`, `when`, `where`, or `with` layout;
-the inferred member column, rather than the physical line indentation, anchors
-generated siblings. The same layout ownership works inside balanced delimiter
-groups. Macro input discovery does not interpret commas or semicolons as
-boundaries: they remain ordinary text until the resulting source reaches the
-tuple, collection, or braced-body parser. Generated text is never scanned for
-macro calls. Text writes exclude ASCII C0 controls, SP, and DEL; `.write.sep`
-and `.write.anchor` exclusively emit logical separation and sibling
-boundaries. Failed searches report only the furthest cursor's active `.case`
-values; successful direct logs publish in source order after the expanded
-declaration parses and carry compiler-owned invocation frames. Invalid
-expanded syntax retains those frames plus a normalized declaration excerpt.
-Macro syntax never enters the syntax AST. Net lowering emits complete bind and
-application spines. Non-evaluating source inspection reports an original
-macro-bearing declaration as `MacroDeferred` rather than parsing its
-macro-owned text or inventing a macro namespace.
+See [`architecture/front_end.md`](../docs/architecture/front_end.md) and the
+focused [`g_syntax` invariants](../docs/agent_context/g_syntax.md).
 
-Macro helpers required during staged expansion must not reach back through an
-ordinary reference to the unsealed final module. Prefer a named top-level
-object declaration and its object-local recursive alias, giving the helper
-grammar a reusable and extendable namespace. Use a local mutually recursive
-group only for deliberately private helpers. Textual declaration order alone
-does not turn a final-module reference into a prior reference. A replacement
-or derived macro object likewise inherits from `_name`, even when the child
-has a different name; inheriting from final `name` reintroduces the
-module-fixpoint dependency.
-
-`LayoutView` selects one next-line or hanging sibling anchor and returns the
-first dedented line without consuming it. `ExpressionContext` carries the
-owner floor and whether such a boundary may yield. Structural parsing then
-resumes only recognized postfix `where` or infix operators; it never reparses
-source fragments or uses indentation as an implicit separator.
-
-## Evaluation Dataflow
+### Evaluation and reflection
 
 ```text
-Assembler -> EvalContext -> Value
-  -> observe existing data
-  -> claim and memoize computed lazy work
-  -> read and follow named promise assignments
-  -> apply a builtin/function/net
-  -> drive a net until its interface exposes data
-
-EvaluationSession owner -> EvaluationWorkCoordinator <- EvaluationExecutor
-  -> weakly linked EvaluationDemandState -> EvalContext
-  -> demanded reflection producers via the serial pump
-  -> coordinator-selected reflection work via shared workers
-  -> coordinator-owned stable spark work via shared workers
+EvaluationSession owner -> EvalContext -> Value demand
+                               |
+                               v
+                    EvaluationWorkCoordinator <- EvaluationExecutor
+                      | reflection work
+                      | deferred producers
+                      | best-effort sparks
+                      v
+             runtime reflection store and event boundary
 ```
 
-Evaluation receives closed values and an explicit session context. Reflection
-effects remain external freer-monad tasks. Generic interaction-net reduction
-knows topology; `core_net` and `eval` supply core semantics. See the
-[evaluation](../docs/architecture/evaluation.md) and
-[reflection](../docs/architecture/reflection.md) notes for the handoffs.
-Permanent failures carry Glam diagnostic values and ordered context frames
-through lazy memoization and task status queries; blocking and unassigned
-promises remain scheduler control states rather than errors.
-
-`EvaluationSession` is the external owner lease, not the machine-visible task
-state. It strongly retains the coordinator so its final drop can close the
-demand domain. `EvalContext` retains the separate `EvaluationDemandState`,
-whose explicit closed flag gates new admissions and whose coordinator route is
-weak. Serial pumping and report construction operate through that demand state
-and never recover the owner wrapper. Isolated direct clients use a small
-owner/context wrapper; scheduled machine contexts never retain their own owner
-lease. Both reflection and
-deferred machines reside in coordinator work records while claimable; a
-running claim detaches the machine exclusively, and release either restores it
-before requeueing/blocking or carries it out for terminal destruction. There
-is no session-side task registry: the coordinator owns task/wait indexes,
-acknowledgement, and a `TaskTerminalPublisher` containing the wait, current
-status, and optional protected-query publisher. That publisher retains only
-runtime query resources rather than its role host. Unacknowledged terminal
-failures remain in a persistent hierarchy keyed first by
-producer-owner session, so reports select one bucket without making failure
-lifetime depend on the owner lease.
-Every public task-handle clone shares one opaque `TaskHandleCell` containing
-its terminal wait, protected status-query lease, scalar runtime/task/owner
-identity, and a weak coordinator reporting route. It cannot retain or recover
-demand state or the external session owner. Propagated failure
-acknowledgement therefore reaches the producer-owner ledger after owner
-closure, while final handle drop queues status-query retirement through
-ordinary reflection-store maintenance.
-The query-backed `.task.status`, `.task.value`, and `.task.error` operations
-are readable from any session in that runtime. Observation changes neither
-the task profile nor demand/reporting ownership; join, cancellation, and
-failure acknowledgement route through the handle to the producer's
-same-runtime coordinator records.
-Final owner drop closes all coordinator records for the demand ID in one
-guarded transition. Non-running work terminalizes immediately; running work
-keeps its first close reason until release. Machine contexts and stable spark
-records retain demand state, not the external owner lease, and guarded
-reservation rejects work after closure wins. Cooperative exact-dependency
-pumping likewise selects coordinator work by demand ID rather than recovering
-the owner lease.
-
-Each coordinator-owned blocked spark publishes a checked subscription epoch
-beside its retained dependency. Wait tokens and promises both retain that
-exact registration and queue it only when work ID, blocked state, epoch, and
-runtime-local dependency key still match. Late notifications after reblocking,
-demand-session closure, executor shutdown, or runtime teardown therefore
-retain no scheduling authority; unrelated task progress does not repoll the
-spark. A spark blocked on a lazy task also promotes that deferred producer
-directly, so worker progress does not depend on upgrading a serial-pump owner.
-
-Named promises share one runtime-bound `PromiseCell`. Resolution, explicit
-failure, resolver drop, reflection-producer failure, and producer-session
-closure use its single terminal publication path under runtime mutation
-admission. Deferred followers and sparks which encounter an unresolved promise
-park their stable work ID and subscription epoch directly in the cell's exact
-subscription set. Publication therefore wakes only work which still awaits
-that promise, without retaining a demand session or embedding one assembler
-context in the resolver.
-
-`CompileContext` constructs one opaque provenance handle for each traced source
-input. The `.g` front end places it in shallow, static definition-initialization
-frames alongside its own line and definition fields. It does not capture
-runtime arguments or make the frame follow later function calls. The
-`module_origin` special reference embeds that same token in user-authored
-static frames. Evaluation never searches contexts for these handles. A
-reflection observer explicitly selects a handle and calls the
-`glam.origin.inspect` capability supplied in its immutable `.env`; only then is
-assembler-owned source and import provenance projected into ordinary data.
-
-The same front-end boundary owns the `abstract_global_path StaticName` keyword.
-Parsing retains a static name path; resolution verifies that an implicit root
-actually selects the module namespace, and lowering asks `CompileContext` to
-qualify it. No runtime expression is carried into core for this operation.
-
-Source-level net construction follows a separate lazy path:
-
-```text
-interaction_net Effect
-  -> isolated standard-effect search
-  -> persistent write-only journal per alternative
-  -> exactly one successful exposed-port result
-  -> checked replay through NetBuilder
-  -> one memoized shared Value::Net runtime
-```
-
-Construction never exposes raw graph identities. Branded opaque port handles
-exist only while the effect runs, and failed alternatives are never replayed.
-
-## Interaction-Net Reduction
-
-```text
-claim one principal-principal pair under the runtime mutex
-  -> rewrite a topology-only rule immediately, or
-  -> release the mutex for callable/operator/cursor work
-  -> complete, block, or mark that same pair stuck
-```
-
-Logical copies are target-owned one-way cursors. Source active pairs reduce in
-the source and never migrate into the target. Detailed fan, frontier, and
-locking rules live only in the focused
-[interaction-net invariants](../docs/agent_context/interaction_nets.md).
+Evaluation consumes closed values. Reflection remains an external persistent
+freer-effect machine. Generic interaction-net reduction owns topology; core and
+eval provide semantic specialization. See
+[`architecture/evaluation.md`](../docs/architecture/evaluation.md),
+[`architecture/reflection.md`](../docs/architecture/reflection.md), and the
+focused [interaction-net invariants](../docs/agent_context/interaction_nets.md).
 
 ## Test Navigation
 
 - Parser tests sit beside `g_syntax/parser/` modules.
-- Cross-front-end tests live in `g_syntax/tests.rs`.
+- Cross-stage front-end tests live in `g_syntax/tests.rs`.
+- Macro tests live in `g_syntax/macro_expansion/tests.rs` and
+  `tests/macro_protocols.rs`.
 - Runtime topology and cursor tests live in
   `interaction_net/runtime/tests.rs`.
 - Evaluator integration tests live in `eval/tests.rs`; fixtures are in
   `eval/test_support.rs`.
-- `tests/` covers the public facade, CLI, valid samples, and invalid source
-  fixtures.
+- `evaluation.rs`, `evaluation/coordinator.rs`, `reflection.rs`, and `api.rs`
+  contain focused lifecycle and concurrency tests beside private machinery.
+- `tests/` covers the public facade, CLI, valid samples, and invalid fixtures.
