@@ -1,4 +1,5 @@
 use super::*;
+use crate::interaction_net::{DemandEndpoint, FrontierObservation, FrontierObservationStatus};
 
 pub(super) fn attach_net_many(function: Value, arguments: Vec<Value>) -> NetValue {
     assert!(!arguments.is_empty(), "net attachment requires an argument");
@@ -101,7 +102,7 @@ fn drive_net_interface(
         }
 
         if let Some(pair) = runtime.with(|net| net.interface_dependency(interface)) {
-            if progress_exact_core_pair(context, runtime, pair, 0)? {
+            if progress_exact_core_pair(context, runtime, pair, 0, None)? {
                 continue;
             }
             if let Some(blocked) = runtime.with(|net| net.blocked_call(pair)) {
@@ -217,33 +218,69 @@ pub(super) fn progress_cursor_dependency(
         CursorDependency::LocalCursor(local_cursor) => {
             progress_dependent_cursor(context, runtime, local_cursor, depth)
         }
-        CursorDependency::SourceCursor {
-            source,
-            cursor: source_cursor,
-            observation,
-        } => {
-            debug_assert!(observation.source().ptr_eq(&source));
-            if observation.status() == crate::interaction_net::FrontierObservationStatus::Disturbed
-            {
-                Ok(true)
-            } else {
-                progress_dependent_cursor(context, &source, source_cursor, depth)
-            }
+        CursorDependency::SourceCursor(observation) => {
+            debug_assert!(matches!(observation.endpoint(), DemandEndpoint::Cursor(_)));
+            progress_frontier_observation(context, observation, depth)
         }
-        CursorDependency::SourcePair {
-            source,
-            pair,
-            observation,
-        } => {
-            debug_assert!(observation.source().ptr_eq(&source));
-            if observation.status() == crate::interaction_net::FrontierObservationStatus::Disturbed
-            {
-                Ok(true)
-            } else {
-                progress_exact_core_pair(context, &source, pair, depth + 1)
-            }
+        CursorDependency::SourceFrontier(observation) => {
+            debug_assert!(matches!(
+                observation.endpoint(),
+                DemandEndpoint::ActivePair(_)
+            ));
+            progress_frontier_observation(context, observation, depth)
         }
     }
+}
+
+fn progress_frontier_observation(
+    context: &EvalContext,
+    observation: FrontierObservation<CoreSpecialization>,
+    depth: usize,
+) -> Result<bool, EvaluationHalt> {
+    if observation.status() == FrontierObservationStatus::Disturbed {
+        return Ok(true);
+    }
+    match observation.endpoint() {
+        DemandEndpoint::Cursor(cursor) => {
+            progress_observed_cursor(context, observation, cursor, depth)
+        }
+        DemandEndpoint::ActivePair(pair) => progress_exact_core_pair(
+            context,
+            observation.source(),
+            pair,
+            depth + 1,
+            Some(&observation),
+        ),
+    }
+}
+
+fn progress_observed_cursor(
+    context: &EvalContext,
+    observation: FrontierObservation<CoreSpecialization>,
+    cursor: crate::interaction_net::NodeId,
+    depth: usize,
+) -> Result<bool, EvaluationHalt> {
+    let progress = match observation.claim_cursor(cursor) {
+        Err(FrontierObservationStatus::Disturbed) => return Ok(true),
+        Ok(Some(progress)) => progress,
+        Ok(None) => {
+            observation.wait_for_disturbance();
+            return Ok(true);
+        }
+        Err(FrontierObservationStatus::Current) => {
+            unreachable!("a current observation cannot fail validation")
+        }
+    };
+    let runtime = observation.source();
+    let progress = finish_core_cursor_claim(runtime, cursor, progress);
+    if progress != crate::interaction_net::CursorProgress::Blocked {
+        return Ok(true);
+    }
+    let progressed = progress_cursor_dependency(context, runtime, cursor, depth + 1)?;
+    if progressed {
+        runtime.with_mut(|source| source.retry_blocked_cursor(cursor));
+    }
+    Ok(progressed)
 }
 
 pub(super) fn progress_dependent_cursor(
@@ -272,14 +309,30 @@ pub(super) fn progress_exact_core_pair(
     runtime: &crate::core_net::CoreRuntimeNet,
     pair: ActivePairKey,
     depth: usize,
+    observation: Option<&FrontierObservation<CoreSpecialization>>,
 ) -> Result<bool, EvaluationHalt> {
-    if let Some(reduction) = runtime.with_mut(|net| net.reduce_pair(pair)) {
+    let reduction = if let Some(observation) = observation {
+        match observation.reduce_pair(pair) {
+            Ok(reduction) => reduction,
+            Err(FrontierObservationStatus::Disturbed) => return Ok(true),
+            Err(FrontierObservationStatus::Current) => {
+                unreachable!("a current observation cannot fail validation")
+            }
+        }
+    } else {
+        runtime.with_mut(|net| net.reduce_pair(pair))
+    };
+    if let Some(reduction) = reduction {
         handle_core_reduction(context, runtime, reduction)?;
         return Ok(true);
     }
     let (claimed, version) = runtime.with_version(|net| net.pair_is_claimed(pair));
     if claimed {
-        runtime.wait_for_change(version);
+        if let Some(observation) = observation {
+            observation.wait_for_disturbance();
+        } else {
+            runtime.wait_for_change(version);
+        }
         return Ok(true);
     }
     if !runtime.with(|net| net.contains_active_pair(pair)) {
@@ -338,7 +391,13 @@ pub(super) fn progress_exact_core_pair(
     if runtime.with(|net| net.stuck_reason(pair).is_some()) {
         return Err(stuck_pair_error(runtime, pair));
     }
-    Ok(false)
+    if observation
+        .is_some_and(|observation| observation.status() == FrontierObservationStatus::Disturbed)
+    {
+        Ok(true)
+    } else {
+        Ok(false)
+    }
 }
 
 impl NetSpecialization for CoreSpecialization {

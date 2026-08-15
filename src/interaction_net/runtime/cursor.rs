@@ -310,15 +310,8 @@ impl<S: NetSpecialization> RuntimeNet<S> {
                         .expect("a source cursor endpoint must carry its frontier observation");
                     assert_eq!(observation.anchor(), claim.remote);
                     assert_eq!(observation.endpoint(), DemandEndpoint::Cursor(port.node()));
-                    let source = observation.source().clone();
-                    self.cursor_dependencies.insert(
-                        claim.cursor,
-                        CursorDependency::SourceCursor {
-                            source,
-                            cursor: port.node(),
-                            observation,
-                        },
-                    );
+                    self.cursor_dependencies
+                        .insert(claim.cursor, CursorDependency::SourceCursor(observation));
                     CursorProgress::Blocked
                 }
                 SourceFrontierShape::Principal { port, node } => {
@@ -350,15 +343,8 @@ impl<S: NetSpecialization> RuntimeNet<S> {
                             .expect("an active-pair endpoint must carry its frontier observation");
                         assert_eq!(observation.anchor(), claim.remote);
                         assert_eq!(observation.endpoint(), DemandEndpoint::ActivePair(pair));
-                        let source = observation.source().clone();
-                        self.cursor_dependencies.insert(
-                            claim.cursor,
-                            CursorDependency::SourcePair {
-                                source,
-                                pair,
-                                observation,
-                            },
-                        );
+                        self.cursor_dependencies
+                            .insert(claim.cursor, CursorDependency::SourceFrontier(observation));
                     } else {
                         assert!(observation.is_none());
                     }
@@ -370,15 +356,8 @@ impl<S: NetSpecialization> RuntimeNet<S> {
                         .expect("an active-pair endpoint must carry its frontier observation");
                     assert_eq!(observation.anchor(), claim.remote);
                     assert_eq!(observation.endpoint(), DemandEndpoint::ActivePair(pair));
-                    let source = observation.source().clone();
-                    self.cursor_dependencies.insert(
-                        claim.cursor,
-                        CursorDependency::SourcePair {
-                            source,
-                            pair,
-                            observation,
-                        },
-                    );
+                    self.cursor_dependencies
+                        .insert(claim.cursor, CursorDependency::SourceFrontier(observation));
                     CursorProgress::Blocked
                 }
             }

@@ -606,14 +606,15 @@ fn nested_cursor_preserves_structured_failure_across_unrelated_source_progress()
         .cursor_dependency(cursor)
         .expect("outer cursor should retain its nested endpoint")
     {
-        CursorDependency::SourcePair {
-            source: owner,
-            pair,
-            ..
-        } => {
-            assert!(owner.ptr_eq(&source));
+        CursorDependency::SourceFrontier(observation) => {
+            assert!(observation.source().ptr_eq(&source));
+            let DemandEndpoint::ActivePair(pair) = observation.endpoint() else {
+                panic!("nested endpoint should remain an active pair");
+            };
             assert_eq!(pair, failed_pair);
-            owner.with(|runtime| runtime.stuck_reason(pair).cloned())
+            observation
+                .source()
+                .with(|runtime| runtime.stuck_reason(pair).cloned())
         }
         dependency => panic!("expected a nested source pair, got {dependency:?}"),
     };
@@ -980,7 +981,8 @@ fn source_change_between_cursor_inspection_publication_and_wait_is_not_lost() {
     );
     assert!(matches!(
         target.cursor_dependency(cursor),
-        Some(CursorDependency::SourcePair { pair, .. }) if pair == source_pair
+        Some(CursorDependency::SourceFrontier(observation))
+            if observation.endpoint() == DemandEndpoint::ActivePair(source_pair)
     ));
 
     let waiter_source = source.clone();
@@ -1029,25 +1031,34 @@ fn active_source_call_is_a_dependency_and_is_never_copied() {
     let (cursor, progress) = reduce_next_cursor(&mut target);
     assert_eq!(progress, CursorProgress::Blocked);
     let dependency = target.cursor_dependency(cursor).unwrap();
-    let CursorDependency::SourcePair {
-        source: dependency_source,
-        pair: dependency_pair,
-        ..
-    } = dependency
-    else {
+    let CursorDependency::SourceFrontier(observation) = dependency else {
         panic!("active source call should remain an exact source dependency");
     };
-    assert!(dependency_source.ptr_eq(&source));
-    assert_eq!(dependency_pair, pair);
+    assert!(observation.source().ptr_eq(&source));
+    assert_eq!(observation.endpoint(), DemandEndpoint::ActivePair(pair));
     source.with(|source| {
         assert_eq!(source.active.get(&pair), Some(&ActivePairState::Claimed));
     });
+    assert!(matches!(observation.reduce_pair(pair), Ok(None)));
+    assert_eq!(
+        observation.status(),
+        FrontierObservationStatus::Current,
+        "an unavailable observed claim must not publish a false disturbance"
+    );
     assert!(
         !target
             .nodes
             .values()
             .any(|entry| matches!(entry.node, RuntimeNode::Bind))
     );
+
+    let call = source
+        .with(|runtime| runtime.call(pair))
+        .expect("claimed source call should remain structurally available");
+    source.with_mut(|runtime| {
+        runtime.fail_claimed_call(call, Arc::from("finished after observation test"));
+    });
+    assert_eq!(observation.status(), FrontierObservationStatus::Disturbed);
 }
 
 #[test]
@@ -1068,16 +1079,10 @@ fn layered_cursor_reports_and_follows_an_exact_dependency() {
     let dependency = outer
         .cursor_dependency(outer_cursor)
         .expect("layered cursor should retain an exact dependency");
-    let CursorDependency::SourceCursor {
-        source,
-        cursor,
-        observation,
-    } = dependency
-    else {
+    let CursorDependency::SourceCursor(observation) = dependency else {
         panic!("layered cursor should point to its exact source cursor");
     };
-    assert!(source.ptr_eq(&middle));
-    assert_eq!(cursor, middle_cursor);
+    assert!(observation.source().ptr_eq(&middle));
     assert_eq!(
         observation.endpoint(),
         DemandEndpoint::Cursor(middle_cursor)
@@ -1281,11 +1286,9 @@ fn auxiliary_cursor_traces_a_principal_chain_to_an_exact_source_pair() {
     );
     assert!(matches!(
         target.cursor_dependency(cursor),
-        Some(CursorDependency::SourcePair {
-            source: dependency_source,
-            pair: dependency_pair,
-            ..
-        }) if dependency_source.ptr_eq(&source) && dependency_pair == pair
+        Some(CursorDependency::SourceFrontier(observation))
+            if observation.source().ptr_eq(&source)
+                && observation.endpoint() == DemandEndpoint::ActivePair(pair)
     ));
 }
 
@@ -1333,7 +1336,8 @@ fn auxiliary_cursor_recomputes_its_spine_after_each_terminal_pair() {
     assert_eq!(progress, CursorProgress::Blocked);
     assert!(matches!(
         target.cursor_dependency(cursor),
-        Some(CursorDependency::SourcePair { pair, .. }) if pair == terminal_pair
+        Some(CursorDependency::SourceFrontier(observation))
+            if observation.endpoint() == DemandEndpoint::ActivePair(terminal_pair)
     ));
 
     for (consumed, next_dependency) in [
@@ -1345,8 +1349,8 @@ fn auxiliary_cursor_recomputes_its_spine_after_each_terminal_pair() {
             .cursor_dependency(cursor)
             .expect("blocked cursor should retain its frontier observation")
         {
-            CursorDependency::SourcePair { observation, .. } => observation,
-            dependency => panic!("expected a source-pair projection, got {dependency:?}"),
+            CursorDependency::SourceFrontier(observation) => observation,
+            dependency => panic!("expected a source-frontier observation, got {dependency:?}"),
         };
         assert_eq!(observation.endpoint(), DemandEndpoint::ActivePair(consumed));
         assert_eq!(observation.status(), FrontierObservationStatus::Current);
@@ -1365,7 +1369,8 @@ fn auxiliary_cursor_recomputes_its_spine_after_each_terminal_pair() {
                 assert_eq!(progress, CursorProgress::Blocked);
                 assert!(matches!(
                     target.cursor_dependency(cursor),
-                    Some(CursorDependency::SourcePair { pair, .. }) if pair == next_dependency
+                    Some(CursorDependency::SourceFrontier(observation))
+                        if observation.endpoint() == DemandEndpoint::ActivePair(next_dependency)
                 ));
             }
             None => {
@@ -1398,7 +1403,8 @@ fn auxiliary_cursor_reinspects_after_a_principal_remote_cursor_materializes() {
     assert_eq!(progress, CursorProgress::Blocked);
     assert!(matches!(
         target.cursor_dependency(target_cursor),
-        Some(CursorDependency::SourcePair { pair, .. }) if pair == cursor_pair
+        Some(CursorDependency::SourceFrontier(observation))
+            if observation.endpoint() == DemandEndpoint::ActivePair(cursor_pair)
     ));
 
     assert_eq!(
@@ -1416,12 +1422,11 @@ fn auxiliary_cursor_reinspects_after_a_principal_remote_cursor_materializes() {
         .cursor_dependency(target_cursor)
         .expect("outer cursor should follow the host's new principal pair")
     {
-        CursorDependency::SourcePair {
-            source: owner,
-            pair,
-            ..
-        } => {
-            assert!(owner.ptr_eq(&source));
+        CursorDependency::SourceFrontier(observation) => {
+            assert!(observation.source().ptr_eq(&source));
+            let DemandEndpoint::ActivePair(pair) = observation.endpoint() else {
+                panic!("replacement endpoint should remain an active pair");
+            };
             pair
         }
         dependency => panic!("expected a replacement source pair, got {dependency:?}"),

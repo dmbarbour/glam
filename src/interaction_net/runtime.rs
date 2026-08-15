@@ -121,6 +121,52 @@ impl<S: NetSpecialization> FrontierObservation<S> {
             FrontierObservationStatus::Disturbed
         }
     }
+
+    pub fn wait_for_disturbance(&self) {
+        self.source.wait_for_change(self.observed_runtime_version);
+    }
+
+    /// Claims the observed active-pair endpoint if this observation is still
+    /// current. An unavailable current endpoint is left untouched so waiting
+    /// on this observation cannot disturb itself.
+    pub fn reduce_pair(
+        &self,
+        pair: ActivePairKey,
+    ) -> Result<Option<Reduction>, FrontierObservationStatus> {
+        assert_eq!(self.endpoint, DemandEndpoint::ActivePair(pair));
+        self.update_source_if_current(|runtime| runtime.reduce_pair(pair))
+    }
+
+    /// Claims the observed source cursor under the same source/version check
+    /// used for active-pair endpoints.
+    pub fn claim_cursor(
+        &self,
+        cursor: NodeId,
+    ) -> Result<Option<CursorProgress>, FrontierObservationStatus> {
+        assert_eq!(self.endpoint, DemandEndpoint::Cursor(cursor));
+        self.update_source_if_current(|runtime| runtime.claim_dependent_cursor(cursor))
+    }
+
+    fn update_source_if_current<R>(
+        &self,
+        update: impl FnOnce(&mut RuntimeNet<S>) -> Option<R>,
+    ) -> Result<Option<R>, FrontierObservationStatus> {
+        let mut runtime = self
+            .source
+            .inner
+            .runtime
+            .lock()
+            .expect("shared runtime net was poisoned");
+        if self.source.inner.version.load(Ordering::Relaxed) != self.observed_runtime_version {
+            return Err(FrontierObservationStatus::Disturbed);
+        }
+        let result = update(&mut runtime);
+        if result.is_some() {
+            self.source.inner.version.fetch_add(1, Ordering::Relaxed);
+            self.source.inner.changed.notify_all();
+        }
+        Ok(result)
+    }
 }
 
 impl<S: NetSpecialization> fmt::Debug for FrontierObservation<S> {
@@ -138,20 +184,12 @@ impl<S: NetSpecialization> fmt::Debug for FrontierObservation<S> {
 #[derive(Clone)]
 pub enum CursorDependency<S: NetSpecialization> {
     LocalCursor(NodeId),
-    /// Transitional execution projection for a source-cursor endpoint. The
-    /// observation, not `cursor`, identifies the continuing frontier demand.
-    SourceCursor {
-        source: SharedRuntimeNet<S>,
-        cursor: NodeId,
-        observation: FrontierObservation<S>,
-    },
-    /// Transitional execution projection for an active-pair endpoint. The
-    /// observation, not `pair`, identifies the continuing frontier demand.
-    SourcePair {
-        source: SharedRuntimeNet<S>,
-        pair: ActivePairKey,
-        observation: FrontierObservation<S>,
-    },
+    /// Transitional classification for a source cursor. Phase 3 replaces
+    /// direct cursor following with an owning-net normalization obligation.
+    SourceCursor(FrontierObservation<S>),
+    /// A versioned observation of an active-pair endpoint on the demanded
+    /// source frontier. The pair is not retained as the dependency identity.
+    SourceFrontier(FrontierObservation<S>),
 }
 
 impl<S: NetSpecialization> fmt::Debug for CursorDependency<S> {
@@ -160,25 +198,13 @@ impl<S: NetSpecialization> fmt::Debug for CursorDependency<S> {
             Self::LocalCursor(cursor) => {
                 formatter.debug_tuple("LocalCursor").field(cursor).finish()
             }
-            Self::SourceCursor {
-                source,
-                cursor,
-                observation,
-            } => formatter
-                .debug_struct("SourceCursor")
-                .field("source", source)
-                .field("cursor", cursor)
-                .field("observation", observation)
+            Self::SourceCursor(observation) => formatter
+                .debug_tuple("SourceCursor")
+                .field(observation)
                 .finish(),
-            Self::SourcePair {
-                source,
-                pair,
-                observation,
-            } => formatter
-                .debug_struct("SourcePair")
-                .field("source", source)
-                .field("pair", pair)
-                .field("observation", observation)
+            Self::SourceFrontier(observation) => formatter
+                .debug_tuple("SourceFrontier")
+                .field(observation)
                 .finish(),
         }
     }
