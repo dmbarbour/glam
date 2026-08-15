@@ -3213,6 +3213,117 @@ mod tests {
     }
 
     #[test]
+    fn recursive_logger_drains_input_queued_before_its_first_poll() {
+        let diagnostics = DiagnosticBus::new();
+        let input = Arc::new(LogHost::new(&diagnostics));
+        let assembler = Assembler::builder()
+            .evaluation_runtime(input.runtime.clone())
+            .build()
+            .expect("prequeued logger assembler should build");
+        let module = assembler
+            .module(["prequeued_logger"])
+            .script(
+                "g",
+                concat!(
+                    "language g0\n",
+                    "import 'std\n",
+                    "object logger as logger_object with\n",
+                    "  run = (.cut (.alt ",
+                    "(.read_log >>= (\\_message -> .r ())) ",
+                    "(.exit.success))) =>> logger_object\n",
+                    "  eff = logger_object.run.eff\n",
+                    "refl.effect = (.heap.get ['start] >>= ",
+                    "(\\start -> (start == 1) =>> .r ())) =>> logger\n",
+                    "refl.start = .heap.set ['start] 1\n",
+                ),
+            )
+            .build()
+            .expect("prequeued logger fixture should compile");
+        let effect = assembler
+            .get(module.value(), "refl.effect")
+            .expect("prequeued logger fixture should define its effect");
+        let start = assembler
+            .get(module.value(), "refl.start")
+            .expect("prequeued logger fixture should define its release effect");
+        let fallback = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let fallback_messages = fallback.clone();
+        let supervisor = LoggerSupervisor::new(input.clone(), move |diagnostic| {
+            fallback_messages
+                .lock()
+                .expect("fallback collection mutex should not be poisoned")
+                .push(diagnostic.message().to_owned());
+        });
+        let installation = supervisor.install().expect("logger should install");
+        let host = Arc::new(LoggerTaskHost::new(
+            input.clone(),
+            DiagnosticBus::for_runtime(&input.runtime),
+            assembler.reflection_environment_for_role("logger"),
+        ));
+        let task = EffectRun::new(
+            &input.runtime,
+            &effect,
+            MainEffects::new(assembler.clone()),
+            host.clone(),
+        )
+        .schedule(&installation.lifecycle)
+        .expect("recursive logger root should enter coordinator work");
+        input.runtime.pump_until_stable();
+        assert!(matches!(
+            input.runtime.readiness(),
+            RuntimeReadiness::Deadlocked(_)
+        ));
+        assert!(matches!(
+            installation.lifecycle.status(),
+            glam::reflection::EffectLifecycleStatus::Blocked
+        ));
+
+        diagnostics.publish_local(Diagnostic::new(
+            &input.runtime.values(),
+            Severity::Info,
+            "queued before first poll",
+        ));
+        let (_generation, _store, input_snapshot) = input.runtime.transaction_snapshot();
+        let mut input_probe = RuntimeEventJournal::new(input_snapshot);
+        assert!(
+            input_probe
+                .read(&input.diagnostic_reader)
+                .expect("diagnostic probe should match its runtime")
+                .is_some(),
+            "the barrier must release only after the diagnostic is admitted"
+        );
+        let release_lifecycle = EffectLifecycle::new(&input.runtime);
+        let release = EffectRun::new(&input.runtime, &start, MainEffects::new(assembler), host)
+            .schedule(&release_lifecycle)
+            .expect("logger release effect should schedule");
+        assert!(matches!(release.run().unwrap(), TaskOutcome::Complete(_)));
+
+        input.runtime.pump_until_stable();
+        let RuntimeReadiness::Ready(snapshot) = input.runtime.readiness() else {
+            panic!("the recursive logger should drain prequeued input and vote to exit")
+        };
+        let report = snapshot.settle().expect("logger exit should settle");
+        assert!(report.task_failures().is_empty());
+        assert!(report.killed_work().is_empty());
+        assert!(
+            task.run().is_err(),
+            "settlement should terminalize the exit vote"
+        );
+        supervisor.finish(&installation);
+        assert_eq!(
+            supervisor
+                .fallback_and_deliver()
+                .expect("terminal logger should drain fallback input"),
+            0
+        );
+        assert!(
+            fallback
+                .lock()
+                .expect("fallback collection mutex should not be poisoned")
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn settled_report_renders_task_and_nonfallback_delivery_failures_once() {
         let source_diagnostics = DiagnosticBus::new();
         let input = Arc::new(LogHost::new(&source_diagnostics));

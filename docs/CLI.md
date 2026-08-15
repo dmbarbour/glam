@@ -137,18 +137,26 @@ The conventional exported values are:
 its coordinated exit after the empty-read alternative:
 
 ```g
-conf.log = .fix \loop ->
-  .cut (.alt
-    (.read_log >>= \message ->
-      .write_stderr (message.msg.text ++ [10]) =>>
-      loop)
-    (.exit.success))
+object conf.logger_loop as logger_loop with
+  run =
+    (.cut (.alt
+      (.read_log >>= \message ->
+        .write_stderr (message.msg.text ++ [10]) =>>
+        .r ())
+      (.exit.success))) =>>
+    logger_loop
+
+  eff = logger_loop.run.eff
+
+conf.log = conf.logger_loop
 ```
 
 The exit vote remains retryable until the whole runtime settles; a diagnostic
 arriving first makes `.read_log` run instead. The diagnostic stream is not
 semantically closed; a logger terminates by participating in coordinated
-runtime exit.
+runtime exit. Recurrence is deliberately outside `.cut`: a successful read and
+write must commit before the next iteration begins, while the empty-read exit
+remains inside the transactional choice so later input can disturb it.
 
 The remaining sections focus on `conf.cli`.
 

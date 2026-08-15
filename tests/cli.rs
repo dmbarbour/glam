@@ -903,10 +903,13 @@ fn configured_logger_can_drain_until_coordinated_exit() {
         concat!(
             "language g0\n",
             "object conf.env\n",
-            "conf.log = .fix (\\loop -> .cut (.alt ",
+            "object conf.logger_loop as logger_loop with\n",
+            "  run = (.cut (.alt ",
             "(.read_log >>= (\\message -> ",
-            "(.write_stderr (message.msg.text ++ [10])) =>> loop)) ",
-            "(.exit.success)))\n",
+            "(.write_stderr (message.msg.text ++ [10])) =>> .r ())) ",
+            "(.exit.success))) =>> logger_loop\n",
+            "  eff = logger_loop.run.eff\n",
+            "conf.log = conf.logger_loop\n",
         ),
     )
     .unwrap_or_else(|err| panic!("failed to write {}: {err}", config.display()));
@@ -927,7 +930,7 @@ fn configured_logger_can_drain_until_coordinated_exit() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(output.stdout, b"ok");
-    assert_eq!(output.stderr, b"warning: DRAINED\n");
+    assert_eq!(output.stderr, b"DRAINED\n");
 }
 
 #[test]
@@ -993,7 +996,7 @@ fn configured_logger_abandons_unjoined_child_tasks_when_its_root_returns() {
     let config = dir.join("conf.g");
     fs::write(
         &config,
-        "language g0\nobject conf.env\nconf.log = .task.new ((.log 'warn { msg:{ text:\"DETACHED CHILD\" } }) =>> .r ()) >>= (\\_task -> .r ())\n",
+        "language g0\nobject conf.env\nconf.log = .task.new (.read_log >>= (\\_message -> (.log 'warn { msg:{ text:\"DETACHED CHILD\" } }) =>> .r ())) >>= (\\_task -> .r ())\n",
     )
     .unwrap_or_else(|err| panic!("failed to write {}: {err}", config.display()));
 
@@ -1018,14 +1021,14 @@ fn configured_logger_abandons_unjoined_child_tasks_when_its_root_returns() {
 }
 
 #[test]
-fn configured_logger_abandons_an_unjoined_child_failure_when_its_root_returns() {
+fn configured_logger_abandons_an_unjoined_child_before_it_can_fail_when_its_root_returns() {
     let dir = unique_temp_dir("glam-conf-log-child-failure");
     fs::create_dir_all(&dir)
         .unwrap_or_else(|err| panic!("failed to create {}: {err}", dir.display()));
     let config = dir.join("conf.g");
     fs::write(
         &config,
-        "language g0\nobject conf.env\nconf.log = .task.new (.fail) >>= (\\_task -> .r ())\n",
+        "language g0\nobject conf.env\nconf.log = .task.new (.read_log >>= (\\_message -> .fail)) >>= (\\_task -> .r ())\n",
     )
     .unwrap_or_else(|err| panic!("failed to write {}: {err}", config.display()));
 

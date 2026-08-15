@@ -1482,41 +1482,6 @@ impl EvaluationWorkCoordinator {
         true
     }
 
-    /// Advances one task's protected-query status under one runtime mutation
-    /// admission without retaining its role host in the coordinator record.
-    /// External notification happens only after mutation admission is
-    /// released.
-    pub(super) fn update_reflection_status(
-        &self,
-        work: EvaluationWorkId,
-        status: EvaluationTaskStatus,
-    ) {
-        let mutation = self.admission.mutation_guard();
-        let update = {
-            let mut state = self
-                .state
-                .lock()
-                .expect("evaluation work coordinator was poisoned");
-            let record = state
-                .work
-                .get_mut(&work)
-                .expect("reported reflection work must remain registered");
-            record
-                .obligations
-                .task_publisher_mut()
-                .expect("active reflection work must retain its terminal publisher")
-                .update_status(status, false)
-        };
-        let wakes = update
-            .into_iter()
-            .map(|(publisher, status)| publisher.publish_guarded(&mutation, status))
-            .collect::<Vec<_>>();
-        drop(mutation);
-        for wake in wakes {
-            wake.notify();
-        }
-    }
-
     #[cfg(test)]
     pub(crate) fn publish_runtime_observation(&self) {
         let mutation = self.admission.mutation_guard();
@@ -3425,8 +3390,39 @@ impl EvaluationWorkCoordinator {
             release.made_progress = true;
             release.remains_blocked = false;
         }
+        let status_wakes = if !release.terminal && !release.exit_waiting {
+            let status = if release.remains_blocked {
+                EvaluationTaskStatus::Blocked
+            } else {
+                EvaluationTaskStatus::Launched
+            };
+            let updates = {
+                let mut state = self
+                    .state
+                    .lock()
+                    .expect("evaluation work coordinator was poisoned");
+                let record = state
+                    .work
+                    .get_mut(&id)
+                    .expect("released reflection work must remain registered");
+                record
+                    .obligations
+                    .task_publisher_mut()
+                    .expect("active reflection work must retain its terminal publisher")
+                    .update_status(status, false)
+            };
+            updates
+                .into_iter()
+                .map(|(publisher, status)| publisher.publish_guarded(&mutation, status))
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
         drop(mutation);
         self.work_available.notify_all();
+        for wake in status_wakes {
+            wake.notify();
+        }
         release.machine = machine;
         release
     }
@@ -4059,14 +4055,16 @@ impl EvaluationWorkCoordinator {
         // values they release are disposed only after coordinator/component
         // locks and mutation admission have been released.
         drop(producer);
+        // Lifecycle observers close terminal root demand before a host waiting
+        // on the root result can return and race that descendant teardown.
+        for status_wake in status_wakes {
+            status_wake.notify();
+        }
         for wake in completion_wakes {
             wake.notify();
         }
         for publication in promise_publications {
             publication.notify();
-        }
-        for status_wake in status_wakes {
-            status_wake.notify();
         }
         drop(status_publishers);
         terminal
@@ -6207,6 +6205,51 @@ mod tests {
 
         settle_test_reflection(&coordinator, work);
         assert_eq!(coordinator.registered_session_count(), 0);
+    }
+
+    #[test]
+    fn reflection_release_publishes_nonterminal_status_before_session_close() {
+        let (coordinator, _executor) = super::super::test_execution_resources(0)
+            .expect("test execution resources should build");
+        let session = TestDemand::new(&coordinator);
+        let session_id = session.demand.id;
+        let (_, work) = reserve_ready_test_reflection(&coordinator, &session);
+        let statuses = Arc::new(Mutex::new(Vec::new()));
+        let published = statuses.clone();
+        assert!(coordinator.attach_reflection_lifecycle_publisher(
+            work,
+            TaskStatusPublisher::new(move |_mutation, status| {
+                published.lock().unwrap().push(status);
+                TaskStatusWake::new(|| {})
+            }),
+        ));
+        let claimed = claim_ready_test_reflection(&coordinator, session_id);
+
+        let release = coordinator.release_reflection(
+            claimed,
+            ReflectionWorkPoll::Blocked(EvaluationTaskBlock {
+                dependency: None,
+                observed_epoch: Some(coordinator.current_observation_epoch()),
+                error: None,
+            }),
+        );
+        assert!(release.remains_blocked);
+        assert!(!release.terminal);
+        assert!(release.machine.is_none());
+        assert_eq!(
+            statuses.lock().unwrap().as_slice(),
+            [EvaluationTaskStatus::Blocked]
+        );
+
+        drop(session);
+        assert_eq!(
+            statuses.lock().unwrap().as_slice(),
+            [
+                EvaluationTaskStatus::Blocked,
+                EvaluationTaskStatus::Abandoned
+            ]
+        );
+        assert!(coordinator.reflection_snapshots(session_id).is_empty());
     }
 
     #[test]

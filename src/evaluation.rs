@@ -2778,14 +2778,6 @@ fn release_reflection_task(
     if !release.terminal {
         if !release.exit_waiting {
             debug_assert!(release.machine.is_none());
-            coordinator.update_reflection_status(
-                work,
-                if release.remains_blocked {
-                    EvaluationTaskStatus::Blocked
-                } else {
-                    EvaluationTaskStatus::Launched
-                },
-            );
             return (release.made_progress, release.remains_blocked, None);
         }
         let released = release.machine.take().map(ReleasedTaskMachine::DropOnly);

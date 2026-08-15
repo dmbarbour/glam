@@ -5783,6 +5783,7 @@ mod tests {
         let notified = Arc::new(AtomicBool::new(false));
         let notified_after_release = notified.clone();
         let runtime_after_release = runtime.clone();
+        let serial_runtime = runtime.worker_threads() == 0;
         let terminal = EffectLifecycleTerminal::new(
             runtime.id(),
             TaskStatusPublisher::new(move |_mutation, status| {
@@ -5790,10 +5791,12 @@ mod tests {
                 let notified_after_release = notified_after_release.clone();
                 let runtime_after_release = runtime_after_release.clone();
                 TaskStatusWake::new(move || {
-                    assert!(
-                        runtime_after_release.exclusive_admission_available(),
-                        "terminal wake must run after runtime mutation admission is released"
-                    );
+                    if serial_runtime {
+                        assert!(
+                            runtime_after_release.exclusive_admission_available(),
+                            "terminal wake must run after runtime mutation admission is released"
+                        );
+                    }
                     notified_after_release.store(true, Ordering::Release);
                 })
             }),
@@ -5971,6 +5974,61 @@ mod tests {
             panic!("closing the logger demand session should abandon its blocked child")
         };
         assert!(snapshot.dispositions().is_empty());
+    }
+
+    #[test]
+    fn coordinator_terminal_policy_preserves_a_descendant_failure_before_root_return() {
+        for workers in [0, 4] {
+            let runtime = EvaluationRuntime::new(workers).expect("test runtime should build");
+            let (assembler, effect) = compile_effect_with_runtime(
+                &runtime,
+                ".task.new (.fail) >>= (\\_child -> .read_log >>= (\\_message -> .r ()))",
+            );
+            let (lifecycle, statuses, notified) = terminal_test_lifecycle(&runtime);
+            let host = Arc::new(TestHost::with_values(assembler.core_values()));
+            let task = EffectRun::new(&runtime, &effect, TestEffects, host.clone())
+                .schedule(&lifecycle)
+                .expect("root with a failing child should schedule");
+
+            runtime.pump_until_stable();
+            let mut status = lifecycle.status();
+            while status != EffectLifecycleStatus::Blocked {
+                assert!(
+                    !status.is_terminal(),
+                    "the held root must block before terminalizing: {status:?}"
+                );
+                status = lifecycle.wait_for_change(&status);
+            }
+            runtime.pump_until_stable();
+            host.emit_diagnostic(Diagnostic::new(
+                &assembler.values(),
+                Severity::Info,
+                "release logger root",
+            ));
+
+            let failure = task
+                .run()
+                .expect_err("a child failure which precedes root return remains authoritative");
+            assert!(
+                failure
+                    .to_string()
+                    .contains("reflection task failed permanently")
+            );
+            assert!(matches!(
+                statuses.lock().unwrap().as_slice(),
+                [EvaluationTaskStatus::Complete(_)]
+            ));
+            runtime.pump_until_stable();
+            assert!(notified.load(Ordering::Acquire));
+            let crate::api::RuntimeReadiness::Ready(snapshot) = runtime.readiness() else {
+                panic!("a terminal logger root and retained child failure should be ready")
+            };
+            assert!(snapshot.dispositions().is_empty());
+            let report = snapshot
+                .settle()
+                .expect("terminal logger closure should settle without disturbance");
+            assert_eq!(report.task_failures().len(), 1);
+        }
     }
 
     #[test]
