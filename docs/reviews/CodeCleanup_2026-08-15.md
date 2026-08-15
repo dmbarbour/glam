@@ -572,6 +572,37 @@ regression, and the complete default suite. All passed, together with
 retained above as the review-time observation; the concurrency defect is no
 longer open.
 
+### Follow-up: retire pairless cursor scaffolding through Cursor WHNF
+
+The pairless-claim repair above is necessary for the current synchronous
+interface-demand model, but it should not become permanent architecture. The
+approved [Cursor WHNF transition](../.tmp/CursorWHNF.md) replaces direct
+`demand_interface`/`claim_dependent_cursor` driving with owning-net cursor
+obligations and request-relative normalization.
+
+This is a semantic transition before it is a cleanup. Do not independently
+remove the repaired exclusivity or quiescence accounting. Instead, latch its
+concurrency behavior, then use the transition phases to retire:
+
+- `claimed_cursors` as a parallel work ledger;
+- `CursorClaim::pair: Option<ActivePairKey>` and pairless claim special cases;
+- durable `CursorDependency::SourcePair` and transitional `SourceCursor`;
+- recursive `progress_cursor_dependency` calls into exact active-pair work;
+- the defensive cursor-dependency depth limit; and
+- whole-net terminal inference where a cursor-WHNF request needs only its
+  demanded cone.
+
+The replacement must keep one authoritative owner for every cursor
+transition: pair-owned cursor state remains in `ActivePairState`, while
+pairless demand belongs to an obligation in the cursor's own `RuntimeNet`.
+Evaluators may aggressively follow claimable work across nets, but they park
+and subscribe when another evaluator owns the required claim. Spine addresses
+are recomputed rather than cached during the initial transition.
+
+Close this follow-up only after the original forced-order pairless-claim test,
+the new demand-spine and nested-failure tests, and the parallel suite pass
+without compatibility use of the structures above.
+
 Implementation of any finding should run:
 
 ```sh

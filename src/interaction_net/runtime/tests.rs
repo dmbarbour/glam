@@ -90,8 +90,8 @@ impl NetSpecialization for StructuredSpecialization {
     type StuckReason = StructuredStuckReason;
 }
 
-fn finish_claimed_cursor<D: TestData>(
-    target: &mut RuntimeNet<D>,
+fn finish_claimed_cursor<S: NetSpecialization>(
+    target: &mut RuntimeNet<S>,
     cursor: NodeId,
 ) -> CursorProgress {
     let claim = target
@@ -103,7 +103,9 @@ fn finish_claimed_cursor<D: TestData>(
     target.finish_cursor_claim(claim, frontier)
 }
 
-fn reduce_next_cursor<D: TestData>(target: &mut RuntimeNet<D>) -> (NodeId, CursorProgress) {
+fn reduce_next_cursor<S: NetSpecialization>(
+    target: &mut RuntimeNet<S>,
+) -> (NodeId, CursorProgress) {
     let Some(Reduction {
         kind:
             ReductionKind::RemoteCursor {
@@ -119,8 +121,8 @@ fn reduce_next_cursor<D: TestData>(target: &mut RuntimeNet<D>) -> (NodeId, Curso
     (cursor, progress)
 }
 
-fn reduce_pair_cursor<D: TestData>(
-    target: &mut RuntimeNet<D>,
+fn reduce_pair_cursor<S: NetSpecialization>(
+    target: &mut RuntimeNet<S>,
     pair: ActivePairKey,
 ) -> (NodeId, CursorProgress) {
     let Some(Reduction {
@@ -524,6 +526,106 @@ fn specialization_failure_remains_structured_in_the_stuck_pair() {
 }
 
 #[test]
+fn nested_cursor_preserves_structured_failure_across_unrelated_source_progress() {
+    let mut source = RuntimeNet::<StructuredSpecialization>::empty();
+    let failed_bind = source.add_node(RuntimeNode::Bind);
+    let failed_data = source.add_node(RuntimeNode::Data(7));
+    source.connect(Port::principal(failed_bind), Port::principal(failed_data));
+    let failed_result = source.add_node(RuntimeNode::Data(0));
+    source.connect(
+        Port::auxiliary(failed_bind, 2),
+        Port::principal(failed_result),
+    );
+    let exposed = source.add_interface(Port::auxiliary(failed_bind, 1));
+    source.exposed = Some(exposed);
+    let failed_pair = ActivePairKey::new(failed_bind, failed_data);
+
+    let unrelated_left = source.add_node(RuntimeNode::Bind);
+    let unrelated_right = source.add_node(RuntimeNode::Bind);
+    source.connect(
+        Port::principal(unrelated_left),
+        Port::principal(unrelated_right),
+    );
+    for index in 1..=2 {
+        let left_data = source.add_node(RuntimeNode::Data(index as i32));
+        let right_data = source.add_node(RuntimeNode::Data(-(index as i32)));
+        source.connect(
+            Port::auxiliary(unrelated_left, index),
+            Port::principal(left_data),
+        );
+        source.connect(
+            Port::auxiliary(unrelated_right, index),
+            Port::principal(right_data),
+        );
+    }
+    let unrelated_pair = ActivePairKey::new(unrelated_left, unrelated_right);
+
+    let reduction = source
+        .reduce_pair(failed_pair)
+        .expect("failed call should be claimable");
+    let ReductionKind::Call { bind, data } = reduction.kind else {
+        panic!("failed source pair should be a call");
+    };
+    let call = Call {
+        pair: failed_pair,
+        bind,
+        data,
+    };
+    let error = StructuredStuckReason {
+        code: 42,
+        detail: Arc::from("nested structured failure"),
+    };
+    source.fail_claimed_call(call, error.clone());
+    let source = SharedRuntimeNet::new(source);
+
+    let mut target = RuntimeNet::<StructuredSpecialization>::empty();
+    let local = target.add_node(RuntimeNode::Data(0));
+    let cursor = target.begin_copy(source.clone());
+    target.connect(Port::principal(local), Port::principal(cursor));
+    assert_eq!(reduce_next_cursor(&mut target).1, CursorProgress::Blocked);
+
+    let progress_barrier = Arc::new(Barrier::new(2));
+    let worker_barrier = progress_barrier.clone();
+    let worker_source = source.clone();
+    let worker = thread::spawn(move || {
+        worker_barrier.wait();
+        assert!(matches!(
+            worker_source.with_mut(|runtime| runtime.reduce_pair(unrelated_pair)),
+            Some(Reduction {
+                kind: ReductionKind::BindJoin,
+                ..
+            })
+        ));
+        worker_barrier.wait();
+    });
+    progress_barrier.wait();
+    progress_barrier.wait();
+    worker
+        .join()
+        .expect("unrelated source worker should not panic");
+
+    let propagated = match target
+        .cursor_dependency(cursor)
+        .expect("outer cursor should retain its nested endpoint")
+    {
+        CursorDependency::SourcePair {
+            source: owner,
+            pair,
+        } => {
+            assert!(owner.ptr_eq(&source));
+            assert_eq!(pair, failed_pair);
+            owner.with(|runtime| runtime.stuck_reason(pair).cloned())
+        }
+        dependency => panic!("expected a nested source pair, got {dependency:?}"),
+    };
+    assert_eq!(
+        propagated,
+        Some(StuckReason::Specialization(error)),
+        "unrelated source versions must not replace the terminal failure"
+    );
+}
+
+#[test]
 fn claimed_callable_data_lowers_to_an_explicit_operator_bind() {
     let mut net = RuntimeNet::<i32>::empty();
     let application = net.add_node(RuntimeNode::Bind);
@@ -807,6 +909,90 @@ fn remote_cursor_exposes_source_progress_without_holding_nested_locks() {
 }
 
 #[test]
+fn source_change_between_cursor_inspection_publication_and_wait_is_not_lost() {
+    let source = source_requiring_one_reduction().instantiate_shared();
+    let source_pair = source.with(|runtime| runtime.ready_pairs()[0]);
+    let mut target = target_waiting_on(source.clone());
+    let Some(Reduction {
+        kind:
+            ReductionKind::RemoteCursor {
+                cursor,
+                progress: CursorProgress::Claimed,
+            },
+        ..
+    }) = target.reduce_next()
+    else {
+        panic!("target should claim its remote cursor");
+    };
+    let claim = target
+        .cursor_claim(cursor)
+        .expect("claimed cursor should remain inspectable");
+    let (frontier, observed_version) =
+        source.with_version(|runtime| runtime.inspect_source_frontier(claim.remote));
+    let inspected_pair = match &frontier {
+        SourceFrontier::StableAuxiliary {
+            terminal_pair: Some(pair),
+            ..
+        } => *pair,
+        SourceFrontier::ActiveAuxiliary { entered, partner } => {
+            ActivePairKey::new(entered.node(), partner.node())
+        }
+        _ => panic!("source cursor should inspect the pending source pair"),
+    };
+    assert_eq!(inspected_pair, source_pair);
+
+    let mutation_barrier = Arc::new(Barrier::new(2));
+    let worker_barrier = mutation_barrier.clone();
+    let worker_source = source.clone();
+    let mutator = thread::spawn(move || {
+        worker_barrier.wait();
+        assert!(matches!(
+            worker_source.with_mut(|runtime| runtime.reduce_pair(source_pair)),
+            Some(Reduction {
+                kind: ReductionKind::BindJoin,
+                ..
+            })
+        ));
+        worker_barrier.wait();
+    });
+    mutation_barrier.wait();
+    mutation_barrier.wait();
+    mutator.join().expect("source mutator should not panic");
+    assert!(!source.with(|runtime| runtime.contains_active_pair(source_pair)));
+
+    assert_eq!(
+        target.finish_cursor_claim(claim, frontier),
+        CursorProgress::Blocked,
+        "the forced ordering publishes the now-stale inspected endpoint"
+    );
+    assert!(matches!(
+        target.cursor_dependency(cursor),
+        Some(CursorDependency::SourcePair { pair, .. }) if pair == source_pair
+    ));
+
+    let waiter_source = source.clone();
+    let (sender, receiver) = mpsc::channel();
+    let waiter = thread::spawn(move || {
+        waiter_source.wait_for_change(observed_version);
+        sender.send(()).expect("test receiver should remain open");
+    });
+    if receiver.recv_timeout(Duration::from_secs(2)).is_err() {
+        // Release a buggy waiter before failing so the test cannot leave a
+        // detached blocked thread behind.
+        source.with_mut(|_| {});
+        waiter.join().expect("runtime waiter should not panic");
+        panic!("a source change preceding wait registration must remain observable");
+    }
+    waiter.join().expect("runtime waiter should not panic");
+
+    assert!(target.retry_blocked_cursor(cursor));
+    assert!(matches!(
+        reduce_next_cursor(&mut target).1,
+        CursorProgress::Materialized { .. }
+    ));
+}
+
+#[test]
 fn active_source_call_is_a_dependency_and_is_never_copied() {
     let mut source: RuntimeNet<&'static str> = RuntimeNet::empty();
     let bind = source.add_node(RuntimeNode::Bind);
@@ -921,6 +1107,52 @@ fn root_cursor_claim_remains_exclusive_while_source_inspection_is_in_flight() {
 }
 
 #[test]
+fn concurrent_interface_demands_share_one_pairless_cursor_claim() {
+    let mut source = NetBuilder::<&'static str>::new();
+    let data = source.data("value");
+    let source = source.finish(data).instantiate_shared();
+
+    let mut target = RuntimeNet::empty();
+    let root_cursor = target.begin_copy(source);
+    let exposed = target.add_interface(Port::principal(root_cursor));
+    let target = SharedRuntimeNet::new(target);
+    let claimed = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+
+    let worker_target = target.clone();
+    let worker_claimed = claimed.clone();
+    let worker_release = release.clone();
+    let worker = thread::spawn(move || {
+        assert_eq!(
+            worker_target.with_mut(|runtime| runtime.demand_interface(exposed)),
+            Some(CursorProgress::Claimed)
+        );
+        worker_claimed.wait();
+        worker_release.wait();
+        assert!(matches!(
+            worker_target.advance_claimed_cursor(root_cursor),
+            Some(CursorProgress::Materialized { .. })
+        ));
+    });
+
+    claimed.wait();
+    assert_eq!(
+        target.with_mut(|runtime| runtime.demand_interface(exposed)),
+        None,
+        "a concurrent demand must not duplicate the pairless cursor claim"
+    );
+    assert!(target.with(|runtime| runtime.has_in_flight_claims()));
+    release.wait();
+    worker.join().expect("cursor worker should not panic");
+
+    assert_eq!(
+        target.with(|runtime| runtime.interface_data(exposed).copied()),
+        Some("value")
+    );
+    assert!(!target.with(|runtime| runtime.has_in_flight_claims()));
+}
+
+#[test]
 fn auxiliary_cursor_drives_the_local_cursor_facing_the_principal() {
     let mut source: RuntimeNet<&'static str> = RuntimeNet::empty();
     let root = source.add_node(RuntimeNode::Bind);
@@ -1029,6 +1261,150 @@ fn auxiliary_cursor_traces_a_principal_chain_to_an_exact_source_pair() {
             pair: dependency_pair,
         }) if dependency_source.ptr_eq(&source) && dependency_pair == pair
     ));
+}
+
+#[test]
+fn auxiliary_cursor_recomputes_its_spine_after_each_terminal_pair() {
+    let mut source: RuntimeNet<&'static str> = RuntimeNet::empty();
+    let first = source.add_node(RuntimeNode::Bind);
+    let second = source.add_node(RuntimeNode::Bind);
+    let terminal_left = source.add_node(RuntimeNode::Bind);
+    let terminal_right = source.add_node(RuntimeNode::Bind);
+    let next = source.add_node(RuntimeNode::Bind);
+    let last = source.add_node(RuntimeNode::Bind);
+    let result = source.add_node(RuntimeNode::Data("result"));
+    let exposed = source.add_interface(Port::auxiliary(first, 1));
+    source.exposed = Some(exposed);
+
+    source.connect(Port::principal(first), Port::auxiliary(second, 1));
+    source.connect(Port::principal(second), Port::auxiliary(terminal_left, 1));
+    source.connect(
+        Port::principal(terminal_left),
+        Port::principal(terminal_right),
+    );
+    source.connect(Port::auxiliary(terminal_right, 1), Port::principal(next));
+    source.connect(Port::auxiliary(next, 1), Port::principal(last));
+    source.connect(Port::auxiliary(last, 1), Port::principal(result));
+
+    for (left, right) in [
+        (terminal_left, terminal_right),
+        (second, next),
+        (first, last),
+    ] {
+        let left_data = source.add_node(RuntimeNode::Data("unused-left"));
+        let right_data = source.add_node(RuntimeNode::Data("unused-right"));
+        source.connect(Port::auxiliary(left, 2), Port::principal(left_data));
+        source.connect(Port::auxiliary(right, 2), Port::principal(right_data));
+    }
+
+    let terminal_pair = ActivePairKey::new(terminal_left, terminal_right);
+    let second_pair = ActivePairKey::new(second, next);
+    let first_pair = ActivePairKey::new(first, last);
+    let source = SharedRuntimeNet::new(source);
+    let mut target = target_waiting_on(source.clone());
+
+    let (cursor, progress) = reduce_next_cursor(&mut target);
+    assert_eq!(progress, CursorProgress::Blocked);
+    assert!(matches!(
+        target.cursor_dependency(cursor),
+        Some(CursorDependency::SourcePair { pair, .. }) if pair == terminal_pair
+    ));
+
+    for (consumed, next_dependency) in [
+        (terminal_pair, Some(second_pair)),
+        (second_pair, Some(first_pair)),
+        (first_pair, None),
+    ] {
+        assert!(matches!(
+            source.with_mut(|runtime| runtime.reduce_pair(consumed)),
+            Some(Reduction {
+                kind: ReductionKind::BindJoin,
+                ..
+            })
+        ));
+        assert!(target.retry_blocked_cursor(cursor));
+        let (_, progress) = reduce_next_cursor(&mut target);
+        match next_dependency {
+            Some(next_dependency) => {
+                assert_eq!(progress, CursorProgress::Blocked);
+                assert!(matches!(
+                    target.cursor_dependency(cursor),
+                    Some(CursorDependency::SourcePair { pair, .. }) if pair == next_dependency
+                ));
+            }
+            None => {
+                assert!(matches!(progress, CursorProgress::Materialized { .. }));
+                assert!(target.cursor_dependency(cursor).is_none());
+            }
+        }
+    }
+}
+
+#[test]
+fn auxiliary_cursor_reinspects_after_a_principal_remote_cursor_materializes() {
+    let mut leaf = NetBuilder::new();
+    let value = leaf.data("leaf");
+    let leaf = leaf.finish(value).instantiate_shared();
+
+    let mut source: RuntimeNet<&'static str> = RuntimeNet::empty();
+    let host = source.add_node(RuntimeNode::Bind);
+    let source_cursor = source.begin_copy(leaf);
+    source.connect(Port::principal(host), Port::principal(source_cursor));
+    let result = source.add_node(RuntimeNode::Data("result"));
+    source.connect(Port::auxiliary(host, 2), Port::principal(result));
+    let exposed = source.add_interface(Port::auxiliary(host, 1));
+    source.exposed = Some(exposed);
+    let cursor_pair = ActivePairKey::new(host, source_cursor);
+    let source = SharedRuntimeNet::new(source);
+
+    let mut target = target_waiting_on(source.clone());
+    let (target_cursor, progress) = reduce_next_cursor(&mut target);
+    assert_eq!(progress, CursorProgress::Blocked);
+    assert!(matches!(
+        target.cursor_dependency(target_cursor),
+        Some(CursorDependency::SourcePair { pair, .. }) if pair == cursor_pair
+    ));
+
+    assert_eq!(
+        source.with_mut(|runtime| runtime.claim_dependent_cursor(source_cursor)),
+        Some(CursorProgress::Claimed)
+    );
+    assert!(matches!(
+        source.advance_claimed_cursor(source_cursor),
+        Some(CursorProgress::Materialized { .. })
+    ));
+
+    assert!(target.retry_blocked_cursor(target_cursor));
+    assert_eq!(reduce_next_cursor(&mut target).1, CursorProgress::Blocked);
+    let replacement_pair = match target
+        .cursor_dependency(target_cursor)
+        .expect("outer cursor should follow the host's new principal pair")
+    {
+        CursorDependency::SourcePair {
+            source: owner,
+            pair,
+        } => {
+            assert!(owner.ptr_eq(&source));
+            pair
+        }
+        dependency => panic!("expected a replacement source pair, got {dependency:?}"),
+    };
+    assert_eq!(
+        replacement_pair, cursor_pair,
+        "the retained host node remains the active-pair key anchor"
+    );
+    source.with(|runtime| {
+        let (left, right) = runtime
+            .active_pair_nodes(replacement_pair)
+            .expect("materialization should install a replacement principal partner");
+        assert_ne!(left, source_cursor);
+        assert_ne!(right, source_cursor);
+        assert!(matches!(runtime.node(host), Some(RuntimeNode::Bind)));
+        assert!(
+            matches!(runtime.node(left), Some(RuntimeNode::Data("leaf")))
+                || matches!(runtime.node(right), Some(RuntimeNode::Data("leaf")))
+        );
+    });
 }
 
 #[test]
