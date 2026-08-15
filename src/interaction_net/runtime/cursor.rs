@@ -1,5 +1,42 @@
 use super::*;
 
+impl<S: NetSpecialization> SourceFrontierShape<S> {
+    fn endpoint(&self) -> Option<DemandEndpoint> {
+        match self {
+            Self::Principal {
+                port,
+                node: RuntimeNode::RemoteCursor { .. },
+            } => Some(DemandEndpoint::Cursor(port.node())),
+            Self::Principal { .. } => None,
+            Self::StableAuxiliary { terminal_pair, .. } => {
+                terminal_pair.map(DemandEndpoint::ActivePair)
+            }
+            Self::ActiveAuxiliary { entered, partner } => Some(DemandEndpoint::ActivePair(
+                ActivePairKey::new(entered.node(), partner.node()),
+            )),
+        }
+    }
+}
+
+impl<S: NetSpecialization> SharedRuntimeNet<S> {
+    /// Traverses one source demand spine under the source lock and retains
+    /// only the root/version/endpoint observation needed to validate it.
+    pub(in crate::interaction_net::runtime) fn inspect_source_frontier(
+        &self,
+        anchor: Port,
+    ) -> SourceFrontier<S> {
+        let (shape, observed_runtime_version) =
+            self.with_version(|runtime| runtime.inspect_source_frontier_shape(anchor));
+        let observation = shape.endpoint().map(|endpoint| FrontierObservation {
+            source: self.clone(),
+            anchor,
+            observed_runtime_version,
+            endpoint,
+        });
+        SourceFrontier { shape, observation }
+    }
+}
+
 impl<S: NetSpecialization> RuntimeNet<S> {
     /// Starts one logical copy and returns its initially unwired remote cursor.
     pub fn begin_copy(&mut self, source: SharedRuntimeNet<S>) -> NodeId {
@@ -180,10 +217,10 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         })
     }
 
-    pub(in crate::interaction_net::runtime) fn inspect_source_frontier(
+    pub(in crate::interaction_net::runtime) fn inspect_source_frontier_shape(
         &self,
         remote: Port,
-    ) -> SourceFrontier<S> {
+    ) -> SourceFrontierShape<S> {
         let port = self
             .neighbor(remote)
             .expect("remote cursor anchor must remain wired in its source");
@@ -192,12 +229,12 @@ impl<S: NetSpecialization> RuntimeNet<S> {
                 .node(port.node())
                 .expect("remote cursor neighbor must exist")
                 .clone();
-            return SourceFrontier::Principal { port, node };
+            return SourceFrontierShape::Principal { port, node };
         }
 
         let principal_neighbor = self.neighbor(Port::principal(port.node()));
         if let Some(partner) = principal_neighbor.filter(|neighbor| neighbor.is_principal()) {
-            return SourceFrontier::ActiveAuxiliary {
+            return SourceFrontierShape::ActiveAuxiliary {
                 entered: port,
                 partner,
             };
@@ -217,7 +254,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
             principal_anchors.push(neighbor);
             node = neighbor.node();
         }
-        SourceFrontier::StableAuxiliary {
+        SourceFrontierShape::StableAuxiliary {
             port,
             principal_anchors,
             terminal_pair,
@@ -241,10 +278,11 @@ impl<S: NetSpecialization> RuntimeNet<S> {
             Some(RuntimeNode::RemoteCursor { copy, remote })
                 if *copy == claim.copy && *remote == claim.remote
         ));
-        let frontier_port = match &frontier {
-            SourceFrontier::Principal { port, .. }
-            | SourceFrontier::StableAuxiliary { port, .. } => *port,
-            SourceFrontier::ActiveAuxiliary { entered, .. } => *entered,
+        let SourceFrontier { shape, observation } = frontier;
+        let frontier_port = match &shape {
+            SourceFrontierShape::Principal { port, .. }
+            | SourceFrontierShape::StableAuxiliary { port, .. } => *port,
+            SourceFrontierShape::ActiveAuxiliary { entered, .. } => *entered,
         };
 
         let converging_cursor = self
@@ -263,28 +301,37 @@ impl<S: NetSpecialization> RuntimeNet<S> {
             ));
             self.join_remote_frontiers(claim.copy, claim.cursor, claim.remote, frontier_port)
         } else {
-            match frontier {
-                SourceFrontier::Principal {
+            match shape {
+                SourceFrontierShape::Principal {
                     port,
                     node: RuntimeNode::RemoteCursor { .. },
                 } => {
+                    let observation = observation
+                        .expect("a source cursor endpoint must carry its frontier observation");
+                    assert_eq!(observation.anchor(), claim.remote);
+                    assert_eq!(observation.endpoint(), DemandEndpoint::Cursor(port.node()));
+                    let source = observation.source().clone();
                     self.cursor_dependencies.insert(
                         claim.cursor,
                         CursorDependency::SourceCursor {
-                            source: claim.source,
+                            source,
                             cursor: port.node(),
+                            observation,
                         },
                     );
                     CursorProgress::Blocked
                 }
-                SourceFrontier::Principal { port, node } => self.materialize_remote_node(
-                    claim.copy,
-                    claim.cursor,
-                    claim.remote,
-                    port.node(),
-                    node,
-                ),
-                SourceFrontier::StableAuxiliary {
+                SourceFrontierShape::Principal { port, node } => {
+                    assert!(observation.is_none());
+                    self.materialize_remote_node(
+                        claim.copy,
+                        claim.cursor,
+                        claim.remote,
+                        port.node(),
+                        node,
+                    )
+                }
+                SourceFrontierShape::StableAuxiliary {
                     principal_anchors,
                     terminal_pair,
                     ..
@@ -299,22 +346,37 @@ impl<S: NetSpecialization> RuntimeNet<S> {
                         self.cursor_dependencies
                             .insert(claim.cursor, CursorDependency::LocalCursor(peer));
                     } else if let Some(pair) = terminal_pair {
+                        let observation = observation
+                            .expect("an active-pair endpoint must carry its frontier observation");
+                        assert_eq!(observation.anchor(), claim.remote);
+                        assert_eq!(observation.endpoint(), DemandEndpoint::ActivePair(pair));
+                        let source = observation.source().clone();
                         self.cursor_dependencies.insert(
                             claim.cursor,
                             CursorDependency::SourcePair {
-                                source: claim.source,
+                                source,
                                 pair,
+                                observation,
                             },
                         );
+                    } else {
+                        assert!(observation.is_none());
                     }
                     CursorProgress::Blocked
                 }
-                SourceFrontier::ActiveAuxiliary { entered, partner } => {
+                SourceFrontierShape::ActiveAuxiliary { entered, partner } => {
+                    let pair = ActivePairKey::new(entered.node(), partner.node());
+                    let observation = observation
+                        .expect("an active-pair endpoint must carry its frontier observation");
+                    assert_eq!(observation.anchor(), claim.remote);
+                    assert_eq!(observation.endpoint(), DemandEndpoint::ActivePair(pair));
+                    let source = observation.source().clone();
                     self.cursor_dependencies.insert(
                         claim.cursor,
                         CursorDependency::SourcePair {
-                            source: claim.source,
-                            pair: ActivePairKey::new(entered.node(), partner.node()),
+                            source,
+                            pair,
+                            observation,
                         },
                     );
                     CursorProgress::Blocked

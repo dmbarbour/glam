@@ -220,9 +220,28 @@ pub(super) fn progress_cursor_dependency(
         CursorDependency::SourceCursor {
             source,
             cursor: source_cursor,
-        } => progress_dependent_cursor(context, &source, source_cursor, depth),
-        CursorDependency::SourcePair { source, pair } => {
-            progress_exact_core_pair(context, &source, pair, depth + 1)
+            observation,
+        } => {
+            debug_assert!(observation.source().ptr_eq(&source));
+            if observation.status() == crate::interaction_net::FrontierObservationStatus::Disturbed
+            {
+                Ok(true)
+            } else {
+                progress_dependent_cursor(context, &source, source_cursor, depth)
+            }
+        }
+        CursorDependency::SourcePair {
+            source,
+            pair,
+            observation,
+        } => {
+            debug_assert!(observation.source().ptr_eq(&source));
+            if observation.status() == crate::interaction_net::FrontierObservationStatus::Disturbed
+            {
+                Ok(true)
+            } else {
+                progress_exact_core_pair(context, &source, pair, depth + 1)
+            }
         }
     }
 }

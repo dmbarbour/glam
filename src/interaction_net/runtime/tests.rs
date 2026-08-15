@@ -97,9 +97,7 @@ fn finish_claimed_cursor<S: NetSpecialization>(
     let claim = target
         .cursor_claim(cursor)
         .expect("cursor reduction should leave an inspectable claim");
-    let frontier = claim
-        .source
-        .with(|source| source.inspect_source_frontier(claim.remote));
+    let frontier = claim.source.inspect_source_frontier(claim.remote);
     target.finish_cursor_claim(claim, frontier)
 }
 
@@ -611,6 +609,7 @@ fn nested_cursor_preserves_structured_failure_across_unrelated_source_progress()
         CursorDependency::SourcePair {
             source: owner,
             pair,
+            ..
         } => {
             assert!(owner.ptr_eq(&source));
             assert_eq!(pair, failed_pair);
@@ -927,14 +926,20 @@ fn source_change_between_cursor_inspection_publication_and_wait_is_not_lost() {
     let claim = target
         .cursor_claim(cursor)
         .expect("claimed cursor should remain inspectable");
-    let (frontier, observed_version) =
-        source.with_version(|runtime| runtime.inspect_source_frontier(claim.remote));
-    let inspected_pair = match &frontier {
-        SourceFrontier::StableAuxiliary {
+    let frontier = source.inspect_source_frontier(claim.remote);
+    let observation = frontier
+        .observation
+        .as_ref()
+        .expect("the inspected pair should have a versioned observation");
+    let observed_version = observation.observed_runtime_version;
+    assert_eq!(observation.anchor(), claim.remote);
+    assert_eq!(observation.status(), FrontierObservationStatus::Current);
+    let inspected_pair = match &frontier.shape {
+        SourceFrontierShape::StableAuxiliary {
             terminal_pair: Some(pair),
             ..
-        } => *pair,
-        SourceFrontier::ActiveAuxiliary { entered, partner } => {
+        } => pair.to_owned(),
+        SourceFrontierShape::ActiveAuxiliary { entered, partner } => {
             ActivePairKey::new(entered.node(), partner.node())
         }
         _ => panic!("source cursor should inspect the pending source pair"),
@@ -959,6 +964,14 @@ fn source_change_between_cursor_inspection_publication_and_wait_is_not_lost() {
     mutation_barrier.wait();
     mutator.join().expect("source mutator should not panic");
     assert!(!source.with(|runtime| runtime.contains_active_pair(source_pair)));
+    assert_eq!(
+        frontier
+            .observation
+            .as_ref()
+            .expect("pair observation should remain attached")
+            .status(),
+        FrontierObservationStatus::Disturbed
+    );
 
     assert_eq!(
         target.finish_cursor_claim(claim, frontier),
@@ -1019,6 +1032,7 @@ fn active_source_call_is_a_dependency_and_is_never_copied() {
     let CursorDependency::SourcePair {
         source: dependency_source,
         pair: dependency_pair,
+        ..
     } = dependency
     else {
         panic!("active source call should remain an exact source dependency");
@@ -1054,11 +1068,21 @@ fn layered_cursor_reports_and_follows_an_exact_dependency() {
     let dependency = outer
         .cursor_dependency(outer_cursor)
         .expect("layered cursor should retain an exact dependency");
-    let CursorDependency::SourceCursor { source, cursor } = dependency else {
+    let CursorDependency::SourceCursor {
+        source,
+        cursor,
+        observation,
+    } = dependency
+    else {
         panic!("layered cursor should point to its exact source cursor");
     };
     assert!(source.ptr_eq(&middle));
     assert_eq!(cursor, middle_cursor);
+    assert_eq!(
+        observation.endpoint(),
+        DemandEndpoint::Cursor(middle_cursor)
+    );
+    assert_eq!(observation.status(), FrontierObservationStatus::Current);
 
     assert!(matches!(
         middle.with_mut(|runtime| runtime.claim_dependent_cursor(middle_cursor)),
@@ -1068,6 +1092,7 @@ fn layered_cursor_reports_and_follows_an_exact_dependency() {
         middle.advance_claimed_cursor(middle_cursor),
         Some(CursorProgress::Materialized { .. })
     ));
+    assert_eq!(observation.status(), FrontierObservationStatus::Disturbed);
     assert!(outer.retry_blocked_cursor(outer_cursor));
     assert!(matches!(
         reduce_next_cursor(&mut outer).1,
@@ -1259,6 +1284,7 @@ fn auxiliary_cursor_traces_a_principal_chain_to_an_exact_source_pair() {
         Some(CursorDependency::SourcePair {
             source: dependency_source,
             pair: dependency_pair,
+            ..
         }) if dependency_source.ptr_eq(&source) && dependency_pair == pair
     ));
 }
@@ -1315,6 +1341,15 @@ fn auxiliary_cursor_recomputes_its_spine_after_each_terminal_pair() {
         (second_pair, Some(first_pair)),
         (first_pair, None),
     ] {
+        let observation = match target
+            .cursor_dependency(cursor)
+            .expect("blocked cursor should retain its frontier observation")
+        {
+            CursorDependency::SourcePair { observation, .. } => observation,
+            dependency => panic!("expected a source-pair projection, got {dependency:?}"),
+        };
+        assert_eq!(observation.endpoint(), DemandEndpoint::ActivePair(consumed));
+        assert_eq!(observation.status(), FrontierObservationStatus::Current);
         assert!(matches!(
             source.with_mut(|runtime| runtime.reduce_pair(consumed)),
             Some(Reduction {
@@ -1322,6 +1357,7 @@ fn auxiliary_cursor_recomputes_its_spine_after_each_terminal_pair() {
                 ..
             })
         ));
+        assert_eq!(observation.status(), FrontierObservationStatus::Disturbed);
         assert!(target.retry_blocked_cursor(cursor));
         let (_, progress) = reduce_next_cursor(&mut target);
         match next_dependency {
@@ -1383,6 +1419,7 @@ fn auxiliary_cursor_reinspects_after_a_principal_remote_cursor_materializes() {
         CursorDependency::SourcePair {
             source: owner,
             pair,
+            ..
         } => {
             assert!(owner.ptr_eq(&source));
             pair
@@ -1567,9 +1604,7 @@ fn converging_frontier_waits_for_a_claimed_peer() {
             panic!("each converging cursor should be independently claimable");
         };
         let claim = caller.cursor_claim(cursor).unwrap();
-        let frontier = claim
-            .source
-            .with(|source| source.inspect_source_frontier(claim.remote));
+        let frontier = claim.source.inspect_source_frontier(claim.remote);
         claims.push((claim, frontier));
     }
 

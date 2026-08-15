@@ -71,16 +71,86 @@ pub enum CursorProgress {
     Blocked,
 }
 
+/// Work found at the end of one transient cursor-demand spine inspection.
+///
+/// The endpoint is a candidate for current progress, not the identity of the
+/// continuing demand rooted at the inspected source anchor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DemandEndpoint {
+    Cursor(NodeId),
+    ActivePair(ActivePairKey),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrontierObservationStatus {
+    Current,
+    Disturbed,
+}
+
+/// One versioned observation of the work currently demanded from a source
+/// frontier. The complete auxiliary/principal spine is deliberately not
+/// retained; a disturbed observation is recomputed from `anchor`.
+#[derive(Clone)]
+pub struct FrontierObservation<S: NetSpecialization> {
+    source: SharedRuntimeNet<S>,
+    anchor: Port,
+    observed_runtime_version: u64,
+    endpoint: DemandEndpoint,
+}
+
+impl<S: NetSpecialization> FrontierObservation<S> {
+    pub fn source(&self) -> &SharedRuntimeNet<S> {
+        &self.source
+    }
+
+    pub fn anchor(&self) -> Port {
+        self.anchor
+    }
+
+    pub fn endpoint(&self) -> DemandEndpoint {
+        self.endpoint
+    }
+
+    /// Validates under the source lock so a mutation cannot become visible
+    /// before its version publication is observed.
+    pub fn status(&self) -> FrontierObservationStatus {
+        let (_, current_version) = self.source.with_version(|_| ());
+        if current_version == self.observed_runtime_version {
+            FrontierObservationStatus::Current
+        } else {
+            FrontierObservationStatus::Disturbed
+        }
+    }
+}
+
+impl<S: NetSpecialization> fmt::Debug for FrontierObservation<S> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("FrontierObservation")
+            .field("source", &self.source)
+            .field("anchor", &self.anchor)
+            .field("observed_runtime_version", &self.observed_runtime_version)
+            .field("endpoint", &self.endpoint)
+            .finish()
+    }
+}
+
 #[derive(Clone)]
 pub enum CursorDependency<S: NetSpecialization> {
     LocalCursor(NodeId),
+    /// Transitional execution projection for a source-cursor endpoint. The
+    /// observation, not `cursor`, identifies the continuing frontier demand.
     SourceCursor {
         source: SharedRuntimeNet<S>,
         cursor: NodeId,
+        observation: FrontierObservation<S>,
     },
+    /// Transitional execution projection for an active-pair endpoint. The
+    /// observation, not `pair`, identifies the continuing frontier demand.
     SourcePair {
         source: SharedRuntimeNet<S>,
         pair: ActivePairKey,
+        observation: FrontierObservation<S>,
     },
 }
 
@@ -90,15 +160,25 @@ impl<S: NetSpecialization> fmt::Debug for CursorDependency<S> {
             Self::LocalCursor(cursor) => {
                 formatter.debug_tuple("LocalCursor").field(cursor).finish()
             }
-            Self::SourceCursor { source, cursor } => formatter
+            Self::SourceCursor {
+                source,
+                cursor,
+                observation,
+            } => formatter
                 .debug_struct("SourceCursor")
                 .field("source", source)
                 .field("cursor", cursor)
+                .field("observation", observation)
                 .finish(),
-            Self::SourcePair { source, pair } => formatter
+            Self::SourcePair {
+                source,
+                pair,
+                observation,
+            } => formatter
                 .debug_struct("SourcePair")
                 .field("source", source)
                 .field("pair", pair)
+                .field("observation", observation)
                 .finish(),
         }
     }
@@ -246,7 +326,7 @@ impl<S: NetSpecialization> SharedRuntimeNet<S> {
     pub fn advance_claimed_cursor(&self, cursor: NodeId) -> Option<CursorProgress> {
         let claim = self.with(|target| target.cursor_claim(cursor))?;
         let source = claim.source.clone();
-        let frontier = source.with(|runtime| runtime.inspect_source_frontier(claim.remote));
+        let frontier = source.inspect_source_frontier(claim.remote);
         Some(self.with_mut(|target| target.finish_cursor_claim(claim, frontier)))
     }
 }
@@ -291,7 +371,12 @@ struct CursorClaim<S: NetSpecialization> {
     source: SharedRuntimeNet<S>,
 }
 
-enum SourceFrontier<S: NetSpecialization> {
+struct SourceFrontier<S: NetSpecialization> {
+    shape: SourceFrontierShape<S>,
+    observation: Option<FrontierObservation<S>>,
+}
+
+enum SourceFrontierShape<S: NetSpecialization> {
     Principal {
         port: Port,
         node: RuntimeNode<S>,
