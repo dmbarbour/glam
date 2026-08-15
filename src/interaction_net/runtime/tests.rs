@@ -472,6 +472,129 @@ fn shared_runtime_waiters_resume_when_a_claimed_pair_is_released() {
 }
 
 #[test]
+fn conditional_runtime_mutation_publishes_only_new_cursor_obligations() {
+    let mut source = NetBuilder::<()>::new();
+    let data = source.data(());
+    let source = source.finish(data).instantiate_shared();
+    let mut target = RuntimeNet::empty();
+    let cursor = target.begin_copy(source);
+    let target = SharedRuntimeNet::new(target);
+
+    let (initial_topology, initial_disturbance) = target.revisions();
+    assert_eq!(initial_topology, initial_disturbance);
+
+    let inserted = target.with_conditional_mut(|runtime| {
+        if runtime.ensure_pairless_cursor_obligation(cursor) {
+            RuntimeNetMutation::Changed(true)
+        } else {
+            RuntimeNetMutation::Unchanged(false)
+        }
+    });
+    assert!(inserted);
+    target.with(RuntimeNet::assert_cursor_obligation_invariants);
+    let (inserted_topology, inserted_disturbance) = target.revisions();
+    assert_eq!(inserted_topology, initial_topology + 1);
+    assert_eq!(inserted_disturbance, initial_disturbance + 1);
+
+    let inserted = target.with_conditional_mut(|runtime| {
+        if runtime.ensure_pairless_cursor_obligation(cursor) {
+            RuntimeNetMutation::Changed(true)
+        } else {
+            RuntimeNetMutation::Unchanged(false)
+        }
+    });
+    assert!(!inserted);
+    target.with(RuntimeNet::assert_cursor_obligation_invariants);
+    let (duplicate_topology, duplicate_disturbance) = target.revisions();
+    assert_eq!(duplicate_topology, inserted_topology);
+    assert_eq!(duplicate_disturbance, inserted_disturbance);
+}
+
+#[test]
+fn pairless_cursor_obligation_transitions_have_one_owner() {
+    let mut source = NetBuilder::<()>::new();
+    let data = source.data(());
+    let source = source.finish(data).instantiate_shared();
+    let mut target = RuntimeNet::empty();
+    let blocked_cursor = target.begin_copy(source.clone());
+    let stable_cursor = target.begin_copy(source);
+
+    assert!(target.ensure_pairless_cursor_obligation(blocked_cursor));
+    assert_eq!(
+        target.cursor_claim_owner(blocked_cursor),
+        Some(CursorClaimOwner::Obligation)
+    );
+    assert!(!target.has_in_flight_claims());
+    assert!(target.claim_pairless_cursor_obligation(blocked_cursor));
+    assert!(!target.claim_pairless_cursor_obligation(blocked_cursor));
+    assert!(target.has_in_flight_claims());
+    assert!(target.block_pairless_cursor_obligation(
+        blocked_cursor,
+        CursorDependency::LocalCursor(stable_cursor),
+    ));
+    assert!(!target.has_in_flight_claims());
+    assert!(matches!(
+        &target
+            .cursor_obligations
+            .get(&blocked_cursor)
+            .expect("blocked obligation should remain installed")
+            .state,
+        PairlessCursorState::Blocked(CursorDependency::LocalCursor(cursor))
+            if *cursor == stable_cursor
+    ));
+    assert!(!target.stabilize_pairless_cursor_obligation(blocked_cursor));
+
+    assert!(target.ensure_pairless_cursor_obligation(stable_cursor));
+    assert!(target.claim_pairless_cursor_obligation(stable_cursor));
+    assert!(target.stabilize_pairless_cursor_obligation(stable_cursor));
+    assert!(matches!(
+        target
+            .cursor_obligations
+            .get(&stable_cursor)
+            .expect("stable obligation should remain installed")
+            .state,
+        PairlessCursorState::Stable
+    ));
+    target.assert_cursor_obligation_invariants();
+}
+
+#[test]
+fn removing_a_cursor_removes_its_dormant_obligation() {
+    let mut source = NetBuilder::<()>::new();
+    let data = source.data(());
+    let source = source.finish(data).instantiate_shared();
+    let mut target = RuntimeNet::empty();
+    let cursor = target.begin_copy(source);
+    assert!(target.ensure_pairless_cursor_obligation(cursor));
+
+    assert!(matches!(
+        target.remove_node(cursor),
+        RuntimeNode::RemoteCursor { .. }
+    ));
+    assert!(!target.cursor_obligations.contains_key(&cursor));
+    assert_eq!(target.cursor_claim_owner(cursor), None);
+    target.assert_cursor_obligation_invariants();
+}
+
+#[test]
+fn active_pair_cursor_owner_is_distinct_from_pairless_obligation_owner() {
+    let mut source = NetBuilder::<()>::new();
+    let data = source.data(());
+    let source = source.finish(data).instantiate_shared();
+    let mut target = RuntimeNet::empty();
+    let cursor = target.begin_copy(source);
+    let bind = target.add_node(RuntimeNode::Bind);
+    target.connect(Port::principal(cursor), Port::principal(bind));
+    let pair = ActivePairKey::new(cursor, bind);
+
+    assert_eq!(
+        target.cursor_claim_owner(cursor),
+        Some(CursorClaimOwner::ActivePair(pair))
+    );
+    assert!(target.cursor_obligations.is_empty());
+}
+
+#[test]
 fn blocked_call_requires_its_current_wait_token_to_be_reclaimed() {
     let mut net = RuntimeNet::<()>::empty();
     let bind = net.add_node(RuntimeNode::Bind);
@@ -932,7 +1055,7 @@ fn source_change_between_cursor_inspection_publication_and_wait_is_not_lost() {
         .observation
         .as_ref()
         .expect("the inspected pair should have a versioned observation");
-    let observed_version = observation.observed_runtime_version;
+    let observed_version = observation.observed_topology_revision;
     assert_eq!(observation.anchor(), claim.remote);
     assert_eq!(observation.status(), FrontierObservationStatus::Current);
     let inspected_pair = match &frontier.shape {

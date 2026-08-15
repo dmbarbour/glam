@@ -94,7 +94,7 @@ pub enum FrontierObservationStatus {
 pub struct FrontierObservation<S: NetSpecialization> {
     source: SharedRuntimeNet<S>,
     anchor: Port,
-    observed_runtime_version: u64,
+    observed_topology_revision: u64,
     endpoint: DemandEndpoint,
 }
 
@@ -115,7 +115,7 @@ impl<S: NetSpecialization> FrontierObservation<S> {
     /// before its version publication is observed.
     pub fn status(&self) -> FrontierObservationStatus {
         let (_, current_version) = self.source.with_version(|_| ());
-        if current_version == self.observed_runtime_version {
+        if current_version == self.observed_topology_revision {
             FrontierObservationStatus::Current
         } else {
             FrontierObservationStatus::Disturbed
@@ -123,7 +123,9 @@ impl<S: NetSpecialization> FrontierObservation<S> {
     }
 
     pub fn wait_for_disturbance(&self) {
-        self.source.wait_for_change(self.observed_runtime_version);
+        // Topology revisions and disturbance epochs remain synchronized until
+        // normalization batching is activated in Phase 4A.2.
+        self.source.wait_for_change(self.observed_topology_revision);
     }
 
     /// Claims the observed active-pair endpoint if this observation is still
@@ -157,13 +159,14 @@ impl<S: NetSpecialization> FrontierObservation<S> {
             .runtime
             .lock()
             .expect("shared runtime net was poisoned");
-        if self.source.inner.version.load(Ordering::Relaxed) != self.observed_runtime_version {
+        if self.source.inner.topology_revision.load(Ordering::Relaxed)
+            != self.observed_topology_revision
+        {
             return Err(FrontierObservationStatus::Disturbed);
         }
         let result = update(&mut runtime);
         if result.is_some() {
-            self.source.inner.version.fetch_add(1, Ordering::Relaxed);
-            self.source.inner.changed.notify_all();
+            self.source.inner.publish_mutation();
         }
         Ok(result)
     }
@@ -175,7 +178,10 @@ impl<S: NetSpecialization> fmt::Debug for FrontierObservation<S> {
             .debug_struct("FrontierObservation")
             .field("source", &self.source)
             .field("anchor", &self.anchor)
-            .field("observed_runtime_version", &self.observed_runtime_version)
+            .field(
+                "observed_topology_revision",
+                &self.observed_topology_revision,
+            )
             .field("endpoint", &self.endpoint)
             .finish()
     }
@@ -208,6 +214,39 @@ impl<S: NetSpecialization> fmt::Debug for CursorDependency<S> {
                 .finish(),
         }
     }
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "Phase 3A obligation states are activated by production demand in Phase 3B"
+    )
+)]
+#[derive(Debug, Clone)]
+enum PairlessCursorState<S: NetSpecialization> {
+    Ready,
+    Claimed,
+    Blocked(CursorDependency<S>),
+    Stable,
+}
+
+impl<S: NetSpecialization> PairlessCursorState<S> {
+    fn is_claimed(&self) -> bool {
+        matches!(self, Self::Claimed)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PairlessCursorObligation<S: NetSpecialization> {
+    cursor: NodeId,
+    state: PairlessCursorState<S>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CursorClaimOwner {
+    ActivePair(ActivePairKey),
+    Obligation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -281,7 +320,23 @@ pub struct SharedRuntimeNet<S: NetSpecialization> {
 struct SharedRuntimeNetInner<S: NetSpecialization> {
     runtime: Mutex<RuntimeNet<S>>,
     changed: Condvar,
-    version: AtomicU64,
+    topology_revision: AtomicU64,
+    disturbance_epoch: AtomicU64,
+}
+
+impl<S: NetSpecialization> SharedRuntimeNetInner<S> {
+    fn publish_mutation(&self) {
+        self.topology_revision.fetch_add(1, Ordering::Relaxed);
+        self.disturbance_epoch.fetch_add(1, Ordering::Relaxed);
+        self.changed.notify_all();
+    }
+}
+
+/// Result of an update which may discover that no authoritative state needs
+/// to change. Only `Changed` publishes a topology revision and disturbance.
+pub(crate) enum RuntimeNetMutation<R> {
+    Unchanged(R),
+    Changed(R),
 }
 
 impl<S: NetSpecialization> SharedRuntimeNet<S> {
@@ -290,7 +345,8 @@ impl<S: NetSpecialization> SharedRuntimeNet<S> {
             inner: Arc::new(SharedRuntimeNetInner {
                 runtime: Mutex::new(runtime),
                 changed: Condvar::new(),
-                version: AtomicU64::new(0),
+                topology_revision: AtomicU64::new(0),
+                disturbance_epoch: AtomicU64::new(0),
             }),
         }
     }
@@ -314,7 +370,7 @@ impl<S: NetSpecialization> SharedRuntimeNet<S> {
             .runtime
             .lock()
             .expect("shared runtime net was poisoned");
-        let version = self.inner.version.load(Ordering::Relaxed);
+        let version = self.inner.topology_revision.load(Ordering::Relaxed);
         (inspect(&runtime), version)
     }
 
@@ -325,18 +381,62 @@ impl<S: NetSpecialization> SharedRuntimeNet<S> {
             .lock()
             .expect("shared runtime net was poisoned");
         let result = update(&mut runtime);
-        self.inner.version.fetch_add(1, Ordering::Relaxed);
-        self.inner.changed.notify_all();
+        self.inner.publish_mutation();
         result
     }
 
-    pub fn wait_for_change(&self, observed_version: u64) {
+    pub(crate) fn with_conditional_mut<R>(
+        &self,
+        update: impl FnOnce(&mut RuntimeNet<S>) -> RuntimeNetMutation<R>,
+    ) -> R {
         let mut runtime = self
             .inner
             .runtime
             .lock()
             .expect("shared runtime net was poisoned");
-        while self.inner.version.load(Ordering::Relaxed) == observed_version {
+        match update(&mut runtime) {
+            RuntimeNetMutation::Unchanged(result) => result,
+            RuntimeNetMutation::Changed(result) => {
+                self.inner.publish_mutation();
+                result
+            }
+        }
+    }
+
+    pub(crate) fn with_optional_mut<R>(
+        &self,
+        update: impl FnOnce(&mut RuntimeNet<S>) -> Option<R>,
+    ) -> Option<R> {
+        self.with_conditional_mut(|runtime| match update(runtime) {
+            Some(result) => RuntimeNetMutation::Changed(Some(result)),
+            None => RuntimeNetMutation::Unchanged(None),
+        })
+    }
+
+    #[cfg(test)]
+    fn revisions(&self) -> (u64, u64) {
+        let _runtime = self
+            .inner
+            .runtime
+            .lock()
+            .expect("shared runtime net was poisoned");
+        (
+            self.inner.topology_revision.load(Ordering::Relaxed),
+            self.inner.disturbance_epoch.load(Ordering::Relaxed),
+        )
+    }
+
+    pub fn wait_for_change(&self, observed_version: u64) {
+        self.wait_for_disturbance(observed_version);
+    }
+
+    pub fn wait_for_disturbance(&self, observed_epoch: u64) {
+        let mut runtime = self
+            .inner
+            .runtime
+            .lock()
+            .expect("shared runtime net was poisoned");
+        while self.inner.disturbance_epoch.load(Ordering::Relaxed) == observed_epoch {
             runtime = self
                 .inner
                 .changed
@@ -439,6 +539,9 @@ pub struct RuntimeNet<S: NetSpecialization> {
     nodes: HashMap<NodeId, RuntimeEntry<S>>,
     next_copy_id: u64,
     copies: HashMap<CopyId, CopyState<S>>,
+    // Phase 3A installs the authoritative shape before production pairless
+    // demand migrates from `claimed_cursors` in Phase 3B.
+    cursor_obligations: HashMap<NodeId, PairlessCursorObligation<S>>,
     cursor_dependencies: HashMap<NodeId, CursorDependency<S>>,
     // Cursor claims may be rooted directly at an exposed interface and
     // therefore have no active-pair state to mark as Claimed. Keep every
@@ -493,6 +596,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
             nodes,
             next_copy_id: 0,
             copies: HashMap::new(),
+            cursor_obligations: HashMap::new(),
             cursor_dependencies: HashMap::new(),
             claimed_cursors: HashSet::new(),
             active: BTreeMap::new(),
@@ -514,6 +618,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
             nodes: HashMap::new(),
             next_copy_id: 0,
             copies: HashMap::new(),
+            cursor_obligations: HashMap::new(),
             cursor_dependencies: HashMap::new(),
             claimed_cursors: HashSet::new(),
             active: BTreeMap::new(),
@@ -527,6 +632,10 @@ impl<S: NetSpecialization> RuntimeNet<S> {
     pub fn has_in_flight_claims(&self) -> bool {
         !self.claimed_cursors.is_empty()
             || self
+                .cursor_obligations
+                .values()
+                .any(|obligation| obligation.state.is_claimed())
+            || self
                 .active
                 .values()
                 .any(|state| matches!(state, ActivePairState::Claimed))
@@ -536,6 +645,133 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         self.active
             .get(&pair)
             .is_some_and(ActivePairState::is_claimed)
+    }
+
+    fn cursor_claim_owner(&self, cursor: NodeId) -> Option<CursorClaimOwner> {
+        let pair_owner = self
+            .active_pair_key(cursor)
+            .map(CursorClaimOwner::ActivePair);
+        let obligation_owner = self.cursor_obligations.get(&cursor).map(|obligation| {
+            assert_eq!(obligation.cursor, cursor);
+            CursorClaimOwner::Obligation
+        });
+        assert!(
+            pair_owner.is_none() || obligation_owner.is_none(),
+            "a cursor transition cannot have both active-pair and obligation owners"
+        );
+        pair_owner.or(obligation_owner)
+    }
+
+    /// Installs dormant Phase 3 pairless ownership. Production callers begin
+    /// using this compatibility entry point in Phase 3B.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Phase 3A obligation transitions are activated by production demand in Phase 3B"
+        )
+    )]
+    pub fn ensure_pairless_cursor_obligation(&mut self, cursor: NodeId) -> bool {
+        assert!(matches!(
+            self.node(cursor),
+            Some(RuntimeNode::RemoteCursor { .. })
+        ));
+        assert!(
+            self.active_pair_key(cursor).is_none(),
+            "an active-pair cursor cannot receive a pairless obligation"
+        );
+        if self.cursor_obligations.contains_key(&cursor) {
+            return false;
+        }
+        assert!(
+            self.cursor_obligations
+                .insert(
+                    cursor,
+                    PairlessCursorObligation {
+                        cursor,
+                        state: PairlessCursorState::Ready,
+                    },
+                )
+                .is_none()
+        );
+        true
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Phase 3A obligation transitions are activated by production demand in Phase 3B"
+        )
+    )]
+    pub fn claim_pairless_cursor_obligation(&mut self, cursor: NodeId) -> bool {
+        let Some(obligation) = self.cursor_obligations.get_mut(&cursor) else {
+            return false;
+        };
+        if !matches!(obligation.state, PairlessCursorState::Ready) {
+            return false;
+        }
+        obligation.state = PairlessCursorState::Claimed;
+        true
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Phase 3A obligation transitions are activated by production demand in Phase 3B"
+        )
+    )]
+    pub fn block_pairless_cursor_obligation(
+        &mut self,
+        cursor: NodeId,
+        dependency: CursorDependency<S>,
+    ) -> bool {
+        let Some(obligation) = self.cursor_obligations.get_mut(&cursor) else {
+            return false;
+        };
+        if !matches!(obligation.state, PairlessCursorState::Claimed) {
+            return false;
+        }
+        obligation.state = PairlessCursorState::Blocked(dependency);
+        true
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Phase 3A obligation transitions are activated by production demand in Phase 3B"
+        )
+    )]
+    pub fn stabilize_pairless_cursor_obligation(&mut self, cursor: NodeId) -> bool {
+        let Some(obligation) = self.cursor_obligations.get_mut(&cursor) else {
+            return false;
+        };
+        if !matches!(obligation.state, PairlessCursorState::Claimed) {
+            return false;
+        }
+        obligation.state = PairlessCursorState::Stable;
+        true
+    }
+
+    #[cfg(test)]
+    fn assert_cursor_obligation_invariants(&self) {
+        for (cursor, obligation) in &self.cursor_obligations {
+            assert_eq!(*cursor, obligation.cursor);
+            assert!(matches!(
+                self.node(*cursor),
+                Some(RuntimeNode::RemoteCursor { .. })
+            ));
+            assert_eq!(
+                self.cursor_claim_owner(*cursor),
+                Some(CursorClaimOwner::Obligation)
+            );
+            assert!(
+                !self.claimed_cursors.contains(cursor),
+                "Phase 3A obligations must not duplicate compatibility claims"
+            );
+        }
     }
 
     pub fn contains_active_pair(&self, pair: ActivePairKey) -> bool {

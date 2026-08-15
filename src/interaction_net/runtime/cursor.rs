@@ -25,12 +25,12 @@ impl<S: NetSpecialization> SharedRuntimeNet<S> {
         &self,
         anchor: Port,
     ) -> SourceFrontier<S> {
-        let (shape, observed_runtime_version) =
+        let (shape, observed_topology_revision) =
             self.with_version(|runtime| runtime.inspect_source_frontier_shape(anchor));
         let observation = shape.endpoint().map(|endpoint| FrontierObservation {
             source: self.clone(),
             anchor,
-            observed_runtime_version,
+            observed_topology_revision,
             endpoint,
         });
         SourceFrontier { shape, observation }
@@ -195,7 +195,10 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         if !self.claimed_cursors.contains(&cursor) {
             return None;
         }
-        let pair = self.active_pair_key(cursor);
+        let pair = match self.cursor_claim_owner(cursor) {
+            Some(CursorClaimOwner::ActivePair(pair)) => Some(pair),
+            Some(CursorClaimOwner::Obligation) | None => None,
+        };
         if pair.is_some_and(|pair| {
             !self
                 .active

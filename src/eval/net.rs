@@ -84,7 +84,7 @@ fn drive_net_interface(
             return Ok(NetInterfaceOutcome::Bind);
         }
 
-        if let Some(progress) = runtime.with_mut(|net| net.demand_interface(interface)) {
+        if let Some(progress) = runtime.with_optional_mut(|net| net.demand_interface(interface)) {
             let cursor = runtime.with(|net| net.interface_cursor(interface));
             let progress = finish_core_cursor_claim(
                 runtime,
@@ -113,7 +113,7 @@ fn drive_net_interface(
             }
         }
 
-        let reduction = runtime.with_mut(|net| net.reduce_next());
+        let reduction = runtime.with_optional_mut(|net| net.reduce_next());
         if let Some(reduction) = reduction {
             handle_core_reduction(context, runtime, reduction)?;
             continue;
@@ -193,7 +193,7 @@ pub(super) fn progress_core_net(
     context: &EvalContext,
     runtime: &crate::core_net::CoreRuntimeNet,
 ) -> Result<bool, EvaluationHalt> {
-    if let Some(reduction) = runtime.with_mut(|net| net.reduce_next()) {
+    if let Some(reduction) = runtime.with_optional_mut(|net| net.reduce_next()) {
         handle_core_reduction(context, runtime, reduction)?;
         return Ok(true);
     }
@@ -289,7 +289,7 @@ pub(super) fn progress_dependent_cursor(
     cursor: crate::interaction_net::NodeId,
     depth: usize,
 ) -> Result<bool, EvaluationHalt> {
-    let progress = runtime.with_mut(|source| source.claim_dependent_cursor(cursor));
+    let progress = runtime.with_optional_mut(|source| source.claim_dependent_cursor(cursor));
     let progress = progress.map(|progress| finish_core_cursor_claim(runtime, cursor, progress));
     match progress {
         Some(crate::interaction_net::CursorProgress::Blocked) => {
@@ -320,7 +320,7 @@ pub(super) fn progress_exact_core_pair(
             }
         }
     } else {
-        runtime.with_mut(|net| net.reduce_pair(pair))
+        runtime.with_optional_mut(|net| net.reduce_pair(pair))
     };
     if let Some(reduction) = reduction {
         handle_core_reduction(context, runtime, reduction)?;
