@@ -163,14 +163,11 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         cursor: NodeId,
         expected_pair: Option<ActivePairKey>,
     ) -> Option<CursorProgress> {
-        if self.claimed_cursors.contains(&cursor) {
-            return None;
-        }
         let pair = expected_pair.or_else(|| self.active_pair_key(cursor));
         if let Some(expected) = expected_pair {
             assert_eq!(pair, Some(expected));
         }
-        if let Some(pair) = pair {
+        let owner = if let Some(pair) = pair {
             match self.active.get_mut(&pair) {
                 Some(state @ ActivePairState::Ready)
                 | Some(state @ ActivePairState::BlockedCursor { .. }) => {
@@ -179,12 +176,16 @@ impl<S: NetSpecialization> RuntimeNet<S> {
                 Some(ActivePairState::Claimed) if expected_pair == Some(pair) => {}
                 _ => return None,
             }
-        }
-        assert!(
-            self.claimed_cursors.insert(cursor),
-            "an available cursor claim must be new"
-        );
-        self.cursor_dependencies.remove(&cursor);
+            CursorClaimOwner::ActivePair(pair)
+        } else {
+            self.ensure_pairless_cursor_obligation(cursor);
+            if !self.claim_pairless_cursor_obligation(cursor) {
+                return None;
+            }
+            CursorClaimOwner::Obligation
+        };
+        assert_eq!(self.cursor_claim_owner(cursor), Some(owner));
+        assert!(self.cursor_claim_is_in_flight(cursor));
         Some(CursorProgress::Claimed)
     }
 
@@ -192,19 +193,8 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         &self,
         cursor: NodeId,
     ) -> Option<CursorClaim<S>> {
-        if !self.claimed_cursors.contains(&cursor) {
-            return None;
-        }
-        let pair = match self.cursor_claim_owner(cursor) {
-            Some(CursorClaimOwner::ActivePair(pair)) => Some(pair),
-            Some(CursorClaimOwner::Obligation) | None => None,
-        };
-        if pair.is_some_and(|pair| {
-            !self
-                .active
-                .get(&pair)
-                .is_some_and(ActivePairState::is_claimed)
-        }) {
+        let owner = self.cursor_claim_owner(cursor)?;
+        if !self.cursor_claim_is_in_flight(cursor) {
             return None;
         }
         let RuntimeNode::RemoteCursor { copy, remote } = self.node(cursor)?.clone() else {
@@ -213,7 +203,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         let source = self.copies.get(&copy)?.source.clone();
         Some(CursorClaim {
             cursor,
-            pair,
+            owner,
             copy,
             remote,
             source,
@@ -269,12 +259,17 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         claim: CursorClaim<S>,
         frontier: SourceFrontier<S>,
     ) -> CursorProgress {
-        if let Some(pair) = claim.pair {
-            assert!(
+        match claim.owner {
+            CursorClaimOwner::ActivePair(pair) => assert!(
                 self.active
                     .get(&pair)
                     .is_some_and(ActivePairState::is_claimed)
-            );
+            ),
+            CursorClaimOwner::Obligation => assert!(
+                self.cursor_obligations
+                    .get(&claim.cursor)
+                    .is_some_and(|obligation| obligation.state.is_claimed())
+            ),
         }
         assert!(matches!(
             self.node(claim.cursor),
@@ -295,14 +290,18 @@ impl<S: NetSpecialization> RuntimeNet<S> {
             .frontiers
             .get(&frontier_port)
             .copied();
-        let progress = if let Some(peer) = converging_cursor {
+        let (progress, blockage) = if let Some(peer) = converging_cursor {
             assert_ne!(peer, claim.cursor, "a frontier cannot converge with itself");
             assert!(matches!(
                 self.node(peer),
                 Some(RuntimeNode::RemoteCursor { copy, remote })
                     if *copy == claim.copy && *remote == frontier_port
             ));
-            self.join_remote_frontiers(claim.copy, claim.cursor, claim.remote, frontier_port)
+            let progress =
+                self.join_remote_frontiers(claim.copy, claim.cursor, claim.remote, frontier_port);
+            let blockage = (progress == CursorProgress::Blocked)
+                .then(|| CursorBlockage::Dependency(CursorDependency::LocalCursor(peer)));
+            (progress, blockage)
         } else {
             match shape {
                 SourceFrontierShape::Principal {
@@ -313,18 +312,24 @@ impl<S: NetSpecialization> RuntimeNet<S> {
                         .expect("a source cursor endpoint must carry its frontier observation");
                     assert_eq!(observation.anchor(), claim.remote);
                     assert_eq!(observation.endpoint(), DemandEndpoint::Cursor(port.node()));
-                    self.cursor_dependencies
-                        .insert(claim.cursor, CursorDependency::SourceCursor(observation));
-                    CursorProgress::Blocked
+                    (
+                        CursorProgress::Blocked,
+                        Some(CursorBlockage::Dependency(CursorDependency::SourceCursor(
+                            observation,
+                        ))),
+                    )
                 }
                 SourceFrontierShape::Principal { port, node } => {
                     assert!(observation.is_none());
-                    self.materialize_remote_node(
-                        claim.copy,
-                        claim.cursor,
-                        claim.remote,
-                        port.node(),
-                        node,
+                    (
+                        self.materialize_remote_node(
+                            claim.copy,
+                            claim.cursor,
+                            claim.remote,
+                            port.node(),
+                            node,
+                        ),
+                        None,
                     )
                 }
                 SourceFrontierShape::StableAuxiliary {
@@ -337,21 +342,20 @@ impl<S: NetSpecialization> RuntimeNet<S> {
                             .iter()
                             .find_map(|anchor| state.frontiers.get(anchor).copied())
                     });
-                    if let Some(peer) = peer {
+                    let blockage = if let Some(peer) = peer {
                         assert_ne!(peer, claim.cursor);
-                        self.cursor_dependencies
-                            .insert(claim.cursor, CursorDependency::LocalCursor(peer));
+                        CursorBlockage::Dependency(CursorDependency::LocalCursor(peer))
                     } else if let Some(pair) = terminal_pair {
                         let observation = observation
                             .expect("an active-pair endpoint must carry its frontier observation");
                         assert_eq!(observation.anchor(), claim.remote);
                         assert_eq!(observation.endpoint(), DemandEndpoint::ActivePair(pair));
-                        self.cursor_dependencies
-                            .insert(claim.cursor, CursorDependency::SourceFrontier(observation));
+                        CursorBlockage::Dependency(CursorDependency::SourceFrontier(observation))
                     } else {
                         assert!(observation.is_none());
-                    }
-                    CursorProgress::Blocked
+                        CursorBlockage::Stable
+                    };
+                    (CursorProgress::Blocked, Some(blockage))
                 }
                 SourceFrontierShape::ActiveAuxiliary { entered, partner } => {
                     let pair = ActivePairKey::new(entered.node(), partner.node());
@@ -359,31 +363,59 @@ impl<S: NetSpecialization> RuntimeNet<S> {
                         .expect("an active-pair endpoint must carry its frontier observation");
                     assert_eq!(observation.anchor(), claim.remote);
                     assert_eq!(observation.endpoint(), DemandEndpoint::ActivePair(pair));
-                    self.cursor_dependencies
-                        .insert(claim.cursor, CursorDependency::SourceFrontier(observation));
-                    CursorProgress::Blocked
+                    (
+                        CursorProgress::Blocked,
+                        Some(CursorBlockage::Dependency(
+                            CursorDependency::SourceFrontier(observation),
+                        )),
+                    )
                 }
             }
         };
 
         if progress == CursorProgress::Blocked {
-            if let Some(pair) = claim.pair {
-                *self.active.get_mut(&pair).unwrap() = ActivePairState::BlockedCursor {
-                    cursor: claim.cursor,
-                };
+            let blockage = blockage.expect("blocked cursor progress must retain its cause");
+            match claim.owner {
+                CursorClaimOwner::ActivePair(pair) => {
+                    *self.active.get_mut(&pair).unwrap() = ActivePairState::BlockedCursor {
+                        cursor: claim.cursor,
+                        blockage,
+                    };
+                }
+                CursorClaimOwner::Obligation => match blockage {
+                    CursorBlockage::Dependency(dependency) => {
+                        assert!(
+                            self.block_pairless_cursor_obligation(claim.cursor, dependency),
+                            "blocked pairless cursor obligation must remain claimed"
+                        );
+                    }
+                    CursorBlockage::Stable => {
+                        assert!(
+                            self.stabilize_pairless_cursor_obligation(claim.cursor),
+                            "stable pairless cursor obligation must remain claimed"
+                        );
+                    }
+                },
             }
-        } else if let Some(pair) = claim.pair
-            && self
-                .active
-                .get(&pair)
-                .is_some_and(ActivePairState::is_claimed)
-        {
-            self.active.remove(&pair);
+        } else {
+            match claim.owner {
+                CursorClaimOwner::ActivePair(pair)
+                    if self
+                        .active
+                        .get(&pair)
+                        .is_some_and(ActivePairState::is_claimed) =>
+                {
+                    self.active.remove(&pair);
+                }
+                CursorClaimOwner::ActivePair(_) => {}
+                CursorClaimOwner::Obligation => {
+                    assert!(
+                        !self.cursor_obligations.contains_key(&claim.cursor),
+                        "completed pairless cursor must remove its obligation with its node"
+                    );
+                }
+            }
         }
-        assert!(
-            self.claimed_cursors.remove(&claim.cursor),
-            "finished cursor claim must remain in flight"
-        );
         progress
     }
 
@@ -473,7 +505,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         // A converging frontier may be inspected concurrently from its other
         // end. Leave both frontier records intact until that active-pair claim
         // is released.
-        if self.claimed_cursors.contains(&peer) {
+        if self.cursor_claim_is_in_flight(peer) {
             return CursorProgress::Blocked;
         }
         let copy_finished = {

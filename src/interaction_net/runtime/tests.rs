@@ -511,6 +511,39 @@ fn conditional_runtime_mutation_publishes_only_new_cursor_obligations() {
 }
 
 #[test]
+fn root_normalization_demand_is_idempotent_and_enumerable() {
+    let mut source = NetBuilder::<()>::new();
+    let data = source.data(());
+    let source = source.finish(data).instantiate_shared();
+    let mut target = RuntimeNet::empty();
+    let cursor = target.begin_copy(source);
+    let interface = target.add_interface(Port::principal(cursor));
+    let target = SharedRuntimeNet::new(target);
+
+    let (initial_topology, initial_disturbance) = target.revisions();
+    assert_eq!(
+        target.ensure_interface_cursor_obligation(interface),
+        Some(cursor)
+    );
+    assert_eq!(
+        target.with(|runtime| runtime.cursor_obligations().collect::<Vec<_>>()),
+        vec![CursorObligationSnapshot {
+            cursor,
+            status: CursorObligationStatus::Ready,
+        }]
+    );
+    let (ensured_topology, ensured_disturbance) = target.revisions();
+    assert_eq!(ensured_topology, initial_topology + 1);
+    assert_eq!(ensured_disturbance, initial_disturbance + 1);
+
+    assert_eq!(
+        target.ensure_interface_cursor_obligation(interface),
+        Some(cursor)
+    );
+    assert_eq!(target.revisions(), (ensured_topology, ensured_disturbance));
+}
+
+#[test]
 fn pairless_cursor_obligation_transitions_have_one_owner() {
     let mut source = NetBuilder::<()>::new();
     let data = source.data(());
@@ -592,6 +625,57 @@ fn active_pair_cursor_owner_is_distinct_from_pairless_obligation_owner() {
         Some(CursorClaimOwner::ActivePair(pair))
     );
     assert!(target.cursor_obligations.is_empty());
+}
+
+#[test]
+fn connecting_a_cursor_transfers_ready_and_blocked_obligations_to_the_pair() {
+    let mut source = NetBuilder::<()>::new();
+    let data = source.data(());
+    let source = source.finish(data).instantiate_shared();
+
+    let mut ready_target = RuntimeNet::empty();
+    let ready_cursor = ready_target.begin_copy(source.clone());
+    let ready_bind = ready_target.add_node(RuntimeNode::Bind);
+    assert!(ready_target.ensure_pairless_cursor_obligation(ready_cursor));
+    ready_target.connect(Port::principal(ready_cursor), Port::principal(ready_bind));
+    let ready_pair = ActivePairKey::new(ready_cursor, ready_bind);
+    assert!(ready_target.cursor_obligations.is_empty());
+    assert!(matches!(
+        ready_target.active.get(&ready_pair),
+        Some(ActivePairState::Ready)
+    ));
+
+    let mut blocked_target = RuntimeNet::empty();
+    let blocked_cursor = blocked_target.begin_copy(source.clone());
+    let dependency = blocked_target.begin_copy(source);
+    let blocked_bind = blocked_target.add_node(RuntimeNode::Bind);
+    assert!(blocked_target.ensure_pairless_cursor_obligation(blocked_cursor));
+    assert!(blocked_target.claim_pairless_cursor_obligation(blocked_cursor));
+    assert!(blocked_target.block_pairless_cursor_obligation(
+        blocked_cursor,
+        CursorDependency::LocalCursor(dependency),
+    ));
+    blocked_target.connect(
+        Port::principal(blocked_cursor),
+        Port::principal(blocked_bind),
+    );
+    let blocked_pair = ActivePairKey::new(blocked_cursor, blocked_bind);
+    assert!(
+        !blocked_target
+            .cursor_obligations
+            .contains_key(&blocked_cursor)
+    );
+    assert!(matches!(
+        blocked_target.active.get(&blocked_pair),
+        Some(ActivePairState::BlockedCursor {
+            cursor,
+            blockage: CursorBlockage::Dependency(CursorDependency::LocalCursor(waiting_on)),
+        }) if *cursor == blocked_cursor && *waiting_on == dependency
+    ));
+    assert!(matches!(
+        blocked_target.cursor_dependency(blocked_cursor),
+        Some(CursorDependency::LocalCursor(waiting_on)) if waiting_on == dependency
+    ));
 }
 
 #[test]
@@ -1213,8 +1297,8 @@ fn layered_cursor_reports_and_follows_an_exact_dependency() {
     assert_eq!(observation.status(), FrontierObservationStatus::Current);
 
     assert!(matches!(
-        middle.with_mut(|runtime| runtime.claim_dependent_cursor(middle_cursor)),
-        Some(CursorProgress::Claimed)
+        observation.claim_cursor_obligation(middle_cursor),
+        Ok(Some(CursorProgress::Claimed))
     ));
     assert!(matches!(
         middle.advance_claimed_cursor(middle_cursor),
@@ -1226,6 +1310,59 @@ fn layered_cursor_reports_and_follows_an_exact_dependency() {
         reduce_next_cursor(&mut outer).1,
         CursorProgress::Materialized { .. }
     ));
+}
+
+#[test]
+fn nested_cursor_demand_reuses_a_claimed_source_obligation() {
+    let mut leaf = NetBuilder::new();
+    let data = leaf.data("leaf");
+    let leaf = leaf.finish(data).instantiate_shared();
+
+    let mut middle = RuntimeNet::empty();
+    let middle_cursor = middle.begin_copy(leaf);
+    let exposed = middle.add_interface(Port::principal(middle_cursor));
+    middle.exposed = Some(exposed);
+    let middle = SharedRuntimeNet::new(middle);
+
+    let mut first = target_waiting_on(middle.clone());
+    let (first_cursor, first_progress) = reduce_next_cursor(&mut first);
+    assert_eq!(first_progress, CursorProgress::Blocked);
+    let Some(CursorDependency::SourceCursor(first_observation)) =
+        first.cursor_dependency(first_cursor)
+    else {
+        panic!("first outer cursor should observe the middle cursor");
+    };
+    assert!(matches!(
+        first_observation.claim_cursor_obligation(middle_cursor),
+        Ok(Some(CursorProgress::Claimed))
+    ));
+
+    let mut second = target_waiting_on(middle.clone());
+    let (second_cursor, second_progress) = reduce_next_cursor(&mut second);
+    assert_eq!(second_progress, CursorProgress::Blocked);
+    let Some(CursorDependency::SourceCursor(second_observation)) =
+        second.cursor_dependency(second_cursor)
+    else {
+        panic!("second outer cursor should observe the middle cursor");
+    };
+    assert_eq!(
+        second_observation.status(),
+        FrontierObservationStatus::Current
+    );
+    assert_eq!(
+        second_observation.claim_cursor_obligation(middle_cursor),
+        Ok(None),
+        "a second demand must reuse rather than duplicate the claimed obligation"
+    );
+
+    assert!(matches!(
+        middle.advance_claimed_cursor(middle_cursor),
+        Some(CursorProgress::Materialized { .. })
+    ));
+    assert_eq!(
+        second_observation.status(),
+        FrontierObservationStatus::Disturbed
+    );
 }
 
 #[test]
@@ -1242,6 +1379,13 @@ fn root_cursor_claim_remains_exclusive_while_source_inspection_is_in_flight() {
         target.demand_interface(exposed),
         Some(CursorProgress::Claimed)
     );
+    assert!(matches!(
+        target
+            .cursor_obligations
+            .get(&root_cursor)
+            .map(|obligation| &obligation.state),
+        Some(PairlessCursorState::Claimed)
+    ));
     assert!(
         target.has_in_flight_claims(),
         "pairless root work must remain visible to quiescence detection"
@@ -1256,7 +1400,82 @@ fn root_cursor_claim_remains_exclusive_while_source_inspection_is_in_flight() {
         CursorProgress::Materialized { .. }
     ));
     assert!(!target.has_in_flight_claims());
+    assert!(!target.cursor_obligations.contains_key(&root_cursor));
     assert_eq!(target.interface_data(exposed), Some(&"value"));
+}
+
+#[test]
+fn pairless_cursor_claim_publishes_blocked_and_stable_obligations() {
+    let source = source_requiring_one_reduction().instantiate_shared();
+    let mut blocked_target = RuntimeNet::empty();
+    let blocked_cursor = blocked_target.begin_copy(source);
+    let blocked_interface = blocked_target.add_interface(Port::principal(blocked_cursor));
+    assert_eq!(
+        blocked_target.demand_interface(blocked_interface),
+        Some(CursorProgress::Claimed)
+    );
+    assert_eq!(
+        finish_claimed_cursor(&mut blocked_target, blocked_cursor),
+        CursorProgress::Blocked
+    );
+    assert!(matches!(
+        blocked_target
+            .cursor_obligations
+            .get(&blocked_cursor)
+            .map(|obligation| &obligation.state),
+        Some(PairlessCursorState::Blocked(
+            CursorDependency::SourceFrontier(_)
+        ))
+    ));
+
+    let mut stable_source = RuntimeNet::<&'static str>::empty();
+    let bind = stable_source.add_node(RuntimeNode::Bind);
+    let exposed = stable_source.add_interface(Port::auxiliary(bind, 1));
+    stable_source.exposed = Some(exposed);
+    let stable_source = SharedRuntimeNet::new(stable_source);
+    let mut stable_target = RuntimeNet::empty();
+    let stable_cursor = stable_target.begin_copy(stable_source);
+    let stable_interface = stable_target.add_interface(Port::principal(stable_cursor));
+    assert_eq!(
+        stable_target.demand_interface(stable_interface),
+        Some(CursorProgress::Claimed)
+    );
+    assert_eq!(
+        finish_claimed_cursor(&mut stable_target, stable_cursor),
+        CursorProgress::Blocked
+    );
+    assert!(matches!(
+        stable_target
+            .cursor_obligations
+            .get(&stable_cursor)
+            .map(|obligation| &obligation.state),
+        Some(PairlessCursorState::Stable)
+    ));
+    assert_eq!(stable_target.demand_interface(stable_interface), None);
+}
+
+#[test]
+fn pair_owned_cursor_retains_stable_blockage_without_a_dependency() {
+    let mut source = RuntimeNet::<&'static str>::empty();
+    let bind = source.add_node(RuntimeNode::Bind);
+    let exposed = source.add_interface(Port::auxiliary(bind, 1));
+    source.exposed = Some(exposed);
+
+    let mut target = target_waiting_on(SharedRuntimeNet::new(source));
+    let (cursor, progress) = reduce_next_cursor(&mut target);
+    assert_eq!(progress, CursorProgress::Blocked);
+    let pair = target
+        .active_pair_key(cursor)
+        .expect("pair-owned cursor should retain its active pair");
+    assert!(matches!(
+        target.active.get(&pair),
+        Some(ActivePairState::BlockedCursor {
+            cursor: blocked,
+            blockage: CursorBlockage::Stable,
+        }) if *blocked == cursor
+    ));
+    assert_eq!(target.cursor_dependency(cursor), None);
+    assert!(!target.retry_blocked_cursor(cursor));
 }
 
 #[test]

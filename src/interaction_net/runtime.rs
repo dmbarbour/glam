@@ -90,7 +90,7 @@ pub enum FrontierObservationStatus {
 /// One versioned observation of the work currently demanded from a source
 /// frontier. The complete auxiliary/principal spine is deliberately not
 /// retained; a disturbed observation is recomputed from `anchor`.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct FrontierObservation<S: NetSpecialization> {
     source: SharedRuntimeNet<S>,
     anchor: Port,
@@ -139,14 +139,14 @@ impl<S: NetSpecialization> FrontierObservation<S> {
         self.update_source_if_current(|runtime| runtime.reduce_pair(pair))
     }
 
-    /// Claims the observed source cursor under the same source/version check
-    /// used for active-pair endpoints.
-    pub fn claim_cursor(
+    /// Creates or claims the observed source cursor's owning-net obligation
+    /// under the same source/version check used for active-pair endpoints.
+    pub fn claim_cursor_obligation(
         &self,
         cursor: NodeId,
     ) -> Result<Option<CursorProgress>, FrontierObservationStatus> {
         assert_eq!(self.endpoint, DemandEndpoint::Cursor(cursor));
-        self.update_source_if_current(|runtime| runtime.claim_dependent_cursor(cursor))
+        self.update_source_if_current(|runtime| runtime.claim_cursor_obligation(cursor))
     }
 
     fn update_source_if_current<R>(
@@ -187,7 +187,7 @@ impl<S: NetSpecialization> fmt::Debug for FrontierObservation<S> {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum CursorDependency<S: NetSpecialization> {
     LocalCursor(NodeId),
     /// Transitional classification for a source cursor. Phase 3 replaces
@@ -216,18 +216,31 @@ impl<S: NetSpecialization> fmt::Debug for CursorDependency<S> {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Phase 3A obligation states are activated by production demand in Phase 3B"
-    )
-)]
 #[derive(Debug, Clone)]
 enum PairlessCursorState<S: NetSpecialization> {
     Ready,
     Claimed,
     Blocked(CursorDependency<S>),
+    Stable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CursorObligationStatus {
+    Ready,
+    Claimed,
+    Blocked,
+    Stable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CursorObligationSnapshot {
+    pub cursor: NodeId,
+    pub status: CursorObligationStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum CursorBlockage<S: NetSpecialization> {
+    Dependency(CursorDependency<S>),
     Stable,
 }
 
@@ -297,9 +310,16 @@ pub struct BlockedCursor {
 pub(super) enum ActivePairState<S: NetSpecialization> {
     Ready,
     Claimed,
-    BlockedCall { wait: S::WaitToken },
-    BlockedOperatorCall { wait: S::WaitToken },
-    BlockedCursor { cursor: NodeId },
+    BlockedCall {
+        wait: S::WaitToken,
+    },
+    BlockedOperatorCall {
+        wait: S::WaitToken,
+    },
+    BlockedCursor {
+        cursor: NodeId,
+        blockage: CursorBlockage<S>,
+    },
     Stuck(StuckReason<S::StuckReason>),
 }
 
@@ -413,6 +433,19 @@ impl<S: NetSpecialization> SharedRuntimeNet<S> {
         })
     }
 
+    pub(crate) fn ensure_interface_cursor_obligation(&self, interface: Port) -> Option<NodeId> {
+        self.with_conditional_mut(|runtime| {
+            let Some(cursor) = runtime.interface_cursor(interface) else {
+                return RuntimeNetMutation::Unchanged(None);
+            };
+            if runtime.ensure_pairless_cursor_obligation(cursor) {
+                RuntimeNetMutation::Changed(Some(cursor))
+            } else {
+                RuntimeNetMutation::Unchanged(Some(cursor))
+            }
+        })
+    }
+
     #[cfg(test)]
     fn revisions(&self) -> (u64, u64) {
         let _runtime = self
@@ -491,7 +524,7 @@ struct CopyState<S: NetSpecialization> {
 #[derive(Clone)]
 struct CursorClaim<S: NetSpecialization> {
     cursor: NodeId,
-    pair: Option<ActivePairKey>,
+    owner: CursorClaimOwner,
     copy: CopyId,
     remote: Port,
     source: SharedRuntimeNet<S>,
@@ -539,15 +572,10 @@ pub struct RuntimeNet<S: NetSpecialization> {
     nodes: HashMap<NodeId, RuntimeEntry<S>>,
     next_copy_id: u64,
     copies: HashMap<CopyId, CopyState<S>>,
-    // Phase 3A installs the authoritative shape before production pairless
-    // demand migrates from `claimed_cursors` in Phase 3B.
+    // Pairless cursor demand is owned here until the cursor participates in
+    // an active pair, at which point `connect` transfers the state into the
+    // pair's authoritative record.
     cursor_obligations: HashMap<NodeId, PairlessCursorObligation<S>>,
-    cursor_dependencies: HashMap<NodeId, CursorDependency<S>>,
-    // Cursor claims may be rooted directly at an exposed interface and
-    // therefore have no active-pair state to mark as Claimed. Keep every
-    // cross-lock source inspection visible here so another evaluator neither
-    // duplicates the claim nor mistakes the target net for quiescent.
-    claimed_cursors: HashSet<NodeId>,
 
     // Every live principal-principal wire has exactly one authoritative state.
     // External work changes Ready to Claimed while the runtime lock is held,
@@ -597,8 +625,6 @@ impl<S: NetSpecialization> RuntimeNet<S> {
             next_copy_id: 0,
             copies: HashMap::new(),
             cursor_obligations: HashMap::new(),
-            cursor_dependencies: HashMap::new(),
-            claimed_cursors: HashSet::new(),
             active: BTreeMap::new(),
         };
         for wire in net.wires.iter() {
@@ -619,8 +645,6 @@ impl<S: NetSpecialization> RuntimeNet<S> {
             next_copy_id: 0,
             copies: HashMap::new(),
             cursor_obligations: HashMap::new(),
-            cursor_dependencies: HashMap::new(),
-            claimed_cursors: HashSet::new(),
             active: BTreeMap::new(),
         }
     }
@@ -630,11 +654,9 @@ impl<S: NetSpecialization> RuntimeNet<S> {
     }
 
     pub fn has_in_flight_claims(&self) -> bool {
-        !self.claimed_cursors.is_empty()
-            || self
-                .cursor_obligations
-                .values()
-                .any(|obligation| obligation.state.is_claimed())
+        self.cursor_obligations
+            .values()
+            .any(|obligation| obligation.state.is_claimed())
             || self
                 .active
                 .values()
@@ -662,15 +684,22 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         pair_owner.or(obligation_owner)
     }
 
-    /// Installs dormant Phase 3 pairless ownership. Production callers begin
-    /// using this compatibility entry point in Phase 3B.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Phase 3A obligation transitions are activated by production demand in Phase 3B"
-        )
-    )]
+    fn cursor_claim_is_in_flight(&self, cursor: NodeId) -> bool {
+        match self.cursor_claim_owner(cursor) {
+            Some(CursorClaimOwner::ActivePair(pair)) => self
+                .active
+                .get(&pair)
+                .is_some_and(ActivePairState::is_claimed),
+            Some(CursorClaimOwner::Obligation) => self
+                .cursor_obligations
+                .get(&cursor)
+                .is_some_and(|obligation| obligation.state.is_claimed()),
+            None => false,
+        }
+    }
+
+    /// Installs pairless cursor ownership without disturbing an existing
+    /// obligation.
     pub fn ensure_pairless_cursor_obligation(&mut self, cursor: NodeId) -> bool {
         assert!(matches!(
             self.node(cursor),
@@ -697,31 +726,20 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         true
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Phase 3A obligation transitions are activated by production demand in Phase 3B"
-        )
-    )]
     pub fn claim_pairless_cursor_obligation(&mut self, cursor: NodeId) -> bool {
         let Some(obligation) = self.cursor_obligations.get_mut(&cursor) else {
             return false;
         };
-        if !matches!(obligation.state, PairlessCursorState::Ready) {
+        if !matches!(
+            obligation.state,
+            PairlessCursorState::Ready | PairlessCursorState::Blocked(_)
+        ) {
             return false;
         }
         obligation.state = PairlessCursorState::Claimed;
         true
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Phase 3A obligation transitions are activated by production demand in Phase 3B"
-        )
-    )]
     pub fn block_pairless_cursor_obligation(
         &mut self,
         cursor: NodeId,
@@ -737,13 +755,6 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         true
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Phase 3A obligation transitions are activated by production demand in Phase 3B"
-        )
-    )]
     pub fn stabilize_pairless_cursor_obligation(&mut self, cursor: NodeId) -> bool {
         let Some(obligation) = self.cursor_obligations.get_mut(&cursor) else {
             return false;
@@ -766,10 +777,6 @@ impl<S: NetSpecialization> RuntimeNet<S> {
             assert_eq!(
                 self.cursor_claim_owner(*cursor),
                 Some(CursorClaimOwner::Obligation)
-            );
-            assert!(
-                !self.claimed_cursors.contains(cursor),
-                "Phase 3A obligations must not duplicate compatibility claims"
             );
         }
     }
@@ -801,7 +808,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         self.active
             .iter()
             .filter_map(|(pair, state)| match state {
-                ActivePairState::BlockedCursor { cursor } => Some((
+                ActivePairState::BlockedCursor { cursor, .. } => Some((
                     *pair,
                     BlockedCursor {
                         pair: *pair,
@@ -815,7 +822,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
 
     pub fn blocked_cursor(&self, pair: ActivePairKey) -> Option<BlockedCursor> {
         match self.active.get(&pair) {
-            Some(ActivePairState::BlockedCursor { cursor }) => Some(BlockedCursor {
+            Some(ActivePairState::BlockedCursor { cursor, .. }) => Some(BlockedCursor {
                 pair,
                 cursor: *cursor,
             }),
@@ -878,7 +885,38 @@ impl<S: NetSpecialization> RuntimeNet<S> {
     }
 
     pub fn cursor_dependency(&self, cursor: NodeId) -> Option<CursorDependency<S>> {
-        self.cursor_dependencies.get(&cursor).cloned()
+        match self.cursor_claim_owner(cursor) {
+            Some(CursorClaimOwner::ActivePair(pair)) => match self.active.get(&pair) {
+                Some(ActivePairState::BlockedCursor {
+                    cursor: blocked,
+                    blockage: CursorBlockage::Dependency(dependency),
+                }) if *blocked == cursor => Some(dependency.clone()),
+                _ => None,
+            },
+            Some(CursorClaimOwner::Obligation) => {
+                match &self.cursor_obligations.get(&cursor)?.state {
+                    PairlessCursorState::Blocked(dependency) => Some(dependency.clone()),
+                    PairlessCursorState::Ready
+                    | PairlessCursorState::Claimed
+                    | PairlessCursorState::Stable => None,
+                }
+            }
+            None => None,
+        }
+    }
+
+    pub(crate) fn cursor_obligations(&self) -> impl Iterator<Item = CursorObligationSnapshot> + '_ {
+        self.cursor_obligations
+            .iter()
+            .map(|(cursor, obligation)| CursorObligationSnapshot {
+                cursor: *cursor,
+                status: match &obligation.state {
+                    PairlessCursorState::Ready => CursorObligationStatus::Ready,
+                    PairlessCursorState::Claimed => CursorObligationStatus::Claimed,
+                    PairlessCursorState::Blocked(_) => CursorObligationStatus::Blocked,
+                    PairlessCursorState::Stable => CursorObligationStatus::Stable,
+                },
+            })
     }
 
     pub fn interface_cursor(&self, interface: Port) -> Option<NodeId> {
@@ -1110,13 +1148,30 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         self.begin_cursor_claim(cursor, None)
     }
 
+    /// Claims pairless cursor demand through its owning-net obligation.
+    /// Nested source-frontier observations use this entry point so the work
+    /// remains enumerable even when no active pair owns the cursor.
+    pub fn claim_cursor_obligation(&mut self, cursor: NodeId) -> Option<CursorProgress> {
+        if !matches!(self.node(cursor), Some(RuntimeNode::RemoteCursor { .. }))
+            || self.active_pair_key(cursor).is_some()
+        {
+            return None;
+        }
+        self.ensure_pairless_cursor_obligation(cursor);
+        self.claim_pairless_cursor_obligation(cursor)
+            .then_some(CursorProgress::Claimed)
+    }
+
     pub fn retry_blocked_cursor(&mut self, cursor: NodeId) -> bool {
         let Some(pair) = self.active_pair_key(cursor) else {
             return false;
         };
         if !matches!(
             self.active.get(&pair),
-            Some(ActivePairState::BlockedCursor { cursor: blocked }) if *blocked == cursor
+            Some(ActivePairState::BlockedCursor {
+                cursor: blocked,
+                blockage: CursorBlockage::Dependency(_),
+            }) if *blocked == cursor
         ) {
             return false;
         }

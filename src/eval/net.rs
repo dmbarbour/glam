@@ -20,7 +20,8 @@ pub(super) fn extract_net_data(
     interface: Port,
     operation: &str,
 ) -> Result<Value, EvaluationHalt> {
-    match drive_net_interface(context, &runtime, interface)? {
+    let request = NormalizationRequest::cursor_whnf(runtime.clone(), interface);
+    match request.drive(context)? {
         NetInterfaceOutcome::Data => {
             let data = runtime
                 .with(|runtime| runtime.interface_data(interface).cloned())
@@ -61,11 +62,46 @@ enum NetInterfaceOutcome {
     NormalForm,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NormalizationMode {
+    CursorWhnf,
+}
+
+/// Evaluator-owned description of one demanded interaction-net frontier.
+/// Shared progress remains in the net's cursor obligations; cloning or
+/// dropping this descriptor has no runtime lifecycle effect.
+struct NormalizationRequest {
+    runtime: crate::core_net::CoreRuntimeNet,
+    root_interface: Port,
+    mode: NormalizationMode,
+}
+
+impl NormalizationRequest {
+    fn cursor_whnf(runtime: crate::core_net::CoreRuntimeNet, root_interface: Port) -> Self {
+        Self {
+            runtime,
+            root_interface,
+            mode: NormalizationMode::CursorWhnf,
+        }
+    }
+
+    fn ensure_root_cursor_obligation(&self) {
+        self.runtime
+            .ensure_interface_cursor_obligation(self.root_interface);
+    }
+
+    fn drive(&self, context: &EvalContext) -> Result<NetInterfaceOutcome, EvaluationHalt> {
+        drive_net_interface(context, self)
+    }
+}
+
 fn drive_net_interface(
     context: &EvalContext,
-    runtime: &crate::core_net::CoreRuntimeNet,
-    interface: Port,
+    request: &NormalizationRequest,
 ) -> Result<NetInterfaceOutcome, EvaluationHalt> {
+    let runtime = &request.runtime;
+    let interface = request.root_interface;
+    debug_assert_eq!(request.mode, NormalizationMode::CursorWhnf);
     loop {
         if runtime.with(|net| net.interface_data(interface).is_some()) {
             return Ok(NetInterfaceOutcome::Data);
@@ -83,6 +119,8 @@ fn drive_net_interface(
         if exposes_bind {
             return Ok(NetInterfaceOutcome::Bind);
         }
+
+        request.ensure_root_cursor_obligation();
 
         if let Some(progress) = runtime.with_optional_mut(|net| net.demand_interface(interface)) {
             let cursor = runtime.with(|net| net.interface_cursor(interface));
@@ -177,8 +215,9 @@ fn drive_net_interface(
                     )
                 })
                 .collect::<Vec<_>>();
+            let cursor_obligations = net.cursor_obligations().collect::<Vec<_>>();
             format!(
-                "neighbor={neighbor:?}, node={node:?}, principal_neighbor={principal_neighbor:?}/{principal_neighbor_node:?}, active={}, cursors={cursor_dependencies:?}, stuck={}",
+                "neighbor={neighbor:?}, node={node:?}, principal_neighbor={principal_neighbor:?}/{principal_neighbor_node:?}, active={}, cursors={cursor_dependencies:?}, obligations={cursor_obligations:?}, stuck={}",
                 net.active_pairs().len(),
                 net.stuck_pairs().count()
             )
@@ -260,7 +299,7 @@ fn progress_observed_cursor(
     cursor: crate::interaction_net::NodeId,
     depth: usize,
 ) -> Result<bool, EvaluationHalt> {
-    let progress = match observation.claim_cursor(cursor) {
+    let progress = match observation.claim_cursor_obligation(cursor) {
         Err(FrontierObservationStatus::Disturbed) => return Ok(true),
         Ok(Some(progress)) => progress,
         Ok(None) => {

@@ -44,7 +44,6 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         node: NodeId,
     ) -> RuntimeNode<S> {
         self.cursor_obligations.remove(&node);
-        self.cursor_dependencies.remove(&node);
         let entry = self.nodes.remove(&node).expect("removed node must exist");
         assert!(entry.links.iter().all(Option::is_none));
         entry.node
@@ -82,16 +81,58 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         assert_ne!(left, right, "an interaction-net port cannot wire to itself");
         assert!(self.valid_port(left) && self.valid_port(right));
         assert!(self.neighbor(left).is_none() && self.neighbor(right).is_none());
+        let transferred_cursor = if left.is_principal() && right.is_principal() {
+            let left_owned = self.cursor_obligations.contains_key(&left.node());
+            let right_owned = self.cursor_obligations.contains_key(&right.node());
+            assert!(
+                !(left_owned && right_owned),
+                "one active pair cannot inherit two pairless cursor obligations"
+            );
+            let cursor = if left_owned {
+                Some(left.node())
+            } else if right_owned {
+                Some(right.node())
+            } else {
+                None
+            };
+            cursor.map(|cursor| {
+                let obligation = self
+                    .cursor_obligations
+                    .remove(&cursor)
+                    .expect("detected pairless cursor obligation must remain installed");
+                assert!(
+                    !obligation.state.is_claimed(),
+                    "an in-flight pairless cursor claim cannot change graph ownership"
+                );
+                (cursor, obligation.state)
+            })
+        } else {
+            None
+        };
         self.nodes.get_mut(&left.node()).unwrap().links[left.index() as usize] = Some(right);
         self.nodes.get_mut(&right.node()).unwrap().links[right.index() as usize] = Some(left);
         if left.is_principal() && right.is_principal() {
             let pair = ActivePairKey::new(left.node(), right.node());
+            let transferred_state = transferred_cursor.map(|(cursor, state)| match state {
+                PairlessCursorState::Ready => ActivePairState::Ready,
+                PairlessCursorState::Blocked(dependency) => ActivePairState::BlockedCursor {
+                    cursor,
+                    blockage: CursorBlockage::Dependency(dependency),
+                },
+                PairlessCursorState::Stable => ActivePairState::BlockedCursor {
+                    cursor,
+                    blockage: CursorBlockage::Stable,
+                },
+                PairlessCursorState::Claimed => {
+                    unreachable!("claimed pairless cursor transfer was rejected")
+                }
+            });
             match self.active.entry(pair) {
                 std::collections::btree_map::Entry::Vacant(entry) => {
-                    entry.insert(ActivePairState::Ready);
+                    entry.insert(transferred_state.unwrap_or(ActivePairState::Ready));
                 }
                 std::collections::btree_map::Entry::Occupied(mut entry)
-                    if entry.get().is_claimed() =>
+                    if entry.get().is_claimed() && transferred_state.is_none() =>
                 {
                     *entry.get_mut() = ActivePairState::Ready;
                 }
