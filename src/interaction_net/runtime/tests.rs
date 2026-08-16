@@ -450,7 +450,7 @@ fn shared_runtime_waiters_resume_when_a_claimed_pair_is_released() {
         bind,
         data,
     };
-    let (claimed, version) = shared.with_version(|net| net.pair_is_claimed(call.pair));
+    let (claimed, revisions) = shared.with_revisions(|net| net.pair_is_claimed(call.pair));
     assert!(claimed);
 
     let barrier = Arc::new(Barrier::new(2));
@@ -459,7 +459,7 @@ fn shared_runtime_waiters_resume_when_a_claimed_pair_is_released() {
     let (sender, receiver) = mpsc::channel();
     let waiter = thread::spawn(move || {
         waiter_barrier.wait();
-        waiter_net.wait_for_change(version);
+        waiter_net.wait_for_disturbance(revisions.disturbance_epoch());
         sender.send(()).expect("test receiver should remain open");
     });
     barrier.wait();
@@ -541,6 +541,302 @@ fn root_normalization_demand_is_idempotent_and_enumerable() {
         Some(cursor)
     );
     assert_eq!(target.revisions(), (ensured_topology, ensured_disturbance));
+}
+
+#[test]
+fn cursor_steps_report_pairless_pair_owned_stable_and_contended_states() {
+    let source = source_requiring_one_reduction().instantiate_shared();
+    let source_pair = source.with(|runtime| runtime.ready_pairs()[0]);
+    let mut target = RuntimeNet::empty();
+    let cursor = target.begin_copy(source.clone());
+    let interface = target.add_interface(Port::principal(cursor));
+    let target = SharedRuntimeNet::new(target);
+    target.ensure_interface_cursor_obligation(interface);
+
+    assert!(matches!(
+        target.step_cursor(cursor),
+        CursorStep::Dependency(CursorDependency::SourceFrontier(_))
+    ));
+    assert!(matches!(
+        source.step_active_pair(source_pair),
+        ActivePairStep::Reduction(Reduction {
+            kind: ReductionKind::BindJoin,
+            ..
+        })
+    ));
+    assert!(target.with_mut(|runtime| runtime.retry_blocked_cursor(cursor)));
+    assert!(matches!(
+        target.step_cursor(cursor),
+        CursorStep::Progressed(CursorProgress::Materialized { .. })
+    ));
+
+    let mut leaf = NetBuilder::<&'static str>::new();
+    let data = leaf.data("leaf");
+    let leaf = leaf.finish(data).instantiate_shared();
+    let mut pair_target = RuntimeNet::empty();
+    let pair_cursor = pair_target.begin_copy(leaf);
+    let local = pair_target.add_node(RuntimeNode::Data("local"));
+    pair_target.connect(Port::principal(pair_cursor), Port::principal(local));
+    let pair_target = SharedRuntimeNet::new(pair_target);
+    assert!(matches!(
+        pair_target.step_cursor(pair_cursor),
+        CursorStep::Progressed(CursorProgress::Materialized { .. })
+    ));
+
+    let mut stable_source = RuntimeNet::<&'static str>::empty();
+    let bind = stable_source.add_node(RuntimeNode::Bind);
+    let exposed = stable_source.add_interface(Port::auxiliary(bind, 1));
+    stable_source.exposed = Some(exposed);
+    let mut stable_target = RuntimeNet::empty();
+    let stable_cursor = stable_target.begin_copy(SharedRuntimeNet::new(stable_source));
+    let stable_interface = stable_target.add_interface(Port::principal(stable_cursor));
+    let stable_target = SharedRuntimeNet::new(stable_target);
+    stable_target.ensure_interface_cursor_obligation(stable_interface);
+    assert!(matches!(
+        stable_target.step_cursor(stable_cursor),
+        CursorStep::Stable
+    ));
+
+    let mut claimed_source = NetBuilder::<&'static str>::new();
+    let data = claimed_source.data("claimed");
+    let claimed_source = claimed_source.finish(data).instantiate_shared();
+    let mut claimed_target = RuntimeNet::empty();
+    let claimed_cursor = claimed_target.begin_copy(claimed_source);
+    let claimed_interface = claimed_target.add_interface(Port::principal(claimed_cursor));
+    let claimed_target = SharedRuntimeNet::new(claimed_target);
+    assert_eq!(
+        claimed_target.with_optional_mut(|runtime| runtime.demand_interface(claimed_interface)),
+        Some(CursorProgress::Claimed)
+    );
+    let contention = match claimed_target.step_cursor(claimed_cursor) {
+        CursorStep::Contended(contention) => contention,
+        other => panic!("claimed cursor should report contention, received {other:?}"),
+    };
+    assert!(contention.runtime().ptr_eq(&claimed_target));
+    assert_eq!(
+        contention.revisions(),
+        claimed_target.with_revisions(|_| ()).1
+    );
+    assert!(matches!(
+        claimed_target.advance_claimed_cursor(claimed_cursor),
+        Some(CursorProgress::Materialized { .. })
+    ));
+    assert!(matches!(
+        claimed_target.step_cursor(claimed_cursor),
+        CursorStep::Gone
+    ));
+}
+
+#[test]
+fn active_pair_steps_report_reduction_contention_blockage_stuck_and_gone() {
+    let mut call_net = RuntimeNet::<()>::empty();
+    let bind = call_net.add_node(RuntimeNode::Bind);
+    let data = call_net.add_node(RuntimeNode::Data(()));
+    call_net.connect(Port::principal(bind), Port::principal(data));
+    let pair = ActivePairKey::new(bind, data);
+    let call_net = SharedRuntimeNet::new(call_net);
+    let reduction = match call_net.step_active_pair(pair) {
+        ActivePairStep::Reduction(reduction) => reduction,
+        other => panic!("ready call should produce a reduction, received {other:?}"),
+    };
+    let ReductionKind::Call { bind, data } = reduction.kind else {
+        panic!("bind-data pair should produce a call");
+    };
+    let call = Call { pair, bind, data };
+    assert!(matches!(
+        call_net.step_active_pair(pair),
+        ActivePairStep::Contended(_)
+    ));
+    call_net.with_mut(|runtime| runtime.block_claimed_call(call, 17));
+    assert!(matches!(
+        call_net.step_active_pair(pair),
+        ActivePairStep::BlockedCall(BlockedCall { wait: 17, .. })
+    ));
+
+    let mut operator_net = RuntimeNet::<()>::empty();
+    let operator = operator_net
+        .add_node(RuntimeNode::Operator(TestOperator::new("blocked", |_| {
+            unreachable!("blocked operator fixture is not executed")
+        })));
+    let data = operator_net.add_node(RuntimeNode::Data(()));
+    operator_net.connect(Port::principal(operator), Port::principal(data));
+    let operator_pair = ActivePairKey::new(operator, data);
+    let operator_net = SharedRuntimeNet::new(operator_net);
+    let call = match operator_net.step_active_pair(operator_pair) {
+        ActivePairStep::Reduction(Reduction {
+            kind: ReductionKind::OperatorCall { operator, data },
+            ..
+        }) => OperatorCall {
+            pair: operator_pair,
+            operator,
+            data,
+        },
+        other => panic!("ready operator call should produce a reduction, received {other:?}"),
+    };
+    operator_net.with_mut(|runtime| runtime.block_claimed_operator_call(call, 23));
+    assert!(matches!(
+        operator_net.step_active_pair(operator_pair),
+        ActivePairStep::BlockedOperatorCall(BlockedOperatorCall { wait: 23, .. })
+    ));
+
+    let mut stuck_net = RuntimeNet::<()>::empty();
+    let left = stuck_net.add_node(RuntimeNode::Data(()));
+    let right = stuck_net.add_node(RuntimeNode::Data(()));
+    stuck_net.connect(Port::principal(left), Port::principal(right));
+    let stuck_pair = ActivePairKey::new(left, right);
+    let stuck_net = SharedRuntimeNet::new(stuck_net);
+    assert!(matches!(
+        stuck_net.step_active_pair(stuck_pair),
+        ActivePairStep::Reduction(Reduction {
+            kind: ReductionKind::Stuck,
+            ..
+        })
+    ));
+    assert!(matches!(
+        stuck_net.step_active_pair(stuck_pair),
+        ActivePairStep::Stuck(StuckPair {
+            reason: StuckReason::NoRule,
+            ..
+        })
+    ));
+
+    let pure_net = source_requiring_one_reduction().instantiate_shared();
+    let pure_pair = pure_net.with(|runtime| runtime.ready_pairs()[0]);
+    assert!(matches!(
+        pure_net.step_active_pair(pure_pair),
+        ActivePairStep::Reduction(Reduction {
+            kind: ReductionKind::BindJoin,
+            ..
+        })
+    ));
+    assert!(matches!(
+        pure_net.step_active_pair(pure_pair),
+        ActivePairStep::Gone
+    ));
+
+    let source = source_requiring_one_reduction().instantiate_shared();
+    let cursor_net = target_waiting_on(source);
+    let cursor_pair = cursor_net.active_pairs().next().unwrap();
+    let cursor_net = SharedRuntimeNet::new(cursor_net);
+    let cursor = match cursor_net.step_active_pair(cursor_pair) {
+        ActivePairStep::Reduction(Reduction {
+            kind:
+                ReductionKind::RemoteCursor {
+                    cursor,
+                    progress: CursorProgress::Claimed,
+                },
+            ..
+        }) => cursor,
+        other => panic!("ready cursor pair should produce a claim, received {other:?}"),
+    };
+    assert_eq!(
+        cursor_net.advance_claimed_cursor(cursor),
+        Some(CursorProgress::Blocked)
+    );
+    assert!(matches!(
+        cursor_net.step_active_pair(cursor_pair),
+        ActivePairStep::Cursor(blocked) if blocked == cursor
+    ));
+}
+
+#[test]
+fn normalization_batch_lease_is_exclusive_and_drop_safe() {
+    let mut builder = NetBuilder::<()>::new();
+    let data = builder.data(());
+    let runtime = builder.finish(data).instantiate_shared();
+
+    let lease = runtime
+        .try_begin_normalization_batch()
+        .expect("first batch must acquire the net");
+    let (first_id, contended) = runtime
+        .active_normalization_batch()
+        .expect("lease must be visible under the net lock");
+    assert!(!contended);
+
+    let contention = runtime
+        .try_begin_normalization_batch()
+        .expect_err("second batch must observe contention");
+    assert!(contention.runtime().ptr_eq(&runtime));
+    assert_eq!(runtime.active_normalization_batch(), Some((first_id, true)));
+
+    lease.close();
+    assert_eq!(runtime.active_normalization_batch(), None);
+    let next = runtime
+        .try_begin_normalization_batch()
+        .expect("closed lease must release ownership");
+    let (next_id, contended) = runtime.active_normalization_batch().unwrap();
+    assert!(next_id > first_id);
+    assert!(!contended);
+    drop(next);
+    assert_eq!(runtime.active_normalization_batch(), None);
+
+    let unwind_runtime = runtime.clone();
+    let unwind = std::panic::catch_unwind(move || {
+        let _lease = unwind_runtime.try_begin_normalization_batch().unwrap();
+        panic!("forced normalization unwind");
+    });
+    assert!(unwind.is_err());
+    assert_eq!(runtime.active_normalization_batch(), None);
+}
+
+#[test]
+fn normalization_batch_defers_disturbance_until_release() {
+    let mut builder = NetBuilder::<()>::new();
+    let data = builder.data(());
+    let runtime = builder.finish(data).instantiate_shared();
+    let initial = runtime.revisions();
+
+    let lease = runtime.try_begin_normalization_batch().unwrap();
+    runtime.with_mut(|net| net.add_node(RuntimeNode::Data(())));
+    let during = runtime.revisions();
+    assert!(during.0 > initial.0, "topology must remain authoritative");
+    assert_eq!(
+        during.1, initial.1,
+        "batch mutations must not wake followers early"
+    );
+
+    let contention = runtime
+        .try_begin_normalization_batch()
+        .expect_err("follower must register against the active batch");
+    assert_eq!(contention.revisions().disturbance_epoch(), initial.1);
+    lease.close();
+    let released = runtime.revisions();
+    assert_eq!(released.0, during.0);
+    assert_eq!(released.1, initial.1 + 1);
+
+    let clean = runtime.try_begin_normalization_batch().unwrap();
+    clean.close();
+    assert_eq!(runtime.revisions(), released);
+}
+
+#[test]
+fn normalization_batch_wakes_a_registered_follower_once_at_release() {
+    let mut builder = NetBuilder::<()>::new();
+    let data = builder.data(());
+    let runtime = builder.finish(data).instantiate_shared();
+    let lease = runtime.try_begin_normalization_batch().unwrap();
+    let follower_runtime = runtime.clone();
+    let (registered_tx, registered_rx) = mpsc::channel();
+    let (woke_tx, woke_rx) = mpsc::channel();
+    let follower = thread::spawn(move || {
+        let contention = follower_runtime
+            .try_begin_normalization_batch()
+            .expect_err("leader must still own the batch");
+        registered_tx.send(()).unwrap();
+        contention
+            .runtime()
+            .wait_for_disturbance(contention.revisions().disturbance_epoch());
+        woke_tx.send(()).unwrap();
+    });
+
+    registered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    for _ in 0..8 {
+        runtime.with_mut(|net| net.add_node(RuntimeNode::Data(())));
+        assert!(woke_rx.try_recv().is_err());
+    }
+    lease.close();
+    woke_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    follower.join().unwrap();
 }
 
 #[test]
@@ -1139,7 +1435,7 @@ fn source_change_between_cursor_inspection_publication_and_wait_is_not_lost() {
         .observation
         .as_ref()
         .expect("the inspected pair should have a versioned observation");
-    let observed_version = observation.observed_topology_revision;
+    let observed_revisions = observation.observed_revisions;
     assert_eq!(observation.anchor(), claim.remote);
     assert_eq!(observation.status(), FrontierObservationStatus::Current);
     let inspected_pair = match &frontier.shape {
@@ -1180,6 +1476,14 @@ fn source_change_between_cursor_inspection_publication_and_wait_is_not_lost() {
             .status(),
         FrontierObservationStatus::Disturbed
     );
+    assert!(matches!(
+        frontier
+            .observation
+            .as_ref()
+            .expect("pair observation should remain attached")
+            .step_active_pair(source_pair),
+        ActivePairStep::Disturbed
+    ));
 
     assert_eq!(
         target.finish_cursor_claim(claim, frontier),
@@ -1195,7 +1499,7 @@ fn source_change_between_cursor_inspection_publication_and_wait_is_not_lost() {
     let waiter_source = source.clone();
     let (sender, receiver) = mpsc::channel();
     let waiter = thread::spawn(move || {
-        waiter_source.wait_for_change(observed_version);
+        waiter_source.wait_for_disturbance(observed_revisions.disturbance_epoch());
         sender.send(()).expect("test receiver should remain open");
     });
     if receiver.recv_timeout(Duration::from_secs(2)).is_err() {

@@ -14,9 +14,9 @@ pub(crate) use model::{
     RuntimeNode,
 };
 pub(crate) use runtime::{
-    Call, CursorDependency, CursorProgress, DemandEndpoint, FrontierObservation,
-    FrontierObservationStatus, OperatorCall, Reduction, ReductionKind, SharedRuntimeNet,
-    StuckReason,
+    ActivePairStep, Call, CursorDependency, CursorProgress, CursorStep, DemandEndpoint,
+    FrontierObservation, NetContention, NormalizationBatchLease, OperatorCall, Reduction,
+    ReductionKind, SharedRuntimeNet, StuckReason,
 };
 
 #[cfg(test)]

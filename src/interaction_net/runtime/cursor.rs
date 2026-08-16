@@ -25,12 +25,12 @@ impl<S: NetSpecialization> SharedRuntimeNet<S> {
         &self,
         anchor: Port,
     ) -> SourceFrontier<S> {
-        let (shape, observed_topology_revision) =
-            self.with_version(|runtime| runtime.inspect_source_frontier_shape(anchor));
+        let (shape, observed_revisions) =
+            self.with_revisions(|runtime| runtime.inspect_source_frontier_shape(anchor));
         let observation = shape.endpoint().map(|endpoint| FrontierObservation {
             source: self.clone(),
             anchor,
-            observed_topology_revision,
+            observed_revisions,
             endpoint,
         });
         SourceFrontier { shape, observation }

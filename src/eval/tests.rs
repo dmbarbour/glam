@@ -4928,6 +4928,11 @@ fn reflection_gate_blocks_and_resumes_the_exact_net_call() {
         .blocked_on()
         .expect("call should report a task wait");
     assert_eq!(runtime.with(|net| net.blocked_calls().count()), 1);
+    assert_eq!(
+        runtime.active_normalization_batch(),
+        None,
+        "specialization waits must not retain a net batch lease"
+    );
 
     context.complete_wait(&wait.0);
     let observer = test_context();

@@ -81,10 +81,80 @@ pub enum DemandEndpoint {
     ActivePair(ActivePairKey),
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrontierObservationStatus {
     Current,
     Disturbed,
+}
+
+/// Revisions captured by one locked shared-net observation.
+///
+/// Topology invalidates structural observations. Disturbance coordinates
+/// competing evaluators and may advance less frequently once batching is
+/// enabled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeNetRevisions {
+    topology_revision: u64,
+    disturbance_epoch: u64,
+}
+
+impl RuntimeNetRevisions {
+    pub fn topology_revision(self) -> u64 {
+        self.topology_revision
+    }
+
+    pub fn disturbance_epoch(self) -> u64 {
+        self.disturbance_epoch
+    }
+}
+
+#[derive(Clone)]
+pub struct NetContention<S: NetSpecialization> {
+    runtime: SharedRuntimeNet<S>,
+    revisions: RuntimeNetRevisions,
+}
+
+impl<S: NetSpecialization> NetContention<S> {
+    pub fn runtime(&self) -> &SharedRuntimeNet<S> {
+        &self.runtime
+    }
+
+    pub fn revisions(&self) -> RuntimeNetRevisions {
+        self.revisions
+    }
+}
+
+impl<S: NetSpecialization> fmt::Debug for NetContention<S> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NetContention")
+            .field("runtime", &self.runtime)
+            .field("revisions", &self.revisions)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum CursorStep<S: NetSpecialization> {
+    Progressed(CursorProgress),
+    Dependency(CursorDependency<S>),
+    Stable,
+    Contended(NetContention<S>),
+    Disturbed,
+    Gone,
+}
+
+#[derive(Debug, Clone)]
+pub enum ActivePairStep<S: NetSpecialization> {
+    Reduction(Reduction),
+    Cursor(NodeId),
+    BlockedCall(BlockedCall<S::WaitToken>),
+    BlockedOperatorCall(BlockedOperatorCall<S::WaitToken>),
+    Stuck(StuckPair<S::StuckReason>),
+    Contended(NetContention<S>),
+    Disturbed,
+    Gone,
 }
 
 /// One versioned observation of the work currently demanded from a source
@@ -94,7 +164,7 @@ pub enum FrontierObservationStatus {
 pub struct FrontierObservation<S: NetSpecialization> {
     source: SharedRuntimeNet<S>,
     anchor: Port,
-    observed_topology_revision: u64,
+    observed_revisions: RuntimeNetRevisions,
     endpoint: DemandEndpoint,
 }
 
@@ -113,24 +183,20 @@ impl<S: NetSpecialization> FrontierObservation<S> {
 
     /// Validates under the source lock so a mutation cannot become visible
     /// before its version publication is observed.
+    #[cfg(test)]
     pub fn status(&self) -> FrontierObservationStatus {
-        let (_, current_version) = self.source.with_version(|_| ());
-        if current_version == self.observed_topology_revision {
+        let (_, current_revisions) = self.source.with_revisions(|_| ());
+        if current_revisions.topology_revision() == self.observed_revisions.topology_revision() {
             FrontierObservationStatus::Current
         } else {
             FrontierObservationStatus::Disturbed
         }
     }
 
-    pub fn wait_for_disturbance(&self) {
-        // Topology revisions and disturbance epochs remain synchronized until
-        // normalization batching is activated in Phase 4A.2.
-        self.source.wait_for_change(self.observed_topology_revision);
-    }
-
     /// Claims the observed active-pair endpoint if this observation is still
     /// current. An unavailable current endpoint is left untouched so waiting
     /// on this observation cannot disturb itself.
+    #[cfg(test)]
     pub fn reduce_pair(
         &self,
         pair: ActivePairKey,
@@ -139,8 +205,25 @@ impl<S: NetSpecialization> FrontierObservation<S> {
         self.update_source_if_current(|runtime| runtime.reduce_pair(pair))
     }
 
+    /// Takes one non-blocking step at the observed pair. Unlike `reduce_pair`,
+    /// this reports claimed, blocked, stuck, gone, and disturbed states
+    /// explicitly for an iterative normalization driver.
+    pub fn step_active_pair(&self, pair: ActivePairKey) -> ActivePairStep<S> {
+        assert_eq!(self.endpoint, DemandEndpoint::ActivePair(pair));
+        self.source
+            .step_active_pair_if_current(pair, Some(self.observed_revisions.topology_revision()))
+    }
+
+    /// Takes one non-blocking step at the observed cursor endpoint.
+    pub fn step_cursor(&self, cursor: NodeId) -> CursorStep<S> {
+        assert_eq!(self.endpoint, DemandEndpoint::Cursor(cursor));
+        self.source
+            .step_cursor_if_current(cursor, Some(self.observed_revisions.topology_revision()))
+    }
+
     /// Creates or claims the observed source cursor's owning-net obligation
     /// under the same source/version check used for active-pair endpoints.
+    #[cfg(test)]
     pub fn claim_cursor_obligation(
         &self,
         cursor: NodeId,
@@ -149,24 +232,25 @@ impl<S: NetSpecialization> FrontierObservation<S> {
         self.update_source_if_current(|runtime| runtime.claim_cursor_obligation(cursor))
     }
 
+    #[cfg(test)]
     fn update_source_if_current<R>(
         &self,
         update: impl FnOnce(&mut RuntimeNet<S>) -> Option<R>,
     ) -> Result<Option<R>, FrontierObservationStatus> {
-        let mut runtime = self
+        let mut state = self
             .source
             .inner
             .runtime
             .lock()
             .expect("shared runtime net was poisoned");
-        if self.source.inner.topology_revision.load(Ordering::Relaxed)
-            != self.observed_topology_revision
+        if self.source.inner.revisions().topology_revision()
+            != self.observed_revisions.topology_revision()
         {
             return Err(FrontierObservationStatus::Disturbed);
         }
-        let result = update(&mut runtime);
+        let result = update(&mut state.runtime);
         if result.is_some() {
-            self.source.inner.publish_mutation();
+            self.source.inner.publish_mutation(&mut state.batches);
         }
         Ok(result)
     }
@@ -178,10 +262,7 @@ impl<S: NetSpecialization> fmt::Debug for FrontierObservation<S> {
             .debug_struct("FrontierObservation")
             .field("source", &self.source)
             .field("anchor", &self.anchor)
-            .field(
-                "observed_topology_revision",
-                &self.observed_topology_revision,
-            )
+            .field("observed_revisions", &self.observed_revisions)
             .field("endpoint", &self.endpoint)
             .finish()
     }
@@ -262,6 +343,14 @@ enum CursorClaimOwner {
     Obligation,
 }
 
+enum CursorStepInspection<S: NetSpecialization> {
+    Claimable(Option<ActivePairKey>),
+    Dependency(CursorDependency<S>),
+    Stable,
+    Claimed,
+    Gone,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Call {
     pub pair: ActivePairKey,
@@ -338,17 +427,109 @@ pub struct SharedRuntimeNet<S: NetSpecialization> {
 }
 
 struct SharedRuntimeNetInner<S: NetSpecialization> {
-    runtime: Mutex<RuntimeNet<S>>,
+    runtime: Mutex<SharedRuntimeNetState<S>>,
     changed: Condvar,
     topology_revision: AtomicU64,
     disturbance_epoch: AtomicU64,
 }
 
+struct SharedRuntimeNetState<S: NetSpecialization> {
+    runtime: RuntimeNet<S>,
+    batches: NormalizationBatchState,
+}
+
+#[derive(Default)]
+struct NormalizationBatchState {
+    next_id: u64,
+    active: Option<ActiveNormalizationBatch>,
+}
+
+struct ActiveNormalizationBatch {
+    id: u64,
+    contended: bool,
+    dirty: bool,
+}
+
+pub struct NormalizationBatchLease<S: NetSpecialization> {
+    inner: std::sync::Weak<SharedRuntimeNetInner<S>>,
+    id: u64,
+    closed: bool,
+}
+
+impl<S: NetSpecialization> fmt::Debug for NormalizationBatchLease<S> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NormalizationBatchLease")
+            .field("id", &self.id)
+            .field("closed", &self.closed)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<S: NetSpecialization> NormalizationBatchLease<S> {
+    pub fn close(mut self) {
+        self.close_inner();
+    }
+
+    fn close_inner(&mut self) {
+        if self.closed {
+            return;
+        }
+        self.closed = true;
+        let Some(inner) = self.inner.upgrade() else {
+            return;
+        };
+        let mut state = inner
+            .runtime
+            .lock()
+            .expect("shared runtime net was poisoned");
+        let publish = if state
+            .batches
+            .active
+            .as_ref()
+            .is_some_and(|active| active.id == self.id)
+        {
+            let active = state
+                .batches
+                .active
+                .take()
+                .expect("matching normalization batch must remain installed");
+            active.dirty || active.contended
+        } else {
+            false
+        };
+        if publish {
+            inner.disturbance_epoch.fetch_add(1, Ordering::Relaxed);
+        }
+        drop(state);
+        if publish {
+            inner.changed.notify_all();
+        }
+    }
+}
+
+impl<S: NetSpecialization> Drop for NormalizationBatchLease<S> {
+    fn drop(&mut self) {
+        self.close_inner();
+    }
+}
+
 impl<S: NetSpecialization> SharedRuntimeNetInner<S> {
-    fn publish_mutation(&self) {
+    fn revisions(&self) -> RuntimeNetRevisions {
+        RuntimeNetRevisions {
+            topology_revision: self.topology_revision.load(Ordering::Relaxed),
+            disturbance_epoch: self.disturbance_epoch.load(Ordering::Relaxed),
+        }
+    }
+
+    fn publish_mutation(&self, batches: &mut NormalizationBatchState) {
         self.topology_revision.fetch_add(1, Ordering::Relaxed);
-        self.disturbance_epoch.fetch_add(1, Ordering::Relaxed);
-        self.changed.notify_all();
+        if let Some(active) = batches.active.as_mut() {
+            active.dirty = true;
+        } else {
+            self.disturbance_epoch.fetch_add(1, Ordering::Relaxed);
+            self.changed.notify_all();
+        }
     }
 }
 
@@ -363,7 +544,10 @@ impl<S: NetSpecialization> SharedRuntimeNet<S> {
     pub fn new(runtime: RuntimeNet<S>) -> Self {
         Self {
             inner: Arc::new(SharedRuntimeNetInner {
-                runtime: Mutex::new(runtime),
+                runtime: Mutex::new(SharedRuntimeNetState {
+                    runtime,
+                    batches: NormalizationBatchState::default(),
+                }),
                 changed: Condvar::new(),
                 topology_revision: AtomicU64::new(0),
                 disturbance_epoch: AtomicU64::new(0),
@@ -371,37 +555,49 @@ impl<S: NetSpecialization> SharedRuntimeNet<S> {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_copy_layer(source: Self) -> (Self, Port) {
+        let mut target = RuntimeNet::empty();
+        let cursor = target.begin_copy(source);
+        let interface = target.add_interface(Port::principal(cursor));
+        target.exposed = Some(interface);
+        (Self::new(target), interface)
+    }
+
     pub fn ptr_eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.inner, &other.inner)
     }
 
     pub fn with<R>(&self, inspect: impl FnOnce(&RuntimeNet<S>) -> R) -> R {
-        let runtime = self
+        let state = self
             .inner
             .runtime
             .lock()
             .expect("shared runtime net was poisoned");
-        inspect(&runtime)
+        inspect(&state.runtime)
     }
 
-    pub fn with_version<R>(&self, inspect: impl FnOnce(&RuntimeNet<S>) -> R) -> (R, u64) {
-        let runtime = self
+    pub fn with_revisions<R>(
+        &self,
+        inspect: impl FnOnce(&RuntimeNet<S>) -> R,
+    ) -> (R, RuntimeNetRevisions) {
+        let state = self
             .inner
             .runtime
             .lock()
             .expect("shared runtime net was poisoned");
-        let version = self.inner.topology_revision.load(Ordering::Relaxed);
-        (inspect(&runtime), version)
+        let revisions = self.inner.revisions();
+        (inspect(&state.runtime), revisions)
     }
 
     pub fn with_mut<R>(&self, update: impl FnOnce(&mut RuntimeNet<S>) -> R) -> R {
-        let mut runtime = self
+        let mut state = self
             .inner
             .runtime
             .lock()
             .expect("shared runtime net was poisoned");
-        let result = update(&mut runtime);
-        self.inner.publish_mutation();
+        let result = update(&mut state.runtime);
+        self.inner.publish_mutation(&mut state.batches);
         result
     }
 
@@ -409,15 +605,15 @@ impl<S: NetSpecialization> SharedRuntimeNet<S> {
         &self,
         update: impl FnOnce(&mut RuntimeNet<S>) -> RuntimeNetMutation<R>,
     ) -> R {
-        let mut runtime = self
+        let mut state = self
             .inner
             .runtime
             .lock()
             .expect("shared runtime net was poisoned");
-        match update(&mut runtime) {
+        match update(&mut state.runtime) {
             RuntimeNetMutation::Unchanged(result) => result,
             RuntimeNetMutation::Changed(result) => {
-                self.inner.publish_mutation();
+                self.inner.publish_mutation(&mut state.batches);
                 result
             }
         }
@@ -448,33 +644,193 @@ impl<S: NetSpecialization> SharedRuntimeNet<S> {
 
     #[cfg(test)]
     fn revisions(&self) -> (u64, u64) {
-        let _runtime = self
+        let _state = self
             .inner
             .runtime
             .lock()
             .expect("shared runtime net was poisoned");
-        (
-            self.inner.topology_revision.load(Ordering::Relaxed),
-            self.inner.disturbance_epoch.load(Ordering::Relaxed),
-        )
-    }
-
-    pub fn wait_for_change(&self, observed_version: u64) {
-        self.wait_for_disturbance(observed_version);
+        let revisions = self.inner.revisions();
+        (revisions.topology_revision(), revisions.disturbance_epoch())
     }
 
     pub fn wait_for_disturbance(&self, observed_epoch: u64) {
-        let mut runtime = self
+        let mut state = self
             .inner
             .runtime
             .lock()
             .expect("shared runtime net was poisoned");
         while self.inner.disturbance_epoch.load(Ordering::Relaxed) == observed_epoch {
-            runtime = self
+            state = self
                 .inner
                 .changed
-                .wait(runtime)
+                .wait(state)
                 .expect("shared runtime net was poisoned");
+        }
+    }
+
+    pub fn try_begin_normalization_batch(
+        &self,
+    ) -> Result<NormalizationBatchLease<S>, NetContention<S>> {
+        let mut state = self
+            .inner
+            .runtime
+            .lock()
+            .expect("shared runtime net was poisoned");
+        let revisions = self.inner.revisions();
+        if let Some(active) = state.batches.active.as_mut() {
+            active.contended = true;
+            return Err(self.contention(revisions));
+        }
+        let id = state.batches.next_id;
+        state.batches.next_id = state
+            .batches
+            .next_id
+            .checked_add(1)
+            .expect("interaction-net normalization batch ID space exhausted");
+        state.batches.active = Some(ActiveNormalizationBatch {
+            id,
+            contended: false,
+            dirty: false,
+        });
+        Ok(NormalizationBatchLease {
+            inner: Arc::downgrade(&self.inner),
+            id,
+            closed: false,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn active_normalization_batch(&self) -> Option<(u64, bool)> {
+        let state = self
+            .inner
+            .runtime
+            .lock()
+            .expect("shared runtime net was poisoned");
+        state
+            .batches
+            .active
+            .as_ref()
+            .map(|active| (active.id, active.contended))
+    }
+
+    fn contention(&self, revisions: RuntimeNetRevisions) -> NetContention<S> {
+        NetContention {
+            runtime: self.clone(),
+            revisions,
+        }
+    }
+
+    pub fn step_active_pair(&self, pair: ActivePairKey) -> ActivePairStep<S> {
+        self.step_active_pair_if_current(pair, None)
+    }
+
+    fn step_active_pair_if_current(
+        &self,
+        pair: ActivePairKey,
+        expected_topology_revision: Option<u64>,
+    ) -> ActivePairStep<S> {
+        let mut state = self
+            .inner
+            .runtime
+            .lock()
+            .expect("shared runtime net was poisoned");
+        let revisions = self.inner.revisions();
+        if expected_topology_revision
+            .is_some_and(|expected| expected != revisions.topology_revision())
+        {
+            return ActivePairStep::Disturbed;
+        }
+        let pair_state = state.runtime.active.get(&pair).cloned();
+        let (outcome, changed) = match pair_state {
+            Some(ActivePairState::Ready) => (
+                ActivePairStep::Reduction(
+                    state
+                        .runtime
+                        .reduce_pair(pair)
+                        .expect("ready pair must produce one reduction"),
+                ),
+                true,
+            ),
+            Some(ActivePairState::Claimed) => {
+                (ActivePairStep::Contended(self.contention(revisions)), false)
+            }
+            Some(ActivePairState::BlockedCursor { cursor, .. }) => {
+                (ActivePairStep::Cursor(cursor), false)
+            }
+            Some(ActivePairState::BlockedCall { wait }) => (
+                ActivePairStep::BlockedCall(BlockedCall { pair, wait }),
+                false,
+            ),
+            Some(ActivePairState::BlockedOperatorCall { wait }) => (
+                ActivePairStep::BlockedOperatorCall(BlockedOperatorCall { pair, wait }),
+                false,
+            ),
+            Some(ActivePairState::Stuck(reason)) => {
+                (ActivePairStep::Stuck(StuckPair { pair, reason }), false)
+            }
+            None => (ActivePairStep::Gone, false),
+        };
+        if changed {
+            self.inner.publish_mutation(&mut state.batches);
+        }
+        outcome
+    }
+
+    pub fn step_cursor(&self, cursor: NodeId) -> CursorStep<S> {
+        self.step_cursor_if_current(cursor, None)
+    }
+
+    fn step_cursor_if_current(
+        &self,
+        cursor: NodeId,
+        expected_topology_revision: Option<u64>,
+    ) -> CursorStep<S> {
+        let claimed = {
+            let mut state = self
+                .inner
+                .runtime
+                .lock()
+                .expect("shared runtime net was poisoned");
+            let revisions = self.inner.revisions();
+            if expected_topology_revision
+                .is_some_and(|expected| expected != revisions.topology_revision())
+            {
+                return CursorStep::Disturbed;
+            }
+            match state.runtime.inspect_cursor_step(cursor) {
+                CursorStepInspection::Claimable(expected_pair) => {
+                    let progress = state
+                        .runtime
+                        .begin_cursor_claim(cursor, expected_pair)
+                        .expect("claimable cursor must accept its owning transition");
+                    self.inner.publish_mutation(&mut state.batches);
+                    progress
+                }
+                CursorStepInspection::Dependency(dependency) => {
+                    return CursorStep::Dependency(dependency);
+                }
+                CursorStepInspection::Stable => return CursorStep::Stable,
+                CursorStepInspection::Claimed => {
+                    return CursorStep::Contended(self.contention(revisions));
+                }
+                CursorStepInspection::Gone => return CursorStep::Gone,
+            }
+        };
+        assert_eq!(claimed, CursorProgress::Claimed);
+        let progress = self
+            .advance_claimed_cursor(cursor)
+            .expect("cursor claimed by a step must remain advanceable");
+        if progress != CursorProgress::Blocked {
+            return CursorStep::Progressed(progress);
+        }
+        let (inspection, revisions) =
+            self.with_revisions(|runtime| runtime.inspect_cursor_step(cursor));
+        match inspection {
+            CursorStepInspection::Claimable(_) => CursorStep::Progressed(progress),
+            CursorStepInspection::Dependency(dependency) => CursorStep::Dependency(dependency),
+            CursorStepInspection::Stable => CursorStep::Stable,
+            CursorStepInspection::Claimed => CursorStep::Contended(self.contention(revisions)),
+            CursorStepInspection::Gone => CursorStep::Gone,
         }
     }
 }
@@ -663,6 +1019,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
                 .any(|state| matches!(state, ActivePairState::Claimed))
     }
 
+    #[cfg(test)]
     pub fn pair_is_claimed(&self, pair: ActivePairKey) -> bool {
         self.active
             .get(&pair)
@@ -695,6 +1052,43 @@ impl<S: NetSpecialization> RuntimeNet<S> {
                 .get(&cursor)
                 .is_some_and(|obligation| obligation.state.is_claimed()),
             None => false,
+        }
+    }
+
+    fn inspect_cursor_step(&self, cursor: NodeId) -> CursorStepInspection<S> {
+        match self.cursor_claim_owner(cursor) {
+            Some(CursorClaimOwner::ActivePair(pair)) => match self.active.get(&pair) {
+                Some(ActivePairState::Ready) => CursorStepInspection::Claimable(Some(pair)),
+                Some(ActivePairState::Claimed) => CursorStepInspection::Claimed,
+                Some(ActivePairState::BlockedCursor {
+                    cursor: blocked,
+                    blockage: CursorBlockage::Dependency(dependency),
+                }) if *blocked == cursor => CursorStepInspection::Dependency(dependency.clone()),
+                Some(ActivePairState::BlockedCursor {
+                    cursor: blocked,
+                    blockage: CursorBlockage::Stable,
+                }) if *blocked == cursor => CursorStepInspection::Stable,
+                _ => CursorStepInspection::Gone,
+            },
+            Some(CursorClaimOwner::Obligation) => {
+                match &self
+                    .cursor_obligations
+                    .get(&cursor)
+                    .expect("cursor obligation owner must remain installed")
+                    .state
+                {
+                    PairlessCursorState::Ready => CursorStepInspection::Claimable(None),
+                    PairlessCursorState::Claimed => CursorStepInspection::Claimed,
+                    PairlessCursorState::Blocked(dependency) => {
+                        CursorStepInspection::Dependency(dependency.clone())
+                    }
+                    PairlessCursorState::Stable => CursorStepInspection::Stable,
+                }
+            }
+            None if matches!(self.node(cursor), Some(RuntimeNode::RemoteCursor { .. })) => {
+                CursorStepInspection::Claimable(None)
+            }
+            None => CursorStepInspection::Gone,
         }
     }
 
@@ -781,6 +1175,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         }
     }
 
+    #[cfg(test)]
     pub fn contains_active_pair(&self, pair: ActivePairKey) -> bool {
         self.active.contains_key(&pair)
     }
@@ -820,16 +1215,6 @@ impl<S: NetSpecialization> RuntimeNet<S> {
             .collect()
     }
 
-    pub fn blocked_cursor(&self, pair: ActivePairKey) -> Option<BlockedCursor> {
-        match self.active.get(&pair) {
-            Some(ActivePairState::BlockedCursor { cursor, .. }) => Some(BlockedCursor {
-                pair,
-                cursor: *cursor,
-            }),
-            _ => None,
-        }
-    }
-
     #[cfg(test)]
     pub fn blocked_calls(&self) -> impl Iterator<Item = BlockedCall<S::WaitToken>> + '_ {
         self.active.iter().filter_map(|(pair, state)| match state {
@@ -841,6 +1226,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         })
     }
 
+    #[cfg(test)]
     pub fn blocked_call(&self, pair: ActivePairKey) -> Option<BlockedCall<S::WaitToken>> {
         match self.active.get(&pair) {
             Some(ActivePairState::BlockedCall { wait }) => Some(BlockedCall {
@@ -851,6 +1237,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         }
     }
 
+    #[cfg(test)]
     pub fn blocked_operator_call(
         &self,
         pair: ActivePairKey,
@@ -1134,6 +1521,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         self.neighbor(port)
     }
 
+    #[cfg(test)]
     pub fn demand_interface(&mut self, interface: Port) -> Option<CursorProgress> {
         self.assert_interface(interface);
         let cursor = self.cursor_across(interface)?;
@@ -1141,6 +1529,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
     }
 
     /// Claims a cursor reached through an exact layered-copy dependency.
+    #[cfg(test)]
     pub fn claim_dependent_cursor(&mut self, cursor: NodeId) -> Option<CursorProgress> {
         if !matches!(self.node(cursor), Some(RuntimeNode::RemoteCursor { .. })) {
             return None;
@@ -1151,6 +1540,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
     /// Claims pairless cursor demand through its owning-net obligation.
     /// Nested source-frontier observations use this entry point so the work
     /// remains enumerable even when no active pair owns the cursor.
+    #[cfg(test)]
     pub fn claim_cursor_obligation(&mut self, cursor: NodeId) -> Option<CursorProgress> {
         if !matches!(self.node(cursor), Some(RuntimeNode::RemoteCursor { .. }))
             || self.active_pair_key(cursor).is_some()
@@ -1163,20 +1553,34 @@ impl<S: NetSpecialization> RuntimeNet<S> {
     }
 
     pub fn retry_blocked_cursor(&mut self, cursor: NodeId) -> bool {
-        let Some(pair) = self.active_pair_key(cursor) else {
-            return false;
-        };
-        if !matches!(
-            self.active.get(&pair),
-            Some(ActivePairState::BlockedCursor {
-                cursor: blocked,
-                blockage: CursorBlockage::Dependency(_),
-            }) if *blocked == cursor
-        ) {
-            return false;
+        match self.cursor_claim_owner(cursor) {
+            Some(CursorClaimOwner::ActivePair(pair))
+                if matches!(
+                    self.active.get(&pair),
+                    Some(ActivePairState::BlockedCursor {
+                        cursor: blocked,
+                        blockage: CursorBlockage::Dependency(_),
+                    }) if *blocked == cursor
+                ) =>
+            {
+                self.active.insert(pair, ActivePairState::Ready);
+                true
+            }
+            Some(CursorClaimOwner::Obligation)
+                if matches!(
+                    self.cursor_obligations.get(&cursor),
+                    Some(PairlessCursorObligation {
+                        state: PairlessCursorState::Blocked(_),
+                        ..
+                    })
+                ) =>
+            {
+                self.cursor_obligations.get_mut(&cursor).unwrap().state =
+                    PairlessCursorState::Ready;
+                true
+            }
+            _ => false,
         }
-        self.active.insert(pair, ActivePairState::Ready);
-        true
     }
 
     pub fn reduce_next(&mut self) -> Option<Reduction> {
