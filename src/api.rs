@@ -2715,7 +2715,6 @@ pub struct RuntimeEventSnapshot {
 struct RuntimeInputCursor {
     start: RuntimeInputSequence,
     next: RuntimeInputSequence,
-    claimed: Vec<RuntimeValueRoot>,
 }
 
 /// Transaction-local observations and FIFO input claims.
@@ -2760,7 +2759,6 @@ impl RuntimeEventJournal {
             .or_insert_with(|| RuntimeInputCursor {
                 start: snapshot.head_sequence,
                 next: snapshot.head_sequence,
-                claimed: Vec::new(),
             });
         let address = ConflictAddress::input_slot(input.endpoint, cursor.next);
         self.observations.observe(&address);
@@ -2773,7 +2771,6 @@ impl RuntimeEventJournal {
             .get(offset as usize)
             .expect("the snapshot sequence range and admitted roots agree");
         debug_assert_eq!(record.sequence, cursor.next);
-        cursor.claimed.push(record.payload.clone());
         cursor.next = cursor
             .next
             .checked_next()
@@ -4241,7 +4238,6 @@ impl EvaluationRuntime {
                 .lock()
                 .expect("runtime transaction mutex should not be poisoned");
             state.events.outputs.records.is_empty()
-                && state.reflection.root() == snapshot.reflection.root()
         };
         if !state_matches
             || self.state.shared_resources.observations.current().get()
@@ -4471,11 +4467,8 @@ impl EvaluationRuntime {
             .settlement_guard()
     }
 
-    /// Reports whether exclusive runtime mutation admission can be acquired
-    /// immediately. This is a transitional readiness probe; it does not retain
-    /// or settle a snapshot.
-    #[doc(hidden)]
-    pub fn exclusive_admission_available(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn exclusive_admission_available(&self) -> bool {
         self.try_settlement_guard().is_some()
     }
 
@@ -7131,10 +7124,18 @@ mod tests {
             .input_endpoint(integer_converter(&runtime))
             .expect("endpoint should register");
         endpoint.sender().admit(7).unwrap();
-        {
+        let retained = {
             let (_, mut abandoned) = input_transaction(&runtime);
-            assert!(abandoned.read(&endpoint.reader()).unwrap().is_some());
-        }
+            abandoned
+                .read(&endpoint.reader())
+                .unwrap()
+                .expect("the admitted value should be readable")
+        };
+        assert_eq!(
+            retained.as_number_text(),
+            Some("7".to_owned()),
+            "the returned value must retain its own runtime root after the journal is dropped"
+        );
         let (store, mut events) = input_transaction(&runtime);
         assert_eq!(
             events
@@ -7334,6 +7335,18 @@ mod tests {
     #[test]
     fn quiescence_validation_rejects_observation_and_delivery_changes() {
         let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let RuntimeReadiness::Ready(no_op_snapshot) = runtime.readiness() else {
+            panic!("new runtime should be ready")
+        };
+        let (_, store) = runtime.reflection_snapshot();
+        assert_eq!(
+            runtime.commit_reflection(&crate::reflection::StoreJournal::new(store)),
+            crate::reflection::StoreCommitResult::Committed
+        );
+        no_op_snapshot
+            .validate_without_settling()
+            .expect("a semantic no-op must preserve readiness");
+
         let RuntimeReadiness::Ready(observation_snapshot) = runtime.readiness() else {
             panic!("new runtime should be ready")
         };

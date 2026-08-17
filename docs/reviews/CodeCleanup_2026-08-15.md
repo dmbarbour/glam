@@ -55,7 +55,7 @@ Two apparent duplicates are specifically **not** findings:
 
 ## Findings
 
-### CCR-001 — Settlement re-traverses the reflection heap after an authoritative epoch check
+### CCR-001 — Resolved: settlement re-traversed the reflection heap after an authoritative epoch check
 
 **Classification:** unnecessary work  
 **Priority:** high  
@@ -98,7 +98,19 @@ directly rather than masked by a second, expensive protocol.
 **Expected simplification:** remove a potentially whole-heap traversal from
 every settlement validation and one redundant condition.
 
-### CCR-002 — Runtime input cursors retain values that no code reads
+Resolution on 2026-08-17:
+
+- `validate_quiescence_guarded` now validates empty output activity and the
+  authoritative observation epoch without comparing reflection roots.
+- Existing forced-order coverage still proves that validation waits for shared
+  mutation admission, and a heap commit after capture still produces
+  `RuntimeChanged`.
+- The same test now establishes that a semantic no-op reflection commit keeps
+  the retained readiness snapshot valid.
+- `ReflectionStore::root`, made production-dead by this removal, is now
+  test-only for store implementation and compatibility assertions.
+
+### CCR-002 — Resolved: runtime input cursors retained values that no code reads
 
 **Classification:** redundant representation and unnecessary work  
 **Priority:** high  
@@ -130,6 +142,14 @@ provenance rejection.
 
 **Expected simplification:** remove three pieces of state manipulation and one
 root clone per successful input read, plus all clones of that history.
+
+Resolution on 2026-08-17:
+
+`RuntimeInputCursor` now contains only `start` and `next`. Reads return the
+payload's independently rooted `Value` without cloning that root into a hidden
+history. The abandoned-claim regression retains and observes the returned
+value after its journal is dropped, then confirms that a later transaction can
+still consume the same buffered input.
 
 ### CCR-003 — Deferred work performs a reservation/activation handshake after its machine already exists
 
@@ -295,7 +315,7 @@ combined heap/event validation.
 **Expected simplification:** remove the per-snapshot collection traversal and
 shift map copying to actual map mutations.
 
-### CCR-007 — A transitional readiness probe is public production API used only by tests
+### CCR-007 — Resolved: a transitional readiness probe was public production API used only by tests
 
 **Classification:** test-only production surface  
 **Priority:** medium  
@@ -322,6 +342,13 @@ outside exclusive admission.
 
 **Expected simplification:** remove one public/transitional API and narrow the
 runtime surface; little line-count reduction.
+
+Resolution on 2026-08-17:
+
+`exclusive_admission_available` is now `#[cfg(test)] pub(crate)`. The existing
+forced-order callback and settlement tests retain the probe, while production
+and external builds no longer expose or compile it as an `EvaluationRuntime`
+operation.
 
 ### CCR-008 — The byte-oriented `Host` adapter duplicates the artifact-oriented source system
 
@@ -515,9 +542,9 @@ without either broad wakeups or incomplete settlement validation.
 
 ## Recommended implementation order
 
-1. **Low-risk removal:** CCR-001, CCR-002, CCR-007, and the stale comments from
-   CCR-009. Each should reduce work or public surface without changing a
-   protocol.
+1. **Low-risk removal:** CCR-001, CCR-002, and CCR-007 are complete. Keep the
+   stale-comment and oracle work in CCR-009 as its own compatibility-retirement
+   checkpoint.
 2. **Latch and retire compatibility:** migrate the macro oracle cases, then
    finish CCR-009; migrate source tests, then perform CCR-008.
 3. **Coordinator protocol cleanup:** barrier-test and implement CCR-003, then
