@@ -7,10 +7,7 @@ use std::sync::Arc;
 use crate::api::Value;
 use crate::core::CoreValueFactory;
 use crate::evaluation::EvalContext;
-use crate::reflection::{
-    CommitResult, ExactConflictAnalysis, HostSnapshot, IsolatedEffectSearch, IsolatedSearchPoll,
-    ReflectionStore, StoreSnapshot, TaskCommit, TaskEnvironment, TaskHost,
-};
+use crate::reflection::{IsolatedEffectSearch, IsolatedSearchPoll, IsolatedTaskHost};
 
 pub(super) use effects::request_specs;
 
@@ -48,48 +45,7 @@ pub(super) struct TokenRun {
     pub(super) candidates: Vec<TokenCandidate>,
 }
 
-pub(super) struct TokenHost {
-    environment: Value,
-    snapshot: TokenSnapshot,
-    store: StoreSnapshot,
-}
-
-impl TokenHost {
-    fn new(values: CoreValueFactory, input: Arc<str>, completion_offset: Option<usize>) -> Self {
-        let environment = Value::from_core(
-            &values,
-            crate::core::Value::Dict(crate::core::Dict::new_sync()),
-        );
-        Self {
-            environment,
-            snapshot: TokenSnapshot {
-                input,
-                completion_offset,
-            },
-            store: ReflectionStore::new(values, Arc::new(ExactConflictAnalysis)).snapshot(),
-        }
-    }
-}
-
-impl TaskEnvironment for TokenHost {
-    fn reflection_environment(&self) -> Value {
-        self.environment.clone()
-    }
-}
-
-impl TaskHost<effects::TokenEffects> for TokenHost {
-    fn snapshot(&self) -> HostSnapshot<effects::TokenEffects> {
-        HostSnapshot::new(1, self.store.clone(), self.snapshot.clone())
-    }
-
-    fn commit(&self, _commit: TaskCommit<effects::TokenEffects>) -> CommitResult {
-        CommitResult::Closed
-    }
-
-    fn wait_for_change(&self, _observed_generation: u64) -> bool {
-        false
-    }
-}
+pub(super) type TokenHost = IsolatedTaskHost<TokenSnapshot>;
 
 pub(super) fn run(
     parser: &Value,
@@ -98,10 +54,18 @@ pub(super) fn run(
     eval_context: EvalContext,
 ) -> Result<TokenRun, String> {
     let input_len = input.len();
+    let values: CoreValueFactory = eval_context.values().clone();
+    let environment = Value::from_core(
+        &values,
+        crate::core::Value::Dict(crate::core::Dict::new_sync()),
+    );
     let host = Arc::new(TokenHost::new(
-        eval_context.values().clone(),
-        input,
-        completion_offset,
+        values,
+        environment,
+        TokenSnapshot {
+            input,
+            completion_offset,
+        },
     ));
     let mut search =
         IsolatedEffectSearch::new_in_context(parser, effects::TokenEffects, host, eval_context)

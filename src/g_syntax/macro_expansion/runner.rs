@@ -9,7 +9,7 @@ use crate::evaluation::EvaluationPumpOutcome;
 use crate::reflection::{IsolatedEffectSearch, IsolatedSearchPoll};
 
 use super::effects::MacroEffects;
-use super::host::MacroHost;
+use super::host::{MacroHost, MacroSnapshot};
 use super::io::{MacroInput, MacroOutput};
 
 const STEP_BUDGET: usize = 256;
@@ -81,10 +81,14 @@ pub(in crate::g_syntax) fn run_macro_effect(
 ) -> Result<MacroRun, Box<MacroFailure>> {
     let values = execution.macro_context().values();
     let effect = PublicValue::from_core(values, effect);
+    let environment = PublicValue::from_core(values, environment);
     let host = Arc::new(MacroHost::new(
         values.clone(),
-        PublicValue::from_core(values, environment),
-        input.clone(),
+        environment.clone(),
+        MacroSnapshot {
+            environment,
+            input: Arc::new(input.clone()),
+        },
     ));
     let mut search = IsolatedEffectSearch::new_in_context(
         &effect,

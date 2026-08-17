@@ -1,13 +1,8 @@
 use std::sync::Arc;
 
 use crate::api::Value;
-use crate::core::CoreValueFactory;
-use crate::reflection::{
-    CommitResult, ExactConflictAnalysis, HostSnapshot, ReflectionStore, StoreSnapshot, TaskCommit,
-    TaskEnvironment, TaskHost,
-};
+use crate::reflection::IsolatedTaskHost;
 
-use super::effects::MacroEffects;
 use super::io::{MacroCursor, MacroInput, MacroOutput};
 
 #[derive(Clone)]
@@ -129,41 +124,4 @@ impl MacroJournal {
     }
 }
 
-pub(super) struct MacroHost {
-    snapshot: MacroSnapshot,
-    store: StoreSnapshot,
-}
-
-impl MacroHost {
-    pub(super) fn new(values: CoreValueFactory, environment: Value, input: MacroInput) -> Self {
-        Self {
-            snapshot: MacroSnapshot {
-                environment: environment.clone(),
-                input: Arc::new(input),
-            },
-            store: ReflectionStore::new(values, Arc::new(ExactConflictAnalysis)).snapshot(),
-        }
-    }
-}
-
-impl TaskEnvironment for MacroHost {
-    fn reflection_environment(&self) -> Value {
-        self.snapshot.environment.clone()
-    }
-}
-
-impl TaskHost<MacroEffects> for MacroHost {
-    fn snapshot(&self) -> HostSnapshot<MacroEffects> {
-        HostSnapshot::new(1, self.store.clone(), self.snapshot.clone())
-    }
-
-    fn commit(&self, _commit: TaskCommit<MacroEffects>) -> CommitResult {
-        // The all-results runner owns the outer transaction. Macro journals
-        // are selected explicitly and never commit through the host.
-        CommitResult::Closed
-    }
-
-    fn wait_for_change(&self, _observed_generation: u64) -> bool {
-        false
-    }
-}
+pub(super) type MacroHost = IsolatedTaskHost<MacroSnapshot>;

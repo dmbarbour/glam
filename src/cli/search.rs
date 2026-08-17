@@ -136,7 +136,7 @@ fn run_search(
     let host = Arc::new(CliHost::new(
         assembler.core_values(),
         assembler.reflection_environment(),
-        invocation,
+        super::host::CliSnapshot { invocation },
     ));
     let mut search =
         IsolatedEffectSearch::new_in_context(effect, CliEffects, host, assembler.eval_context())

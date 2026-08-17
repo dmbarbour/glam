@@ -8,6 +8,7 @@ mod requests;
 mod search;
 mod store;
 
+pub(crate) use search::IsolatedTaskHost;
 #[doc(hidden)]
 pub use search::{
     IsolatedEffectSearch, IsolatedSearchBlock, IsolatedSearchBranch, IsolatedSearchPoll,

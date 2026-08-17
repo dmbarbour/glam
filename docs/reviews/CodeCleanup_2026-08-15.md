@@ -692,7 +692,7 @@ Verification on 2026-08-17:
 - Phase 1 deleted the 158-line oracle; Phase 2 changed comments and one test
   name without changing production behavior.
 
-### CCR-010 — Four isolated effect hosts repeat the same non-committing execution mechanism
+### CCR-010 — Resolved: four isolated effect hosts repeated one non-committing mechanism
 
 **Classification:** duplicated mechanism with distinct specialization policy  
 **Priority:** low/medium  
@@ -780,7 +780,7 @@ with a change to its transactional read path. Reflection annotations demanded
 while evaluating macros continue to run in the surrounding evaluation runtime;
 the isolated macro host must not replace or suppress that separate path.
 
-##### Phase 0: Latch the existing boundary
+##### Phase 0: Latch the existing boundary — complete
 
 Before replacing a host, map and run the existing regressions which pin its
 distinct policy:
@@ -803,7 +803,15 @@ Add a focused regression before refactoring if any listed contract is only
 incidental to a larger test. In particular, selected CLI `.log` output must be
 shown to come from the retained branch journal rather than host emission.
 
-##### Phase 1: Introduce the mechanism and prototype it on token parsing
+Baseline verification on 2026-08-17 found no missing latch. In particular,
+`configured_cli_returns_only_selected_branch_diagnostics` returns the selected
+journal diagnostic while asserting that the assembler diagnostic bus remains
+empty. Existing macro tests distinguish direct branch-local logs from
+committed `anno refl:` diagnostics and heap updates. The isolated-search,
+token, macro, configured-CLI, interaction-net, and construction-port focused
+groups all pass before the host refactor.
+
+##### Phase 1: Introduce the mechanism and prototype it on token parsing — complete
 
 1. Add `IsolatedTaskHost<X>` beside `IsolatedEffectSearch` with one constructor
    that receives a `CoreValueFactory`, environment, and specialization
@@ -820,7 +828,22 @@ This phase is the prototype gate. Stop and retain the concrete hosts if the
 generic form requires changes to `TaskSpecialization`, policy closures,
 consumer-specific trait bounds, or more forwarding code than it deletes.
 
-##### Phase 2A: Migrate interaction-net construction
+Resolution on 2026-08-17:
+
+- Added `IsolatedTaskHost<X>` beside `IsolatedEffectSearch`, parameterized by
+  the specialization snapshot rather than the whole specialization. Its sole
+  policy is the fixed immutable environment/store/extra snapshot, closed
+  commit, and absence of mutable host observations.
+- `TokenEffects` now uses `IsolatedTaskHost<TokenSnapshot>` directly. The
+  concrete `TokenHost` fields and its `TaskEnvironment`/`TaskHost`
+  implementations were removed without changing `TaskSpecialization` or
+  introducing forwarding policy.
+- A mechanism test pins environment and extra-snapshot preservation,
+  generation `1`, `CommitResult::Closed`, and `wait_for_change == false`.
+  That test and all 20 token-filtered regressions pass, so the prototype gate
+  accepts the common shape.
+
+##### Phase 2A: Migrate interaction-net construction — complete
 
 Use `IsolatedTaskHost<()>` with the existing empty environment. Do not move
 `ConstructionJournal`, the invocation brand, checked replay, result-count
@@ -828,7 +851,12 @@ policy, or `NetConstructionMachine` blocking behavior. Verify construction in
 an existing `EvalContext`, cross-invocation port rejection, and retry after a
 lazy construction dependency.
 
-##### Phase 2B: Migrate macro expansion
+Resolution on 2026-08-17: `InteractionNetEffects` now uses
+`IsolatedTaskHost<()>`; only the concrete lifecycle wrapper was removed. All 11
+interaction-net-filtered tests and the invocation-scoped construction-port
+test pass, including the lazy-dependency regression.
+
+##### Phase 2B: Migrate macro expansion — complete
 
 Use `IsolatedTaskHost<MacroSnapshot>` while leaving `MacroSnapshot`,
 `MacroJournal`, and the macro-specific `.env` and `.log` handlers intact.
@@ -838,7 +866,14 @@ retains its diagnostics and scoped-case evidence, shared heap/task operations
 remain absent from the macro API, and `anno refl:` observations still use the
 owning evaluation runtime.
 
-##### Phase 3: Migrate configured CLI and prove logging policy
+Resolution on 2026-08-17: `MacroEffects` now uses
+`IsolatedTaskHost<MacroSnapshot>`. `MacroSnapshot` deliberately retains its
+environment field and the macro-specific `.env`/`.log` handlers are unchanged.
+All 39 library macro-filtered tests, the macro integration test, and four macro
+contract samples pass, including direct-log branch selection and committed
+reflection annotation/heap behavior.
+
+##### Phase 3: Migrate configured CLI and prove logging policy — complete
 
 Implement the generic host's deliberately non-emitting `ReflectionServices`
 boundary, then change `CliEffects::Host` to
@@ -856,7 +891,20 @@ general diagnostic-policy parameter. That outcome may reduce the final host
 count to one wrapper plus the common mechanism and is preferable to a broader
 capability surface.
 
-##### Phase 4: Structural audit and decision checkpoint
+Resolution on 2026-08-17:
+
+- `CliEffects` now uses `IsolatedTaskHost<CliSnapshot>` and the concrete
+  `CliHost` lifecycle implementation is gone.
+- The generic host implements the former non-emitting `ReflectionServices`
+  policy. This Rust trait implementation does not install effects: CLI remains
+  the only migrated specialization which includes the reusable `.env`/`.log`
+  request family, and query services remain unavailable.
+- All 13 configured-CLI-filtered tests pass. The focused selected-diagnostic
+  regression still returns the journaled warning while the assembler bus count
+  remains zero, and the forbidden-capability regression confirms that heap and
+  task operations remain absent.
+
+##### Phase 4: Structural audit and decision checkpoint — complete
 
 After all viable migrations:
 
@@ -892,6 +940,33 @@ The final checkpoint requires `cargo fmt --check`,
 `cargo test -q`. Review the diff separately from those behavioral checks: this
 finding succeeds only if it removes the duplicated lifecycle without merging
 the four specializations' semantics.
+
+Resolution on 2026-08-17:
+
+- All four concrete host structs and their repeated `TaskEnvironment` and
+  `TaskHost` implementations are gone. Local aliases retain the useful
+  specialization names while pointing to `IsolatedTaskHost<TokenSnapshot>`,
+  `IsolatedTaskHost<CliSnapshot>`, `IsolatedTaskHost<MacroSnapshot>`, and
+  `IsolatedTaskHost<()>`.
+- The Rust source diff removes 66 net lines despite adding the generic host's
+  contract documentation and focused mechanism test. No specialization API,
+  journal, search result policy, macro staging rule, or net replay operation
+  moved into the abstraction.
+- `ReflectionServices` on the generic host is intentionally non-emitting and
+  supplies no query writer. Effect visibility remains specialization-owned, so
+  only configured CLI uses that trait through its existing reusable
+  `.env`/`.log` request family.
+- Empty-store construction remains invocation-local. Runtime-owned sharing is
+  deferred rather than coupling this ownership cleanup to a cache and
+  runtime-provenance change.
+
+Final verification on 2026-08-17:
+
+- The isolated-search, token, macro, configured-CLI, interaction-net, and
+  construction-port focused groups all pass after every migration.
+- `cargo fmt --check` passes.
+- `cargo clippy --all-targets --all-features -- -D warnings` passes.
+- `cargo test -q` passes all 1,283 tests.
 
 ### CCR-011 — Presence-oriented `Assembler::{get,get_optional}` remains a compatibility interpreter
 
@@ -977,8 +1052,8 @@ without either broad wakeups or incomplete settlement validation.
    and CCR-009 are complete.
 2. **Coordinator protocol cleanup:** CCR-003 and CCR-004 are complete.
 3. **Event-state rewrite:** CCR-005 and CCR-006 are complete.
-4. **Repeated mechanism:** prototype CCR-010 and retain it only if the result is
-   materially smaller and clearer.
+4. **Repeated mechanism:** CCR-010 is complete; its prototype removed all four
+   concrete lifecycle implementations and reduced the Rust source.
 5. **Semantic facade cleanup:** stage CCR-011 after the main/configuration call
    sites have composition helpers.
 6. **Module splitting:** only after the representations above settle. Split

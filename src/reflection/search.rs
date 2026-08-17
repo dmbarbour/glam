@@ -1,8 +1,67 @@
 use std::sync::Arc;
 
 use super::{
-    EffectTask, EffectTaskPoll, EvalContext, PublicValue, TaskCommit, TaskHalt, TaskSpecialization,
+    CommitResult, CoreValueFactory, Diagnostic, EffectTask, EffectTaskPoll, EvalContext,
+    ExactConflictAnalysis, HostSnapshot, PublicValue, ReflectionServices, ReflectionStore,
+    StoreSnapshot, TaskCommit, TaskEnvironment, TaskHalt, TaskHost, TaskSpecialization,
 };
+
+/// Immutable host for one all-results effect search.
+///
+/// Isolated searches retain their branch journals as results, so this host has
+/// no commit or mutable-observation path of its own.
+pub(crate) struct IsolatedTaskHost<X> {
+    environment: PublicValue,
+    store: StoreSnapshot,
+    extra: X,
+}
+
+impl<X> IsolatedTaskHost<X> {
+    pub(crate) fn new(values: CoreValueFactory, environment: PublicValue, extra: X) -> Self {
+        Self {
+            environment,
+            store: ReflectionStore::new(values, Arc::new(ExactConflictAnalysis)).snapshot(),
+            extra,
+        }
+    }
+}
+
+impl<X> TaskEnvironment for IsolatedTaskHost<X>
+where
+    X: Send + Sync,
+{
+    fn reflection_environment(&self) -> PublicValue {
+        self.environment.clone()
+    }
+}
+
+impl<X> ReflectionServices for IsolatedTaskHost<X>
+where
+    X: Send + Sync,
+{
+    fn emit_diagnostic(&self, _diagnostic: Diagnostic) {
+        // Isolated `.log` operations are retained in their branch journal;
+        // this host has no committed diagnostic destination.
+    }
+}
+
+impl<S, X> TaskHost<S> for IsolatedTaskHost<X>
+where
+    S: TaskSpecialization<Snapshot = X>,
+    X: Clone + Send + Sync + 'static,
+{
+    fn snapshot(&self) -> HostSnapshot<S> {
+        HostSnapshot::new(1, self.store.clone(), self.extra.clone())
+    }
+
+    fn commit(&self, _commit: TaskCommit<S>) -> CommitResult {
+        CommitResult::Closed
+    }
+
+    fn wait_for_change(&self, _observed_generation: u64) -> bool {
+        false
+    }
+}
 
 /// Selects how terminal branches at the outer effect boundary are handled.
 ///
@@ -227,5 +286,34 @@ impl<S: TaskSpecialization> IsolatedEffectSearch<S> {
 
     pub fn cancel(&mut self) {
         self.task.finish(super::TaskTerminal::Cancelled);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::{Dict, Value};
+    use crate::reflection::{StandardEffects, StoreJournal};
+
+    #[test]
+    fn isolated_task_host_has_one_immutable_non_committing_snapshot() {
+        let values = crate::core::test_value_factory();
+        let environment = PublicValue::from_core(&values, Value::Dict(Dict::new_sync()));
+        let host = IsolatedTaskHost::new(values, environment.clone(), ());
+        let snapshot = <IsolatedTaskHost<()> as TaskHost<StandardEffects>>::snapshot(&host);
+
+        assert_eq!(snapshot.generation(), 1);
+        assert_eq!(snapshot.extra(), &());
+        assert_eq!(
+            host.reflection_environment().as_core(),
+            environment.as_core()
+        );
+        assert!(!<IsolatedTaskHost<()> as TaskHost<StandardEffects>>::wait_for_change(&host, 1));
+
+        let commit = TaskCommit::new(StoreJournal::new(snapshot.store().clone()), (), ());
+        assert_eq!(
+            <IsolatedTaskHost<()> as TaskHost<StandardEffects>>::commit(&host, commit),
+            CommitResult::Closed
+        );
     }
 }

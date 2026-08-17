@@ -9,9 +9,8 @@ use crate::core_net::{CoreSpecialization, CoreWaitToken};
 use crate::evaluation::EvalContext;
 use crate::interaction_net::{NetBuilder, Port};
 use crate::reflection::{
-    CommitResult, EffectRequestSpec, ExactConflictAnalysis, HostSnapshot, IsolatedEffectSearch,
-    IsolatedSearchPoll, ReflectionStore, RequestContext, RequestResult, StoreSnapshot, TaskCommit,
-    TaskEnvironment, TaskHalt, TaskHost, TaskSpecialization, task_eval_error,
+    EffectRequestSpec, IsolatedEffectSearch, IsolatedSearchPoll, IsolatedTaskHost, RequestContext,
+    RequestResult, TaskHalt, TaskSpecialization, task_eval_error,
 };
 
 use super::super::super::{EvaluationHalt, eval_index_number, eval_value};
@@ -182,40 +181,7 @@ impl TaskSpecialization for InteractionNetEffects {
     }
 }
 
-struct ConstructionHost {
-    environment: PublicValue,
-    store: StoreSnapshot,
-}
-
-impl ConstructionHost {
-    fn new(values: CoreValueFactory) -> Self {
-        let environment = PublicValue::from_core(&values, Value::Dict(Dict::new_sync()));
-        Self {
-            environment,
-            store: ReflectionStore::new(values, Arc::new(ExactConflictAnalysis)).snapshot(),
-        }
-    }
-}
-
-impl TaskEnvironment for ConstructionHost {
-    fn reflection_environment(&self) -> PublicValue {
-        self.environment.clone()
-    }
-}
-
-impl TaskHost<InteractionNetEffects> for ConstructionHost {
-    fn snapshot(&self) -> HostSnapshot<InteractionNetEffects> {
-        HostSnapshot::new(1, self.store.clone(), ())
-    }
-
-    fn commit(&self, _commit: TaskCommit<InteractionNetEffects>) -> CommitResult {
-        CommitResult::Closed
-    }
-
-    fn wait_for_change(&self, _observed_generation: u64) -> bool {
-        false
-    }
-}
+type ConstructionHost = IsolatedTaskHost<()>;
 
 pub(in crate::eval) struct NetConstructionMachine {
     brand: Arc<ConstructionBrand>,
@@ -235,7 +201,11 @@ impl NetConstructionMachine {
         let search = IsolatedEffectSearch::new_in_context(
             &effect,
             specialization,
-            Arc::new(ConstructionHost::new(context.values().clone())),
+            Arc::new(ConstructionHost::new(
+                context.values().clone(),
+                PublicValue::from_core(context.values(), Value::Dict(Dict::new_sync())),
+                (),
+            )),
             context,
         )
         .map_err(TaskHalt::into_evaluation_halt)?;
