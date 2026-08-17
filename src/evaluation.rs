@@ -4921,6 +4921,7 @@ mod tests {
             .expect("test task must retain its coordinator");
         let status_authoritative = Arc::new(AtomicBool::new(false));
         let status_notified = Arc::new(AtomicBool::new(false));
+        let observed_before_notification = Arc::new(AtomicBool::new(false));
         let dropped_after_publication = Arc::new(AtomicBool::new(false));
         let task = context
             .schedule_task({
@@ -4955,11 +4956,40 @@ mod tests {
             }
         });
         assert!(coordinator.attach_reflection_status_publisher(task.work, publisher));
+        let task_wait = task.wait().clone();
+        coordinator.set_terminal_publication_probe({
+            let coordinator = Arc::downgrade(&coordinator);
+            let status_authoritative = status_authoritative.clone();
+            let status_notified = status_notified.clone();
+            let observed_before_notification = observed_before_notification.clone();
+            move || {
+                assert!(
+                    task_wait.terminal_poll().is_some(),
+                    "the terminal wait must be authoritative during guarded publication"
+                );
+                assert!(
+                    status_authoritative.load(Ordering::Acquire),
+                    "the terminal status must be authoritative during guarded publication"
+                );
+                assert!(
+                    !status_notified.load(Ordering::Acquire),
+                    "status notification must remain deferred during guarded publication"
+                );
+                assert!(
+                    coordinator
+                        .upgrade()
+                        .is_some_and(|coordinator| !coordinator.settlement_admission_is_free()),
+                    "terminal publication must still hold runtime mutation admission"
+                );
+                observed_before_notification.store(true, Ordering::Release);
+            }
+        });
 
         assert_eq!(
             context.pump_wait(task.wait(), 256),
             EvaluationPumpOutcome::TargetReady
         );
+        assert!(observed_before_notification.load(Ordering::Acquire));
         assert!(status_authoritative.load(Ordering::Acquire));
         assert!(status_notified.load(Ordering::Acquire));
         assert!(

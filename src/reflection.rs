@@ -6046,7 +6046,6 @@ mod tests {
                 statuses.lock().unwrap().as_slice(),
                 [EvaluationTaskStatus::Complete(_)]
             ));
-            assert!(notified.load(Ordering::Acquire));
             let snapshot = loop {
                 runtime.pump_until_stable();
                 match runtime.readiness() {
@@ -6057,6 +6056,10 @@ mod tests {
                     ),
                 }
             };
+            assert!(
+                notified.load(Ordering::Acquire),
+                "terminal notification must finish before the runtime becomes stable"
+            );
             assert!(snapshot.dispositions().is_empty());
             let report = snapshot
                 .settle()

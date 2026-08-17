@@ -4080,8 +4080,10 @@ impl EvaluationWorkCoordinator {
         // values they release are disposed only after coordinator/component
         // locks and mutation admission have been released.
         drop(producer);
-        // Lifecycle observers close terminal root demand before a host waiting
-        // on the root result can return and race that descendant teardown.
+        // Deliver lifecycle/status callbacks before waking parked completion
+        // subscribers. The terminal cells are already authoritative, so a
+        // direct poller may observe them before either notification; callback
+        // completion is not part of the semantic terminal state.
         for status_wake in status_wakes {
             status_wake.notify();
         }
