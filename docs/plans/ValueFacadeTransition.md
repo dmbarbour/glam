@@ -208,22 +208,59 @@ Additional list conveniences such as `list_at`, `list_split`, and
 migrations need them. They are not prerequisites for deleting
 `Assembler::binary_slice`.
 
-### Dictionary pattern computations
+### Basic dictionary composition
 
-`Values` will expose the smallest semantic constructors required to express
-required (`:`) and optional (`?:`) dictionary pattern selection. They may wrap
-the existing compiler-private pattern builtins internally, but those builtins
-do not become public API.
+The initial public dictionary layer stays below pattern decomposition:
 
-The constructed operation retains Glam's effectful match result and remainder
-semantics. The core API does **not** translate it to `Option<Value>`.
-Embeddings which want that Rust policy may define a wrapper by running the
-semantic computation through `ValueEvaluator`. A convenience utility can be
-added later if real use warrants it.
+```rust
+impl Values {
+    pub fn empty_dict(&self) -> Value;
 
-Exact method names and whether the primitive exposes `{value, rest}` directly
-will be chosen after the current callers are inventoried. The semantic tests,
-not `get_optional` compatibility, define the contract.
+    pub fn dict_singleton(
+        &self,
+        key: Value,
+        value: Value,
+    ) -> Result<Value, Error>;
+
+    pub fn dict_union(
+        &self,
+        left: Value,
+        right: Value,
+    ) -> Result<Value, Error>;
+
+    pub fn dict_update(
+        &self,
+        dictionary: Value,
+        path: Value,
+        new_value: Value,
+    ) -> Result<Value, Error>;
+}
+```
+
+Together with `access_path`, these construct the ordinary semantics of `{}`,
+dictionary literals, hierarchical union, and path updates. `empty_dict`
+constructs the immediate empty dictionary, which is also Glam's undefined
+value and the identity for union. Updating a path to `{}` performs semantic
+removal. The other operations validate runtime provenance but do not evaluate
+keys, paths, dictionaries, or values.
+
+The existing `empty_record` name becomes a transitional delegate to
+`empty_dict` and is removed after callers migrate. There is no distinct empty
+record representation: records are merely dictionaries whose keys are names.
+
+These operations deliberately do not return a combined `{value, rest}`
+pattern-lowering record. Most callers need either lookup or update, while the
+remainder exists only when lowering a larger dictionary pattern. A Glam helper
+can combine access, matching, and update when it genuinely needs “take”
+semantics, and can choose a result appropriate to its caller—an effect, tagged
+result, fallback value, or something else.
+
+Required and optional host-selection policy will initially be expressed by a
+small user-expressible Glam helper and invoked through `Values::apply`. The
+bootstrap may cache the lowered helper as an acceleration, just as it caches
+other compiler functions, but its semantics must remain expressible in Glam.
+The public facade does not standardize `Option<Value>`, a zero-or-one list, or
+the compiler's internal pattern-step record without demonstrated broader use.
 
 ### `ValueEvaluator`
 
@@ -263,12 +300,17 @@ witness visible.
 Immediate extraction lives on `EvaluatedValue`:
 
 - `as_bytes` for an already compact binary result;
-- no-demand iteration of an already materialized list spine;
+- `array_items` for an already strict value array;
 - `as_i64` and `as_rational_i64` for small exact numbers;
 - `as_f64` for the existing documented lossy conversion;
-- `number_text` for canonical, exact arbitrary-precision number text;
-- `is_undefined`; and
-- semantic `kind`, which has no `Lazy` or `Promised` case.
+- `number_text` for canonical, exact arbitrary-precision number text.
+
+`EvaluatedValue` does not expose a general `kind` or `is_undefined` shortcut.
+Current representation kind belongs to reflection. Logical undefined testing
+may require recursively observing dictionary members, so it belongs to the
+ordinary Glam matching/assertion helpers invoked through `Values`, not an
+immediate outer-WHNF view. Crate-private immediate checks may remain where an
+internal representation invariant already guarantees their meaning.
 
 `ValueEvaluator::eval(&Value)` is the sole initial evaluator operation. The
 name is intentionally shorter than `evaluate_whnf`, while its documentation
@@ -278,11 +320,24 @@ belongs to `EvaluatedValue`. A client which wants bytes composes
 which wants a number evaluates and calls the corresponding number extractor.
 
 Extraction which would demand additional nested structure is not an immediate
-`EvaluatedValue` operation. An immediate list iterator succeeds only when no
-unresolved list-spine thunk remains. Evaluating `Values::anno_array` or
-`Values::anno_deque` guarantees that condition; arbitrary list WHNF does not.
-The exact Rust iterator/view type is selected in Phase 2A, but iteration must
-not perform hidden evaluation.
+`EvaluatedValue` operation. Phase 2A adds:
+
+```rust
+pub fn array_items(&self) -> Option<Vec<Value>>;
+```
+
+The method recognizes the strict value-array representation produced by
+`Values::anno_array` (including an empty array), clones its runtime-root
+handles into one owned `Vec`, and does not demand the elements. It declines a
+non-array list representation rather than traversing a deque, concatenation,
+byte chunk, or unresolved list thunk. This keeps the immediate API simple and
+makes the allocation visible in its return type.
+
+Clients working with a large list or deque can construct an ordinary semantic
+slice first, normalize only that slice with `anno_array`, evaluate it, and
+extract the resulting small array. `anno_deque` remains useful for semantic
+list composition but does not require a second host view abstraction in this
+transition.
 
 ### `ReflectionInspector`
 
@@ -302,8 +357,8 @@ right boundary.
 
 `ReflectionInspector::{evaluate,list_items}` are not inherently reflective:
 WHNF demand moves to `ValueEvaluator`, while whole-list enumeration becomes
-explicit array/deque annotation, evaluation, and immediate iteration of the
-materialized result. A reflective operation may still demand when its own
+explicit array annotation, evaluation, and `array_items` extraction. A
+reflective operation may still demand when its own
 documented protocol requires it, but that does not make ordinary semantic
 observation reflective.
 
@@ -311,15 +366,17 @@ observation reflective.
 
 | Current API | Target owner | Retirement intent |
 |---|---|---|
+| `Values::empty_record` | `Values::empty_dict` | Remove the false suggestion that records have a distinct empty representation |
 | `Assembler::apply` | `Values::apply` | Compose lazily, then evaluate explicitly if needed |
-| `Assembler::{get,get_optional}` | `Values` access and pattern computations | Remove host dotted-path interpreter |
+| `Assembler::{get,get_optional}` | `Values` access plus caller-selected Glam helpers | Remove host dotted-path and presence interpreter |
 | `Assembler::evaluate` | `ValueEvaluator::eval` | Compatibility delegate, then remove |
 | `Assembler::to_binary` | `Values::anno_binary`, `ValueEvaluator::eval`, then `EvaluatedValue::as_bytes` | Keep one semantic binary assertion path |
 | `Assembler::binary_slice` | `Values::list_slice`, binary annotation, evaluation, and `EvaluatedValue::as_bytes` | Delete separate list traversal |
 | `ReflectionInspector::evaluate` | `ValueEvaluator::eval` | Move ordinary demand out of reflection |
 | `ReflectionInspector::list_items` | `Values::anno_array`, `ValueEvaluator::eval`, then materialized-list iteration on `EvaluatedValue` | Make spine demand semantic and explicit |
-| `Value::kind` | Evaluator after WHNF or reflection before WHNF | Split semantic kind from representation kind |
-| `Value::{is_undefined,as_*}` | `EvaluatedValue` | Preserve current extraction functionality; retain crate-private fast paths |
+| `Value::kind` | `ReflectionInspector` | Treat kind as current runtime representation |
+| `Value::is_undefined` | User-expressible Glam matching/assertion helper | Do not confuse exact empty-dict representation with logical undefined semantics |
+| `Value::as_*` | `EvaluatedValue` | Preserve scalar extraction functionality; retain crate-private fast paths |
 
 `Value::runtime_id` remains an ordinary ownership property. It does not cross
 the reflection boundary.
@@ -361,9 +418,34 @@ The current public surface provides `as_binary`, `as_i64`,
   precision is retained internally and exposed losslessly as canonical text.
 
 The transition therefore changes ownership, not numerical functionality.
-These immediate observations move to `EvaluatedValue`; they are not removed
-merely for cleanup. Adding public number-library types or type-specific
-evaluator conveniences remains deferred.
+Scalar extraction moves to `EvaluatedValue`; it is not removed merely for
+cleanup. `kind` becomes reflective, while undefined testing uses semantic
+Glam matching/assertion machinery. Adding public number-library types or
+type-specific evaluator conveniences remains deferred.
+
+## Pre-implementation Review
+
+Reviewed on 2026-08-17 before Phase 0. The facade split and transition order
+are sound, and no architectural blocker prevents beginning the inventory.
+This review made four corrections:
+
+1. A general value `kind` remains a representation observation and therefore
+   belongs to reflection. `EvaluatedValue` exposes typed extractors, not a
+   second public kind taxonomy.
+2. Logical undefined testing belongs to ordinary Glam matching/assertion
+   semantics. It is not equivalent to recognizing the current empty-dictionary
+   representation after one WHNF step.
+3. Verification must establish both positive results and absence of hidden
+   demand. Broad end-to-end tests alone cannot prove that a constructor did not
+   claim a lazy value, subscribe to a promise, or reduce a net.
+4. Phase 3 introduces and documents the explicit reflection replacement, but
+   compatibility methods cannot be removed before Phase 4 migrates production
+   callers. Their deletion therefore belongs to the Phase 5 audit.
+
+The prior open list-view question is resolved by `array_items`. The proposed
+public dictionary-pattern result is withdrawn: Phase 1C instead establishes
+basic dictionary composition and leaves higher-level match result shapes to
+user-expressible helpers until repeated usage supports standardizing one.
 
 ## Transition Phases
 
@@ -376,7 +458,7 @@ Status: pending.
 
 #### Phase 0A — Classify callers
 
-- Inventory every call to the five `Assembler` compatibility methods,
+- Inventory every call to the six `Assembler` compatibility methods,
   `ReflectionInspector::{evaluate,list_items}`, and public immediate `Value`
   observations.
 - Classify each as construction, semantic demand/extraction, or reflection.
@@ -392,12 +474,15 @@ Verification:
 
 #### Phase 0B — Latch boundary behavior
 
-- Add focused tests showing that semantic composition does not demand an
-  unresolved lazy value or promise.
+- Add focused characterization tests showing that the existing
+  `Values::{access,annotate}` constructors do not demand an unresolved lazy
+  value or promise.
+- Establish the crate-private claim/status test helpers used to apply the same
+  negative assertion to the new Phase 1 constructors as each one lands.
 - Preserve structured failure/context tests for WHNF and binary assertion.
 - Preserve foreign-runtime rejection at construction and demand boundaries.
-- Add direct `.g` comparison fixtures for access, slicing, and required versus
-  optional dictionary patterns.
+- Add direct `.g` comparison fixtures for access, slicing, dictionary union and
+  update, and the small required/fallback helpers needed by current callers.
 
 The tests should expose the current mismatch before changing behavior where
 feasible, then be updated only when the intended new contract lands.
@@ -436,17 +521,27 @@ and boundary ranges, invalid ranges, structured item failures, array
 materialization, deque balancing, preservation of lazy element values, and
 proof that construction performs no demand.
 
-#### Phase 1C — Dictionary pattern computations
+#### Phase 1C — Basic dictionary composition
 
-- Define public semantic constructors for required and optional dictionary
-  pattern steps without exposing compiler-private builtin identities.
-- Reuse the evaluator's existing pattern semantics rather than implementing
-  host dictionary inspection.
-- Do not add an `Option<Value>` evaluator convenience.
+- Add `empty_dict` plus no-demand semantic singleton, hierarchical-union, and
+  path-update constructors without exposing compiler-private builtin
+  identities.
+- Migrate `empty_record` callers to `empty_dict`, retaining it only as a
+  temporary delegate during the transition.
+- Treat update-to-`{}` as the ordinary deletion operation rather than adding a
+  separate Rust-only removal primitive.
+- Define the current required/fallback lookup policies as small Glam helpers,
+  invoked through `Values::apply`; cache their lowered values only as an
+  implementation acceleration.
+- Keep compiler pattern-step operations private and do not add an
+  `Option<Value>` evaluator convenience.
 
-Verification compares the constructed computations with `.g` patterns for
-missing fields, explicit/logical `{}`, wrong intermediate kinds, lazy fields,
-failing fields, nested paths, and remainder preservation.
+Verification compares each constructor and helper with its `.g` definition.
+Cases cover empty-dictionary identity, missing fields, explicit and recursively
+logical `{}`, wrong intermediate kinds, lazy and failing fields, nested paths,
+union conflicts, update introduction/replacement/removal, and proof that
+construction performs no demand. No public result contains an unused
+dictionary remainder.
 
 ### Phase 2 — `ValueEvaluator`
 
@@ -458,10 +553,24 @@ Status: pending.
 - Add `as_value`, `into_value`, `From<EvaluatedValue> for Value`, and `Clone`.
 - Move the existing immediate scalar views onto the wrapper while retaining
   temporary `Value` delegates for staged migration.
-- Add a no-demand view/iterator for a materialized list spine. It must reject
-  or decline an unresolved list representation rather than forcing it.
-- Give the wrapper a semantic kind enum without lazy/promise variants.
+- Add `array_items` as an owned `Vec<Value>` extraction for the strict
+  value-array representation. It must decline every other list representation
+  rather than traversing or forcing it.
 - Document explicitly that only the outer layer is in WHNF.
+
+Verification:
+
+- Only `ValueEvaluator` and crate-private trusted paths can construct the
+  wrapper; public conversions can only borrow it or discard the witness.
+- Converting, borrowing, and cloning preserve runtime provenance and value
+  identity, do not evaluate nested values, and remain valid after the
+  short-lived evaluator handle is dropped.
+- Scalar tests cover signed bounds, exact rational pairs, the documented lossy
+  float conversion, and canonical arbitrary-precision text.
+- Array extraction preserves order and leaves deliberately lazy elements
+  unclaimed. Empty arrays succeed; deques, compact byte chunks,
+  concatenations, and unresolved list spines are declined without changing
+  claim or subscription state.
 
 #### Phase 2B — Introduce evaluator facade
 
@@ -474,7 +583,11 @@ Status: pending.
 
 Verification covers successful-result equivalence across worker schedules,
 structured but not necessarily identical failures, foreign-runtime rejection,
-and type-mismatch diagnostics after demand.
+and type-mismatch diagnostics after demand. Promise and lazy suspension tests
+use barriers or explicit resolver steps to force wait, wake, success, and
+failure orderings; sleeps and repetition are supplementary stress checks, not
+the primary proof. An already-WHNF value completes without queueing work, and
+repeated evaluation of one fulfilled lazy value does not recompute it.
 
 #### Phase 2C — Separate composition from extraction
 
@@ -483,30 +596,46 @@ and type-mismatch diagnostics after demand.
 - Ensure slicing is never reintroduced into the evaluator.
 - Make each migrated caller visibly compose under `Values` before extracting.
 
+Verification compares the old and new byte-output paths before the old path is
+removed. The cases include compact and value-list binaries, empty data, lazy
+concatenation, an invalid byte, a non-list value, and an upstream structured
+failure. A prefix slice with a deliberately poisoned unused tail proves that
+the new path preserves slice demand rather than materializing the whole input.
+The public evaluator surface is audited to contain only `eval`.
+
 ### Phase 3 — Explicit Reflection Boundary
 
 Status: pending.
 
 #### Phase 3A — Split the current inspector
 
-- Remove ordinary `evaluate` and list-enumeration responsibilities from
-  `ReflectionInspector` after evaluator migration.
-- Replace current `list_items` callers with explicit array/deque annotation,
-  evaluation, and no-demand `EvaluatedValue` iteration.
+- Introduce the explicit evaluator and materialized-list replacements for
+  `ReflectionInspector::{evaluate,list_items}` and mark the old methods as
+  transitional.
+- Migrate a small inspector-specific caller cohort to explicit array
+  annotation, evaluation, and `EvaluatedValue::array_items` extraction.
 - Retain metadata, dictionary iteration, and atom-key inspection.
 - Rewrite facade documentation to state instability and reproducibility limits.
+
+Verification compares replacement list enumeration with the old inspector on
+the same lists before deletion. It additionally proves that `array` expands
+compact bytes into small integer values, a deque must be sliced or normalized
+before host extraction, dictionary iteration order and atom identity remain
+unchanged, and no ordinary caller acquires reflection merely to evaluate or
+enumerate a semantic list.
 
 #### Phase 3B — Representation observation
 
 - Move pre-demand `Value::kind` behavior to a clearly named reflection method.
-- Provide semantic kind information only through `EvaluatedValue`.
-- Remove the temporary immediate `Value` extraction delegates after callers
-  migrate.
+- Replace public `is_undefined` callers with ordinary Glam matching/assertion
+  helpers rather than another representation check.
+- Keep immediate `Value` observations as documented transitional delegates
+  until Phase 4 migrates their production callers.
 - Defer detailed lazy-state APIs unless needed to replace a real caller.
 
-Verification distinguishes the representation kind of an unresolved lazy
-value from the semantic kind obtained after demand, without making timing a
-semantic assertion.
+Verification shows that representation kind can report an unresolved lazy
+value without forcing it, while ordinary semantic callers use evaluation,
+extractors, and patterns rather than representation-kind branching.
 
 ### Phase 4 — Production Caller Migration
 
@@ -516,10 +645,16 @@ Status: pending.
 
 - Replace dotted-string `get` calls for `conf.env`, `conf.cli`, `conf.log`, and
   related configuration entries with semantic name-array paths.
-- Use dictionary pattern computations where optional configuration is truly a
-  match rather than raw access followed by undefined handling.
+- Apply the source-defined required/fallback helpers where configuration policy
+  must distinguish a defined value from logical `{}`.
 - Replace application-plus-extraction chains with explicit `Values` then
   `ValueEvaluator` calls.
+
+Verification covers present, missing, logically undefined, failing, and
+divergent configuration entries through the real CLI lifecycle. Path-demand
+context remains an explicit host composition policy (for example, an
+`anno context:...` wrapper at the configuration boundary), not hidden behavior
+inside `Values::access_names`.
 
 #### Phase 4B — Diagnostics, viewers, and logger
 
@@ -527,6 +662,11 @@ Status: pending.
 - Keep dictionary iteration or metadata inspection visibly under reflection.
 - Preserve context and origin frames on evaluator failure.
 - Do not turn the logger into a reason to restore host path interpretation.
+
+Verification exercises plain and structured messages, origins, nested context
+frames, associated metadata inspection, and logger fallback. It confirms that
+reflection is used only for the privileged observations and that evaluator
+failures retain context through final rendering.
 
 #### Phase 4C — Assembly, macro, and reflection hosts
 
@@ -536,12 +676,22 @@ Status: pending.
 - Migrate volume-capability and reflection-task call construction to batched
   `Values::apply` and semantic paths.
 
+Verification includes executable samples, binary imports, macro protocol
+contracts, volume capabilities, reflection-task construction, and worker-zero
+and worker-enabled assembly. The same successful assembly bytes must result
+from both schedules.
+
 #### Phase 4D — Public tests and examples
 
 - Rewrite public API tests around the three explicit facades.
 - Retain a small number of tests for temporary compatibility delegates until
   their deletion phase.
 - Update examples and API documentation before removing old methods.
+
+Verification treats public API examples as compile-tested clients. Each
+example must make construction, evaluation, and reflection crossings visible;
+none may import crate-private representations or depend on a compatibility
+delegate not named as transitional.
 
 ### Phase 5 — Compatibility Removal and Audit
 
@@ -550,8 +700,13 @@ Status: pending.
 #### Phase 5A — Remove `Assembler` semantic helpers
 
 - Remove `Assembler::{apply,get,get_optional,evaluate,to_binary,binary_slice}`.
+- Remove transitional `ReflectionInspector::{evaluate,list_items}`.
+- Remove the transitional `Values::empty_record` naming delegate.
 - Remove the private binary-slice interpreter and now-unused path-context glue.
 - Remove imports, tests, and comments which describe the transitional surface.
+
+Verification includes a repository-wide symbol search for every removed
+method and its private implementation helpers, followed by a public API build.
 
 #### Phase 5B — Audit `Value` and reflection
 
@@ -563,12 +718,87 @@ Status: pending.
   reflective.
 - Verify that ordinary extraction is reachable without reflection.
 
+Verification checks public visibility as well as call sites: arbitrary
+`Value` has no immediate scalar/representation inspection other than runtime
+ownership, `EvaluatedValue` owns immediate scalar extraction, and pre-demand
+kind and privileged iteration are available only through reflection.
+
 #### Phase 5C — Close CCR-011
 
 - Update the cleanup review with the final surface and verification results.
 - Mark all completed phases in this plan.
 - Promote any enduring semantic explanation into architecture/API docs; leave
   transition-only detail here as history.
+
+Final verification runs focused facade and lifecycle tests first, then the
+entire required check suite. Relevant end-to-end cases are run with zero and
+multiple workers so successful-value equivalence is exercised across both
+deterministic and concurrent scheduling.
+
+## Verification Strategy
+
+Verification is layered so a broad green suite cannot conceal a boundary
+mistake:
+
+1. **Internal contract tests** exercise construction, demand, extraction, and
+   reflection separately. These tests may use crate-private claim/status
+   inspection solely to prove that a public `Values` operation took no action.
+2. **Public facade tests** in `tests/public_api.rs` compile and run through only
+   exported types. They prove ownership and visibility, not just runtime
+   behavior.
+3. **Source equivalence fixtures** express the corresponding `.g` operation
+   for application, access, slicing, annotations, dictionary composition, and
+   the lookup-policy helpers used by the host.
+   The host-composed operation and source-composed operation must produce
+   equivalent successful values. Tests compare the appropriate semantic
+   observation—bytes, exact number text, selected members, or normalized list
+   contents—not runtime-root identity or incidental internal representation.
+4. **Lifecycle and scheduling tests** force important orderings with barriers,
+   resolvers, explicit work pumping, or existing deterministic test hooks.
+   Sleeping, high iteration counts, and many worker threads may supplement but
+   never replace an ordering-controlled regression.
+5. **End-to-end integration tests** cover the CLI, macro protocols, executable
+   samples, assembly samples, diagnostics, and reflection hosts after their
+   migration.
+
+### Proving absence of demand
+
+Each no-demand constructor is applied to unresolved lazy values, resolver-owned
+promises, reflection gates, and nets where those inputs are meaningful. The
+test records the relevant claim/subscription/reduction state, constructs the
+result, and verifies that state is unchanged. It then demands the result and
+verifies that the expected work occurs. Returning quickly is not sufficient
+evidence: an implementation could subscribe or enqueue work and still return
+quickly.
+
+### Differential migration
+
+Before a compatibility implementation is deleted, old and new paths run
+side-by-side for their shared intended semantics. The old implementation is
+not the oracle where this plan deliberately corrects it—most importantly
+optional dictionary access and logical undefined handling. Those cases use
+the `.g` helpers as the semantic oracle and retain a test showing the former
+mismatch until the replacement lands.
+
+The differential comparisons cover values and structured failure shape. They
+do not require byte-for-byte identical failure messages or timing because the
+evaluator only promises equivalence of successful results.
+
+### Focused and final commands
+
+Implementation checkpoints run the narrowest affected unit tests first, then
+the relevant integration targets, such as:
+
+```sh
+cargo test -q --test public_api
+cargo test -q --test macro_protocols
+cargo test -q --test cli
+cargo test -q --test executable_samples
+cargo test -q --test hello_assemblies
+```
+
+The exact focused commands are recorded with each completed checkpoint. Every
+Rust-edit checkpoint then runs the repository-required full checks shown below.
 
 ## Verification Matrix
 
@@ -578,11 +808,14 @@ Status: pending.
 | Runtime provenance | every composite and evaluator entry rejects foreign-runtime values |
 | Application | zero, one, and multiple arguments match `.g` association and order |
 | Paths | empty, nested, dotted-name, computed-key, missing, and failing-intermediate cases |
-| Dictionary patterns | required/optional, logical undefined, nested path, wrong kind, and remainder cases match `.g` |
+| Dictionaries | access, singleton, union, update/removal, and caller-defined required/fallback helpers match `.g` |
 | Lists | compact binary, ordinary list, concatenation, lazy chunk, bounds, item failure, array materialization, and deque balancing |
 | Binary | annotation is lazy; `eval` preserves structured semantic errors; evaluated extraction is immediate |
 | Reproducibility | successful values agree across worker schedules; failures are only required to remain well-formed |
 | Reflection | pre-demand kind/status is visibly reflective and documented unstable |
+| Wrapper lifecycle | `EvaluatedValue` preserves its runtime root and remains usable after temporary facade handles are dropped |
+| API boundary | public clients cannot construct the WHNF witness or reach immediate representation inspection through `Value` |
+| Error context | path, configuration, binary assertion, and logger migrations retain structured context through rendering |
 | Compatibility removal | no production call or public test uses removed `Assembler` helpers |
 
 Every Rust-edit checkpoint runs:
