@@ -52,9 +52,7 @@ use crate::runtime::{
     EvaluationRuntimeId, RuntimeIds, RuntimeMutationAdmission, RuntimeMutationAuthority,
     RuntimeMutationGuard, RuntimeSettlementGuard, RuntimeValueRoot, allocate_evaluation_runtime_id,
 };
-use crate::source::{
-    FileSourceSystem, Host, HostSourceSystem, SourceArtifact, SourceIdentity, SourceSystem,
-};
+use crate::source::{FileSourceSystem, SourceArtifact, SourceIdentity, SourceSystem};
 
 const GLAM_COMPATIBILITY_VERSION: &str = "0.1.0";
 const IMPLEMENTATION_NAME: &str = "rust-bootstrap";
@@ -5181,11 +5179,6 @@ impl AssemblerBuilder {
     pub fn source_system(mut self, source_system: impl SourceSystem + 'static) -> Self {
         self.source_system = Arc::new(source_system);
         self
-    }
-
-    /// Adapts the previous byte-host API to the artifact-oriented source API.
-    pub fn host(self, host: impl Host + 'static) -> Self {
-        self.source_system(HostSourceSystem::new(host))
     }
 
     pub fn evaluation_runtime(mut self, runtime: EvaluationRuntime) -> Self {

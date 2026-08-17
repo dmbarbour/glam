@@ -350,19 +350,19 @@ forced-order callback and settlement tests retain the probe, while production
 and external builds no longer expose or compile it as an `EvaluationRuntime`
 operation.
 
-### CCR-008 — The byte-oriented `Host` adapter duplicates the artifact-oriented source system
+### CCR-008 — Resolved: `SourceSystem` exclusively owns source acquisition
 
 **Classification:** transitional compatibility  
 **Priority:** medium  
 **Confidence:** high
 
-`source.rs` still defines the old byte `Host`, `SystemHost`,
+At review time, `source.rs` still defined the old byte `Host`, `SystemHost`,
 `HostSourceSystem`, and a dedicated relative import resolver
 ([`source.rs`](../../src/source.rs#L376)). `AssemblerBuilder::host` explicitly
-adapts the “previous byte-host API” ([`api.rs`](../../src/api.rs#L5193)), and
-the types are re-exported publicly. Production construction uses
-`SourceSystem`; the remaining in-tree clients are compatibility tests with a
-`MemoryHost`. Even `FileSourceSystem::read_untracked` reaches the filesystem
+adapted the “previous byte-host API” ([`api.rs`](../../src/api.rs#L5193)), and
+the types were re-exported publicly. Production construction already used
+`SourceSystem`; the remaining in-tree clients were compatibility tests with a
+`MemoryHost`. Even `FileSourceSystem::read_untracked` reached the filesystem
 through `SystemHost` rather than reading directly.
 
 **Canonical owner:** `SourceSystem` returning a `SourceArtifact` with identity,
@@ -382,6 +382,37 @@ diagnostic provenance.
 
 **Expected simplification:** remove roughly seventy lines of adapter code plus
 the old public builder path and duplicate test fixture vocabulary.
+
+Resolution on 2026-08-17:
+
+- The six `MemoryHost` call sites in `tests/public_api.rs` now use the existing
+  artifact-oriented `MemorySourceSystem` or, where no source is loaded, the
+  default builder. The duplicate custom-host import test was consolidated into
+  the `SourceSystem` test that already covers top-level acquisition and a
+  relative binary import.
+- The migrated provenance tests now assert the identity selected by their
+  source system (`source.memory` and `memory:<path>`) instead of inheriting a
+  fabricated filesystem identity from the compatibility adapter. Exact-byte
+  digests, distinct compilation invocations, cached import diagnostics, and
+  import chains remain covered.
+- `Host`, `HostError`, `SystemHost`, and `HostSourceSystem` are no longer
+  exported or implemented. `AssemblerBuilder::host` has been removed, leaving
+  `AssemblerBuilder::source_system` as the single custom acquisition boundary.
+- `FileSourceSystem` reads through `std::fs` directly while retaining its own
+  absolute identities, consistency observations, relative resolver, manifest,
+  and mutation checks.
+- This is an intentional pre-release public API break. Clients that previously
+  supplied bytes through `Host` must now return a `SourceArtifact`, making
+  identity, digest, provenance, and relative-import authority explicit.
+
+Verification on 2026-08-17:
+
+- All seven focused `source::tests` and all 44 public API tests pass.
+- `cargo fmt --check` passes.
+- `cargo clippy --all-targets --all-features -- -D warnings` passes.
+- `cargo test -q` passes all 1,275 tests. The count is one lower because the
+  byte-host import test was consolidated into its artifact-source equivalent,
+  not because coverage was dropped.
 
 ### CCR-009 — Resolved: production tests own macro contracts and comments state current invariants
 
@@ -661,18 +692,17 @@ without either broad wakeups or incomplete settlement validation.
 
 ## Recommended implementation order
 
-1. **Low-risk removal:** CCR-001, CCR-002, CCR-007, and CCR-009 are complete.
-2. **Retire the remaining compatibility surface:** migrate source tests, then
-   perform CCR-008.
-3. **Coordinator protocol cleanup:** barrier-test and implement CCR-003, then
+1. **Low-risk and compatibility removal:** CCR-001, CCR-002, CCR-007, CCR-008,
+   and CCR-009 are complete.
+2. **Coordinator protocol cleanup:** barrier-test and implement CCR-003, then
    collapse the terminal representation in CCR-004.
-4. **Event-state rewrite:** decide CCR-005 explicitly, then combine it with
+3. **Event-state rewrite:** decide CCR-005 explicitly, then combine it with
    CCR-006 so the event maps and validation protocol are changed once.
-5. **Repeated mechanism:** prototype CCR-010 and retain it only if the result is
+4. **Repeated mechanism:** prototype CCR-010 and retain it only if the result is
    materially smaller and clearer.
-6. **Semantic facade cleanup:** stage CCR-011 after the main/configuration call
+5. **Semantic facade cleanup:** stage CCR-011 after the main/configuration call
    sites have composition helpers.
-7. **Module splitting:** only after the representations above settle. Split
+6. **Module splitting:** only after the representations above settle. Split
    large files along the remaining ownership boundaries, not around mechanisms
    scheduled for deletion.
 

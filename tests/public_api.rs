@@ -5,9 +5,9 @@ use std::sync::{Arc, Mutex};
 use bytes::Bytes;
 use glam::{
     Assembler, AssemblerBuilder, CONTENT_DIGEST_ALGORITHM, ContentDigest, Diagnostic,
-    DiagnosticEvent, EvaluationRuntime, Host, HostError, ImportResolver, ModuleInput,
-    QuiescenceReport, RelativeSourcePath, RuntimeDispositionKind, RuntimeReadiness, Severity,
-    SourceArtifact, SourceError, SourceIdentity, SourceSystem, Value, ValueKind,
+    DiagnosticEvent, EvaluationRuntime, ImportResolver, ModuleInput, QuiescenceReport,
+    RelativeSourcePath, RuntimeDispositionKind, RuntimeReadiness, Severity, SourceArtifact,
+    SourceError, SourceIdentity, SourceSystem, Value, ValueKind,
 };
 
 fn record<I, S>(values: &glam::Values, entries: I) -> Value
@@ -1154,34 +1154,7 @@ fn replacing_retained_diagnostic_subscriber_preserves_scheduled_reasoning() {
 }
 
 #[test]
-fn public_api_can_load_sources_and_binaries_from_a_custom_host() {
-    let host = MemoryHost::new([
-        (
-            "main.g",
-            b"language g0\nimport \"payload.bin\" binary as payload\nasm.result = payload\n"
-                .as_slice(),
-        ),
-        ("payload.bin", b"virtual bytes".as_slice()),
-    ]);
-    let assembler = Assembler::builder()
-        .host(host)
-        .build()
-        .expect("custom-host assembler should build");
-    let module = assembler
-        .module(["virtual"])
-        .inputs([ModuleInput::file("main.g")])
-        .build()
-        .expect("virtual module should build");
-
-    assert_eq!(
-        binary_at(&assembler, module.value(), "asm.result")
-            .expect("virtual binary import should evaluate"),
-        b"virtual bytes".as_slice()
-    );
-}
-
-#[test]
-fn public_api_can_load_from_an_artifact_source_system() {
+fn public_api_loads_top_level_sources_and_relative_binaries_from_a_source_system() {
     let sources = MemorySourceSystem::new([
         (
             "main.g",
@@ -1210,7 +1183,6 @@ fn public_api_can_load_from_an_artifact_source_system() {
 fn client_reflection_environment_is_visible_to_reflection_annotations() {
     let (builder, diagnostics) = collecting_builder();
     let assembler = builder
-        .host(MemoryHost::new([]))
         .reflection_environment(|environment| {
             let values = environment.values();
             let process_environment = dictionary(
@@ -1275,7 +1247,7 @@ fn client_reflection_environment_is_visible_to_reflection_annotations() {
 fn top_level_file_inputs_may_be_absolute() {
     let source_path = absolute_path_text("absolute-input.g");
     let assembler = Assembler::builder()
-        .host(MemoryHost::new([(
+        .source_system(MemorySourceSystem::new([(
             source_path.as_str(),
             b"language g0\nasm.result = \"absolute\"\n".as_slice(),
         )]))
@@ -1296,7 +1268,7 @@ fn top_level_file_inputs_may_be_absolute() {
 #[test]
 fn source_compiler_reports_invalid_utf8_with_assembler_provenance() {
     let assembler = Assembler::builder()
-        .host(MemoryHost::new([(
+        .source_system(MemorySourceSystem::new([(
             "invalid.g",
             b"language g0\nvalue = \xff\n".as_slice(),
         )]))
@@ -1311,8 +1283,7 @@ fn source_compiler_reports_invalid_utf8_with_assembler_provenance() {
 
     assert_eq!(error.diagnostics().len(), 1);
     let diagnostic = &error.diagnostics()[0];
-    let source_path = absolute_path_text("invalid.g");
-    assert_eq!(diagnostic.source(), Some(source_path.as_str()));
+    assert_eq!(diagnostic.source(), Some("memory:invalid.g"));
     assert_eq!(diagnostic.line(), Some(1));
     assert_eq!(diagnostic.severity(), Severity::Error);
     assert!(diagnostic.message().contains("not valid UTF-8"));
@@ -1328,10 +1299,10 @@ fn source_compiler_reports_invalid_utf8_with_assembler_provenance() {
     );
     assert_eq!(
         assembler
-            .get(&enriched, "msg.origin.source.file")
+            .get(&enriched, "msg.origin.source.memory")
             .expect("assembler source provenance should be mixed in")
             .as_binary(),
-        Some(source_path.as_bytes())
+        Some(b"invalid.g".as_slice())
     );
     let expected_digest = ContentDigest::of(b"language g0\nvalue = \xff\n");
     let digest_path = format!("msg.origin.digest.{CONTENT_DIGEST_ALGORITHM}");
@@ -1354,7 +1325,7 @@ fn source_compiler_reports_invalid_utf8_with_assembler_provenance() {
 #[test]
 fn repeated_source_compilations_have_distinct_invocations() {
     let assembler = Assembler::builder()
-        .host(MemoryHost::new([(
+        .source_system(MemorySourceSystem::new([(
             "invalid.g",
             b"language g0\nvalue = \xff\n".as_slice(),
         )]))
@@ -1384,12 +1355,11 @@ fn repeated_source_compilations_have_distinct_invocations() {
         invocation(&error.diagnostics()[0]),
         invocation(&error.diagnostics()[1])
     );
-    let source_path = absolute_path_text("invalid.g");
     assert!(
         error
             .diagnostics()
             .iter()
-            .all(|diagnostic| diagnostic.source() == Some(source_path.as_str()))
+            .all(|diagnostic| diagnostic.source() == Some("memory:invalid.g"))
     );
 }
 
@@ -1397,7 +1367,7 @@ fn repeated_source_compilations_have_distinct_invocations() {
 fn imported_source_diagnostics_include_the_import_chain() {
     let (builder, diagnostics) = collecting_builder();
     let assembler = builder
-        .host(MemoryHost::new([
+        .source_system(MemorySourceSystem::new([
             (
                 "main.g",
                 b"language g0\nimport \"child.g\" as child\nasm.result = child.value\n".as_slice(),
@@ -1426,15 +1396,11 @@ fn imported_source_diagnostics_include_the_import_chain() {
     let child_source = assembler
         .to_binary(
             &assembler
-                .get(&child_origin, "source.file")
+                .get(&child_origin, "source.memory")
                 .expect("child origin should retain its source identity"),
         )
         .unwrap();
-    assert!(
-        String::from_utf8_lossy(&child_source).ends_with("child.g"),
-        "unexpected child source: {}",
-        String::from_utf8_lossy(&child_source)
-    );
+    assert_eq!(child_source, b"child.g".as_slice());
 
     binary_at(&assembler, module.value(), "asm.result")
         .expect_err("the cached imported failure should remain observable");
@@ -1445,8 +1411,7 @@ fn imported_source_diagnostics_include_the_import_chain() {
         "forcing a cached import failure must not duplicate compile diagnostics"
     );
     let diagnostic = &diagnostics[0];
-    let source_path = absolute_path_text("child.g");
-    assert_eq!(diagnostic.source(), Some(source_path.as_str()));
+    assert_eq!(diagnostic.source(), Some("memory:child.g"));
     let enriched = diagnostic
         .enrich(&assembler.values())
         .expect("assembler metadata should enrich the diagnostic");
@@ -1664,30 +1629,6 @@ fn checked_net_builder_reports_wiring_and_finalization_errors() {
         })
         .expect_err("a port cannot be wired twice");
     assert!(duplicate.to_string().contains("wired more than once"));
-}
-
-struct MemoryHost {
-    files: HashMap<PathBuf, Bytes>,
-}
-
-impl MemoryHost {
-    fn new<const N: usize>(files: [(&str, &[u8]); N]) -> Self {
-        Self {
-            files: files
-                .into_iter()
-                .map(|(path, bytes)| (PathBuf::from(path), Bytes::copy_from_slice(bytes)))
-                .collect(),
-        }
-    }
-}
-
-impl Host for MemoryHost {
-    fn read(&self, path: &Path) -> Result<Bytes, HostError> {
-        self.files
-            .get(path)
-            .cloned()
-            .ok_or_else(|| HostError::new(format!("missing virtual file `{}`", path.display())))
-    }
 }
 
 #[derive(Clone)]

@@ -373,78 +373,6 @@ pub fn check_local_manifest(path: &Path) -> Result<Vec<ManifestMismatch>, Source
     Ok(mismatches)
 }
 
-/// Compatibility byte host adapted into the artifact-oriented source API.
-pub trait Host: Send + Sync {
-    fn read(&self, path: &Path) -> Result<Bytes, SourceError>;
-}
-
-impl<T: Host + ?Sized> Host for Arc<T> {
-    fn read(&self, path: &Path) -> Result<Bytes, SourceError> {
-        (**self).read(path)
-    }
-}
-
-pub type HostError = SourceError;
-
-#[derive(Debug, Default, Clone, Copy)]
-pub struct SystemHost;
-
-impl Host for SystemHost {
-    fn read(&self, path: &Path) -> Result<Bytes, SourceError> {
-        fs::read(path).map(Bytes::from).map_err(|error| {
-            SourceError::new(format!("could not read `{}`: {error}", path.display()))
-        })
-    }
-}
-
-#[derive(Clone)]
-pub struct HostSourceSystem {
-    host: Arc<dyn Host>,
-}
-
-impl HostSourceSystem {
-    pub fn new(host: impl Host + 'static) -> Self {
-        Self {
-            host: Arc::new(host),
-        }
-    }
-
-    fn load_path(&self, path: &Path) -> Result<SourceArtifact, SourceError> {
-        let bytes = self.host.read(path)?;
-        let absolute = absolute_path(path)?;
-        let base = path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .to_path_buf();
-        Ok(
-            SourceArtifact::new(bytes, SourceIdentity::file(&absolute)).with_import_resolver(
-                HostImportResolver {
-                    system: self.clone(),
-                    base,
-                },
-            ),
-        )
-    }
-}
-
-impl SourceSystem for HostSourceSystem {
-    fn load_top_level(&self, path: &Path) -> Result<SourceArtifact, SourceError> {
-        self.load_path(path)
-    }
-}
-
-#[derive(Clone)]
-struct HostImportResolver {
-    system: HostSourceSystem,
-    base: PathBuf,
-}
-
-impl ImportResolver for HostImportResolver {
-    fn load_relative(&self, request: &RelativeSourcePath) -> Result<SourceArtifact, SourceError> {
-        self.system.load_path(&self.base.join(request.as_str()))
-    }
-}
-
 /// Local filesystem source system with per-instance consistency observations.
 #[derive(Clone, Default)]
 pub struct FileSourceSystem {
@@ -453,7 +381,9 @@ pub struct FileSourceSystem {
 
 impl FileSourceSystem {
     fn read_untracked(path: &Path) -> Result<Bytes, SourceError> {
-        SystemHost.read(path)
+        fs::read(path).map(Bytes::from).map_err(|error| {
+            SourceError::new(format!("could not read `{}`: {error}", path.display()))
+        })
     }
 
     fn load_path(&self, path: &Path) -> Result<SourceArtifact, SourceError> {

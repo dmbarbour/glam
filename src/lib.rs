@@ -37,7 +37,7 @@ pub use g_source::{
 pub use reflection::{RuntimeInputEndpointId, RuntimeInputSequence};
 pub use runtime::EvaluationRuntimeId;
 pub use source::{
-    CONTENT_DIGEST_ALGORITHM, ContentDigest, FileSourceSystem, Host, HostError, HostSourceSystem,
-    ImportResolver, ManifestMismatch, RelativeSourcePath, SourceArtifact, SourceError,
-    SourceIdentity, SourceSystem, SystemHost, check_local_manifest,
+    CONTENT_DIGEST_ALGORITHM, ContentDigest, FileSourceSystem, ImportResolver, ManifestMismatch,
+    RelativeSourcePath, SourceArtifact, SourceError, SourceIdentity, SourceSystem,
+    check_local_manifest,
 };
