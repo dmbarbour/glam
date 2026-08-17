@@ -380,7 +380,7 @@ Verification on 2026-08-17:
   `cargo clippy --all-targets --all-features -- -D warnings`, and
   `cargo test -q` pass.
 
-### CCR-006 — Every event snapshot rebuilds the endpoint map
+### CCR-006 — Resolved: every event snapshot rebuilt the endpoint map
 
 **Classification:** unnecessary persistent-state copying  
 **Priority:** medium  
@@ -410,6 +410,32 @@ combined heap/event validation.
 
 **Expected simplification:** remove the per-snapshot collection traversal and
 shift map copying to actual map mutations.
+
+Resolution on 2026-08-17:
+
+- `RuntimeEventState::inputs` and `RuntimeEventSnapshot::inputs` now use the
+  project's existing `rpds::RedBlackTreeMapSync` convention. A transaction
+  snapshot clones one persistent root instead of traversing and rebuilding the
+  endpoint table.
+- Endpoint registration uses persistent insertion. Admission and committed
+  consumption use the map's copy-on-write `get_mut`, followed by the existing
+  `Arc::make_mut` on only the affected input buffer. A retained snapshot
+  therefore shares unrelated tree paths and buffers while preserving its
+  immutable view of the changed endpoint.
+- Output state and diagnostic routes remain ordinary `BTreeMap`s because they
+  are not part of `RuntimeEventSnapshot`.
+
+Verification on 2026-08-17:
+
+- A focused regression retains snapshots across later endpoint registration,
+  input admission, and committed consumption. Each old snapshot continues to
+  expose exactly the state captured at its transaction boundary.
+- Existing tests cover independent endpoint mutation, concurrent snapshots and
+  commits, diagnostic fallback draining, and atomic combined heap/event
+  validation.
+- `cargo fmt --check`,
+  `cargo clippy --all-targets --all-features -- -D warnings`, and
+  `cargo test -q` pass.
 
 ### CCR-007 — Resolved: a transitional readiness probe was public production API used only by tests
 
@@ -791,8 +817,7 @@ without either broad wakeups or incomplete settlement validation.
 1. **Low-risk and compatibility removal:** CCR-001, CCR-002, CCR-007, CCR-008,
    and CCR-009 are complete.
 2. **Coordinator protocol cleanup:** CCR-003 and CCR-004 are complete.
-3. **Event-state rewrite:** CCR-005 is complete; make snapshots clone one
-   persistent endpoint-map root in CCR-006 next.
+3. **Event-state rewrite:** CCR-005 and CCR-006 are complete.
 4. **Repeated mechanism:** prototype CCR-010 and retain it only if the result is
    materially smaller and clearer.
 5. **Semantic facade cleanup:** stage CCR-011 after the main/configuration call

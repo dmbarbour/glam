@@ -2510,7 +2510,7 @@ pub enum RuntimeDeliveryOutcome {
 }
 
 struct RuntimeEventState {
-    inputs: BTreeMap<RuntimeInputEndpointId, Arc<RuntimeInputBuffer>>,
+    inputs: RedBlackTreeMapSync<RuntimeInputEndpointId, Arc<RuntimeInputBuffer>>,
     outputs: RuntimeOutputState,
     diagnostic_routes: BTreeMap<RuntimeInputEndpointId, RuntimeDiagnosticRoute>,
 }
@@ -2518,7 +2518,7 @@ struct RuntimeEventState {
 impl RuntimeEventState {
     fn new() -> Self {
         Self {
-            inputs: BTreeMap::new(),
+            inputs: RedBlackTreeMapSync::new_sync(),
             outputs: RuntimeOutputState::default(),
             diagnostic_routes: BTreeMap::new(),
         }
@@ -2527,12 +2527,7 @@ impl RuntimeEventState {
     fn snapshot(&self, runtime: EvaluationRuntimeId) -> RuntimeEventSnapshot {
         RuntimeEventSnapshot {
             runtime,
-            inputs: Arc::new(
-                self.inputs
-                    .iter()
-                    .map(|(endpoint, input)| (*endpoint, input.clone()))
-                    .collect(),
-            ),
+            inputs: self.inputs.clone(),
         }
     }
 
@@ -2673,7 +2668,7 @@ impl RuntimeEventState {
 #[derive(Clone)]
 pub struct RuntimeEventSnapshot {
     runtime: EvaluationRuntimeId,
-    inputs: Arc<BTreeMap<RuntimeInputEndpointId, Arc<RuntimeInputBuffer>>>,
+    inputs: RedBlackTreeMapSync<RuntimeInputEndpointId, Arc<RuntimeInputBuffer>>,
 }
 
 #[derive(Clone)]
@@ -3939,7 +3934,7 @@ impl EvaluationRuntime {
             .expect("runtime transaction mutex should not be poisoned")
             .events
             .inputs
-            .insert(endpoint, Arc::new(RuntimeInputBuffer::default()));
+            .insert_mut(endpoint, Arc::new(RuntimeInputBuffer::default()));
         let owner = Arc::downgrade(&self.state.shared_resources);
         Ok(RuntimeInputEndpoint {
             sender: RuntimeInputSender {
@@ -6828,6 +6823,52 @@ mod tests {
     }
 
     #[test]
+    fn runtime_event_snapshots_preserve_persistent_input_roots() {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let (_, _, before_registration) = runtime.transaction_snapshot();
+        let endpoint = runtime
+            .input_endpoint(integer_converter(&runtime))
+            .expect("endpoint should register");
+
+        assert!(
+            !before_registration
+                .inputs
+                .contains_key(&endpoint.reader().id()),
+            "a retained snapshot must not observe later endpoint registration"
+        );
+        let (_, _, before_admission) = runtime.transaction_snapshot();
+        endpoint.sender().admit(11).expect("input should admit");
+        let mut stale = RuntimeEventJournal::new(before_admission);
+        assert_eq!(
+            stale.read(&endpoint.reader()).unwrap(),
+            None,
+            "a retained snapshot must not observe later input admission"
+        );
+
+        let (_, store, admitted) = runtime.transaction_snapshot();
+        let retained = admitted.clone();
+        let mut consumer = RuntimeEventJournal::new(admitted);
+        assert!(consumer.read(&endpoint.reader()).unwrap().is_some());
+        let store = crate::reflection::StoreJournal::new(store);
+        assert_eq!(
+            runtime.try_commit_transaction(&store, &consumer),
+            crate::reflection::StoreCommitResult::Committed
+        );
+
+        let mut historical = RuntimeEventJournal::new(retained);
+        assert_eq!(
+            historical
+                .read(&endpoint.reader())
+                .unwrap()
+                .and_then(|value| value.as_i64()),
+            Some(11),
+            "consumption must not mutate a retained input snapshot"
+        );
+        let (_, mut current) = input_transaction(&runtime);
+        assert_eq!(current.read(&endpoint.reader()).unwrap(), None);
+    }
+
+    #[test]
     fn runtime_input_conversion_precedes_admission_and_stores_only_roots() {
         struct HostPayload(Arc<()>);
 
@@ -6934,11 +6975,11 @@ mod tests {
                 .is_empty()
         );
 
-        let endpoint_count = after.inputs.len();
+        let endpoint_count = after.inputs.size();
         runtime.state.shared_resources.ids.exhaust_input_endpoints();
         assert!(runtime.input_endpoint(integer_converter(&runtime)).is_err());
         let (_, _, after_id_failure) = runtime.transaction_snapshot();
-        assert_eq!(after_id_failure.inputs.len(), endpoint_count);
+        assert_eq!(after_id_failure.inputs.size(), endpoint_count);
     }
 
     #[test]
