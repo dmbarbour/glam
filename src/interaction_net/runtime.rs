@@ -524,6 +524,7 @@ impl<S: NetSpecialization> SharedRuntimeNet<S> {
 
     #[cfg(test)]
     pub(crate) fn test_copy_layer(source: Self) -> (Self, Port) {
+        let source = source.prepare_copy_source();
         let mut target = RuntimeNet::empty();
         let cursor = target.begin_copy(source);
         let interface = target.add_interface(Port::principal(cursor));
@@ -542,6 +543,7 @@ impl<S: NetSpecialization> SharedRuntimeNet<S> {
 
     #[cfg(test)]
     pub(crate) fn test_pair_owned_copy_layer(source: Self) -> (Self, Port, NodeId) {
+        let source = source.prepare_copy_source();
         let mut target = RuntimeNet::empty();
         let bind = target.add_node(RuntimeNode::Bind);
         let cursor = target.begin_copy(source);
@@ -553,6 +555,7 @@ impl<S: NetSpecialization> SharedRuntimeNet<S> {
 
     #[cfg(test)]
     pub(crate) fn test_stable_root_with_claimed_cursor(source: Self) -> (Self, Port, NodeId) {
+        let source = source.prepare_copy_source();
         let mut target = RuntimeNet::empty();
         let root = target.add_node(RuntimeNode::Erase);
         let interface = target.add_interface(Port::principal(root));

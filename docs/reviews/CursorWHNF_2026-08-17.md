@@ -14,11 +14,11 @@ reducer. The former compatibility entry points are gone. The net-wide batch
 lease and broad disturbance epoch are recognizable, documented performance
 policies rather than hidden semantic shortcuts.
 
-One high-severity locking defect remains: completing a net-valued call holds
-the target runtime lock while acquiring the source runtime lock. A
-self-referential net deadlocks immediately; reciprocal copy installation can
-deadlock two threads. This directly contradicts the transition's central
-one-net-lock invariant.
+The high-severity locking defect found by this review has since been fixed.
+Logical-copy installation now captures the immutable source endpoint before
+acquiring the target net lock, then carries it through a prepared copy-source
+token. Forced self-source and reciprocal A/B regressions cover the former
+deadlocks.
 
 There is also one material semantic mismatch. The plan makes an observed
 permanent stuck endpoint immune to unrelated source revisions, but the
@@ -35,14 +35,15 @@ reference-count-dependent semantics.
 
 ## Findings
 
-### CW-001 — High: logical-copy installation can hold source and target locks together
+### CW-001 — Resolved: logical-copy installation held source and target locks together
 
 Confidence: high.
 
+At the reviewed baseline,
 [`RuntimeNet::begin_copy`](../../src/interaction_net/runtime/cursor.rs#L42)
-calls `source.with(RuntimeNet::exposed)` before installing the target-owned
-`CopyState`. That is safe while constructing an unshared `RuntimeNet`, as most
-low-level fixtures do. It is not safe through the production call path:
+called `source.with(RuntimeNet::exposed)` before installing the target-owned
+`CopyState`. That was safe while constructing an unshared `RuntimeNet`, as
+most low-level fixtures did. It was not safe through the production call path:
 [`progress_exact_core_call`](../../src/eval/net.rs#L630) invokes
 `runtime.with_mut(...)`, then
 [`resume_claimed_call_with_copy`](../../src/interaction_net/runtime/cursor.rs#L72)
@@ -62,21 +63,20 @@ that promise as net data. A promise may therefore be resolved with the net
 which contains it. The known retained `Arc` cycle is separate from the
 immediate mutex deadlock once the promised net is called.
 
-Recommended change:
+Resolution on 2026-08-17:
 
-1. Read and retain the source exposed port before acquiring the target lock.
-2. Replace the lock-taking `begin_copy(source)` inner operation with something
-   like `begin_copy(source, source_exposed)` or a prepared copy origin.
-3. Keep the source inspection and target installation as separate lock
-   phases, just like cursor advancement already does.
-
-Required regressions:
-
-- a same-runtime promised-net call which cannot hang while installing its
-  logical copy;
-- a barrier-forced reciprocal A/B installation which proves no nested lock
-  acquisition; and
-- the existing ordinary net-valued call and independent-copy fixtures.
+1. [`SharedRuntimeNet::prepare_copy_source`](../../src/interaction_net/runtime/cursor.rs#L27)
+   reads and retains the source exposed port before target mutation.
+2. `RuntimeNet::begin_copy` and claimed-call completion now accept only the
+   resulting `PreparedCopySource`; neither operation can inspect another
+   shared net while the target lock is held.
+3. [`progress_exact_core_call`](../../src/eval/net.rs#L630) prepares a
+   net-valued callable before entering `runtime.with_mut(...)`.
+4. `logical_copy_preparation_does_not_reenter_the_target_net_lock` exercises
+   the former self-source deadlock directly, while
+   `reciprocal_copy_installation_never_nests_runtime_net_locks` uses a barrier
+   to hold both target locks before the two insertions proceed. Existing
+   ordinary call and independent-copy fixtures remain passing.
 
 Do not solve this with a lock order. The intended invariant is stronger and
 cheaper: never hold two runtime-net locks simultaneously.
@@ -137,9 +137,9 @@ divergence or a lazy/promise dependency, not a cursor-claim deadlock.
 
 The transition plan and current interaction-net contract now state this
 distinction explicitly. No cursor-cycle detector or restriction on recursive
-net values is recommended. CW-001 remains independent: even a semantically
-divergent computation must not become a host mutex deadlock while installing a
-copy.
+net values is recommended. The CW-001 repair remains independently necessary:
+even a semantically divergent computation must not become a host mutex
+deadlock while installing a copy.
 
 ### CW-004 — Medium: Phase 5's final verification claim is broader than the tests
 
@@ -260,7 +260,7 @@ as the generic reducer and low-level test utility; cursor-WHNF production uses
 | Intended invariant | Accounting |
 | --- | --- |
 | Preserve source work sharing | Implemented. A logical copy stores its shared source and materializes only stable principal-frontier nodes. |
-| Normalize a cursor in its owning runtime | Implemented for cursor transitions and dependency resolution. CW-001 violates the related lock boundary during copy creation, not ownership of the cursor state. |
+| Normalize a cursor in its owning runtime | Implemented for cursor transitions and dependency resolution. Copy creation prepares the source endpoint before entering the target owner. |
 | Keep cursor administration distinct from interaction rules | Implemented. `CursorStep` and `ActivePairStep` keep discovery/administration explicit, while exact source pairs use ordinary `reduce_pair`. |
 | No demand agents or refcount policy in topology | Implemented. Demand resides in evaluator work and owner-local obligation records. |
 | Materialize only from a source principal frontier | Implemented in `inspect_source_frontier_shape` and `materialize_remote_node`. |
@@ -270,7 +270,7 @@ as the generic reducer and low-level test utility; cursor-WHNF production uses
 | Exactly one owner per cursor transition | Implemented and asserted: active-pair owner XOR pairless obligation owner. Authority transfer is under the target lock. Test coverage is incomplete for stable/claimed transfer (CW-004). |
 | Do not retain complete demand spines | Implemented. `principal_anchors` exists only during one locked inspection and is discarded after convergence lookup. |
 | Durable endpoint work is version validated | Implemented for nonterminal cursor/pair observations. Permanent stuck is over-invalidated (CW-002). |
-| Never hold two net locks | Implemented by cursor advancement, violated by net-valued call copy installation (CW-001). |
+| Never hold two net locks | Implemented by cursor advancement and copy installation. `PreparedCopySource` separates source inspection from target mutation (CW-001 resolution). |
 | No lost wakeup around claimed work | Implemented by capture-under-lock, disturbance epoch recheck under the same mutex, and condition-variable waiting. Barrier tests cover the disputed ordering. |
 | Batch follower disturbance without per-step thrashing | Implemented with a net-wide RAII lease. Every topology mutation advances its revision; only batch close publishes disturbance. |
 | Request-relative completion | Implemented for root shapes, stable cursors, unrelated active work, exact waits, and demanded failures. CW-002 is the terminal exception mismatch. |
@@ -298,10 +298,11 @@ as the generic reducer and low-level test utility; cursor-WHNF production uses
 - Recursive semantic evaluation may revisit a shared closed-net runtime, but
   cursor materialization still creates no cycle of mutually held work claims.
   CW-003 records the clarified scope of the hierarchy invariant.
+- Logical-copy installation uses a prepared source token so the target-owned
+  mutation phase has no reason or ability to acquire the source net lock.
 
 ### Accidental or unresolved drift
 
-- Copy installation breaks the one-lock rule (CW-001).
 - Permanent stuck observations do not receive their documented revision
   exception (CW-002).
 - The Phase 5 completion note overstates the retained test matrix (CW-004).
@@ -344,7 +345,7 @@ every reduction.
 | Pairless lifecycle | `pairless_cursor_obligation_transitions_have_one_owner`, `removing_a_cursor_removes_its_dormant_obligation` | Good owner and cleanup coverage. |
 | Authority transfer | `connecting_a_cursor_transfers_ready_and_blocked_obligations_to_the_pair` | Missing stable transfer and claimed-transfer rejection. |
 | Nonblocking step states | `cursor_steps_report_pairless_pair_owned_stable_and_contended_states`, `active_pair_steps_report_reduction_contention_blockage_stuck_and_gone` | Broad enumeration coverage. |
-| Source lock separation during advancement | `remote_cursor_exposes_source_progress_without_holding_nested_locks`, `root_cursor_claim_remains_exclusive_while_source_inspection_is_in_flight` | Strong for advancement; does not cover copy creation (CW-001). |
+| Source/target lock separation | `remote_cursor_exposes_source_progress_without_holding_nested_locks`, `root_cursor_claim_remains_exclusive_while_source_inspection_is_in_flight`, `logical_copy_preparation_does_not_reenter_the_target_net_lock`, `reciprocal_copy_installation_never_nests_runtime_net_locks` | Strong for both advancement and logical-copy creation. The reciprocal case forces both target locks to be held before insertion. |
 | Inspect/publish/wait race | `source_change_between_cursor_inspection_publication_and_wait_is_not_lost` | Barrier-driven and appropriately forced. |
 | Parallel pairless demand | `concurrent_interface_demands_share_one_pairless_cursor_claim` | Barrier-driven ownership coverage. |
 | Batch lifecycle and followers | `normalization_batch_lease_is_exclusive_and_drop_safe`, `normalization_batch_defers_disturbance_until_release`, `normalization_batch_wakes_a_registered_follower_once_at_release` | Strong, including RAII release and one closing wake. |
@@ -356,23 +357,21 @@ every reduction.
 | Exact semantic waits | `blocked_call_requires_its_current_wait_token_to_be_reclaimed`, operator equivalent, reflection-gate call/operator tests | Exact token and scheduler-visible retry are covered. |
 | Permanent failure | generic stuck tests and `specialization_failure_remains_structured_in_the_stuck_pair` | Direct root behavior is covered; nested post-disturbance driver propagation is not. |
 | Iterative depth | `iterative_cursor_driver_exceeds_the_former_recursion_limit` | Strong productive pairless case; missing deep stable/mixed cases. |
-| Runtime transfer | `cursor_driver_releases_each_runtime_before_crossing_to_the_next` | Proves leases are closed, but not mutex lock ordering during copy creation. |
+| Runtime transfer | `cursor_driver_releases_each_runtime_before_crossing_to_the_next` | Proves leases are closed before crossing between runtime nets. Copy installation lock separation is covered independently above. |
 | Public semantic boundary | raw-net opacity, `net_arity`, net computation/function, non-data-normal-form, and executable sample tests | Good language-level integration coverage. |
 
-The focused runtime suite contains 60 tests and the evaluator driver suite 10;
-both pass at the reviewed baseline. The full repository suite also passes with
-1,270 tests across all targets. Passing counts do not close CW-001, CW-002, or
-CW-004 because their disputed orderings or depths are not exercised.
+The focused runtime suite contains 62 tests and the evaluator driver suite 10;
+both pass after the CW-001 resolution. The full repository suite also passes
+with 1,272 tests across all targets. Passing counts do not close CW-002 or
+CW-004 because their disputed ordering or depths are not exercised.
 
 ## Recommended order
 
-1. Fix CW-001 before additional concurrency or GC work. It is a hard hang at a
-   boundary the design explicitly intended to make lock-separated.
-2. Implement the terminal stuck exception and replace the state-inspection
+1. Implement the terminal stuck exception and replace the state-inspection
    test with a driver-level forced-order regression (CW-002).
-3. Complete the promised Phase 5 test matrix, especially deep stable and mixed
+2. Complete the promised Phase 5 test matrix, especially deep stable and mixed
    ownership (CW-004).
-4. Remove the false call-read publication (CW-005), then perform the small
+3. Remove the false call-read publication (CW-005), then perform the small
    observation/driver and current-doc cleanup (CW-006).
 
 After these items, the cursor-WHNF transition can reasonably be treated as a

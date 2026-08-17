@@ -143,13 +143,27 @@ fn claim_test_interface_cursor<S: NetSpecialization>(
     .flatten()
 }
 
+fn remove_unwired_test_copy<S: NetSpecialization>(target: &SharedRuntimeNet<S>, cursor: NodeId) {
+    target.with_mut(|runtime| {
+        let copy = match runtime.node(cursor) {
+            Some(RuntimeNode::RemoteCursor { copy, .. }) => *copy,
+            _ => panic!("logical copy should install a remote cursor"),
+        };
+        assert!(runtime.copies.remove(&copy).is_some());
+        assert!(matches!(
+            runtime.remove_node(cursor),
+            RuntimeNode::RemoteCursor { .. }
+        ));
+    });
+}
+
 fn pairless_cursor_dependency_fixture() -> (SharedRuntimeNet<()>, NodeId, CursorDependency<()>) {
     let mut source = NetBuilder::<()>::new();
     let data = source.data(());
     let source = source.finish(data).instantiate_shared();
     let mut target = RuntimeNet::empty();
-    let cursor = target.begin_copy(source.clone());
-    let dependency = target.begin_copy(source);
+    let cursor = target.begin_copy(source.prepare_copy_source());
+    let dependency = target.begin_copy(source.prepare_copy_source());
     assert!(target.ensure_pairless_cursor_obligation(cursor));
     assert!(target.claim_pairless_cursor_obligation(cursor));
     let expected = CursorDependency::LocalCursor(dependency);
@@ -162,8 +176,8 @@ fn pair_owned_cursor_dependency_fixture() -> (SharedRuntimeNet<()>, NodeId, Curs
     let data = source.data(());
     let source = source.finish(data).instantiate_shared();
     let mut target = RuntimeNet::empty();
-    let cursor = target.begin_copy(source.clone());
-    let dependency = target.begin_copy(source);
+    let cursor = target.begin_copy(source.prepare_copy_source());
+    let dependency = target.begin_copy(source.prepare_copy_source());
     let local = target.add_node(RuntimeNode::Data(()));
     target.connect(Port::principal(cursor), Port::principal(local));
     let pair = ActivePairKey::new(cursor, local);
@@ -536,7 +550,7 @@ fn conditional_runtime_mutation_publishes_only_new_cursor_obligations() {
     let data = source.data(());
     let source = source.finish(data).instantiate_shared();
     let mut target = RuntimeNet::empty();
-    let cursor = target.begin_copy(source);
+    let cursor = target.begin_copy(source.prepare_copy_source());
     let target = SharedRuntimeNet::new(target);
 
     let (initial_topology, initial_disturbance) = target.revisions();
@@ -575,7 +589,7 @@ fn root_normalization_demand_is_idempotent_and_enumerable() {
     let data = source.data(());
     let source = source.finish(data).instantiate_shared();
     let mut target = RuntimeNet::empty();
-    let cursor = target.begin_copy(source);
+    let cursor = target.begin_copy(source.prepare_copy_source());
     let interface = target.add_interface(Port::principal(cursor));
     let target = SharedRuntimeNet::new(target);
 
@@ -669,7 +683,7 @@ fn interface_demand_poll_installs_and_recognizes_stable_cursor_owners() {
     let data = data_source.data(());
     let data_source = data_source.finish(data).instantiate_shared();
     let mut target = RuntimeNet::empty();
-    let cursor = target.begin_copy(data_source);
+    let cursor = target.begin_copy(data_source.prepare_copy_source());
     let interface = target.add_interface(Port::principal(cursor));
     let target = SharedRuntimeNet::new(target);
     let revisions = target.revisions();
@@ -691,7 +705,7 @@ fn interface_demand_poll_installs_and_recognizes_stable_cursor_owners() {
     let stable_source = SharedRuntimeNet::new(stable_source);
 
     let mut pairless_target = RuntimeNet::empty();
-    let pairless_cursor = pairless_target.begin_copy(stable_source.clone());
+    let pairless_cursor = pairless_target.begin_copy(stable_source.prepare_copy_source());
     let pairless_interface = pairless_target.add_interface(Port::principal(pairless_cursor));
     let pairless_target = SharedRuntimeNet::new(pairless_target);
     assert_eq!(
@@ -709,7 +723,7 @@ fn interface_demand_poll_installs_and_recognizes_stable_cursor_owners() {
 
     let mut pair_target = RuntimeNet::empty();
     let root_bind = pair_target.add_node(RuntimeNode::Bind);
-    let pair_cursor = pair_target.begin_copy(stable_source);
+    let pair_cursor = pair_target.begin_copy(stable_source.prepare_copy_source());
     pair_target.connect(Port::principal(root_bind), Port::principal(pair_cursor));
     let pair = ActivePairKey::new(root_bind, pair_cursor);
     let pair_interface = pair_target.add_interface(Port::auxiliary(root_bind, 1));
@@ -750,7 +764,7 @@ fn interface_demand_work_selection_is_revalidated_before_dispatch() {
     let data = source.data(());
     let source = source.finish(data).instantiate_shared();
     let mut target = RuntimeNet::empty();
-    let cursor = target.begin_copy(source);
+    let cursor = target.begin_copy(source.prepare_copy_source());
     let interface = target.add_interface(Port::principal(cursor));
     let target = SharedRuntimeNet::new(target);
     assert_eq!(
@@ -859,7 +873,7 @@ fn cursor_steps_report_pairless_pair_owned_stable_and_contended_states() {
     let source = source_requiring_one_reduction().instantiate_shared();
     let source_pair = source.with(|runtime| runtime.ready_pairs()[0]);
     let mut target = RuntimeNet::empty();
-    let cursor = target.begin_copy(source.clone());
+    let cursor = target.begin_copy(source.prepare_copy_source());
     let interface = target.add_interface(Port::principal(cursor));
     let target = SharedRuntimeNet::new(target);
     assert_eq!(
@@ -888,7 +902,7 @@ fn cursor_steps_report_pairless_pair_owned_stable_and_contended_states() {
     let data = leaf.data("leaf");
     let leaf = leaf.finish(data).instantiate_shared();
     let mut pair_target = RuntimeNet::empty();
-    let pair_cursor = pair_target.begin_copy(leaf);
+    let pair_cursor = pair_target.begin_copy(leaf.prepare_copy_source());
     let local = pair_target.add_node(RuntimeNode::Data("local"));
     pair_target.connect(Port::principal(pair_cursor), Port::principal(local));
     let pair_target = SharedRuntimeNet::new(pair_target);
@@ -902,7 +916,8 @@ fn cursor_steps_report_pairless_pair_owned_stable_and_contended_states() {
     let exposed = stable_source.add_interface(Port::auxiliary(bind, 1));
     stable_source.exposed = Some(exposed);
     let mut stable_target = RuntimeNet::empty();
-    let stable_cursor = stable_target.begin_copy(SharedRuntimeNet::new(stable_source));
+    let stable_source = SharedRuntimeNet::new(stable_source);
+    let stable_cursor = stable_target.begin_copy(stable_source.prepare_copy_source());
     let stable_interface = stable_target.add_interface(Port::principal(stable_cursor));
     let stable_target = SharedRuntimeNet::new(stable_target);
     assert_eq!(
@@ -918,7 +933,7 @@ fn cursor_steps_report_pairless_pair_owned_stable_and_contended_states() {
     let data = claimed_source.data("claimed");
     let claimed_source = claimed_source.finish(data).instantiate_shared();
     let mut claimed_target = RuntimeNet::empty();
-    let claimed_cursor = claimed_target.begin_copy(claimed_source);
+    let claimed_cursor = claimed_target.begin_copy(claimed_source.prepare_copy_source());
     let claimed_interface = claimed_target.add_interface(Port::principal(claimed_cursor));
     let claimed_target = SharedRuntimeNet::new(claimed_target);
     assert_eq!(
@@ -1165,8 +1180,8 @@ fn pairless_cursor_obligation_transitions_have_one_owner() {
     let data = source.data(());
     let source = source.finish(data).instantiate_shared();
     let mut target = RuntimeNet::empty();
-    let blocked_cursor = target.begin_copy(source.clone());
-    let stable_cursor = target.begin_copy(source);
+    let blocked_cursor = target.begin_copy(source.prepare_copy_source());
+    let stable_cursor = target.begin_copy(source.prepare_copy_source());
 
     assert!(target.ensure_pairless_cursor_obligation(blocked_cursor));
     assert_eq!(
@@ -1213,7 +1228,7 @@ fn removing_a_cursor_removes_its_dormant_obligation() {
     let data = source.data(());
     let source = source.finish(data).instantiate_shared();
     let mut target = RuntimeNet::empty();
-    let cursor = target.begin_copy(source);
+    let cursor = target.begin_copy(source.prepare_copy_source());
     assert!(target.ensure_pairless_cursor_obligation(cursor));
 
     assert!(matches!(
@@ -1231,7 +1246,7 @@ fn active_pair_cursor_owner_is_distinct_from_pairless_obligation_owner() {
     let data = source.data(());
     let source = source.finish(data).instantiate_shared();
     let mut target = RuntimeNet::empty();
-    let cursor = target.begin_copy(source);
+    let cursor = target.begin_copy(source.prepare_copy_source());
     let bind = target.add_node(RuntimeNode::Bind);
     target.connect(Port::principal(cursor), Port::principal(bind));
     let pair = ActivePairKey::new(cursor, bind);
@@ -1250,7 +1265,7 @@ fn connecting_a_cursor_transfers_ready_and_blocked_obligations_to_the_pair() {
     let source = source.finish(data).instantiate_shared();
 
     let mut ready_target = RuntimeNet::empty();
-    let ready_cursor = ready_target.begin_copy(source.clone());
+    let ready_cursor = ready_target.begin_copy(source.prepare_copy_source());
     let ready_bind = ready_target.add_node(RuntimeNode::Bind);
     assert!(ready_target.ensure_pairless_cursor_obligation(ready_cursor));
     ready_target.connect(Port::principal(ready_cursor), Port::principal(ready_bind));
@@ -1262,8 +1277,8 @@ fn connecting_a_cursor_transfers_ready_and_blocked_obligations_to_the_pair() {
     ));
 
     let mut blocked_target = RuntimeNet::empty();
-    let blocked_cursor = blocked_target.begin_copy(source.clone());
-    let dependency = blocked_target.begin_copy(source);
+    let blocked_cursor = blocked_target.begin_copy(source.prepare_copy_source());
+    let dependency = blocked_target.begin_copy(source.prepare_copy_source());
     let blocked_bind = blocked_target.add_node(RuntimeNode::Bind);
     assert!(blocked_target.ensure_pairless_cursor_obligation(blocked_cursor));
     assert!(blocked_target.claim_pairless_cursor_obligation(blocked_cursor));
@@ -1401,7 +1416,7 @@ fn nested_cursor_preserves_structured_failure_across_unrelated_source_progress()
 
     let mut target = RuntimeNet::<StructuredSpecialization>::empty();
     let local = target.add_node(RuntimeNode::Data(0));
-    let cursor = target.begin_copy(source.clone());
+    let cursor = target.begin_copy(source.prepare_copy_source());
     target.connect(Port::principal(local), Port::principal(cursor));
     assert_eq!(reduce_next_cursor(&mut target).1, CursorProgress::Blocked);
 
@@ -1688,7 +1703,7 @@ fn source_requiring_one_reduction() -> InteractionNet<&'static str> {
 fn target_waiting_on(source: SharedRuntimeNet<&'static str>) -> RuntimeNet<&'static str> {
     let mut target = RuntimeNet::empty();
     let local = target.add_node(RuntimeNode::Data("local"));
-    let cursor = target.begin_copy(source);
+    let cursor = target.begin_copy(source.prepare_copy_source());
     target.connect(Port::principal(local), Port::principal(cursor));
     target
 }
@@ -1899,7 +1914,7 @@ fn layered_cursor_reports_and_follows_an_exact_dependency() {
     let leaf = leaf.finish(data).instantiate_shared();
 
     let mut middle = RuntimeNet::empty();
-    let middle_cursor = middle.begin_copy(leaf);
+    let middle_cursor = middle.begin_copy(leaf.prepare_copy_source());
     let exposed = middle.add_interface(Port::principal(middle_cursor));
     middle.exposed = Some(exposed);
     let middle = SharedRuntimeNet::new(middle);
@@ -1940,7 +1955,7 @@ fn nested_cursor_demand_reuses_a_claimed_source_obligation() {
     let leaf = leaf.finish(data).instantiate_shared();
 
     let mut middle = RuntimeNet::empty();
-    let middle_cursor = middle.begin_copy(leaf);
+    let middle_cursor = middle.begin_copy(leaf.prepare_copy_source());
     let exposed = middle.add_interface(Port::principal(middle_cursor));
     middle.exposed = Some(exposed);
     let middle = SharedRuntimeNet::new(middle);
@@ -1996,7 +2011,7 @@ fn root_cursor_claim_remains_exclusive_while_source_inspection_is_in_flight() {
     let source = source.finish(data).instantiate_shared();
 
     let mut target = RuntimeNet::empty();
-    let root_cursor = target.begin_copy(source);
+    let root_cursor = target.begin_copy(source.prepare_copy_source());
     let exposed = target.add_interface(Port::principal(root_cursor));
 
     assert_eq!(
@@ -2032,7 +2047,7 @@ fn root_cursor_claim_remains_exclusive_while_source_inspection_is_in_flight() {
 fn pairless_cursor_claim_publishes_blocked_and_stable_obligations() {
     let source = source_requiring_one_reduction().instantiate_shared();
     let mut blocked_target = RuntimeNet::empty();
-    let blocked_cursor = blocked_target.begin_copy(source);
+    let blocked_cursor = blocked_target.begin_copy(source.prepare_copy_source());
     let blocked_interface = blocked_target.add_interface(Port::principal(blocked_cursor));
     assert_eq!(
         claim_test_interface_cursor(&mut blocked_target, blocked_interface),
@@ -2058,7 +2073,7 @@ fn pairless_cursor_claim_publishes_blocked_and_stable_obligations() {
     stable_source.exposed = Some(exposed);
     let stable_source = SharedRuntimeNet::new(stable_source);
     let mut stable_target = RuntimeNet::empty();
-    let stable_cursor = stable_target.begin_copy(stable_source);
+    let stable_cursor = stable_target.begin_copy(stable_source.prepare_copy_source());
     let stable_interface = stable_target.add_interface(Port::principal(stable_cursor));
     assert_eq!(
         claim_test_interface_cursor(&mut stable_target, stable_interface),
@@ -2112,7 +2127,7 @@ fn concurrent_interface_demands_share_one_pairless_cursor_claim() {
     let source = source.finish(data).instantiate_shared();
 
     let mut target = RuntimeNet::empty();
-    let root_cursor = target.begin_copy(source);
+    let root_cursor = target.begin_copy(source.prepare_copy_source());
     let exposed = target.add_interface(Port::principal(root_cursor));
     let target = SharedRuntimeNet::new(target);
     let claimed = Arc::new(Barrier::new(2));
@@ -2166,7 +2181,7 @@ fn auxiliary_cursor_drives_the_local_cursor_facing_the_principal() {
     let source = SharedRuntimeNet::new(source);
 
     let mut target = RuntimeNet::empty();
-    let root_cursor = target.begin_copy(source);
+    let root_cursor = target.begin_copy(source.prepare_copy_source());
     let target_exposed = target.add_interface(Port::principal(root_cursor));
     assert_eq!(
         claim_test_interface_cursor(&mut target, target_exposed),
@@ -2233,7 +2248,7 @@ fn auxiliary_cursor_traces_a_principal_chain_to_an_exact_source_pair() {
     let source = SharedRuntimeNet::new(source);
 
     let mut target = RuntimeNet::empty();
-    let root_cursor = target.begin_copy(source.clone());
+    let root_cursor = target.begin_copy(source.prepare_copy_source());
     let target_exposed = target.add_interface(Port::principal(root_cursor));
     assert_eq!(
         claim_test_interface_cursor(&mut target, target_exposed),
@@ -2359,7 +2374,7 @@ fn auxiliary_cursor_reinspects_after_a_principal_remote_cursor_materializes() {
 
     let mut source: RuntimeNet<&'static str> = RuntimeNet::empty();
     let host = source.add_node(RuntimeNode::Bind);
-    let source_cursor = source.begin_copy(leaf);
+    let source_cursor = source.begin_copy(leaf.prepare_copy_source());
     source.connect(Port::principal(host), Port::principal(source_cursor));
     let result = source.add_node(RuntimeNode::Data("result"));
     source.connect(Port::auxiliary(host, 2), Port::principal(result));
@@ -2425,7 +2440,7 @@ fn materializing_a_root_creates_lazy_auxiliary_cursors() {
     let source_nodes = source.with(|runtime| runtime.nodes.len());
     let mut target = RuntimeNet::empty();
     let local = target.add_node(RuntimeNode::Data(()));
-    let cursor = target.begin_copy(source.clone());
+    let cursor = target.begin_copy(source.prepare_copy_source());
     target.connect(Port::principal(local), Port::principal(cursor));
 
     assert!(matches!(
@@ -2439,6 +2454,90 @@ fn materializing_a_root_creates_lazy_auxiliary_cursors() {
         .count();
     assert_eq!(cursors, 2);
     assert_eq!(source.with(|runtime| runtime.nodes.len()), source_nodes);
+}
+
+#[test]
+fn logical_copy_preparation_does_not_reenter_the_target_net_lock() {
+    let mut template = NetBuilder::<()>::new();
+    let data = template.data(());
+    let runtime = template.finish(data).instantiate_shared();
+    let target = runtime.clone();
+    let source = runtime.prepare_copy_source();
+    let (sender, receiver) = mpsc::channel();
+
+    let worker = thread::spawn(move || {
+        let cursor = target.with_mut(|target| target.begin_copy(source));
+        sender
+            .send(cursor)
+            .expect("copy-preparation test receiver should remain open");
+    });
+
+    let cursor = receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("logical-copy preparation must not inspect the source under the target lock");
+    worker
+        .join()
+        .expect("copy-preparation worker should not panic");
+    remove_unwired_test_copy(&runtime, cursor);
+}
+
+#[test]
+fn reciprocal_copy_installation_never_nests_runtime_net_locks() {
+    let mut first_template = NetBuilder::<()>::new();
+    let first_data = first_template.data(());
+    let first = first_template.finish(first_data).instantiate_shared();
+    let mut second_template = NetBuilder::<()>::new();
+    let second_data = second_template.data(());
+    let second = second_template.finish(second_data).instantiate_shared();
+
+    let first_target = first.clone();
+    let first_source = second.prepare_copy_source();
+    let second_target = second.clone();
+    let second_source = first.prepare_copy_source();
+    let barrier = Arc::new(Barrier::new(3));
+    let (sender, receiver) = mpsc::channel();
+
+    let first_barrier = barrier.clone();
+    let first_sender = sender.clone();
+    let first_worker = thread::spawn(move || {
+        let cursor = first_target.with_mut(|target| {
+            first_barrier.wait();
+            target.begin_copy(first_source)
+        });
+        first_sender
+            .send((true, cursor))
+            .expect("reciprocal-copy receiver should remain open");
+    });
+    let second_barrier = barrier.clone();
+    let second_worker = thread::spawn(move || {
+        let cursor = second_target.with_mut(|target| {
+            second_barrier.wait();
+            target.begin_copy(second_source)
+        });
+        sender
+            .send((false, cursor))
+            .expect("reciprocal-copy receiver should remain open");
+    });
+
+    barrier.wait();
+    let installed = [
+        receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("first reciprocal logical copy should complete"),
+        receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("second reciprocal logical copy should complete"),
+    ];
+    first_worker
+        .join()
+        .expect("first reciprocal-copy worker should not panic");
+    second_worker
+        .join()
+        .expect("second reciprocal-copy worker should not panic");
+
+    for (installed_in_first, cursor) in installed {
+        remove_unwired_test_copy(if installed_in_first { &first } else { &second }, cursor);
+    }
 }
 
 #[test]
@@ -2461,7 +2560,7 @@ fn resuming_a_call_materializes_only_the_root_bind() {
         panic!("bind-data must block as a call");
     };
     let call = Call { pair, bind, data };
-    caller.resume_claimed_call_with_copy(call, source);
+    caller.resume_claimed_call_with_copy(call, source.prepare_copy_source());
     assert!(matches!(
         reduce_next_cursor(&mut caller).1,
         CursorProgress::Materialized { .. }
@@ -2507,7 +2606,7 @@ fn converging_frontiers_join_without_leaving_a_stale_cursor_pair() {
         panic!("bind-data must become a call");
     };
     let call = Call { pair, bind, data };
-    caller.resume_claimed_call_with_copy(call, source);
+    caller.resume_claimed_call_with_copy(call, source.prepare_copy_source());
     assert!(matches!(
         reduce_next_cursor(&mut caller).1,
         CursorProgress::Materialized { .. }
@@ -2552,7 +2651,7 @@ fn converging_frontier_waits_for_a_claimed_peer() {
         panic!("bind-data must become a call");
     };
     let call = Call { pair, bind, data };
-    caller.resume_claimed_call_with_copy(call, source);
+    caller.resume_claimed_call_with_copy(call, source.prepare_copy_source());
     assert!(matches!(
         reduce_next_cursor(&mut caller).1,
         CursorProgress::Materialized { .. }
@@ -2617,7 +2716,7 @@ fn separate_logical_copies_rebase_fans_to_distinct_local_sites() {
     let mut cursor_pairs = Vec::new();
     for _ in 0..2 {
         let local = target.add_node(RuntimeNode::Data(()));
-        let cursor = target.begin_copy(source.clone());
+        let cursor = target.begin_copy(source.prepare_copy_source());
         target.connect(Port::principal(local), Port::principal(cursor));
         cursor_pairs.push(ActivePairKey::new(local, cursor));
     }
@@ -2645,7 +2744,7 @@ fn erasing_a_remote_cursor_materializes_then_uses_ordinary_erasure() {
     let source_nodes = source.with(|runtime| runtime.nodes.len());
     let mut target = RuntimeNet::empty();
     let eraser = target.add_node(RuntimeNode::Erase);
-    let cursor = target.begin_copy(source.clone());
+    let cursor = target.begin_copy(source.prepare_copy_source());
     target.connect(Port::principal(eraser), Port::principal(cursor));
 
     assert!(matches!(

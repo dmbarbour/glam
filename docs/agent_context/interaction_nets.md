@@ -110,6 +110,11 @@ There is deliberately no source-node to target-node history. Embedded data is
 ordinary `Clone` data. Copied target nodes may reduce or disappear immediately,
 so their former source identity is not useful provenance.
 
+Creating a logical copy is also lock-separated. The source's immutable exposed
+port is captured in a prepared copy-source token before target mutation begins;
+installing `CopyState` and its first cursor then holds only the target runtime
+mutex. This applies even when source and target are the same shared runtime.
+
 `RemoteCursor { copy, remote }` is a target-local, principal-only agent and a
 one-way suspended wire from source to target. `remote` identifies the source
 interface port or an auxiliary port of a source node already materialized for

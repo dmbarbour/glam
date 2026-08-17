@@ -19,6 +19,18 @@ impl<S: NetSpecialization> SourceFrontierShape<S> {
 }
 
 impl<S: NetSpecialization> SharedRuntimeNet<S> {
+    /// Captures the immutable source endpoint needed to start a logical copy.
+    ///
+    /// Callers must prepare the source before acquiring the target net lock.
+    /// The resulting token lets target mutation proceed without inspecting a
+    /// second shared net.
+    pub(crate) fn prepare_copy_source(&self) -> PreparedCopySource<S> {
+        PreparedCopySource {
+            source: self.clone(),
+            remote: self.with(RuntimeNet::exposed),
+        }
+    }
+
     /// Traverses one source demand spine under the source lock and retains
     /// only the root/version/endpoint observation needed to validate it.
     pub(in crate::interaction_net::runtime) fn inspect_source_frontier(
@@ -37,10 +49,18 @@ impl<S: NetSpecialization> SharedRuntimeNet<S> {
     }
 }
 
+pub(crate) struct PreparedCopySource<S: NetSpecialization> {
+    source: SharedRuntimeNet<S>,
+    remote: Port,
+}
+
 impl<S: NetSpecialization> RuntimeNet<S> {
     /// Starts one logical copy and returns its initially unwired remote cursor.
-    pub fn begin_copy(&mut self, source: SharedRuntimeNet<S>) -> NodeId {
-        let remote = source.with(RuntimeNet::exposed);
+    ///
+    /// Source inspection has already happened in `prepare_copy_source`, so
+    /// this operation may safely run while the target net lock is held.
+    pub fn begin_copy(&mut self, prepared: PreparedCopySource<S>) -> NodeId {
+        let PreparedCopySource { source, remote } = prepared;
         let copy = CopyId(self.next_copy_id);
         self.next_copy_id = self
             .next_copy_id
@@ -72,7 +92,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
     pub fn resume_claimed_call_with_copy(
         &mut self,
         call: Call,
-        source: SharedRuntimeNet<S>,
+        source: PreparedCopySource<S>,
     ) -> NodeId {
         self.attach_call_to_copy(call, source)
     }
@@ -80,7 +100,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
     pub(in crate::interaction_net::runtime) fn attach_call_to_copy(
         &mut self,
         call: Call,
-        source: SharedRuntimeNet<S>,
+        source: PreparedCopySource<S>,
     ) -> NodeId {
         assert!(
             self.active

@@ -637,6 +637,7 @@ pub(super) fn progress_exact_core_call(
     };
     match lower_core_callable(context, data) {
         Ok(Callable::Net(source)) => {
+            let source = source.prepare_copy_source();
             runtime.with_mut(|runtime| runtime.resume_claimed_call_with_copy(call, source));
             Ok(true)
         }
