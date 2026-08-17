@@ -151,20 +151,20 @@ history. The abandoned-claim regression retains and observes the returned
 value after its journal is dropped, then confirms that a later transaction can
 still consume the same buffered input.
 
-### CCR-003 — Deferred work performs a reservation/activation handshake after its machine already exists
+### CCR-003 — Resolved: deferred machines are installed atomically as dormant work
 
 **Classification:** transitional handshake  
 **Priority:** high  
 **Confidence:** high
 
-`EvalContext::deferred_task` constructs the complete task machine before
-calling `reserve_deferred`, passes that machine into the coordinator, and then
-calls `activate_deferred` in a second mutation cycle
+At review time, `EvalContext::deferred_task` constructed the complete task
+machine before calling `reserve_deferred`, passed that machine into the
+coordinator, and then called `activate_deferred` in a second mutation cycle
 ([`evaluation.rs`](../../src/evaluation.rs#L1816)). The coordinator nevertheless
-installs the record as `WorkState::Reserved`, tracks
-`demanded_while_reserved`, and later moves it to `Dormant` or `Queued`
+installed the record as `WorkState::Reserved`, tracked
+`demanded_while_reserved`, and later moved it to `Dormant` or `Queued`
 ([`coordinator.rs`](../../src/evaluation/coordinator.rs#L3500)). Promotion has a
-special branch that only sets the temporary demand bit
+special branch that only set the temporary demand bit
 ([`coordinator.rs`](../../src/evaluation/coordinator.rs#L5095)).
 
 This handshake was appropriate when a coordinator-visible reservation could
@@ -194,6 +194,40 @@ insertion, and retain the existing loser-machine destruction test.
 **Expected simplification:** one state field, one coordinator operation, one
 work-state branch, and one mutation/generation/wakeup cycle per new deferred
 producer.
+
+Resolution on 2026-08-17:
+
+- A regression first demonstrated that a fully installed deferred machine was
+  still externally visible as `Reserved`. `reserve_deferred` now publishes the
+  machine, settlement obligation, and every task/wait/value/session index
+  together as `Dormant` under one coordinator mutation.
+- `demanded_while_reserved`, `activate_deferred`, and both reserved-promotion
+  branches have been removed. `EvalContext::deferred_task` returns immediately
+  after the atomic reservation, and exact demand promotes only
+  `Dormant -> Queued`.
+- `DeferredWorkReservation::New` no longer carries an implementation-only work
+  ID that production callers do not need. Tests recover the stable record
+  through its canonical wait index when settlement needs to be driven
+  explicitly.
+- A barrier-synchronized two-candidate test proves that exactly one machine and
+  wait become canonical and that the losing machine is destroyed only after
+  coordinator state and mutation admission are released. A separate test
+  closes the owner immediately after insertion and proves the dormant record
+  is abandoned, retired, and leaves its lazy value unpoisoned.
+- `WorkState::Reserved` remains unchanged for reflection-task launch. The
+  remaining reserved branches either explicitly manipulate reflection work or
+  are generic reporting and forced-settlement paths which must still accept a
+  reserved reflection record.
+
+Verification on 2026-08-17:
+
+- The new dormant-insertion regression failed against the old handshake and
+  passed after the repair.
+- All 43 coordinator tests and the focused deferred-registration, forced-kill,
+  and session-close regressions pass.
+- `cargo fmt --check` passes.
+- `cargo clippy --all-targets --all-features -- -D warnings` passes.
+- `cargo test -q` passes all 1,277 tests.
 
 ### CCR-004 — `EvaluationTaskState` exactly duplicates `EvaluationWaitTerminal`
 
@@ -546,9 +580,9 @@ Resolution on 2026-08-17:
   coordinator work record; coordinator-owned terminals detach and wake under
   mutation admission. Task-local promise inventories are described by the
   same ownership distinction rather than by the completed Phase 10B.
-- The deferred-machine activation comment retains the real installation
-  handshake, but no longer calls it temporary. Removing that handshake is the
-  separately latched work in CCR-003, not comment cleanup.
+- The deferred-machine activation comment retained the real installation
+  handshake rather than deleting behavior during comment cleanup. CCR-003
+  subsequently removed that handshake with dedicated ordering regressions.
 - The `Diagnostic` compatibility projections remain explicitly transitional:
   they are a live public embedding surface, not stale phase chronology. No
   architecture or agent-context document referred to the deleted macro
@@ -694,8 +728,8 @@ without either broad wakeups or incomplete settlement validation.
 
 1. **Low-risk and compatibility removal:** CCR-001, CCR-002, CCR-007, CCR-008,
    and CCR-009 are complete.
-2. **Coordinator protocol cleanup:** barrier-test and implement CCR-003, then
-   collapse the terminal representation in CCR-004.
+2. **Coordinator protocol cleanup:** CCR-003 is complete; collapse the terminal
+   representation in CCR-004 next.
 3. **Event-state rewrite:** decide CCR-005 explicitly, then combine it with
    CCR-006 so the event maps and validation protocol are changed once.
 4. **Repeated mechanism:** prototype CCR-010 and retain it only if the result is

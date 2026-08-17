@@ -721,7 +721,6 @@ struct DeferredWork {
     producer: DeferredProducer,
     machine: Option<Box<dyn EvaluationTaskMachine>>,
     block: Option<EvaluationTaskBlock>,
-    demanded_while_reserved: bool,
 }
 
 enum WorkKind {
@@ -852,7 +851,7 @@ pub(super) struct DeferredWorkRelease {
 }
 
 pub(super) enum DeferredWorkReservation {
-    New(EvaluationWorkId),
+    New,
     Existing(EvaluationWaitToken),
 }
 
@@ -3539,14 +3538,13 @@ impl EvaluationWorkCoordinator {
                         wait.clone(),
                         producer.clone(),
                     ),
-                    state: WorkState::Reserved,
+                    state: WorkState::Dormant,
                     kind: WorkKind::Deferred(DeferredWork {
                         task,
                         wait: wait.clone(),
                         producer,
                         machine: machine.take(),
                         block: None,
-                        demanded_while_reserved: false,
                     }),
                 };
                 assert!(state.work.insert(id, record).is_none());
@@ -3559,7 +3557,7 @@ impl EvaluationWorkCoordinator {
                     .or_default()
                     .insert(id);
                 state.work_generation = state.work_generation.wrapping_add(1);
-                DeferredWorkReservation::New(id)
+                DeferredWorkReservation::New
             }
         };
         drop(mutation);
@@ -3567,10 +3565,20 @@ impl EvaluationWorkCoordinator {
         // were constructing this candidate. Dispose the unused candidate only
         // after releasing coordinator state and mutation admission.
         drop(machine);
-        if matches!(reservation, DeferredWorkReservation::New(_)) {
+        if matches!(reservation, DeferredWorkReservation::New) {
             self.work_available.notify_all();
         }
         Ok(reservation)
+    }
+
+    #[cfg(test)]
+    fn deferred_work_for_wait(&self, wait: &EvaluationWaitToken) -> Option<EvaluationWorkId> {
+        self.state
+            .lock()
+            .expect("evaluation work coordinator was poisoned")
+            .deferred_by_wait
+            .get(wait)
+            .copied()
     }
 
     pub(super) fn deferred_wait(&self, producer: DeferredValueId) -> Option<EvaluationWaitToken> {
@@ -3591,43 +3599,6 @@ impl EvaluationWorkCoordinator {
         )
     }
 
-    /// Finishes the coordinator-first deferred-machine installation handshake.
-    /// Demand observed while the session installed its machine is preserved
-    /// and makes the producer worker-ready immediately.
-    pub(super) fn activate_deferred(&self, id: EvaluationWorkId) -> bool {
-        let mutation = self.admission.mutation_guard();
-        let activated = {
-            let mut state = self
-                .state
-                .lock()
-                .expect("evaluation work coordinator was poisoned");
-            let demanded = {
-                let Some(record) = state.work.get_mut(&id) else {
-                    return false;
-                };
-                assert!(matches!(record.kind, WorkKind::Deferred(_)));
-                if !matches!(record.state, WorkState::Reserved) {
-                    return false;
-                }
-                let demanded = deferred_work(record).demanded_while_reserved;
-                record.state = if demanded {
-                    WorkState::Queued
-                } else {
-                    WorkState::Dormant
-                };
-                demanded
-            };
-            if demanded {
-                queue_deferred(&mut state, id);
-            }
-            state.work_generation = state.work_generation.wrapping_add(1);
-            true
-        };
-        drop(mutation);
-        self.work_available.notify_all();
-        activated
-    }
-
     #[cfg(test)]
     pub(super) fn promote_deferred_wait(&self, wait: &EvaluationWaitToken) -> bool {
         let mutation = self.admission.mutation_guard();
@@ -3641,17 +3612,6 @@ impl EvaluationWorkCoordinator {
             };
             let next = state.work.get(&id).map(|record| record.state);
             match next {
-                Some(WorkState::Reserved) => {
-                    deferred_work_mut(
-                        state
-                            .work
-                            .get_mut(&id)
-                            .expect("reserved deferred work must remain registered"),
-                    )
-                    .demanded_while_reserved = true;
-                    state.work_generation = state.work_generation.wrapping_add(1);
-                    true
-                }
                 Some(WorkState::Dormant) => {
                     state
                         .work
@@ -5102,16 +5062,6 @@ fn promote_deferred_wait_locked(
         return false;
     };
     match state.work.get(&id).map(|record| record.state) {
-        Some(WorkState::Reserved) => {
-            deferred_work_mut(
-                state
-                    .work
-                    .get_mut(&id)
-                    .expect("reserved deferred work must remain registered"),
-            )
-            .demanded_while_reserved = true;
-            true
-        }
         Some(WorkState::Dormant) => {
             state
                 .work
@@ -5506,7 +5456,7 @@ fn detach_client_demand(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Barrier, OnceLock};
     use std::thread;
 
@@ -5926,6 +5876,31 @@ mod tests {
             });
             self.dropped_without_runtime_locks
                 .store(unlocked, Ordering::Release);
+        }
+    }
+
+    struct CountDeferredDropLocks {
+        coordinator: Weak<EvaluationWorkCoordinator>,
+        drops: Arc<AtomicUsize>,
+        all_drops_unlocked: Arc<AtomicBool>,
+    }
+
+    impl EvaluationTaskMachine for CountDeferredDropLocks {
+        fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+            panic!("the coordinator test drives this machine explicitly")
+        }
+    }
+
+    impl Drop for CountDeferredDropLocks {
+        fn drop(&mut self) {
+            let unlocked = self.coordinator.upgrade().is_none_or(|coordinator| {
+                let state_unlocked = coordinator.state.try_lock().is_ok();
+                let admission_unlocked = coordinator.admission.try_settlement_guard().is_some();
+                state_unlocked && admission_unlocked
+            });
+            self.all_drops_unlocked
+                .fetch_and(unlocked, Ordering::AcqRel);
+            self.drops.fetch_add(1, Ordering::AcqRel);
         }
     }
 
@@ -7193,7 +7168,7 @@ mod tests {
     }
 
     #[test]
-    fn coordinator_owns_dormant_deferred_promotion_and_release() {
+    fn deferred_insertion_is_immediately_dormant_and_promotable() {
         let (coordinator, _executor) = super::super::test_execution_resources(0)
             .expect("test execution resources should build");
         let session = TestDemand::new(&coordinator);
@@ -7206,7 +7181,7 @@ mod tests {
             "coordinator deferred lifecycle",
             |_| panic!("coordinator lifecycle test never evaluates its synthetic lazy"),
         );
-        let DeferredWorkReservation::New(work) = coordinator
+        let DeferredWorkReservation::New = coordinator
             .reserve_deferred(
                 &session.demand,
                 task,
@@ -7218,17 +7193,29 @@ mod tests {
         else {
             panic!("fresh deferred work should reserve a canonical record")
         };
+        let work = coordinator
+            .deferred_work_for_wait(&wait)
+            .expect("new deferred work should retain its wait index");
 
         assert!(
             coordinator
                 .claim_ready_task_for_session(session.demand.id)
                 .is_none()
         );
+        assert!(matches!(
+            coordinator
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned")
+                .work
+                .get(&work)
+                .map(|record| record.state),
+            Some(WorkState::Dormant)
+        ));
         assert!(coordinator.promote_deferred_wait(&wait));
-        assert!(coordinator.activate_deferred(work));
         let ClaimedTaskWork::Deferred(claimed) = coordinator
             .claim_ready_task_for_session(session.demand.id)
-            .expect("demand observed during installation should queue the producer")
+            .expect("demand after atomic insertion should queue the producer")
         else {
             panic!("queued deferred work should preserve its kind")
         };
@@ -7271,6 +7258,120 @@ mod tests {
     }
 
     #[test]
+    fn closing_owner_immediately_after_deferred_insertion_abandons_the_dormant_record() {
+        let (coordinator, _executor) = super::super::test_execution_resources(0)
+            .expect("test execution resources should build");
+        let session = TestDemand::new(&coordinator);
+        let session_id = session.demand.id;
+        let task = super::super::allocate_task_id(&session.demand.values)
+            .expect("deferred task identity should allocate");
+        let wait = super::super::allocate_wait_token(&session.demand, task)
+            .expect("deferred wait identity should allocate");
+        let lazy = LazyValue::deferred(
+            &session.demand.values,
+            "close after deferred insertion",
+            |_| panic!("session-close test must not poll its deferred machine"),
+        );
+        assert!(matches!(
+            coordinator
+                .reserve_deferred(
+                    &session.demand,
+                    task,
+                    wait.clone(),
+                    DeferredProducer::Lazy(lazy.clone()),
+                    Box::new(TestTaskMachine),
+                )
+                .expect("open test session should reserve deferred work"),
+            DeferredWorkReservation::New
+        ));
+
+        drop(session);
+
+        assert_eq!(coordinator.deferred_counts(session_id), (0, 0, 0));
+        assert_eq!(
+            wait.terminal_poll(),
+            Some(super::super::EvaluationWaitPoll::Abandoned)
+        );
+        assert!(lazy.cached().is_none());
+    }
+
+    #[test]
+    fn racing_deferred_candidates_install_one_dormant_machine_and_drop_the_loser_unlocked() {
+        let (coordinator, _executor) = super::super::test_execution_resources(0)
+            .expect("test execution resources should build");
+        let session = TestDemand::new(&coordinator);
+        let lazy =
+            LazyValue::deferred(&session.demand.values, "racing deferred candidates", |_| {
+                panic!("candidate race test drives its machine explicitly")
+            });
+        let barrier = Arc::new(Barrier::new(3));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let all_drops_unlocked = Arc::new(AtomicBool::new(true));
+        let mut candidates = Vec::new();
+        for _ in 0..2 {
+            let task = super::super::allocate_task_id(&session.demand.values)
+                .expect("candidate task identity should allocate");
+            let wait = super::super::allocate_wait_token(&session.demand, task)
+                .expect("candidate wait identity should allocate");
+            let coordinator = coordinator.clone();
+            let demand = session.demand.clone();
+            let lazy = lazy.clone();
+            let barrier = barrier.clone();
+            let drops = drops.clone();
+            let all_drops_unlocked = all_drops_unlocked.clone();
+            candidates.push(thread::spawn(move || {
+                barrier.wait();
+                let reservation = coordinator
+                    .reserve_deferred(
+                        &demand,
+                        task,
+                        wait.clone(),
+                        DeferredProducer::Lazy(lazy),
+                        Box::new(CountDeferredDropLocks {
+                            coordinator: Arc::downgrade(&coordinator),
+                            drops,
+                            all_drops_unlocked,
+                        }),
+                    )
+                    .expect("racing candidate should observe an open session");
+                match reservation {
+                    DeferredWorkReservation::New => (true, wait),
+                    DeferredWorkReservation::Existing(canonical) => (false, canonical),
+                }
+            }));
+        }
+        barrier.wait();
+        let outcomes = candidates
+            .into_iter()
+            .map(|candidate| candidate.join().expect("candidate should not panic"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(outcomes.iter().filter(|(new, _)| *new).count(), 1);
+        assert_eq!(outcomes[0].1, outcomes[1].1);
+        assert_eq!(drops.load(Ordering::Acquire), 1);
+        assert!(all_drops_unlocked.load(Ordering::Acquire));
+
+        let canonical = &outcomes[0].1;
+        let work = coordinator
+            .deferred_work_for_wait(canonical)
+            .expect("the winning candidate should retain the canonical index");
+        assert!(coordinator.promote_deferred_wait(canonical));
+        let ClaimedTaskWork::Deferred(claimed) = coordinator
+            .claim_ready_task_for_session(session.demand.id)
+            .expect("the canonical machine should become claimable")
+        else {
+            panic!("the canonical work should remain deferred")
+        };
+        let release = coordinator.release_deferred(claimed, DeferredWorkPoll::Terminal);
+        assert!(release.terminal);
+        settle_test_deferred(&coordinator, work);
+        drop(release);
+
+        assert_eq!(drops.load(Ordering::Acquire), 2);
+        assert!(all_drops_unlocked.load(Ordering::Acquire));
+    }
+
+    #[test]
     fn deferred_claim_excludes_competitors_and_releases_its_machine_outside_runtime_locks() {
         let (coordinator, _executor) = super::super::test_execution_resources(0)
             .expect("test execution resources should build");
@@ -7285,7 +7386,7 @@ mod tests {
             |_| panic!("coordinator ownership test never evaluates its synthetic lazy"),
         );
         let dropped_without_runtime_locks = Arc::new(AtomicBool::new(false));
-        let DeferredWorkReservation::New(work) = coordinator
+        let DeferredWorkReservation::New = coordinator
             .reserve_deferred(
                 &session.demand,
                 task,
@@ -7300,7 +7401,9 @@ mod tests {
         else {
             panic!("fresh deferred work should reserve a canonical record")
         };
-        assert!(coordinator.activate_deferred(work));
+        let work = coordinator
+            .deferred_work_for_wait(&wait)
+            .expect("new deferred work should retain its wait index");
         assert!(coordinator.promote_deferred_wait(&wait));
         let ClaimedTaskWork::Deferred(claimed) = coordinator
             .claim_ready_task_for_session(session.demand.id)
@@ -7347,7 +7450,7 @@ mod tests {
             "cross-session canonical producer",
             |_| panic!("coordinator promotion test does not evaluate its lazy"),
         );
-        let DeferredWorkReservation::New(producer_work) = coordinator
+        let DeferredWorkReservation::New = coordinator
             .reserve_deferred(
                 &producer_session.demand,
                 producer_task,
@@ -7359,8 +7462,9 @@ mod tests {
         else {
             panic!("first demand should reserve the canonical producer")
         };
-        assert!(coordinator.activate_deferred(producer_work));
-
+        let producer_work = coordinator
+            .deferred_work_for_wait(&producer_wait)
+            .expect("new deferred work should retain its wait index");
         let duplicate_task = super::super::allocate_task_id(&observer_session.demand.values)
             .expect("duplicate task identity should allocate");
         let duplicate_wait =

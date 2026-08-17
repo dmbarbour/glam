@@ -1838,17 +1838,10 @@ impl EvalContext {
             originating_task,
             self.task_profile.clone(),
         ));
-        let work = match coordinator.reserve_deferred(
-            &self.session,
-            id,
-            wait.clone(),
-            producer,
-            machine,
-        )? {
+        match coordinator.reserve_deferred(&self.session, id, wait.clone(), producer, machine)? {
             DeferredWorkReservation::Existing(wait) => return Ok(wait),
-            DeferredWorkReservation::New(work) => work,
-        };
-        let _ = coordinator.activate_deferred(work);
+            DeferredWorkReservation::New => {}
+        }
         Ok(wait)
     }
 
