@@ -572,7 +572,7 @@ regression, and the complete default suite. All passed, together with
 retained above as the review-time observation; the concurrency defect is no
 longer open.
 
-### Follow-up: retire pairless cursor scaffolding through Cursor WHNF
+### Follow-up resolved: replace pairless cursor scaffolding through Cursor WHNF
 
 The pairless-claim repair above is necessary for the current synchronous
 interface-demand model, but it should not become permanent architecture. The
@@ -602,6 +602,34 @@ are recomputed rather than cached during the initial transition.
 Close this follow-up only after the original forced-order pairless-claim test,
 the new demand-spine and nested-failure tests, and the parallel suite pass
 without compatibility use of the structures above.
+
+Resolution on 2026-08-17:
+
+- `claimed_cursors` and optional pair ownership are gone. Every transition is
+  owned either by `ActivePairState` or by one cursor-local
+  `PairlessCursorObligation`, selected through `CursorClaimOwner`.
+- `CursorDependency::SourcePair` and its direct mutation interface are gone.
+  The `SourceCursor` name remains only as the endpoint classification of a
+  versioned `FrontierObservation`; it no longer grants or records a direct
+  source claim and is therefore not the transitional representation named by
+  this follow-up.
+- `NormalizationRequest` now drives an iterative worklist. Recursive
+  `progress_cursor_dependency`, the defensive depth limit, and evaluator
+  fallback to unrelated whole-net work have been removed.
+- The obligation transition methods used by `step_cursor` are private owning
+  state-machine operations. The one evaluator test that deliberately creates
+  contention uses a `#[cfg(test)]` `SharedRuntimeNet` hook rather than retaining
+  a production transition surface.
+- Forced-order concurrent root demand, source mutation before wait,
+  transitive-demand, nested structured-failure, mixed-owner depth, and
+  request-relative terminal tests all pass. The complete parallel repository
+  suite passes with 1,278 tests.
+
+Pairless *obligations* remain intentionally: they are the authoritative owner
+for a demanded cursor which is not in an active pair. What was retired was the
+parallel claim ledger and compatibility driving API, not that ownership case.
+The detailed transition accounting and its independent findings are recorded
+in the [Cursor-WHNF review](CursorWHNF_2026-08-17.md).
 
 Implementation of any finding should run:
 

@@ -1057,7 +1057,7 @@ mod driver_tests {
             InterfaceDemand::Cursor(cursor) => cursor,
             other => panic!("copy root should expose a cursor, received {other:?}"),
         };
-        assert!(target.with_mut(|net| net.claim_pairless_cursor_obligation(cursor)));
+        assert!(target.test_claim_pairless_cursor_obligation(cursor));
         let request = NormalizationRequest::cursor_whnf(target.clone(), interface);
         let contention = match drive_net_work(&test_context(), &request).unwrap() {
             NetDriverOutcome::Contended(contention) => contention,

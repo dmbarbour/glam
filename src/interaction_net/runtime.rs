@@ -584,6 +584,11 @@ impl<S: NetSpecialization> SharedRuntimeNet<S> {
         (Self::new(target), interface, cursor)
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_claim_pairless_cursor_obligation(&self, cursor: NodeId) -> bool {
+        self.with_mut(|runtime| runtime.claim_pairless_cursor_obligation(cursor))
+    }
+
     pub fn ptr_eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.inner, &other.inner)
     }
@@ -1131,7 +1136,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
 
     /// Installs pairless cursor ownership without disturbing an existing
     /// obligation.
-    pub fn ensure_pairless_cursor_obligation(&mut self, cursor: NodeId) -> bool {
+    fn ensure_pairless_cursor_obligation(&mut self, cursor: NodeId) -> bool {
         assert!(matches!(
             self.node(cursor),
             Some(RuntimeNode::RemoteCursor { .. })
@@ -1157,7 +1162,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         true
     }
 
-    pub fn claim_pairless_cursor_obligation(&mut self, cursor: NodeId) -> bool {
+    fn claim_pairless_cursor_obligation(&mut self, cursor: NodeId) -> bool {
         let Some(obligation) = self.cursor_obligations.get_mut(&cursor) else {
             return false;
         };
@@ -1171,7 +1176,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         true
     }
 
-    pub fn block_pairless_cursor_obligation(
+    fn block_pairless_cursor_obligation(
         &mut self,
         cursor: NodeId,
         dependency: CursorDependency<S>,
@@ -1186,7 +1191,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         true
     }
 
-    pub fn stabilize_pairless_cursor_obligation(&mut self, cursor: NodeId) -> bool {
+    fn stabilize_pairless_cursor_obligation(&mut self, cursor: NodeId) -> bool {
         let Some(obligation) = self.cursor_obligations.get_mut(&cursor) else {
             return false;
         };
