@@ -530,10 +530,9 @@ impl EvaluationTaskHandle {
             ReflectionCancellation::Requested => EvaluationTaskCancellation::Requested,
             ReflectionCancellation::Late => EvaluationTaskCancellation::Late,
             ReflectionCancellation::Terminalize => {
-                settle_task_work(
-                    &coordinator,
+                coordinator.settle_terminal_work(
                     self.work,
-                    EvaluationTaskState::Cancelled,
+                    EvaluationWaitTerminal::Cancelled,
                     evaluation_failure("reflection fixpoint producer was cancelled"),
                 );
                 let mut machine = coordinator.retire_reflection(self.work);
@@ -1062,51 +1061,6 @@ pub(crate) struct EvaluationUnfinishedTask {
     pub(crate) error: Option<Arc<EvaluationFailure>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum EvaluationTaskState {
-    Complete(RuntimeValueRoot),
-    Failed(Arc<EvaluationFailure>),
-    Cancelled,
-    Abandoned,
-    Exited,
-    Killed(Arc<EvaluationFailure>),
-}
-
-fn evaluation_task_state(terminal: EvaluationWaitTerminal) -> EvaluationTaskState {
-    match terminal {
-        EvaluationWaitTerminal::Complete(value) => EvaluationTaskState::Complete(value),
-        EvaluationWaitTerminal::Failed(error) => EvaluationTaskState::Failed(error),
-        EvaluationWaitTerminal::Cancelled => EvaluationTaskState::Cancelled,
-        EvaluationWaitTerminal::Abandoned => EvaluationTaskState::Abandoned,
-        EvaluationWaitTerminal::Exited => EvaluationTaskState::Exited,
-        EvaluationWaitTerminal::Killed(error) => EvaluationTaskState::Killed(error),
-    }
-}
-
-fn task_wait_terminal(state: &EvaluationTaskState) -> EvaluationWaitTerminal {
-    match state {
-        EvaluationTaskState::Complete(value) => EvaluationWaitTerminal::Complete(value.clone()),
-        EvaluationTaskState::Failed(error) => EvaluationWaitTerminal::Failed(error.clone()),
-        EvaluationTaskState::Cancelled => EvaluationWaitTerminal::Cancelled,
-        EvaluationTaskState::Abandoned => EvaluationWaitTerminal::Abandoned,
-        EvaluationTaskState::Exited => EvaluationWaitTerminal::Exited,
-        EvaluationTaskState::Killed(error) => EvaluationWaitTerminal::Killed(error.clone()),
-    }
-}
-
-fn settle_task_work(
-    coordinator: &Arc<EvaluationWorkCoordinator>,
-    work: EvaluationWorkId,
-    state: EvaluationTaskState,
-    promise_failure: Arc<EvaluationFailure>,
-) -> EvaluationTaskState {
-    evaluation_task_state(coordinator.settle_terminal_work(
-        work,
-        task_wait_terminal(&state),
-        promise_failure,
-    ))
-}
-
 #[derive(Clone)]
 pub(crate) struct PendingReflectionTask {
     inner: Arc<PendingReflectionTaskInner>,
@@ -1246,13 +1200,12 @@ impl Drop for EvaluationSession {
                     work.task.get()
                 )
             });
-            settle_task_work(
-                &self.coordinator,
+            self.coordinator.settle_terminal_work(
                 work.id,
                 if work.cancel {
-                    EvaluationTaskState::Cancelled
+                    EvaluationWaitTerminal::Cancelled
                 } else {
-                    EvaluationTaskState::Abandoned
+                    EvaluationWaitTerminal::Abandoned
                 },
                 failure,
             );
@@ -2120,10 +2073,9 @@ impl EvalContext {
             Err(error) => {
                 let promise_failure = error.clone();
                 if coordinator.terminalize_reserved_reflection(handle.work) {
-                    settle_task_work(
-                        &coordinator,
+                    coordinator.settle_terminal_work(
                         handle.work,
-                        EvaluationTaskState::Failed(error),
+                        EvaluationWaitTerminal::Failed(error),
                         promise_failure,
                     );
                     drop(coordinator.retire_reflection(handle.work));
@@ -2157,10 +2109,9 @@ impl EvalContext {
             ReflectionCancellation::Terminalize,
             "a committed pre-launch cancellation must own its reservation"
         );
-        settle_task_work(
-            &coordinator,
+        coordinator.settle_terminal_work(
             handle.work,
-            EvaluationTaskState::Cancelled,
+            EvaluationWaitTerminal::Cancelled,
             evaluation_failure("reflection fixpoint producer was cancelled"),
         );
         drop(coordinator.retire_reflection(handle.work));
@@ -2338,10 +2289,9 @@ impl EvalContext {
             .reflection_work_for_wait(&wait)
             .expect("test task must belong to this runtime");
         assert!(coordinator.terminalize_reflection(work));
-        settle_task_work(
-            &coordinator,
+        coordinator.settle_terminal_work(
             work,
-            EvaluationTaskState::Complete(RuntimeValueRoot::new(&self.session.values, value)),
+            EvaluationWaitTerminal::Complete(RuntimeValueRoot::new(&self.session.values, value)),
             evaluation_failure("reflection task completed without fulfilling its fixpoint"),
         );
         drop(coordinator.retire_reflection(work));
@@ -2371,10 +2321,9 @@ impl EvalContext {
             .reflection_work_for_wait(&wait)
             .expect("test task must belong to this runtime");
         assert!(coordinator.terminalize_reflection(work));
-        settle_task_work(
-            &coordinator,
+        coordinator.settle_terminal_work(
             work,
-            EvaluationTaskState::Failed(failure.clone()),
+            EvaluationWaitTerminal::Failed(failure.clone()),
             failure,
         );
         drop(coordinator.retire_reflection(work));
@@ -2812,23 +2761,23 @@ fn release_reflection_task(
     poll: EvaluationMachinePoll,
 ) -> (bool, bool, Option<ReleasedTaskMachine>) {
     let work = claimed.id();
-    let (work_poll, terminal_state) = match poll {
+    let (work_poll, terminal) = match poll {
         EvaluationMachinePoll::Yielded => (ReflectionWorkPoll::Yielded, None),
         EvaluationMachinePoll::Blocked(block) => (ReflectionWorkPoll::Blocked(block), None),
         EvaluationMachinePoll::Exit(exit) => (ReflectionWorkPoll::Exit(exit), None),
         EvaluationMachinePoll::Complete(value) => (
             ReflectionWorkPoll::Terminal,
-            Some(EvaluationTaskState::Complete(
+            Some(EvaluationWaitTerminal::Complete(
                 RuntimeValueRoot::from_runtime(coordinator.runtime_id(), value),
             )),
         ),
         EvaluationMachinePoll::Failed(error) => (
             ReflectionWorkPoll::Terminal,
-            Some(EvaluationTaskState::Failed(error)),
+            Some(EvaluationWaitTerminal::Failed(error)),
         ),
         EvaluationMachinePoll::Cancelled => (
             ReflectionWorkPoll::Terminal,
-            Some(EvaluationTaskState::Cancelled),
+            Some(EvaluationWaitTerminal::Cancelled),
         ),
     };
 
@@ -2842,30 +2791,30 @@ fn release_reflection_task(
         return (release.made_progress, release.remains_blocked, released);
     }
 
-    let state = if release.cancel {
-        EvaluationTaskState::Cancelled
+    let terminal = if release.cancel {
+        EvaluationWaitTerminal::Cancelled
     } else if release.abandoned {
-        EvaluationTaskState::Abandoned
+        EvaluationWaitTerminal::Abandoned
     } else {
-        terminal_state.expect("terminal reflection poll must carry a terminal result")
+        terminal.expect("terminal reflection poll must carry a terminal result")
     };
-    let promise_failure = match &state {
-        EvaluationTaskState::Complete(_) => {
+    let promise_failure = match &terminal {
+        EvaluationWaitTerminal::Complete(_) => {
             evaluation_failure("reflection task completed without fulfilling its fixpoint")
         }
-        EvaluationTaskState::Failed(error) => error.clone(),
-        EvaluationTaskState::Cancelled => {
+        EvaluationWaitTerminal::Failed(error) => error.clone(),
+        EvaluationWaitTerminal::Cancelled => {
             evaluation_failure("reflection fixpoint producer was cancelled")
         }
-        EvaluationTaskState::Abandoned => {
+        EvaluationWaitTerminal::Abandoned => {
             evaluation_failure("reflection fixpoint producer was abandoned")
         }
-        EvaluationTaskState::Exited => {
+        EvaluationWaitTerminal::Exited => {
             evaluation_failure("reflection fixpoint producer exited without a result")
         }
-        EvaluationTaskState::Killed(error) => error.clone(),
+        EvaluationWaitTerminal::Killed(error) => error.clone(),
     };
-    settle_task_work(coordinator, work, state, promise_failure);
+    coordinator.settle_terminal_work(work, terminal, promise_failure);
     let machine = release
         .machine
         .take()
@@ -7548,10 +7497,9 @@ mod tests {
             RuntimeCoordinatorReadiness::Busy
         ));
 
-        settle_task_work(
-            &coordinator,
+        coordinator.settle_terminal_work(
             work,
-            EvaluationTaskState::Complete(RuntimeValueRoot::new(
+            EvaluationWaitTerminal::Complete(RuntimeValueRoot::new(
                 context.values(),
                 crate::core::keys::unit_value(),
             )),

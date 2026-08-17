@@ -229,7 +229,7 @@ Verification on 2026-08-17:
 - `cargo clippy --all-targets --all-features -- -D warnings` passes.
 - `cargo test -q` passes all 1,277 tests.
 
-### CCR-004 — `EvaluationTaskState` exactly duplicates `EvaluationWaitTerminal`
+### CCR-004 — Resolved: terminal settlement uses one immutable outcome type
 
 **Classification:** redundant representation  
 **Priority:** high  
@@ -264,6 +264,35 @@ failure messages produced by terminal settlement.
 
 **Expected simplification:** delete one enum and two exhaustive conversions;
 simplify every terminal settlement call site.
+
+Resolution on 2026-08-17:
+
+- Removed `EvaluationTaskState`; `EvaluationWaitTerminal` is now the sole
+  internal terminal outcome for reflection tasks, deferred computations, wait
+  publication, status projection, and runtime settlement.
+- Removed both exhaustive conversion functions and the reflection-only
+  `settle_task_work` forwarding wrapper. Reflection call sites now pass the
+  authoritative terminal outcome directly to
+  `EvaluationWorkCoordinator::settle_terminal_work`.
+- Kept `EvaluationTaskStatus`, `EvaluationWaitPoll`, and public lifecycle
+  states as deliberate boundary projections. They still encode transactional
+  status, wait observation, and host-facing lifecycle contracts rather than a
+  second authoritative terminal representation.
+- Preserved `RuntimeValueRoot` and `Arc<EvaluationFailure>` ownership without
+  adding conversion-time clones. The coordinator continues to derive failure
+  ledger entries, protected task status, wait completion, and task-owned
+  promise failures from the same terminal value under one mutation admission.
+
+Verification on 2026-08-17:
+
+- `coordinator_terminal_policy_observes_every_root_disposition` covers status
+  publication and notification for complete, failed, cancelled, abandoned,
+  exited, and killed outcomes.
+- Focused failure-ledger acknowledgement and killed-promise settlement tests
+  pass.
+- `cargo fmt --check`,
+  `cargo clippy --all-targets --all-features -- -D warnings`, and
+  `cargo test -q` pass.
 
 ### CCR-005 — FIFO input conflicts maintain a general address history in parallel with cursor validation
 
@@ -728,8 +757,7 @@ without either broad wakeups or incomplete settlement validation.
 
 1. **Low-risk and compatibility removal:** CCR-001, CCR-002, CCR-007, CCR-008,
    and CCR-009 are complete.
-2. **Coordinator protocol cleanup:** CCR-003 is complete; collapse the terminal
-   representation in CCR-004 next.
+2. **Coordinator protocol cleanup:** CCR-003 and CCR-004 are complete.
 3. **Event-state rewrite:** decide CCR-005 explicitly, then combine it with
    CCR-006 so the event maps and validation protocol are changed once.
 4. **Repeated mechanism:** prototype CCR-010 and retain it only if the result is
