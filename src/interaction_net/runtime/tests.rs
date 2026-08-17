@@ -1259,7 +1259,7 @@ fn active_pair_cursor_owner_is_distinct_from_pairless_obligation_owner() {
 }
 
 #[test]
-fn connecting_a_cursor_transfers_ready_and_blocked_obligations_to_the_pair() {
+fn connecting_a_cursor_transfers_ready_blocked_and_stable_obligations_to_the_pair() {
     let mut source = NetBuilder::<()>::new();
     let data = source.data(());
     let source = source.finish(data).instantiate_shared();
@@ -1307,6 +1307,46 @@ fn connecting_a_cursor_transfers_ready_and_blocked_obligations_to_the_pair() {
         blocked_target.cursor_dependency(blocked_cursor),
         Some(CursorDependency::LocalCursor(waiting_on)) if waiting_on == dependency
     ));
+
+    let mut stable_target = RuntimeNet::empty();
+    let stable_cursor = stable_target.begin_copy(source.prepare_copy_source());
+    let stable_bind = stable_target.add_node(RuntimeNode::Bind);
+    assert!(stable_target.ensure_pairless_cursor_obligation(stable_cursor));
+    assert!(stable_target.claim_pairless_cursor_obligation(stable_cursor));
+    assert!(stable_target.stabilize_pairless_cursor_obligation(stable_cursor));
+    stable_target.connect(Port::principal(stable_cursor), Port::principal(stable_bind));
+    let stable_pair = ActivePairKey::new(stable_cursor, stable_bind);
+    assert!(
+        !stable_target
+            .cursor_obligations
+            .contains_key(&stable_cursor)
+    );
+    assert!(matches!(
+        stable_target.active.get(&stable_pair),
+        Some(ActivePairState::BlockedCursor {
+            cursor,
+            blockage: CursorBlockage::Stable,
+        }) if *cursor == stable_cursor
+    ));
+    assert_eq!(
+        stable_target.cursor_claim_owner(stable_cursor),
+        Some(CursorClaimOwner::ActivePair(stable_pair))
+    );
+}
+
+#[test]
+#[should_panic(expected = "in-flight pairless cursor claim cannot change graph ownership")]
+fn connecting_a_cursor_rejects_transfer_of_a_claimed_obligation() {
+    let mut source = NetBuilder::<()>::new();
+    let data = source.data(());
+    let source = source.finish(data).instantiate_shared();
+    let mut target = RuntimeNet::empty();
+    let cursor = target.begin_copy(source.prepare_copy_source());
+    let bind = target.add_node(RuntimeNode::Bind);
+    assert!(target.ensure_pairless_cursor_obligation(cursor));
+    assert!(target.claim_pairless_cursor_obligation(cursor));
+
+    target.connect(Port::principal(cursor), Port::principal(bind));
 }
 
 #[test]

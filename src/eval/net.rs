@@ -890,6 +890,67 @@ mod driver_tests {
     }
 
     #[test]
+    fn deep_stable_cursor_dependencies_exceed_the_former_recursion_limit() {
+        let (mut source, _) = crate::interaction_net::SharedRuntimeNet::test_stable_auxiliary();
+        let mut root_interface = source.with(|net| net.exposed());
+
+        for _ in 0..1_100 {
+            (source, root_interface) =
+                crate::interaction_net::SharedRuntimeNet::test_copy_layer(source);
+        }
+
+        assert!(matches!(
+            drive_net_work(
+                &test_context(),
+                NetDriverWork::RequestRoot {
+                    runtime: source.clone(),
+                    interface: root_interface,
+                },
+            )
+            .unwrap(),
+            NetDriverOutcome::Root(InterfaceDemand::StableCursor(_))
+        ));
+        assert!(matches!(
+            source.poll_interface_demand(root_interface),
+            InterfaceDemand::StableCursor(_)
+        ));
+        assert_eq!(source.active_normalization_batch(), None);
+    }
+
+    #[test]
+    fn deep_productive_cursor_chain_alternates_pairless_and_pair_owned_layers() {
+        let expected = crate::core::test_value_factory().unit();
+        let mut leaf = NetBuilder::<CoreSpecialization>::new();
+        let data = leaf.data(expected.clone());
+        let mut source = leaf.finish(data).instantiate_shared();
+        let mut root_interface = source.with(|net| net.exposed());
+
+        for layer in 0..1_100 {
+            if layer % 2 == 0 {
+                (source, root_interface) =
+                    crate::interaction_net::SharedRuntimeNet::test_productive_pair_owned_copy_layer(
+                        source,
+                    );
+            } else {
+                (source, root_interface) =
+                    crate::interaction_net::SharedRuntimeNet::test_copy_layer(source);
+            }
+        }
+
+        assert_eq!(
+            NormalizationRequest::cursor_whnf(source.clone(), root_interface)
+                .drive(&test_context())
+                .unwrap(),
+            NetInterfaceOutcome::Data
+        );
+        assert_eq!(
+            source.with(|net| net.interface_data(root_interface).cloned()),
+            Some(expected)
+        );
+        assert_eq!(source.active_normalization_batch(), None);
+    }
+
+    #[test]
     fn stable_root_does_not_reduce_disconnected_or_undemanded_ready_work() {
         let mut disconnected = NetBuilder::<CoreSpecialization>::new();
         let root = disconnected.push(crate::interaction_net::Node::Erase);
@@ -1117,6 +1178,91 @@ mod driver_tests {
             Ok(_) => panic!("demanded stuck pair must remain a failure"),
         };
         assert!(failure.to_string().contains("demanded call failed"));
+    }
+
+    #[test]
+    fn nested_terminal_failure_propagates_through_the_complete_driver() {
+        let value = crate::core::test_value_factory().unit();
+        let mut source = NetBuilder::<CoreSpecialization>::new();
+        let failed_bind = source.push(crate::interaction_net::Node::Bind);
+        let failed_data = source.data(value.clone());
+        let failed_result = source.data(value.clone());
+        source.wire(Port::principal(failed_bind), failed_data);
+        source.wire(Port::auxiliary(failed_bind, 2), failed_result);
+
+        let unrelated_left = source.push(crate::interaction_net::Node::Bind);
+        let unrelated_right = source.push(crate::interaction_net::Node::Bind);
+        source.wire(
+            Port::principal(unrelated_left),
+            Port::principal(unrelated_right),
+        );
+        for auxiliary in 1..=2 {
+            let left_data = source.data(value.clone());
+            let right_data = source.data(value.clone());
+            source.wire(Port::auxiliary(unrelated_left, auxiliary), left_data);
+            source.wire(Port::auxiliary(unrelated_right, auxiliary), right_data);
+        }
+        let source = source
+            .finish(Port::auxiliary(failed_bind, 1))
+            .instantiate_shared();
+        let (failed_pair, unrelated_pair) = source.with(|net| {
+            let pairs = net.active_pairs().collect::<Vec<_>>();
+            let failed_pair = pairs
+                .iter()
+                .copied()
+                .find(|pair| net.call(*pair).is_some())
+                .expect("source should contain one callable pair");
+            let unrelated_pair = pairs
+                .into_iter()
+                .find(|pair| *pair != failed_pair)
+                .expect("source should contain one unrelated pure pair");
+            (failed_pair, unrelated_pair)
+        });
+
+        let reduction = source
+            .with_optional_mut(|net| net.reduce_pair(failed_pair))
+            .expect("nested source call should be claimable");
+        let ReductionKind::Call { bind, data } = reduction.kind else {
+            panic!("nested source failure should originate in a call");
+        };
+        source.with_mut(|net| {
+            net.fail_claimed_call(
+                Call {
+                    pair: failed_pair,
+                    bind,
+                    data,
+                },
+                EvaluationHalt::new("nested driver failure"),
+            );
+        });
+
+        let (target, interface) =
+            crate::interaction_net::SharedRuntimeNet::test_copy_layer(source.clone());
+        let cursor = match target.poll_interface_demand(interface) {
+            InterfaceDemand::Cursor(cursor) => cursor,
+            demand => panic!("copy root should expose a cursor, got {demand:?}"),
+        };
+        let CursorStep::Dependency(CursorDependency::SourceFrontier(observation)) =
+            target.step_cursor(cursor)
+        else {
+            panic!("nested source failure should become an exact frontier dependency");
+        };
+        assert_eq!(
+            observation.endpoint(),
+            DemandEndpoint::ActivePair(failed_pair)
+        );
+
+        assert!(matches!(
+            source.with_optional_mut(|net| net.reduce_pair(unrelated_pair)),
+            Some(Reduction {
+                kind: ReductionKind::BindJoin,
+                ..
+            })
+        ));
+        let failure = NormalizationRequest::cursor_whnf(target, interface)
+            .drive(&test_context())
+            .expect_err("nested terminal failure must propagate through the driver");
+        assert!(failure.to_string().contains("nested driver failure"));
     }
 
     #[test]

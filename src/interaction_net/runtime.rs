@@ -553,6 +553,29 @@ impl<S: NetSpecialization> SharedRuntimeNet<S> {
         (Self::new(target), interface, cursor)
     }
 
+    /// Builds a transparent data-producing layer whose cursor transition is
+    /// owned by an active pair rather than a pairless obligation.
+    #[cfg(test)]
+    pub(crate) fn test_productive_pair_owned_copy_layer(source: Self) -> (Self, Port) {
+        let source = source.prepare_copy_source();
+        let mut target = RuntimeNet::empty();
+        let site = FanSite(target.next_fan_site);
+        target.next_fan_site = target
+            .next_fan_site
+            .checked_add(1)
+            .expect("interaction-net fan site space exhausted");
+        let fan = target.add_node(RuntimeNode::Fan {
+            identity: FanIdentity::root(site),
+        });
+        let cursor = target.begin_copy(source);
+        target.connect(Port::principal(fan), Port::principal(cursor));
+        let discard = target.add_node(RuntimeNode::Erase);
+        target.connect(Port::auxiliary(fan, 2), Port::principal(discard));
+        let interface = target.add_interface(Port::auxiliary(fan, 1));
+        target.exposed = Some(interface);
+        (Self::new(target), interface)
+    }
+
     #[cfg(test)]
     pub(crate) fn test_stable_root_with_claimed_cursor(source: Self) -> (Self, Port, NodeId) {
         let source = source.prepare_copy_source();
