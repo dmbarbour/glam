@@ -187,18 +187,14 @@ pub(crate) enum EvaluationQueryPoll {
 
 /// An address understood by the runtime's conflict-analysis strategy.
 ///
-/// Reflection paths retain hierarchical overlap within one volume. Runtime
-/// input slots are exact virtual addresses: neither endpoints nor sequences
-/// imply hierarchy or ordering for conflict analysis.
+/// Reflection paths retain hierarchical overlap within one volume. Buffered
+/// runtime inputs use their own FIFO cursor validation rather than this
+/// hierarchical store policy.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ConflictAddress {
     Reflection {
         volume: VolumeId,
         path: ConflictPath,
-    },
-    InputSlot {
-        endpoint: RuntimeInputEndpointId,
-        sequence: RuntimeInputSequence,
     },
 }
 
@@ -209,13 +205,6 @@ impl ConflictAddress {
 
     fn reflection_root(volume: VolumeId) -> Self {
         Self::reflection(volume, ConflictPath::root())
-    }
-
-    pub(crate) fn input_slot(
-        endpoint: RuntimeInputEndpointId,
-        sequence: RuntimeInputSequence,
-    ) -> Self {
-        Self::InputSlot { endpoint, sequence }
     }
 
     fn is_prefix_of(&self, other: &Self) -> bool {
@@ -230,8 +219,6 @@ impl ConflictAddress {
                     path: right_path,
                 },
             ) => left_volume == right_volume && left_path.is_prefix_of(right_path),
-            (Self::InputSlot { .. }, Self::InputSlot { .. }) => self == other,
-            _ => false,
         }
     }
 
@@ -245,14 +232,12 @@ impl ConflictAddress {
                 .prefixes()
                 .map(|path| Self::reflection(*volume, path))
                 .collect(),
-            Self::InputSlot { .. } => vec![self.clone()],
         }
     }
 
-    fn reflection_parts(&self) -> Option<(VolumeId, &ConflictPath)> {
+    fn reflection_parts(&self) -> (VolumeId, &ConflictPath) {
         match self {
-            Self::Reflection { volume, path } => Some((*volume, path)),
-            Self::InputSlot { .. } => None,
+            Self::Reflection { volume, path } => (*volume, path),
         }
     }
 }
@@ -513,9 +498,7 @@ impl StoreJournal {
         }
         let mut dependency = ConflictPath::from_keys(path.to_vec());
         for edit in self.edits.iter().rev() {
-            let Some((edit_volume, edit_path)) = edit.address().reflection_parts() else {
-                unreachable!("store journals contain only reflection addresses")
-            };
+            let (edit_volume, edit_path) = edit.address().reflection_parts();
             match edit {
                 StoreEdit::Set { .. }
                     if edit_volume == volume && edit_path.is_prefix_of(&dependency) =>
@@ -833,12 +816,7 @@ impl ReflectionStore {
         if let Some(volume) = journal
             .edits
             .iter()
-            .map(|edit| {
-                edit.address()
-                    .reflection_parts()
-                    .expect("store journals contain only reflection addresses")
-                    .0
-            })
+            .map(|edit| edit.address().reflection_parts().0)
             .find(|volume| self.roots.get(volume).is_none())
         {
             return StoreCommitResult::MissingVolume(volume);
@@ -921,11 +899,7 @@ fn apply_edits(
     edits: &[StoreEdit],
 ) -> RedBlackTreeMapSync<VolumeId, PublicValue> {
     for edit in edits {
-        let volume = edit
-            .address()
-            .reflection_parts()
-            .expect("store journals contain only reflection addresses")
-            .0;
+        let volume = edit.address().reflection_parts().0;
         let root = roots
             .get(&volume)
             .cloned()
@@ -1017,15 +991,11 @@ pub(crate) fn decode_query_state(
 fn apply_edit(values: &CoreValueFactory, root: PublicValue, edit: &StoreEdit) -> PublicValue {
     match edit {
         StoreEdit::Set { address, value } => {
-            let (_, path) = address
-                .reflection_parts()
-                .expect("store edits contain only reflection addresses");
+            let (_, path) = address.reflection_parts();
             apply_value_at_path(values, root, path, value.as_core().clone())
         }
         StoreEdit::Rewrite { address, updater } => {
-            let (_, path) = address
-                .reflection_parts()
-                .expect("store edits contain only reflection addresses");
+            let (_, path) = address.reflection_parts();
             let prior = lazy_core_value_path(values, root.as_core().clone(), path.keys());
             let updated = Value::Lazy(LazyValue::from_application(
                 values,

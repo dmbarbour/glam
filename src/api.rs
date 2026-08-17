@@ -42,11 +42,11 @@ use crate::g_syntax::compile_source;
 use crate::interaction_net::{NetBuildError, NetBuilder as CoreNetBuilder, Port as CorePort};
 use crate::number::Number;
 use crate::reflection::{
-    CommitResult, ConflictAddress, ConflictAnalysisStrategy, ConflictObservationIndex,
-    EffectLifecycleTerminal, ExactConflictAnalysis, HostSnapshot, ReasoningSessionId,
-    ReflectionEffects, ReflectionQueryMutation, ReflectionQueryWriter, ReflectionServices,
-    ReflectionStore, RuntimeInputEndpointId, RuntimeInputSequence, TaskCommit, TaskEnvironment,
-    TaskHost, VolumeId, coordinator_task_launcher, volume_effects,
+    CommitResult, ConflictAnalysisStrategy, EffectLifecycleTerminal, ExactConflictAnalysis,
+    HostSnapshot, ReasoningSessionId, ReflectionEffects, ReflectionQueryMutation,
+    ReflectionQueryWriter, ReflectionServices, ReflectionStore, RuntimeInputEndpointId,
+    RuntimeInputSequence, TaskCommit, TaskEnvironment, TaskHost, VolumeId,
+    coordinator_task_launcher, volume_effects,
 };
 use crate::runtime::{
     EvaluationRuntimeId, RuntimeIds, RuntimeMutationAdmission, RuntimeMutationAuthority,
@@ -2513,60 +2513,41 @@ struct RuntimeEventState {
     inputs: BTreeMap<RuntimeInputEndpointId, Arc<RuntimeInputBuffer>>,
     outputs: RuntimeOutputState,
     diagnostic_routes: BTreeMap<RuntimeInputEndpointId, RuntimeDiagnosticRoute>,
-    revision: u64,
-    latest_changes: BTreeMap<ConflictAddress, u64>,
-    strategy: Arc<dyn ConflictAnalysisStrategy>,
 }
 
 impl RuntimeEventState {
-    fn new(strategy: Arc<dyn ConflictAnalysisStrategy>) -> Self {
+    fn new() -> Self {
         Self {
             inputs: BTreeMap::new(),
             outputs: RuntimeOutputState::default(),
             diagnostic_routes: BTreeMap::new(),
-            revision: 0,
-            latest_changes: BTreeMap::new(),
-            strategy,
         }
     }
 
     fn snapshot(&self, runtime: EvaluationRuntimeId) -> RuntimeEventSnapshot {
         RuntimeEventSnapshot {
             runtime,
-            revision: self.revision,
             inputs: Arc::new(
                 self.inputs
                     .iter()
                     .map(|(endpoint, input)| (*endpoint, input.clone()))
                     .collect(),
             ),
-            strategy: self.strategy.clone(),
         }
-    }
-
-    fn conflicts(&self, journal: &RuntimeEventJournal) -> bool {
-        self.latest_changes.iter().any(|(changed, revision)| {
-            *revision > journal.snapshot.revision && journal.observations.may_conflict(changed)
-        })
     }
 
     fn validate(&self, journal: &RuntimeEventJournal) -> bool {
         if journal.snapshot.runtime != journal.runtime {
             return false;
         }
-        if self.conflicts(journal) {
-            return false;
-        }
         let inputs_valid = journal.cursors.iter().all(|(endpoint, cursor)| {
-            if cursor.next == cursor.start {
-                return true;
-            }
             let Some(input) = self.inputs.get(endpoint) else {
                 return false;
             };
             input.head_sequence == cursor.start
                 && cursor.next.get().saturating_sub(cursor.start.get())
                     <= input.admitted.len() as u64
+                && (!cursor.observed_empty || input.next_sequence == cursor.next)
         });
         inputs_valid
             && journal.outputs.iter().all(|intent| {
@@ -2578,12 +2559,13 @@ impl RuntimeEventState {
     }
 
     fn commit_validated(&mut self, journal: &RuntimeEventJournal) -> bool {
-        let mut consumed = Vec::new();
+        let mut input_changed = false;
         for (endpoint, cursor) in &journal.cursors {
             let count = cursor.next.get() - cursor.start.get();
             if count == 0 {
                 continue;
             }
+            input_changed = true;
             let input = self
                 .inputs
                 .get_mut(endpoint)
@@ -2595,18 +2577,10 @@ impl RuntimeEventState {
                     .pop_front()
                     .expect("event validation retained every claimed input");
                 debug_assert_eq!(record.sequence, input.head_sequence);
-                consumed.push(ConflictAddress::input_slot(*endpoint, record.sequence));
                 input.head_sequence = input
                     .head_sequence
                     .checked_next()
                     .expect("an admitted input always has a successor boundary");
-            }
-        }
-        let input_changed = !consumed.is_empty();
-        if input_changed {
-            self.revision = self.revision.wrapping_add(1);
-            for address in consumed {
-                self.latest_changes.insert(address, self.revision);
             }
         }
         for intent in &journal.outputs {
@@ -2655,11 +2629,6 @@ impl RuntimeEventState {
             .admitted
             .push_back(RuntimeInputRecord { sequence, payload });
         input.next_sequence = next;
-        self.revision = self.revision.wrapping_add(1);
-        self.latest_changes.insert(
-            ConflictAddress::input_slot(endpoint, sequence),
-            self.revision,
-        );
         Ok(sequence)
     }
 
@@ -2704,15 +2673,14 @@ impl RuntimeEventState {
 #[derive(Clone)]
 pub struct RuntimeEventSnapshot {
     runtime: EvaluationRuntimeId,
-    revision: u64,
     inputs: Arc<BTreeMap<RuntimeInputEndpointId, Arc<RuntimeInputBuffer>>>,
-    strategy: Arc<dyn ConflictAnalysisStrategy>,
 }
 
 #[derive(Clone)]
 struct RuntimeInputCursor {
     start: RuntimeInputSequence,
     next: RuntimeInputSequence,
+    observed_empty: bool,
 }
 
 /// Transaction-local observations and FIFO input claims.
@@ -2724,7 +2692,6 @@ struct RuntimeInputCursor {
 pub struct RuntimeEventJournal {
     runtime: EvaluationRuntimeId,
     snapshot: RuntimeEventSnapshot,
-    observations: Box<dyn ConflictObservationIndex>,
     cursors: BTreeMap<RuntimeInputEndpointId, RuntimeInputCursor>,
     outputs: Vec<RuntimeOutputIntent>,
 }
@@ -2734,7 +2701,6 @@ impl RuntimeEventJournal {
     pub fn new(snapshot: RuntimeEventSnapshot) -> Self {
         Self {
             runtime: snapshot.runtime,
-            observations: snapshot.strategy.begin(),
             snapshot,
             cursors: BTreeMap::new(),
             outputs: Vec::new(),
@@ -2757,10 +2723,10 @@ impl RuntimeEventJournal {
             .or_insert_with(|| RuntimeInputCursor {
                 start: snapshot.head_sequence,
                 next: snapshot.head_sequence,
+                observed_empty: false,
             });
-        let address = ConflictAddress::input_slot(input.endpoint, cursor.next);
-        self.observations.observe(&address);
         if cursor.next == snapshot.next_sequence {
+            cursor.observed_empty = true;
             return Ok(None);
         }
         let offset = cursor.next.get() - snapshot.head_sequence.get();
@@ -3289,7 +3255,7 @@ fn set_runtime_diagnostic_route_guarded(
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            let (records, consumed) = {
+            let records = {
                 let buffered = state
                     .events
                     .inputs
@@ -3297,21 +3263,10 @@ fn set_runtime_diagnostic_route_guarded(
                     .expect("validated diagnostic input remains registered");
                 let buffered = Arc::make_mut(buffered);
                 let records = buffered.admitted.drain(..).collect::<Vec<_>>();
-                let consumed = records
-                    .iter()
-                    .map(|record| ConflictAddress::input_slot(input, record.sequence))
-                    .collect::<Vec<_>>();
                 buffered.head_sequence = buffered.next_sequence;
-                (records, consumed)
+                records
             };
             transferred = records.len();
-            if !consumed.is_empty() {
-                state.events.revision = state.events.revision.wrapping_add(1);
-                let revision = state.events.revision;
-                for address in consumed {
-                    state.events.latest_changes.insert(address, revision);
-                }
-            }
             for (record, delivery) in records.into_iter().zip(deliveries) {
                 state
                     .events
@@ -3850,7 +3805,6 @@ impl EvaluationRuntime {
             runtime: id,
             core: CoreValueFactory::new(id, ids.clone()),
         };
-        let event_conflict_analysis = conflict_analysis.clone();
         let mutation_admission = RuntimeMutationAdmission::new();
         let observations = RuntimeObservationState::new();
         let work = EvaluationWorkCoordinator::new(
@@ -3868,7 +3822,7 @@ impl EvaluationRuntime {
             transactions: RuntimeTransactionState {
                 state: Mutex::new(RuntimeTransactionData {
                     reflection: ReflectionStore::new(values.core().clone(), conflict_analysis),
-                    events: RuntimeEventState::new(event_conflict_analysis),
+                    events: RuntimeEventState::new(),
                 }),
             },
             observations,
@@ -4567,7 +4521,7 @@ pub(crate) fn compiler_test_runtime() -> EvaluationRuntime {
             transactions: RuntimeTransactionState {
                 state: Mutex::new(RuntimeTransactionData {
                     reflection: ReflectionStore::new(core, Arc::new(ExactConflictAnalysis)),
-                    events: RuntimeEventState::new(Arc::new(ExactConflictAnalysis)),
+                    events: RuntimeEventState::new(),
                 }),
             },
             observations,
@@ -6926,13 +6880,12 @@ mod tests {
         let endpoint = runtime
             .input_endpoint(|_: ()| -> Result<Value, Error> { Err(Error::new("rejected")) })
             .expect("endpoint should register");
-        let (generation, _, before) = runtime.transaction_snapshot();
+        let (generation, _, _) = runtime.transaction_snapshot();
 
         assert!(endpoint.sender().admit(()).is_err());
 
         let (after_generation, _, after) = runtime.transaction_snapshot();
         assert_eq!(after_generation, generation);
-        assert_eq!(after.revision, before.revision);
         let mut journal = RuntimeEventJournal::new(after);
         assert_eq!(
             journal
@@ -6966,13 +6919,12 @@ mod tests {
             input.head_sequence = RuntimeInputSequence::from_u64(u64::MAX);
             input.next_sequence = RuntimeInputSequence::from_u64(u64::MAX);
         }
-        let (generation, _, before) = runtime.transaction_snapshot();
+        let (generation, _, _) = runtime.transaction_snapshot();
 
         assert!(endpoint.sender().admit(1).is_err());
 
         let (after_generation, _, after) = runtime.transaction_snapshot();
         assert_eq!(after_generation, generation);
-        assert_eq!(after.revision, before.revision);
         assert!(
             after
                 .inputs
@@ -7052,26 +7004,92 @@ mod tests {
     }
 
     #[test]
-    fn runtime_input_uses_the_configured_conflict_strategy() {
-        let strategies: [Arc<dyn ConflictAnalysisStrategy>; 3] = [
-            Arc::new(crate::reflection::ExactConflictAnalysis),
-            Arc::new(crate::reflection::FingerprintConflictAnalysis),
+    fn append_then_consume_does_not_restore_a_stale_empty_observation() {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let endpoint = runtime
+            .input_endpoint(integer_converter(&runtime))
+            .expect("endpoint should register");
+        let (stale_store, mut stale_events) = input_transaction(&runtime);
+        assert_eq!(stale_events.read(&endpoint.reader()).unwrap(), None);
+
+        endpoint.sender().admit(1).expect("input should admit");
+        let (consumer_store, mut consumer_events) = input_transaction(&runtime);
+        assert!(consumer_events.read(&endpoint.reader()).unwrap().is_some());
+        assert_eq!(
+            runtime.try_commit_transaction(&consumer_store, &consumer_events),
+            crate::reflection::StoreCommitResult::Committed
+        );
+
+        assert_eq!(
+            runtime.try_commit_transaction(&stale_store, &stale_events),
+            crate::reflection::StoreCommitResult::Conflict,
+            "monotonic FIFO boundaries must prevent empty-state ABA"
+        );
+    }
+
+    #[test]
+    fn nonempty_fifo_read_survives_a_concurrent_append_under_coarse_heap_analysis() {
+        let runtime = EvaluationRuntime::with_conflict_analysis(
+            0,
             Arc::new(crate::reflection::CoarseConflictAnalysis),
-        ];
-        for strategy in strategies {
-            let runtime = EvaluationRuntime::with_conflict_analysis(0, strategy)
-                .expect("runtime should build");
-            let endpoint = runtime
-                .input_endpoint(integer_converter(&runtime))
-                .expect("endpoint should register");
-            let (store, mut events) = input_transaction(&runtime);
-            assert_eq!(events.read(&endpoint.reader()).unwrap(), None);
-            endpoint.sender().admit(1).expect("input should admit");
-            assert_eq!(
-                runtime.try_commit_transaction(&store, &events),
-                crate::reflection::StoreCommitResult::Conflict
-            );
-        }
+        )
+        .expect("runtime should build");
+        let endpoint = runtime
+            .input_endpoint(integer_converter(&runtime))
+            .expect("endpoint should register");
+        endpoint
+            .sender()
+            .admit(1)
+            .expect("first input should admit");
+        let (store, mut events) = input_transaction(&runtime);
+        assert!(events.read(&endpoint.reader()).unwrap().is_some());
+
+        endpoint
+            .sender()
+            .admit(2)
+            .expect("concurrent append should admit");
+        assert_eq!(
+            runtime.try_commit_transaction(&store, &events),
+            crate::reflection::StoreCommitResult::Committed,
+            "FIFO conflicts must not inherit the reflection heap's coarse analysis"
+        );
+
+        let (store, mut events) = input_transaction(&runtime);
+        assert_eq!(
+            events
+                .read(&endpoint.reader())
+                .unwrap()
+                .and_then(|value| value.as_i64()),
+            Some(2)
+        );
+        assert_eq!(
+            runtime.try_commit_transaction(&store, &events),
+            crate::reflection::StoreCommitResult::Committed
+        );
+    }
+
+    #[test]
+    fn append_conflicts_after_a_fifo_reader_observes_the_tail_empty() {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let endpoint = runtime
+            .input_endpoint(integer_converter(&runtime))
+            .expect("endpoint should register");
+        endpoint
+            .sender()
+            .admit(1)
+            .expect("first input should admit");
+        let (store, mut events) = input_transaction(&runtime);
+        assert!(events.read(&endpoint.reader()).unwrap().is_some());
+        assert_eq!(events.read(&endpoint.reader()).unwrap(), None);
+
+        endpoint
+            .sender()
+            .admit(2)
+            .expect("concurrent append should admit");
+        assert_eq!(
+            runtime.try_commit_transaction(&store, &events),
+            crate::reflection::StoreCommitResult::Conflict
+        );
     }
 
     #[test]
@@ -7106,6 +7124,30 @@ mod tests {
         );
         assert_eq!(
             runtime.try_commit_transaction(&competing_store, &competing_events),
+            crate::reflection::StoreCommitResult::Conflict
+        );
+    }
+
+    #[test]
+    fn cloned_fifo_claim_cannot_reconsume_a_committed_prefix() {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let endpoint = runtime
+            .input_endpoint(integer_converter(&runtime))
+            .expect("endpoint should register");
+        endpoint.sender().admit(1).expect("input should admit");
+        let (_, store, snapshot) = runtime.transaction_snapshot();
+        let committed_store = crate::reflection::StoreJournal::new(store.clone());
+        let replay_store = crate::reflection::StoreJournal::new(store);
+        let mut committed_events = RuntimeEventJournal::new(snapshot);
+        assert!(committed_events.read(&endpoint.reader()).unwrap().is_some());
+        let replay_events = committed_events.clone();
+
+        assert_eq!(
+            runtime.try_commit_transaction(&committed_store, &committed_events),
+            crate::reflection::StoreCommitResult::Committed
+        );
+        assert_eq!(
+            runtime.try_commit_transaction(&replay_store, &replay_events),
             crate::reflection::StoreCommitResult::Conflict
         );
     }
@@ -9185,6 +9227,45 @@ mod tests {
                 .expect("rearmed input should remain a diagnostic")
                 .message(),
             "rearmed"
+        );
+    }
+
+    #[test]
+    fn diagnostic_fallback_drain_invalidates_a_stale_fifo_claim() {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let bus = DiagnosticBus::for_runtime(&runtime);
+        let (ingress, reader) = bus
+            .diagnostic_ingress(&runtime)
+            .expect("ingress should attach");
+        let fallback = runtime
+            .output_endpoint(
+                |value| Diagnostic::from_transport_value(&value),
+                |_: Diagnostic| Ok(()),
+            )
+            .expect("fallback output should register");
+        let (writer, delivery) = fallback.into_parts();
+        ingress
+            .set_fallback_output(&writer)
+            .expect("fallback should share the ingress runtime");
+        bus.publish_local(Diagnostic::new(
+            &runtime.values(),
+            Severity::Info,
+            "stale logger claim",
+        ));
+        let (_, store, snapshot) = runtime.transaction_snapshot();
+        let mut events = RuntimeEventJournal::new(snapshot);
+        assert!(events.read(&reader).unwrap().is_some());
+
+        assert_eq!(ingress.fallback().expect("fallback should activate"), 1);
+        assert_eq!(
+            runtime.try_commit_transaction(&StoreJournal::new(store), &events),
+            StoreCommitResult::Conflict
+        );
+        assert!(
+            delivery
+                .deliver_next()
+                .expect("fallback delivery should remain valid")
+                .is_some()
         );
     }
 

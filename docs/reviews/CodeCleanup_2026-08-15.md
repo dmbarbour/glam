@@ -294,7 +294,7 @@ Verification on 2026-08-17:
   `cargo clippy --all-targets --all-features -- -D warnings`, and
   `cargo test -q` pass.
 
-### CCR-005 — FIFO input conflicts maintain a general address history in parallel with cursor validation
+### CCR-005 — Resolved: FIFO inputs validate sequence boundaries directly
 
 **Classification:** duplicated mechanism with a broader-than-needed policy  
 **Priority:** medium  
@@ -346,6 +346,39 @@ commit conflicts.
 **Expected simplification:** remove an unbounded change-history map, a full-map
 validation scan, and the event side of the generic conflict-analysis
 abstraction.
+
+Resolution on 2026-08-17:
+
+- Runtime input journals now validate their endpoint-local FIFO cursors
+  directly. A successful claim requires the authoritative head to remain at
+  the snapshot start with the claimed prefix still available.
+- Each cursor records whether a read observed the tail empty. Such a cursor
+  additionally requires the authoritative `next_sequence` to remain at that
+  boundary, so an append invalidates precisely the transaction that observed
+  its absence.
+- Removed event revisions, the event `latest_changes` map, per-journal conflict
+  observation indexes, and the event copy of the reflection conflict strategy.
+  `ConflictAddress` consequently models only hierarchical reflection-store
+  paths again.
+- Kept the runtime observation epoch and broad wake behavior separate from
+  commit conflict analysis. Input admission still wakes retryable runtime work;
+  this cleanup does not introduce endpoint-specific scheduler subscriptions.
+- This deliberately specializes runtime external inputs as FIFO resources.
+  Any future non-FIFO transactional host resource should provide its own
+  validation protocol instead of inheriting the reflection heap's strategy.
+
+Verification on 2026-08-17:
+
+- A new regression failed under the former coarse event analysis: reading one
+  present item and then concurrently appending another incorrectly conflicted.
+  It now commits and leaves the appended item queued, even when the reflection
+  heap uses `CoarseConflictAnalysis`.
+- Protocol tests cover empty-tail append conflicts, competing and independent
+  consumers, cloned-claim replay, fallback drain invalidation, abandoned
+  claims, and atomic rollback beside a reflection-store conflict.
+- `cargo fmt --check`,
+  `cargo clippy --all-targets --all-features -- -D warnings`, and
+  `cargo test -q` pass.
 
 ### CCR-006 — Every event snapshot rebuilds the endpoint map
 
@@ -758,8 +791,8 @@ without either broad wakeups or incomplete settlement validation.
 1. **Low-risk and compatibility removal:** CCR-001, CCR-002, CCR-007, CCR-008,
    and CCR-009 are complete.
 2. **Coordinator protocol cleanup:** CCR-003 and CCR-004 are complete.
-3. **Event-state rewrite:** decide CCR-005 explicitly, then combine it with
-   CCR-006 so the event maps and validation protocol are changed once.
+3. **Event-state rewrite:** CCR-005 is complete; make snapshots clone one
+   persistent endpoint-map root in CCR-006 next.
 4. **Repeated mechanism:** prototype CCR-010 and retain it only if the result is
    materially smaller and clearer.
 5. **Semantic facade cleanup:** stage CCR-011 after the main/configuration call
