@@ -14,17 +14,12 @@ reducer. The former compatibility entry points are gone. The net-wide batch
 lease and broad disturbance epoch are recognizable, documented performance
 policies rather than hidden semantic shortcuts.
 
-The high-severity locking defect found by this review has since been fixed.
-Logical-copy installation now captures the immutable source endpoint before
-acquiring the target net lock, then carries it through a prepared copy-source
-token. Forced self-source and reciprocal A/B regressions cover the former
-deadlocks.
-
-There is also one material semantic mismatch. The plan makes an observed
-permanent stuck endpoint immune to unrelated source revisions, but the
-implementation checks the broad topology revision before reading the pair's
-terminal state. Finite unrelated progress merely causes a rescan; continuing
-unrelated mutation can postpone a demanded permanent failure.
+The high-severity locking defect and material terminal-observation mismatch
+found by this review have since been fixed. Logical-copy installation now
+captures the immutable source endpoint before acquiring the target net lock,
+then carries it through a prepared copy-source token. A stale exact-pair
+observation also propagates the pair's authoritative `Stuck` result rather
+than allowing unrelated topology progress to postpone it.
 
 The remaining findings concern overstated verification, one read path which
 publishes a false mutation, and small post-transition representation cleanup.
@@ -81,7 +76,7 @@ Resolution on 2026-08-17:
 Do not solve this with a lock order. The intended invariant is stronger and
 cheaper: never hold two runtime-net locks simultaneously.
 
-### CW-002 — Medium: an unrelated topology revision invalidates an already permanent stuck endpoint
+### CW-002 — Resolved: an unrelated topology revision invalidated a permanent stuck endpoint
 
 Confidence: high.
 
@@ -90,11 +85,11 @@ lock, the terminal pair cannot reduce, node IDs are not reused, and unrelated
 source mutations cannot invalidate that terminal spine
 ([plan](../.tmp/CursorWHNF.md#transient-demand-spines-and-frontier-observations)).
 
-The implementation does not preserve that exception. A
+At the reviewed baseline, the implementation did not preserve that exception. A
 [`FrontierObservation`](../../src/interaction_net/runtime.rs#L182) retains the
 pair and topology revision. Its `step_active_pair` passes the expected revision
-to `step_active_pair_if_current`, which returns `Disturbed` on any mismatch
-*before* inspecting [`ActivePairState::Stuck`](../../src/interaction_net/runtime.rs#L734).
+to `step_active_pair_if_current`, which returned `Disturbed` on any mismatch
+*before* inspecting `ActivePairState::Stuck`.
 
 After a finite unrelated mutation the driver safely restarts, rescans, and
 rediscovers the same failure. The error is not corrupted. The mismatch is
@@ -103,20 +98,20 @@ continuing mutation can indefinitely postpone a permanent demanded error.
 That is contrary to request-relative terminality even though the broad
 revision remains acceptable for nonterminal endpoints.
 
-The named regression
-[`nested_cursor_preserves_structured_failure_across_unrelated_source_progress`](../../src/interaction_net/runtime/tests.rs#L1350)
-does not exercise this path. After mutating the source it directly reads
-`stuck_reason`; it never dispatches the retained observation through
-`step_active_pair` or the evaluator driver.
+Resolution on 2026-08-17:
 
-Recommended change: carry a terminal stuck observation out of the locked
-source inspection, or otherwise allow an already observed stuck endpoint to
-terminalize without broad revision rejection. Retain revision validation for
-ready, claimed, blocked, cursor, and gone endpoints.
-
-Required regression: force an unrelated source mutation between nested
-frontier observation and dispatch, then require the driver to return the same
-structured specialization failure without treating the endpoint as disturbed.
+1. On a topology-revision mismatch,
+   [`step_active_pair_if_current`](../../src/interaction_net/runtime.rs#L744)
+   performs one exact lookup. An authoritative `Stuck` state propagates
+   immediately; every other stale state remains `Disturbed`.
+2. Current-revision dispatch is unchanged. The added lookup occurs only on a
+   path which would otherwise rebuild and rescan the frontier.
+3. `nested_cursor_preserves_structured_failure_across_unrelated_source_progress`
+   now captures the observation before an unrelated reduction and dispatches
+   it afterward, preserving the structured failure.
+4. `active_source_call_is_a_dependency_and_is_never_copied` now also verifies
+   that an exact claimed dependency propagates its later terminal failure.
+   Nonterminal stale-observation tests continue to require `Disturbed`.
 
 ### CW-003 — Resolved clarification: semantic recursion is not a cursor coordination cycle
 
@@ -158,8 +153,8 @@ The implementation has good focused coverage, but not that complete matrix:
   [`stable_cursor_dependencies_propagate_through_mixed_owner_layers`](../../src/eval/net.rs#L863)
   cover only two layers;
 - there is no deep alternating pair-owned/pairless productive chain;
-- the nested structured-failure test does not propagate through the driver, as
-  described in CW-002; and
+- the nested structured-failure test now dispatches a stale observation but
+  does not propagate through the complete evaluator driver; and
 - [`connecting_a_cursor_transfers_ready_and_blocked_obligations_to_the_pair`](../../src/interaction_net/runtime/tests.rs#L1247)
   omits stable-obligation transfer and rejection of an in-flight claimed
   transfer, even though the implementation handles both.
@@ -185,8 +180,9 @@ That increments the topology revision and either marks the current batch dirty
 or publishes a disturbance.
 
 The result is a false structural invalidation and potentially an unnecessary
-follower wake every time callable lowering begins. It also makes CW-002 easier
-to encounter. This is unnecessary work rather than a semantic corruption.
+follower wake every time callable lowering begins. It also needlessly makes
+frontier observations stale. This is unnecessary work rather than a semantic
+corruption.
 
 Make `claim_call` take `&self` and call it through `SharedRuntimeNet::with`.
 Add a revision test showing that reading the already claimed payload is quiet,
@@ -269,11 +265,11 @@ as the generic reducer and low-level test utility; cursor-WHNF production uses
 | Independent logical copies remain independent | Implemented. Frontier and fan-site maps are target-copy-local; the source computation remains shared. |
 | Exactly one owner per cursor transition | Implemented and asserted: active-pair owner XOR pairless obligation owner. Authority transfer is under the target lock. Test coverage is incomplete for stable/claimed transfer (CW-004). |
 | Do not retain complete demand spines | Implemented. `principal_anchors` exists only during one locked inspection and is discarded after convergence lookup. |
-| Durable endpoint work is version validated | Implemented for nonterminal cursor/pair observations. Permanent stuck is over-invalidated (CW-002). |
+| Durable endpoint work is version validated | Implemented for nonterminal cursor/pair observations. An exact pair's authoritative `Stuck` result is terminal despite unrelated revision changes (CW-002 resolution). |
 | Never hold two net locks | Implemented by cursor advancement and copy installation. `PreparedCopySource` separates source inspection from target mutation (CW-001 resolution). |
 | No lost wakeup around claimed work | Implemented by capture-under-lock, disturbance epoch recheck under the same mutex, and condition-variable waiting. Barrier tests cover the disputed ordering. |
 | Batch follower disturbance without per-step thrashing | Implemented with a net-wide RAII lease. Every topology mutation advances its revision; only batch close publishes disturbance. |
-| Request-relative completion | Implemented for root shapes, stable cursors, unrelated active work, exact waits, and demanded failures. CW-002 is the terminal exception mismatch. |
+| Request-relative completion | Implemented for root shapes, stable cursors, unrelated active work, exact waits, and demanded failures, including stale observations of terminal pairs. |
 | Iterative traversal with no 1,024-layer limit | Implemented and proven for a 1,100-layer productive pairless chain. Deep stable and mixed chains remain verification gaps. |
 | Raw `Value::Net` is opaque WHNF | Implemented. Explicit net computation and arity/function bridges initiate normalization; ordinary value evaluation does not. |
 
@@ -303,8 +299,6 @@ as the generic reducer and low-level test utility; cursor-WHNF production uses
 
 ### Accidental or unresolved drift
 
-- Permanent stuck observations do not receive their documented revision
-  exception (CW-002).
 - The Phase 5 completion note overstates the retained test matrix (CW-004).
 - A read-only call-payload operation publishes mutation (CW-005).
 - Observation and driver representations retain now-unused generality
@@ -355,23 +349,21 @@ every reduction.
 | Independent copies | `separate_logical_copies_rebase_fans_to_distinct_local_sites` | Proves copy-local fan identity and source sharing. |
 | Request-relative unrelated work | `stable_root_does_not_reduce_disconnected_or_undemanded_ready_work`, `stable_root_ignores_unrelated_claimed_and_stuck_work` | Good controls for global-work leakage. |
 | Exact semantic waits | `blocked_call_requires_its_current_wait_token_to_be_reclaimed`, operator equivalent, reflection-gate call/operator tests | Exact token and scheduler-visible retry are covered. |
-| Permanent failure | generic stuck tests and `specialization_failure_remains_structured_in_the_stuck_pair` | Direct root behavior is covered; nested post-disturbance driver propagation is not. |
+| Permanent failure | generic stuck tests, `specialization_failure_remains_structured_in_the_stuck_pair`, `nested_cursor_preserves_structured_failure_across_unrelated_source_progress`, and the terminal part of `active_source_call_is_a_dependency_and_is_never_copied` | Direct roots and stale exact-observation dispatch are covered; full nested driver propagation remains absent (CW-004). |
 | Iterative depth | `iterative_cursor_driver_exceeds_the_former_recursion_limit` | Strong productive pairless case; missing deep stable/mixed cases. |
 | Runtime transfer | `cursor_driver_releases_each_runtime_before_crossing_to_the_next` | Proves leases are closed before crossing between runtime nets. Copy installation lock separation is covered independently above. |
 | Public semantic boundary | raw-net opacity, `net_arity`, net computation/function, non-data-normal-form, and executable sample tests | Good language-level integration coverage. |
 
 The focused runtime suite contains 62 tests and the evaluator driver suite 10;
-both pass after the CW-001 resolution. The full repository suite also passes
-with 1,272 tests across all targets. Passing counts do not close CW-002 or
-CW-004 because their disputed ordering or depths are not exercised.
+both pass after the CW-001 and CW-002 resolutions. The full repository suite
+also passes with 1,272 tests across all targets. Passing counts do not close
+CW-004 because its disputed driver path and depths are not exercised.
 
 ## Recommended order
 
-1. Implement the terminal stuck exception and replace the state-inspection
-   test with a driver-level forced-order regression (CW-002).
-2. Complete the promised Phase 5 test matrix, especially deep stable and mixed
+1. Complete the promised Phase 5 test matrix, especially deep stable and mixed
    ownership (CW-004).
-3. Remove the false call-read publication (CW-005), then perform the small
+2. Remove the false call-read publication (CW-005), then perform the small
    observation/driver and current-doc cleanup (CW-006).
 
 After these items, the cursor-WHNF transition can reasonably be treated as a

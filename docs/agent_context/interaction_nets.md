@@ -80,6 +80,11 @@ external work records `Claimed` in place so another worker cannot take it.
 Stuck pairs should be exceptional and remain visible for diagnostics rather
 than moving to a separate queue.
 
+Versioned frontier observations invalidate nonterminal pair state when the
+source topology changes. `Stuck` is the terminal exception: if the exact pair
+is now authoritatively stuck, dispatch propagates that structured failure even
+from a stale observation instead of rescanning unrelated topology.
+
 ## Reduction and External Work
 
 Only principal-principal pairs reduce. Ordinary topology rules rewrite under

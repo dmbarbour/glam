@@ -748,7 +748,13 @@ impl<S: NetSpecialization> SharedRuntimeNet<S> {
         if expected_topology_revision
             .is_some_and(|expected| expected != revisions.topology_revision())
         {
-            return ActivePairStep::Disturbed;
+            return match state.runtime.active.get(&pair) {
+                Some(ActivePairState::Stuck(reason)) => ActivePairStep::Stuck(StuckPair {
+                    pair,
+                    reason: reason.clone(),
+                }),
+                _ => ActivePairStep::Disturbed,
+            };
         }
         let pair_state = state.runtime.active.get(&pair).cloned();
         let (outcome, changed) = match pair_state {

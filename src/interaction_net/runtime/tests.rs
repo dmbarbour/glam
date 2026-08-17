@@ -1419,6 +1419,20 @@ fn nested_cursor_preserves_structured_failure_across_unrelated_source_progress()
     let cursor = target.begin_copy(source.prepare_copy_source());
     target.connect(Port::principal(local), Port::principal(cursor));
     assert_eq!(reduce_next_cursor(&mut target).1, CursorProgress::Blocked);
+    let observation = match target
+        .cursor_dependency(cursor)
+        .expect("outer cursor should retain its nested endpoint")
+    {
+        CursorDependency::SourceFrontier(observation) => {
+            assert!(observation.source().ptr_eq(&source));
+            assert_eq!(
+                observation.endpoint(),
+                DemandEndpoint::ActivePair(failed_pair)
+            );
+            observation
+        }
+        dependency => panic!("expected a nested source pair, got {dependency:?}"),
+    };
 
     let progress_barrier = Arc::new(Barrier::new(2));
     let worker_barrier = progress_barrier.clone();
@@ -1440,26 +1454,17 @@ fn nested_cursor_preserves_structured_failure_across_unrelated_source_progress()
         .join()
         .expect("unrelated source worker should not panic");
 
-    let propagated = match target
-        .cursor_dependency(cursor)
-        .expect("outer cursor should retain its nested endpoint")
-    {
-        CursorDependency::SourceFrontier(observation) => {
-            assert!(observation.source().ptr_eq(&source));
-            let DemandEndpoint::ActivePair(pair) = observation.endpoint() else {
-                panic!("nested endpoint should remain an active pair");
-            };
-            assert_eq!(pair, failed_pair);
-            observation
-                .source()
-                .with(|runtime| runtime.stuck_reason(pair).cloned())
-        }
-        dependency => panic!("expected a nested source pair, got {dependency:?}"),
+    let propagated = match observation.step_active_pair(failed_pair) {
+        ActivePairStep::Stuck(stuck) => stuck,
+        step => panic!("permanent nested failure should survive disturbance, got {step:?}"),
     };
     assert_eq!(
         propagated,
-        Some(StuckReason::Specialization(error)),
-        "unrelated source versions must not replace the terminal failure"
+        StuckPair {
+            pair: failed_pair,
+            reason: StuckReason::Specialization(error),
+        },
+        "unrelated source versions must not postpone the terminal failure"
     );
 }
 
@@ -1898,13 +1903,20 @@ fn active_source_call_is_a_dependency_and_is_never_copied() {
     let call = source
         .with(|runtime| runtime.call(pair))
         .expect("claimed source call should remain structurally available");
+    let error: Arc<str> = Arc::from("finished after observation test");
     source.with_mut(|runtime| {
-        runtime.fail_claimed_call(call, Arc::from("finished after observation test"));
+        runtime.fail_claimed_call(call, error.clone());
     });
-    assert!(matches!(
-        observation.step_active_pair(pair),
-        ActivePairStep::Disturbed
-    ));
+    let ActivePairStep::Stuck(stuck) = observation.step_active_pair(pair) else {
+        panic!("an exact claimed dependency should propagate its terminal failure");
+    };
+    assert_eq!(
+        stuck,
+        StuckPair {
+            pair,
+            reason: StuckReason::Specialization(error),
+        }
+    );
 }
 
 #[test]
