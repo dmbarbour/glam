@@ -734,6 +734,165 @@ construction in an existing evaluation context.
 store construction. Reject the refactor if the generic API merely moves equal
 amounts of complexity into type constraints.
 
+#### CCR-010 proposed update and V&V plan
+
+Keep this refactor narrower than the four effect systems which use it. The
+shared mechanism is an immutable, non-committing host for one isolated
+all-results search; the specializations do not share a journal, request
+vocabulary, result policy, or runner lifecycle.
+
+The provisional common shape is:
+
+```rust
+pub(crate) struct IsolatedTaskHost<X> {
+    environment: PublicValue,
+    store: StoreSnapshot,
+    extra: X,
+}
+```
+
+It belongs beside `IsolatedEffectSearch`, not in the general runtime host API.
+For a specialization whose `Snapshot = X` and `Host =
+IsolatedTaskHost<X>`, its `TaskHost` implementation:
+
+- returns generation `1`, the retained exact empty-store snapshot, and a clone
+  of `extra`;
+- always returns `CommitResult::Closed` from `commit`; and
+- always returns `false` from `wait_for_change` because mutable host
+  observations do not exist in this execution model.
+
+`TaskEnvironment` returns the retained environment. The specialization remains
+responsible for omitting the shared heap through `exposes_shared_heap`; the
+generic host must not make that policy implicit or configurable.
+
+CLI additionally requires `ReflectionServices` because it composes the
+reusable `.env`/`.log` request family. The generic host may implement the same
+non-emitting service policy as `CliHost`: direct diagnostics have no committed
+destination, while ordinary isolated `.log` calls are retained in each
+branch's `ReflectionJournal`. Do not add a callback, diagnostic sink, commit
+closure, or other policy parameter merely to generalize behavior none of the
+four hosts supports. Query services remain unavailable.
+
+Macro `.log` remains a macro-specialization operation in `MacroJournal`, not a
+generic host service. Likewise, the macro environment may remain duplicated in
+`MacroSnapshot` for this refactor rather than combining a lifecycle cleanup
+with a change to its transactional read path. Reflection annotations demanded
+while evaluating macros continue to run in the surrounding evaluation runtime;
+the isolated macro host must not replace or suppress that separate path.
+
+##### Phase 0: Latch the existing boundary
+
+Before replacing a host, map and run the existing regressions which pin its
+distinct policy:
+
+- search core: ordered all-results traversal, successful and failed
+  branch-local journals, abandoned alternatives, retryable dependencies, and
+  no host commit;
+- token parsing: rejection of outer CLI/host/shared-heap effects, fresh
+  task-local state per parse, and rollback of failed alternatives;
+- macro expansion: environment access, direct journaled logging, selected
+  versus discarded branch diagnostics, omission of heap/task operations, and
+  the separate survival of committed reflection annotations;
+- configured CLI: environment access, selected-branch diagnostics, and
+  omission of shared heap/task capabilities; and
+- interaction-net construction: invocation-scoped ports, checked replay in an
+  existing evaluation context, and resumable lazy dependency without poisoning
+  the construction value.
+
+Add a focused regression before refactoring if any listed contract is only
+incidental to a larger test. In particular, selected CLI `.log` output must be
+shown to come from the retained branch journal rather than host emission.
+
+##### Phase 1: Introduce the mechanism and prototype it on token parsing
+
+1. Add `IsolatedTaskHost<X>` beside `IsolatedEffectSearch` with one constructor
+   that receives a `CoreValueFactory`, environment, and specialization
+   snapshot. Construct a fresh exact store snapshot just as every current host
+   does.
+2. Add small mechanism tests for environment and extra-snapshot preservation,
+   fixed generation, forbidden commit, and non-waiting host observations.
+3. Change `TokenEffects::Host` to the generic host and construct its empty
+   environment and `TokenSnapshot` at the existing call site. Remove
+   `TokenHost` and its three trait implementations.
+4. Re-run the isolated-search and token suites before continuing.
+
+This phase is the prototype gate. Stop and retain the concrete hosts if the
+generic form requires changes to `TaskSpecialization`, policy closures,
+consumer-specific trait bounds, or more forwarding code than it deletes.
+
+##### Phase 2A: Migrate interaction-net construction
+
+Use `IsolatedTaskHost<()>` with the existing empty environment. Do not move
+`ConstructionJournal`, the invocation brand, checked replay, result-count
+policy, or `NetConstructionMachine` blocking behavior. Verify construction in
+an existing `EvalContext`, cross-invocation port rejection, and retry after a
+lazy construction dependency.
+
+##### Phase 2B: Migrate macro expansion
+
+Use `IsolatedTaskHost<MacroSnapshot>` while leaving `MacroSnapshot`,
+`MacroJournal`, and the macro-specific `.env` and `.log` handlers intact.
+Remove only `MacroHost` and its repeated lifecycle implementations. Verify that
+failed alternatives discard their direct diagnostics, the selected branch
+retains its diagnostics and scoped-case evidence, shared heap/task operations
+remain absent from the macro API, and `anno refl:` observations still use the
+owning evaluation runtime.
+
+##### Phase 3: Migrate configured CLI and prove logging policy
+
+Implement the generic host's deliberately non-emitting `ReflectionServices`
+boundary, then change `CliEffects::Host` to
+`IsolatedTaskHost<CliSnapshot>`. Keep `CliJournal` as the sole owner of direct
+CLI diagnostics. Verify both sides of the distinction:
+
+- direct `.log` evidence follows the selected or best-failure branch and
+  abandoned alternatives do not leak diagnostics; and
+- the host itself does not publish diagnostics or gain query, heap, or task
+  capabilities.
+
+If expressing this policy on the generic host grants an unintended operation
+to another specialization, retain a narrow CLI wrapper instead of adding a
+general diagnostic-policy parameter. That outcome may reduce the final host
+count to one wrapper plus the common mechanism and is preferable to a broader
+capability surface.
+
+##### Phase 4: Structural audit and decision checkpoint
+
+After all viable migrations:
+
+1. Confirm that the four concrete `TaskHost` implementations and their stored
+   `StoreSnapshot` fields are gone, or record why a narrow CLI wrapper remains.
+2. Confirm that no effect request list, specialization journal, branch
+   selection rule, diagnostic enrichment rule, or interaction-net replay code
+   changed as collateral work.
+3. Compare the resulting type constraints and line count with the original.
+   Revert the abstraction if it mainly relocates equivalent boilerplate or
+   makes specialization errors materially harder to understand.
+4. Keep each host's exact empty store invocation-local for now. Sharing that
+   store is a separate allocation optimization: `StoreSnapshot` contains
+   runtime-local values, identity, volumes, and a query domain, so any future
+   cache must be owned by and keyed to one evaluation runtime. Do not introduce
+   a global or cross-runtime empty snapshot as part of CCR-010.
+
+##### Verification and validation
+
+Run focused checks after every migration rather than relying only on the final
+suite:
+
+- `reflection::tests::isolated_search_*` for branch retention, failure
+  evidence, retry, and non-commit behavior;
+- the token parser isolation and task-local-state tests;
+- `macro_expansion::tests::macro_runner_*`, direct-log selection tests,
+  forbidden-capability tests, and the shared-runtime reflection tests;
+- configured CLI selected-diagnostic and forbidden-capability tests; and
+- interaction-net construction port-scope and lazy-dependency tests.
+
+The final checkpoint requires `cargo fmt --check`,
+`cargo clippy --all-targets --all-features -- -D warnings`, and
+`cargo test -q`. Review the diff separately from those behavioral checks: this
+finding succeeds only if it removes the duplicated lifecycle without merging
+the four specializations' semantics.
+
 ### CCR-011 — Presence-oriented `Assembler::{get,get_optional}` remains a compatibility interpreter
 
 **Classification:** transitional compatibility  
