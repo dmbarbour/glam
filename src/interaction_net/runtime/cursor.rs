@@ -419,19 +419,6 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         progress
     }
 
-    pub(in crate::interaction_net::runtime) fn cursor_across(&self, local: Port) -> Option<NodeId> {
-        let neighbor = self.neighbor(local)?;
-        if !neighbor.is_principal()
-            || !matches!(
-                self.node(neighbor.node()),
-                Some(RuntimeNode::RemoteCursor { .. })
-            )
-        {
-            return None;
-        }
-        Some(neighbor.node())
-    }
-
     pub(in crate::interaction_net::runtime) fn materialize_remote_node(
         &mut self,
         copy: CopyId,

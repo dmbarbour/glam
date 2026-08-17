@@ -1,7 +1,7 @@
 use super::*;
 use crate::interaction_net::{
-    ActivePairStep, CursorStep, DemandEndpoint, FrontierObservation, NetContention,
-    NormalizationBatchLease,
+    ActivePairStep, CursorDependencyDisposition, CursorDependencyResolution, CursorStep,
+    DemandEndpoint, FrontierObservation, InterfaceDemand, NetContention, NormalizationBatchLease,
 };
 
 pub(super) fn attach_net_many(function: Value, arguments: Vec<Value>) -> NetValue {
@@ -104,9 +104,11 @@ enum NetDriverWork {
         observation: FrontierObservation<CoreSpecialization>,
         pair: ActivePairKey,
     },
-    RetryCursor {
+    ResumeCursorDependency {
         runtime: crate::core_net::CoreRuntimeNet,
         cursor: crate::interaction_net::NodeId,
+        expected_dependency: CursorDependency<CoreSpecialization>,
+        disposition: CursorDependencyDisposition,
     },
 }
 
@@ -136,9 +138,11 @@ impl NetDriverWorklist {
         cursor: crate::interaction_net::NodeId,
         dependency: CursorDependency<CoreSpecialization>,
     ) {
-        self.push(NetDriverWork::RetryCursor {
+        self.push(NetDriverWork::ResumeCursorDependency {
             runtime: runtime.clone(),
             cursor,
+            expected_dependency: dependency.clone(),
+            disposition: CursorDependencyDisposition::Progressed,
         });
         self.push(match dependency {
             CursorDependency::LocalCursor(cursor) => NetDriverWork::Cursor { runtime, cursor },
@@ -159,6 +163,43 @@ impl NetDriverWorklist {
             }
         });
     }
+
+    fn mark_nearest_dependency_stable(&mut self) -> bool {
+        let Some(resumption) = self
+            .items
+            .iter_mut()
+            .rev()
+            .find(|item| matches!(item, NetDriverWork::ResumeCursorDependency { .. }))
+        else {
+            return false;
+        };
+        let NetDriverWork::ResumeCursorDependency { disposition, .. } = resumption else {
+            unreachable!()
+        };
+        *disposition = CursorDependencyDisposition::Stable;
+        true
+    }
+
+    fn restart_from_request_root(&mut self) -> bool {
+        let Some(root) = self
+            .items
+            .iter()
+            .find(|item| matches!(item, NetDriverWork::RequestRoot { .. }))
+            .cloned()
+        else {
+            self.items.clear();
+            return false;
+        };
+        self.items.clear();
+        self.items.push(root);
+        true
+    }
+
+    fn has_request_root(&self) -> bool {
+        self.items
+            .iter()
+            .any(|item| matches!(item, NetDriverWork::RequestRoot { .. }))
+    }
 }
 
 impl NetDriverWork {
@@ -167,7 +208,7 @@ impl NetDriverWork {
             Self::RequestRoot { runtime, .. }
             | Self::Cursor { runtime, .. }
             | Self::ActivePair { runtime, .. }
-            | Self::RetryCursor { runtime, .. } => runtime,
+            | Self::ResumeCursorDependency { runtime, .. } => runtime,
             Self::ObservedCursor { observation, .. }
             | Self::ObservedActivePair { observation, .. } => observation.source(),
         }
@@ -176,7 +217,7 @@ impl NetDriverWork {
 
 enum NetDriverOutcome {
     Progressed,
-    Stable,
+    Root(InterfaceDemand),
     Contended(NetContention<CoreSpecialization>),
 }
 
@@ -240,23 +281,31 @@ fn drive_net_work(
         }
         match work {
             NetDriverWork::RequestRoot { runtime, interface } => {
-                runtime.ensure_interface_cursor_obligation(interface);
-                if let Some(cursor) = runtime.with(|net| net.interface_cursor(interface)) {
-                    driver.worklist.push(NetDriverWork::RequestRoot {
-                        runtime: runtime.clone(),
-                        interface,
-                    });
-                    driver
-                        .worklist
-                        .push(NetDriverWork::Cursor { runtime, cursor });
-                } else if let Some(pair) = runtime.with(|net| net.interface_dependency(interface)) {
-                    driver.worklist.push(NetDriverWork::RequestRoot {
-                        runtime: runtime.clone(),
-                        interface,
-                    });
-                    driver
-                        .worklist
-                        .push(NetDriverWork::ActivePair { runtime, pair });
+                match runtime.poll_interface_demand(interface) {
+                    terminal @ (InterfaceDemand::Data
+                    | InterfaceDemand::Bind
+                    | InterfaceDemand::NormalForm
+                    | InterfaceDemand::StableCursor(_)) => {
+                        return Ok(NetDriverOutcome::Root(terminal));
+                    }
+                    InterfaceDemand::Cursor(cursor) => {
+                        driver.worklist.push(NetDriverWork::RequestRoot {
+                            runtime: runtime.clone(),
+                            interface,
+                        });
+                        driver
+                            .worklist
+                            .push(NetDriverWork::Cursor { runtime, cursor });
+                    }
+                    InterfaceDemand::ActivePair(pair) => {
+                        driver.worklist.push(NetDriverWork::RequestRoot {
+                            runtime: runtime.clone(),
+                            interface,
+                        });
+                        driver
+                            .worklist
+                            .push(NetDriverWork::ActivePair { runtime, pair });
+                    }
                 }
             }
             NetDriverWork::Cursor { runtime, cursor } => match runtime.step_cursor(cursor) {
@@ -272,7 +321,14 @@ fn drive_net_work(
                         .worklist
                         .follow_cursor_dependency(runtime, cursor, dependency);
                 }
-                CursorStep::Stable => return Ok(NetDriverOutcome::Stable),
+                CursorStep::Stable => {
+                    if !driver.worklist.mark_nearest_dependency_stable() {
+                        assert!(
+                            driver.worklist.has_request_root(),
+                            "stable cursor work must resume an evaluator request root"
+                        );
+                    }
+                }
                 CursorStep::Contended(contention) => {
                     return Ok(NetDriverOutcome::Contended(contention));
                 }
@@ -295,7 +351,14 @@ fn drive_net_work(
                         dependency,
                     );
                 }
-                CursorStep::Stable => return Ok(NetDriverOutcome::Stable),
+                CursorStep::Stable => {
+                    if !driver.worklist.mark_nearest_dependency_stable() {
+                        assert!(
+                            driver.worklist.has_request_root(),
+                            "stable observed cursor work must resume an evaluator request root"
+                        );
+                    }
+                }
                 CursorStep::Contended(contention) => {
                     return Ok(NetDriverOutcome::Contended(contention));
                 }
@@ -320,18 +383,37 @@ fn drive_net_work(
                     return Ok(NetDriverOutcome::Contended(contention));
                 }
             }
-            NetDriverWork::RetryCursor { runtime, cursor } => {
-                if runtime.with_mut(|net| net.retry_blocked_cursor(cursor)) {
-                    driver.progressed = true;
+            NetDriverWork::ResumeCursorDependency {
+                runtime,
+                cursor,
+                expected_dependency,
+                disposition,
+            } => {
+                match runtime.resolve_cursor_dependency(cursor, &expected_dependency, disposition) {
+                    CursorDependencyResolution::Resolved => {
+                        driver.progressed = true;
+                        if disposition == CursorDependencyDisposition::Stable
+                            && !driver.worklist.mark_nearest_dependency_stable()
+                        {
+                            assert!(
+                                driver.worklist.has_request_root(),
+                                "stable dependency must resume an evaluator request root"
+                            );
+                        }
+                    }
+                    CursorDependencyResolution::Disturbed | CursorDependencyResolution::Gone => {
+                        driver.progressed = true;
+                        driver.worklist.restart_from_request_root();
+                    }
                 }
             }
         }
     }
-    Ok(if driver.progressed {
-        NetDriverOutcome::Progressed
-    } else {
-        NetDriverOutcome::Stable
-    })
+    assert!(
+        driver.progressed,
+        "request driver exhausted without progress or a root result"
+    );
+    Ok(NetDriverOutcome::Progressed)
 }
 
 fn drive_active_pair_step(
@@ -477,130 +559,34 @@ fn drive_net_interface(
     let interface = request.root_interface;
     debug_assert_eq!(request.mode, NormalizationMode::CursorWhnf);
     loop {
-        if runtime.with(|net| net.interface_data(interface).is_some()) {
-            return Ok(NetInterfaceOutcome::Data);
-        }
-
-        let exposes_bind = runtime.with(|net| {
-            net.interface_neighbor(interface).is_some_and(|port| {
-                port.is_principal()
-                    && matches!(
-                        net.node(port.node()),
-                        Some(crate::interaction_net::RuntimeNode::Bind)
-                    )
-            })
-        });
-        if exposes_bind {
-            return Ok(NetInterfaceOutcome::Bind);
-        }
-
-        if finish_driver_outcome(drive_net_work(
+        match drive_net_work(
             context,
             NetDriverWork::RequestRoot {
                 runtime: runtime.clone(),
                 interface,
             },
-        )?)? {
-            continue;
-        }
-
-        let reduction = runtime.with_optional_mut(|net| net.reduce_next());
-        if let Some(reduction) = reduction {
-            handle_core_reduction(context, runtime, reduction)?;
-            continue;
-        }
-
-        if progress_core_net(context, runtime)? {
-            continue;
-        }
-
-        // Recheck the interface in the same locked observation used to declare
-        // quiescence. Another evaluator may have completed an in-flight claim
-        // after the checks at the top of the loop; observing only the now-empty
-        // scheduler would otherwise misclassify its freshly published data as
-        // a non-data normal form.
-        let ((terminal, scheduler_is_empty, has_in_flight_claims), revisions) = runtime
-            .with_revisions(|net| {
-                let terminal = if net.interface_data(interface).is_some() {
-                    Some(NetInterfaceOutcome::Data)
-                } else if net.interface_neighbor(interface).is_some_and(|port| {
-                    port.is_principal()
-                        && matches!(
-                            net.node(port.node()),
-                            Some(crate::interaction_net::RuntimeNode::Bind)
-                        )
-                }) {
-                    Some(NetInterfaceOutcome::Bind)
-                } else {
-                    None
-                };
-                (
-                    terminal,
-                    net.active_pairs().len() == 0,
-                    net.has_in_flight_claims(),
-                )
-            });
-        if let Some(terminal) = terminal {
-            return Ok(terminal);
-        }
-        if scheduler_is_empty && !has_in_flight_claims {
-            return Ok(NetInterfaceOutcome::NormalForm);
-        }
-        if has_in_flight_claims {
-            runtime.wait_for_disturbance(revisions.disturbance_epoch());
-            continue;
-        }
-
-        let detail = runtime.with(|net| {
-            let neighbor = net.interface_neighbor(interface);
-            let node = neighbor.and_then(|port| net.node(port.node()));
-            let principal_neighbor = neighbor
-                .and_then(|port| net.port_neighbor(Port::principal(port.node())));
-            let principal_neighbor_node =
-                principal_neighbor.and_then(|port| net.node(port.node()));
-            let cursor_dependencies = net
-                .blocked_cursors()
-                .values()
-                .map(|blocked| {
-                    (
-                        blocked.cursor,
-                        net.cursor_dependency(blocked.cursor),
-                    )
-                })
-                .collect::<Vec<_>>();
-            let cursor_obligations = net.cursor_obligations().collect::<Vec<_>>();
-            format!(
-                "neighbor={neighbor:?}, node={node:?}, principal_neighbor={principal_neighbor:?}/{principal_neighbor_node:?}, active={}, cursors={cursor_dependencies:?}, obligations={cursor_obligations:?}, stuck={}",
-                net.active_pairs().len(),
-                net.stuck_pairs().count()
-            )
-        });
-        return Err(EvaluationHalt::new(format!(
-            "interaction net became quiescent before producing a value ({detail})"
-        )));
-    }
-}
-
-pub(super) fn progress_core_net(
-    context: &EvalContext,
-    runtime: &crate::core_net::CoreRuntimeNet,
-) -> Result<bool, EvaluationHalt> {
-    if let Some(reduction) = runtime.with_optional_mut(|net| net.reduce_next()) {
-        handle_core_reduction(context, runtime, reduction)?;
-        return Ok(true);
-    }
-    Ok(false)
-}
-
-fn finish_driver_outcome(outcome: NetDriverOutcome) -> Result<bool, EvaluationHalt> {
-    match outcome {
-        NetDriverOutcome::Progressed => Ok(true),
-        NetDriverOutcome::Stable => Ok(false),
-        NetDriverOutcome::Contended(contention) => {
-            contention
-                .runtime()
-                .wait_for_disturbance(contention.revisions().disturbance_epoch());
-            Ok(true)
+        )? {
+            NetDriverOutcome::Progressed => continue,
+            NetDriverOutcome::Root(InterfaceDemand::Data) => {
+                return Ok(NetInterfaceOutcome::Data);
+            }
+            NetDriverOutcome::Root(InterfaceDemand::Bind) => {
+                return Ok(NetInterfaceOutcome::Bind);
+            }
+            NetDriverOutcome::Root(
+                InterfaceDemand::NormalForm | InterfaceDemand::StableCursor(_),
+            ) => {
+                return Ok(NetInterfaceOutcome::NormalForm);
+            }
+            NetDriverOutcome::Root(InterfaceDemand::Cursor(_) | InterfaceDemand::ActivePair(_)) => {
+                unreachable!("root driver must dispatch nonterminal demand")
+            }
+            NetDriverOutcome::Contended(contention) => {
+                contention
+                    .runtime()
+                    .wait_for_disturbance(contention.revisions().disturbance_epoch());
+                continue;
+            }
         }
     }
 }
@@ -672,57 +658,6 @@ pub(super) fn progress_exact_core_call(
             runtime.with_mut(|runtime| runtime.fail_claimed_call(call, error.clone()));
             Err(error)
         }
-    }
-}
-
-pub(super) fn handle_core_reduction(
-    context: &EvalContext,
-    runtime: &crate::core_net::CoreRuntimeNet,
-    reduction: Reduction,
-) -> Result<(), EvaluationHalt> {
-    match reduction.kind {
-        ReductionKind::Stuck => Err(stuck_pair_error(runtime, reduction.pair)),
-        ReductionKind::Call { bind, data } => {
-            let call = Call {
-                pair: reduction.pair,
-                bind,
-                data,
-            };
-            if !progress_exact_core_call(context, runtime, call)? {
-                return Err(EvaluationHalt::new("interaction-net call lost its claim"));
-            }
-            Ok(())
-        }
-        ReductionKind::OperatorCall { operator, data } => {
-            let call = OperatorCall {
-                pair: reduction.pair,
-                operator,
-                data,
-            };
-            if !progress_core_operator_call(context, runtime, call)? {
-                return Err(EvaluationHalt::new(
-                    "interaction-net operator call lost its claim",
-                ));
-            }
-            Ok(())
-        }
-        ReductionKind::RemoteCursor { cursor, progress } => {
-            let progress = finish_core_cursor_claim(runtime, cursor, progress);
-            if progress != crate::interaction_net::CursorProgress::Blocked {
-                return Ok(());
-            }
-            if finish_driver_outcome(drive_net_work(
-                context,
-                NetDriverWork::Cursor {
-                    runtime: runtime.clone(),
-                    cursor,
-                },
-            )?)? {
-                runtime.with_mut(|net| net.retry_blocked_cursor(cursor));
-            }
-            Ok(())
-        }
-        _ => Ok(()),
     }
 }
 
@@ -879,16 +814,308 @@ mod driver_tests {
             _ => panic!("cursor dependency must schedule its child first"),
         }
         match worklist.pop().expect("parent resumption must be present") {
-            NetDriverWork::RetryCursor {
+            NetDriverWork::ResumeCursorDependency {
                 runtime: parent_runtime,
                 cursor: parent,
+                expected_dependency,
+                disposition,
             } => {
                 assert!(parent_runtime.ptr_eq(&runtime));
                 assert_eq!(parent, cursor);
+                assert_eq!(expected_dependency, CursorDependency::LocalCursor(cursor));
+                assert_eq!(disposition, CursorDependencyDisposition::Progressed);
             }
             _ => panic!("cursor dependency must retain a parent retry"),
         }
         assert!(worklist.pop().is_none());
+    }
+
+    #[test]
+    fn stable_cursor_dependencies_propagate_through_pairless_layers() {
+        let (leaf, _) = crate::interaction_net::SharedRuntimeNet::test_stable_auxiliary();
+        let (middle, middle_interface) =
+            crate::interaction_net::SharedRuntimeNet::test_copy_layer(leaf);
+        let (root, root_interface) =
+            crate::interaction_net::SharedRuntimeNet::test_copy_layer(middle.clone());
+
+        assert!(matches!(
+            drive_net_work(
+                &test_context(),
+                NetDriverWork::RequestRoot {
+                    runtime: root.clone(),
+                    interface: root_interface,
+                },
+            )
+            .unwrap(),
+            NetDriverOutcome::Root(InterfaceDemand::StableCursor(_))
+        ));
+        assert!(matches!(
+            root.poll_interface_demand(root_interface),
+            crate::interaction_net::InterfaceDemand::StableCursor(_)
+        ));
+        assert!(matches!(
+            middle.poll_interface_demand(middle_interface),
+            crate::interaction_net::InterfaceDemand::StableCursor(_)
+        ));
+    }
+
+    #[test]
+    fn stable_cursor_dependencies_propagate_through_mixed_owner_layers() {
+        let (leaf, _) = crate::interaction_net::SharedRuntimeNet::test_stable_auxiliary();
+        let (middle, middle_interface, middle_cursor) =
+            crate::interaction_net::SharedRuntimeNet::test_pair_owned_copy_layer(leaf);
+        let (root, root_interface) =
+            crate::interaction_net::SharedRuntimeNet::test_copy_layer(middle.clone());
+
+        assert!(matches!(
+            drive_net_work(
+                &test_context(),
+                NetDriverWork::RequestRoot {
+                    runtime: root.clone(),
+                    interface: root_interface,
+                },
+            )
+            .unwrap(),
+            NetDriverOutcome::Root(InterfaceDemand::StableCursor(_))
+        ));
+        assert!(matches!(
+            root.poll_interface_demand(root_interface),
+            crate::interaction_net::InterfaceDemand::StableCursor(_)
+        ));
+        assert_eq!(
+            middle.poll_interface_demand(middle_interface),
+            crate::interaction_net::InterfaceDemand::StableCursor(middle_cursor)
+        );
+    }
+
+    #[test]
+    fn stable_root_does_not_reduce_disconnected_or_undemanded_ready_work() {
+        let mut disconnected = NetBuilder::<CoreSpecialization>::new();
+        let root = disconnected.push(crate::interaction_net::Node::Erase);
+        let left = disconnected.push(crate::interaction_net::Node::Erase);
+        let right = disconnected.push(crate::interaction_net::Node::Erase);
+        disconnected.wire(Port::principal(left), Port::principal(right));
+        let disconnected = disconnected
+            .finish(Port::principal(root))
+            .instantiate_shared();
+        let disconnected_interface = disconnected.with(|net| net.exposed());
+        let before = disconnected.with(|net| net.active_pairs().collect::<Vec<_>>());
+        assert_eq!(
+            NormalizationRequest::cursor_whnf(disconnected.clone(), disconnected_interface,)
+                .drive(&test_context())
+                .unwrap(),
+            NetInterfaceOutcome::NormalForm
+        );
+        assert_eq!(
+            disconnected.with(|net| net.active_pairs().collect::<Vec<_>>()),
+            before
+        );
+
+        let mut branched = NetBuilder::<CoreSpecialization>::new();
+        let root = branched.push_fan();
+        let active = branched.push(crate::interaction_net::Node::Bind);
+        let erase = branched.push(crate::interaction_net::Node::Erase);
+        branched.wire(Port::auxiliary(root, 1), Port::auxiliary(active, 1));
+        branched.wire(Port::auxiliary(root, 2), Port::auxiliary(active, 2));
+        branched.wire(Port::principal(active), Port::principal(erase));
+        let branched = branched.finish(Port::principal(root)).instantiate_shared();
+        let branched_interface = branched.with(|net| net.exposed());
+        let before = branched.with(|net| net.active_pairs().collect::<Vec<_>>());
+        assert_eq!(
+            NormalizationRequest::cursor_whnf(branched.clone(), branched_interface)
+                .drive(&test_context())
+                .unwrap(),
+            NetInterfaceOutcome::NormalForm
+        );
+        assert_eq!(
+            branched.with(|net| net.active_pairs().collect::<Vec<_>>()),
+            before
+        );
+    }
+
+    #[test]
+    fn demanded_ready_pair_runs_before_root_completion() {
+        let value = crate::core::test_value_factory().unit();
+        let mut net = NetBuilder::<CoreSpecialization>::new();
+        let left = net.push(crate::interaction_net::Node::Bind);
+        let right = net.push(crate::interaction_net::Node::Bind);
+        let left_result = net.data(value.clone());
+        let exposed_result = net.data(value.clone());
+        let right_result = net.data(value);
+        net.wire(Port::principal(left), Port::principal(right));
+        net.wire(Port::auxiliary(left, 2), left_result);
+        net.wire(Port::auxiliary(right, 1), exposed_result);
+        net.wire(Port::auxiliary(right, 2), right_result);
+        let runtime = net.finish(Port::auxiliary(left, 1)).instantiate_shared();
+        let interface = runtime.with(|net| net.exposed());
+        let demanded = runtime.with(|net| {
+            let pairs = net.active_pairs().collect::<Vec<_>>();
+            assert_eq!(pairs.len(), 1);
+            pairs[0]
+        });
+        assert_eq!(
+            NormalizationRequest::cursor_whnf(runtime.clone(), interface)
+                .drive(&test_context())
+                .unwrap(),
+            NetInterfaceOutcome::Data
+        );
+        assert!(!runtime.with(|net| net.contains_active_pair(demanded)));
+    }
+
+    #[test]
+    fn stable_root_ignores_unrelated_claimed_and_stuck_work() {
+        let value = crate::core::test_value_factory().unit();
+        let mut claimed = NetBuilder::<CoreSpecialization>::new();
+        let root = claimed.push(crate::interaction_net::Node::Erase);
+        let bind = claimed.push(crate::interaction_net::Node::Bind);
+        let data = claimed.data(value);
+        let erase_left = claimed.push(crate::interaction_net::Node::Erase);
+        let erase_right = claimed.push(crate::interaction_net::Node::Erase);
+        claimed.wire(Port::principal(bind), data);
+        claimed.wire(Port::auxiliary(bind, 1), Port::principal(erase_left));
+        claimed.wire(Port::auxiliary(bind, 2), Port::principal(erase_right));
+        let claimed = claimed.finish(Port::principal(root)).instantiate_shared();
+        let interface = claimed.with(|net| net.exposed());
+        let pair = claimed.with(|net| net.active_pairs().next().unwrap());
+        assert!(matches!(
+            claimed.with_optional_mut(|net| net.reduce_pair(pair)),
+            Some(Reduction {
+                kind: ReductionKind::Call { .. },
+                ..
+            })
+        ));
+        assert!(claimed.with(|net| net.pair_is_claimed(pair)));
+        assert_eq!(
+            NormalizationRequest::cursor_whnf(claimed.clone(), interface)
+                .drive(&test_context())
+                .unwrap(),
+            NetInterfaceOutcome::NormalForm
+        );
+        assert!(claimed.with(|net| net.pair_is_claimed(pair)));
+
+        let mut source = NetBuilder::<CoreSpecialization>::new();
+        let data = source.data(crate::core::test_value_factory().unit());
+        let source = source.finish(data).instantiate_shared();
+        let (claimed_cursor, cursor_interface, cursor) =
+            crate::interaction_net::SharedRuntimeNet::test_stable_root_with_claimed_cursor(source);
+        assert_eq!(
+            NormalizationRequest::cursor_whnf(claimed_cursor.clone(), cursor_interface)
+                .drive(&test_context())
+                .unwrap(),
+            NetInterfaceOutcome::NormalForm
+        );
+        assert!(matches!(
+            claimed_cursor.step_cursor(cursor),
+            CursorStep::Contended(_)
+        ));
+
+        let mut stuck = NetBuilder::<CoreSpecialization>::new();
+        let root = stuck.push(crate::interaction_net::Node::Erase);
+        let left = stuck.data(crate::core::test_value_factory().unit());
+        let right = stuck.data(crate::core::test_value_factory().unit());
+        stuck.wire(left, right);
+        let stuck = stuck.finish(Port::principal(root)).instantiate_shared();
+        let interface = stuck.with(|net| net.exposed());
+        let pair = stuck.with(|net| net.active_pairs().next().unwrap());
+        assert!(matches!(
+            stuck.with_optional_mut(|net| net.reduce_pair(pair)),
+            Some(Reduction {
+                kind: ReductionKind::Stuck,
+                ..
+            })
+        ));
+        assert_eq!(
+            NormalizationRequest::cursor_whnf(stuck.clone(), interface)
+                .drive(&test_context())
+                .unwrap(),
+            NetInterfaceOutcome::NormalForm
+        );
+        assert!(stuck.with(|net| net.stuck_reason(pair).is_some()));
+    }
+
+    #[test]
+    fn demanded_claim_completion_before_wait_registration_is_not_lost() {
+        let mut source = NetBuilder::<CoreSpecialization>::new();
+        let data = source.data(crate::core::test_value_factory().unit());
+        let source = source.finish(data).instantiate_shared();
+        let (target, interface) = crate::interaction_net::SharedRuntimeNet::test_copy_layer(source);
+        let cursor = match target.poll_interface_demand(interface) {
+            InterfaceDemand::Cursor(cursor) => cursor,
+            other => panic!("copy root should expose a cursor, received {other:?}"),
+        };
+        assert!(target.with_mut(|net| net.claim_pairless_cursor_obligation(cursor)));
+        let contention = match drive_net_work(
+            &test_context(),
+            NetDriverWork::RequestRoot {
+                runtime: target.clone(),
+                interface,
+            },
+        )
+        .unwrap()
+        {
+            NetDriverOutcome::Contended(contention) => contention,
+            _ => panic!("claimed demanded cursor must report contention"),
+        };
+        assert!(matches!(
+            target.advance_claimed_cursor(cursor),
+            Some(crate::interaction_net::CursorProgress::Materialized { .. })
+        ));
+        contention
+            .runtime()
+            .wait_for_disturbance(contention.revisions().disturbance_epoch());
+        assert_eq!(
+            NormalizationRequest::cursor_whnf(target, interface)
+                .drive(&test_context())
+                .unwrap(),
+            NetInterfaceOutcome::Data
+        );
+    }
+
+    #[test]
+    fn demanded_claimed_pair_remains_request_relative_and_propagates_failure() {
+        let value = crate::core::test_value_factory().unit();
+        let mut net = NetBuilder::<CoreSpecialization>::new();
+        let bind = net.push(crate::interaction_net::Node::Bind);
+        let data = net.data(value);
+        let erase = net.push(crate::interaction_net::Node::Erase);
+        net.wire(Port::principal(bind), data);
+        net.wire(Port::auxiliary(bind, 2), Port::principal(erase));
+        let runtime = net.finish(Port::auxiliary(bind, 1)).instantiate_shared();
+        let interface = runtime.with(|net| net.exposed());
+        let pair = runtime.with(|net| net.active_pairs().next().unwrap());
+        let reduction = runtime
+            .with_optional_mut(|net| net.reduce_pair(pair))
+            .expect("demanded call should be claimable");
+        let ReductionKind::Call { bind, data } = reduction.kind else {
+            panic!("bind-data demand should be a call")
+        };
+        let call = Call { pair, bind, data };
+        let contention = match drive_net_work(
+            &test_context(),
+            NetDriverWork::RequestRoot {
+                runtime: runtime.clone(),
+                interface,
+            },
+        )
+        .unwrap()
+        {
+            NetDriverOutcome::Contended(contention) => contention,
+            _ => panic!("claimed demanded pair must report contention"),
+        };
+        runtime.with_mut(|net| {
+            net.fail_claimed_call(call, EvaluationHalt::new("demanded call failed"))
+        });
+        contention
+            .runtime()
+            .wait_for_disturbance(contention.revisions().disturbance_epoch());
+        let failure = match drive_net_work(
+            &test_context(),
+            NetDriverWork::RequestRoot { runtime, interface },
+        ) {
+            Err(failure) => failure,
+            Ok(_) => panic!("demanded stuck pair must remain a failure"),
+        };
+        assert!(failure.to_string().contains("demanded call failed"));
     }
 
     #[test]

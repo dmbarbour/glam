@@ -81,11 +81,33 @@ pub enum DemandEndpoint {
     ActivePair(ActivePairKey),
 }
 
-#[cfg(test)]
+/// One locked observation of the work required by an evaluator-owned
+/// interface demand.
+///
+/// This classifies only the root frontier. Cursor and active-pair state is
+/// interpreted by `step_cursor` and `step_active_pair`, except that a cursor
+/// already known to be stable is terminal for this request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FrontierObservationStatus {
-    Current,
+pub enum InterfaceDemand {
+    Data,
+    Bind,
+    NormalForm,
+    StableCursor(NodeId),
+    Cursor(NodeId),
+    ActivePair(ActivePairKey),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorDependencyDisposition {
+    Progressed,
+    Stable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorDependencyResolution {
+    Resolved,
     Disturbed,
+    Gone,
 }
 
 /// Revisions captured by one locked shared-net observation.
@@ -181,30 +203,6 @@ impl<S: NetSpecialization> FrontierObservation<S> {
         self.endpoint
     }
 
-    /// Validates under the source lock so a mutation cannot become visible
-    /// before its version publication is observed.
-    #[cfg(test)]
-    pub fn status(&self) -> FrontierObservationStatus {
-        let (_, current_revisions) = self.source.with_revisions(|_| ());
-        if current_revisions.topology_revision() == self.observed_revisions.topology_revision() {
-            FrontierObservationStatus::Current
-        } else {
-            FrontierObservationStatus::Disturbed
-        }
-    }
-
-    /// Claims the observed active-pair endpoint if this observation is still
-    /// current. An unavailable current endpoint is left untouched so waiting
-    /// on this observation cannot disturb itself.
-    #[cfg(test)]
-    pub fn reduce_pair(
-        &self,
-        pair: ActivePairKey,
-    ) -> Result<Option<Reduction>, FrontierObservationStatus> {
-        assert_eq!(self.endpoint, DemandEndpoint::ActivePair(pair));
-        self.update_source_if_current(|runtime| runtime.reduce_pair(pair))
-    }
-
     /// Takes one non-blocking step at the observed pair. Unlike `reduce_pair`,
     /// this reports claimed, blocked, stuck, gone, and disturbed states
     /// explicitly for an iterative normalization driver.
@@ -219,40 +217,6 @@ impl<S: NetSpecialization> FrontierObservation<S> {
         assert_eq!(self.endpoint, DemandEndpoint::Cursor(cursor));
         self.source
             .step_cursor_if_current(cursor, Some(self.observed_revisions.topology_revision()))
-    }
-
-    /// Creates or claims the observed source cursor's owning-net obligation
-    /// under the same source/version check used for active-pair endpoints.
-    #[cfg(test)]
-    pub fn claim_cursor_obligation(
-        &self,
-        cursor: NodeId,
-    ) -> Result<Option<CursorProgress>, FrontierObservationStatus> {
-        assert_eq!(self.endpoint, DemandEndpoint::Cursor(cursor));
-        self.update_source_if_current(|runtime| runtime.claim_cursor_obligation(cursor))
-    }
-
-    #[cfg(test)]
-    fn update_source_if_current<R>(
-        &self,
-        update: impl FnOnce(&mut RuntimeNet<S>) -> Option<R>,
-    ) -> Result<Option<R>, FrontierObservationStatus> {
-        let mut state = self
-            .source
-            .inner
-            .runtime
-            .lock()
-            .expect("shared runtime net was poisoned");
-        if self.source.inner.revisions().topology_revision()
-            != self.observed_revisions.topology_revision()
-        {
-            return Err(FrontierObservationStatus::Disturbed);
-        }
-        let result = update(&mut state.runtime);
-        if result.is_some() {
-            self.source.inner.publish_mutation(&mut state.batches);
-        }
-        Ok(result)
     }
 }
 
@@ -271,8 +235,8 @@ impl<S: NetSpecialization> fmt::Debug for FrontierObservation<S> {
 #[derive(Clone, PartialEq, Eq)]
 pub enum CursorDependency<S: NetSpecialization> {
     LocalCursor(NodeId),
-    /// Transitional classification for a source cursor. Phase 3 replaces
-    /// direct cursor following with an owning-net normalization obligation.
+    /// Versioned observation of a source cursor. Work is claimed through that
+    /// cursor's owning-net obligation rather than directly from its observer.
     SourceCursor(FrontierObservation<S>),
     /// A versioned observation of an active-pair endpoint on the demanded
     /// source frontier. The pair is not retained as the dependency identity.
@@ -305,6 +269,7 @@ enum PairlessCursorState<S: NetSpecialization> {
     Stable,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CursorObligationStatus {
     Ready,
@@ -313,6 +278,7 @@ pub(crate) enum CursorObligationStatus {
     Stable,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CursorObligationSnapshot {
     pub cursor: NodeId,
@@ -389,6 +355,7 @@ pub struct BlockedOperatorCall<W> {
     pub wait: W,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlockedCursor {
     pub pair: ActivePairKey,
@@ -564,6 +531,38 @@ impl<S: NetSpecialization> SharedRuntimeNet<S> {
         (Self::new(target), interface)
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_stable_auxiliary() -> (Self, Port) {
+        let mut runtime = RuntimeNet::empty();
+        let bind = runtime.add_node(RuntimeNode::Bind);
+        let interface = runtime.add_interface(Port::auxiliary(bind, 1));
+        runtime.exposed = Some(interface);
+        (Self::new(runtime), interface)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_pair_owned_copy_layer(source: Self) -> (Self, Port, NodeId) {
+        let mut target = RuntimeNet::empty();
+        let bind = target.add_node(RuntimeNode::Bind);
+        let cursor = target.begin_copy(source);
+        target.connect(Port::principal(bind), Port::principal(cursor));
+        let interface = target.add_interface(Port::auxiliary(bind, 1));
+        target.exposed = Some(interface);
+        (Self::new(target), interface, cursor)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_stable_root_with_claimed_cursor(source: Self) -> (Self, Port, NodeId) {
+        let mut target = RuntimeNet::empty();
+        let root = target.add_node(RuntimeNode::Erase);
+        let interface = target.add_interface(Port::principal(root));
+        let cursor = target.begin_copy(source);
+        assert!(target.ensure_pairless_cursor_obligation(cursor));
+        assert!(target.claim_pairless_cursor_obligation(cursor));
+        target.exposed = Some(interface);
+        (Self::new(target), interface, cursor)
+    }
+
     pub fn ptr_eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.inner, &other.inner)
     }
@@ -619,6 +618,7 @@ impl<S: NetSpecialization> SharedRuntimeNet<S> {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn with_optional_mut<R>(
         &self,
         update: impl FnOnce(&mut RuntimeNet<S>) -> Option<R>,
@@ -629,15 +629,22 @@ impl<S: NetSpecialization> SharedRuntimeNet<S> {
         })
     }
 
-    pub(crate) fn ensure_interface_cursor_obligation(&self, interface: Port) -> Option<NodeId> {
+    pub fn poll_interface_demand(&self, interface: Port) -> InterfaceDemand {
+        self.with_conditional_mut(|runtime| runtime.poll_interface_demand(interface))
+    }
+
+    pub fn resolve_cursor_dependency(
+        &self,
+        cursor: NodeId,
+        expected: &CursorDependency<S>,
+        disposition: CursorDependencyDisposition,
+    ) -> CursorDependencyResolution {
         self.with_conditional_mut(|runtime| {
-            let Some(cursor) = runtime.interface_cursor(interface) else {
-                return RuntimeNetMutation::Unchanged(None);
-            };
-            if runtime.ensure_pairless_cursor_obligation(cursor) {
-                RuntimeNetMutation::Changed(Some(cursor))
+            let resolution = runtime.resolve_cursor_dependency(cursor, expected, disposition);
+            if resolution == CursorDependencyResolution::Resolved {
+                RuntimeNetMutation::Changed(resolution)
             } else {
-                RuntimeNetMutation::Unchanged(Some(cursor))
+                RuntimeNetMutation::Unchanged(resolution)
             }
         })
     }
@@ -1005,10 +1012,12 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         }
     }
 
+    #[cfg(test)]
     pub fn active_pairs(&self) -> impl ExactSizeIterator<Item = ActivePairKey> + '_ {
         self.active.keys().copied()
     }
 
+    #[cfg(test)]
     pub fn has_in_flight_claims(&self) -> bool {
         self.cursor_obligations
             .values()
@@ -1199,6 +1208,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
             .collect()
     }
 
+    #[cfg(test)]
     pub fn blocked_cursors(&self) -> BTreeMap<ActivePairKey, BlockedCursor> {
         self.active
             .iter()
@@ -1271,6 +1281,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         }
     }
 
+    #[cfg(test)]
     pub fn cursor_dependency(&self, cursor: NodeId) -> Option<CursorDependency<S>> {
         match self.cursor_claim_owner(cursor) {
             Some(CursorClaimOwner::ActivePair(pair)) => match self.active.get(&pair) {
@@ -1292,6 +1303,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn cursor_obligations(&self) -> impl Iterator<Item = CursorObligationSnapshot> + '_ {
         self.cursor_obligations
             .iter()
@@ -1306,11 +1318,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
             })
     }
 
-    pub fn interface_cursor(&self, interface: Port) -> Option<NodeId> {
-        self.assert_interface(interface);
-        self.cursor_across(interface)
-    }
-
+    #[cfg(test)]
     pub fn stuck_pairs(&self) -> impl Iterator<Item = StuckPair<S::StuckReason>> + '_ {
         self.active.iter().filter_map(|(pair, state)| match state {
             ActivePairState::Stuck(reason) => Some(StuckPair {
@@ -1494,64 +1502,84 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         }
     }
 
+    #[cfg(test)]
     pub fn interface_neighbor(&self, interface: Port) -> Option<Port> {
         self.assert_interface(interface);
         self.neighbor(interface)
     }
 
-    /// Finds the exact local active pair that can advance an interface whose
-    /// current value is connected through auxiliary result ports.
-    pub fn interface_dependency(&self, interface: Port) -> Option<ActivePairKey> {
+    fn poll_interface_demand(&mut self, interface: Port) -> RuntimeNetMutation<InterfaceDemand> {
         self.assert_interface(interface);
-        let mut port = self.neighbor(interface)?;
-        let mut visited = HashSet::new();
-        while !port.is_principal() && visited.insert(port.node()) {
-            let neighbor = self.neighbor(Port::principal(port.node()))?;
-            if neighbor.is_principal() {
-                return Some(ActivePairKey::new(port.node(), neighbor.node()));
-            }
-            port = neighbor;
+        let Some(neighbor) = self.neighbor(interface) else {
+            return RuntimeNetMutation::Unchanged(InterfaceDemand::NormalForm);
+        };
+
+        if neighbor.is_principal() {
+            let node = neighbor.node();
+            let demand = match self.node(node) {
+                Some(RuntimeNode::Data(_)) => InterfaceDemand::Data,
+                Some(RuntimeNode::Bind) => InterfaceDemand::Bind,
+                Some(RuntimeNode::RemoteCursor { .. }) => {
+                    let inserted = self.cursor_claim_owner(node).is_none()
+                        && self.ensure_pairless_cursor_obligation(node);
+                    let demand =
+                        if matches!(self.inspect_cursor_step(node), CursorStepInspection::Stable) {
+                            InterfaceDemand::StableCursor(node)
+                        } else {
+                            InterfaceDemand::Cursor(node)
+                        };
+                    return if inserted {
+                        RuntimeNetMutation::Changed(demand)
+                    } else {
+                        RuntimeNetMutation::Unchanged(demand)
+                    };
+                }
+                Some(
+                    RuntimeNode::Fan { .. }
+                    | RuntimeNode::Erase
+                    | RuntimeNode::Operator(_)
+                    | RuntimeNode::Interface,
+                )
+                | None => InterfaceDemand::NormalForm,
+            };
+            return RuntimeNetMutation::Unchanged(demand);
         }
-        None
+
+        let mut port = neighbor;
+        let mut visited = HashSet::new();
+        let pair = loop {
+            if port.is_principal() || !visited.insert(port.node()) {
+                break None;
+            }
+            let Some(principal_neighbor) = self.neighbor(Port::principal(port.node())) else {
+                break None;
+            };
+            if principal_neighbor.is_principal() {
+                break Some(ActivePairKey::new(port.node(), principal_neighbor.node()));
+            }
+            port = principal_neighbor;
+        };
+        let Some(pair) = pair else {
+            return RuntimeNetMutation::Unchanged(InterfaceDemand::NormalForm);
+        };
+        let demand = match self.active.get(&pair) {
+            Some(ActivePairState::BlockedCursor {
+                cursor,
+                blockage: CursorBlockage::Stable,
+            }) => InterfaceDemand::StableCursor(*cursor),
+            _ => InterfaceDemand::ActivePair(pair),
+        };
+        RuntimeNetMutation::Unchanged(demand)
     }
 
     /// Returns the port wired to `port`, for evaluator diagnostics and demand
     /// propagation across evaluator-owned interfaces.
+    #[cfg(test)]
     pub fn port_neighbor(&self, port: Port) -> Option<Port> {
         self.neighbor(port)
     }
 
     #[cfg(test)]
-    pub fn demand_interface(&mut self, interface: Port) -> Option<CursorProgress> {
-        self.assert_interface(interface);
-        let cursor = self.cursor_across(interface)?;
-        self.begin_cursor_claim(cursor, None)
-    }
-
-    /// Claims a cursor reached through an exact layered-copy dependency.
-    #[cfg(test)]
-    pub fn claim_dependent_cursor(&mut self, cursor: NodeId) -> Option<CursorProgress> {
-        if !matches!(self.node(cursor), Some(RuntimeNode::RemoteCursor { .. })) {
-            return None;
-        }
-        self.begin_cursor_claim(cursor, None)
-    }
-
-    /// Claims pairless cursor demand through its owning-net obligation.
-    /// Nested source-frontier observations use this entry point so the work
-    /// remains enumerable even when no active pair owns the cursor.
-    #[cfg(test)]
-    pub fn claim_cursor_obligation(&mut self, cursor: NodeId) -> Option<CursorProgress> {
-        if !matches!(self.node(cursor), Some(RuntimeNode::RemoteCursor { .. }))
-            || self.active_pair_key(cursor).is_some()
-        {
-            return None;
-        }
-        self.ensure_pairless_cursor_obligation(cursor);
-        self.claim_pairless_cursor_obligation(cursor)
-            .then_some(CursorProgress::Claimed)
-    }
-
     pub fn retry_blocked_cursor(&mut self, cursor: NodeId) -> bool {
         match self.cursor_claim_owner(cursor) {
             Some(CursorClaimOwner::ActivePair(pair))
@@ -1583,6 +1611,65 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         }
     }
 
+    fn resolve_cursor_dependency(
+        &mut self,
+        cursor: NodeId,
+        expected: &CursorDependency<S>,
+        disposition: CursorDependencyDisposition,
+    ) -> CursorDependencyResolution {
+        let Some(owner) = self.cursor_claim_owner(cursor) else {
+            return CursorDependencyResolution::Gone;
+        };
+        let matches_expected = match owner {
+            CursorClaimOwner::ActivePair(pair) => matches!(
+                self.active.get(&pair),
+                Some(ActivePairState::BlockedCursor {
+                    cursor: blocked,
+                    blockage: CursorBlockage::Dependency(actual),
+                }) if *blocked == cursor && actual == expected
+            ),
+            CursorClaimOwner::Obligation => matches!(
+                self.cursor_obligations.get(&cursor),
+                Some(PairlessCursorObligation {
+                    state: PairlessCursorState::Blocked(actual),
+                    ..
+                }) if actual == expected
+            ),
+        };
+        if !matches_expected {
+            return CursorDependencyResolution::Disturbed;
+        }
+
+        match owner {
+            CursorClaimOwner::ActivePair(pair) => {
+                self.active.insert(
+                    pair,
+                    match disposition {
+                        CursorDependencyDisposition::Progressed => ActivePairState::Ready,
+                        CursorDependencyDisposition::Stable => ActivePairState::BlockedCursor {
+                            cursor,
+                            blockage: CursorBlockage::Stable,
+                        },
+                    },
+                );
+            }
+            CursorClaimOwner::Obligation => {
+                self.cursor_obligations
+                    .get_mut(&cursor)
+                    .expect("cursor obligation owner must remain installed")
+                    .state = match disposition {
+                    CursorDependencyDisposition::Progressed => PairlessCursorState::Ready,
+                    CursorDependencyDisposition::Stable => PairlessCursorState::Stable,
+                };
+            }
+        }
+        CursorDependencyResolution::Resolved
+    }
+
+    /// Reduces one arbitrary ready pair. Cursor-WHNF evaluation deliberately
+    /// uses exact demand endpoints instead; this remains the generic runtime's
+    /// ordinary reducer and a low-level test utility.
+    #[allow(dead_code)]
     pub fn reduce_next(&mut self) -> Option<Reduction> {
         let pair = self
             .active

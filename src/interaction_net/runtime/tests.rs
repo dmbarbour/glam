@@ -119,6 +119,65 @@ fn reduce_next_cursor<S: NetSpecialization>(
     (cursor, progress)
 }
 
+fn claim_test_cursor<S: NetSpecialization>(
+    target: &mut RuntimeNet<S>,
+    cursor: NodeId,
+) -> Option<CursorProgress> {
+    matches!(target.node(cursor), Some(RuntimeNode::RemoteCursor { .. }))
+        .then(|| target.begin_cursor_claim(cursor, None))
+        .flatten()
+}
+
+fn claim_test_interface_cursor<S: NetSpecialization>(
+    target: &mut RuntimeNet<S>,
+    interface: Port,
+) -> Option<CursorProgress> {
+    target.assert_interface(interface);
+    let neighbor = target.neighbor(interface)?;
+    (neighbor.is_principal()
+        && matches!(
+            target.node(neighbor.node()),
+            Some(RuntimeNode::RemoteCursor { .. })
+        ))
+    .then(|| target.begin_cursor_claim(neighbor.node(), None))
+    .flatten()
+}
+
+fn pairless_cursor_dependency_fixture() -> (SharedRuntimeNet<()>, NodeId, CursorDependency<()>) {
+    let mut source = NetBuilder::<()>::new();
+    let data = source.data(());
+    let source = source.finish(data).instantiate_shared();
+    let mut target = RuntimeNet::empty();
+    let cursor = target.begin_copy(source.clone());
+    let dependency = target.begin_copy(source);
+    assert!(target.ensure_pairless_cursor_obligation(cursor));
+    assert!(target.claim_pairless_cursor_obligation(cursor));
+    let expected = CursorDependency::LocalCursor(dependency);
+    assert!(target.block_pairless_cursor_obligation(cursor, expected.clone()));
+    (SharedRuntimeNet::new(target), cursor, expected)
+}
+
+fn pair_owned_cursor_dependency_fixture() -> (SharedRuntimeNet<()>, NodeId, CursorDependency<()>) {
+    let mut source = NetBuilder::<()>::new();
+    let data = source.data(());
+    let source = source.finish(data).instantiate_shared();
+    let mut target = RuntimeNet::empty();
+    let cursor = target.begin_copy(source.clone());
+    let dependency = target.begin_copy(source);
+    let local = target.add_node(RuntimeNode::Data(()));
+    target.connect(Port::principal(cursor), Port::principal(local));
+    let pair = ActivePairKey::new(cursor, local);
+    let expected = CursorDependency::LocalCursor(dependency);
+    target.active.insert(
+        pair,
+        ActivePairState::BlockedCursor {
+            cursor,
+            blockage: CursorBlockage::Dependency(expected.clone()),
+        },
+    );
+    (SharedRuntimeNet::new(target), cursor, expected)
+}
+
 fn reduce_pair_cursor<S: NetSpecialization>(
     target: &mut RuntimeNet<S>,
     pair: ActivePairKey,
@@ -522,8 +581,8 @@ fn root_normalization_demand_is_idempotent_and_enumerable() {
 
     let (initial_topology, initial_disturbance) = target.revisions();
     assert_eq!(
-        target.ensure_interface_cursor_obligation(interface),
-        Some(cursor)
+        target.poll_interface_demand(interface),
+        InterfaceDemand::Cursor(cursor)
     );
     assert_eq!(
         target.with(|runtime| runtime.cursor_obligations().collect::<Vec<_>>()),
@@ -537,10 +596,262 @@ fn root_normalization_demand_is_idempotent_and_enumerable() {
     assert_eq!(ensured_disturbance, initial_disturbance + 1);
 
     assert_eq!(
-        target.ensure_interface_cursor_obligation(interface),
-        Some(cursor)
+        target.poll_interface_demand(interface),
+        InterfaceDemand::Cursor(cursor)
     );
     assert_eq!(target.revisions(), (ensured_topology, ensured_disturbance));
+}
+
+#[test]
+fn interface_demand_poll_classifies_stable_roots_and_exact_work() {
+    let mut disconnected = RuntimeNet::<()>::empty();
+    let data = disconnected.add_node(RuntimeNode::Data(()));
+    let interface = disconnected.add_interface(Port::principal(data));
+    disconnected.disconnect(interface);
+    let disconnected = SharedRuntimeNet::new(disconnected);
+    assert_eq!(
+        disconnected.poll_interface_demand(interface),
+        InterfaceDemand::NormalForm
+    );
+
+    let mut data_net = RuntimeNet::<()>::empty();
+    let data = data_net.add_node(RuntimeNode::Data(()));
+    let data_interface = data_net.add_interface(Port::principal(data));
+    let data_net = SharedRuntimeNet::new(data_net);
+    assert_eq!(
+        data_net.poll_interface_demand(data_interface),
+        InterfaceDemand::Data
+    );
+
+    let mut bind_net = RuntimeNet::<()>::empty();
+    let bind = bind_net.add_node(RuntimeNode::Bind);
+    let bind_interface = bind_net.add_interface(Port::principal(bind));
+    let bind_net = SharedRuntimeNet::new(bind_net);
+    assert_eq!(
+        bind_net.poll_interface_demand(bind_interface),
+        InterfaceDemand::Bind
+    );
+
+    let mut other_net = RuntimeNet::<()>::empty();
+    let erase = other_net.add_node(RuntimeNode::Erase);
+    let other_interface = other_net.add_interface(Port::principal(erase));
+    let other_net = SharedRuntimeNet::new(other_net);
+    assert_eq!(
+        other_net.poll_interface_demand(other_interface),
+        InterfaceDemand::NormalForm
+    );
+
+    let mut auxiliary_net = RuntimeNet::<()>::empty();
+    let bind = auxiliary_net.add_node(RuntimeNode::Bind);
+    let auxiliary_interface = auxiliary_net.add_interface(Port::auxiliary(bind, 1));
+    let auxiliary_net = SharedRuntimeNet::new(auxiliary_net);
+    assert_eq!(
+        auxiliary_net.poll_interface_demand(auxiliary_interface),
+        InterfaceDemand::NormalForm
+    );
+
+    let mut active_net = RuntimeNet::<()>::empty();
+    let bind = active_net.add_node(RuntimeNode::Bind);
+    let erase = active_net.add_node(RuntimeNode::Erase);
+    active_net.connect(Port::principal(bind), Port::principal(erase));
+    let pair = ActivePairKey::new(bind, erase);
+    let active_interface = active_net.add_interface(Port::auxiliary(bind, 1));
+    let active_net = SharedRuntimeNet::new(active_net);
+    assert_eq!(
+        active_net.poll_interface_demand(active_interface),
+        InterfaceDemand::ActivePair(pair)
+    );
+}
+
+#[test]
+fn interface_demand_poll_installs_and_recognizes_stable_cursor_owners() {
+    let mut data_source = NetBuilder::<()>::new();
+    let data = data_source.data(());
+    let data_source = data_source.finish(data).instantiate_shared();
+    let mut target = RuntimeNet::empty();
+    let cursor = target.begin_copy(data_source);
+    let interface = target.add_interface(Port::principal(cursor));
+    let target = SharedRuntimeNet::new(target);
+    let revisions = target.revisions();
+    assert_eq!(
+        target.poll_interface_demand(interface),
+        InterfaceDemand::Cursor(cursor)
+    );
+    assert_eq!(target.revisions(), (revisions.0 + 1, revisions.1 + 1));
+    assert_eq!(
+        target.poll_interface_demand(interface),
+        InterfaceDemand::Cursor(cursor)
+    );
+    assert_eq!(target.revisions(), (revisions.0 + 1, revisions.1 + 1));
+
+    let mut stable_source = RuntimeNet::<()>::empty();
+    let source_bind = stable_source.add_node(RuntimeNode::Bind);
+    let source_exposed = stable_source.add_interface(Port::auxiliary(source_bind, 1));
+    stable_source.exposed = Some(source_exposed);
+    let stable_source = SharedRuntimeNet::new(stable_source);
+
+    let mut pairless_target = RuntimeNet::empty();
+    let pairless_cursor = pairless_target.begin_copy(stable_source.clone());
+    let pairless_interface = pairless_target.add_interface(Port::principal(pairless_cursor));
+    let pairless_target = SharedRuntimeNet::new(pairless_target);
+    assert_eq!(
+        pairless_target.poll_interface_demand(pairless_interface),
+        InterfaceDemand::Cursor(pairless_cursor)
+    );
+    assert!(matches!(
+        pairless_target.step_cursor(pairless_cursor),
+        CursorStep::Stable
+    ));
+    assert_eq!(
+        pairless_target.poll_interface_demand(pairless_interface),
+        InterfaceDemand::StableCursor(pairless_cursor)
+    );
+
+    let mut pair_target = RuntimeNet::empty();
+    let root_bind = pair_target.add_node(RuntimeNode::Bind);
+    let pair_cursor = pair_target.begin_copy(stable_source);
+    pair_target.connect(Port::principal(root_bind), Port::principal(pair_cursor));
+    let pair = ActivePairKey::new(root_bind, pair_cursor);
+    let pair_interface = pair_target.add_interface(Port::auxiliary(root_bind, 1));
+    let pair_target = SharedRuntimeNet::new(pair_target);
+    assert_eq!(
+        pair_target.poll_interface_demand(pair_interface),
+        InterfaceDemand::ActivePair(pair)
+    );
+    assert!(matches!(
+        pair_target.step_cursor(pair_cursor),
+        CursorStep::Stable
+    ));
+    assert_eq!(
+        pair_target.poll_interface_demand(pair_interface),
+        InterfaceDemand::StableCursor(pair_cursor)
+    );
+}
+
+#[test]
+fn interface_demand_work_selection_is_revalidated_before_dispatch() {
+    let active_net = source_requiring_one_reduction().instantiate_shared();
+    let interface = active_net.with(|net| net.exposed());
+    let pair = active_net.with(|net| net.ready_pairs()[0]);
+    assert_eq!(
+        active_net.poll_interface_demand(interface),
+        InterfaceDemand::ActivePair(pair)
+    );
+    assert!(matches!(
+        active_net.step_active_pair(pair),
+        ActivePairStep::Reduction(_)
+    ));
+    assert!(matches!(
+        active_net.step_active_pair(pair),
+        ActivePairStep::Gone
+    ));
+
+    let mut source = NetBuilder::<()>::new();
+    let data = source.data(());
+    let source = source.finish(data).instantiate_shared();
+    let mut target = RuntimeNet::empty();
+    let cursor = target.begin_copy(source);
+    let interface = target.add_interface(Port::principal(cursor));
+    let target = SharedRuntimeNet::new(target);
+    assert_eq!(
+        target.poll_interface_demand(interface),
+        InterfaceDemand::Cursor(cursor)
+    );
+    assert!(matches!(
+        target.step_cursor(cursor),
+        CursorStep::Progressed(CursorProgress::Materialized { .. })
+    ));
+    assert!(matches!(target.step_cursor(cursor), CursorStep::Gone));
+    assert_eq!(
+        target.poll_interface_demand(interface),
+        InterfaceDemand::Data
+    );
+}
+
+#[test]
+fn cursor_dependency_resolution_updates_both_owner_forms() {
+    for fixture in [
+        pairless_cursor_dependency_fixture,
+        pair_owned_cursor_dependency_fixture,
+    ] {
+        let (runtime, cursor, expected) = fixture();
+        let revisions = runtime.revisions();
+        assert_eq!(
+            runtime.resolve_cursor_dependency(
+                cursor,
+                &expected,
+                CursorDependencyDisposition::Progressed,
+            ),
+            CursorDependencyResolution::Resolved
+        );
+        assert_eq!(runtime.revisions(), (revisions.0 + 1, revisions.1 + 1));
+        assert!(matches!(
+            runtime.with(|net| net.inspect_cursor_step(cursor)),
+            CursorStepInspection::Claimable(_)
+        ));
+
+        let (runtime, cursor, expected) = fixture();
+        let revisions = runtime.revisions();
+        assert_eq!(
+            runtime.resolve_cursor_dependency(
+                cursor,
+                &expected,
+                CursorDependencyDisposition::Stable,
+            ),
+            CursorDependencyResolution::Resolved
+        );
+        assert_eq!(runtime.revisions(), (revisions.0 + 1, revisions.1 + 1));
+        assert!(matches!(
+            runtime.with(|net| net.inspect_cursor_step(cursor)),
+            CursorStepInspection::Stable
+        ));
+    }
+}
+
+#[test]
+fn cursor_dependency_resolution_rejects_stale_or_missing_parents_without_mutation() {
+    let (runtime, cursor, expected) = pairless_cursor_dependency_fixture();
+    let CursorDependency::LocalCursor(dependency) = expected else {
+        unreachable!()
+    };
+    let stale = CursorDependency::LocalCursor(cursor);
+    assert_ne!(stale, CursorDependency::LocalCursor(dependency));
+    let revisions = runtime.revisions();
+    assert_eq!(
+        runtime.resolve_cursor_dependency(cursor, &stale, CursorDependencyDisposition::Progressed,),
+        CursorDependencyResolution::Disturbed
+    );
+    assert_eq!(runtime.revisions(), revisions);
+    assert_eq!(
+        runtime.with(|net| net.cursor_dependency(cursor)),
+        Some(CursorDependency::LocalCursor(dependency))
+    );
+
+    let missing = NodeId::from_zero_based(1_000_000);
+    assert_eq!(
+        runtime.resolve_cursor_dependency(missing, &stale, CursorDependencyDisposition::Stable,),
+        CursorDependencyResolution::Gone
+    );
+    assert_eq!(runtime.revisions(), revisions);
+
+    assert_eq!(
+        runtime.resolve_cursor_dependency(
+            cursor,
+            &CursorDependency::LocalCursor(dependency),
+            CursorDependencyDisposition::Stable,
+        ),
+        CursorDependencyResolution::Resolved
+    );
+    let stable_revisions = runtime.revisions();
+    assert_eq!(
+        runtime.resolve_cursor_dependency(
+            cursor,
+            &CursorDependency::LocalCursor(dependency),
+            CursorDependencyDisposition::Progressed,
+        ),
+        CursorDependencyResolution::Disturbed
+    );
+    assert_eq!(runtime.revisions(), stable_revisions);
 }
 
 #[test]
@@ -551,7 +862,10 @@ fn cursor_steps_report_pairless_pair_owned_stable_and_contended_states() {
     let cursor = target.begin_copy(source.clone());
     let interface = target.add_interface(Port::principal(cursor));
     let target = SharedRuntimeNet::new(target);
-    target.ensure_interface_cursor_obligation(interface);
+    assert_eq!(
+        target.poll_interface_demand(interface),
+        InterfaceDemand::Cursor(cursor)
+    );
 
     assert!(matches!(
         target.step_cursor(cursor),
@@ -591,7 +905,10 @@ fn cursor_steps_report_pairless_pair_owned_stable_and_contended_states() {
     let stable_cursor = stable_target.begin_copy(SharedRuntimeNet::new(stable_source));
     let stable_interface = stable_target.add_interface(Port::principal(stable_cursor));
     let stable_target = SharedRuntimeNet::new(stable_target);
-    stable_target.ensure_interface_cursor_obligation(stable_interface);
+    assert_eq!(
+        stable_target.poll_interface_demand(stable_interface),
+        InterfaceDemand::Cursor(stable_cursor)
+    );
     assert!(matches!(
         stable_target.step_cursor(stable_cursor),
         CursorStep::Stable
@@ -605,8 +922,11 @@ fn cursor_steps_report_pairless_pair_owned_stable_and_contended_states() {
     let claimed_interface = claimed_target.add_interface(Port::principal(claimed_cursor));
     let claimed_target = SharedRuntimeNet::new(claimed_target);
     assert_eq!(
-        claimed_target.with_optional_mut(|runtime| runtime.demand_interface(claimed_interface)),
-        Some(CursorProgress::Claimed)
+        claimed_target.poll_interface_demand(claimed_interface),
+        InterfaceDemand::Cursor(claimed_cursor)
+    );
+    assert!(
+        claimed_target.with_mut(|runtime| runtime.claim_pairless_cursor_obligation(claimed_cursor))
     );
     let contention = match claimed_target.step_cursor(claimed_cursor) {
         CursorStep::Contended(contention) => contention,
@@ -1437,7 +1757,7 @@ fn source_change_between_cursor_inspection_publication_and_wait_is_not_lost() {
         .expect("the inspected pair should have a versioned observation");
     let observed_revisions = observation.observed_revisions;
     assert_eq!(observation.anchor(), claim.remote);
-    assert_eq!(observation.status(), FrontierObservationStatus::Current);
+    assert_eq!(source.with_revisions(|_| ()).1, observed_revisions);
     let inspected_pair = match &frontier.shape {
         SourceFrontierShape::StableAuxiliary {
             terminal_pair: Some(pair),
@@ -1468,14 +1788,7 @@ fn source_change_between_cursor_inspection_publication_and_wait_is_not_lost() {
     mutation_barrier.wait();
     mutator.join().expect("source mutator should not panic");
     assert!(!source.with(|runtime| runtime.contains_active_pair(source_pair)));
-    assert_eq!(
-        frontier
-            .observation
-            .as_ref()
-            .expect("pair observation should remain attached")
-            .status(),
-        FrontierObservationStatus::Disturbed
-    );
+    assert_ne!(source.with_revisions(|_| ()).1, observed_revisions);
     assert!(matches!(
         frontier
             .observation
@@ -1550,10 +1863,14 @@ fn active_source_call_is_a_dependency_and_is_never_copied() {
     source.with(|source| {
         assert_eq!(source.active.get(&pair), Some(&ActivePairState::Claimed));
     });
-    assert!(matches!(observation.reduce_pair(pair), Ok(None)));
+    let revisions = source.with_revisions(|_| ()).1;
+    assert!(matches!(
+        observation.step_active_pair(pair),
+        ActivePairStep::Contended(_)
+    ));
     assert_eq!(
-        observation.status(),
-        FrontierObservationStatus::Current,
+        source.with_revisions(|_| ()).1,
+        revisions,
         "an unavailable observed claim must not publish a false disturbance"
     );
     assert!(
@@ -1569,7 +1886,10 @@ fn active_source_call_is_a_dependency_and_is_never_copied() {
     source.with_mut(|runtime| {
         runtime.fail_claimed_call(call, Arc::from("finished after observation test"));
     });
-    assert_eq!(observation.status(), FrontierObservationStatus::Disturbed);
+    assert!(matches!(
+        observation.step_active_pair(pair),
+        ActivePairStep::Disturbed
+    ));
 }
 
 #[test]
@@ -1598,17 +1918,14 @@ fn layered_cursor_reports_and_follows_an_exact_dependency() {
         observation.endpoint(),
         DemandEndpoint::Cursor(middle_cursor)
     );
-    assert_eq!(observation.status(), FrontierObservationStatus::Current);
-
     assert!(matches!(
-        observation.claim_cursor_obligation(middle_cursor),
-        Ok(Some(CursorProgress::Claimed))
+        observation.step_cursor(middle_cursor),
+        CursorStep::Progressed(CursorProgress::Materialized { .. })
     ));
     assert!(matches!(
-        middle.advance_claimed_cursor(middle_cursor),
-        Some(CursorProgress::Materialized { .. })
+        observation.step_cursor(middle_cursor),
+        CursorStep::Disturbed
     ));
-    assert_eq!(observation.status(), FrontierObservationStatus::Disturbed);
     assert!(outer.retry_blocked_cursor(outer_cursor));
     assert!(matches!(
         reduce_next_cursor(&mut outer).1,
@@ -1636,9 +1953,17 @@ fn nested_cursor_demand_reuses_a_claimed_source_obligation() {
     else {
         panic!("first outer cursor should observe the middle cursor");
     };
+    assert_eq!(
+        first_observation.endpoint(),
+        DemandEndpoint::Cursor(middle_cursor)
+    );
+    assert_eq!(
+        middle.with_mut(|runtime| claim_test_cursor(runtime, middle_cursor)),
+        Some(CursorProgress::Claimed)
+    );
     assert!(matches!(
-        first_observation.claim_cursor_obligation(middle_cursor),
-        Ok(Some(CursorProgress::Claimed))
+        first_observation.step_cursor(middle_cursor),
+        CursorStep::Disturbed
     ));
 
     let mut second = target_waiting_on(middle.clone());
@@ -1649,24 +1974,19 @@ fn nested_cursor_demand_reuses_a_claimed_source_obligation() {
     else {
         panic!("second outer cursor should observe the middle cursor");
     };
-    assert_eq!(
-        second_observation.status(),
-        FrontierObservationStatus::Current
-    );
-    assert_eq!(
-        second_observation.claim_cursor_obligation(middle_cursor),
-        Ok(None),
-        "a second demand must reuse rather than duplicate the claimed obligation"
-    );
+    assert!(matches!(
+        second_observation.step_cursor(middle_cursor),
+        CursorStep::Contended(_)
+    ));
 
     assert!(matches!(
         middle.advance_claimed_cursor(middle_cursor),
         Some(CursorProgress::Materialized { .. })
     ));
-    assert_eq!(
-        second_observation.status(),
-        FrontierObservationStatus::Disturbed
-    );
+    assert!(matches!(
+        second_observation.step_cursor(middle_cursor),
+        CursorStep::Disturbed
+    ));
 }
 
 #[test]
@@ -1680,7 +2000,7 @@ fn root_cursor_claim_remains_exclusive_while_source_inspection_is_in_flight() {
     let exposed = target.add_interface(Port::principal(root_cursor));
 
     assert_eq!(
-        target.demand_interface(exposed),
+        claim_test_interface_cursor(&mut target, exposed),
         Some(CursorProgress::Claimed)
     );
     assert!(matches!(
@@ -1695,7 +2015,7 @@ fn root_cursor_claim_remains_exclusive_while_source_inspection_is_in_flight() {
         "pairless root work must remain visible to quiescence detection"
     );
     assert_eq!(
-        target.demand_interface(exposed),
+        claim_test_interface_cursor(&mut target, exposed),
         None,
         "a second evaluator must observe the in-flight root cursor claim"
     );
@@ -1715,7 +2035,7 @@ fn pairless_cursor_claim_publishes_blocked_and_stable_obligations() {
     let blocked_cursor = blocked_target.begin_copy(source);
     let blocked_interface = blocked_target.add_interface(Port::principal(blocked_cursor));
     assert_eq!(
-        blocked_target.demand_interface(blocked_interface),
+        claim_test_interface_cursor(&mut blocked_target, blocked_interface),
         Some(CursorProgress::Claimed)
     );
     assert_eq!(
@@ -1741,7 +2061,7 @@ fn pairless_cursor_claim_publishes_blocked_and_stable_obligations() {
     let stable_cursor = stable_target.begin_copy(stable_source);
     let stable_interface = stable_target.add_interface(Port::principal(stable_cursor));
     assert_eq!(
-        stable_target.demand_interface(stable_interface),
+        claim_test_interface_cursor(&mut stable_target, stable_interface),
         Some(CursorProgress::Claimed)
     );
     assert_eq!(
@@ -1755,7 +2075,10 @@ fn pairless_cursor_claim_publishes_blocked_and_stable_obligations() {
             .map(|obligation| &obligation.state),
         Some(PairlessCursorState::Stable)
     ));
-    assert_eq!(stable_target.demand_interface(stable_interface), None);
+    assert_eq!(
+        claim_test_interface_cursor(&mut stable_target, stable_interface),
+        None
+    );
 }
 
 #[test]
@@ -1800,7 +2123,7 @@ fn concurrent_interface_demands_share_one_pairless_cursor_claim() {
     let worker_release = release.clone();
     let worker = thread::spawn(move || {
         assert_eq!(
-            worker_target.with_mut(|runtime| runtime.demand_interface(exposed)),
+            worker_target.with_mut(|runtime| claim_test_interface_cursor(runtime, exposed)),
             Some(CursorProgress::Claimed)
         );
         worker_claimed.wait();
@@ -1813,7 +2136,7 @@ fn concurrent_interface_demands_share_one_pairless_cursor_claim() {
 
     claimed.wait();
     assert_eq!(
-        target.with_mut(|runtime| runtime.demand_interface(exposed)),
+        target.with_mut(|runtime| claim_test_interface_cursor(runtime, exposed)),
         None,
         "a concurrent demand must not duplicate the pairless cursor claim"
     );
@@ -1846,7 +2169,7 @@ fn auxiliary_cursor_drives_the_local_cursor_facing_the_principal() {
     let root_cursor = target.begin_copy(source);
     let target_exposed = target.add_interface(Port::principal(root_cursor));
     assert_eq!(
-        target.demand_interface(target_exposed),
+        claim_test_interface_cursor(&mut target, target_exposed),
         Some(CursorProgress::Claimed)
     );
     assert!(matches!(
@@ -1858,7 +2181,7 @@ fn auxiliary_cursor_drives_the_local_cursor_facing_the_principal() {
     let argument_cursor = state.frontiers[&Port::auxiliary(root, 1)];
     let result_cursor = state.frontiers[&Port::auxiliary(root, 2)];
     assert_eq!(
-        target.claim_dependent_cursor(result_cursor),
+        claim_test_cursor(&mut target, result_cursor),
         Some(CursorProgress::Claimed)
     );
     assert_eq!(
@@ -1870,7 +2193,7 @@ fn auxiliary_cursor_drives_the_local_cursor_facing_the_principal() {
         Some(CursorDependency::LocalCursor(cursor)) if cursor == argument_cursor
     ));
     assert_eq!(
-        target.claim_dependent_cursor(argument_cursor),
+        claim_test_cursor(&mut target, argument_cursor),
         Some(CursorProgress::Claimed)
     );
     assert!(matches!(
@@ -1878,7 +2201,7 @@ fn auxiliary_cursor_drives_the_local_cursor_facing_the_principal() {
         CursorProgress::Materialized { .. }
     ));
     assert_eq!(
-        target.claim_dependent_cursor(result_cursor),
+        claim_test_cursor(&mut target, result_cursor),
         Some(CursorProgress::Claimed)
     );
     assert_eq!(
@@ -1913,7 +2236,7 @@ fn auxiliary_cursor_traces_a_principal_chain_to_an_exact_source_pair() {
     let root_cursor = target.begin_copy(source.clone());
     let target_exposed = target.add_interface(Port::principal(root_cursor));
     assert_eq!(
-        target.demand_interface(target_exposed),
+        claim_test_interface_cursor(&mut target, target_exposed),
         Some(CursorProgress::Claimed)
     );
     assert!(matches!(
@@ -1923,7 +2246,7 @@ fn auxiliary_cursor_traces_a_principal_chain_to_an_exact_source_pair() {
 
     let cursor = target.copies.values().next().unwrap().frontiers[&Port::auxiliary(root, 2)];
     assert_eq!(
-        target.claim_dependent_cursor(cursor),
+        claim_test_cursor(&mut target, cursor),
         Some(CursorProgress::Claimed)
     );
     assert_eq!(
@@ -1999,7 +2322,8 @@ fn auxiliary_cursor_recomputes_its_spine_after_each_terminal_pair() {
             dependency => panic!("expected a source-frontier observation, got {dependency:?}"),
         };
         assert_eq!(observation.endpoint(), DemandEndpoint::ActivePair(consumed));
-        assert_eq!(observation.status(), FrontierObservationStatus::Current);
+        let observed_revisions = observation.observed_revisions;
+        assert_eq!(source.with_revisions(|_| ()).1, observed_revisions);
         assert!(matches!(
             source.with_mut(|runtime| runtime.reduce_pair(consumed)),
             Some(Reduction {
@@ -2007,7 +2331,7 @@ fn auxiliary_cursor_recomputes_its_spine_after_each_terminal_pair() {
                 ..
             })
         ));
-        assert_eq!(observation.status(), FrontierObservationStatus::Disturbed);
+        assert_ne!(source.with_revisions(|_| ()).1, observed_revisions);
         assert!(target.retry_blocked_cursor(cursor));
         let (_, progress) = reduce_next_cursor(&mut target);
         match next_dependency {
@@ -2054,7 +2378,7 @@ fn auxiliary_cursor_reinspects_after_a_principal_remote_cursor_materializes() {
     ));
 
     assert_eq!(
-        source.with_mut(|runtime| runtime.claim_dependent_cursor(source_cursor)),
+        source.with_mut(|runtime| claim_test_cursor(runtime, source_cursor)),
         Some(CursorProgress::Claimed)
     );
     assert!(matches!(
