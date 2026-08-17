@@ -211,7 +211,7 @@ Resolution on 2026-08-17:
    verifies that payload inspection changes neither revision, while blockage
    and permanent failure each advance both topology and disturbance once.
 
-### CW-006 — Low: two transition-era generalities no longer serve production
+### CW-006 — Resolved: remove two transition-era production generalities
 
 Confidence: high.
 
@@ -240,6 +240,25 @@ This is benign implementation drift: the authoritative parent state is a
 better reconstruction owner than the observation itself. The plan and current
 contract should be updated together if the fields are removed.
 
+Resolution on 2026-08-17:
+
+1. `SourceFrontier` now retains the inspected anchor only for the transient
+   source-to-owner handoff. `finish_cursor_claim` validates it once against the
+   owning claim before constructing durable blockage state.
+2. `FrontierObservation` now stores only the source runtime, topology revision,
+   and endpoint. Tests that specifically exercise lost-wakeup behavior capture
+   the independent disturbance epoch from the source; ordinary dependency
+   dispatch no longer carries it.
+3. `NetDriver` is constructed from a complete `NormalizationRequest` and
+   retains that request as its structural root. A disturbed or gone dependency
+   resets the worklist to that root through an infallible operation.
+4. Rootless full-driver construction and the assertions compensating for it
+   are gone. Focused worklist tests may still construct individual work records
+   without weakening the production boundary.
+
+This preserves the useful ownership assertion at the handoff and removes only
+state that had no later semantic consumer.
+
 ## Ownership and transition map
 
 | Concern | Authoritative owner | Transition path |
@@ -248,7 +267,7 @@ contract should be updated together if the fields are removed.
 | Pair-owned cursor state | `ActivePairState::{Ready, Claimed, BlockedCursor}` | claim under owner lock; inspect source unlocked; complete under owner lock |
 | Pairless cursor state | `cursor_obligations: HashMap<NodeId, PairlessCursorObligation>` | root demand installs; step claims; finish blocks, stabilizes, or removes with cursor |
 | Copy provenance | target-local `CopyState { source, frontiers, fan_sites }` | begin copy, principal materialization, local convergence |
-| Transient source work | `FrontierObservation` and `DemandEndpoint` | inspect under source lock; version-validate one exact step |
+| Transient source work | transient `SourceFrontier`, then `FrontierObservation { source, topology, endpoint }` | validate the anchor at handoff; version-validate one exact step |
 | Parent resumption | `NetDriverWork::ResumeCursorDependency` | exact dependency equality, then owner-local Ready or Stable publication |
 | Root demand | evaluator-local `NormalizationRequest` | locked `poll_interface_demand`, then iterative worklist |
 | Contention | `NetContention { runtime, revisions }` | wait on disturbance epoch, then rebuild from root |
@@ -324,8 +343,7 @@ as the generic reducer and low-level test utility; cursor-WHNF production uses
 
 ### Accidental or unresolved drift
 
-- Observation and driver representations retain now-unused generality
-  (CW-006).
+None found after resolving CW-001 through CW-006.
 
 ### Deliberately deferred policy
 
@@ -372,9 +390,7 @@ repository suite passes with 1,278 tests across all targets.
 
 ## Recommended order
 
-1. Perform the small observation/driver cleanup (CW-006).
-
-After these items, the cursor-WHNF transition can reasonably be treated as a
+The cursor-WHNF transition can reasonably be treated as a
 closed correctness foundation. Further changes should be driven by profiling
 of batch duration, repeated spine scans, disturbance breadth, and parked worker
 time rather than by speculative scheduler machinery.

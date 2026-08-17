@@ -31,8 +31,9 @@ impl<S: NetSpecialization> SharedRuntimeNet<S> {
         }
     }
 
-    /// Traverses one source demand spine under the source lock and retains
-    /// only the root/version/endpoint observation needed to validate it.
+    /// Traverses one source demand spine under the source lock, retaining its
+    /// anchor for the transient owner handoff and only a topology-versioned
+    /// endpoint for later dependency dispatch.
     pub(in crate::interaction_net::runtime) fn inspect_source_frontier(
         &self,
         anchor: Port,
@@ -41,11 +42,14 @@ impl<S: NetSpecialization> SharedRuntimeNet<S> {
             self.with_revisions(|runtime| runtime.inspect_source_frontier_shape(anchor));
         let observation = shape.endpoint().map(|endpoint| FrontierObservation {
             source: self.clone(),
-            anchor,
-            observed_revisions,
+            observed_topology: observed_revisions.topology_revision(),
             endpoint,
         });
-        SourceFrontier { shape, observation }
+        SourceFrontier {
+            anchor,
+            shape,
+            observation,
+        }
     }
 }
 
@@ -296,7 +300,12 @@ impl<S: NetSpecialization> RuntimeNet<S> {
             Some(RuntimeNode::RemoteCursor { copy, remote })
                 if *copy == claim.copy && *remote == claim.remote
         ));
-        let SourceFrontier { shape, observation } = frontier;
+        let SourceFrontier {
+            anchor,
+            shape,
+            observation,
+        } = frontier;
+        assert_eq!(anchor, claim.remote);
         let frontier_port = match &shape {
             SourceFrontierShape::Principal { port, .. }
             | SourceFrontierShape::StableAuxiliary { port, .. } => *port,
@@ -330,7 +339,6 @@ impl<S: NetSpecialization> RuntimeNet<S> {
                 } => {
                     let observation = observation
                         .expect("a source cursor endpoint must carry its frontier observation");
-                    assert_eq!(observation.anchor(), claim.remote);
                     assert_eq!(observation.endpoint(), DemandEndpoint::Cursor(port.node()));
                     (
                         CursorProgress::Blocked,
@@ -368,7 +376,6 @@ impl<S: NetSpecialization> RuntimeNet<S> {
                     } else if let Some(pair) = terminal_pair {
                         let observation = observation
                             .expect("an active-pair endpoint must carry its frontier observation");
-                        assert_eq!(observation.anchor(), claim.remote);
                         assert_eq!(observation.endpoint(), DemandEndpoint::ActivePair(pair));
                         CursorBlockage::Dependency(CursorDependency::SourceFrontier(observation))
                     } else {
@@ -381,7 +388,6 @@ impl<S: NetSpecialization> RuntimeNet<S> {
                     let pair = ActivePairKey::new(entered.node(), partner.node());
                     let observation = observation
                         .expect("an active-pair endpoint must carry its frontier observation");
-                    assert_eq!(observation.anchor(), claim.remote);
                     assert_eq!(observation.endpoint(), DemandEndpoint::ActivePair(pair));
                     (
                         CursorProgress::Blocked,

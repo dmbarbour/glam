@@ -73,6 +73,7 @@ enum NormalizationMode {
 /// Evaluator-owned description of one demanded interaction-net frontier.
 /// Shared progress remains in the net's cursor obligations; cloning or
 /// dropping this descriptor has no runtime lifecycle effect.
+#[derive(Clone)]
 struct NormalizationRequest {
     runtime: crate::core_net::CoreRuntimeNet,
     root_interface: Port,
@@ -118,12 +119,6 @@ struct NetDriverWorklist {
 }
 
 impl NetDriverWorklist {
-    fn request_root(runtime: crate::core_net::CoreRuntimeNet, interface: Port) -> Self {
-        Self {
-            items: vec![NetDriverWork::RequestRoot { runtime, interface }],
-        }
-    }
-
     fn pop(&mut self) -> Option<NetDriverWork> {
         self.items.pop()
     }
@@ -164,41 +159,24 @@ impl NetDriverWorklist {
         });
     }
 
-    fn mark_nearest_dependency_stable(&mut self) -> bool {
+    fn mark_nearest_dependency_stable(&mut self) {
         let Some(resumption) = self
             .items
             .iter_mut()
             .rev()
             .find(|item| matches!(item, NetDriverWork::ResumeCursorDependency { .. }))
         else {
-            return false;
+            return;
         };
         let NetDriverWork::ResumeCursorDependency { disposition, .. } = resumption else {
             unreachable!()
         };
         *disposition = CursorDependencyDisposition::Stable;
-        true
     }
 
-    fn restart_from_request_root(&mut self) -> bool {
-        let Some(root) = self
-            .items
-            .iter()
-            .find(|item| matches!(item, NetDriverWork::RequestRoot { .. }))
-            .cloned()
-        else {
-            self.items.clear();
-            return false;
-        };
+    fn reset(&mut self, root: NetDriverWork) {
         self.items.clear();
         self.items.push(root);
-        true
-    }
-
-    fn has_request_root(&self) -> bool {
-        self.items
-            .iter()
-            .any(|item| matches!(item, NetDriverWork::RequestRoot { .. }))
     }
 }
 
@@ -222,6 +200,7 @@ enum NetDriverOutcome {
 }
 
 struct NetDriver {
+    request: NormalizationRequest,
     worklist: NetDriverWorklist,
     progressed: bool,
     batch_runtime: Option<crate::core_net::CoreRuntimeNet>,
@@ -229,18 +208,12 @@ struct NetDriver {
 }
 
 impl NetDriver {
-    fn new(initial: NetDriverWork) -> Self {
-        let worklist = match initial {
-            NetDriverWork::RequestRoot { runtime, interface } => {
-                NetDriverWorklist::request_root(runtime, interface)
-            }
-            work => {
-                let mut worklist = NetDriverWorklist::default();
-                worklist.push(work);
-                worklist
-            }
-        };
+    fn new(request: &NormalizationRequest) -> Self {
+        let request = request.clone();
+        let mut worklist = NetDriverWorklist::default();
+        worklist.push(request.root_work());
         Self {
+            request,
             worklist,
             progressed: false,
             batch_runtime: None,
@@ -254,13 +227,17 @@ impl NetDriver {
         }
         self.batch_runtime = None;
     }
+
+    fn restart_from_request_root(&mut self) {
+        self.worklist.reset(self.request.root_work());
+    }
 }
 
 fn drive_net_work(
     context: &EvalContext,
-    initial: NetDriverWork,
+    request: &NormalizationRequest,
 ) -> Result<NetDriverOutcome, EvaluationHalt> {
-    let mut driver = NetDriver::new(initial);
+    let mut driver = NetDriver::new(request);
     while let Some(work) = driver.worklist.pop() {
         let work_runtime = work.runtime().clone();
         if driver
@@ -322,12 +299,7 @@ fn drive_net_work(
                         .follow_cursor_dependency(runtime, cursor, dependency);
                 }
                 CursorStep::Stable => {
-                    if !driver.worklist.mark_nearest_dependency_stable() {
-                        assert!(
-                            driver.worklist.has_request_root(),
-                            "stable cursor work must resume an evaluator request root"
-                        );
-                    }
+                    driver.worklist.mark_nearest_dependency_stable();
                 }
                 CursorStep::Contended(contention) => {
                     return Ok(NetDriverOutcome::Contended(contention));
@@ -352,12 +324,7 @@ fn drive_net_work(
                     );
                 }
                 CursorStep::Stable => {
-                    if !driver.worklist.mark_nearest_dependency_stable() {
-                        assert!(
-                            driver.worklist.has_request_root(),
-                            "stable observed cursor work must resume an evaluator request root"
-                        );
-                    }
+                    driver.worklist.mark_nearest_dependency_stable();
                 }
                 CursorStep::Contended(contention) => {
                     return Ok(NetDriverOutcome::Contended(contention));
@@ -392,18 +359,13 @@ fn drive_net_work(
                 match runtime.resolve_cursor_dependency(cursor, &expected_dependency, disposition) {
                     CursorDependencyResolution::Resolved => {
                         driver.progressed = true;
-                        if disposition == CursorDependencyDisposition::Stable
-                            && !driver.worklist.mark_nearest_dependency_stable()
-                        {
-                            assert!(
-                                driver.worklist.has_request_root(),
-                                "stable dependency must resume an evaluator request root"
-                            );
+                        if disposition == CursorDependencyDisposition::Stable {
+                            driver.worklist.mark_nearest_dependency_stable();
                         }
                     }
                     CursorDependencyResolution::Disturbed | CursorDependencyResolution::Gone => {
                         driver.progressed = true;
-                        driver.worklist.restart_from_request_root();
+                        driver.restart_from_request_root();
                     }
                 }
             }
@@ -546,6 +508,13 @@ impl NormalizationRequest {
         }
     }
 
+    fn root_work(&self) -> NetDriverWork {
+        NetDriverWork::RequestRoot {
+            runtime: self.runtime.clone(),
+            interface: self.root_interface,
+        }
+    }
+
     fn drive(&self, context: &EvalContext) -> Result<NetInterfaceOutcome, EvaluationHalt> {
         drive_net_interface(context, self)
     }
@@ -555,17 +524,9 @@ fn drive_net_interface(
     context: &EvalContext,
     request: &NormalizationRequest,
 ) -> Result<NetInterfaceOutcome, EvaluationHalt> {
-    let runtime = &request.runtime;
-    let interface = request.root_interface;
     debug_assert_eq!(request.mode, NormalizationMode::CursorWhnf);
     loop {
-        match drive_net_work(
-            context,
-            NetDriverWork::RequestRoot {
-                runtime: runtime.clone(),
-                interface,
-            },
-        )? {
+        match drive_net_work(context, request)? {
             NetDriverOutcome::Progressed => continue,
             NetDriverOutcome::Root(InterfaceDemand::Data) => {
                 return Ok(NetInterfaceOutcome::Data);
@@ -842,10 +803,7 @@ mod driver_tests {
         assert!(matches!(
             drive_net_work(
                 &test_context(),
-                NetDriverWork::RequestRoot {
-                    runtime: root.clone(),
-                    interface: root_interface,
-                },
+                &NormalizationRequest::cursor_whnf(root.clone(), root_interface),
             )
             .unwrap(),
             NetDriverOutcome::Root(InterfaceDemand::StableCursor(_))
@@ -871,10 +829,7 @@ mod driver_tests {
         assert!(matches!(
             drive_net_work(
                 &test_context(),
-                NetDriverWork::RequestRoot {
-                    runtime: root.clone(),
-                    interface: root_interface,
-                },
+                &NormalizationRequest::cursor_whnf(root.clone(), root_interface),
             )
             .unwrap(),
             NetDriverOutcome::Root(InterfaceDemand::StableCursor(_))
@@ -902,10 +857,7 @@ mod driver_tests {
         assert!(matches!(
             drive_net_work(
                 &test_context(),
-                NetDriverWork::RequestRoot {
-                    runtime: source.clone(),
-                    interface: root_interface,
-                },
+                &NormalizationRequest::cursor_whnf(source.clone(), root_interface),
             )
             .unwrap(),
             NetDriverOutcome::Root(InterfaceDemand::StableCursor(_))
@@ -1106,15 +1058,8 @@ mod driver_tests {
             other => panic!("copy root should expose a cursor, received {other:?}"),
         };
         assert!(target.with_mut(|net| net.claim_pairless_cursor_obligation(cursor)));
-        let contention = match drive_net_work(
-            &test_context(),
-            NetDriverWork::RequestRoot {
-                runtime: target.clone(),
-                interface,
-            },
-        )
-        .unwrap()
-        {
+        let request = NormalizationRequest::cursor_whnf(target.clone(), interface);
+        let contention = match drive_net_work(&test_context(), &request).unwrap() {
             NetDriverOutcome::Contended(contention) => contention,
             _ => panic!("claimed demanded cursor must report contention"),
         };
@@ -1152,15 +1097,8 @@ mod driver_tests {
             panic!("bind-data demand should be a call")
         };
         let call = Call { pair, bind, data };
-        let contention = match drive_net_work(
-            &test_context(),
-            NetDriverWork::RequestRoot {
-                runtime: runtime.clone(),
-                interface,
-            },
-        )
-        .unwrap()
-        {
+        let request = NormalizationRequest::cursor_whnf(runtime.clone(), interface);
+        let contention = match drive_net_work(&test_context(), &request).unwrap() {
             NetDriverOutcome::Contended(contention) => contention,
             _ => panic!("claimed demanded pair must report contention"),
         };
@@ -1170,10 +1108,7 @@ mod driver_tests {
         contention
             .runtime()
             .wait_for_disturbance(contention.revisions().disturbance_epoch());
-        let failure = match drive_net_work(
-            &test_context(),
-            NetDriverWork::RequestRoot { runtime, interface },
-        ) {
+        let failure = match drive_net_work(&test_context(), &request) {
             Err(failure) => failure,
             Ok(_) => panic!("demanded stuck pair must remain a failure"),
         };

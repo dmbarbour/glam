@@ -181,22 +181,18 @@ pub enum ActivePairStep<S: NetSpecialization> {
 
 /// One versioned observation of the work currently demanded from a source
 /// frontier. The complete auxiliary/principal spine is deliberately not
-/// retained; a disturbed observation is recomputed from `anchor`.
+/// retained; a disturbed observation is reconstructed from the authoritative
+/// parent cursor and evaluator request root.
 #[derive(Clone, PartialEq, Eq)]
 pub struct FrontierObservation<S: NetSpecialization> {
     source: SharedRuntimeNet<S>,
-    anchor: Port,
-    observed_revisions: RuntimeNetRevisions,
+    observed_topology: u64,
     endpoint: DemandEndpoint,
 }
 
 impl<S: NetSpecialization> FrontierObservation<S> {
     pub fn source(&self) -> &SharedRuntimeNet<S> {
         &self.source
-    }
-
-    pub fn anchor(&self) -> Port {
-        self.anchor
     }
 
     pub fn endpoint(&self) -> DemandEndpoint {
@@ -209,14 +205,14 @@ impl<S: NetSpecialization> FrontierObservation<S> {
     pub fn step_active_pair(&self, pair: ActivePairKey) -> ActivePairStep<S> {
         assert_eq!(self.endpoint, DemandEndpoint::ActivePair(pair));
         self.source
-            .step_active_pair_if_current(pair, Some(self.observed_revisions.topology_revision()))
+            .step_active_pair_if_current(pair, Some(self.observed_topology))
     }
 
     /// Takes one non-blocking step at the observed cursor endpoint.
     pub fn step_cursor(&self, cursor: NodeId) -> CursorStep<S> {
         assert_eq!(self.endpoint, DemandEndpoint::Cursor(cursor));
         self.source
-            .step_cursor_if_current(cursor, Some(self.observed_revisions.topology_revision()))
+            .step_cursor_if_current(cursor, Some(self.observed_topology))
     }
 }
 
@@ -225,8 +221,7 @@ impl<S: NetSpecialization> fmt::Debug for FrontierObservation<S> {
         formatter
             .debug_struct("FrontierObservation")
             .field("source", &self.source)
-            .field("anchor", &self.anchor)
-            .field("observed_revisions", &self.observed_revisions)
+            .field("observed_topology", &self.observed_topology)
             .field("endpoint", &self.endpoint)
             .finish()
     }
@@ -926,6 +921,7 @@ struct CursorClaim<S: NetSpecialization> {
 }
 
 struct SourceFrontier<S: NetSpecialization> {
+    anchor: Port,
     shape: SourceFrontierShape<S>,
     observation: Option<FrontierObservation<S>>,
 }

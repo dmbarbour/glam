@@ -84,6 +84,11 @@ Versioned frontier observations invalidate nonterminal pair state when the
 source topology changes. `Stuck` is the terminal exception: if the exact pair
 is now authoritatively stuck, dispatch propagates that structured failure even
 from a stale observation instead of rescanning unrelated topology.
+The durable observation stores only its source, endpoint, and topology
+revision. Source inspection retains the root anchor just long enough to
+validate the cursor handoff; a disturbance makes the evaluator reconstruct the
+path from its retained normalization request. Disturbance epochs belong to
+contention records, not frontier observations.
 
 ## Reduction and External Work
 

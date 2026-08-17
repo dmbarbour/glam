@@ -1870,9 +1870,9 @@ fn source_change_between_cursor_inspection_publication_and_wait_is_not_lost() {
         .observation
         .as_ref()
         .expect("the inspected pair should have a versioned observation");
-    let observed_revisions = observation.observed_revisions;
-    assert_eq!(observation.anchor(), claim.remote);
-    assert_eq!(source.with_revisions(|_| ()).1, observed_revisions);
+    let observed_topology = observation.observed_topology;
+    let observed_revisions = source.with_revisions(|_| ()).1;
+    assert_eq!(observed_revisions.topology_revision(), observed_topology);
     let inspected_pair = match &frontier.shape {
         SourceFrontierShape::StableAuxiliary {
             terminal_pair: Some(pair),
@@ -1903,7 +1903,10 @@ fn source_change_between_cursor_inspection_publication_and_wait_is_not_lost() {
     mutation_barrier.wait();
     mutator.join().expect("source mutator should not panic");
     assert!(!source.with(|runtime| runtime.contains_active_pair(source_pair)));
-    assert_ne!(source.with_revisions(|_| ()).1, observed_revisions);
+    assert_ne!(
+        source.with_revisions(|_| ()).1.topology_revision(),
+        observed_topology
+    );
     assert!(matches!(
         frontier
             .observation
@@ -2444,8 +2447,11 @@ fn auxiliary_cursor_recomputes_its_spine_after_each_terminal_pair() {
             dependency => panic!("expected a source-frontier observation, got {dependency:?}"),
         };
         assert_eq!(observation.endpoint(), DemandEndpoint::ActivePair(consumed));
-        let observed_revisions = observation.observed_revisions;
-        assert_eq!(source.with_revisions(|_| ()).1, observed_revisions);
+        let observed_topology = observation.observed_topology;
+        assert_eq!(
+            source.with_revisions(|_| ()).1.topology_revision(),
+            observed_topology
+        );
         assert!(matches!(
             source.with_mut(|runtime| runtime.reduce_pair(consumed)),
             Some(Reduction {
@@ -2453,7 +2459,10 @@ fn auxiliary_cursor_recomputes_its_spine_after_each_terminal_pair() {
                 ..
             })
         ));
-        assert_ne!(source.with_revisions(|_| ()).1, observed_revisions);
+        assert_ne!(
+            source.with_revisions(|_| ()).1.topology_revision(),
+            observed_topology
+        );
         assert!(target.retry_blocked_cursor(cursor));
         let (_, progress) = reduce_next_cursor(&mut target);
         match next_dependency {
