@@ -383,24 +383,24 @@ diagnostic provenance.
 **Expected simplification:** remove roughly seventy lines of adapter code plus
 the old public builder path and duplicate test fixture vocabulary.
 
-### CCR-009 — A phase-zero macro oracle duplicates production behavior and preserves stale chronology
+### CCR-009 — Resolved: production tests own macro contracts and comments state current invariants
 
 **Classification:** vestigial test oracle and stale documentation  
 **Priority:** medium  
 **Confidence:** high
 
-`parser/macro_contract.rs` is a 158-line test-only implementation whose header
-says later phases will replace and consume it
+At review time, `parser/macro_contract.rs` was a 158-line test-only
+implementation whose header said later phases would replace and consume it
 ([`macro_contract.rs`](../../src/g_syntax/parser/macro_contract.rs#L1)). Those
-phases are complete. It reimplements static macro-head scanning and the
+phases were already complete. It reimplemented static macro-head scanning and the
 `@`/`#` output restriction. Production macro-expansion tests already cover
 right-to-left expansion and output restrictions.
 
-The malformed/dynamic-head table remains useful and should be moved to tests
-that exercise the production staged parser before deleting the oracle. Related
-module comments still describe the staged lexer, logical tokens, isolated CLI
-search, and coordinator task terminalization as future phases rather than
-current invariants.
+The malformed/dynamic-head table remained useful and therefore needed to move
+to tests that exercise the production staged parser before deleting the
+oracle. Related module comments described the staged lexer, logical tokens,
+isolated CLI search, and coordinator task terminalization as future phases
+rather than current invariants.
 
 **Canonical owner:** staged parser and macro-expansion contract tests; current
 architecture documents for lifecycle explanation.
@@ -474,10 +474,10 @@ Resolution on 2026-08-17:
 
 The focused logical-parser, right-to-left expansion, generated-text, and five
 macro protocol tests pass after deletion, as does the complete 1,276-test
-repository suite. Phase 2 remains intentionally separate so comment edits
-describe this final ownership boundary.
+repository suite. This established the behavior boundary before Phase 2
+updated its ownership comments.
 
-##### Phase 2: Replace stale chronology with current invariants
+##### Phase 2: Replace stale chronology with current invariants — complete
 
 1. Audit production comments which still describe completed parser,
    macro-expansion, isolated-search, conditional-syntax, or coordinator phases
@@ -501,12 +501,43 @@ Phase 2 is complete when production comments describe present owners and
 contracts, while actual future work remains explicit without stale transition
 numbering.
 
+Resolution on 2026-08-17:
+
+- The lexer, logical-source, staged-source, and conditional-resolution module
+  comments now describe their present ownership. The numeric-validation test
+  likewise names macro expansion as a current downstream consumer rather than
+  future work.
+- `IsolatedEffectSearch` documents all of its current consumers: configured
+  CLI and token parsing, macro expansion, interaction-net construction, and
+  policy tests.
+- Completion publication now documents its two current policies. Locally
+  driven waits publish from their producer registry because they have no
+  coordinator work record; coordinator-owned terminals detach and wake under
+  mutation admission. Task-local promise inventories are described by the
+  same ownership distinction rather than by the completed Phase 10B.
+- The deferred-machine activation comment retains the real installation
+  handshake, but no longer calls it temporary. Removing that handshake is the
+  separately latched work in CCR-003, not comment cleanup.
+- The `Diagnostic` compatibility projections remain explicitly transitional:
+  they are a live public embedding surface, not stale phase chronology. No
+  architecture or agent-context document referred to the deleted macro
+  oracle, so no compensating documentation edit was required.
+
 ##### Final verification
 
 Run `cargo fmt --check`, all-target/all-feature Clippy with warnings denied,
 and the complete parallel test suite. Record the migrated cases, deleted lines,
 and any chronology deliberately retained in this finding before marking
 CCR-009 resolved.
+
+Verification on 2026-08-17:
+
+- The focused numeric-before-grammar-or-macro-expansion regression passes.
+- `cargo fmt --check` passes.
+- `cargo clippy --all-targets --all-features -- -D warnings` passes.
+- `cargo test -q` passes all 1,276 tests.
+- Phase 1 deleted the 158-line oracle; Phase 2 changed comments and one test
+  name without changing production behavior.
 
 ### CCR-010 — Four isolated effect hosts repeat the same non-committing execution mechanism
 
@@ -630,11 +661,9 @@ without either broad wakeups or incomplete settlement validation.
 
 ## Recommended implementation order
 
-1. **Low-risk removal:** CCR-001, CCR-002, and CCR-007 are complete. Keep the
-   stale-comment and oracle work in CCR-009 as its own compatibility-retirement
-   checkpoint.
-2. **Latch and retire compatibility:** migrate the macro oracle cases, then
-   finish CCR-009; migrate source tests, then perform CCR-008.
+1. **Low-risk removal:** CCR-001, CCR-002, CCR-007, and CCR-009 are complete.
+2. **Retire the remaining compatibility surface:** migrate source tests, then
+   perform CCR-008.
 3. **Coordinator protocol cleanup:** barrier-test and implement CCR-003, then
    collapse the terminal representation in CCR-004.
 4. **Event-state rewrite:** decide CCR-005 explicitly, then combine it with

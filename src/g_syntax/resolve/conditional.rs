@@ -1,8 +1,8 @@
 //! Internal conditional choice resolution and effect lowering.
 //!
-//! Public conditional syntax is introduced in later phases. This module owns
-//! the shared flat search shape first, so syntax parsing never has to invent a
-//! do block or duplicate pattern lowering.
+//! Public conditional syntax resolves through this shared flat search shape,
+//! so syntax parsing never has to invent a do block or duplicate pattern
+//! lowering.
 
 use super::super::*;
 use super::effect_steps::{ResolvedEffectStep, ResolvedPatternInput, emit_effect_steps};

@@ -1,8 +1,8 @@
 //! Single-pass lexical structure for the built-in `.g` compiler.
 //!
 //! Production parsing consumes its diagnostics, token groups, declaration
-//! sections, and text values directly. Character-oriented parsers remain only
-//! as temporary test oracles pending their deletion.
+//! sections, and text values directly. This lexer owns whitespace, newline,
+//! delimiter, indentation, and declaration structure for the staged parser.
 
 use std::ops::Range;
 

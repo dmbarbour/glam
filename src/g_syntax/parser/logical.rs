@@ -1,9 +1,9 @@
 //! Parser-neutral logical-token storage prepared for macro expansion.
 //!
-//! Phase 1 mirrors original tokens through compact payload arenas and rebuilds
-//! structural indices without changing parser input. Later phases splice
-//! generated fragments and embedded values into this representation before
-//! materializing ordinary parser tokens.
+//! Original tokens are mirrored through compact payload arenas while
+//! structural indices remain parser-neutral. Macro expansion splices generated
+//! fragments and embedded values into this representation before materializing
+//! ordinary parser tokens.
 
 use std::ops::Range;
 use std::sync::Arc;

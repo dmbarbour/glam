@@ -80,9 +80,10 @@ pub(super) fn parse_lexed(lexical: &super::lexical::LexedSource<'_>) -> ParsedSo
 
 /// Declaration-at-a-time parser over one immutable lexical result.
 ///
-/// Macro expansion will eventually replace selected logical declaration items
-/// before this stage. Keeping lexical ownership here lets ordinary compilation
-/// lower each declaration before parsing the next without rescanning source.
+/// Macro expansion replaces selected logical declaration items before this
+/// owner materializes ordinary parser tokens. Keeping lexical ownership here
+/// lets compilation lower each declaration before parsing the next without
+/// rescanning source.
 pub(in crate::g_syntax) struct StagedSourceParser<'source> {
     lexical: Option<LexedSource<'source>>,
     diagnostics: Vec<Diagnostic>,

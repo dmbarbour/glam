@@ -268,9 +268,9 @@ impl EvaluationWaitToken {
 /// settlement. Resolver-owned promises are a distinct ownership model and do
 /// not acquire a task obligation.
 ///
-/// Directly driven effect tasks temporarily use a task-local inventory until
-/// client demand becomes coordinator work in Phase 10B. Neither form retains
-/// a producer session or runtime coordinator.
+/// Directly driven effect tasks use a task-local inventory because they have
+/// no coordinator work record. Neither form retains a producer session or
+/// keeps the runtime coordinator alive.
 pub(crate) struct PromiseProducerObligation {
     owner: EvaluationTaskId,
     wait: EvaluationWaitToken,

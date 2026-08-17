@@ -36,7 +36,7 @@ fn scans_validation_structure_and_declarations_together() {
 }
 
 #[test]
-fn validates_numeric_data_before_grammar_or_future_macro_expansion() {
+fn validates_numeric_data_before_grammar_or_macro_expansion() {
     let source = "language g0\nhidden = 1e999999999999999999999\nnext = 42\n";
     let lexed = lex_source(source);
 

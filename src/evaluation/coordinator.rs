@@ -280,10 +280,10 @@ impl CompletionSubscriptions {
     /// Detaches and delivers registrations for a terminal which was already
     /// published under its producer registry lock.
     ///
-    /// Session-owned waits use this transitional split until task
-    /// terminalization moves under coordinator mutation admission. The
-    /// terminal cell is immutable before this call, so subscribe-and-recheck
-    /// still cannot lose a wake.
+    /// Locally driven waits use this split because they have no coordinator
+    /// work record. Coordinator-owned terminals detach and wake registrations
+    /// under coordinator mutation admission. The terminal cell is immutable
+    /// before this call, so subscribe-and-recheck still cannot lose a wake.
     pub(crate) fn notify_published(&self) {
         self.publish(|| Ok::<_, std::convert::Infallible>(()))
             .expect("published completion notification is infallible");
@@ -3591,7 +3591,7 @@ impl EvaluationWorkCoordinator {
         )
     }
 
-    /// Finishes the temporary coordinator-first installation handshake.
+    /// Finishes the coordinator-first deferred-machine installation handshake.
     /// Demand observed while the session installed its machine is preserved
     /// and makes the producer worker-ready immediately.
     pub(super) fn activate_deferred(&self, id: EvaluationWorkId) -> bool {

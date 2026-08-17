@@ -162,9 +162,9 @@ pub enum IsolatedSearchPoll<S: TaskSpecialization> {
     Cancelled,
 }
 
-/// Pollable all-results execution used by policy tests and, later, configured
-/// CLI parsing. Successful and failed branch journals remain isolated from the
-/// host.
+/// Pollable all-results execution shared by configured CLI and token parsing,
+/// macro expansion, interaction-net construction, and policy tests.
+/// Successful and failed branch journals remain isolated from the host.
 #[doc(hidden)]
 pub struct IsolatedEffectSearch<S: TaskSpecialization> {
     task: EffectTask<S>,
