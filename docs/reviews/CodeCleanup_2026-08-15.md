@@ -974,6 +974,8 @@ Final verification on 2026-08-17:
 **Priority:** low  
 **Confidence:** medium
 
+**Transition plan:** [`ValueFacadeTransition.md`](../plans/ValueFacadeTransition.md)
+
 The methods explicitly call themselves compatibility helpers and direct new
 code to `Values::access` ([`api.rs`](../../src/api.rs#L5647)). They manually
 split an atom path, demand each intermediate dictionary, and deliberately leave
