@@ -1377,6 +1377,61 @@ fn blocked_call_requires_its_current_wait_token_to_be_reclaimed() {
 }
 
 #[test]
+fn claimed_call_reads_are_quiet_while_block_and_failure_publish() {
+    let claim = |data| {
+        let mut net = RuntimeNet::<i32>::empty();
+        let bind = net.add_node(RuntimeNode::Bind);
+        let data_node = net.add_node(RuntimeNode::Data(data));
+        net.connect(Port::principal(bind), Port::principal(data_node));
+        let net = SharedRuntimeNet::new(net);
+        let reduction = net
+            .with_optional_mut(RuntimeNet::reduce_next)
+            .expect("bind-data must claim a call");
+        let ReductionKind::Call { bind, data } = reduction.kind else {
+            panic!("expected a claimed call")
+        };
+        (
+            net,
+            Call {
+                pair: reduction.pair,
+                bind,
+                data,
+            },
+        )
+    };
+
+    let (blocked, blocked_call) = claim(7);
+    let before_read = blocked.with_revisions(|_| ()).1;
+    assert_eq!(blocked.with(|net| net.claim_call(blocked_call)), Some(7));
+    assert_eq!(blocked.with_revisions(|_| ()).1, before_read);
+    blocked.with_mut(|net| net.block_claimed_call(blocked_call, 17));
+    let after_block = blocked.with_revisions(|_| ()).1;
+    assert_eq!(
+        after_block.topology_revision(),
+        before_read.topology_revision() + 1
+    );
+    assert_eq!(
+        after_block.disturbance_epoch(),
+        before_read.disturbance_epoch() + 1
+    );
+
+    let (failed, failed_call) = claim(11);
+    let before_failure = failed.with_revisions(|_| ()).1;
+    assert_eq!(failed.with(|net| net.claim_call(failed_call)), Some(11));
+    assert_eq!(failed.with_revisions(|_| ()).1, before_failure);
+    failed.with_mut(|net| net.fail_claimed_call(failed_call, Arc::from("not callable")));
+    let after_failure = failed.with_revisions(|_| ()).1;
+    assert_eq!(
+        after_failure.topology_revision(),
+        before_failure.topology_revision() + 1
+    );
+    assert_eq!(
+        after_failure.disturbance_epoch(),
+        before_failure.disturbance_epoch() + 1
+    );
+}
+
+#[test]
 fn specialization_failure_remains_structured_in_the_stuck_pair() {
     let mut net = RuntimeNet::<StructuredSpecialization>::empty();
     let bind = net.add_node(RuntimeNode::Bind);

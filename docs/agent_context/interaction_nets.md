@@ -212,12 +212,16 @@ The same module provides the ordinary `interaction_net` construction builtin;
 source programs may use either explicit `>>=`/`=>>` or the built-in front
 end's `do` notation, which lowers away before net construction runs.
 
-Shared runtime mutation increments a condition-variable generation. If one
-observer encounters an active pair already claimed by another evaluator, it
-waits for that exact runtime to change and retries; a claimed pair must never
-be misreported as quiescence. Cursor dependencies similarly treat a source
-pair disappearing between inspection and claim as progress and refresh their
-frontier.
+Every authoritative shared-runtime mutation advances a topology revision.
+Outside a normalization batch it also advances the disturbance epoch and
+wakes followers; inside a batch, disturbance and notification are deferred
+until the batch closes. Reading the immutable payload of an already claimed
+call is quiet, while completing, blocking, or failing that claim is an
+authoritative mutation. If one observer encounters an active pair already
+claimed by another evaluator, it waits for that exact runtime to be disturbed
+and retries; a claimed pair must never be misreported as quiescence. Cursor
+dependencies similarly treat a source pair disappearing between inspection
+and claim as progress and refresh their frontier.
 
 ## Deliberate Limits
 

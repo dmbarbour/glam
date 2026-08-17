@@ -21,12 +21,12 @@ then carries it through a prepared copy-source token. A stale exact-pair
 observation also propagates the pair's authoritative `Stuck` result rather
 than allowing unrelated topology progress to postpone it.
 
-The verification gap found by the review is now closed as well. The remaining
-findings concern one read path which publishes a false mutation and small
-post-transition representation cleanup. The review also records one resolved
-clarification about recursive semantic evaluation versus cursor-work
-ownership. None argues for restoring recursive cursor execution, a whole-net
-fallback, topology demand agents, or reference-count-dependent semantics.
+The verification gap and false call-read publication found by the review are
+now closed as well. The remaining finding is small post-transition
+representation cleanup. The review also records one resolved clarification
+about recursive semantic evaluation versus cursor-work ownership. None argues
+for restoring recursive cursor execution, a whole-net fallback, topology
+demand agents, or reference-count-dependent semantics.
 
 ## Findings
 
@@ -180,15 +180,15 @@ Resolution on 2026-08-17:
 No production behavior changed for this finding. The only supporting addition
 is a `cfg(test)` constructor for the transparent pair-owned layer.
 
-### CW-005 — Low: reading claimed call data publishes a graph mutation
+### CW-005 — Resolved: reading claimed call data published a graph mutation
 
 Confidence: high.
 
-[`RuntimeNet::claim_call`](../../src/interaction_net/runtime.rs#L1343) only
+[`RuntimeNet::claim_call`](../../src/interaction_net/runtime.rs#L1376) only
 validates `ActivePairState::Claimed` and clones the immutable data payload. The
 state transition to `Claimed` already occurred when the exact pair was reduced.
 Nevertheless, `progress_exact_core_call` invokes it through unconditional
-[`SharedRuntimeNet::with_mut`](../../src/interaction_net/runtime.rs#L592).
+[`SharedRuntimeNet::with_mut`](../../src/interaction_net/runtime.rs#L618).
 That increments the topology revision and either marks the current batch dirty
 or publishes a disturbance.
 
@@ -197,10 +197,19 @@ follower wake every time callable lowering begins. It also needlessly makes
 frontier observations stale. This is unnecessary work rather than a semantic
 corruption.
 
-Make `claim_call` take `&self` and call it through `SharedRuntimeNet::with`.
-Add a revision test showing that reading the already claimed payload is quiet,
-while completing, blocking, or failing the claim still advances authoritative
-state.
+Resolution on 2026-08-17:
+
+1. `RuntimeNet::claim_call` now takes `&self`, making its read-only contract
+   explicit.
+2. `progress_exact_core_call` reads the payload through
+   `SharedRuntimeNet::with`; only its later completion, blockage, or failure
+   path mutates the net.
+3. `progressing_a_claimed_call_publishes_only_its_completion` first failed
+   against the old path with two revision increments, then passed with exactly
+   the real completion publication.
+4. `claimed_call_reads_are_quiet_while_block_and_failure_publish` independently
+   verifies that payload inspection changes neither revision, while blockage
+   and permanent failure each advance both topology and disturbance once.
 
 ### CW-006 — Low: two transition-era generalities no longer serve production
 
@@ -309,23 +318,14 @@ as the generic reducer and low-level test utility; cursor-WHNF production uses
   CW-003 records the clarified scope of the hierarchy invariant.
 - Logical-copy installation uses a prepared source token so the target-owned
   mutation phase has no reason or ability to acquire the source net lock.
+- Claimed callable payload inspection is immutable and does not invalidate
+  structural observations; each later claim disposition publishes exactly
+  once (CW-005 resolution).
 
 ### Accidental or unresolved drift
 
-- A read-only call-payload operation publishes mutation (CW-005).
 - Observation and driver representations retain now-unused generality
   (CW-006).
-
-### Current documentation drift
-
-The focused current contract says that “shared runtime mutation increments a
-condition-variable generation” in
-[`interaction_nets.md`](../agent_context/interaction_nets.md#core-specialization).
-The implementation now has two generations: topology revision advances for
-every authoritative mutation, while disturbance epoch and notification may be
-deferred until the normalization batch closes. Update that paragraph when
-CW-005 is fixed so it describes the authoritative publication rule rather than
-the pre-batching mechanism.
 
 ### Deliberately deferred policy
 
@@ -360,20 +360,19 @@ every reduction.
 | Two-sided convergence | `converging_frontiers_join_without_leaving_a_stale_cursor_pair`, `converging_frontier_waits_for_a_claimed_peer` | Covers duplicate prevention and in-flight peer behavior. |
 | Independent copies | `separate_logical_copies_rebase_fans_to_distinct_local_sites` | Proves copy-local fan identity and source sharing. |
 | Request-relative unrelated work | `stable_root_does_not_reduce_disconnected_or_undemanded_ready_work`, `stable_root_ignores_unrelated_claimed_and_stuck_work` | Good controls for global-work leakage. |
-| Exact semantic waits | `blocked_call_requires_its_current_wait_token_to_be_reclaimed`, operator equivalent, reflection-gate call/operator tests | Exact token and scheduler-visible retry are covered. |
+| Exact semantic waits | `blocked_call_requires_its_current_wait_token_to_be_reclaimed`, `claimed_call_reads_are_quiet_while_block_and_failure_publish`, operator equivalent, reflection-gate call/operator tests | Exact token, quiet payload reads, authoritative dispositions, and scheduler-visible retry are covered. |
 | Permanent failure | generic stuck tests, `specialization_failure_remains_structured_in_the_stuck_pair`, `nested_cursor_preserves_structured_failure_across_unrelated_source_progress`, `nested_terminal_failure_propagates_through_the_complete_driver`, and the terminal part of `active_source_call_is_a_dependency_and_is_never_copied` | Direct roots, stale exact-observation dispatch, and full nested driver propagation are covered. |
 | Iterative depth | `iterative_cursor_driver_exceeds_the_former_recursion_limit`, `deep_stable_cursor_dependencies_exceed_the_former_recursion_limit`, `deep_productive_cursor_chain_alternates_pairless_and_pair_owned_layers` | Complete pairless productive, stable, and mixed-owner matrix beyond the former bound. |
 | Runtime transfer | `cursor_driver_releases_each_runtime_before_crossing_to_the_next` | Proves leases are closed before crossing between runtime nets. Copy installation lock separation is covered independently above. |
 | Public semantic boundary | raw-net opacity, `net_arity`, net computation/function, non-data-normal-form, and executable sample tests | Good language-level integration coverage. |
 
-The focused runtime suite contains 63 tests and the evaluator driver suite 13;
-both pass after the CW-001, CW-002, and CW-004 resolutions. The full repository
-suite passes with 1,276 tests across all targets.
+The focused runtime suite contains 64 tests and the evaluator driver suite 14;
+both pass after the CW-001, CW-002, CW-004, and CW-005 resolutions. The full
+repository suite passes with 1,278 tests across all targets.
 
 ## Recommended order
 
-1. Remove the false call-read publication (CW-005), then perform the small
-   observation/driver and current-doc cleanup (CW-006).
+1. Perform the small observation/driver cleanup (CW-006).
 
 After these items, the cursor-WHNF transition can reasonably be treated as a
 closed correctness foundation. Further changes should be driven by profiling

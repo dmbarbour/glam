@@ -1373,7 +1373,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
     }
 
     /// Reads callable data from an active pair already claimed by reduction.
-    pub fn claim_call(&mut self, call: Call) -> Option<S::Data> {
+    pub fn claim_call(&self, call: Call) -> Option<S::Data> {
         if !self
             .active
             .get(&call.pair)

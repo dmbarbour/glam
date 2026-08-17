@@ -632,7 +632,7 @@ pub(super) fn progress_exact_core_call(
     runtime: &crate::core_net::CoreRuntimeNet,
     call: Call,
 ) -> Result<bool, EvaluationHalt> {
-    let Some(data) = runtime.with_mut(|runtime| runtime.claim_call(call)) else {
+    let Some(data) = runtime.with(|runtime| runtime.claim_call(call)) else {
         return Ok(false);
     };
     match lower_core_callable(context, data) {
@@ -1178,6 +1178,35 @@ mod driver_tests {
             Ok(_) => panic!("demanded stuck pair must remain a failure"),
         };
         assert!(failure.to_string().contains("demanded call failed"));
+    }
+
+    #[test]
+    fn progressing_a_claimed_call_publishes_only_its_completion() {
+        let mut net = NetBuilder::<CoreSpecialization>::new();
+        let bind = net.push(crate::interaction_net::Node::Bind);
+        let data = net.data(Value::Builtin(Builtin::Add));
+        let erase = net.push(crate::interaction_net::Node::Erase);
+        net.wire(Port::principal(bind), data);
+        net.wire(Port::auxiliary(bind, 2), Port::principal(erase));
+        let runtime = net.finish(Port::auxiliary(bind, 1)).instantiate_shared();
+        let pair = runtime.with(|net| net.active_pairs().next().unwrap());
+        let reduction = runtime
+            .with_optional_mut(|net| net.reduce_pair(pair))
+            .expect("builtin call should be claimable");
+        let ReductionKind::Call { bind, data } = reduction.kind else {
+            panic!("bind-data demand should be a call")
+        };
+        let call = Call { pair, bind, data };
+        let before = runtime.with_revisions(|_| ()).1.topology_revision();
+
+        assert!(progress_exact_core_call(&test_context(), &runtime, call).unwrap());
+
+        let after = runtime.with_revisions(|_| ()).1.topology_revision();
+        assert_eq!(
+            after,
+            before.checked_add(1).expect("revision must not overflow"),
+            "reading the claimed payload must be quiet; only completion publishes"
+        );
     }
 
     #[test]
