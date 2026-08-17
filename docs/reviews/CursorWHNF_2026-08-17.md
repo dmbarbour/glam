@@ -1,0 +1,381 @@
+# Cursor WHNF Implementation Review — 2026-08-17
+
+Baseline: `14e9dda55745`. This is a review-only audit of the completed
+transition in [CursorWHNF.md](../.tmp/CursorWHNF.md) against the current
+implementation and tests.
+
+## Outcome
+
+The implementation substantially realizes the intended cursor-WHNF boundary.
+Demand is request-relative, cursor state has an authoritative owner, source
+spines are transient, source active pairs remain ordinary interaction work,
+and the evaluator uses an iterative exact-work driver rather than a whole-net
+reducer. The former compatibility entry points are gone. The net-wide batch
+lease and broad disturbance epoch are recognizable, documented performance
+policies rather than hidden semantic shortcuts.
+
+One high-severity locking defect remains: completing a net-valued call holds
+the target runtime lock while acquiring the source runtime lock. A
+self-referential net deadlocks immediately; reciprocal copy installation can
+deadlock two threads. This directly contradicts the transition's central
+one-net-lock invariant.
+
+There is also one material semantic mismatch. The plan makes an observed
+permanent stuck endpoint immune to unrelated source revisions, but the
+implementation checks the broad topology revision before reading the pair's
+terminal state. Finite unrelated progress merely causes a rescan; continuing
+unrelated mutation can postpone a demanded permanent failure.
+
+The remaining findings concern overstated verification, one read path which
+publishes a false mutation, and small post-transition representation cleanup.
+The review also records one resolved clarification about recursive semantic
+evaluation versus cursor-work ownership. None argues for restoring recursive
+cursor execution, a whole-net fallback, topology demand agents, or
+reference-count-dependent semantics.
+
+## Findings
+
+### CW-001 — High: logical-copy installation can hold source and target locks together
+
+Confidence: high.
+
+[`RuntimeNet::begin_copy`](../../src/interaction_net/runtime/cursor.rs#L42)
+calls `source.with(RuntimeNet::exposed)` before installing the target-owned
+`CopyState`. That is safe while constructing an unshared `RuntimeNet`, as most
+low-level fixtures do. It is not safe through the production call path:
+[`progress_exact_core_call`](../../src/eval/net.rs#L630) invokes
+`runtime.with_mut(...)`, then
+[`resume_claimed_call_with_copy`](../../src/interaction_net/runtime/cursor.rs#L72)
+reaches `begin_copy` while the target's `SharedRuntimeNet` mutex is still held.
+
+This creates two failures:
+
+- if source and target are the same `SharedRuntimeNet`, the thread recursively
+  locks a non-reentrant mutex and hangs;
+- if two threads install copies from A into B and B into A, they can acquire
+  the two mutexes in opposite order and deadlock.
+
+The public API does not exclude the first shape. A
+[`PromiseResolver`](../../src/api.rs#L396) accepts any value from the same
+evaluation runtime, while [`NetBuilder::data`](../../src/api.rs#L548) accepts
+that promise as net data. A promise may therefore be resolved with the net
+which contains it. The known retained `Arc` cycle is separate from the
+immediate mutex deadlock once the promised net is called.
+
+Recommended change:
+
+1. Read and retain the source exposed port before acquiring the target lock.
+2. Replace the lock-taking `begin_copy(source)` inner operation with something
+   like `begin_copy(source, source_exposed)` or a prepared copy origin.
+3. Keep the source inspection and target installation as separate lock
+   phases, just like cursor advancement already does.
+
+Required regressions:
+
+- a same-runtime promised-net call which cannot hang while installing its
+  logical copy;
+- a barrier-forced reciprocal A/B installation which proves no nested lock
+  acquisition; and
+- the existing ordinary net-valued call and independent-copy fixtures.
+
+Do not solve this with a lock order. The intended invariant is stronger and
+cheaper: never hold two runtime-net locks simultaneously.
+
+### CW-002 — Medium: an unrelated topology revision invalidates an already permanent stuck endpoint
+
+Confidence: high.
+
+The plan explicitly makes `Stuck` exceptional: once observed under the source
+lock, the terminal pair cannot reduce, node IDs are not reused, and unrelated
+source mutations cannot invalidate that terminal spine
+([plan](../.tmp/CursorWHNF.md#transient-demand-spines-and-frontier-observations)).
+
+The implementation does not preserve that exception. A
+[`FrontierObservation`](../../src/interaction_net/runtime.rs#L182) retains the
+pair and topology revision. Its `step_active_pair` passes the expected revision
+to `step_active_pair_if_current`, which returns `Disturbed` on any mismatch
+*before* inspecting [`ActivePairState::Stuck`](../../src/interaction_net/runtime.rs#L734).
+
+After a finite unrelated mutation the driver safely restarts, rescans, and
+rediscovers the same failure. The error is not corrupted. The mismatch is
+nevertheless observable as unnecessary dependence on unrelated work, and
+continuing mutation can indefinitely postpone a permanent demanded error.
+That is contrary to request-relative terminality even though the broad
+revision remains acceptable for nonterminal endpoints.
+
+The named regression
+[`nested_cursor_preserves_structured_failure_across_unrelated_source_progress`](../../src/interaction_net/runtime/tests.rs#L1350)
+does not exercise this path. After mutating the source it directly reads
+`stuck_reason`; it never dispatches the retained observation through
+`step_active_pair` or the evaluator driver.
+
+Recommended change: carry a terminal stuck observation out of the locked
+source inspection, or otherwise allow an already observed stuck endpoint to
+terminalize without broad revision rejection. Retain revision validation for
+ready, claimed, blocked, cursor, and gone endpoints.
+
+Required regression: force an unrelated source mutation between nested
+frontier observation and dispatch, then require the driver to return the same
+structured specialization failure without treating the endpoint as disturbed.
+
+### CW-003 — Resolved clarification: semantic recursion is not a cursor coordination cycle
+
+The initial review conflated runtime identity re-entry with a cycle of cursor
+work ownership. The transition's hierarchy claim is narrower and sound.
+
+Materializing a logical copy creates target-local cursors into a closed source.
+It does not create a cursor from that source back into the target, and the
+driver retains no source claim while crossing runtimes. Cursor administration
+therefore cannot create a cycle of mutually held claims.
+
+Promises and fixpoints can still make a closed net contain itself as data.
+Forcing that data may revisit the same shared runtime. This folds the unbounded
+chain of partial evaluations which fresh instantiation of an equivalent closed
+template would produce; it does not turn one independently materialized copy
+into the source of its ancestor. Failure to reach a frontier is semantic
+divergence or a lazy/promise dependency, not a cursor-claim deadlock.
+
+The transition plan and current interaction-net contract now state this
+distinction explicitly. No cursor-cycle detector or restriction on recursive
+net values is recommended. CW-001 remains independent: even a semantically
+divergent computation must not become a host mutex deadlock while installing a
+copy.
+
+### CW-004 — Medium: Phase 5's final verification claim is broader than the tests
+
+Confidence: high.
+
+Phase 5C.3 required “deep stable and productive mixed cursor chains beyond the
+former depth limit” and then recorded those cases as covered
+([CursorWHNF.md](../.tmp/CursorWHNF.md#phase-5c3-final-request-relative-verification--complete)).
+The implementation has good focused coverage, but not that complete matrix:
+
+- [`iterative_cursor_driver_exceeds_the_former_recursion_limit`](../../src/eval/net.rs#L1122)
+  covers 1,100 productive pairless copy layers;
+- the stable pairless and mixed-owner tests at
+  [`stable_cursor_dependencies_propagate_through_pairless_layers`](../../src/eval/net.rs#L834)
+  and
+  [`stable_cursor_dependencies_propagate_through_mixed_owner_layers`](../../src/eval/net.rs#L863)
+  cover only two layers;
+- there is no deep alternating pair-owned/pairless productive chain;
+- the nested structured-failure test does not propagate through the driver, as
+  described in CW-002; and
+- [`connecting_a_cursor_transfers_ready_and_blocked_obligations_to_the_pair`](../../src/interaction_net/runtime/tests.rs#L1247)
+  omits stable-obligation transfer and rejection of an in-flight claimed
+  transfer, even though the implementation handles both.
+
+The productive 1,100-layer test proves that the old recursive depth limit is
+gone. It does not prove iterative stable-disposition propagation through a
+similarly deep resumption stack, which is the more distinctive Phase 5 path.
+
+Add the missing deep stable and mixed-owner cases, the driver-level terminal
+failure case, and both authority-transfer states. Then narrow or renew the
+completion statement according to the evidence actually retained.
+
+### CW-005 — Low: reading claimed call data publishes a graph mutation
+
+Confidence: high.
+
+[`RuntimeNet::claim_call`](../../src/interaction_net/runtime.rs#L1343) only
+validates `ActivePairState::Claimed` and clones the immutable data payload. The
+state transition to `Claimed` already occurred when the exact pair was reduced.
+Nevertheless, `progress_exact_core_call` invokes it through unconditional
+[`SharedRuntimeNet::with_mut`](../../src/interaction_net/runtime.rs#L592).
+That increments the topology revision and either marks the current batch dirty
+or publishes a disturbance.
+
+The result is a false structural invalidation and potentially an unnecessary
+follower wake every time callable lowering begins. It also makes CW-002 easier
+to encounter. This is unnecessary work rather than a semantic corruption.
+
+Make `claim_call` take `&self` and call it through `SharedRuntimeNet::with`.
+Add a revision test showing that reading the already claimed payload is quiet,
+while completing, blocking, or failing the claim still advances authoritative
+state.
+
+### CW-006 — Low: two transition-era generalities no longer serve production
+
+Confidence: high.
+
+First, `FrontierObservation` retains `anchor` and the complete
+`RuntimeNetRevisions`. Production dispatch uses only the source, endpoint, and
+topology revision. The anchor is checked only while constructing the
+dependency; on disturbance the driver discards transient work and reconstructs
+the path from the authoritative parent cursor and request root. The stored
+disturbance epoch is likewise unused; `NetContention` is the representation
+which needs it.
+
+Second, [`NetDriver::new`](../../src/eval/net.rs#L231) still accepts arbitrary
+`NetDriverWork`, and `restart_from_request_root` can fail when no root exists.
+Every production call and every full-driver test starts from
+`RequestRoot`. Assertions compensate for a rootless state which the public
+construction path cannot create.
+
+Recommended cleanup:
+
+- shrink `FrontierObservation` to source, topology revision, and endpoint
+  unless the anchor is deliberately retained for future diagnostics; and
+- construct `NetDriver` from `NormalizationRequest` or runtime/interface,
+  make the root structural, and make restart infallible.
+
+This is benign implementation drift: the authoritative parent state is a
+better reconstruction owner than the observation itself. The plan and current
+contract should be updated together if the fields are removed.
+
+## Ownership and transition map
+
+| Concern | Authoritative owner | Transition path |
+| --- | --- | --- |
+| Nodes, links, copies, active pairs | `RuntimeNet` under one `SharedRuntimeNet` mutex | exact graph helpers and `step_active_pair` |
+| Pair-owned cursor state | `ActivePairState::{Ready, Claimed, BlockedCursor}` | claim under owner lock; inspect source unlocked; complete under owner lock |
+| Pairless cursor state | `cursor_obligations: HashMap<NodeId, PairlessCursorObligation>` | root demand installs; step claims; finish blocks, stabilizes, or removes with cursor |
+| Copy provenance | target-local `CopyState { source, frontiers, fan_sites }` | begin copy, principal materialization, local convergence |
+| Transient source work | `FrontierObservation` and `DemandEndpoint` | inspect under source lock; version-validate one exact step |
+| Parent resumption | `NetDriverWork::ResumeCursorDependency` | exact dependency equality, then owner-local Ready or Stable publication |
+| Root demand | evaluator-local `NormalizationRequest` | locked `poll_interface_demand`, then iterative worklist |
+| Contention | `NetContention { runtime, revisions }` | wait on disturbance epoch, then rebuild from root |
+| Notification batching | net-local `NormalizationBatchState` plus weak RAII lease | topology revision per mutation; disturbance on batch close |
+| Semantic external wait | `ActivePairState::BlockedCall` / `BlockedOperatorCall` | exact `EvaluationWaitToken`, scheduler-visible `EvaluationHalt::blocked` |
+
+The normal production trace is:
+
+```text
+NormalizationRequest
+  -> locked root poll
+  -> exact cursor or active-pair work
+  -> child dependency before parent resumption
+  -> owner-local dependency resolution
+  -> rebuild and re-poll the request root
+  -> Data | Bind | other normal form | stable cursor | wait | stuck failure
+```
+
+The old `demand_interface`, `claim_dependent_cursor`, `claimed_cursors`,
+`FrontierObservationStatus`, and whole-runtime evaluator scheduling paths have
+no surviving source reference. `RuntimeNet::reduce_next` remains deliberately
+as the generic reducer and low-level test utility; cursor-WHNF production uses
+`reduce_pair` on exact selected work.
+
+## Invariant accounting
+
+| Intended invariant | Accounting |
+| --- | --- |
+| Preserve source work sharing | Implemented. A logical copy stores its shared source and materializes only stable principal-frontier nodes. |
+| Normalize a cursor in its owning runtime | Implemented for cursor transitions and dependency resolution. CW-001 violates the related lock boundary during copy creation, not ownership of the cursor state. |
+| Keep cursor administration distinct from interaction rules | Implemented. `CursorStep` and `ActivePairStep` keep discovery/administration explicit, while exact source pairs use ordinary `reduce_pair`. |
+| No demand agents or refcount policy in topology | Implemented. Demand resides in evaluator work and owner-local obligation records. |
+| Materialize only from a source principal frontier | Implemented in `inspect_source_frontier_shape` and `materialize_remote_node`. |
+| Auxiliary demand discovers rather than copies active work | Implemented. Traversal follows principal links to an endpoint and copies no auxiliary-entered node. |
+| Converging frontiers do not duplicate materialization | Implemented through `CopyState::frontiers`; an in-flight peer is retained until its claim finishes. |
+| Independent logical copies remain independent | Implemented. Frontier and fan-site maps are target-copy-local; the source computation remains shared. |
+| Exactly one owner per cursor transition | Implemented and asserted: active-pair owner XOR pairless obligation owner. Authority transfer is under the target lock. Test coverage is incomplete for stable/claimed transfer (CW-004). |
+| Do not retain complete demand spines | Implemented. `principal_anchors` exists only during one locked inspection and is discarded after convergence lookup. |
+| Durable endpoint work is version validated | Implemented for nonterminal cursor/pair observations. Permanent stuck is over-invalidated (CW-002). |
+| Never hold two net locks | Implemented by cursor advancement, violated by net-valued call copy installation (CW-001). |
+| No lost wakeup around claimed work | Implemented by capture-under-lock, disturbance epoch recheck under the same mutex, and condition-variable waiting. Barrier tests cover the disputed ordering. |
+| Batch follower disturbance without per-step thrashing | Implemented with a net-wide RAII lease. Every topology mutation advances its revision; only batch close publishes disturbance. |
+| Request-relative completion | Implemented for root shapes, stable cursors, unrelated active work, exact waits, and demanded failures. CW-002 is the terminal exception mismatch. |
+| Iterative traversal with no 1,024-layer limit | Implemented and proven for a 1,100-layer productive pairless chain. Deep stable and mixed chains remain verification gaps. |
+| Raw `Value::Net` is opaque WHNF | Implemented. Explicit net computation and arity/function bridges initiate normalization; ordinary value evaluation does not. |
+
+## Drift ledger
+
+### Intentional refinements
+
+- The locked root poll is conditionally mutating: its first observation of a
+  pairless cursor installs the authoritative obligation. Repeated polls are
+  quiet. This is clearer than separating observation from demand admission.
+- Stable child completion is propagated as a `CursorDependencyDisposition`
+  through the same exact parent record instead of retrying and rediscovering a
+  stable child.
+- The worklist stores only immediate child work and parent resumptions. It does
+  not retain the source traversal spine.
+- A directly selected root active pair uses the live `ActivePairKey` without a
+  separate revision snapshot. Ordinary reduction removes its nodes, node IDs
+  are not reused, and pair-key-preserving cursor administration retains the
+  demanded anchor; the exact step still validates current pair state.
+- `RuntimeNet::reduce_next` remains available below the evaluator boundary.
+  This is a useful generic primitive, not a surviving cursor-WHNF fallback.
+- Recursive semantic evaluation may revisit a shared closed-net runtime, but
+  cursor materialization still creates no cycle of mutually held work claims.
+  CW-003 records the clarified scope of the hierarchy invariant.
+
+### Accidental or unresolved drift
+
+- Copy installation breaks the one-lock rule (CW-001).
+- Permanent stuck observations do not receive their documented revision
+  exception (CW-002).
+- The Phase 5 completion note overstates the retained test matrix (CW-004).
+- A read-only call-payload operation publishes mutation (CW-005).
+- Observation and driver representations retain now-unused generality
+  (CW-006).
+
+### Current documentation drift
+
+The focused current contract says that “shared runtime mutation increments a
+condition-variable generation” in
+[`interaction_nets.md`](../agent_context/interaction_nets.md#core-specialization).
+The implementation now has two generations: topology revision advances for
+every authoritative mutation, while disturbance epoch and notification may be
+deferred until the normalization batch closes. Update that paragraph when
+CW-005 is fixed so it describes the authoritative publication rule rather than
+the pre-batching mechanism.
+
+### Deliberately deferred policy
+
+- net-wide rather than per-frontier batch ownership;
+- broad disturbance instead of exact subscriber indexes;
+- condition-variable parking rather than scheduler-visible net suspension;
+- no cached spine frames, propagated frontier revisions, or reduction quotas;
+- no SNF-like, annotation-guided, or JIT normalization policy; and
+- no public exposure of normalization descriptors or bootstrap cursor jargon.
+
+These limits are visible in the code and do not currently alter the intended
+language semantics. Net-wide serialization can delay independent work, but it
+was explicitly chosen to prevent synchronized followers from thrashing after
+every reduction.
+
+## Test evidence
+
+| Area | Direct evidence | Assessment |
+| --- | --- | --- |
+| Root shapes and idempotence | `conditional_runtime_mutation_publishes_only_new_cursor_obligations`, `root_normalization_demand_is_idempotent_and_enumerable`, `interface_demand_poll_classifies_stable_roots_and_exact_work` | Strong structural coverage. |
+| Stale root selection | `interface_demand_work_selection_is_revalidated_before_dispatch` | Exact stale selection is covered. |
+| Owner forms and dependency resolution | `cursor_dependency_resolution_updates_both_owner_forms`, `cursor_dependency_resolution_rejects_stale_or_missing_parents_without_mutation` | Good positive and negative coverage. |
+| Pairless lifecycle | `pairless_cursor_obligation_transitions_have_one_owner`, `removing_a_cursor_removes_its_dormant_obligation` | Good owner and cleanup coverage. |
+| Authority transfer | `connecting_a_cursor_transfers_ready_and_blocked_obligations_to_the_pair` | Missing stable transfer and claimed-transfer rejection. |
+| Nonblocking step states | `cursor_steps_report_pairless_pair_owned_stable_and_contended_states`, `active_pair_steps_report_reduction_contention_blockage_stuck_and_gone` | Broad enumeration coverage. |
+| Source lock separation during advancement | `remote_cursor_exposes_source_progress_without_holding_nested_locks`, `root_cursor_claim_remains_exclusive_while_source_inspection_is_in_flight` | Strong for advancement; does not cover copy creation (CW-001). |
+| Inspect/publish/wait race | `source_change_between_cursor_inspection_publication_and_wait_is_not_lost` | Barrier-driven and appropriately forced. |
+| Parallel pairless demand | `concurrent_interface_demands_share_one_pairless_cursor_claim` | Barrier-driven ownership coverage. |
+| Batch lifecycle and followers | `normalization_batch_lease_is_exclusive_and_drop_safe`, `normalization_batch_defers_disturbance_until_release`, `normalization_batch_wakes_a_registered_follower_once_at_release` | Strong, including RAII release and one closing wake. |
+| Active source work is not copied | `active_source_call_is_a_dependency_and_is_never_copied`, auxiliary-chain tests | Directly covers the topology/work split. |
+| Transitive cursors and reinspection | `layered_cursor_reports_and_follows_an_exact_dependency`, `nested_cursor_demand_reuses_a_claimed_source_obligation`, `auxiliary_cursor_recomputes_its_spine_after_each_terminal_pair`, `auxiliary_cursor_reinspects_after_a_principal_remote_cursor_materializes` | Strong shallow semantic coverage. |
+| Two-sided convergence | `converging_frontiers_join_without_leaving_a_stale_cursor_pair`, `converging_frontier_waits_for_a_claimed_peer` | Covers duplicate prevention and in-flight peer behavior. |
+| Independent copies | `separate_logical_copies_rebase_fans_to_distinct_local_sites` | Proves copy-local fan identity and source sharing. |
+| Request-relative unrelated work | `stable_root_does_not_reduce_disconnected_or_undemanded_ready_work`, `stable_root_ignores_unrelated_claimed_and_stuck_work` | Good controls for global-work leakage. |
+| Exact semantic waits | `blocked_call_requires_its_current_wait_token_to_be_reclaimed`, operator equivalent, reflection-gate call/operator tests | Exact token and scheduler-visible retry are covered. |
+| Permanent failure | generic stuck tests and `specialization_failure_remains_structured_in_the_stuck_pair` | Direct root behavior is covered; nested post-disturbance driver propagation is not. |
+| Iterative depth | `iterative_cursor_driver_exceeds_the_former_recursion_limit` | Strong productive pairless case; missing deep stable/mixed cases. |
+| Runtime transfer | `cursor_driver_releases_each_runtime_before_crossing_to_the_next` | Proves leases are closed, but not mutex lock ordering during copy creation. |
+| Public semantic boundary | raw-net opacity, `net_arity`, net computation/function, non-data-normal-form, and executable sample tests | Good language-level integration coverage. |
+
+The focused runtime suite contains 60 tests and the evaluator driver suite 10;
+both pass at the reviewed baseline. The full repository suite also passes with
+1,270 tests across all targets. Passing counts do not close CW-001, CW-002, or
+CW-004 because their disputed orderings or depths are not exercised.
+
+## Recommended order
+
+1. Fix CW-001 before additional concurrency or GC work. It is a hard hang at a
+   boundary the design explicitly intended to make lock-separated.
+2. Implement the terminal stuck exception and replace the state-inspection
+   test with a driver-level forced-order regression (CW-002).
+3. Complete the promised Phase 5 test matrix, especially deep stable and mixed
+   ownership (CW-004).
+4. Remove the false call-read publication (CW-005), then perform the small
+   observation/driver and current-doc cleanup (CW-006).
+
+After these items, the cursor-WHNF transition can reasonably be treated as a
+closed correctness foundation. Further changes should be driven by profiling
+of batch duration, repeated spine scans, disturbance breadth, and parked worker
+time rather than by speculative scheduler machinery.

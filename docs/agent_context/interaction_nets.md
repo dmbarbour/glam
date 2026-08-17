@@ -141,6 +141,16 @@ This preserves one-way dataflow and work sharing: shared source-local active
 pairs normalize only in the shared source, while each target receives stable
 frontier nodes on demand.
 
+The hierarchy here is a work-ownership property, not a claim that every
+recursive program terminates. A promise or fixpoint may make a closed net
+contain itself as data. Sharing may then revisit the same source runtime where
+fresh template instantiation would produce an unbounded chain of equivalent
+calls. Such partial evaluation may diverge or block on its semantic value
+dependency, but cursor materialization itself never introduces a back edge of
+mutually held work claims: a target cursor points into its closed source, and
+the source never acquires a cursor into that target merely because it was
+copied.
+
 ## Fans
 
 `FanSite` is a runtime-local `u64`; there is no process-global instance ID. Each
