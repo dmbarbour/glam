@@ -420,6 +420,94 @@ output markers.
 **Expected simplification:** delete 158 lines of duplicate test parser and
 remove misleading phase language from production modules.
 
+#### CCR-009 update plan
+
+Treat this as two independently verifiable checkpoints. The first changes the
+test ownership boundary; the second documents the architecture left by that
+change.
+
+##### Phase 1: Latch production contracts and retire the oracle — complete
+
+1. Inventory every behavior in `macro_contract` before editing it:
+   - one-component and joint multi-component static heads;
+   - a spaced dot ending the head and beginning macro input;
+   - heads inside delimiter groups and attached layout;
+   - macro-like text hidden in source texts and comments;
+   - missing, spaced, dynamic, computed, empty, and non-joint path components;
+   - right-to-left expansion order; and
+   - rejection of `@` and `#` from textual macro output.
+2. Map each case to a test that exercises the production staged parser or
+   macro-expansion path. A lexer-only assertion is insufficient when the
+   contract concerns expansion, diagnostics, or source rewriting.
+3. Add every missing production regression before deleting its oracle case.
+   Invalid heads must assert the relevant production diagnostic, while valid
+   heads must demonstrate the selected path and expansion order where those
+   are observable.
+4. Delete `parser/macro_contract.rs` and its test-module registration only
+   after the coverage map has no unmatched behavior.
+5. Run the focused lexer/parser, macro-expansion, macro contract-sample, and
+   invalid-syntax suites.
+
+Phase 1 is complete when no source reference to `macro_contract` remains and
+every unique table entry is owned by production-path coverage. Broader tests
+which happen to pass are not a substitute for the explicit case inventory.
+
+Resolution on 2026-08-17:
+
+- `production_macro_heads_are_static_joint_paths_in_expansion_order` now owns
+  the accepted-head table through `DeclarationMacroWork::from_original`. It
+  covers single and joint paths, the spaced-dot boundary, delimiter and layout
+  nesting, source-order reversal into expansion order, and exclusion of text
+  and comments.
+- `production_macro_heads_reject_missing_dynamic_or_nonjoint_paths` sends all
+  eight missing, dynamic, computed, empty, or non-joint cases through the same
+  production collector and asserts its public diagnostic.
+- `declaration_macros_expand_right_to_left_and_share_the_evolving_view`
+  continues to prove actual execution order, one execution per original
+  invocation, and evolving-source visibility. The macro protocol sample suite
+  independently covers single-component and object-path macro lookup.
+- `source_macro_rejects_reserved_or_unbalanced_generated_text` now covers both
+  `@` and `#`, including markers embedded within otherwise ordinary output;
+  `GeneratedText::classify` retains its lower-level structural assertion.
+- `parser/macro_contract.rs` and its module registration have been deleted.
+  No production or test source references the oracle.
+
+The focused logical-parser, right-to-left expansion, generated-text, and five
+macro protocol tests pass after deletion, as does the complete 1,276-test
+repository suite. Phase 2 remains intentionally separate so comment edits
+describe this final ownership boundary.
+
+##### Phase 2: Replace stale chronology with current invariants
+
+1. Audit production comments which still describe completed parser,
+   macro-expansion, isolated-search, conditional-syntax, or coordinator phases
+   as future work. Start with the module headers and transition comments in
+   `g_syntax/parser`, `reflection/search.rs`, `evaluation.rs`, and
+   `evaluation/coordinator.rs`.
+2. Classify each match before editing it:
+   - rewrite completed-phase chronology as a timeless ownership or behavior
+     statement;
+   - retain genuine deferred design work, labeling it by the missing behavior
+     rather than an obsolete phase number; and
+   - leave ordinary uses of words such as “later” or “temporary” untouched
+     when they describe runtime ordering or temporary files rather than project
+     chronology.
+3. Update any architecture or agent-context statement which still points at
+   the deleted oracle or contradicts the production parser after Phase 1.
+4. Re-run a targeted text audit and review the resulting comments beside their
+   implementations; comment cleanup has no useful automated semantic oracle.
+
+Phase 2 is complete when production comments describe present owners and
+contracts, while actual future work remains explicit without stale transition
+numbering.
+
+##### Final verification
+
+Run `cargo fmt --check`, all-target/all-feature Clippy with warnings denied,
+and the complete parallel test suite. Record the migrated cases, deleted lines,
+and any chronology deliberately retained in this finding before marking
+CCR-009 resolved.
+
 ### CCR-010 — Four isolated effect hosts repeat the same non-committing execution mechanism
 
 **Classification:** duplicated mechanism with distinct specialization policy  

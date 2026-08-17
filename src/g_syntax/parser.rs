@@ -11,8 +11,6 @@ mod input;
 mod layout;
 mod lexical;
 mod logical;
-#[cfg(test)]
-mod macro_contract;
 mod pattern;
 mod source;
 mod structural;

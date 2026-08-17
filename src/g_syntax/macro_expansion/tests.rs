@@ -825,6 +825,9 @@ fn source_macro_anchor_contract_rejects_ambiguous_or_empty_items() {
 fn source_macro_rejects_reserved_or_unbalanced_generated_text() {
     for (body, expected) in [
         (".write.text \"@next\"", "cannot emit `@`"),
+        (".write.text \"#next\"", "cannot emit `@` or `#`"),
+        (".write.text \"left@right\"", "cannot emit `@` or `#`"),
+        (".write.text \"left#right\"", "cannot emit `@` or `#`"),
         (".write.text \"(\"", "unclosed delimiter"),
         (".write.text \" \"", "cannot emit ASCII C0 controls"),
         (".write.text \" leading\"", "cannot emit ASCII C0 controls"),

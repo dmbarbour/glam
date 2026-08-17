@@ -1018,6 +1018,71 @@ mod tests {
     use super::*;
     use crate::diagnostic::Severity;
 
+    fn original_macro_paths(source: &str) -> Result<Vec<Vec<String>>, Diagnostic> {
+        let lexical = lex_source(source);
+        assert!(
+            !lexical.has_errors(),
+            "macro-head fixture must be lexically valid: {:?}",
+            lexical.diagnostics()
+        );
+        let declaration = lexical
+            .declarations()
+            .first()
+            .expect("macro-head fixture must contain one declaration");
+        Ok(DeclarationMacroWork::from_original(&lexical, declaration)?
+            .map(|work| {
+                work.invocations()
+                    .iter()
+                    .map(|invocation| invocation.path.clone())
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    #[test]
+    fn production_macro_heads_are_static_joint_paths_in_expansion_order() {
+        let cases: &[(&str, &[&[&str]])] = &[
+            ("value = @name", &[&["name"]]),
+            ("value = @name.child", &[&["name", "child"]]),
+            ("value = @table.create input", &[&["table", "create"]]),
+            ("value = @name .child", &[&["name"]]),
+            ("value = (@outer @inner input)", &[&["inner"], &["outer"]]),
+            ("value = @outer\n  @inner input", &[&["inner"], &["outer"]]),
+            ("value = \"@text\" # @comment", &[]),
+        ];
+
+        for (source, expected) in cases {
+            let actual = original_macro_paths(source)
+                .unwrap_or_else(|diagnostic| panic!("{source:?} failed: {diagnostic:?}"));
+            let expected = expected
+                .iter()
+                .map(|path| path.iter().map(|part| (*part).to_owned()).collect())
+                .collect::<Vec<Vec<String>>>();
+            assert_eq!(actual, expected, "{source:?}");
+        }
+    }
+
+    #[test]
+    fn production_macro_heads_reject_missing_dynamic_or_nonjoint_paths() {
+        for source in [
+            "@",
+            "@ name",
+            "@(name)",
+            "@.name",
+            "@name.[42]",
+            "@name.",
+            "@name. child",
+            "@name..child",
+        ] {
+            let diagnostic = original_macro_paths(source)
+                .expect_err("malformed macro head must fail in the production parser");
+            assert_eq!(
+                diagnostic.message, "macro invocation requires a joint static name path after `@`",
+                "{source:?}"
+            );
+        }
+    }
+
     #[test]
     fn original_tokens_and_indices_round_trip_without_reclassification() {
         let source = "language g0\nfirst = [1, (2)]\nobject nested with\n  member = \"x\"\n";
