@@ -9,10 +9,20 @@ logger lifecycle live in [`diagnostics.md`](diagnostics.md).
 
 ## Specialization Layers
 
-`reflection.rs` implements the generic task machine and standard effects.
+`reflection.rs` is the public facade over three ownership layers:
+
+- `reflection/protocol.rs` owns specialization, host, transaction, and
+  structured task-outcome contracts;
+- `reflection/lifecycle.rs` owns scheduled runs, lifecycle publication, and
+  type-erased task launchers; and
+- `reflection/machine.rs` owns the persistent interpreter, control frames,
+  retry state, and request decoding.
+
 `TaskSpecialization` contributes an additional request enum, private request
 tags, host behavior, and transactional host data. Request families remain
-reusable by mapping their request type into a specialization.
+reusable by mapping their request type into a specialization. The existing
+`requests`, `search`, and `store` children retain their focused roles rather
+than becoming implementation details of one of the three layers.
 
 The reusable `ReflectionEffects` family adds environment lookup, diagnostic
 emission, dictionary iteration, lazy-shell value observation, and child-task

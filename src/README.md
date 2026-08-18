@@ -52,12 +52,14 @@ not define language semantics or collect subsystem invariants.
 | `eval/sequence.rs` | Lazy sequence and binary extraction |
 | `list.rs`, `number.rs` | Persistent list ropes and exact numbers |
 | `diagnostic.rs`, `api.rs` diagnostic facade | Diagnostic values, buses, ingress, enrichment |
-| `reflection.rs`, `reflection/requests.rs`, `reflection/search.rs` | Persistent effect machine, requests, isolated search |
+| `reflection.rs`, `reflection/protocol.rs` | Reflection facade and specialization/host transaction protocol |
+| `reflection/lifecycle.rs` | Effect lifecycle, scheduled runs, and task launchers |
+| `reflection/machine.rs`, `reflection/requests.rs`, `reflection/search.rs` | Persistent effect machine, request interpretation, isolated search |
 | `reflection/store.rs` | Journaled volumes, conflict analysis, query state |
 | `runtime.rs` | Runtime identity, mutation admission, activity accounting |
 
-`interaction_net.rs`, `eval.rs`, and `g_syntax.rs` are facades over their
-submodules rather than additional implementation layers.
+`interaction_net.rs`, `eval.rs`, `g_syntax.rs`, and `reflection.rs` are facades
+over their submodules rather than additional implementation layers.
 
 ## Principal Dataflows
 

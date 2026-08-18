@@ -1,10 +1,14 @@
 use std::sync::Arc;
 
-use super::{
-    CommitResult, Diagnostic, EffectTask, EffectTaskPoll, EvalContext, ExactConflictAnalysis,
-    HostSnapshot, PublicValue, ReflectionServices, ReflectionStore, StoreSnapshot, TaskCommit,
-    TaskEnvironment, TaskHalt, TaskHost, TaskSpecialization,
+use super::machine::{EffectTask, EffectTaskPoll, TaskTerminal};
+use super::protocol::{
+    CommitResult, HostSnapshot, TaskCommit, TaskEnvironment, TaskHalt, TaskHost, TaskSpecialization,
 };
+use super::requests::ReflectionServices;
+use super::store::{ExactConflictAnalysis, ReflectionStore, StoreSnapshot};
+use crate::api::{Diagnostic, Value as PublicValue};
+use crate::core::CoreValueFactory;
+use crate::evaluation::{EvalContext, EvaluationWaitToken};
 
 /// Immutable host for one all-results effect search.
 ///
@@ -35,11 +39,7 @@ impl<X> IsolatedTaskHost<X> {
         })
     }
 
-    pub(crate) fn new_core(
-        values: super::CoreValueFactory,
-        environment: PublicValue,
-        extra: X,
-    ) -> Self {
+    pub(crate) fn new_core(values: CoreValueFactory, environment: PublicValue, extra: X) -> Self {
         Self {
             environment,
             store: ReflectionStore::new(values, Arc::new(ExactConflictAnalysis)).snapshot(),
@@ -211,7 +211,7 @@ impl<S: TaskSpecialization> IsolatedSearchBranch<S> {
 
 #[doc(hidden)]
 pub struct IsolatedSearchBlock {
-    dependency: Option<super::EvaluationWaitToken>,
+    dependency: Option<EvaluationWaitToken>,
     observed_generation: Option<u64>,
     error: Option<TaskHalt>,
 }
@@ -221,7 +221,7 @@ impl IsolatedSearchBlock {
         self.dependency.is_some()
     }
 
-    pub(crate) fn dependency(&self) -> Option<&super::EvaluationWaitToken> {
+    pub(crate) fn dependency(&self) -> Option<&EvaluationWaitToken> {
         self.dependency.as_ref()
     }
 
@@ -307,7 +307,7 @@ impl<S: TaskSpecialization> IsolatedEffectSearch<S> {
     }
 
     pub fn cancel(&mut self) {
-        self.task.finish(super::TaskTerminal::Cancelled);
+        self.task.finish(TaskTerminal::Cancelled);
     }
 }
 

@@ -1,6 +1,6 @@
 # Module Split Plan — 2026-08-18
 
-Status: Phase 1 complete; Phase 2A is next.
+Status: Phase 2 complete; Phase 3A is next.
 
 This is a dated review and transition plan. Module shape will continue to
 change as the bootstrap grows, so a later review should create a new dated
@@ -715,6 +715,8 @@ Post-Phase-1 drift review:
 
 #### Phase 2A — Exact dependency and move map
 
+Status: complete (2026-08-18).
+
 - Map the public specialization/host transaction protocol, scheduled effect
   lifecycle and launchers, task-machine/continuation state, transaction state,
   and request decoding.
@@ -723,32 +725,142 @@ Post-Phase-1 drift review:
   or the machine; keep continuation, cut, retry, and fixpoint state together.
 - Record public re-exports and filtered tests before moving code.
 
+Resulting ownership map:
+
+| Current range/child | Responsibility | Target owner |
+| --- | --- | --- |
+| `reflection.rs:63-494` | specialization request specifications/results, reasoning identity, host snapshots/commits, host/environment contracts, task outcome and structured halt | `reflection/protocol.rs` |
+| `reflection.rs:495-1114` | host-observable lifecycle, scheduled/synchronous effect runs, coordinator-root activation, result policy, and type-erased launchers | `reflection/lifecycle.rs` |
+| `reflection.rs:1115-4278` | effect vocabulary, task interpreter, branches/cuts/retry/fix/reset/continuations, transaction state, request context and decoding | divided between `reflection/machine.rs` and the protocol-owned transaction boundary below |
+| `reflection/requests.rs` | reusable reflection request family and reflection-specific journal/host services | remains a protocol-adjacent child |
+| `reflection/search.rs` | isolated all-results policy, immutable isolated host, and pollable search wrapper | remains a machine-adjacent child |
+| `reflection/store.rs` | persistent reflection volumes, queries, journals, and conflict analysis | remains the independent store child |
+| `reflection.rs:4279-end` | shared cross-layer effect harness and 104 protocol/machine/lifecycle integration tests | move intact to `reflection/machine/tests.rs`; feature-local child tests remain in `requests`, `search`, and `store` |
+
+The dependency direction is:
+
+```text
+reflection facade
+  -> protocol -> requests, search API, store, evaluation value/wait types
+  -> machine  -> protocol, requests, search policy, store, evaluator
+  -> search   -> protocol + machine
+  -> lifecycle -> protocol + machine + evaluation coordinator facade
+```
+
+`RequestActivity`, `Transaction<S>`, `RequestContext`, and
+`TransactionContext` move to `protocol`, despite currently appearing beside
+the machine. They contain only host snapshots, reflection-store journals, and
+specialization journals; none contains branch, continuation, cut, reset, or
+fixpoint state. Keeping them with the public host contract removes what would
+otherwise be a protocol-to-machine dependency. The small sealed request-value
+constructor used by `EffectRequestSpec::effect` moves with them and is shared
+privately with request decoding.
+
+All branch, control, retry, fixpoint, continuation, reset-frame, task-block,
+and terminal state moves together to `machine`. Request decoding and the
+standard effect API also stay there because their tags and outcomes directly
+drive that state machine. Lifecycle depends on the machine to construct and
+erase tasks; the machine does not depend on lifecycle publication.
+
+Public paths remain rooted at `reflection::*` through explicit facade
+re-exports. The Phase 1E additions are accounted for as follows:
+
+- `EffectRequestSpec`, `RequestContext`, and their public construction/demand
+  helpers move with `protocol`;
+- `IsolatedTaskHost` remains in `search`, re-exported by the facade;
+- `EffectTokenDomain` remains in `api.rs` for the forthcoming Phase 3 ownership
+  map—it transports public runtime values and is not part of reflection task
+  interpretation; and
+- `TextPattern` remains its independent library facility.
+
+The latched reflection suite contains 134 tests: 104 cross-layer root tests,
+five request tests, one search test, and 24 store tests. Moving the root suite
+intact first avoids manufacturing a test-support facade merely to classify
+integration tests by filename. Pure request/search/store tests are already
+owned locally; lifecycle-only tests may move later only if they cease to rely
+on the shared full-machine host fixture.
+
 #### Phase 2B — Extract specialization and host protocol
+
+Status: complete (2026-08-18).
 
 - Move `TaskSpecialization`, host/snapshot/journal/commit contracts, standard
   and reflection effect markers, and closely owned request result types.
 - Preserve existing `reflection::*` paths through private modules/re-exports.
 
+Result: `reflection/protocol.rs` now owns specialization request
+specifications/results, reasoning identity, host snapshots and commits,
+task environment/host contracts, task outcomes and structured halts, plus the
+host/store transaction and public request contexts. The latter move eliminates
+a protocol-to-machine dependency: a transaction contains no interpreter
+control state. Existing `reflection::*` paths are explicit facade re-exports.
+
+Verification: `cargo check --lib`, formatting, and all 134 filtered reflection
+tests passed after the extraction.
+
 #### Phase 2C — Extract lifecycle and launchers
+
+Status: complete (2026-08-18).
 
 - Move effect lifecycle state, scheduled runs, result policy, run builders,
   and type-erased launchers as one ownership layer.
 - Preserve weak/strong ownership, runtime settlement participation, terminal
   publication, and diagnostic routing.
 
+Result: `reflection/lifecycle.rs` owns lifecycle status publication,
+coordinator terminal policies, scheduled and synchronous composed runs, result
+policy, and both direct and coordinator-capable type-erased task launchers.
+The layer constructs machine tasks but the machine has no lifecycle
+dependency. Public paths and the crate-private coordinator launcher remain
+facade re-exports.
+
+Verification: formatting and all 134 filtered reflection tests passed,
+including lifecycle terminal publication, observer drop, abandonment, child
+failure, and diagnostic-consumer activation cases.
+
 #### Phase 2D — Extract the task machine
+
+Status: complete (2026-08-18).
 
 - Move branches, continuations, cut/reset/fix state, block/retry state,
   transactions, and request interpretation together.
 - Do not alter deterministic alternative scheduling, transactional retry, or
   cycle/error recovery while moving the interpreter.
 
+Result: `reflection/machine.rs` owns the effect vocabulary, persistent task
+interpreter, branch/cut/retry/fix/reset/continuation state, blocking and
+terminal records, and request decoding. Transaction snapshots and journals
+remain protocol-owned because they contain no interpreter control state. The
+machine depends on the protocol and focused request/search/store children;
+the protocol and machine do not depend on lifecycle publication.
+
 #### Phase 2E — Tests, visibility, and drift review
 
-- Place protocol, lifecycle, and machine tests with their new owners; retain
-  cross-layer effect tests at the reflection root.
+Status: complete (2026-08-18).
+
+- Place protocol, lifecycle, and machine tests with their new owners; keep the
+  cross-layer harness beside the machine whose private state it exercises.
 - Tighten visibility, run reflection/store/public API coverage and full gates,
   then refresh the `api.rs` dossier.
+
+Result: the 104 shared effect tests live in `reflection/machine/tests.rs`.
+They inspect private interpreter state and exercise protocol and lifecycle
+through the real machine, so colocating the harness with its machine owner is
+clearer than adding a broad root-level test-support facade. The five request,
+one search, and 24 store tests remain beside their focused owners. Production
+modules now use explicit imports and sibling-only visibility for internal
+construction and polling surfaces. `reflection.rs` is a small facade which
+retains the established public and crate-private paths.
+
+Verification: all 134 focused reflection tests, public embedding/API and macro
+protocol tests, logger-filtered binary tests, formatting, full-feature Clippy,
+and the complete `cargo test -q` suite pass after the split.
+
+Post-Phase-2 drift review: the Phase 3 dossier remains current.
+`EffectTokenDomain` still belongs with public runtime-value construction in
+`api.rs`, while diagnostic transport and runtime event ownership remain the
+unresolved seams Phase 3A must map. The reflection split introduced no new
+dependency from the value facade to interpreter internals.
 
 ### Phase 3 — Turn `api.rs` into an embedding facade
 

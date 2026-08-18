@@ -12,11 +12,14 @@ use crate::evaluation::{
 };
 use crate::number::Number;
 
-use super::{
-    CommitResult, EffectRequestSpec, EvaluationQueryHandle, EvaluationQueryPoll,
-    EvaluationQueryState, RequestContext, RequestResult, StoreJournal, TaskCommit, TaskEnvironment,
-    TaskHalt, TaskHost, TaskSpecialization, decode_query_state, evaluate, get_value_path,
-    task_eval_error,
+use super::machine::{evaluate, get_value_path, task_eval_error};
+use super::protocol::{
+    CommitResult, EffectRequestSpec, RequestContext, RequestResult, TaskCommit, TaskEnvironment,
+    TaskHalt, TaskHost, TaskSpecialization,
+};
+use super::store::{
+    EvaluationQueryHandle, EvaluationQueryPoll, EvaluationQueryState, StoreJournal,
+    decode_query_state,
 };
 
 /// Requests shared by every full reflection task.
