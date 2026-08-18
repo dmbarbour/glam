@@ -1,6 +1,6 @@
 # Module Split Plan — 2026-08-18
 
-Status: Phase 0 complete; Phase 1A is next.
+Status: Phase 1 complete; Phase 2A is next.
 
 This is a dated review and transition plan. Module shape will continue to
 change as the bootstrap grows, so a later review should create a new dated
@@ -299,6 +299,8 @@ deferred.
 
 #### Phase 1A — Exact dependency and move map
 
+Status: complete (2026-08-18).
+
 - Map every production item in `main.rs` to process entry/command dispatch,
   configuration loading, batch assembly/settlement, logger effect handling,
   logger supervision, or default rendering.
@@ -323,7 +325,78 @@ Deliverable: an in-plan item-range/dependency table and an ordered list of
 mechanical moves plus a list of exact generic library prerequisites. Review
 that map before editing Rust.
 
+Resulting production ownership map:
+
+| Current source | Current responsibility | Target owner |
+| --- | --- | --- |
+| `main.rs:32-363`, `2541-2562` | entry dispatch, completion/inspection/check-manifest commands, process argument and local-file helpers | `main.rs`, `command_line`, and thin command-specific adapters |
+| `main.rs:364-473` | dormant runtime, assembler, configuration, diagnostic ingress, and canonical-environment preparation | `configuration` with the final handoff owned by `batch` |
+| `main.rs:474-830` | assembly execution, output, manifest finalization, runtime settlement, and no-logger completion | `batch` |
+| `main.rs:831-1019`, `1868-1931` | configuration module, `conf.env`, `conf.log` selection, configuration paths, and configuration error contexts | `configuration`, with logger launch under `configuration/logger` |
+| `main.rs:1020-1204` | configured logger request vocabulary, snapshot, journal, and handler | `configuration/logger/effects` |
+| `main.rs:1205-1726` | ingress lifecycle, fallback outbox, settled-report selection and conversion | `configuration/logger/supervisor` |
+| `main.rs:1597-1867` | logger task host, runtime endpoints, transactional commit, and diagnostic consumption | `configuration/logger` split by the Phase 1C dependency checkpoint |
+| `main.rs:1932-2540` | default diagnostic evaluation, structured context layout, and terminal color | `rendering` |
+| `main.rs:2563-end` | renderer, logger, settlement, configuration, and process integration tests | responsibility-local binary tests plus cross-component tests at the binary root |
+| `cli/{bootstrap,basic,adapters}.rs` | bootstrap grammar and shell-neutral/basic completion routing | `command_line` |
+| `cli/{model,completion,output}.rs` | executable command model, completion evidence, help and output format | `command_line` |
+| `cli/path.rs` | filesystem path acceptance and completion policy | `command_line/configured/path.rs` |
+| `cli/{configured,effects,host,search}.rs` | `conf.cli` selection, effect vocabulary, branch journal, and ambiguity policy | `command_line/configured` |
+| `cli/token.rs`, `cli/token/` | nested token-effect search | `command_line/configured/token.rs`, `token/` |
+| `cli/tests.rs` | bootstrap, configured CLI, completion, token, and path contracts | binary command-line tests, partitioned only after the move is green |
+
+The directed executable call graph is:
+
+```text
+main
+  -> command_line
+  -> configuration
+       -> configuration::logger
+  -> batch
+       -> configuration::PreparedAssembly
+       -> configuration::logger
+       -> rendering (fallback only)
+
+command_line::configured
+  -> public glam value/effect/search mechanisms
+  -> command_line::{model,completion}
+```
+
+The library never depends on any node in this graph. Cross-cutting
+`PreparedAssembly` remains configuration-owned because it owns the loaded
+configuration and unresolved environment promises; batch consumes it after
+canonical arguments are selected.
+
+The private dependency audit found these required replacements:
+
+| Existing private dependency | Required generic boundary |
+| --- | --- |
+| `Values::core`, `Value::from_core`, direct core construction | existing public `Values` constructors plus missing semantic effect/token constructors |
+| `RequestContext::eval_context` and `eval::eval_value` | request-context outer-WHNF demand returning public `EvaluatedValue`/structured `TaskHalt` |
+| `IsolatedTaskHost::new` | safe public immutable isolated-search host construction |
+| `IsolatedEffectSearch::new_in_context` | nested request-context search preserving current demand ownership; top-level configured search may own an explicit client-demand session |
+| `g_syntax::fail_effect_value` | generic semantic standard-fail constructor |
+| hand-built hidden case-close request | specialization-owned request-effect construction without exposing abstract-global keys |
+| `environment_log_request_specs` | reusable restricted environment/diagnostic request profile |
+| private `TextPattern` | narrow public capture-free text-pattern facility shared with macros |
+| `OpaqueValue<PathHandle>` | constrained host-token domain whose values cannot be forged or downcast generically |
+| runtime `next_cli_invocation` | binary-owned invocation identity, removable once path-token ownership is explicit |
+
+Minor decisions recorded for review:
+
+- `PreparedAssembly` is configuration-owned rather than a generic shared type.
+- The default renderer remains separate from the configured logger lifecycle;
+  it is process fallback policy, not part of `conf.log` semantics.
+- The existing one-file CLI test suite moves intact first; responsibility-local
+  partitioning happens only after the external-crate boundary is green.
+
+Verification: the pre-move baseline completed with all 1,300 tests passing
+(`cargo test -q`: 1,165 library/unit plus 135 binary/integration tests across
+the remaining targets). `git diff --check` passed for the plan update.
+
 #### Phase 1B — Establish the directory-form binary and default rendering
+
+Status: complete (2026-08-18).
 
 - Move the binary crate root from `src/main.rs` to `src/bin/glam/main.rs` without
   changing the target name or process behavior.
@@ -337,7 +410,26 @@ This validates both Cargo target discovery and the private binary module shape
 before moving lifecycle code. Confirm that `cargo check --lib` remains
 independent of the binary and that binary unit tests remain discoverable.
 
+Result: Cargo now discovers `src/bin/glam/main.rs` as the package's sole
+primary binary, while the library remains rooted at `src/lib.rs`.
+`src/bin/glam/rendering.rs` owns the default formatter, context rendering,
+terminal policy, and eight focused renderer tests. The binary root retains the
+cross-component logger and settlement tests.
+
+Verification:
+
+- `cargo check --lib` and `cargo check --bin glam` passed after moving the root;
+- `cargo metadata --no-deps --format-version 1` reported exactly the expected
+  `lib` and `bin` target kinds;
+- `cargo test -q --bin glam` passed all 22 binary unit tests, the same count as
+  before extraction;
+- `cargo clippy --bin glam --tests -- -D warnings`, `cargo fmt --check`, and
+  `git diff --check` passed; and
+- `src/main.rs` no longer exists and both binary source files are present.
+
 #### Phase 1C — Extract binary-owned logger effects and supervision
+
+Status: complete (2026-08-18).
 
 - Move `MainEffects`, its request/snapshot/journal protocol, logger task host,
   `LogHost`, and logger supervisor ownership beneath
@@ -351,7 +443,26 @@ independent of the binary and that binary unit tests remain discoverable.
 Treat effect protocol and supervisor lifecycle as separate checkpoints if the
 Phase 1A map shows that one can move without the other.
 
+Result: `configuration/logger/effects.rs` now owns the configured logger's
+effect specialization, request/snapshot/journal protocol, and task host;
+`configuration/logger/supervisor.rs` owns the long-lived diagnostic ingress,
+logger lifecycle supervision, settlement-report conversion, and fallback
+delivery; and `configuration/logger/mod.rs` owns configured logger startup and
+the running logger handle. No logger policy moved into the library.
+
+Tests are partitioned by responsibility: diagnostic-ingress counting, rearm,
+and teardown tests live with the supervisor; output-bus isolation lives with
+the effect host; and retry, settlement, and shutdown-order tests remain at the
+binary root because they deliberately cross configuration, runtime, and
+supervisor boundaries.
+
+Verification: `cargo fmt --check`,
+`cargo clippy --bin glam --tests -- -D warnings`, and
+`cargo test -q --bin glam` passed; all 22 binary tests remain present.
+
 #### Phase 1D — Extract configuration and batch orchestration
+
+Status: complete (2026-08-18).
 
 - Move `GLAM_CONF` discovery, configuration loading and assembly, `conf.env`
   construction, and the interfaces used to invoke `conf.cli` and `conf.log`
@@ -363,7 +474,30 @@ Phase 1A map shows that one can move without the other.
 - Preserve the existing order of configuration, assembly output, runtime
   settlement, fallback rendering, logger completion, and exit-code selection.
 
+Result: `configuration/mod.rs` now owns `GLAM_CONF` discovery, the dormant
+runtime and assembler construction, canonical process/reflection argument
+promises, `conf.env` loading, configuration contexts, and the
+`PreparedAssembly` handoff. `batch.rs` owns file finalization, worker
+activation, assembly and stdout output, runtime settlement, fallback report
+delivery, configured CLI execution, and process exit policy. `main.rs` is
+reduced to top-level dispatch plus the still-to-be-moved command-specific
+adapters.
+
+Configuration-load failure crosses the boundary as a boxed internal
+`PreparationFailure` carrying the partially constructed assembler, source
+tracker, and log host. Batch can therefore publish and render the error and
+finalize a requested manifest without giving configuration terminal output or
+exit-code responsibilities. This is a private ownership handoff, not a new
+semantic error category.
+
+Verification: `cargo fmt --check`,
+`cargo clippy --bin glam --tests -- -D warnings`, and
+`cargo test -q --bin glam` passed; all 22 binary tests remain green, including
+the cross-component settlement and logger-order tests.
+
 #### Phase 1E — Complete the generic effect-host embedding boundary
+
+Status: complete (2026-08-18).
 
 Add only the reusable library facilities established by Phase 1A. Expected
 categories, subject to that dependency map, are:
@@ -384,7 +518,67 @@ effect specialization as an external consumer using only public `glam` APIs.
 The checkpoint is incomplete if the test imports implementation modules or if
 configuration-specific vocabulary appears in the library API.
 
+Host-token checkpoint discovered during migration:
+
+- The configured CLI currently returns a private `OpaqueValue<PathHandle>`
+  from `.read.path` and later downcasts it in `.write.file` or
+  `.write.manifest`. Moving that code across the crate boundary must not expose
+  arbitrary opaque-value construction or downcasting, and encoding the handle
+  as an ordinary dictionary would make a capability forgeable.
+- The proposed generic boundary is an `EffectTokenDomain<T>` created for one
+  runtime and one host-owned scope. It issues runtime-local opaque token
+  values and resolves only tokens issued by that exact domain to `Arc<T>`.
+  There is no generic inspection or downcast on `Value`.
+- Token values hold only a domain-scoped ID and a weak domain reference. The
+  domain owns the payload map; dropping the domain revokes every outstanding
+  token, and dropping the last clone of one token removes its payload. This
+  avoids a `Value -> payload -> Value/runtime` ownership cycle and gives token
+  lifetime an explicit host owner.
+- The configured CLI would put a fresh domain in each invocation snapshot.
+  Path handles therefore cannot cross invocations by construction, allowing
+  removal of `EvaluationRuntime::allocate_cli_invocation_id` and the
+  CLI-specific runtime-global allocator.
+- This is deliberately narrower than a `HostValue`: it is an effect-handler
+  capability transport, not a persistence or IPC value, and it cannot be
+  observed without possession of the issuing Rust domain.
+
+The remaining Phase 1E boundaries are straightforward projections of existing
+internals: public outer-WHNF demand and `Values` access on `RequestContext`, a
+request-spec-owned constructor for hidden scoped-close effects, a standard
+fail-effect constructor, immutable isolated-search host construction and
+nested search, the restricted environment/diagnostic request profile, and the
+shared capture-free text-pattern parser.
+
+Result: the library now exposes runtime-local `EffectTokenDomain<T>`, public
+immutable `IsolatedTaskHost`, standard fail-effect construction, request-spec
+effect construction for specialization-owned hidden operations,
+`RequestContext` value construction/outer-WHNF demand/nested search, the
+restricted environment-and-diagnostic request profile, and the versioned
+capture-free `TextPattern`. `Values::unit` and `EvaluatedValue::as_u64` fill
+the corresponding ordinary semantic construction/extraction gaps without
+exposing core representations.
+
+`EffectTokenDomain<T>` uses weak token-to-domain references and domain-owned
+payload records. It provides revocation and cleanup without allowing generic
+opaque-value downcasts or creating token/payload ownership cycles. The CLI now
+uses one path-token domain per invocation, and the obsolete CLI invocation ID
+was removed from `RuntimeIds`.
+
+Verification:
+
+- `tests/effect_embedding.rs` implements and runs an external effect
+  specialization using only public `glam` APIs;
+- the focused token-domain test proves exact-domain resolution, rejection by
+  another domain, rejection of ordinary values, and weak revocation ownership;
+- a private-dependency scan of `src/cli/` finds no remaining `core`, `eval`,
+  `evaluation`, `g_syntax`, raw `EvalContext`, opaque downcast, or CLI ID use;
+- `cargo clippy --all-targets --all-features -- -D warnings` passed after the
+  boundary changes; and
+- the focused external embedding and token-domain tests passed.
+
 #### Phase 1F — Migrate the CLI implementation into the binary
+
+Status: complete (2026-08-18).
 
 - Move the bootstrap parser, command models, output formatting, completion
   protocol/adapters, configured `conf.cli` effects, isolated search, token
@@ -401,7 +595,27 @@ configuration-specific vocabulary appears in the library API.
 - Keep CLI unit tests beside the binary modules and retain process-level tests
   in `tests/`.
 
+Result: bootstrap parsing, command models, output formatting, completion,
+configured effects and search, token parsing, path policy, and their 46 unit
+tests now live under `src/bin/glam/command_line/`. The effectful implementation
+is grouped under `command_line/configured/`; pure bootstrap/basic completion
+remains at the command-line root. Process-level contracts remain in
+`tests/cli.rs`.
+
+The temporary semantic mismatch found by the move was in the new embedding
+facade, not CLI behavior: `Values::unit` initially constructed an empty list
+instead of projecting the runtime's cached unit atom. The migrated success-path
+tests reliably exposed it, and the constructor now returns the existing
+semantic unit.
+
+Verification: `cargo clippy --all-targets --all-features -- -D warnings`
+passed, `cargo test -q --bin glam` passed all 68 binary tests (the prior 22 plus
+46 moved CLI tests), and `cargo test -q --test cli` passed all 49 process-level
+CLI tests.
+
 #### Phase 1G — Remove accidental library CLI policy
+
+Status: complete (2026-08-18).
 
 - Remove `pub mod cli` and every configuration/command-specific export from
   the library.
@@ -414,7 +628,21 @@ configuration-specific vocabulary appears in the library API.
 - Treat removal of `glam::cli` as the deliberate pre-release API correction
   authorized by this plan, not as an accidental path-preservation failure.
 
+Result: `src/cli.rs`, `src/cli/`, and `pub mod cli` are removed. All binary
+callers use the private `command_line` module directly. The CLI-specific
+runtime invocation allocator and its `RuntimeIds` field are gone; path token
+identity is invocation-domain-local instead. No forwarding facade remains.
+
+Verification: source scans find no `glam::cli`, `crate::cli`,
+`allocate_cli_invocation`, or `next_cli_invocation` references. A policy scan
+outside `src/bin/` finds no executable ownership of `GLAM_CONF`, `conf.cli`,
+`conf.log`, or `conf.ide`; the lone `conf.env` occurrence is evaluator test
+data. Cargo metadata still reports one `lib` target and one `glam` `bin`
+target in the same package.
+
 #### Phase 1H — Tighten, document, and audit the executable boundary
+
+Status: complete (2026-08-18).
 
 - Narrow visibility introduced by the moves.
 - Remove forwarding used only during extraction.
@@ -427,6 +655,61 @@ configuration-specific vocabulary appears in the library API.
   contains one library and the one primary `glam` binary; no package split is
   introduced.
 - Review Phases 2–5 for drift before proceeding.
+
+Result: every command-line model and operation is now at most binary-crate
+visible; the direct `batch` and `configuration` handoffs are parent-visible,
+while nested logger items remain crate-visible only where the sibling batch or
+cross-component tests consume them. No extraction-only forwarding module or
+compatibility entry point remains. The binary compiles cleanly through the
+private `command_line`, `configuration`, `batch`, and `rendering` ownership
+graph.
+
+`src/README.md` now maps the directory-form binary and its private policy
+modules. The assembly and diagnostic architecture documents explicitly
+separate executable-owned configuration, completion, configured logging,
+rendering, and exit behavior from the generic library mechanisms used to
+implement them. `docs/CLI.md` records that this is a library/binary crate
+boundary inside one package, not a package split. The assembly agent context
+and cleanup-review links now point at the moved tests and configured hosts.
+
+Verification:
+
+- `cargo check --lib` passed independently of the binary;
+- the 46 command-line unit tests and four logger-local tests passed;
+- all 49 process CLI integration tests passed;
+- `tests/effect_embedding.rs` passed as an external public-API consumer;
+- `cargo fmt --check` and
+  `cargo clippy --all-targets --all-features -- -D warnings` passed;
+- `cargo test -q` passed all 1,302 tests (1,120 library, 68 binary, and 114
+  integration tests); and
+- Cargo metadata reports one `lib` target at `src/lib.rs` and one `glam` `bin`
+  target at `src/bin/glam/main.rs` in the same package.
+
+Post-Phase-1 drift review:
+
+- **Phase 2 remains correctly ordered.** Phase 1E deliberately added public
+  `EffectRequestSpec` construction, `RequestContext` demand/search helpers,
+  `IsolatedTaskHost`, and `EffectTokenDomain`. Phase 2A must include these in
+  the specialization/host-protocol map; Phase 2B should move them with that
+  protocol rather than strand embedding facilities in the machine or lifecycle
+  layer. This enlarges the inventory, not the extraction risk or dependency
+  direction.
+- **Phase 3's intended seams are stronger.** `Values`, `EvaluatedValue`, and
+  evaluator roles now follow the completed Value Facade boundary, while the
+  default renderer and all configured diagnostic policy have left `api.rs`.
+  Phase 3A should treat generic diagnostic transport as library-owned and must
+  not recreate an executable logger or rendering child. No phase reorder is
+  needed.
+- **Phase 4 has no Phase-1-dependent semantic drift.** The external effect-host
+  test now provides an additional contract for any reflection/evaluation move:
+  isolated demand and nested search must remain usable without private
+  `EvalContext` access. The combined dependency map is still the appropriate
+  first checkpoint for the two large files.
+- **Phase 5 must inventory the new binary tree.** Its census should distinguish
+  the 46 command-line tests and logger/rendering tests now colocated with the
+  executable from library production size. The package-boundary documentation
+  is already current, but Phase 5 still owns the final post-split audit and
+  cleanup-review closure.
 
 ### Phase 2 — Split reflection protocol, lifecycle, and machine
 

@@ -1,5 +1,4 @@
 mod api;
-pub mod cli;
 mod compiler;
 mod core;
 mod core_net;
@@ -19,16 +18,17 @@ mod text_pattern;
 pub use api::{
     Assembler, AssemblerBuilder, BuiltModule, DeadlockSnapshot, Diagnostic, DiagnosticBus,
     DiagnosticCounts, DiagnosticEvent, DiagnosticIngress, DiagnosticSubscriber,
-    DiagnosticSubscription, Error, EvaluatedValue, EvaluationRuntime, ModuleBuilder, ModuleInput,
-    NetBind, NetBuilder, NetCopy, NetPort, PromiseResolver, QuiescenceReport, QuiescenceSnapshot,
-    ReasoningFailure, ReasoningVolume, ReflectionEnvironmentBuilder, ReflectionInspector,
-    RuntimeDeadlockWork, RuntimeDeliveryFailure, RuntimeDeliveryFailureKind,
-    RuntimeDeliveryFailureSnapshot, RuntimeDeliveryId, RuntimeDeliveryOutcome, RuntimeDependency,
-    RuntimeDisposition, RuntimeDispositionKind, RuntimeEventJournal, RuntimeEventSnapshot,
-    RuntimeInputEndpoint, RuntimeInputReader, RuntimeInputSender, RuntimeKillReason,
-    RuntimeOutputDelivery, RuntimeOutputEndpoint, RuntimeOutputEndpointId, RuntimeOutputWriter,
-    RuntimeReadiness, RuntimeReadinessStamp, RuntimeSettlementError, RuntimeTaskCapability,
-    RuntimeTaskWait, RuntimeWorkKind, RuntimeWorkState, Value, ValueEvaluator, ValueKind, Values,
+    DiagnosticSubscription, EffectTokenDomain, Error, EvaluatedValue, EvaluationRuntime,
+    ModuleBuilder, ModuleInput, NetBind, NetBuilder, NetCopy, NetPort, PromiseResolver,
+    QuiescenceReport, QuiescenceSnapshot, ReasoningFailure, ReasoningVolume,
+    ReflectionEnvironmentBuilder, ReflectionInspector, RuntimeDeadlockWork, RuntimeDeliveryFailure,
+    RuntimeDeliveryFailureKind, RuntimeDeliveryFailureSnapshot, RuntimeDeliveryId,
+    RuntimeDeliveryOutcome, RuntimeDependency, RuntimeDisposition, RuntimeDispositionKind,
+    RuntimeEventJournal, RuntimeEventSnapshot, RuntimeInputEndpoint, RuntimeInputReader,
+    RuntimeInputSender, RuntimeKillReason, RuntimeOutputDelivery, RuntimeOutputEndpoint,
+    RuntimeOutputEndpointId, RuntimeOutputWriter, RuntimeReadiness, RuntimeReadinessStamp,
+    RuntimeSettlementError, RuntimeTaskCapability, RuntimeTaskWait, RuntimeWorkKind,
+    RuntimeWorkState, Value, ValueEvaluator, ValueKind, Values,
 };
 pub use diagnostic::Severity;
 pub use g_source::{
@@ -41,3 +41,4 @@ pub use source::{
     RelativeSourcePath, SourceArtifact, SourceError, SourceIdentity, SourceSystem,
     check_local_manifest,
 };
+pub use text_pattern::{MAX_PATTERN_BYTES, MAX_PATTERN_GROUP_DEPTH, TextPattern};

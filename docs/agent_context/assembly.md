@@ -111,8 +111,8 @@ reasoning may run indefinitely; stable blocked work is reported as deadlock.
 - `tests/cli.rs`: bootstrap validation and command behavior.
 - `tests/hello_assemblies.rs`, `tests/executable_samples.rs`, and
   `tests/sample_sources.rs`: end-to-end assembly behavior.
-- `src/main.rs` tests: logger activation, settlement, fallback ordering, and
-  exit accounting.
+- `src/bin/glam/main.rs` and `src/bin/glam/configuration/logger/` tests: logger
+  activation, settlement, fallback ordering, and exit accounting.
 - `src/api.rs` tests: diagnostic ingress, runtime event endpoints, public
   readiness, and settlement.
 

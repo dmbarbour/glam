@@ -1,23 +1,45 @@
 use std::sync::Arc;
 
 use super::{
-    CommitResult, CoreValueFactory, Diagnostic, EffectTask, EffectTaskPoll, EvalContext,
-    ExactConflictAnalysis, HostSnapshot, PublicValue, ReflectionServices, ReflectionStore,
-    StoreSnapshot, TaskCommit, TaskEnvironment, TaskHalt, TaskHost, TaskSpecialization,
+    CommitResult, Diagnostic, EffectTask, EffectTaskPoll, EvalContext, ExactConflictAnalysis,
+    HostSnapshot, PublicValue, ReflectionServices, ReflectionStore, StoreSnapshot, TaskCommit,
+    TaskEnvironment, TaskHalt, TaskHost, TaskSpecialization,
 };
 
 /// Immutable host for one all-results effect search.
 ///
 /// Isolated searches retain their branch journals as results, so this host has
 /// no commit or mutable-observation path of its own.
-pub(crate) struct IsolatedTaskHost<X> {
+pub struct IsolatedTaskHost<X> {
     environment: PublicValue,
     store: StoreSnapshot,
     extra: X,
 }
 
 impl<X> IsolatedTaskHost<X> {
-    pub(crate) fn new(values: CoreValueFactory, environment: PublicValue, extra: X) -> Self {
+    pub fn new(
+        values: &crate::api::Values,
+        environment: PublicValue,
+        extra: X,
+    ) -> Result<Self, crate::api::Error> {
+        if environment.runtime_id() != values.runtime_id() {
+            return Err(crate::api::Error::new(
+                "isolated task environment belongs to another runtime",
+            ));
+        }
+        Ok(Self {
+            environment,
+            store: ReflectionStore::new(values.core().clone(), Arc::new(ExactConflictAnalysis))
+                .snapshot(),
+            extra,
+        })
+    }
+
+    pub(crate) fn new_core(
+        values: super::CoreValueFactory,
+        environment: PublicValue,
+        extra: X,
+    ) -> Self {
         Self {
             environment,
             store: ReflectionStore::new(values, Arc::new(ExactConflictAnalysis)).snapshot(),
@@ -299,7 +321,7 @@ mod tests {
     fn isolated_task_host_has_one_immutable_non_committing_snapshot() {
         let values = crate::core::test_value_factory();
         let environment = PublicValue::from_core(&values, Value::Dict(Dict::new_sync()));
-        let host = IsolatedTaskHost::new(values, environment.clone(), ());
+        let host = IsolatedTaskHost::new_core(values, environment.clone(), ());
         let snapshot = <IsolatedTaskHost<()> as TaskHost<StandardEffects>>::snapshot(&host);
 
         assert_eq!(snapshot.generation(), 1);

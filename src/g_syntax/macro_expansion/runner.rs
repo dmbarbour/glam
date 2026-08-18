@@ -82,7 +82,7 @@ pub(in crate::g_syntax) fn run_macro_effect(
     let values = execution.macro_context().values();
     let effect = PublicValue::from_core(values, effect);
     let environment = PublicValue::from_core(values, environment);
-    let host = Arc::new(MacroHost::new(
+    let host = Arc::new(MacroHost::new_core(
         values.clone(),
         environment.clone(),
         MacroSnapshot {

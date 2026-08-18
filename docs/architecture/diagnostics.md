@@ -47,7 +47,11 @@ severity counts do not alias. Batch exit reads the assembler and logger counts
 independently.
 
 The embedding library installs no default renderer. `Assembler` drops events
-unless a client subscribes and never prints diagnostics itself.
+unless a client subscribes and never prints diagnostics itself. The `glam`
+binary privately owns `conf.log` selection, supervision, fallback rendering,
+terminal styling, and the process exit decision; it implements those policies
+with the library's generic buses, ingresses, runtime event endpoints, and
+effect-host facilities.
 
 ## Provenance and Enrichment
 
@@ -68,8 +72,9 @@ the original event or publish a second message.
 
 ## Runtime Diagnostic Ingress
 
-Before configuration compilation, batch `main` binds the assembler bus to its
-runtime and installs one long-lived `DiagnosticIngress`. The ingress converts
+Before configuration compilation, the binary's batch/configuration layer binds
+the assembler bus to its runtime and installs one long-lived
+`DiagnosticIngress`. The ingress converts
 each structured diagnostic to a runtime-rooted transport value before entering
 runtime mutation admission. Valid bus publication remains counted even if
 transport preparation fails; the ingress retains that terminal transport
@@ -81,7 +86,7 @@ queue. `.read_log` observes and consumes this endpoint through the logger's
 ordinary `RuntimeEventJournal`, so a successful transaction commits its heap
 edits, input claim, and output intents atomically.
 
-Installing `conf.log` prepares its evaluation root first. `main` then switches
+Installing `conf.log` prepares its evaluation root first. The binary then switches
 the ingress route and activates that root under one exclusive settlement guard.
 No diagnostic can enter an intermediate state in which the logger route is
 visible without its consumer root. Notifications happen after the guard is
@@ -122,7 +127,7 @@ reflection bus policy.
 
 ## Formatting Policy
 
-`main` is the default terminal presentation client. It uses
+The `glam` binary is the default terminal presentation client. It uses
 `Assembler::reflection` to inspect context structure, resolve opaque origins,
 and build `viewer` data. The runtime-cached Glam `Diagnostic -> Bytes`
 formatter arranges that client-provided view; it does not choose diagnostic

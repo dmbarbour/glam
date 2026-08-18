@@ -2,14 +2,14 @@ use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::ModuleInput;
+use glam::ModuleInput;
 
 use super::CompletionRequest;
 use super::model::{
     CliArguments, CliError, CommandEdit, CommandPlanBuilder, ParseVerbosity, TopLevelCommand,
 };
 
-pub fn dispatch_bootstrap(
+pub(crate) fn dispatch_bootstrap(
     user_args: impl IntoIterator<Item = OsString>,
 ) -> Result<TopLevelCommand, CliError> {
     let user_args = Arc::<[OsString]>::from(user_args.into_iter().collect::<Vec<_>>());
@@ -173,7 +173,7 @@ fn parse_configured_inspection(
     })
 }
 
-pub fn parse_worker_count(value: &OsStr, source: &str) -> Result<usize, CliError> {
+pub(crate) fn parse_worker_count(value: &OsStr, source: &str) -> Result<usize, CliError> {
     let Some(value) = value.to_str() else {
         return Err(CliError::new(format!(
             "`{source}` requires a non-negative integer"

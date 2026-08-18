@@ -4,7 +4,7 @@
 //! core values, evaluator topology, and interaction-net scheduling remain
 //! implementation details behind the facade.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::marker::PhantomData;
 use std::num::NonZeroU64;
@@ -113,6 +113,112 @@ pub struct Values {
     core: CoreValueFactory,
 }
 
+/// Host-owned domain for unforgeable values exchanged with one effect
+/// specialization.
+///
+/// Glam code may carry and return an issued token but cannot inspect its Rust
+/// payload or manufacture another token in the same domain. Domains are local
+/// to one evaluation runtime and are intended for short-lived handler
+/// capabilities, not persistence or IPC.
+pub struct EffectTokenDomain<T> {
+    values: Values,
+    state: Arc<EffectTokenDomainState<T>>,
+}
+
+struct EffectTokenDomainState<T> {
+    next_id: AtomicU64,
+    payloads: Mutex<HashMap<NonZeroU64, Arc<T>>>,
+}
+
+struct EffectToken<T> {
+    id: NonZeroU64,
+    domain: Weak<EffectTokenDomainState<T>>,
+}
+
+impl<T> Clone for EffectTokenDomain<T> {
+    fn clone(&self) -> Self {
+        Self {
+            values: self.values.clone(),
+            state: self.state.clone(),
+        }
+    }
+}
+
+impl<T> fmt::Debug for EffectTokenDomain<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EffectTokenDomain")
+            .field("runtime", &self.values.runtime_id())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<T> EffectTokenDomain<T>
+where
+    T: Send + Sync + 'static,
+{
+    /// Creates a revocable token domain in the value factory's runtime.
+    pub fn new(values: &Values) -> Self {
+        Self {
+            values: values.clone(),
+            state: Arc::new(EffectTokenDomainState {
+                next_id: AtomicU64::new(1),
+                payloads: Mutex::new(HashMap::new()),
+            }),
+        }
+    }
+
+    /// Issues one opaque token carrying `payload` in this domain.
+    pub fn issue(&self, payload: T) -> Value {
+        let id = NonZeroU64::new(self.state.next_id.fetch_add(1, Ordering::Relaxed))
+            .expect("effect token IDs exhausted for one domain");
+        let replaced = self
+            .state
+            .payloads
+            .lock()
+            .expect("effect token domain mutex should not be poisoned")
+            .insert(id, Arc::new(payload));
+        assert!(replaced.is_none(), "effect token IDs remain unique");
+        self.values
+            .wrap(CoreValue::Opaque(crate::core::OpaqueValue::new(Arc::new(
+                EffectToken {
+                    id,
+                    domain: Arc::downgrade(&self.state),
+                },
+            ))))
+    }
+
+    /// Resolves a token only when it was issued by this exact domain.
+    pub fn resolve(&self, token: &EvaluatedValue) -> Option<Arc<T>> {
+        let CoreValue::Opaque(token) = token.as_value().as_core() else {
+            return None;
+        };
+        let token = token.downcast::<EffectToken<T>>()?;
+        if !Weak::ptr_eq(&token.domain, &Arc::downgrade(&self.state)) {
+            return None;
+        }
+        self.state
+            .payloads
+            .lock()
+            .expect("effect token domain mutex should not be poisoned")
+            .get(&token.id)
+            .cloned()
+    }
+}
+
+impl<T> Drop for EffectToken<T> {
+    fn drop(&mut self) {
+        let Some(domain) = self.domain.upgrade() else {
+            return;
+        };
+        domain
+            .payloads
+            .lock()
+            .expect("effect token domain mutex should not be poisoned")
+            .remove(&self.id);
+    }
+}
+
 impl Values {
     pub fn runtime_id(&self) -> EvaluationRuntimeId {
         self.runtime
@@ -125,6 +231,13 @@ impl Values {
     fn wrap(&self, value: CoreValue) -> Value {
         debug_assert_eq!(self.runtime, self.core.runtime_id());
         Value(RuntimeValueRoot::new(&self.core, value))
+    }
+
+    pub(crate) fn from_core_factory(core: CoreValueFactory) -> Self {
+        Self {
+            runtime: core.runtime_id(),
+            core,
+        }
     }
 
     fn require(&self, value: &Value) -> Result<(), Error> {
@@ -147,6 +260,11 @@ impl Values {
 
     pub fn integer(&self, value: i64) -> Value {
         self.wrap(CoreValue::Number(Number::integer(value)))
+    }
+
+    /// Returns Glam's cached semantic unit value `()`.
+    pub fn unit(&self) -> Value {
+        self.wrap(self.core.unit())
     }
 
     pub fn rational(&self, numerator: i64, denominator: i64) -> Option<Value> {
@@ -389,6 +507,11 @@ impl Values {
         self.wrap(crate::g_syntax::defined_or_value(&self.core))
     }
 
+    /// Constructs the standard failing effect without evaluating anything.
+    pub fn fail_effect(&self) -> Value {
+        self.wrap(crate::g_syntax::fail_effect_value(&self.core))
+    }
+
     /// Returns the cached closed Glam helper which asserts that its second
     /// argument is logically defined, using its first argument as the name in
     /// a structured failure.
@@ -550,6 +673,13 @@ impl EvaluatedValue {
     pub fn as_i64(&self) -> Option<i64> {
         match self.0.as_core() {
             CoreValue::Number(number) => number.to_i64_if_integer(),
+            _ => None,
+        }
+    }
+
+    pub fn as_u64(&self) -> Option<u64> {
+        match self.0.as_core() {
+            CoreValue::Number(number) => number.to_u64_if_integer(),
             _ => None,
         }
     }
@@ -4618,10 +4748,6 @@ impl EvaluationRuntime {
         self.default_reflection_profile.is_sealed()
     }
 
-    pub(crate) fn allocate_cli_invocation_id(&self) -> u64 {
-        self.state.shared_resources.ids.cli_invocation().get()
-    }
-
     fn mutation_guard(&self) -> RuntimeMutationGuard<'_> {
         self.state
             .shared_resources
@@ -5647,10 +5773,6 @@ impl Assembler {
         self.eval_context().values().clone()
     }
 
-    pub(crate) fn allocate_cli_invocation_id(&self) -> u64 {
-        self.reasoning.runtime.allocate_cli_invocation_id()
-    }
-
     /// Pumps useful work across every evaluation session in this assembler's
     /// runtime until it reaches a stable instant, then returns an
     /// observational readiness snapshot.
@@ -6319,7 +6441,6 @@ mod tests {
                 ids.evaluation_wait().unwrap().get(),
                 ids.deferred_value().get(),
                 ids.reasoning_session().get(),
-                ids.cli_invocation().get(),
                 ids.input_endpoint().unwrap().get(),
                 ids.output_endpoint().unwrap().get(),
                 ids.delivery().unwrap().get(),
@@ -6936,6 +7057,38 @@ mod tests {
         let bytes = EvaluatedValue::from_whnf(values.bytes(Bytes::from_static(b"bytes")));
         assert_eq!(bytes.as_bytes(), Some(b"bytes".as_slice()));
         assert_eq!(bytes.as_i64(), None);
+    }
+
+    #[test]
+    fn effect_tokens_are_domain_scoped_unforgeable_and_revoked_with_the_domain() {
+        let runtime = EvaluationRuntime::new(0).unwrap();
+        let values = runtime.values();
+        let assembler = Assembler::builder()
+            .evaluation_runtime(runtime.clone())
+            .build()
+            .unwrap();
+        let domain = EffectTokenDomain::new(&values);
+        let other = EffectTokenDomain::<String>::new(&values);
+        let state = Arc::downgrade(&domain.state);
+        let token = domain.issue("path payload".to_owned());
+        let evaluated = assembler.evaluator().eval(&token).unwrap();
+
+        assert_eq!(
+            domain.resolve(&evaluated).as_deref(),
+            Some(&"path payload".to_owned())
+        );
+        assert!(other.resolve(&evaluated).is_none());
+        assert!(
+            domain
+                .resolve(&assembler.evaluator().eval(&values.unit()).unwrap())
+                .is_none()
+        );
+
+        drop(domain);
+        assert!(
+            state.upgrade().is_none(),
+            "escaped tokens weakly reference and do not retain their issuing domain"
+        );
     }
 
     #[test]

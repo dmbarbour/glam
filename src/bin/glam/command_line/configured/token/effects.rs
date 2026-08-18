@@ -1,10 +1,7 @@
-use crate::api::Value;
-use crate::core::{Dict, Key, Value as CoreValue};
-use crate::eval;
-use crate::reflection::{
+use glam::reflection::{
     EffectRequestSpec, RequestContext, RequestResult, TaskHalt, TaskSpecialization,
 };
-use crate::text_pattern::TextPattern;
+use glam::{TextPattern, Value, Values};
 
 use super::{TokenHost, TokenJournal, literal_completion, record_expectation};
 
@@ -12,7 +9,7 @@ use super::{TokenHost, TokenJournal, literal_completion, record_expectation};
 pub(super) struct TokenEffects;
 
 #[derive(Clone, Copy)]
-pub(in crate::cli) enum TokenRequest {
+pub(in crate::command_line) enum TokenRequest {
     Text,
     Regex,
     TextSpan,
@@ -50,7 +47,7 @@ impl TaskSpecialization for TokenEffects {
     }
 }
 
-pub(in crate::cli) fn request_specs() -> Vec<EffectRequestSpec<TokenRequest>> {
+pub(in crate::command_line) fn request_specs() -> Vec<EffectRequestSpec<TokenRequest>> {
     vec![
         request("text", 1, TokenRequest::Text),
         request("regex", 1, TokenRequest::Regex),
@@ -124,7 +121,7 @@ fn regex_span(
     let pattern = text_value(context, pattern, "`.token.regex`")?;
     let matcher = TextPattern::parse(&pattern)
         .map_err(|error| TaskHalt::new(format!("invalid `.token.regex` pattern: {error}")))?;
-    let values = context.eval_context().values().clone();
+    let values = context.values();
     let mut transaction = context
         .transaction()
         .ok_or_else(|| TaskHalt::new("token reader escaped its isolated transaction"))?;
@@ -157,7 +154,7 @@ fn text_span(
     let []: [Value; 0] = arguments
         .try_into()
         .map_err(|_| TaskHalt::new("`.token.text_span` received arguments"))?;
-    let values = context.eval_context().values().clone();
+    let values = context.values();
     let mut transaction = context
         .transaction()
         .ok_or_else(|| TaskHalt::new("token reader escaped its isolated transaction"))?;
@@ -205,20 +202,15 @@ fn any(
         return Ok(RequestResult::Fail);
     };
     journal.cursor += character.len_utf8();
-    Ok(RequestResult::Return(Value::from_core(
-        context.eval_context().values(),
-        CoreValue::binary_from_text(&character.to_string()),
-    )))
+    Ok(RequestResult::Return(
+        context.values().text(character.to_string()),
+    ))
 }
 
-fn span_value(values: &crate::core::CoreValueFactory, span: &str) -> Value {
-    Value::from_core(
-        values,
-        CoreValue::Dict(Dict::new_sync().insert(
-            Key::atom_from_text("span"),
-            CoreValue::binary_from_text(span),
-        )),
-    )
+fn span_value(values: &Values, span: &str) -> Value {
+    values
+        .record([("span", values.text(span))])
+        .expect("token span values share one runtime")
 }
 
 fn end(
@@ -245,11 +237,10 @@ fn text_value(
     value: Value,
     request: &str,
 ) -> Result<String, TaskHalt> {
-    let CoreValue::Binary(bytes) =
-        eval::eval_value(context.eval_context(), value.as_core()).map_err(TaskHalt::from)?
-    else {
-        return Err(TaskHalt::new(format!("{request} requires text")));
-    };
+    let value = context.evaluate(&value)?;
+    let bytes = value
+        .as_bytes()
+        .ok_or_else(|| TaskHalt::new(format!("{request} requires text")))?;
     String::from_utf8(bytes.to_vec())
         .map_err(|_| TaskHalt::new(format!("{request} requires UTF-8 text")))
 }

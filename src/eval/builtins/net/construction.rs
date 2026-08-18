@@ -201,7 +201,7 @@ impl NetConstructionMachine {
         let search = IsolatedEffectSearch::new_in_context(
             &effect,
             specialization,
-            Arc::new(ConstructionHost::new(
+            Arc::new(ConstructionHost::new_core(
                 context.values().clone(),
                 PublicValue::from_core(context.values(), Value::Dict(Dict::new_sync())),
                 (),

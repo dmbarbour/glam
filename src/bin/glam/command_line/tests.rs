@@ -2,8 +2,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::Path;
 
-use crate::Assembler;
-use crate::api::TestValueFacade;
+use glam::{Assembler, Error, EvaluatedValue, Value};
 
 use super::{
     CompletionKind, CompletionRequest, CompletionRoute, ParseVerbosity, TopLevelCommand,
@@ -13,6 +12,46 @@ use super::{
 
 fn dispatch(arguments: &[&str]) -> Result<TopLevelCommand, String> {
     dispatch_bootstrap(arguments.iter().map(OsString::from)).map_err(|error| error.to_string())
+}
+
+trait TestValueFacade {
+    fn get<'a>(&'a self, root: &Value, path: &str) -> Result<TestEvaluated<'a>, Error>;
+}
+
+struct TestEvaluated<'a> {
+    assembler: &'a Assembler,
+    value: EvaluatedValue,
+}
+
+impl TestValueFacade for Assembler {
+    fn get<'a>(&'a self, root: &Value, path: &str) -> Result<TestEvaluated<'a>, Error> {
+        let value = self.values().access_names(root, path.split('.'))?;
+        Ok(TestEvaluated {
+            assembler: self,
+            value: self.evaluator().eval(&value)?,
+        })
+    }
+}
+
+impl TestEvaluated<'_> {
+    fn as_binary(&self) -> Option<&[u8]> {
+        self.value.as_bytes()
+    }
+
+    fn into_value(self) -> Value {
+        self.value.into_value()
+    }
+
+    fn is_undefined(&self) -> bool {
+        let values = self.assembler.values();
+        values
+            .apply(
+                &values.defined_or_function(),
+                [values.integer(1), self.value.as_value().clone()],
+            )
+            .and_then(|value| self.assembler.evaluator().eval(&value))
+            .is_ok_and(|value| value.as_i64() == Some(1))
+    }
 }
 
 #[test]
@@ -60,7 +99,7 @@ fn file_paths_are_not_required_to_be_utf8_text() {
             panic!("expected an assembly plan");
         };
         let parts = plan.into_parts();
-        assert_eq!(parts.inputs, [crate::ModuleInput::file(path)]);
+        assert_eq!(parts.inputs, [glam::ModuleInput::file(path)]);
     }
 }
 
@@ -307,7 +346,7 @@ fn completion_script_dispatch_has_exact_arity() {
     assert!(dispatch(&["--completion_script", "bash", "extra"]).is_err());
 }
 
-fn configuration(source: &str) -> (Assembler, crate::Value) {
+fn configuration(source: &str) -> (Assembler, Value) {
     let assembler = Assembler::new();
     let module = assembler
         .module(["configuration"])
@@ -926,7 +965,7 @@ fn configured_cli_rejects_nonunit_unconsumed_and_ambiguous_results() {
             .expect("configured CLI errors should carry entry-point context");
         let frames = assembler
             .values()
-            .anno_array(contexts)
+            .anno_array(contexts.into_value())
             .and_then(|array| assembler.evaluator().eval(&array))
             .expect("configured CLI contexts should be a list")
             .array_items()

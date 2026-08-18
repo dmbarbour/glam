@@ -1,14 +1,14 @@
 use std::sync::Arc;
 
-use crate::api::{Assembler, Diagnostic, Value};
-use crate::reflection::{IsolatedEffectSearch, IsolatedSearchBranch, IsolatedSearchPoll};
+use glam::reflection::{IsolatedEffectSearch, IsolatedSearchBranch, IsolatedSearchPoll};
+use glam::{Assembler, Diagnostic, Value};
 
-use super::completion::{
+use super::super::completion::{
     CliCompletion, CompletionCandidate, CompletionExpectation, CompletionRequest, Frontier,
 };
+use super::super::model::{CliArguments, CliError, CommandPlan, CommandPlanBuilder};
 use super::effects::CliEffects;
 use super::host::{CliHost, CliInvocation, CliJournal};
-use super::model::{CliArguments, CliError, CommandPlan, CommandPlanBuilder};
 
 const SEARCH_STEP_BUDGET: usize = 256;
 
@@ -30,10 +30,7 @@ pub(super) fn run_cli_search(
     let branches = run_search(
         assembler,
         effect,
-        CliInvocation::new(
-            assembler.allocate_cli_invocation_id(),
-            arguments.shared_args(),
-        ),
+        CliInvocation::new(arguments.shared_args()),
     )?;
     select_branch(assembler, arguments, &branches)
 }
@@ -52,7 +49,6 @@ pub(super) fn run_cli_completion(
         assembler,
         effect,
         CliInvocation::for_completion(
-            assembler.allocate_cli_invocation_id(),
             arguments.clone(),
             active,
             active_argument.prefix().to_owned(),
@@ -133,13 +129,17 @@ fn run_search(
     effect: &Value,
     invocation: CliInvocation,
 ) -> Result<Arc<[IsolatedSearchBranch<CliEffects>]>, CliError> {
-    let host = Arc::new(CliHost::new(
-        assembler.core_values(),
-        assembler.reflection_environment(),
-        super::host::CliSnapshot { invocation },
-    ));
+    let values = assembler.values();
+    let host = Arc::new(
+        CliHost::new(
+            &values,
+            assembler.reflection_environment(),
+            super::host::CliSnapshot::new(&values, invocation),
+        )
+        .map_err(CliError::from_error)?,
+    );
     let mut search =
-        IsolatedEffectSearch::new_in_context(effect, CliEffects, host, assembler.eval_context())
+        IsolatedEffectSearch::new(&assembler.evaluation_runtime(), effect, CliEffects, host)
             .map_err(|error| CliError::new(format!("configured CLI could not start: {error}")))?;
 
     loop {
@@ -181,15 +181,11 @@ fn completion_candidate_viable(
     arguments[active] = replacement.to_owned();
     let argument_count = arguments.len();
     let cli_arguments = CliArguments::new(arguments.clone().into());
-    let branches = run_search(
-        assembler,
-        effect,
-        CliInvocation::new(assembler.allocate_cli_invocation_id(), arguments.into()),
-    )?;
+    let branches = run_search(assembler, effect, CliInvocation::new(arguments.into()))?;
     Ok(branches.iter().any(|branch| {
         let journal = branch.journal();
         branch.value().is_some_and(|value| {
-            value.as_core() == &assembler.core_values().unit()
+            value == &assembler.values().unit()
                 && journal.cursor == argument_count
                 && plan_is_valid(journal, cli_arguments.clone())
         }) || journal
@@ -212,7 +208,7 @@ fn plan_is_valid(journal: &CliJournal, arguments: CliArguments) -> bool {
 fn select_branch(
     assembler: &Assembler,
     arguments: CliArguments,
-    branches: &[crate::reflection::IsolatedSearchBranch<CliEffects>],
+    branches: &[glam::reflection::IsolatedSearchBranch<CliEffects>],
 ) -> Result<CliSearchResult, CliError> {
     let mut successful = Vec::<SuccessfulBranch>::new();
     let mut best_failure: Option<&CliJournal> = None;
@@ -226,7 +222,7 @@ fn select_branch(
             }
             continue;
         };
-        if value.as_core() != &assembler.core_values().unit() {
+        if value != &assembler.values().unit() {
             retain_invalid(
                 assembler,
                 &mut best_invalid,

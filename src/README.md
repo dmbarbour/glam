@@ -17,14 +17,12 @@ not define language semantics or collect subsystem invariants.
 
 | Path | Responsibility |
 | --- | --- |
-| `main.rs` | Typed command execution, logger supervision, process I/O, exit policy |
-| `cli.rs`, `cli/model.rs` | Public CLI facade and validated command models |
-| `cli/bootstrap.rs`, `cli/output.rs` | Bootstrap dispatch, validation, help, output formatting |
-| `cli/configured.rs`, `cli/search.rs` | `conf.cli` search and semantic-plan selection |
-| `cli/effects.rs`, `cli/host.rs` | Serial CLI effect specialization and invocation host |
-| `cli/completion.rs`, `cli/basic.rs` | Completion model, frontiers, and bootstrap completion |
-| `cli/path.rs`, `cli/adapters.rs` | Filesystem completion and minimal shell adapters |
-| `cli/token.rs`, `cli/token/` | Restricted nested token-effect parsing |
+| `bin/glam/main.rs` | Process entry, typed command dispatch, and command-specific I/O adapters |
+| `bin/glam/batch.rs` | Assembly output, runtime settlement, reports, and exit policy |
+| `bin/glam/rendering.rs` | Default and fallback terminal diagnostic rendering |
+| `bin/glam/configuration/` | `GLAM_CONF`, `conf.env`, configured logger lifecycle, and executable configuration policy |
+| `bin/glam/command_line/` | Private bootstrap command grammar, validated command models, help, and shell completion |
+| `bin/glam/command_line/configured/` | `conf.cli` effects, isolated search, path policy, and nested token parsing |
 | `source.rs` | Source artifacts, digests, relative resolvers, tracked local files |
 | `lib.rs`, `api.rs` | Embedding facade, runtime construction, modules, diagnostics, extraction |
 | `g_source.rs` | Non-evaluating public `.g` inspection summary |
@@ -66,7 +64,7 @@ submodules rather than additional implementation layers.
 ### Assembly
 
 ```text
-main or embedding client
+`glam` binary or embedding client
   -> AssemblerBuilder fixes SourceSystem + EvaluationRuntime + reasoning policy
   -> ModuleBuilder creates one CompilationExecution
   -> SourceArtifact bytes + CompileContext capabilities
@@ -127,4 +125,8 @@ focused [interaction-net invariants](../docs/agent_context/interaction_nets.md).
   `eval/test_support.rs`.
 - `evaluation.rs`, `evaluation/coordinator.rs`, `reflection.rs`, and `api.rs`
   contain focused lifecycle and concurrency tests beside private machinery.
-- `tests/` covers the public facade, CLI, valid samples, and invalid fixtures.
+- Binary command-line and logger unit tests live below `bin/glam/`; `tests/cli.rs`
+  covers the executable process contract.
+- `tests/` also covers the public library facade, valid samples, and invalid
+  fixtures. `tests/effect_embedding.rs` is the external generic effect-host
+  contract used by the binary-owned configured interfaces.

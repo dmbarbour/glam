@@ -5,6 +5,14 @@ Rust bootstrap. The configured interface is intentionally extensible, so a
 project or shared configuration can present much friendlier commands than the
 fixed bootstrap options.
 
+This configuration model belongs to the `glam` executable, not to the Rust
+library API. Embedders receive the generic assembler, runtime, diagnostic,
+value, source, and effect-host mechanisms needed to build their own product
+policy; they do not inherit `GLAM_CONF`, `conf.env`, `conf.cli`, `conf.log`,
+shell completion, terminal rendering, or process exit behavior automatically.
+The package still contains both the library and the primary executable—this is
+a crate boundary inside one package, not a package split.
+
 For Glam source syntax, see [SyntaxCheatSheet.md](SyntaxCheatSheet.md).
 
 ## Quick start

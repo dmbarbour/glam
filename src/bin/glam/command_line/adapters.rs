@@ -1,6 +1,6 @@
-pub const BUILTIN_COMPLETION_SCRIPTS: &[&str] = &["bash", "zsh"];
+pub(crate) const BUILTIN_COMPLETION_SCRIPTS: &[&str] = &["bash", "zsh"];
 
-pub fn builtin_completion_script(name: &str) -> Option<&'static str> {
+pub(crate) fn builtin_completion_script(name: &str) -> Option<&'static str> {
     match name {
         "bash" => Some(BASH),
         "zsh" => Some(ZSH),

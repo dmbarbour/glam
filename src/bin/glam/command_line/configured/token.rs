@@ -4,10 +4,8 @@ mod effects;
 
 use std::sync::Arc;
 
-use crate::api::Value;
-use crate::core::CoreValueFactory;
-use crate::evaluation::EvalContext;
-use crate::reflection::{IsolatedEffectSearch, IsolatedSearchPoll, IsolatedTaskHost};
+use glam::Value;
+use glam::reflection::{IsolatedSearchPoll, IsolatedTaskHost, RequestContext, TaskSpecialization};
 
 pub(super) use effects::request_specs;
 
@@ -47,29 +45,32 @@ pub(super) struct TokenRun {
 
 pub(super) type TokenHost = IsolatedTaskHost<TokenSnapshot>;
 
-pub(super) fn run(
+pub(super) fn run<S>(
     parser: &Value,
     input: Arc<str>,
     completion_offset: Option<usize>,
-    eval_context: EvalContext,
-) -> Result<TokenRun, String> {
+    context: &RequestContext<'_, S>,
+) -> Result<TokenRun, String>
+where
+    S: TaskSpecialization,
+{
     let input_len = input.len();
-    let values: CoreValueFactory = eval_context.values().clone();
-    let environment = Value::from_core(
-        &values,
-        crate::core::Value::Dict(crate::core::Dict::new_sync()),
+    let values = context.values();
+    let environment = values.empty_dict();
+    let host = Arc::new(
+        TokenHost::new(
+            &values,
+            environment,
+            TokenSnapshot {
+                input,
+                completion_offset,
+            },
+        )
+        .map_err(|error| format!("token parser host could not start: {error}"))?,
     );
-    let host = Arc::new(TokenHost::new(
-        values,
-        environment,
-        TokenSnapshot {
-            input,
-            completion_offset,
-        },
-    ));
-    let mut search =
-        IsolatedEffectSearch::new_in_context(parser, effects::TokenEffects, host, eval_context)
-            .map_err(|error| format!("token parser could not start: {error}"))?;
+    let mut search = context
+        .isolated_search(parser, effects::TokenEffects, host)
+        .map_err(|error| format!("token parser could not start: {error}"))?;
 
     loop {
         match search.poll(SEARCH_STEP_BUDGET) {

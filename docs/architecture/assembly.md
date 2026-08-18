@@ -37,14 +37,17 @@ This is not an isolation boundary: nested values may remain lazy, and a future
 phase barrier would require an explicit opaque envelope and opening
 capability.
 
-`main` is one client. `cli::dispatch_bootstrap` first turns raw `OsString`
-arguments into a typed `TopLevelCommand`; `main` performs the requested I/O but
-does not interpret individual assembly flags. A hyphen-leading command uses
-the bootstrap plan directly. A bare command loads configuration and runs
-`conf.cli` through the CLI effect specialization before producing the same
-typed plan. For assembly main chooses the two module roots, supplies CLI-derived
+The `glam` executable is one library client. Its private `command_line`
+module first turns raw `OsString` arguments into a typed `TopLevelCommand`;
+the process entry performs the requested I/O but does not interpret individual
+assembly flags. A hyphen-leading command uses the bootstrap plan directly. A
+bare command loads executable-owned configuration and runs `conf.cli` through
+the binary's effect specialization before producing the same typed plan. For
+assembly, the executable chooses the two module roots, supplies CLI-derived
 values, installs a `FileSourceSystem` and subscribes a diagnostic queue,
-requests `asm.result`, and decides process output and exit status.
+requests `asm.result`, and decides process output and exit status. None of the
+`GLAM_CONF`, `conf.env`, `conf.cli`, `conf.log`, completion, rendering, or exit
+policy is part of the library API.
 
 ## Module Construction
 
@@ -79,10 +82,13 @@ for provenance and macro-bus bridging.
 ## Diagnostics and Logging
 
 `Assembler` is silent by default and owns neither buffering nor rendering.
-Batch `main` installs a runtime diagnostic ingress, optionally runs `conf.log`
-as a separate demand session, and retains independent assembler and logger bus
-counts. The logger reads transactionally, buffers output in runtime outboxes,
-and votes to exit only after input is quiescent. Returning non-unit is an error.
+The binary's batch layer installs a runtime diagnostic ingress, optionally
+runs `conf.log` as a separate demand session, and retains independent assembler
+and logger bus counts. The logger reads transactionally, buffers output in
+runtime outboxes, and votes to exit only after input is quiescent. Returning
+non-unit is an error. The runtime ingress, transactional event endpoints, and
+effect-host protocols are generic library mechanisms; selecting and supervising
+`conf.log` is executable policy.
 
 Diagnostic structure, provenance, ingress activation, transactional output,
 viewer enrichment, the cached Glam formatter, and fallback delivery are owned
@@ -174,7 +180,7 @@ result resumes the outer continuation. Regex matching returns its whole match
 as `{span:Text}`, is anchored at the current token cursor, and follows
 the text-pattern contract's ordered, leftmost-first preference.
 
-`cli::complete_configured` runs the same outer parser with an optional active
+The binary's configured completer runs the same outer parser with an optional active
 argument split into prefix and suffix. Readers at that frontier record
 candidates and expectations, then fail so sibling alternatives remain visible.
 Candidates at shallower frontiers are discarded. Complete keyword, path, and

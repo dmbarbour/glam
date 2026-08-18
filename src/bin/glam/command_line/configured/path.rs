@@ -1,17 +1,17 @@
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
 
-use super::completion::CompletionKind;
+use super::super::completion::CompletionKind;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum PathKind {
+pub(in crate::command_line) enum PathKind {
     File,
     Folder,
     Any,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum PathAccess {
+pub(in crate::command_line) enum PathAccess {
     Read,
     Write,
 }
@@ -49,7 +49,7 @@ pub(super) fn expectation(kind: PathKind, access: PathAccess) -> &'static str {
     }
 }
 
-pub(super) fn completions(
+pub(in crate::command_line) fn completions(
     prefix: &OsStr,
     suffix: &OsStr,
     kind: PathKind,

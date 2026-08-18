@@ -3,12 +3,12 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::{Diagnostic, Error, ModuleInput, Severity, Value, Values};
+use glam::{Diagnostic, Error, ModuleInput, Severity, Value, Values};
 
 use super::completion::{CliCaseExplanation, CompletionRequest};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CliError {
+pub(crate) struct CliError {
     message: String,
     cause: Option<Box<Error>>,
     diagnostics: Vec<Diagnostic>,
@@ -40,13 +40,13 @@ impl CliError {
         self
     }
 
-    pub fn diagnostics(&self) -> &[Diagnostic] {
+    pub(crate) fn diagnostics(&self) -> &[Diagnostic] {
         &self.diagnostics
     }
 
     pub(super) fn with_explanations(
         mut self,
-        explanations: impl IntoIterator<Item = crate::Value>,
+        explanations: impl IntoIterator<Item = Value>,
     ) -> Self {
         self.explanations = explanations
             .into_iter()
@@ -55,13 +55,14 @@ impl CliError {
         self
     }
 
-    pub fn explanations(&self) -> &[CliCaseExplanation] {
+    #[cfg(test)]
+    pub(crate) fn explanations(&self) -> &[CliCaseExplanation] {
         &self.explanations
     }
 
     /// Projects this CLI failure into a rich diagnostic while retaining the
     /// original `.case` values for configured loggers and IDE clients.
-    pub fn diagnostic(&self, values: &Values) -> Result<Diagnostic, Error> {
+    pub(crate) fn diagnostic(&self, values: &Values) -> Result<Diagnostic, Error> {
         if let Some(cause) = &self.cause {
             return cause
                 .diagnostic(values)?
@@ -102,12 +103,12 @@ impl fmt::Display for CliError {
 impl std::error::Error for CliError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CliArguments {
+pub(crate) struct CliArguments {
     args: Arc<[OsString]>,
 }
 
 impl CliArguments {
-    pub fn from_args(arguments: impl IntoIterator<Item = OsString>) -> Self {
+    pub(crate) fn from_args(arguments: impl IntoIterator<Item = OsString>) -> Self {
         Self {
             args: arguments.into_iter().collect(),
         }
@@ -117,7 +118,7 @@ impl CliArguments {
         Self { args }
     }
 
-    pub fn args(&self) -> &[OsString] {
+    pub(crate) fn args(&self) -> &[OsString] {
         &self.args
     }
 
@@ -127,14 +128,14 @@ impl CliArguments {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ParseVerbosity {
+pub(crate) enum ParseVerbosity {
     Quiet,
     Normal,
     Verbose,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TopLevelCommand {
+pub(crate) enum TopLevelCommand {
     Help,
     Version,
     InspectGSource {
@@ -159,7 +160,7 @@ pub enum TopLevelCommand {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CommandPlan {
+pub(crate) struct CommandPlan {
     inputs: Vec<ModuleInput>,
     assembly_args: Vec<OsString>,
     reflection_args: Vec<OsString>,
@@ -170,23 +171,23 @@ pub struct CommandPlan {
 }
 
 impl CommandPlan {
-    pub fn cli_arguments(&self) -> &CliArguments {
+    pub(crate) fn cli_arguments(&self) -> &CliArguments {
         &self.cli_arguments
     }
 
-    pub fn process_args(&self) -> &[OsString] {
+    pub(crate) fn process_args(&self) -> &[OsString] {
         &self.process_args
     }
 
-    pub fn reflection_args(&self) -> &[OsString] {
+    pub(crate) fn reflection_args(&self) -> &[OsString] {
         &self.reflection_args
     }
 
-    pub fn manifest(&self) -> Option<&std::path::Path> {
+    pub(crate) fn manifest(&self) -> Option<&std::path::Path> {
         self.manifest.as_deref()
     }
 
-    pub fn into_parts(self) -> CommandPlanParts {
+    pub(crate) fn into_parts(self) -> CommandPlanParts {
         CommandPlanParts {
             inputs: self.inputs,
             assembly_args: self.assembly_args,
@@ -200,18 +201,18 @@ impl CommandPlan {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CommandPlanParts {
-    pub inputs: Vec<ModuleInput>,
-    pub assembly_args: Vec<OsString>,
-    pub reflection_args: Vec<OsString>,
-    pub manifest: Option<PathBuf>,
-    pub worker_count: Option<usize>,
-    pub process_args: Arc<[OsString]>,
-    pub cli_arguments: CliArguments,
+pub(crate) struct CommandPlanParts {
+    pub(crate) inputs: Vec<ModuleInput>,
+    pub(crate) assembly_args: Vec<OsString>,
+    pub(crate) reflection_args: Vec<OsString>,
+    pub(crate) manifest: Option<PathBuf>,
+    pub(crate) worker_count: Option<usize>,
+    pub(crate) process_args: Arc<[OsString]>,
+    pub(crate) cli_arguments: CliArguments,
 }
 
 #[derive(Debug, Clone)]
-pub struct CliExpansion {
+pub(crate) struct CliExpansion {
     plan: CommandPlan,
     diagnostics: Vec<Diagnostic>,
 }
@@ -221,15 +222,17 @@ impl CliExpansion {
         Self { plan, diagnostics }
     }
 
-    pub fn plan(&self) -> &CommandPlan {
+    #[cfg(test)]
+    pub(crate) fn plan(&self) -> &CommandPlan {
         &self.plan
     }
 
-    pub fn diagnostics(&self) -> &[Diagnostic] {
+    #[cfg(test)]
+    pub(crate) fn diagnostics(&self) -> &[Diagnostic] {
         &self.diagnostics
     }
 
-    pub fn into_parts(self) -> (CommandPlan, Vec<Diagnostic>) {
+    pub(crate) fn into_parts(self) -> (CommandPlan, Vec<Diagnostic>) {
         (self.plan, self.diagnostics)
     }
 }

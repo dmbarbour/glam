@@ -6,19 +6,19 @@
 
 use regex_lite::{Regex, RegexBuilder};
 
-pub(crate) const MAX_PATTERN_BYTES: usize = 16 * 1024;
-pub(crate) const MAX_PATTERN_GROUP_DEPTH: usize = 64;
+pub const MAX_PATTERN_BYTES: usize = 16 * 1024;
+pub const MAX_PATTERN_GROUP_DEPTH: usize = 64;
 
 const MAX_COMPILED_BYTES: usize = 1024 * 1024;
 
 /// A validated `g0` text pattern with an implementation-private matcher.
 #[derive(Debug)]
-pub(crate) struct TextPattern {
+pub struct TextPattern {
     matcher: Regex,
 }
 
 impl TextPattern {
-    pub(crate) fn parse(source: &str) -> Result<Self, String> {
+    pub fn parse(source: &str) -> Result<Self, String> {
         let syntax = Parser::parse(source)?;
         let backend_source = syntax.backend_source();
         let mut builder = RegexBuilder::new(&backend_source);
@@ -32,7 +32,7 @@ impl TextPattern {
     }
 
     /// Returns the ordered, greedy match at the beginning of `input`.
-    pub(crate) fn match_prefix<'input>(&self, input: &'input str) -> Option<&'input str> {
+    pub fn match_prefix<'input>(&self, input: &'input str) -> Option<&'input str> {
         self.matcher
             .find(input)
             .filter(|matched| matched.start() == 0)

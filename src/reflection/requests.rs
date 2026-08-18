@@ -178,7 +178,7 @@ where
 
 /// API constructors contributed by the reusable reflection request family.
 pub fn reflection_request_specs() -> Vec<EffectRequestSpec<ReflectionRequest>> {
-    environment_log_request_specs()
+    environment_diagnostic_request_specs()
         .into_iter()
         .chain([
             EffectRequestSpec::new(
@@ -245,7 +245,8 @@ pub fn reflection_request_specs() -> Vec<EffectRequestSpec<ReflectionRequest>> {
         .collect()
 }
 
-pub(crate) fn environment_log_request_specs() -> Vec<EffectRequestSpec<ReflectionRequest>> {
+/// Reusable `.env` and `.log` request subset for isolated host interpreters.
+pub fn environment_diagnostic_request_specs() -> Vec<EffectRequestSpec<ReflectionRequest>> {
     vec![
         EffectRequestSpec::new(
             "env",

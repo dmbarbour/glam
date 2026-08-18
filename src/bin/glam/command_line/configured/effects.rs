@@ -1,17 +1,15 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::api::{ModuleInput, Value};
-use crate::core::{Atom, Dict, Key, List, OpaqueValue, Value as CoreValue};
-use crate::eval;
-use crate::reflection::{
+use glam::reflection::{
     EffectRequestSpec, ReflectionRequest, RequestContext, RequestResult, TaskHalt,
-    TaskSpecialization, environment_log_request_specs, handle_reflection_request,
+    TaskSpecialization, environment_diagnostic_request_specs, handle_reflection_request,
 };
+use glam::{ModuleInput, Value};
 
-use super::completion::{CompletionEvidence, CompletionKind, ExpectationEvidence, Frontier};
+use super::super::completion::{CompletionEvidence, CompletionKind, ExpectationEvidence, Frontier};
+use super::super::model::CommandEdit;
 use super::host::{CliHost, CliJournal};
-use super::model::CommandEdit;
 use super::path::{self, PathAccess, PathKind};
 use super::token;
 
@@ -50,7 +48,7 @@ impl TaskSpecialization for CliEffects {
     }
 
     fn requests(&self) -> Vec<EffectRequestSpec<Self::Request>> {
-        environment_log_request_specs()
+        environment_diagnostic_request_specs()
             .into_iter()
             .map(|spec| spec.map_request(CliRequest::Reflection))
             .chain([
@@ -101,7 +99,7 @@ impl TaskSpecialization for CliEffects {
                     2,
                     CliRequest::Case,
                 ),
-                EffectRequestSpec::hidden(CASE_EXIT_TAG, 0, CliRequest::CaseExit),
+                case_exit_spec(),
             ])
             .chain(
                 token::request_specs()
@@ -174,7 +172,7 @@ fn enter_case(
     journal.visited_cases.push(explanation);
     Ok(RequestResult::Scoped {
         operation: parse,
-        close: case_exit_effect(context),
+        close: case_exit_effect(context)?,
     })
 }
 
@@ -196,15 +194,14 @@ fn exit_case(
     Ok(RequestResult::ReturnUnit)
 }
 
-fn case_exit_effect(context: &RequestContext<'_, CliEffects>) -> Value {
-    let request = CoreValue::Dict(Dict::new_sync().insert(
-        Key::abstract_global_path(CASE_EXIT_TAG),
-        CoreValue::List(List::empty()),
-    ));
-    Value::from_core(
-        context.eval_context().values(),
-        eval::constant_effect(request),
-    )
+fn case_exit_spec() -> EffectRequestSpec<CliRequest> {
+    EffectRequestSpec::hidden(CASE_EXIT_TAG, 0, CliRequest::CaseExit)
+}
+
+fn case_exit_effect(context: &RequestContext<'_, CliEffects>) -> Result<Value, TaskHalt> {
+    case_exit_spec()
+        .effect(&context.values(), [])
+        .map_err(TaskHalt::from)
 }
 
 fn read_keyword(
@@ -273,7 +270,7 @@ fn read_text(
         .try_into()
         .map_err(|_| TaskHalt::new("`.read.text` received the wrong number of arguments"))?;
     let expectation = text_value(context, expectation, "`.read.text` expectation")?;
-    let values = context.eval_context().values().clone();
+    let values = context.values();
     let mut transaction = context
         .transaction()
         .ok_or_else(|| TaskHalt::new("CLI reader escaped its isolated search transaction"))?;
@@ -301,10 +298,7 @@ fn read_text(
         return Ok(RequestResult::Fail);
     };
     journal.cursor += 1;
-    Ok(RequestResult::Return(Value::from_core(
-        &values,
-        CoreValue::binary_from_text(argument),
-    )))
+    Ok(RequestResult::Return(values.text(argument)))
 }
 
 fn read_token(
@@ -315,7 +309,6 @@ fn read_token(
         .try_into()
         .map_err(|_| TaskHalt::new("`.read.token` received the wrong number of arguments"))?;
     let expectation = text_value(context, expectation, "`.read.token` expectation")?;
-    let eval_context = context.eval_context().clone();
     let (argument_index, argument, completion_offset) = {
         let mut transaction = context
             .transaction()
@@ -343,8 +336,8 @@ fn read_token(
         )
     };
 
-    let result = token::run(&parser, argument, completion_offset, eval_context.clone())
-        .map_err(TaskHalt::new)?;
+    let result =
+        token::run(&parser, argument, completion_offset, context).map_err(TaskHalt::new)?;
     let completion_candidates = if completion_offset.is_some() {
         result
             .candidates
@@ -354,7 +347,7 @@ fn read_token(
                     &parser,
                     Arc::from(candidate.replacement.as_str()),
                     None,
-                    eval_context.clone(),
+                    context,
                 )
                 .ok()?;
                 let complete_reader = !verification.values.is_empty();
@@ -373,12 +366,12 @@ fn read_token(
         for (candidate, complete_reader) in completion_candidates {
             record_candidate(
                 journal,
-                super::completion::Frontier {
+                Frontier {
                     argument: argument_index,
                     token_offset: candidate.offset,
                 },
                 candidate.replacement.into(),
-                super::completion::CompletionKind::Value,
+                CompletionKind::Value,
                 complete_reader,
             );
         }
@@ -429,8 +422,7 @@ fn read_end(
     }
 }
 
-struct PathHandle {
-    invocation: u64,
+pub(super) struct PathHandle {
     argument: usize,
     kind: PathKind,
     access: PathAccess,
@@ -454,7 +446,6 @@ fn read_path(
         "w" => PathAccess::Write,
         _ => unreachable!(),
     };
-    let values = context.eval_context().values().clone();
     let mut transaction = context
         .transaction()
         .ok_or_else(|| TaskHalt::new("CLI reader escaped its isolated search transaction"))?;
@@ -495,14 +486,12 @@ fn read_path(
         return Ok(RequestResult::Fail);
     }
     journal.cursor += 1;
-    Ok(RequestResult::Return(Value::from_core(
-        &values,
-        CoreValue::Opaque(OpaqueValue::new(Arc::new(PathHandle {
-            invocation: snapshot.invocation.id,
+    Ok(RequestResult::Return(snapshot.path_tokens.issue(
+        PathHandle {
             argument: argument_index,
             kind,
             access,
-        }))),
+        },
     )))
 }
 
@@ -519,21 +508,15 @@ fn write_path(
     let [handle]: [Value; 1] = arguments
         .try_into()
         .map_err(|_| TaskHalt::new("CLI path writer received the wrong number of arguments"))?;
-    let CoreValue::Opaque(handle) = evaluated(context, handle)? else {
-        return Err(TaskHalt::new("CLI path writer requires a path handle"));
-    };
-    let handle = handle
-        .downcast::<PathHandle>()
-        .ok_or_else(|| TaskHalt::new("CLI path writer requires a path handle"))?;
+    let handle = context.evaluate(&handle)?;
     let mut transaction = context
         .transaction()
         .ok_or_else(|| TaskHalt::new("CLI writer escaped its isolated search transaction"))?;
     let (snapshot, journal) = transaction.parts();
-    if handle.invocation != snapshot.invocation.id {
-        return Err(TaskHalt::new(
-            "CLI path handle belongs to another invocation",
-        ));
-    }
+    let handle = snapshot
+        .path_tokens
+        .resolve(&handle)
+        .ok_or_else(|| TaskHalt::new("CLI path writer requires a path handle"))?;
     let path = snapshot
         .invocation
         .args
@@ -614,13 +597,9 @@ fn write_worker_count(
     let [count]: [Value; 1] = arguments.try_into().map_err(|_| {
         TaskHalt::new("`.write.worker_count` received the wrong number of arguments")
     })?;
-    let CoreValue::Number(count) = evaluated(context, count)? else {
-        return Err(TaskHalt::new(
-            "`.write.worker_count` requires a non-negative integer",
-        ));
-    };
-    let count = count
-        .to_u64_if_integer()
+    let count = context
+        .evaluate(&count)?
+        .as_u64()
         .and_then(|count| usize::try_from(count).ok())
         .ok_or_else(|| {
             TaskHalt::new("`.write.worker_count` requires a supported non-negative integer")
@@ -645,9 +624,10 @@ fn text_value(
     value: Value,
     request: &str,
 ) -> Result<String, TaskHalt> {
-    let CoreValue::Binary(bytes) = evaluated(context, value)? else {
-        return Err(TaskHalt::new(format!("{request} requires text")));
-    };
+    let value = context.evaluate(&value)?;
+    let bytes = value
+        .as_bytes()
+        .ok_or_else(|| TaskHalt::new(format!("{request} requires text")))?;
     String::from_utf8(bytes.to_vec())
         .map_err(|_| TaskHalt::new(format!("{request} requires UTF-8 text")))
 }
@@ -658,19 +638,13 @@ fn atom_name<'a>(
     accepted: &'a [&str],
     kind: &str,
 ) -> Result<&'a str, TaskHalt> {
-    let value = evaluated(context, value)?;
+    let value = context.evaluate(&value)?;
+    let values = context.values();
     accepted
         .iter()
         .copied()
-        .find(|name| value == CoreValue::Atom(Atom::from_key(&Key::binary_from_text(name))))
+        .find(|name| value.as_value() == &values.atom_from_text(name))
         .ok_or_else(|| TaskHalt::new(format!("invalid CLI {kind}")))
-}
-
-fn evaluated(
-    context: &RequestContext<'_, CliEffects>,
-    value: Value,
-) -> Result<CoreValue, TaskHalt> {
-    eval::eval_value(context.eval_context(), value.as_core()).map_err(TaskHalt::from)
 }
 
 fn record_expectation(

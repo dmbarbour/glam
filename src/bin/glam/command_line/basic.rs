@@ -3,7 +3,7 @@ use std::ffi::{OsStr, OsString};
 use super::adapters::BUILTIN_COMPLETION_SCRIPTS;
 use super::bootstrap::{is_option_like, os_eq};
 use super::completion::{CliCompletion, CompletionCandidate, CompletionKind, CompletionRequest};
-use super::path::{self, PathAccess, PathKind};
+use super::configured::path::{self, PathAccess, PathKind};
 
 const ROOT_OPTIONS: &[&str] = &[
     "--check_manifest",
@@ -38,13 +38,13 @@ const ASSEMBLY_OPTIONS: &[&str] = &[
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CompletionRoute {
+pub(crate) enum CompletionRoute {
     Basic(CompletionRequest),
     Configured(CompletionRequest),
 }
 
 /// Applies the same first-argument ownership rule as ordinary CLI dispatch.
-pub fn route_completion(request: CompletionRequest) -> CompletionRoute {
+pub(crate) fn route_completion(request: CompletionRequest) -> CompletionRoute {
     if request
         .arguments_before()
         .first()
@@ -79,7 +79,7 @@ pub fn route_completion(request: CompletionRequest) -> CompletionRoute {
 }
 
 /// Completes the bootstrap-owned command grammar without loading configuration.
-pub fn complete_basic(request: &CompletionRequest) -> CliCompletion {
+pub(crate) fn complete_basic(request: &CompletionRequest) -> CliCompletion {
     let active = request.active_argument();
     let prefix = active.map_or_else(|| OsStr::new(""), |active| active.prefix());
     let suffix = active.map_or_else(|| OsStr::new(""), |active| active.suffix());

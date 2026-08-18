@@ -702,8 +702,8 @@ CLI, token parsing, macro expansion, and interaction-net construction each
 define a host containing an environment, an exact empty reflection-store
 snapshot, and a specialization snapshot. Each returns generation `1`, rejects
 commit with `CommitResult::Closed`, and never waits for change
-([`cli/host.rs`](../../src/cli/host.rs#L87),
-[`cli/token.rs`](../../src/cli/token.rs#L51),
+([`configured/host.rs`](../../src/bin/glam/command_line/configured/host.rs),
+[`configured/token.rs`](../../src/bin/glam/command_line/configured/token.rs),
 [`macro_expansion/host.rs`](../../src/g_syntax/macro_expansion/host.rs#L132),
 [`construction.rs`](../../src/eval/builtins/net/construction.rs#L185)).
 

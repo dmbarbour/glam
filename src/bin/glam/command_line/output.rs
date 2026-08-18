@@ -2,12 +2,12 @@ use std::ffi::OsString;
 use std::fmt::Write;
 use std::path::Path;
 
-use crate::{GSourceInspection, Severity};
+use glam::{GSourceInspection, Severity};
 
 use super::CliCompletion;
 use super::ParseVerbosity;
 
-pub const HELP_TEXT: &str = "\
+pub(crate) const HELP_TEXT: &str = "\
 Usage: glam [(-f|--file) <PATH> | (-s|--script).<EXT> <TEXT>]...
             [--manifest <PATH>]
             [--refl <ARG>]...
@@ -38,7 +38,7 @@ Configuration is loaded from GLAM_CONF as an OS path-list, or from the user conf
 Bare arguments are reserved for configured `conf.cli` rewriting.
 ";
 
-pub fn format_parse_summary(
+pub(crate) fn format_parse_summary(
     path: &Path,
     parsed: &GSourceInspection,
     verbosity: ParseVerbosity,
@@ -90,7 +90,7 @@ pub fn format_parse_summary(
 /// Renders configured CLI inspection without inventing an escaping format.
 /// Human mode numbers arguments and indents continuation lines; NUL mode
 /// preserves the raw argument boundaries.
-pub fn format_configured_arguments(arguments: &[OsString], nul_terminated: bool) -> Vec<u8> {
+pub(crate) fn format_configured_arguments(arguments: &[OsString], nul_terminated: bool) -> Vec<u8> {
     let mut output = Vec::new();
     if nul_terminated {
         for argument in arguments {
@@ -118,7 +118,7 @@ pub fn format_configured_arguments(arguments: &[OsString], nul_terminated: bool)
 }
 
 /// Renders protocol-v0 completion candidates as replacement-only NUL records.
-pub fn format_completion_replacements(completion: &CliCompletion) -> Vec<u8> {
+pub(crate) fn format_completion_replacements(completion: &CliCompletion) -> Vec<u8> {
     let mut output = Vec::new();
     for candidate in completion.candidates() {
         output.extend_from_slice(candidate.replacement().as_encoded_bytes());

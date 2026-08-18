@@ -8,18 +8,17 @@ mod requests;
 mod search;
 mod store;
 
-pub(crate) use search::IsolatedTaskHost;
-#[doc(hidden)]
 pub use search::{
     IsolatedEffectSearch, IsolatedSearchBlock, IsolatedSearchBranch, IsolatedSearchPoll,
+    IsolatedTaskHost,
 };
 
 pub use requests::{
     ReflectionHost, ReflectionJournal, ReflectionQueryMutation, ReflectionQueryWriter,
-    ReflectionRequest, ReflectionServices, ReflectionTransaction, handle_reflection_request,
-    reflection_request_specs,
+    ReflectionRequest, ReflectionServices, ReflectionTransaction,
+    environment_diagnostic_request_specs, handle_reflection_request, reflection_request_specs,
 };
-pub(crate) use requests::{environment_log_request_specs, parse_severity, prepare_message};
+pub(crate) use requests::{parse_severity, prepare_message};
 pub use store::{
     CoarseConflictAnalysis, ConflictAddress, ConflictAnalysisStrategy, ConflictObservationIndex,
     ConflictPath, EvaluationQueryHandle, ExactConflictAnalysis, FingerprintConflictAnalysis,
@@ -37,8 +36,8 @@ use std::sync::{Arc, Condvar, Mutex, Weak};
 use search::SearchPolicy;
 
 use crate::api::{
-    Diagnostic, DiagnosticIngress, Error as ApiError, EvaluationRuntime, Value as PublicValue,
-    Values,
+    Diagnostic, DiagnosticIngress, Error as ApiError, EvaluatedValue, EvaluationRuntime,
+    Value as PublicValue, Values,
 };
 use crate::core::{
     Atom, Builtin, CoreValueFactory, Dict, EvaluationFailure, EvaluationHalt, FunctionValue, Key,
@@ -118,6 +117,43 @@ impl<R> EffectRequestSpec<R> {
             arity: self.arity,
             request: map(self.request),
         }
+    }
+
+    /// Constructs the constant effect for this registered request.
+    ///
+    /// This is primarily useful for specialization-owned hidden close
+    /// operations paired with [`RequestResult::Scoped`]. The request tag
+    /// remains inaccessible to Glam code except through values issued by the
+    /// owning Rust specialization.
+    pub fn effect(
+        &self,
+        values: &Values,
+        arguments: impl IntoIterator<Item = PublicValue>,
+    ) -> Result<PublicValue, ApiError> {
+        let arguments = arguments.into_iter().collect::<Vec<_>>();
+        if arguments.len() != self.arity {
+            return Err(ApiError::new(format!(
+                "effect request expects {} arguments, received {}",
+                self.arity,
+                arguments.len()
+            )));
+        }
+        for argument in &arguments {
+            if argument.runtime_id() != values.runtime_id() {
+                return Err(ApiError::new(format!(
+                    "effect request argument belongs to evaluation runtime {}, expected evaluation runtime {}",
+                    argument.runtime_id().get(),
+                    values.runtime_id().get()
+                )));
+            }
+        }
+        Ok(PublicValue::from_core(
+            values.core(),
+            eval::constant_effect(request_value(
+                &Key::abstract_global_path(self.tag_path.iter().map(Arc::as_ref)),
+                arguments.into_iter().map(PublicValue::into_core).collect(),
+            )),
+        ))
     }
 }
 
@@ -3458,6 +3494,46 @@ pub struct RequestContext<'a, S: TaskSpecialization> {
 impl<'a, S: TaskSpecialization> RequestContext<'a, S> {
     pub(crate) fn eval_context(&self) -> &EvalContext {
         self.eval_context
+    }
+
+    /// Returns runtime-local value construction for this effect request.
+    pub fn values(&self) -> Values {
+        Values::from_core_factory(self.eval_context.values().clone())
+    }
+
+    /// Demands the outer weak-head normal form of a request argument.
+    pub fn evaluate(&self, value: &PublicValue) -> Result<EvaluatedValue, TaskHalt> {
+        if value.runtime_id() != self.eval_context.values().runtime_id() {
+            return Err(TaskHalt::new(
+                "effect request value belongs to another runtime",
+            ));
+        }
+        let value =
+            eval::eval_value(self.eval_context, value.as_core()).map_err(task_eval_error)?;
+        Ok(EvaluatedValue::from_whnf(PublicValue::from_core(
+            self.eval_context.values(),
+            value,
+        )))
+    }
+
+    /// Starts a nested isolated search in the current evaluation session.
+    /// Branch journals remain isolated and dependencies retain the current
+    /// request's demand ownership.
+    pub fn isolated_search<N>(
+        &self,
+        effect: &PublicValue,
+        specialization: N,
+        host: Arc<N::Host>,
+    ) -> Result<IsolatedEffectSearch<N>, TaskHalt>
+    where
+        N: TaskSpecialization,
+    {
+        IsolatedEffectSearch::new_in_context(
+            effect,
+            specialization,
+            host,
+            self.eval_context.clone(),
+        )
     }
 
     pub fn host(&self) -> &S::Host {

@@ -1,17 +1,17 @@
 use std::ffi::{OsStr, OsString};
 use std::sync::Arc;
 
-use crate::{Diagnostic, Value};
+use glam::{Diagnostic, Value};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CompletionRequest {
+pub(crate) struct CompletionRequest {
     arguments_before: Arc<[OsString]>,
     active_argument: Option<ActiveArgument>,
     arguments_after: Arc<[OsString]>,
 }
 
 impl CompletionRequest {
-    pub fn with_active<B, A>(
+    pub(crate) fn with_active<B, A>(
         arguments_before: B,
         active_prefix: impl Into<OsString>,
         active_suffix: impl Into<OsString>,
@@ -31,7 +31,7 @@ impl CompletionRequest {
         }
     }
 
-    pub fn without_active<B, A>(arguments_before: B, arguments_after: A) -> Self
+    pub(crate) fn without_active<B, A>(arguments_before: B, arguments_after: A) -> Self
     where
         B: IntoIterator<Item = OsString>,
         A: IntoIterator<Item = OsString>,
@@ -43,19 +43,19 @@ impl CompletionRequest {
         }
     }
 
-    pub fn arguments_before(&self) -> &[OsString] {
+    pub(crate) fn arguments_before(&self) -> &[OsString] {
         &self.arguments_before
     }
 
-    pub fn active_argument(&self) -> Option<&ActiveArgument> {
+    pub(crate) fn active_argument(&self) -> Option<&ActiveArgument> {
         self.active_argument.as_ref()
     }
 
-    pub fn arguments_after(&self) -> &[OsString] {
+    pub(crate) fn arguments_after(&self) -> &[OsString] {
         &self.arguments_after
     }
 
-    pub fn arguments(&self) -> Arc<[OsString]> {
+    pub(crate) fn arguments(&self) -> Arc<[OsString]> {
         let mut arguments = Vec::with_capacity(
             self.arguments_before.len()
                 + usize::from(self.active_argument.is_some())
@@ -71,21 +71,21 @@ impl CompletionRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ActiveArgument {
+pub(crate) struct ActiveArgument {
     prefix: OsString,
     suffix: OsString,
 }
 
 impl ActiveArgument {
-    pub fn prefix(&self) -> &OsStr {
+    pub(crate) fn prefix(&self) -> &OsStr {
         &self.prefix
     }
 
-    pub fn suffix(&self) -> &OsStr {
+    pub(crate) fn suffix(&self) -> &OsStr {
         &self.suffix
     }
 
-    pub fn value(&self) -> OsString {
+    pub(crate) fn value(&self) -> OsString {
         let mut value = self.prefix.clone();
         value.push(&self.suffix);
         value
@@ -93,7 +93,7 @@ impl ActiveArgument {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum CompletionKind {
+pub(crate) enum CompletionKind {
     Keyword,
     Value,
     File,
@@ -102,9 +102,8 @@ pub enum CompletionKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CompletionCandidate {
+pub(crate) struct CompletionCandidate {
     replacement: OsString,
-    display: String,
     kind: CompletionKind,
     explanations: Vec<CliCaseExplanation>,
 }
@@ -120,10 +119,8 @@ impl CompletionCandidate {
         explanations: impl IntoIterator<Item = Value>,
     ) -> Self {
         let replacement = replacement.into();
-        let display = replacement.to_string_lossy().into_owned();
         Self {
             replacement,
-            display,
             kind,
             explanations: explanations
                 .into_iter()
@@ -132,20 +129,17 @@ impl CompletionCandidate {
         }
     }
 
-    pub fn replacement(&self) -> &OsStr {
+    pub(crate) fn replacement(&self) -> &OsStr {
         &self.replacement
     }
 
-    pub fn display(&self) -> &str {
-        &self.display
-    }
-
-    pub fn kind(&self) -> CompletionKind {
+    pub(crate) fn kind(&self) -> CompletionKind {
         self.kind
     }
 
     /// Explained parser cases that remain viable for this replacement.
-    pub fn explanations(&self) -> &[CliCaseExplanation] {
+    #[cfg(test)]
+    pub(crate) fn explanations(&self) -> &[CliCaseExplanation] {
         &self.explanations
     }
 
@@ -160,7 +154,7 @@ impl CompletionCandidate {
 
 /// One lazy, structured explanation supplied to `.case` by configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CliCaseExplanation {
+pub(crate) struct CliCaseExplanation {
     value: Value,
 }
 
@@ -169,14 +163,15 @@ impl CliCaseExplanation {
         Self { value }
     }
 
-    pub fn value(&self) -> &Value {
+    pub(crate) fn value(&self) -> &Value {
         &self.value
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct CliCompletion {
+pub(crate) struct CliCompletion {
     candidates: Vec<CompletionCandidate>,
+    #[cfg_attr(not(test), allow(dead_code))]
     expectations: Vec<CompletionExpectation>,
     diagnostics: Vec<Diagnostic>,
 }
@@ -194,21 +189,22 @@ impl CliCompletion {
         }
     }
 
-    pub fn candidates(&self) -> &[CompletionCandidate] {
+    pub(crate) fn candidates(&self) -> &[CompletionCandidate] {
         &self.candidates
     }
 
-    pub fn expectations(&self) -> &[CompletionExpectation] {
+    #[cfg(test)]
+    pub(crate) fn expectations(&self) -> &[CompletionExpectation] {
         &self.expectations
     }
 
-    pub fn diagnostics(&self) -> &[Diagnostic] {
+    pub(crate) fn diagnostics(&self) -> &[Diagnostic] {
         &self.diagnostics
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CompletionExpectation {
+pub(crate) struct CompletionExpectation {
     argument: usize,
     token_offset: usize,
     label: String,
@@ -216,19 +212,20 @@ pub struct CompletionExpectation {
 }
 
 impl CompletionExpectation {
-    pub fn argument(&self) -> usize {
+    pub(crate) fn argument(&self) -> usize {
         self.argument
     }
 
-    pub fn token_offset(&self) -> usize {
+    pub(crate) fn token_offset(&self) -> usize {
         self.token_offset
     }
 
-    pub fn label(&self) -> &str {
+    pub(crate) fn label(&self) -> &str {
         &self.label
     }
 
-    pub fn explanations(&self) -> &[CliCaseExplanation] {
+    #[cfg(test)]
+    pub(crate) fn explanations(&self) -> &[CliCaseExplanation] {
         &self.explanations
     }
 

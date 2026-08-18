@@ -235,7 +235,6 @@ pub(crate) struct RuntimeIds {
     next_evaluation_wait: AtomicU64,
     next_deferred_value: AtomicU64,
     next_reasoning_session: AtomicU64,
-    next_cli_invocation: AtomicU64,
     next_input_endpoint: AtomicU64,
     next_output_endpoint: AtomicU64,
     next_delivery: AtomicU64,
@@ -250,7 +249,6 @@ impl RuntimeIds {
             next_evaluation_wait: AtomicU64::new(1),
             next_deferred_value: AtomicU64::new(1),
             next_reasoning_session: AtomicU64::new(1),
-            next_cli_invocation: AtomicU64::new(1),
             next_input_endpoint: AtomicU64::new(1),
             next_output_endpoint: AtomicU64::new(1),
             next_delivery: AtomicU64::new(1),
@@ -304,13 +302,6 @@ impl RuntimeIds {
         self.allocate_or_panic(
             &self.next_reasoning_session,
             "reasoning session IDs exhausted for this evaluation runtime",
-        )
-    }
-
-    pub(crate) fn cli_invocation(&self) -> NonZeroU64 {
-        self.allocate_or_panic(
-            &self.next_cli_invocation,
-            "CLI invocation IDs exhausted for this evaluation runtime",
         )
     }
 

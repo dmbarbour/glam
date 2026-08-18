@@ -1,33 +1,31 @@
 use std::ffi::OsString;
 use std::sync::Arc;
 
-use crate::api::Value;
-use crate::reflection::{IsolatedTaskHost, ReflectionJournal, ReflectionTransaction};
+use glam::reflection::{IsolatedTaskHost, ReflectionJournal, ReflectionTransaction};
+use glam::{EffectTokenDomain, Value, Values};
 
-use super::completion::{CompletionEvidence, ExpectationEvidence};
-use super::model::CommandEdit;
+use super::super::completion::{CompletionEvidence, ExpectationEvidence};
+use super::super::model::CommandEdit;
+use super::effects::PathHandle;
 
 #[derive(Clone)]
 pub(super) struct CliInvocation {
-    pub(super) id: u64,
     pub(super) args: Arc<[OsString]>,
     pub(super) completion: Option<CompletionPoint>,
 }
 
 impl CliInvocation {
-    pub(super) fn new(id: u64, args: Arc<[OsString]>) -> Self {
-        Self::from_parts(id, args, None)
+    pub(super) fn new(args: Arc<[OsString]>) -> Self {
+        Self::from_parts(args, None)
     }
 
     pub(super) fn for_completion(
-        id: u64,
         args: Arc<[OsString]>,
         argument: usize,
         prefix: OsString,
         suffix: OsString,
     ) -> Self {
         Self::from_parts(
-            id,
             args,
             Some(CompletionPoint {
                 argument,
@@ -37,12 +35,8 @@ impl CliInvocation {
         )
     }
 
-    fn from_parts(id: u64, args: Arc<[OsString]>, completion: Option<CompletionPoint>) -> Self {
-        Self {
-            id,
-            args,
-            completion,
-        }
+    fn from_parts(args: Arc<[OsString]>, completion: Option<CompletionPoint>) -> Self {
+        Self { args, completion }
     }
 }
 
@@ -56,6 +50,16 @@ pub(super) struct CompletionPoint {
 #[derive(Clone)]
 pub(super) struct CliSnapshot {
     pub(super) invocation: CliInvocation,
+    pub(super) path_tokens: EffectTokenDomain<PathHandle>,
+}
+
+impl CliSnapshot {
+    pub(super) fn new(values: &Values, invocation: CliInvocation) -> Self {
+        Self {
+            invocation,
+            path_tokens: EffectTokenDomain::new(values),
+        }
+    }
 }
 
 #[derive(Clone, Default)]
