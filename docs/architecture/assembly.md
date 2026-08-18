@@ -17,12 +17,25 @@ volumes, work coordinator, and executor attachment. Clients choose module
 paths and inputs; the library does not assign special meaning to
 `configuration` or `assembly`.
 
-Executable and IDE clients are privileged reflection observers. Ordinary
-`Value` accessors remain non-demanding, while `Assembler::reflection` exposes
-session-bound operations that deliberately evaluate and inspect value
-structure. Host policy should extend that facade when it needs another
-reflection capability; it should not add client-specific interpretation or
+The embedding value boundary has three explicit roles. `Assembler::values`
+constructs runtime-local literals and lazy semantic composition without
+demand. `Assembler::evaluator().eval` performs ordinary outer-WHNF demand and
+returns `EvaluatedValue`, whose scalar and strict-array extractors cannot be
+called on an arbitrary unresolved root. `Assembler::reflection` owns
+runtime-specific pre-demand kind, atom-key, dictionary-entry, associated
+metadata, and opaque-origin inspection. Bare `Value` exposes runtime identity
+but no scalar, kind, undefined, or structural observation. Host policy should
+extend reflection through a constructed capability when it needs another
+privileged observation; it should not add client-specific interpretation or
 rendering builtins to core evaluation.
+
+Runtime input and output FIFOs retain unrestricted `Value` roots. Admission,
+journaling, commit, and delivery do not demand a payload or require WHNF. A
+host output decoder which needs semantic data explicitly captures an assembler
+and evaluates the delivered value before using `EvaluatedValue` extraction.
+This is not an isolation boundary: nested values may remain lazy, and a future
+phase barrier would require an explicit opaque envelope and opening
+capability.
 
 `main` is one client. `cli::dispatch_bootstrap` first turns raw `OsString`
 arguments into a typed `TopLevelCommand`; `main` performs the requested I/O but

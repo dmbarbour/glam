@@ -61,6 +61,18 @@ pub(crate) fn default_diagnostic_formatter(values: &CoreValueFactory) -> Value {
     diagnostic_formatter::value(values)
 }
 
+pub(crate) fn defined_or_value(values: &CoreValueFactory) -> Value {
+    compiler_values::defined_or(values)
+}
+
+pub(crate) fn require_defined_value(values: &CoreValueFactory) -> Value {
+    compiler_values::require_defined(values)
+}
+
+pub(crate) fn fail_effect_value(values: &CoreValueFactory) -> Value {
+    compiler_values::effect_value(values, "fail")
+}
+
 #[cfg(test)]
 pub(crate) fn initialize_cached_compiler_values(values: &CoreValueFactory) {
     let _ = compiler_values::builtin_module(values, "std")

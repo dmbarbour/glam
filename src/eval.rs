@@ -38,7 +38,7 @@ pub(crate) use operator::{
 };
 #[cfg(test)]
 pub(crate) use sequence::list_output_bytes;
-pub(crate) use sequence::{eval_key_path_list, list_output_bytes_range, list_to_value_items};
+pub(crate) use sequence::{eval_key_path_list, list_to_value_items};
 pub use value::eval_value;
 #[cfg(test)]
 pub(crate) use value::halt_diagnostic_value;

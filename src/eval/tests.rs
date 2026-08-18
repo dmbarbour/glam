@@ -193,7 +193,10 @@ fn evaluation_context_frames_use_an_atom_operation_and_optional_named_arguments(
         ))
     );
 
-    let args = Dict::new_sync().insert((*keys::PATH).clone(), Value::binary_from_text("conf.env"));
+    let args = Dict::new_sync().insert(
+        Key::atom_from_text("path"),
+        Value::binary_from_text("conf.env"),
+    );
     assert_eq!(
         evaluation_context_frame_with_args("path_lookup", args.clone()),
         Value::Dict(

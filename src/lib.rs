@@ -19,8 +19,8 @@ mod text_pattern;
 pub use api::{
     Assembler, AssemblerBuilder, BuiltModule, DeadlockSnapshot, Diagnostic, DiagnosticBus,
     DiagnosticCounts, DiagnosticEvent, DiagnosticIngress, DiagnosticSubscriber,
-    DiagnosticSubscription, Error, EvaluationRuntime, ModuleBuilder, ModuleInput, NetBind,
-    NetBuilder, NetCopy, NetPort, PromiseResolver, QuiescenceReport, QuiescenceSnapshot,
+    DiagnosticSubscription, Error, EvaluatedValue, EvaluationRuntime, ModuleBuilder, ModuleInput,
+    NetBind, NetBuilder, NetCopy, NetPort, PromiseResolver, QuiescenceReport, QuiescenceSnapshot,
     ReasoningFailure, ReasoningVolume, ReflectionEnvironmentBuilder, ReflectionInspector,
     RuntimeDeadlockWork, RuntimeDeliveryFailure, RuntimeDeliveryFailureKind,
     RuntimeDeliveryFailureSnapshot, RuntimeDeliveryId, RuntimeDeliveryOutcome, RuntimeDependency,
@@ -28,7 +28,7 @@ pub use api::{
     RuntimeInputEndpoint, RuntimeInputReader, RuntimeInputSender, RuntimeKillReason,
     RuntimeOutputDelivery, RuntimeOutputEndpoint, RuntimeOutputEndpointId, RuntimeOutputWriter,
     RuntimeReadiness, RuntimeReadinessStamp, RuntimeSettlementError, RuntimeTaskCapability,
-    RuntimeTaskWait, RuntimeWorkKind, RuntimeWorkState, Value, ValueKind, Values,
+    RuntimeTaskWait, RuntimeWorkKind, RuntimeWorkState, Value, ValueEvaluator, ValueKind, Values,
 };
 pub use diagnostic::Severity;
 pub use g_source::{

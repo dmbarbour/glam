@@ -3,6 +3,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::Assembler;
+use crate::api::TestValueFacade;
 
 use super::{
     CompletionKind, CompletionRequest, CompletionRoute, ParseVerbosity, TopLevelCommand,
@@ -924,9 +925,12 @@ fn configured_cli_rejects_nonunit_unconsumed_and_ambiguous_results() {
             .get(diagnostic.emission(), "msg.context")
             .expect("configured CLI errors should carry entry-point context");
         let frames = assembler
-            .reflection()
-            .list_items(&contexts)
-            .expect("configured CLI contexts should be a list");
+            .values()
+            .anno_array(contexts)
+            .and_then(|array| assembler.evaluator().eval(&array))
+            .expect("configured CLI contexts should be a list")
+            .array_items()
+            .expect("array annotation should produce strict context items");
         assert_eq!(
             assembler
                 .get(

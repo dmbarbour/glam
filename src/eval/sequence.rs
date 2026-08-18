@@ -124,31 +124,7 @@ pub(crate) fn list_output_bytes(
     context: &EvalContext,
     list: &List,
 ) -> Result<Vec<u8>, EvaluationHalt> {
-    list_output_bytes_for(context, list, "`value`")
-}
-
-pub(crate) fn list_output_bytes_for(
-    context: &EvalContext,
-    list: &List,
-    subject: &str,
-) -> Result<Vec<u8>, EvaluationHalt> {
-    list_to_binary_bytes(context, list, subject)
-}
-
-pub(crate) fn list_output_bytes_range(
-    context: &EvalContext,
-    list: &List,
-    range: std::ops::Range<usize>,
-    subject: &str,
-) -> Result<Option<Vec<u8>>, EvaluationHalt> {
-    let Some(slice) = list.try_slice(range.start, range.end, &mut |thunk| {
-        force_list_thunk(context, thunk)
-            .map_err(|error| error.with_context(evaluation_context_frame("binary_extraction")))
-    })?
-    else {
-        return Ok(None);
-    };
-    list_output_bytes_for(context, &slice, subject).map(Some)
+    list_to_binary_bytes(context, list, "`value`")
 }
 
 pub(super) fn append_values(left: Value, right: Value) -> Result<Value, EvaluationHalt> {

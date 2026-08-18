@@ -178,6 +178,21 @@ impl<V: Clone, T: Clone> List<V, T> {
         }
     }
 
+    /// Borrows the one strict value leaf represented by this list.
+    ///
+    /// The canonical empty list also qualifies. Byte leaves, concatenations,
+    /// finger trees, and deferred tails deliberately do not.
+    pub(crate) fn value_slice(&self) -> Option<&[V]> {
+        match self.0.as_ref() {
+            ListNode::Empty => Some(&[]),
+            ListNode::Values(values) => Some(values.as_slice()),
+            ListNode::Bytes(_)
+            | ListNode::Concat(_, _)
+            | ListNode::Finger(_)
+            | ListNode::Thunk(_) => None,
+        }
+    }
+
     pub fn from_thunk(thunk: T) -> Self {
         Self(Arc::new(ListNode::Thunk(thunk)))
     }

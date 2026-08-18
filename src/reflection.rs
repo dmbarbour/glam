@@ -4207,7 +4207,7 @@ mod tests {
     use bytes::Bytes;
 
     use super::*;
-    use crate::api::{Assembler, Diagnostic};
+    use crate::api::{Assembler, Diagnostic, TestValueFacade};
     use crate::evaluation::{EvaluationTaskCancellation, EvaluationTaskHandle};
 
     fn public_record<I, S>(assembler: &Assembler, entries: I) -> PublicValue
@@ -5054,7 +5054,7 @@ mod tests {
             [Bytes::from_static(b"right journal")]
         );
         assert!(host.stderr().is_empty());
-        assert_eq!(host.heap(), assembler.values().empty_record());
+        assert_eq!(host.heap(), assembler.values().empty_dict());
     }
 
     #[test]
@@ -5448,7 +5448,11 @@ mod tests {
         let exit = poll_machine_exit(&mut machine);
         assert_eq!(exit.intent, ExitIntent::Success);
         assert_eq!(exit.observed_epoch, None);
-        assert!(assembler.get(&host.heap(), "discarded").is_err());
+        assert!(
+            assembler
+                .get(&host.heap(), "discarded")
+                .is_ok_and(|value| value.is_undefined())
+        );
         assert!(host.diagnostics().is_empty());
         assert!(host.stderr().is_empty());
         assert_eq!(builds.load(Ordering::Acquire), 0);
@@ -5479,7 +5483,11 @@ mod tests {
         let first = poll_machine_exit(&mut machine);
         assert_eq!(first.intent, ExitIntent::Success);
         assert!(first.observed_epoch.is_some());
-        assert!(assembler.get(&host.heap(), "attempt").is_err());
+        assert!(
+            assembler
+                .get(&host.heap(), "attempt")
+                .is_ok_and(|value| value.is_undefined())
+        );
         assert!(host.stderr().is_empty());
         assert!(host.diagnostics().is_empty());
         assert!(matches!(
@@ -8206,9 +8214,13 @@ mod tests {
         else {
             panic!("state effect should complete")
         };
-        assert_eq!(value, assembler.values().empty_record());
-        assert_eq!(host.heap(), assembler.values().empty_record());
-        assert!(assembler.get(&value, "answer").is_err());
+        assert_eq!(value, assembler.values().empty_dict());
+        assert_eq!(host.heap(), assembler.values().empty_dict());
+        assert!(
+            assembler
+                .get(&value, "answer")
+                .is_ok_and(|answer| answer.is_undefined())
+        );
     }
 
     #[test]
@@ -8226,7 +8238,7 @@ mod tests {
             assembler
                 .evaluate(&assembler.get(&value, "local").unwrap())
                 .unwrap(),
-            assembler.values().empty_record()
+            assembler.values().empty_dict()
         );
         assert_eq!(
             assembler
@@ -8304,15 +8316,15 @@ mod tests {
             assembler
                 .evaluate(&assembler.get(&value, "local").unwrap())
                 .unwrap(),
-            assembler.values().empty_record()
+            assembler.values().empty_dict()
         );
         assert_eq!(
             assembler
                 .evaluate(&assembler.get(&value, "shared").unwrap())
                 .unwrap(),
-            assembler.values().empty_record()
+            assembler.values().empty_dict()
         );
-        assert_eq!(host.heap(), assembler.values().empty_record());
+        assert_eq!(host.heap(), assembler.values().empty_dict());
     }
 
     #[test]
@@ -8323,7 +8335,7 @@ mod tests {
         let error = run_standard_on(&assembler, &effect, host.clone()).unwrap_err();
         assert!(error.to_string().contains("failed permanently"));
         assert_eq!(host.wait_count(), 0);
-        assert_eq!(host.heap(), assembler.values().empty_record());
+        assert_eq!(host.heap(), assembler.values().empty_dict());
     }
 
     #[test]
@@ -8339,7 +8351,7 @@ mod tests {
 
         assert!(error.to_string().contains("failed permanently"));
         assert_eq!(host.wait_count(), 0);
-        assert_eq!(host.heap(), assembler.values().empty_record());
+        assert_eq!(host.heap(), assembler.values().empty_dict());
     }
 
     #[test]
@@ -8375,7 +8387,7 @@ mod tests {
 
         assert!(error.to_string().contains("failed permanently"));
         assert_eq!(host.wait_count(), 0);
-        assert_eq!(host.heap(), assembler.values().empty_record());
+        assert_eq!(host.heap(), assembler.values().empty_dict());
     }
 
     #[test]

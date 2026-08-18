@@ -1011,6 +1011,28 @@ lookup context on evaluation failure.
 and shrink `Assembler`; defer until semantic composition has replaced real
 callers.
 
+**Resolution (2026-08-18): complete.** The linked transition replaced the
+compatibility interpreter with three explicit facades: `Values` constructs
+ordinary no-demand semantic operations, `ValueEvaluator` demands outer WHNF
+and returns `EvaluatedValue`, and `ReflectionInspector` owns privileged
+runtime observations. `Assembler::{apply,get,get_optional,evaluate,to_binary,
+binary_slice}`, transitional reflection demand/list helpers, and the
+`Values::empty_record` alias are removed. `Values::empty_dict` is the sole
+empty dictionary/undefined constructor.
+
+Bare public `Value` now exposes runtime identity but no scalar, kind,
+undefined, or structural observer. Scalar and strict-array extraction require
+`EvaluatedValue`; pre-demand kind, atom identity, dictionary iteration,
+metadata, and opaque origins remain reflection. Runtime FIFO payloads remain
+unrestricted values: output callbacks explicitly evaluate when their protocol
+needs extraction rather than relying on primitive-layer WHNF admission.
+
+Verification includes source-equivalence and no-demand construction tests,
+foreign-runtime rejection, structured failure/context preservation, lazy
+output transport followed by decoder-selected demand, 44 external facade
+tests, and the repository format, all-target clippy, and full test gates
+recorded in the transition plan.
+
 ## Explicit non-findings
 
 ### Completion publication has two policies, not two accidental mechanisms

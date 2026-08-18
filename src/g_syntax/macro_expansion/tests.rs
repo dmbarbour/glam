@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::api::{
     Assembler, CompilationExecution, Diagnostic, DiagnosticEvent, DiagnosticSubscriber,
-    Value as PublicValue,
+    TestValueFacade, Value as PublicValue,
 };
 use crate::core::{Dict, Key, List, Value, keys};
 use crate::diagnostic::Severity;
@@ -47,7 +47,8 @@ fn compile_effects(source: &str) -> (Assembler, PublicValue) {
         .build()
         .expect("macro effect fixture should compile");
     let effects = assembler
-        .get(module.value(), "meta.effects")
+        .values()
+        .access_names(module.value(), ["meta", "effects"])
         .expect("macro effect fixture should define `meta.effects`");
     (assembler, effects)
 }
@@ -257,7 +258,8 @@ fn committed_reflection_heap_and_children_outlive_macro_alternatives() {
 
     for name in ["write", "read", "child"] {
         let effect = assembler
-            .get(&effects, name)
+            .values()
+            .access_names(&effects, [name])
             .expect("effect fixture member should exist");
         run(&execution, &effect, empty.clone()).expect("macro effect should select its fallback");
     }

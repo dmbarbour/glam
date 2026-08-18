@@ -152,12 +152,31 @@ fn completion_script_command(name: &std::ffi::OsStr, cli_arguments: CliArguments
         Ok(prepared) => prepared,
         Err(exit) => return exit,
     };
-    let path = format!("conf.completion_script.{name}");
-    let configured = prepared
-        .assembler
-        .get(&prepared.configuration.value, &path)
+    let values = prepared.assembler.values();
+    let configured = values
+        .access_names(
+            &prepared.configuration.value,
+            ["conf", "completion_script", name],
+        )
+        .and_then(|candidate| {
+            with_path_lookup_context(
+                &values,
+                candidate,
+                &format!("conf.completion_script.{name}"),
+            )
+        })
+        .and_then(|candidate| {
+            values.apply(&values.defined_or_function(), [values.list([])?, candidate])
+        })
+        .and_then(|selected| prepared.assembler.evaluator().eval(&selected))
         .ok()
-        .filter(|value| !value.is_undefined());
+        .and_then(|selected| {
+            selected
+                .array_items()
+                .filter(Vec::is_empty)
+                .map(|_| None)
+                .unwrap_or_else(|| Some(selected.into_value()))
+        });
     let output: Result<Vec<u8>, String> = match configured {
         Some(function) => configured_completion_script(&prepared.assembler, &function),
         None => builtin_completion_script(name)
@@ -201,16 +220,22 @@ fn configured_completion_script(
         .record([
             (
                 "executable",
-                values.binary(executable.as_encoded_bytes().to_vec()),
+                values.bytes(executable.as_encoded_bytes().to_vec()),
             ),
             ("protocol", values.text("v0")),
             ("request", values.text("--completions")),
         ])
         .expect("completion-script context uses one runtime");
-    assembler
+    values
         .apply(function, [context])
-        .and_then(|value| assembler.to_binary(&value))
-        .map(|bytes| bytes.to_vec())
+        .and_then(|value| values.anno_binary(value))
+        .and_then(|binary| assembler.evaluator().eval(&binary))
+        .and_then(|binary| {
+            binary
+                .as_bytes()
+                .map(ToOwned::to_owned)
+                .ok_or_else(|| Error::new("completion script did not evaluate to binary data"))
+        })
         .map_err(|error| error.to_string())
 }
 
@@ -256,13 +281,13 @@ fn process_reflection_environment(
     cli_arguments: CliArguments,
 ) -> Value {
     fn os_value(values: &Values, value: &std::ffi::OsStr) -> Value {
-        values.binary(value.as_encoded_bytes().to_vec())
+        values.bytes(value.as_encoded_bytes().to_vec())
     }
 
     let variables = values
         .dictionary(env::vars_os().map(|(name, value)| {
             (
-                values.binary(name.as_encoded_bytes().to_vec()),
+                values.bytes(name.as_encoded_bytes().to_vec()),
                 os_value(values, &value),
             )
         }))
@@ -300,7 +325,7 @@ fn argument_values(values: &Values, arguments: &[std::ffi::OsString]) -> Value {
         .list(
             arguments
                 .iter()
-                .map(|argument| values.binary(argument.as_encoded_bytes().to_vec())),
+                .map(|argument| values.bytes(argument.as_encoded_bytes().to_vec())),
         )
         .expect("argument values share one runtime")
 }
@@ -767,7 +792,7 @@ fn assemble(
     let arguments = values.list(
         cli_args
             .iter()
-            .map(|argument| values.binary(argument.as_encoded_bytes().to_vec())),
+            .map(|argument| values.bytes(argument.as_encoded_bytes().to_vec())),
     )?;
     let initial_definitions = values.record([
         ("asm", values.record([("args", arguments)])?),
@@ -779,13 +804,21 @@ fn assemble(
         .inputs(inputs)
         .build()?;
     let context = assembly_result_context(&values)?;
-    let asm = values.access(module.value(), values.atom_from_text("asm"))?;
-    let result = values.access(&asm, values.atom_from_text("result"))?;
-    assembler.to_binary(&result).map_err(|error| {
-        error
-            .with_context(&values, context)
-            .expect("assembly-result context belongs to the assembler runtime")
-    })
+    let result = values.access_names(module.value(), ["asm", "result"])?;
+    values
+        .anno_binary(result)
+        .and_then(|binary| assembler.evaluator().eval(&binary))
+        .and_then(|binary| {
+            binary
+                .as_bytes()
+                .map(Bytes::copy_from_slice)
+                .ok_or_else(|| Error::new("asm.result did not evaluate to binary data"))
+        })
+        .map_err(|error| {
+            error
+                .with_context(&values, context)
+                .expect("assembly-result context belongs to the assembler runtime")
+        })
 }
 
 fn assembly_result_context(values: &Values) -> Result<Value, Error> {
@@ -810,8 +843,17 @@ fn load_configuration(assembler: &Assembler) -> Result<LoadedConfiguration, Erro
         .inputs(configuration_paths().into_iter().map(ModuleInput::file))
         .build()?;
 
-    let environment = match assembler
-        .get_optional(module.value(), "conf.env")
+    let environment = values
+        .access_names(module.value(), ["conf", "env"])
+        .and_then(|candidate| with_path_lookup_context(&values, candidate, "conf.env"))
+        .and_then(|candidate| {
+            values.apply(
+                &values.defined_or_function(),
+                [default_environment, candidate],
+            )
+        })
+        .and_then(|environment| assembler.evaluator().eval(&environment))
+        .map(glam::EvaluatedValue::into_value)
         .map_err(|error| {
             error
                 .with_context(
@@ -820,20 +862,7 @@ fn load_configuration(assembler: &Assembler) -> Result<LoadedConfiguration, Erro
                         .expect("configuration context is local"),
                 )
                 .expect("configuration context is local")
-        })? {
-        Some(environment) if !environment.is_undefined() => {
-            assembler.evaluate(&environment).map_err(|error| {
-                error
-                    .with_context(
-                        &values,
-                        configuration_entry_context(&values, "env")
-                            .expect("configuration context is local"),
-                    )
-                    .expect("configuration context is local")
-            })?
-        }
-        Some(_) | None => default_environment,
-    };
+        })?;
     Ok(LoadedConfiguration {
         value: module.into_value(),
         environment,
@@ -853,13 +882,21 @@ fn start_logger(assembler: &Assembler, configuration: &Value, input: Arc<LogHost
         input.clone(),
         diagnostics.clone(),
         assembler.reflection_environment_for_role("logger"),
+        assembler.clone(),
     ));
     let effect_assembler = assembler.clone();
-    let custom = match assembler.get_optional(configuration, "conf.log") {
-        Ok(Some(logger)) if !logger.is_undefined() => Some(logger),
-        Ok(Some(_)) | Ok(None) => None,
+    let values = assembler.values();
+    let custom = match values
+        .access_names(configuration, ["conf", "log"])
+        .and_then(|candidate| with_path_lookup_context(&values, candidate, "conf.log"))
+        .and_then(|candidate| {
+            values.apply(&values.defined_or_function(), [values.list([])?, candidate])
+        })
+        .and_then(|selected| assembler.evaluator().eval(&selected))
+    {
+        Ok(logger) if logger.array_items().is_some_and(|items| items.is_empty()) => None,
+        Ok(logger) => Some(logger.into_value()),
         Err(error) => {
-            let values = assembler.values();
             let diagnostic = error
                 .with_context(
                     &values,
@@ -969,6 +1006,17 @@ fn configuration_entry_context(values: &Values, entry: &str) -> Result<Value, Er
     values.record([("conf", values.record([("entry", values.text(entry))])?)])
 }
 
+fn with_path_lookup_context(values: &Values, value: Value, path: &str) -> Result<Value, Error> {
+    let frame = values.record([(
+        "eval",
+        values.record([
+            ("op", values.atom_from_text("path_lookup")),
+            ("args", values.record([("path", values.text(path))])?),
+        ])?,
+    )])?;
+    values.anno(values.record([("context", frame)])?, value)
+}
+
 struct LoggerRun {
     thread: thread::JoinHandle<()>,
     diagnostics: DiagnosticBus,
@@ -1060,16 +1108,24 @@ impl TaskSpecialization for MainEffects {
                         "`.write_stderr` received the wrong number of arguments",
                     )
                 })?;
-                let bytes = self
-                    .assembler
-                    .to_binary(&value)
+                let values = self.assembler.values();
+                let binary = values
+                    .anno_binary(value)
+                    .and_then(|binary| self.assembler.evaluator().eval(&binary))
                     .map_err(glam::reflection::TaskHalt::from)?;
+                let bytes = binary
+                    .as_bytes()
+                    .map(Bytes::copy_from_slice)
+                    .ok_or_else(|| {
+                        glam::reflection::TaskHalt::new(
+                            "`.write_stderr` argument did not evaluate to binary data",
+                        )
+                    })?;
                 let stderr_writer = context.host().stderr_writer.clone();
                 if let Some(mut transaction) = context.transaction() {
                     let (snapshot, journal) = transaction.parts();
-                    let value = self.assembler.values().binary(bytes);
                     event_journal(snapshot, journal)
-                        .write(&stderr_writer, value)
+                        .write(&stderr_writer, binary.into_value())
                         .map_err(glam::reflection::TaskHalt::from)?;
                 } else {
                     context
@@ -1551,7 +1607,12 @@ struct LoggerTaskHost {
 }
 
 impl LoggerTaskHost {
-    fn new(input: Arc<LogHost>, diagnostics: DiagnosticBus, reflection_environment: Value) -> Self {
+    fn new(
+        input: Arc<LogHost>,
+        diagnostics: DiagnosticBus,
+        reflection_environment: Value,
+        assembler: Assembler,
+    ) -> Self {
         diagnostics
             .bind_runtime(&input.runtime)
             .expect("logger output bus must belong to the logger runtime");
@@ -1570,9 +1631,11 @@ impl LoggerTaskHost {
         let stderr_output = input
             .runtime
             .output_endpoint(
-                |value| {
-                    value
-                        .as_binary()
+                move |value| {
+                    assembler
+                        .evaluator()
+                        .eval(&value)?
+                        .as_bytes()
                         .map(Bytes::copy_from_slice)
                         .ok_or_else(|| Error::new("stderr output requires binary data"))
                 },
@@ -1623,7 +1686,7 @@ impl LoggerTaskHost {
     fn write_stderr(&self, bytes: Bytes) -> Result<(), Error> {
         let (_generation, store, snapshot) = self.resources.transaction_snapshot();
         let mut events = RuntimeEventJournal::new(snapshot);
-        events.write(&self.stderr_writer, self.resources.values().binary(bytes))?;
+        events.write(&self.stderr_writer, self.resources.values().bytes(bytes))?;
         match self
             .resources
             .try_commit_transaction(&glam::reflection::StoreJournal::new(store), &events)
@@ -1910,9 +1973,14 @@ impl DefaultLogger {
     }
 
     fn format_message(&self, message: Value) -> Result<Bytes, Error> {
-        self.evaluator
-            .apply(&self.formatter, [message])
-            .and_then(|rendered| self.evaluator.to_binary(&rendered))
+        let values = self.evaluator.values();
+        let rendered = values.apply(&self.formatter, [message])?;
+        let binary = values.anno_binary(rendered)?;
+        let evaluated = self.evaluator.evaluator().eval(&binary)?;
+        evaluated
+            .as_bytes()
+            .map(Bytes::copy_from_slice)
+            .ok_or_else(|| Error::new("diagnostic formatter did not return binary data"))
     }
 
     fn viewer_updates(&self, diagnostic: &Diagnostic, terminal: &TerminalContext) -> Value {
@@ -1990,9 +2058,20 @@ impl DefaultLogger {
         terminal: &TerminalContext,
         base_indent: usize,
     ) -> Vec<String> {
-        let contexts = match self.evaluator.get_optional(message, "msg.context") {
-            Ok(Some(contexts)) => contexts,
-            Ok(None) => return Vec::new(),
+        let values = self.evaluator.values();
+        let frames = match values
+            .access_names(message, ["msg", "context"])
+            .and_then(|candidate| {
+                values.apply(&values.defined_or_function(), [values.list([])?, candidate])
+            })
+            .and_then(|contexts| values.anno_array(contexts))
+            .and_then(|array| self.evaluator.evaluator().eval(&array))
+            .and_then(|array| {
+                array
+                    .array_items()
+                    .ok_or_else(|| glam::Error::new("context array did not materialize"))
+            }) {
+            Ok(frames) => frames,
             Err(error) => {
                 return vec![
                     format!("{}context:", " ".repeat(base_indent + Self::ANCHOR_INDENT)),
@@ -2002,17 +2081,6 @@ impl DefaultLogger {
                     ),
                 ];
             }
-        };
-        let reflection = self.evaluator.reflection();
-        let contexts = reflection.evaluate(&contexts).unwrap_or(contexts);
-        let frames = if contexts.is_undefined() {
-            Vec::new()
-        } else if contexts.kind() == glam::ValueKind::List {
-            reflection
-                .list_items(&contexts)
-                .unwrap_or_else(|_| vec![contexts])
-        } else {
-            vec![contexts]
         };
         if frames.is_empty() {
             return Vec::new();
@@ -2035,8 +2103,8 @@ impl DefaultLogger {
         terminal: &TerminalContext,
         frame_indent: usize,
     ) -> String {
-        let frame = match self.evaluator.reflection().evaluate(frame) {
-            Ok(frame) => frame,
+        let frame = match self.evaluator.evaluator().eval(frame) {
+            Ok(frame) => frame.into_value(),
             Err(error) => {
                 return format!(
                     "{}msg: <context rendering failed: {error}>",
@@ -2102,18 +2170,17 @@ impl DefaultLogger {
     }
 
     fn context_message_header(&self, message: &Value, terminal: &TerminalContext) -> String {
-        let Some(severity) = self
-            .evaluator
-            .get_optional(message, "msg.severity")
-            .ok()
-            .flatten()
+        let values = self.evaluator.values();
+        let Ok(severity) = values
+            .access_names(message, ["msg", "severity"])
+            .and_then(|severity| self.evaluator.evaluator().eval(&severity))
         else {
             return "msg: ".to_owned();
         };
-        let Ok(key) = self.evaluator.reflection().atom_key(&severity) else {
+        let Ok(key) = self.evaluator.reflection().atom_key(severity.as_value()) else {
             return "msg: ".to_owned();
         };
-        match immediate_diagnostic_text(&key).as_deref() {
+        match diagnostic_text(&self.evaluator, &key).as_deref() {
             Some("info") => Self::severity_header(Severity::Info, terminal),
             Some("warn") => Self::severity_header(Severity::Warning, terminal),
             Some("error") => Self::severity_header(Severity::Error, terminal),
@@ -2151,10 +2218,10 @@ impl DefaultLogger {
     fn summarize_context_frame(&self, frame: &Value) -> String {
         let reflection = self.evaluator.reflection();
         let Ok(entries) = reflection.dictionary_items(frame) else {
-            return diagnostic_value_kind(&self.evaluator.values(), frame).to_owned();
+            return diagnostic_value_kind(&self.evaluator, frame).to_owned();
         };
         let [(tag, payload)] = entries.as_slice() else {
-            return diagnostic_value_kind(&self.evaluator.values(), frame).to_owned();
+            return diagnostic_value_kind(&self.evaluator, frame).to_owned();
         };
 
         let values = self.evaluator.values();
@@ -2180,14 +2247,14 @@ impl DefaultLogger {
             return self.runtime_context_summary(payload);
         }
         self.context_tag_text(tag)
-            .unwrap_or_else(|| diagnostic_value_kind(&self.evaluator.values(), frame).to_owned())
+            .unwrap_or_else(|| diagnostic_value_kind(&self.evaluator, frame).to_owned())
     }
 
     fn eval_context_summary(&self, payload: &Value) -> String {
         let operation = self
-            .context_field_tag_text(payload, "op")
+            .context_field_tag_text(payload, &["op"])
             .map(|operation| operation.replace('_', " "));
-        let path = self.context_field_text(payload, "args.path");
+        let path = self.context_field_text(payload, &["args", "path"]);
         match (operation, path) {
             (Some(operation), Some(path)) => format!("eval: {operation} `{path}`"),
             (Some(operation), None) => format!("eval: {operation}"),
@@ -2197,8 +2264,8 @@ impl DefaultLogger {
     }
 
     fn g_context_summary(&self, payload: &Value) -> String {
-        let definition = self.context_field_text(payload, "definition");
-        let line = self.context_field_text(payload, "line");
+        let definition = self.context_field_text(payload, &["definition"]);
+        let line = self.context_field_text(payload, &["line"]);
         match (definition, line) {
             (Some(definition), Some(line)) => {
                 format!("g: definition `{definition}` on line {line}")
@@ -2210,7 +2277,7 @@ impl DefaultLogger {
     }
 
     fn import_context_summary(&self, payload: &Value) -> String {
-        self.context_field_text(payload, "request.file")
+        self.context_field_text(payload, &["request", "file"])
             .map_or_else(
                 || "import".to_owned(),
                 |request| format!("import: request `{request}`"),
@@ -2218,22 +2285,22 @@ impl DefaultLogger {
     }
 
     fn asm_context_summary(&self, payload: &Value) -> String {
-        self.context_field_text(payload, "result").map_or_else(
+        self.context_field_text(payload, &["result"]).map_or_else(
             || "asm".to_owned(),
             |result| format!("asm: result `{result}`"),
         )
     }
 
     fn conf_context_summary(&self, payload: &Value) -> String {
-        self.context_field_text(payload, "entry").map_or_else(
+        self.context_field_text(payload, &["entry"]).map_or_else(
             || "conf".to_owned(),
             |entry| format!("conf: entry `{entry}`"),
         )
     }
 
     fn task_context_summary(&self, payload: &Value) -> String {
-        let operation = self.context_field_tag_text(payload, "operation");
-        let id = self.context_field_text(payload, "id");
+        let operation = self.context_field_tag_text(payload, &["operation"]);
+        let id = self.context_field_text(payload, &["id"]);
         match (operation, id) {
             (Some(operation), Some(id)) => format!("task: {operation} task {id}"),
             (Some(operation), None) => format!("task: {operation}"),
@@ -2244,15 +2311,15 @@ impl DefaultLogger {
 
     fn runtime_context_summary(&self, payload: &Value) -> String {
         let operation = self
-            .context_field_tag_text(payload, "op")
+            .context_field_tag_text(payload, &["op"])
             .map(|operation| operation.replace('_', " "));
-        let work = self.context_field_text(payload, "args.work");
-        let session = self.context_field_text(payload, "args.session");
-        let task = self.context_field_text(payload, "args.task");
-        let delivery = self.context_field_text(payload, "args.delivery");
-        let endpoint = self.context_field_text(payload, "args.endpoint");
+        let work = self.context_field_text(payload, &["args", "work"]);
+        let session = self.context_field_text(payload, &["args", "session"]);
+        let task = self.context_field_text(payload, &["args", "task"]);
+        let delivery = self.context_field_text(payload, &["args", "delivery"]);
+        let endpoint = self.context_field_text(payload, &["args", "endpoint"]);
         let kind = self
-            .context_field_tag_text(payload, "args.kind")
+            .context_field_tag_text(payload, &["args", "kind"])
             .map(|kind| kind.replace('_', " "));
 
         let mut details = Vec::new();
@@ -2283,27 +2350,29 @@ impl DefaultLogger {
         }
     }
 
-    fn context_field_text(&self, value: &Value, path: &str) -> Option<String> {
+    fn context_field_text(&self, value: &Value, path: &[&str]) -> Option<String> {
         self.evaluator
-            .get(value, path)
+            .values()
+            .access_names(value, path.iter().copied())
             .ok()
-            .and_then(|value| immediate_diagnostic_text(&value))
+            .and_then(|value| diagnostic_text(&self.evaluator, &value))
     }
 
-    fn context_field_tag_text(&self, value: &Value, path: &str) -> Option<String> {
+    fn context_field_tag_text(&self, value: &Value, path: &[&str]) -> Option<String> {
         self.evaluator
-            .get(value, path)
+            .values()
+            .access_names(value, path.iter().copied())
             .ok()
             .and_then(|value| self.context_tag_text(&value))
     }
 
     fn context_tag_text(&self, tag: &Value) -> Option<String> {
-        immediate_diagnostic_text(tag).or_else(|| {
+        diagnostic_text(&self.evaluator, tag).or_else(|| {
             self.evaluator
                 .reflection()
                 .atom_key(tag)
                 .ok()
-                .and_then(|key| immediate_diagnostic_text(&key))
+                .and_then(|key| diagnostic_text(&self.evaluator, &key))
         })
     }
 
@@ -2353,32 +2422,42 @@ impl DefaultLogger {
     }
 }
 
-fn immediate_diagnostic_text(value: &Value) -> Option<String> {
+fn diagnostic_text(assembler: &Assembler, value: &Value) -> Option<String> {
+    let value = assembler.evaluator().eval(value).ok()?;
     value
-        .as_binary()
+        .as_bytes()
         .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
-        .or_else(|| value.as_number_text())
+        .or_else(|| value.number_text())
 }
 
-fn diagnostic_value_kind(values: &glam::Values, value: &Value) -> &'static str {
-    if value.is_undefined() {
-        return "Undefined";
-    }
+fn diagnostic_value_kind(assembler: &Assembler, value: &Value) -> &'static str {
+    let values = assembler.values();
     if value == &values.abstract_global_path(["builtin", "unit"]) {
         return "Unit";
     }
-    match value.kind() {
-        glam::ValueKind::Atom => "Atom",
-        glam::ValueKind::Number => "Number",
-        glam::ValueKind::Binary => "Binary",
-        glam::ValueKind::List => "List",
-        glam::ValueKind::Dict => "Dict",
-        glam::ValueKind::Function => "Function",
-        glam::ValueKind::Net => "Net",
-        glam::ValueKind::Lazy => "Lazy",
-        glam::ValueKind::Sealed => "Sealed",
-        glam::ValueKind::Opaque => "Opaque",
-        _ => "Value",
+    match assembler.reflection().kind(value) {
+        Err(_) => "Foreign",
+        Ok(glam::ValueKind::Atom) => "Atom",
+        Ok(glam::ValueKind::Number) => "Number",
+        Ok(glam::ValueKind::Binary) => "Binary",
+        Ok(glam::ValueKind::List) => "List",
+        Ok(glam::ValueKind::Dict) => {
+            if assembler
+                .reflection()
+                .dictionary_items(value)
+                .is_ok_and(|items| items.is_empty())
+            {
+                "Undefined"
+            } else {
+                "Dict"
+            }
+        }
+        Ok(glam::ValueKind::Function) => "Function",
+        Ok(glam::ValueKind::Net) => "Net",
+        Ok(glam::ValueKind::Lazy) => "Lazy",
+        Ok(glam::ValueKind::Sealed) => "Sealed",
+        Ok(glam::ValueKind::Opaque) => "Opaque",
+        Ok(_) => "Value",
     }
 }
 
@@ -2485,6 +2564,23 @@ fn inspect_g_source_command(path: &Path, verbosity: glam::cli::ParseVerbosity) -
 mod tests {
     use super::*;
     use glam::SourceSystem;
+
+    trait TestValueFacade {
+        fn get(&self, root: &Value, path: &str) -> Result<Value, Error>;
+        fn get_evaluated(&self, root: &Value, path: &str) -> Result<glam::EvaluatedValue, Error>;
+    }
+
+    impl TestValueFacade for Assembler {
+        fn get(&self, root: &Value, path: &str) -> Result<Value, Error> {
+            self.get_evaluated(root, path)
+                .map(glam::EvaluatedValue::into_value)
+        }
+
+        fn get_evaluated(&self, root: &Value, path: &str) -> Result<glam::EvaluatedValue, Error> {
+            let value = self.values().access_names(root, path.split('.'))?;
+            self.evaluator().eval(&value)
+        }
+    }
 
     fn record<I, S>(values: &glam::Values, entries: I) -> Value
     where
@@ -3009,7 +3105,7 @@ mod tests {
         assert_eq!(
             logger
                 .evaluator
-                .get(&enriched, "viewer.auto_indent")
+                .get_evaluated(&enriched, "viewer.auto_indent")
                 .expect("viewer should declare automatic indentation")
                 .as_i64(),
             Some(4)
@@ -3017,32 +3113,37 @@ mod tests {
         assert_eq!(
             logger
                 .evaluator
-                .get(&enriched, "viewer.header")
+                .get_evaluated(&enriched, "viewer.header")
                 .expect("viewer should materialize the complete message header")
-                .as_binary(),
+                .as_bytes(),
             Some(b"\x1b[36minfo\x1b[0m: ".as_slice())
         );
         assert_eq!(
             logger
                 .evaluator
-                .get(&enriched, "viewer.anchor_indent")
+                .get_evaluated(&enriched, "viewer.anchor_indent")
                 .expect("viewer should expose its section anchor indentation")
-                .as_binary(),
+                .as_bytes(),
             Some(b"  ".as_slice())
         );
         assert_eq!(
             logger
                 .evaluator
-                .get(&enriched, "viewer.term")
+                .get_evaluated(&enriched, "viewer.term")
                 .expect("viewer should declare its terminal")
-                .as_binary(),
+                .as_bytes(),
             Some(b"xterm-256color".as_slice())
         );
+        let viewer = logger
+            .evaluator
+            .get_evaluated(diagnostic.emission(), "viewer")
+            .expect("the raw diagnostic should expose undefined viewer metadata");
         assert!(
             logger
                 .evaluator
-                .get(diagnostic.emission(), "viewer")
-                .is_err()
+                .reflection()
+                .dictionary_items(viewer.as_value())
+                .is_ok_and(|items| items.is_empty())
         );
     }
 
@@ -3051,13 +3152,13 @@ mod tests {
         let assembler = Assembler::default();
         assert_eq!(
             assembler
-                .get(
+                .get_evaluated(
                     &assembly_result_context(&assembler.values())
                         .expect("result context should be local"),
                     "asm.result",
                 )
                 .expect("assembly result context should identify its output")
-                .as_binary(),
+                .as_bytes(),
             Some(b"asm.result".as_slice())
         );
     }
@@ -3170,6 +3271,7 @@ mod tests {
             input.clone(),
             DiagnosticBus::for_runtime(&input.runtime),
             assembler.reflection_environment_for_role("logger"),
+            assembler.clone(),
         ));
         let task = EffectRun::new(
             &input.runtime,
@@ -3267,6 +3369,7 @@ mod tests {
             input.clone(),
             DiagnosticBus::for_runtime(&input.runtime),
             assembler.reflection_environment_for_role("logger"),
+            assembler.clone(),
         ));
         let task = EffectRun::new(
             &input.runtime,
@@ -3371,6 +3474,7 @@ mod tests {
             input.clone(),
             logger_diagnostics.clone(),
             assembler.reflection_environment_for_role("logger"),
+            assembler.clone(),
         ));
         let lifecycle = EffectLifecycle::new(&input.runtime);
         let task = EffectRun::new(
@@ -3482,6 +3586,7 @@ mod tests {
             input.clone(),
             DiagnosticBus::for_runtime(&input.runtime),
             assembler.reflection_environment_for_role("logger"),
+            assembler.clone(),
         ));
         let exit_lifecycle = EffectLifecycle::new(&input.runtime);
         let blocked_lifecycle = EffectLifecycle::new(&input.runtime);
@@ -3523,9 +3628,9 @@ mod tests {
             .expect("report should retain the exit message");
         assert_eq!(
             assembler
-                .get(exit_message, "msg.text")
+                .get_evaluated(exit_message, "msg.text")
                 .expect("exit error should retain its structured message")
-                .as_binary(),
+                .as_bytes(),
             Some(b"settled exit failure".as_slice())
         );
         assert_eq!(report.killed_work().len(), 1);
@@ -3599,6 +3704,7 @@ mod tests {
             input.clone(),
             DiagnosticBus::for_runtime(&input.runtime),
             assembler.reflection_environment_for_role("logger"),
+            assembler.clone(),
         ));
         let lifecycle = EffectLifecycle::new(&input.runtime);
         let task = EffectRun::new(
@@ -3834,6 +3940,7 @@ mod tests {
             input.clone(),
             diagnostics.clone(),
             assembler.reflection_environment_for_role("logger"),
+            assembler.clone(),
         );
 
         <LoggerTaskHost as ReflectionServices>::emit_diagnostic(

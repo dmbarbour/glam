@@ -410,13 +410,17 @@ fn render_explanation_detail(assembler: &Assembler, explanations: &[Value]) -> S
 }
 
 fn render_explanation(assembler: &Assembler, explanation: &Value) -> String {
-    let explanation = match assembler.evaluate(explanation) {
+    let explanation = match assembler.evaluator().eval(explanation) {
         Ok(value) => value,
         Err(error) => return format!("explanation unavailable ({error})"),
     };
-    if let Some(text) = utf8_text(&explanation) {
+    if let Some(text) = explanation
+        .as_bytes()
+        .and_then(|bytes| String::from_utf8(bytes.to_vec()).ok())
+    {
         return text;
     }
+    let explanation = explanation.into_value();
 
     let usage = explanation_field(assembler, &explanation, "usage");
     let summary = explanation_field(assembler, &explanation, "summary");
@@ -433,14 +437,10 @@ fn render_explanation(assembler: &Assembler, explanation: &Value) -> String {
 }
 
 fn explanation_field(assembler: &Assembler, explanation: &Value, field: &str) -> Option<String> {
-    let value = assembler.get(explanation, field).ok()?;
-    if value.is_undefined() {
-        return None;
-    }
-    let value = assembler.evaluate(&value).ok()?;
-    utf8_text(&value)
-}
-
-fn utf8_text(value: &Value) -> Option<String> {
-    String::from_utf8(value.as_binary()?.to_vec()).ok()
+    let values = assembler.values();
+    let value = values.access_names(explanation, [field]).ok()?;
+    let value = assembler.evaluator().eval(&value).ok()?;
+    value
+        .as_bytes()
+        .and_then(|bytes| String::from_utf8(bytes.to_vec()).ok())
 }

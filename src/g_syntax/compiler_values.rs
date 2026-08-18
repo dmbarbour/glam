@@ -25,6 +25,8 @@ struct GCompilerValues {
     reflection_annotator: Value,
     pure_if_runner: Value,
     pure_match_runner: Value,
+    defined_or: Value,
+    require_defined: Value,
     macro_environment: Value,
     effects: Mutex<HashMap<Key, Value>>,
 }
@@ -116,6 +118,8 @@ impl GCompilerValues {
             value,
         };
 
+        let pure_if_runner = build_pure_conditional_runner(values, Builtin::IfResult);
+        let defined_or = build_defined_or(values, &build_cache, pure_if_runner.clone());
         Self {
             math: make_module(math_value),
             list: make_module(list_value),
@@ -123,7 +127,9 @@ impl GCompilerValues {
             empty_object_defs: build_empty_object_defs(values),
             constant_object_defs,
             reflection_annotator: build_reflection_annotator(values, &build_cache),
-            pure_if_runner: build_pure_conditional_runner(values, Builtin::IfResult),
+            require_defined: build_require_defined(values, defined_or.clone()),
+            defined_or,
+            pure_if_runner,
             pure_match_runner: build_pure_conditional_runner(values, Builtin::MatchResult),
             macro_environment: build_macro_environment(values),
             effects,
@@ -163,6 +169,14 @@ pub(in crate::g_syntax) fn empty_object_defs(values: &CoreValueFactory) -> Value
 pub(in crate::g_syntax) fn constant_object_defs(values: &CoreValueFactory, value: Value) -> Value {
     let function = with_values(values, |compiler| compiler.constant_object_defs.clone());
     apply_closed(values, function, [value])
+}
+
+pub(in crate::g_syntax) fn defined_or(values: &CoreValueFactory) -> Value {
+    with_values(values, |compiler| compiler.defined_or.clone())
+}
+
+pub(in crate::g_syntax) fn require_defined(values: &CoreValueFactory) -> Value {
+    with_values(values, |compiler| compiler.require_defined.clone())
 }
 
 pub(in crate::g_syntax) fn reflection_annotator_resolved(
@@ -444,6 +458,87 @@ fn build_could(values: &CoreValueFactory, not: Value) -> Value {
             vec![condition],
             ResolvedExpr::apply(ResolvedExpr::Embedded(not), [inner]),
         ),
+    )
+}
+
+fn build_defined_or(
+    values: &CoreValueFactory,
+    cache: &dyn EffectValueCache,
+    pure_if_runner: Value,
+) -> Value {
+    let mut locals = ResolverContext::default();
+    let fallback = locals.push_internal_binding("<defined-fallback>");
+    let candidate = locals.push_internal_binding("<defined-candidate>");
+    let is_undefined = apply_builtin(
+        Builtin::PatternDictIsEmpty,
+        [ResolvedExpr::Local(candidate)],
+    );
+    let use_fallback = effect_call(values, cache, "r", [ResolvedExpr::Local(fallback)]);
+    let undefined_branch = effect_then(
+        values,
+        cache,
+        is_undefined,
+        use_fallback,
+        "defined-or condition",
+        &mut locals,
+    );
+    let defined_branch = effect_call(values, cache, "r", [ResolvedExpr::Local(candidate)]);
+    let choice = effect_call(
+        values,
+        cache,
+        "cut",
+        [effect_call(
+            values,
+            cache,
+            "alt",
+            [undefined_branch, defined_branch],
+        )],
+    );
+    let selected = ResolvedExpr::apply(ResolvedExpr::Embedded(pure_if_runner), [choice]);
+    evaluate_closed(
+        values,
+        ResolvedExpr::lambda(vec![fallback, candidate], selected),
+    )
+}
+
+fn build_require_defined(values: &CoreValueFactory, defined_or: Value) -> Value {
+    let mut locals = ResolverContext::default();
+    let name = locals.push_internal_binding("<required-name>");
+    let candidate = locals.push_internal_binding("<required-candidate>");
+    let singleton = |key: &str, value| {
+        apply_builtin(
+            Builtin::DictSingleton,
+            [
+                ResolvedExpr::Embedded(Value::Atom(atom_from_str(key))),
+                value,
+            ],
+        )
+    };
+    let message = singleton(
+        "msg",
+        singleton(
+            "text",
+            ResolvedExpr::Embedded(Value::binary_from_text("required value is undefined")),
+        ),
+    );
+    let failure = apply_builtin(
+        Builtin::DictUnion,
+        [message, singleton("name", ResolvedExpr::Local(name))],
+    );
+    let failure = apply_builtin(
+        Builtin::Anno,
+        [
+            ResolvedExpr::Embedded(Value::Atom(atom_from_str("error"))),
+            failure,
+        ],
+    );
+    let required = ResolvedExpr::apply(
+        ResolvedExpr::Embedded(defined_or),
+        [failure, ResolvedExpr::Local(candidate)],
+    );
+    evaluate_closed(
+        values,
+        ResolvedExpr::lambda(vec![name, candidate], required),
     )
 }
 

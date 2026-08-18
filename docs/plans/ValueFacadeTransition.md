@@ -1,6 +1,6 @@
 # Value Facade Transition Plan
 
-Status: proposed on 2026-08-17. No implementation phases are complete.
+Status: complete (2026-08-18).
 
 This plan resolves
 [CCR-011](../reviews/CodeCleanup_2026-08-15.md#ccr-011--presence-oriented-assemblergetget_optional-remains-a-compatibility-interpreter)
@@ -406,7 +406,7 @@ operation.
 
 ### Immediate extraction scope
 
-The current public surface provides `as_binary`, `as_i64`,
+The pre-transition public surface provided `as_binary`, `as_i64`,
 `as_rational_i64`, `as_f64`, and `as_number_text`, plus `is_undefined` and
 `kind`. The implementation audit found:
 
@@ -454,7 +454,7 @@ tests. Completion is recorded here as phases land.
 
 ### Phase 0 — Inventory and Contract Latching
 
-Status: pending.
+Status: complete (2026-08-17).
 
 #### Phase 0A — Classify callers
 
@@ -472,6 +472,48 @@ Verification:
 - Any surprising semantics become an explicit amendment to this plan before
   implementation.
 
+Phase 0A result (2026-08-17): complete.
+
+The compiler-assisted inventory found 423 typed references across all Cargo
+targets. The largest test cohorts are `tests/public_api.rs` (133), reflection
+tests (102), `api` tests (72), macro-expansion tests (29), CLI tests (14), and
+reflection-store tests (11). Production sources contain 43 typed references;
+three are compatibility implementations delegating to another compatibility
+method rather than independent policy callers.
+
+The public surface totals are:
+
+| Surface | Typed references | Classification |
+| --- | ---: | --- |
+| `Assembler::apply` | 22 | semantic composition followed by demand |
+| `Assembler::evaluate` | 56 | semantic WHNF demand |
+| `Assembler::{get,get_optional}` | 155 | semantic access plus caller-local required/fallback policy |
+| `Assembler::to_binary` | 83 | semantic binary assertion and host extraction |
+| `Assembler::binary_slice` | 4 | compatibility extraction; no production caller |
+| `ReflectionInspector::{evaluate,list_items}` | 7 | diagnostic/viewer representation inspection |
+| immediate `Value` observations | 96 | scalar extraction or representation inspection |
+
+Production `get_optional` callers use absence only to select a default
+configuration/CLI behavior or omit an optional diagnostic field. None needs
+presence to be a first-class Glam result, and none depends on distinguishing
+absence without later applying its own policy. Required lookups likewise use
+ordinary access followed by an embedding-level assertion. The inventory
+therefore confirms that no production caller needs `Option<Value>` as a core
+semantic API.
+
+The representation-sensitive production uses are confined to diagnostic
+transport decoding and the default logger/viewer. Dictionary and atom
+iteration there remain explicit reflection. Logger calls to
+`ReflectionInspector::evaluate` and `list_items` mix ordinary WHNF/list
+materialization with that reflection policy and should migrate to the semantic
+evaluator/list facade while retaining reflection only for representation
+inspection.
+
+No inventory finding changes the target API. Direct `.g` equivalence fixtures
+for constructors which do not exist yet will land with their Phase 1
+implementation; Phase 0B latches the existing access/annotation and demand
+boundaries first.
+
 #### Phase 0B — Latch boundary behavior
 
 - Add focused characterization tests showing that the existing
@@ -487,9 +529,19 @@ Verification:
 The tests should expose the current mismatch before changing behavior where
 feasible, then be updated only when the intended new contract lands.
 
+Phase 0B result (2026-08-17): complete.
+
+The new characterization test observes both the producer state of an
+unresolved lazy value and the exact subscription count of an unresolved
+promise. `Values::{access,annotate}` leave both untouched, and their constructed
+results remain unclaimed lazy values. Existing tests continue to cover
+structured binary failures, nested evaluation context, path-demand context,
+and foreign-runtime rejection at construction and demand boundaries. The full
+format, lint, and test suite passes at this checkpoint.
+
 ### Phase 1 — No-demand `Values` Composition
 
-Status: pending.
+Status: complete (2026-08-17).
 
 #### Phase 1A — Batched application and paths
 
@@ -507,6 +559,17 @@ Verification:
 - Names containing dots remain one name.
 - Empty paths and argument lists preserve runtime identity.
 
+Phase 1A result (2026-08-17): complete.
+
+`Values::apply` now retains a whole application batch in one lazy semantic
+application source. `access_path` validates all keys before constructing the
+access chain, and `access_names` treats each supplied string as one complete
+atom name. Tests compare batched and nested construction with direct `.g`
+application, verify argument order, prove promised callees remain
+unsubscribed, distinguish a dotted name from two path components, cover empty
+identity behavior, and reject foreign-runtime roots and members. Assembly
+result selection is the first migrated production cohort.
+
 #### Phase 1B — List slicing and binary annotation
 
 - Add no-demand list slicing through the ordinary `Slice` builtin.
@@ -520,6 +583,18 @@ Verification covers compact binaries, value lists, lazy concatenations, empty
 and boundary ranges, invalid ranges, structured item failures, array
 materialization, deque balancing, preservation of lazy element values, and
 proof that construction performs no demand.
+
+Phase 1B result (2026-08-17): complete.
+
+`Values` now distinguishes host `bytes` from semantic `anno`, with temporary
+`binary` and `annotate` aliases, and provides lazy slice, binary, array, and
+deque constructors. `Assembler::binary_slice` delegates through semantic
+slice and binary annotation; its separate recursive list traversal and the
+now-unused range-output helpers have been removed. Tests cover compact and
+value-list slices, invalid ranges at demand time, strict array and balanced
+deque materialization, preservation of lazy elements, exact no-demand promise
+state, and foreign-runtime rejection. The public slicing test now exercises
+the semantic composition path rather than the compatibility helper.
 
 #### Phase 1C — Basic dictionary composition
 
@@ -543,9 +618,26 @@ union conflicts, update introduction/replacement/removal, and proof that
 construction performs no demand. No public result contains an unused
 dictionary remainder.
 
+Phase 1C result (2026-08-17): complete.
+
+`empty_dict` is now the primary immediate constructor and all in-repository
+callers have migrated from `empty_record`; the old name remains only as a
+temporary delegate. Singleton, hierarchical union, and path update are lazy
+semantic builtin calls hidden behind `Values`. Source-comparison tests cover
+nested merge, ambiguity, introduction, replacement, and deletion by `{}`;
+separate state assertions prove construction leaves promised operands
+unsubscribed.
+
+The cached `defined_or` and `require_defined` functions are lowered closed Glam
+helpers. The first uses ordinary recursive equality with `{}`, so dictionaries
+whose fields are themselves logically undefined select the fallback. The
+second uses the existing semantic defined assertion. They remain crate-private
+until Phase 4 caller migration demonstrates whether any broader convenience
+surface is warranted; no `Option<Value>` or remainder record was introduced.
+
 ### Phase 2 — `ValueEvaluator`
 
-Status: pending.
+Status: complete (2026-08-17).
 
 #### Phase 2A — Introduce `EvaluatedValue`
 
@@ -568,9 +660,21 @@ Verification:
 - Scalar tests cover signed bounds, exact rational pairs, the documented lossy
   float conversion, and canonical arbitrary-precision text.
 - Array extraction preserves order and leaves deliberately lazy elements
-  unclaimed. Empty arrays succeed; deques, compact byte chunks,
+  unclaimed. The canonical empty list succeeds (an empty array and empty deque
+  have the same representation); nonempty deques, compact byte chunks,
   concatenations, and unresolved list spines are declined without changing
   claim or subscription state.
+
+Phase 2A result (2026-08-17): complete.
+
+Public `EvaluatedValue` now witnesses outer WHNF while retaining an ordinary
+runtime-rooted `Value`. It supports explicit borrow/conversion, byte and number
+views, and owned extraction from exactly one strict value leaf. Tests cover
+numeric bounds and arbitrary precision, witness lifetime after the assembler
+handle is dropped, lazy array elements, compact bytes, concatenations,
+nonempty deques, and deferred spines. Array inspection performs no demand. The
+canonical empty list necessarily qualifies regardless of whether it was
+produced by `array` or `deque`, since those empty representations coincide.
 
 #### Phase 2B — Introduce evaluator facade
 
@@ -589,6 +693,18 @@ failure orderings; sleeps and repetition are supplementary stress checks, not
 the primary proof. An already-WHNF value completes without queueing work, and
 repeated evaluation of one fulfilled lazy value does not recompute it.
 
+Phase 2B result (2026-08-17): complete.
+
+`Assembler::evaluator()` now provides the sole `ValueEvaluator::eval`
+operation, backed by the existing client-demand context. The temporary
+`Assembler::evaluate` method delegates through it. Tests cover immediate
+WHNF, foreign-runtime rejection, a retained resolver-promise subscription
+which wakes a later demand, lazy result caching, and structured failure
+preservation. A separate worker-claimed lazy test proves that synchronous
+evaluation waits when the runtime has an authoritative owner for future
+progress. Resolver-owned promises deliberately may report stable blockage:
+an arbitrary external resolver is not runtime-owned progress.
+
 #### Phase 2C — Separate composition from extraction
 
 - Migrate byte extraction to `Values::anno_binary`, `ValueEvaluator::eval`, and
@@ -603,9 +719,18 @@ failure. A prefix slice with a deliberately poisoned unused tail proves that
 the new path preserves slice demand rather than materializing the whole input.
 The public evaluator surface is audited to contain only `eval`.
 
+Phase 2C result (2026-08-17): complete.
+
+Compatibility byte extraction now composes `anno_binary`, `eval`, and
+`as_bytes`; it no longer performs its own semantic conversion. Slicing remains
+entirely under `Values`. A poisoned-tail test proves that prefix slicing plus
+binary assertion does not materialize an unused deferred suffix. Existing
+structured failure, invalid byte, non-list, compact binary, and value-list
+tests continue to exercise this single path.
+
 ### Phase 3 — Explicit Reflection Boundary
 
-Status: pending.
+Status: complete (2026-08-17).
 
 #### Phase 3A — Split the current inspector
 
@@ -624,11 +749,22 @@ before host extraction, dictionary iteration order and atom identity remain
 unchanged, and no ordinary caller acquires reflection merely to evaluate or
 enumerate a semantic list.
 
+Phase 3A result (2026-08-17): complete.
+
+Reflection documentation now states its runtime-specific, unstable, and
+non-reproducible boundary. Diagnostic, CLI, and public API callers enumerate
+lists through `anno_array`, `eval`, and `array_items`; ordinary WHNF callers
+use the evaluator. The transitional inspector methods remain only for direct
+replacement comparison and are scheduled for Phase 5 deletion. Tests verify
+equivalent enumeration, compact-byte expansion, and preservation of the
+existing reflective dictionary and atom operations.
+
 #### Phase 3B — Representation observation
 
 - Move pre-demand `Value::kind` behavior to a clearly named reflection method.
-- Replace public `is_undefined` callers with ordinary Glam matching/assertion
-  helpers rather than another representation check.
+- Establish ordinary Glam matching/assertion helpers as the replacement for
+  public `is_undefined`; migrate production callers in Phase 4 rather than
+  adding another representation check.
 - Keep immediate `Value` observations as documented transitional delegates
   until Phase 4 migrates their production callers.
 - Defer detailed lazy-state APIs unless needed to replace a real caller.
@@ -637,9 +773,19 @@ Verification shows that representation kind can report an unresolved lazy
 value without forcing it, while ordinary semantic callers use evaluation,
 extractors, and patterns rather than representation-kind branching.
 
+Phase 3B result (2026-08-17): complete.
+
+`ReflectionInspector::kind` now performs the runtime-provenance check and
+reports current representation without demand. The default logger's kind
+rendering uses that explicit boundary. An unresolved-promise test proves kind
+inspection neither subscribes nor assigns it. Immediate `Value` delegates and
+remaining undefined-policy callers are intentionally retained only until the
+coordinated Phase 4 migration, avoiding a second temporary public selection
+API.
+
 ### Phase 4 — Production Caller Migration
 
-Status: pending.
+Status: complete (2026-08-18).
 
 #### Phase 4A — Configuration and CLI
 
@@ -656,6 +802,14 @@ context remains an explicit host composition policy (for example, an
 `anno context:...` wrapper at the configuration boundary), not hidden behavior
 inside `Values::access_names`.
 
+Phase 4A result (2026-08-18): complete. Configuration selection now composes
+semantic name-array access, cached Glam defined/fallback policy, and explicit
+evaluation. `conf.env`, `conf.cli`, `conf.log`, and completion-script selection
+wrap the delayed candidate in an explicit `anno context:...` path frame; the
+facade itself neither parses dotted host strings nor invents demand context.
+Focused CLI library and end-to-end configuration tests pass for missing,
+defined, failing, and fallback entries.
+
 #### Phase 4B — Diagnostics, viewers, and logger
 
 - Use semantic access for known diagnostic paths.
@@ -667,6 +821,13 @@ Verification exercises plain and structured messages, origins, nested context
 frames, associated metadata inspection, and logger fallback. It confirms that
 reflection is used only for the privileged observations and that evaluator
 failures retain context through final rendering.
+
+Phase 4B result (2026-08-18): complete. The default logger uses semantic
+access/evaluation for known message fields and reserves reflection for atom
+identity, dictionary enumeration, and pre-demand representation kind. Context
+arrays cross through `anno_array` and `EvaluatedValue::array_items`; scalar
+text and number rendering crosses through evaluated extractors. The binary's
+22 logger/supervisor tests and all 49 CLI integration tests pass.
 
 #### Phase 4C — Assembly, macro, and reflection hosts
 
@@ -681,6 +842,13 @@ contracts, volume capabilities, reflection-task construction, and worker-zero
 and worker-enabled assembly. The same successful assembly bytes must result
 from both schedules.
 
+Phase 4C result (2026-08-18): complete. Assembly output, configured completion
+scripts, diagnostic formatting, and `.write_stderr` now explicitly construct
+binary annotations, evaluate them, and extract from `EvaluatedValue`.
+Transactional stderr output retains the already evaluated runtime value rather
+than extracting and reinjecting it. Macro protocol extraction uses the same
+composition. Macro protocols, executable samples, and hello assemblies pass.
+
 #### Phase 4D — Public tests and examples
 
 - Rewrite public API tests around the three explicit facades.
@@ -693,11 +861,37 @@ example must make construction, evaluation, and reflection crossings visible;
 none may import crate-private representations or depend on a compatibility
 delegate not named as transitional.
 
+Phase 4D result (2026-08-18): complete. `tests/public_api.rs` now acts as an
+external facade client: construction goes through `Values`, demand and scalar
+extraction through `ValueEvaluator`/`EvaluatedValue`, and representation
+inspection through `ReflectionInspector`. Its local readability helpers are
+compositions of those exported operations rather than compatibility delegates.
+All 44 public API tests pass.
+
+Phase 4 review: the production migration did not require a new facade. It
+confirmed that path-demand context is caller policy and raised the question of
+whether buffered output should require an evaluated runtime root. Phase 5B.2
+resolves that question in favor of unrestricted `Value` transport and
+callback-selected demand. Phase 5 has a larger internal-test migration than
+its original two checkpoints suggested, so the removal work is split below;
+this changes staging, not the target API.
+
 ### Phase 5 — Compatibility Removal and Audit
 
-Status: pending.
+Status: complete (2026-08-18).
 
 #### Phase 5A — Remove `Assembler` semantic helpers
+
+##### Phase 5A.1 — Migrate internal test clients
+
+- Add narrowly scoped test helpers which compose `Values`, `ValueEvaluator`,
+  and `EvaluatedValue`; do not add production compatibility surface.
+- Migrate unit tests in `api`, `reflection`, the reflection store, CLI, and the
+  binary crate away from the retiring methods.
+- Preserve tests whose purpose is the old/new differential only until their
+  replacement assertion is established, then remove the old side.
+
+##### Phase 5A.2 — Delete compatibility methods
 
 - Remove `Assembler::{apply,get,get_optional,evaluate,to_binary,binary_slice}`.
 - Remove transitional `ReflectionInspector::{evaluate,list_items}`.
@@ -708,32 +902,179 @@ Status: pending.
 Verification includes a repository-wide symbol search for every removed
 method and its private implementation helpers, followed by a public API build.
 
+Phase 5A result (2026-08-18): complete. Internal tests now use a test-only
+composition trait backed exclusively by `Values`, `ValueEvaluator`, and
+`EvaluatedValue`; tests which intentionally retain an unresolved value use
+`Values::access_path` directly. The `Assembler` semantic helpers, transitional
+reflection methods, `Values::empty_record`, private binary-slice interpreter,
+and obsolete path-context helper have been removed. `Values::empty_dict` is
+the sole empty dictionary/undefined constructor. Repository-wide symbol
+searches find no retired public method, and the 1164 library, 22 binary, 44
+public API, and 5 macro-protocol tests pass.
+
+One migration test exposed an incorrect timing assumption rather than a
+runtime defect: a resolver-owned promise is not authoritative runtime-owned
+future progress, so synchronous evaluation may report stable blockage before
+an external resolver runs. The deterministic replacement verifies that the
+blocked lazy producer retains exactly one promise subscription, resolution
+wakes it, and a later demand succeeds. The separate worker-claimed lazy test
+continues to prove that synchronous evaluation waits when progress has a
+runtime-known owner.
+
 #### Phase 5B — Audit `Value` and reflection
 
-- Remove public immediate observations which violate the selected facade
-  boundary.
+##### Phase 5B.1 — Migrate immediate observers
+
+- Move public-client scalar assertions to `EvaluatedValue` and pre-demand kind
+  assertions to reflection.
+- Keep direct core matches inside trusted implementation modules and test them
+  as implementation details, not through the public `Value` surface.
+
+Phase 5B.1 result (2026-08-18): complete. Public clients retain the
+`EvaluatedValue` witness through scalar and byte extraction, while pre-demand
+kind and empty-dictionary inspection are explicit reflection. The CLI search
+renderer no longer evaluates a value and immediately discards its witness;
+binary-crate tests likewise use evaluated extraction. Immediate number,
+undefined, and kind views on arbitrary `Value` are no longer public. Internal
+core matches remain available for transport decoding and implementation tests.
+Format, all-target clippy, the binary tests, and all 44 public facade tests pass
+at this checkpoint.
+
+##### Phase 5B.2 — Narrow `Value`
+
+The design checkpoint is resolved as follows:
+
+- Runtime input and output FIFOs continue to transport unrestricted `Value`.
+- Journaling, commit, and delivery neither force values nor require outer
+  WHNF. A lazy value may be delivered directly.
+- Output callbacks choose whether to evaluate their payload and may capture an
+  assembler/evaluator when semantic extraction is required.
+- `EvaluatedValue` is a proof of completed outer demand, not an isolation or
+  staging boundary. It neither prevents nested demand nor establishes a
+  schema for dictionaries and lists.
+- A future boundary that truly prohibits observation until another phase must
+  be represented explicitly, for example by an opaque `ValueEnvelope` and a
+  separate opening capability. This transition does not approximate that
+  policy through incidental WHNF checks.
+- Public scalar extraction belongs to `EvaluatedValue`. Immediate core
+  matches remain crate-private implementation fast paths and trusted protocol
+  decoders.
+
+##### Phase 5B.2a — Migrate the remaining output decoder
+
+- Give the logger stderr decoder explicit access to the assembler it already
+  retains through `MainEffects`.
+- Evaluate the delivered value in the callback, then extract bytes from its
+  `EvaluatedValue` witness.
+- Preserve the existing `.write_stderr` semantic check before transaction
+  commit; the delivery-side evaluation is the host decoder independently
+  enforcing its protocol, not a new primitive-layer requirement.
+- Add a regression proving the generic output journal accepts a lazy payload
+  without demanding it and that a callback may choose to evaluate it during
+  delivery.
+
+The logger specialization already retains the same `Assembler` in every task
+machine. Capturing a clone in its host-side decoder therefore adds no new
+ownership edge category; it only makes the decoder's existing protocol demand
+explicit.
+
+Phase 5B.2a result (2026-08-18): complete. The logger stderr decoder now
+evaluates its delivered payload explicitly and extracts bytes from the
+resulting witness. A runtime regression writes a deliberately lazy value,
+proves that journal construction and transaction commit leave it unclaimed,
+then proves that a decoder which captures an assembler may demand and deliver
+it. The focused runtime test and all 22 binary tests pass.
+
+##### Phase 5B.2b — Close the public `Value` surface
+
+- Make the remaining public `Value::as_binary` view crate-private.
 - Keep internal immediate matches where they are safe implementation fast
   paths.
 - Verify that every public pre-demand representation observation is explicitly
   reflective.
 - Verify that ordinary extraction is reachable without reflection.
+- Search exported source for public `Value` scalar/kind/undefined observers
+  and run the external public-API suite after the visibility change.
 
 Verification checks public visibility as well as call sites: arbitrary
 `Value` has no immediate scalar/representation inspection other than runtime
 ownership, `EvaluatedValue` owns immediate scalar extraction, and pre-demand
 kind and privileged iteration are available only through reflection.
 
+Phase 5B.2b result (2026-08-18): complete. `Value::as_binary` is now
+crate-private; `Value::runtime_id` is the only public method on the bare root.
+All public scalar and strict-array extraction lives on `EvaluatedValue`, while
+`ReflectionInspector` owns kind, atom-key, dictionary-entry, and associated
+metadata inspection. An all-target build, all-target clippy, 44 external
+public facade tests, and 5 macro-protocol tests pass after the visibility
+change.
+
 #### Phase 5C — Close CCR-011
 
+The final phase is split because documentation closure and the plan-wide
+completion audit prove different things.
+
+##### Phase 5C.1 — Close review and architecture documentation
+
 - Update the cleanup review with the final surface and verification results.
-- Mark all completed phases in this plan.
-- Promote any enduring semantic explanation into architecture/API docs; leave
-  transition-only detail here as history.
+- Promote the enduring construction/demand/reflection boundary into current
+  architecture/API documentation; leave transition-only detail here as
+  history.
+- Correct stale architecture text that assigns ordinary demand to reflection
+  or treats `Value` itself as an accessor service.
+
+Phase 5C.1 result (2026-08-18): complete. CCR-011 records the retired
+compatibility surface, final facade ownership, unrestricted FIFO decision, and
+verification evidence. Current assembly architecture now distinguishes
+no-demand `Values`, semantic `ValueEvaluator`, and privileged
+`ReflectionInspector`; diagnostic architecture explicitly states that event
+transport does not force payloads and that decoder demand is host policy.
+Transition chronology remains in this plan rather than the current-state
+architecture. Documentation diff checks and stale-claim searches pass.
+
+##### Phase 5C.2 — Plan-wide completion audit
+
+- Audit every invariant, target-surface item, migration row, phase result, and
+  verification-matrix entry against current source and tests.
+- Search for every removed compatibility symbol and unintended public
+  immediate observer.
+- Run focused facade/lifecycle coverage followed by all required repository
+  gates and end-to-end targets.
+- Record final evidence, mark the plan complete only after every requirement
+  has direct evidence, and close the active implementation goal.
 
 Final verification runs focused facade and lifecycle tests first, then the
 entire required check suite. Relevant end-to-end cases are run with zero and
 multiple workers so successful-value equivalence is exercised across both
 deterministic and concurrent scheduling.
+
+Phase 5C.2 result (2026-08-18): complete. The final source audit found every
+provisional target operation under its intended facade. `ValueEvaluator`
+contains only `eval`; immediate byte, number, and strict-array extraction lives
+on `EvaluatedValue`; and `Value::runtime_id` is the only public method on the
+bare value root. Reflection retains pre-demand kind observation, canonical
+dictionary iteration, atom-key inspection, and associated-metadata inspection
+behind its explicitly unstable boundary.
+
+The semantic invariants and verification matrix have direct coverage:
+
+| Requirement | Final evidence |
+| --- | --- |
+| No-demand construction | `access_and_annotation_construction_do_not_demand_inputs`, `values_apply_is_lazy_and_matches_source_application_order`, `list_and_representation_constructors_are_lazy_semantic_operations`, `dictionary_composition_is_lazy_and_rejects_foreign_members`, the opaque-net public tests, and `output_journaling_preserves_lazy_payload_until_decoder_demand` inspect lazy claims, promise subscriptions, or delayed delivery demand directly. |
+| Runtime provenance | `public_value_factories_reject_foreign_composite_members`, `value_evaluator_returns_a_runtime_rooted_whnf_witness`, `reflection_kind_observes_an_unresolved_promise_without_demand`, `assembler_boundaries_reject_foreign_values_before_evaluation_or_storage`, and the runtime-event boundary tests cover construction, demand, reflection, storage, and host events. |
+| Semantic composition | Application, complete-name and computed paths, source dictionary literals/union/update/removal, semantic binary slicing, array/deque normalization, and defined/required lookup helpers are compared with direct `.g` behavior in facade and public tests. |
+| Demand and extraction | Evaluator tests cover immediate and suspended WHNF demand, retained promise subscriptions, cached lazy success, structured failures, scalar bounds, arbitrary-precision number text, strict-array extraction, and witness lifetime after facade owners are dropped. |
+| Reflection boundary | Public reflection tests cover pre-demand kind without subscription, canonical dictionary entries, atom identity, and sealed metadata; current architecture documentation marks the surface unstable and outside reproducibility. |
+| Error context | Structured evaluator, binary assertion, path, configuration, import, diagnostic, and logger tests retain their Glam diagnostic data and contextual frames through final rendering. |
+| Scheduling equivalence | `ordinary_result_is_identical_across_worker_counts` compares successful CLI output with zero, one, and four workers; the executable and hello sample targets exercise the migrated assembly path. |
+| Compatibility removal | Repository-wide searches find no retired `Assembler` or `ReflectionInspector` symbol and no `Values::empty_record` use outside this historical plan/review. Exported-source inspection finds no public scalar, kind, undefined, or binary observer on arbitrary `Value`. |
+
+Focused completion runs passed 105 facade/lifecycle unit tests, 44 external
+public-API tests, 5 macro-protocol tests, 49 CLI tests, 5 executable-sample
+tests, and the independently timed hello-assembly test. Final
+`cargo fmt --check`, all-target/all-feature clippy with warnings denied, and
+`cargo test -q` all pass; the full test run includes 1165 library tests and
+all integration targets. No additional transition subphase is needed.
 
 ## Verification Strategy
 

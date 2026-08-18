@@ -17,7 +17,12 @@ fn binary_at(assembler: &Assembler, root: &Value, path: &str) -> Result<Bytes, E
     for part in path.split('.') {
         value = values.access(&value, values.atom_from_text(part))?;
     }
-    assembler.to_binary(&value)
+    let binary = values.anno_binary(value)?;
+    let evaluated = assembler.evaluator().eval(&binary)?;
+    evaluated
+        .as_bytes()
+        .map(Bytes::copy_from_slice)
+        .ok_or_else(|| Error::new("macro protocol result did not evaluate to binary data"))
 }
 
 fn assert_protocol_failure(source: &str, module: &str, expected: &str) {

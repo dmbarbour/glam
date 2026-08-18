@@ -1051,7 +1051,7 @@ fn lazy_core_value_path(values: &CoreValueFactory, value: Value, path: &[Key]) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::Assembler;
+    use crate::api::{Assembler, TestValueFacade};
 
     fn path(parts: &[&str]) -> Vec<Key> {
         parts.iter().map(Key::atom_from_text).collect()

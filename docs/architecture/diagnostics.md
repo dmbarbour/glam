@@ -100,6 +100,14 @@ record, releases every runtime lock, decodes the retained root, and invokes the
 host callback. Independent endpoints may deliver concurrently; one endpoint
 preserves commit order.
 
+The event layer transports unrestricted values and neither forces them nor
+uses outer WHNF as an admission policy. `.log` places its possibly lazy message
+inside an immediate transport envelope; `.write_stderr` performs its semantic
+binary assertion before committing the output intent. A decoder remains free
+to evaluate its delivered value explicitly. This choice is host policy rather
+than a primitive delivery guarantee, and nested diagnostic fields may remain
+lazy until formatting demands them.
+
 Decode errors, callback errors, and caught panics become persistent Rust-layer
 delivery failures. They remain reportable until explicitly acknowledged and
 make batch execution fail independently of whether rendering succeeds.
