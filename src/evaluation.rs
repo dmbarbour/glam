@@ -29,6 +29,7 @@ use crate::runtime::{EvaluationRuntimeId, RuntimeMutationAuthority, RuntimeValue
 
 mod coordinator;
 mod executor;
+mod observation;
 use coordinator::{
     ClaimedDeferredWork, ClaimedReflectionWork, ClaimedTaskWork, ClientDemandSnapshot,
     DeferredLazyCycleMember, DeferredProducer, DeferredWorkPoll, DeferredWorkReservation,
@@ -37,13 +38,13 @@ use coordinator::{
 pub(crate) use coordinator::{
     CompletionSubscriptionOutcome, CompletionSubscriptions, CompletionWake, EvaluationTaskBlock,
     EvaluationWorkCoordinator, RuntimeCoordinatorReadiness, RuntimeDeadlockWorkSnapshot,
-    RuntimeDependencySnapshot, RuntimeExitSnapshot, RuntimeObservationEpoch,
-    RuntimeObservationState, RuntimeWorkKindSnapshot, RuntimeWorkStateSnapshot,
-    ValidatedRuntimeSettlementPlan, WakeRegistration, WorkDependency,
+    RuntimeDependencySnapshot, RuntimeExitSnapshot, RuntimeWorkKindSnapshot,
+    RuntimeWorkStateSnapshot, ValidatedRuntimeSettlementPlan, WakeRegistration, WorkDependency,
 };
 #[cfg(test)]
 use coordinator::{ReflectionWorkSnapshot, test_wake_registration};
 pub(crate) use executor::EvaluationExecutor;
+pub(crate) use observation::{RuntimeObservationEpoch, RuntimeObservationState};
 
 #[cfg(test)]
 pub(crate) fn test_execution_resources(

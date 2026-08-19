@@ -19,8 +19,8 @@ use super::{
     ClientDemandOperation, ClientDemandResult, ClientDemandSink, EvaluationDemandState,
     EvaluationExitBlock, EvaluationFailure, EvaluationMachinePoll, EvaluationSessionId,
     EvaluationTaskId, EvaluationTaskMachine, EvaluationTaskStatus, EvaluationWaitTerminal,
-    EvaluationWaitToken, ExitIntent, RuntimeFailureLedger, TaskFailureLedger, TaskStatusPublisher,
-    TaskStatusWake,
+    EvaluationWaitToken, ExitIntent, RuntimeFailureLedger, RuntimeObservationEpoch,
+    RuntimeObservationState, TaskFailureLedger, TaskStatusPublisher, TaskStatusWake,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,76 +36,6 @@ pub(crate) struct EvaluationWorkId(NonZeroU64);
 impl EvaluationWorkId {
     pub(crate) fn get(self) -> u64 {
         self.0.get()
-    }
-}
-
-/// Runtime-wide semantic-state revision observed by retryable evaluation.
-///
-/// Scheduler queue churn uses a separate work generation and never advances
-/// this value. Epochs begin at one so `Option<RuntimeObservationEpoch>` can use
-/// the zero niche for absence without increasing the block representation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct RuntimeObservationEpoch(NonZeroU64);
-
-impl RuntimeObservationEpoch {
-    pub(crate) fn from_raw(epoch: u64) -> Self {
-        Self(NonZeroU64::new(epoch).expect("runtime observation epochs must be nonzero"))
-    }
-
-    pub(crate) fn get(self) -> u64 {
-        self.0.get()
-    }
-}
-
-pub(crate) struct RuntimeObservationState {
-    epoch: Mutex<RuntimeObservationEpoch>,
-    changed: Condvar,
-}
-
-impl RuntimeObservationState {
-    pub(crate) fn new() -> Arc<Self> {
-        Arc::new(Self {
-            epoch: Mutex::new(RuntimeObservationEpoch::from_raw(1)),
-            changed: Condvar::new(),
-        })
-    }
-
-    pub(crate) fn current(&self) -> RuntimeObservationEpoch {
-        *self
-            .epoch
-            .lock()
-            .expect("runtime observation mutex should not be poisoned")
-    }
-
-    pub(crate) fn advance(&self) -> RuntimeObservationEpoch {
-        let mut epoch = self
-            .epoch
-            .lock()
-            .expect("runtime observation mutex should not be poisoned");
-        *epoch = RuntimeObservationEpoch::from_raw(
-            epoch
-                .get()
-                .checked_add(1)
-                .expect("runtime observation epochs exhausted"),
-        );
-        *epoch
-    }
-
-    pub(crate) fn notify_all(&self) {
-        self.changed.notify_all();
-    }
-
-    pub(crate) fn wait_for_change(&self, observed: RuntimeObservationEpoch) {
-        let mut epoch = self
-            .epoch
-            .lock()
-            .expect("runtime observation mutex should not be poisoned");
-        while *epoch == observed {
-            epoch = self
-                .changed
-                .wait(epoch)
-                .expect("runtime observation mutex should not be poisoned");
-        }
     }
 }
 
@@ -5485,18 +5415,6 @@ mod tests {
     }
 
     #[test]
-    fn observation_epochs_are_nonzero_and_option_niche_optimized() {
-        assert_eq!(
-            std::mem::size_of::<Option<RuntimeObservationEpoch>>(),
-            std::mem::size_of::<u64>()
-        );
-
-        let observations = RuntimeObservationState::new();
-        assert_eq!(observations.current().get(), 1);
-        assert_eq!(observations.advance().get(), 2);
-    }
-
-    #[test]
     fn task_block_dependency_identity_includes_the_runtime() {
         let id = NonZeroU64::new(17).expect("test dependency identity must be nonzero");
         let dependency = WorkDependency::Test(TestWorkDependency {
@@ -7025,11 +6943,7 @@ mod tests {
         let observed = coordinator.observations.current();
         let (_, work) = reserve_ready_test_reflection(&coordinator, &session);
         let claimed = claim_ready_test_reflection(&coordinator, session.demand.id);
-        let mut epoch = coordinator
-            .observations
-            .epoch
-            .lock()
-            .expect("runtime observation mutex should not be poisoned");
+        let mut epoch = coordinator.observations.lock_epoch_for_test();
         let releasing = {
             let coordinator = coordinator.clone();
             thread::spawn(move || {
@@ -7053,10 +6967,7 @@ mod tests {
         {
             thread::yield_now();
         }
-        epoch.0 = epoch
-            .0
-            .checked_add(1)
-            .expect("test observation epoch should advance");
+        epoch.advance_for_test();
         drop(epoch);
 
         let release = releasing

@@ -1,6 +1,6 @@
 # Module Split Plan — 2026-08-18
 
-Status: Phase 4 reviewed; Phase 4B.1 is next.
+Status: Phase 4B.1 complete; Phase 4B.2 is next.
 
 This is a dated review and transition plan. Module shape will continue to
 change as the bootstrap grows, so a later review should create a new dated
@@ -1121,6 +1121,8 @@ the sole mutation authority.
 #### Phase 4B — Extract observation and completion foundations
 
 ##### Phase 4B.1 — Semantic observation epoch
+
+Status: complete (2026-08-19).
 
 - Move `RuntimeObservationEpoch` and `RuntimeObservationState` to
   `evaluation/observation.rs` and preserve their crate-private re-exports.
