@@ -1,6 +1,6 @@
 # Module Split Plan — 2026-08-18
 
-Status: Phase 5B complete; Phase 5C is next.
+Status: Phase 5C complete; Phase 5D is next.
 
 This is a dated review and transition plan. Module shape will continue to
 change as the bootstrap grows, so a later review should create a new dated
@@ -1443,6 +1443,8 @@ Clippy with warnings denied, and the complete `cargo test -q` suite passed
 
 #### Phase 5C — Remove the dormant logical-token mirror
 
+Status: complete (2026-08-19).
+
 - First latch generated-output validation for reserved `@`/`#`, invalid
   numbers, and unbalanced or mismatched delimiter structure.
 - Delete `LogicalSource`, `LogicalToken`, `LogicalTokenKind`, `LogicalIndex`,
@@ -1459,6 +1461,35 @@ Clippy with warnings denied, and the complete `cargo test -q` suite passed
 - Run the focused logical-parser and macro protocol suites, followed by the
   repository gates. This checkpoint is a representation cleanup, not a macro
   semantics change.
+
+Result: generated macro text is now validated directly with the authoritative
+lexer. The narrow validator retains the explicit `@`/`#` prohibition and
+returns the lexer's ordinary invalid-number, whitespace, and delimiter
+diagnostics. It does not copy the generated string, tokens, numbers, texts, or
+group index into a representation that no consumer observes.
+
+`LogicalSource`, its token and structural-index mirrors, the generated-token
+arenas, and the debug-only source round trip are gone. Their removal exposed
+and removed the mirror-only `SpannedToken::new`, bulk number/embedded-value
+accessors, token replacement helper, and `parse_lexed` test path. The live
+`DeclarationMacroWork` pipeline remains together: it discovers invocations,
+builds normalized macro input/layouts, renders output, preserves embedded
+values, and reparses the completed declaration.
+
+Before removal, a focused regression latched unmatched, mismatched, and
+unclosed-delimiter diagnostics through the production `generated_output` path,
+including generated source-line adjustment. The existing reserved-marker and
+invalid-number tests now target the narrow validator rather than inspecting
+unused copied arenas.
+
+The three affected files lost 392 net lines: `logical.rs` fell from 1,147 to
+811 total lines, `source.rs` from 727 to 694, and `lexical.rs` from 1,054 to
+1,031. No syntax or macro semantics changed.
+
+Verification: all six focused logical-parser tests, 31 macro-expansion tests,
+and five external macro-protocol tests passed. `cargo fmt --check`, full-feature
+Clippy with warnings denied, and the complete `cargo test -q` suite passed
+(1,121 library tests plus every integration-test target).
 
 #### Phase 5D — Architecture and cleanup-review closure
 

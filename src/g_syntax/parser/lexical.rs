@@ -131,14 +131,6 @@ pub(super) struct SpannedToken<'source> {
 }
 
 impl<'source> SpannedToken<'source> {
-    pub(super) fn new(kind: TokenKind<'source>, span: ByteSpan, leading: LeadingTrivia) -> Self {
-        Self {
-            kind,
-            span,
-            leading,
-        }
-    }
-
     pub(super) fn kind(&self) -> &TokenKind<'source> {
         &self.kind
     }
@@ -251,27 +243,12 @@ impl<'source> LexedSource<'source> {
         &self.texts
     }
 
-    pub(super) fn numbers(&self) -> &[Number] {
-        &self.numbers
-    }
-
     pub(super) fn number(&self, id: NumberId) -> Option<&Number> {
         self.numbers.get(id)
     }
 
     pub(super) fn embedded_value(&self, id: EmbeddedValueId) -> Option<&Value> {
         self.embedded_values.get(id)
-    }
-
-    pub(super) fn embedded_values(&self) -> &[Value] {
-        &self.embedded_values
-    }
-
-    pub(super) fn with_tokens(&self, tokens: Vec<SpannedToken<'source>>) -> Self {
-        Self {
-            tokens,
-            ..self.clone()
-        }
     }
 
     pub(super) fn replace_unknowns_with_embedded(

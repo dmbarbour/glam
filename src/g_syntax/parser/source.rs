@@ -11,7 +11,6 @@ use super::expression_context::{ExpressionContext, validate_expression_floor};
 use super::input::{ParseSession, TokenView};
 use super::layout::validate_delimited_layouts;
 use super::lexical::{DeclarationSection, LexedSource, TokenKind, lex_source};
-use super::logical::LogicalSource;
 use super::logical::{DeclarationMacroWork, EMBEDDED_MARKER, OriginalMacroInvocation};
 use crate::api::Value as PublicValue;
 use crate::compiler::CompileContext;
@@ -43,35 +42,6 @@ pub fn parse_source(source: &[u8]) -> ParsedSource {
         declarations.push(declaration);
     }
     let diagnostics = parser.finish(&declarations);
-    ParsedSource {
-        declarations,
-        diagnostics,
-    }
-}
-
-#[cfg(test)]
-pub(super) fn parse_lexed(lexical: &super::lexical::LexedSource<'_>) -> ParsedSource {
-    let mut diagnostics = lexical.diagnostics().to_vec();
-    if lexical.has_errors() {
-        return ParsedSource {
-            declarations: Vec::new(),
-            diagnostics,
-        };
-    }
-    report_orphan_continuations(lexical, &mut diagnostics);
-    diagnostics.extend(validate_delimited_layouts(lexical));
-
-    let mut declarations = Vec::with_capacity(lexical.declarations().len());
-    for declaration in lexical.declarations() {
-        declarations.push(parse_lexical_declaration(
-            lexical,
-            declaration,
-            &mut diagnostics,
-        ));
-    }
-
-    validate_language_position(&declarations, &mut diagnostics);
-
     ParsedSource {
         declarations,
         diagnostics,
@@ -111,9 +81,6 @@ impl<'source> StagedSourceParser<'source> {
         let lexical = lex_source(text);
         debug_assert!(lexical.invariants_hold());
         let validate_language = !lexical.has_errors();
-        if validate_language {
-            debug_assert!(LogicalSource::from_original(&lexical).round_trips(&lexical));
-        }
         let mut diagnostics = lexical.diagnostics().to_vec();
         if validate_language {
             report_orphan_continuations(&lexical, &mut diagnostics);
