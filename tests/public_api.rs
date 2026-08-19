@@ -76,6 +76,45 @@ fn is_logically_undefined(assembler: &Assembler, value: Value) -> Result<bool, g
     evaluate(assembler, &selected).map(|selected| selected.as_value() == &marker)
 }
 
+#[derive(Clone)]
+struct PublicConflictIndex(bool);
+
+impl glam::reflection::ConflictObservationIndex for PublicConflictIndex {
+    fn clone_box(&self) -> Box<dyn glam::reflection::ConflictObservationIndex> {
+        Box::new(self.clone())
+    }
+
+    fn observe(&mut self, _address: &glam::reflection::ConflictAddress) {
+        self.0 = true;
+    }
+
+    fn may_conflict(&self, _changed: &glam::reflection::ConflictAddress) -> bool {
+        self.0
+    }
+}
+
+struct PublicConflictStrategy;
+
+impl glam::reflection::ConflictAnalysisStrategy for PublicConflictStrategy {
+    fn begin(&self) -> Box<dyn glam::reflection::ConflictObservationIndex> {
+        Box::new(PublicConflictIndex(false))
+    }
+
+    fn name(&self) -> &'static str {
+        "public-test"
+    }
+}
+
+#[test]
+fn custom_conflict_analysis_remains_available_through_the_public_facade() {
+    let assembler = Assembler::builder()
+        .conflict_analysis(Arc::new(PublicConflictStrategy))
+        .build()
+        .expect("public conflict strategy should configure an assembler");
+
+    assert_eq!(assembler.conflict_analysis().name(), "public-test");
+}
+
 fn settle_ready_reasoning(assembler: &Assembler) -> QuiescenceReport {
     match assembler.drain_reasoning() {
         RuntimeReadiness::Ready(snapshot) => snapshot

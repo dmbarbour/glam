@@ -1,6 +1,6 @@
 # Module Split Plan — 2026-08-18
 
-Status: Phase 5A complete; Phase 5B is next.
+Status: Phase 5B complete; Phase 5C is next.
 
 This is a dated review and transition plan. Module shape will continue to
 change as the bootstrap grows, so a later review should create a new dated
@@ -1397,6 +1397,8 @@ module seam look architectural. Neither changes Glam semantics.
 
 #### Phase 5B — Extract reflection-store conflict analysis
 
+Status: complete (2026-08-19).
+
 - Move `ConflictPath`, `ConflictAddress`, the strategy/index traits, and the
   exact, fingerprint, and coarse implementations to
   `reflection/store/conflict.rs`.
@@ -1415,6 +1417,29 @@ module seam look architectural. Neither changes Glam semantics.
   fingerprints, coarse invalidation, custom strategy construction through the
   public facade, and the existing snapshot/rebase/query/store suite before the
   full repository gates.
+
+Result: `reflection/store/conflict.rs` now owns conflict paths and addresses,
+the strategy/index extension traits, and the exact, fingerprint, and coarse
+implementations. `store.rs` retains volume identity, query lifetime, exact
+edits, snapshots, journals, roots, rebasing, and commits. Its exact-edit
+normalization still deliberately uses a separate `BTreeSet`; that is commit
+policy, not a second conflict-observation index.
+
+The child module remains private. `store.rs` and `reflection.rs` re-export the
+same public conflict types, and an external integration test implements a
+custom strategy using only `glam::reflection` before installing it through
+`AssemblerBuilder`. No public path or strategy semantics changed.
+
+All five strategy tests now live beside the conflict owner. The remaining 19
+query, volume, journal, rewrite, and commit tests moved from the production
+file to `reflection/store/tests.rs`. The production store owner is 812 lines;
+the conflict owner is 259 production lines; and 500 test lines are split
+between their responsibility-local test modules.
+
+Verification: the focused conflict/store suite passed all 24 tests and the
+external public-facade regression passed. `cargo fmt --check`, full-feature
+Clippy with warnings denied, and the complete `cargo test -q` suite passed
+(1,121 library tests plus every integration-test target).
 
 #### Phase 5C — Remove the dormant logical-token mirror
 
