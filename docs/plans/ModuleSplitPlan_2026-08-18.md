@@ -1,6 +1,6 @@
 # Module Split Plan — 2026-08-18
 
-Status: Phase 3 complete; Phase 4A is next.
+Status: Phase 4 reviewed; Phase 4B.1 is next.
 
 This is a dated review and transition plan. Module shape will continue to
 change as the bootstrap grows, so a later review should create a new dated
@@ -1036,6 +1036,8 @@ now-established API/runtime ownership boundary.
 
 #### Phase 4A — Combined dependency map and ordering decision
 
+Status: complete (2026-08-19).
+
 - Map both `evaluation.rs` and `evaluation/coordinator.rs` together: waits,
   promise producer obligations, task handles/status, client demand, reflection
   profiles, sessions/contexts, completion subscriptions, work records/queues,
@@ -1045,31 +1047,202 @@ now-established API/runtime ownership boundary.
 - Select an extraction order that leaves the coordinator as the sole owner of
   scheduling state and avoids bidirectional sibling dependencies.
 
-#### Phase 4B — Extract passive completion and settlement protocol
+The two files contain substantially less production code than their total line
+counts first suggest, but still form the largest remaining coupled owner:
 
-- Move completion-subscription primitives and/or readiness/settlement snapshot
-  types only as approved by Phase 4A.
-- Preserve the atomic subscription protocol, mutation admission, and terminal
-  publication ordering.
+| Current owner/range | Production responsibility |
+| --- | --- |
+| `evaluation.rs:63-670` | task/session IDs, wait terminal cells, task handles, task-owned promise obligations, task policies, exit and machine protocols |
+| `evaluation.rs:671-882` | client-demand operation, result cell, sink, and host handle |
+| `evaluation.rs:883-1114` | reflection launcher/profile, task-status publication, result policy, and session-report protocol |
+| `evaluation.rs:1128-2397` | demand state, owner lease, evaluation contexts, task/deferred admission, wait polling, and session reports |
+| `evaluation.rs:2398-3013` | cooperative pumping, claimed-machine release, retirement, and pure-lazy-cycle poisoning |
+| `evaluation/coordinator.rs:27-354` | semantic observation epoch and atomic exact-completion subscription protocol |
+| `evaluation/coordinator.rs:355-656` | common close control, producer/terminal obligations, work state, and dependency identity |
+| `evaluation/coordinator.rs:657-1004` | kind-local spark, client-demand, reflection, and deferred payloads and claims |
+| `evaluation/coordinator.rs:1005-1200` | authoritative indexes/queues plus internal readiness and settlement values |
+| `evaluation/coordinator.rs:1218-2351` | construction, demand registration/closure, failure ledgers, selection, readiness validation, and settlement |
+| `evaluation/coordinator.rs:2352-4494` | work-kind claim, release, cancellation, wake, and reporting transitions |
+| `evaluation/coordinator.rs:4495-5457` | common record helpers, queue/index maintenance, dependency cycles, and retirement |
 
-#### Phase 4C — Partition coordinator work kinds
+`evaluation.rs` has 3,013 production lines followed by 98 tests;
+`evaluation/coordinator.rs` has 5,457 production lines followed by 43 tests.
+The 217-line executor and its one focused test are already cohesive.
 
-- Separate work-kind records and claims only where the coordinator retains
-  queue selection and state transition authority.
-- Keep producer settlement obligations close to the work records they retire.
+The review makes these ownership decisions:
 
-#### Phase 4D — Partition session-side waits, promises, tasks, and client demand
+- Completion subscriptions are not passive values. They own the subscriber
+  mutex, subscribe-and-recheck protocol, weak coordinator route, and detached
+  notification. Keep them under the coordinator and move the protocol as one
+  unit.
+- Settlement is also active. The validated plan is a passive description, but
+  validation and `RuntimeSettlementRelease` jointly own terminal obligations,
+  machines, client sinks, exact wakes, status publication, and destruction
+  after admission is released. Move them together only after work-kind
+  transitions have stable owners.
+- Preserve one authoritative `WorkRecord` discriminated union and one set of
+  indexes/ready queues. The accepted kind-local payload design should not be
+  replaced by independent per-kind registries merely to create files.
+- The coordinator owns active wait/task terminalization and client-demand
+  claims. Session/context code owns demand policy, reflection profiles, task
+  construction, and cooperative pumping. `EvaluationDemandState` is the
+  intentional bridge: coordinator records may retain it for sparks and client
+  demand, while it retains only a weak route back to the coordinator.
+- Keep `EvaluationDemandState` and any other irreducibly shared bridge in
+  `evaluation.rs` rather than inventing a trait object or broad visibility
+  solely to make the facade tiny. This facade need not reach the 85-line shape
+  of `api.rs`.
+- Internal readiness snapshots remain coordinator protocol projected by
+  `api/runtime/readiness.rs`; runtime observation and host-event ownership do
+  not move back from `api/runtime/`.
 
-- Move session-side concepts in the dependency order established by Phase 4A.
-- Preserve task status publication, promise abandonment semantics, cross-
-  session same-runtime handles, and resumable client-demand claims.
+The target hierarchy is provisional by checkpoint, but its direction is:
 
-#### Phase 4E — Extract session/context orchestration and close the boundary
+```text
+evaluation.rs                 demand/profile bridge and crate-private re-exports
+  observation.rs              semantic observation epoch/state
+  session.rs                  owner lease, reports, and evaluation contexts
+  pump.rs                     cooperative/runtime polling and release
+  coordinator.rs              authoritative record model, indexes, and queues
+    completion.rs             exact subscriptions and wake delivery
+    task.rs                   task protocol plus wait/promise terminal lifecycle
+    client_demand.rs          resumable host demand records
+    spark.rs                  best-effort background demand
+    reflection.rs             reflection record transitions
+    deferred.rs               lazy/promise producers and pure-cycle handling
+    settlement.rs             readiness validation and terminal settlement
+  executor.rs                 worker lifecycle and dispatch
+```
 
-- Leave `evaluation.rs` as a deliberate facade/ownership map.
+Names are not approval to create empty forwarding modules. A child is kept
+only when its state and transitions move together and the coordinator remains
+the sole mutation authority.
+
+#### Phase 4B — Extract observation and completion foundations
+
+##### Phase 4B.1 — Semantic observation epoch
+
+- Move `RuntimeObservationEpoch` and `RuntimeObservationState` to
+  `evaluation/observation.rs` and preserve their crate-private re-exports.
+- Move the niche-layout and wait/advance tests with them.
+- Do not combine scheduler work generation with semantic observation.
+
+##### Phase 4B.2 — Exact completion subscriptions
+
+- Move `WorkDependencyKey`, `WakeRegistration`, `DependencyWakeBatch`,
+  `CompletionSubscriptions`, `CompletionWake`, and
+  `CompletionSubscriptionOutcome` together under
+  `evaluation/coordinator/completion.rs`.
+- Move the coordinator's subscribe, recheck, exact-wake, and detached-notify
+  helpers with the protocol when doing so does not duplicate record mutation.
+- Preserve terminal-before-detach ordering, `(work ID, subscription epoch)`
+  validation, no nested subscriber/coordinator mutexes, and notifications
+  after mutation admission.
+- Verify completion-before, completion-during, and completion-after
+  subscription with the existing forced-order tests before proceeding.
+
+#### Phase 4C — Partition coordinator-owned lifecycles
+
+##### Phase 4C.1 — Task and wait protocol
+
+- First move scalar/passive task protocol—IDs, status/policy enums, exit
+  intent, machine poll/trait, result policy, and status wake wrappers—to
+  `evaluation/coordinator/task.rs` without changing behavior. Re-export that
+  crate-private protocol through `coordinator` and `evaluation` for evaluator
+  and reflection consumers.
+- Then move the active wait cell, task handle/preparation, task-owned promise
+  obligations, and coordinator terminal publisher into the same child.
+  Preserve the existing public-in-crate re-export paths.
+- Keep wait/status/failure/promise publication under one mutation admission;
+  notifications, cancellation hooks, and destruction remain detached.
+
+##### Phase 4C.2 — Client demand
+
+- Move the operation data, result cell, sink/handle, coordinator payload/claim,
+  and claim/release/abandon/kill transitions together to
+  `evaluation/coordinator/client_demand.rs`.
+- Keep evaluation of the operation in `pump.rs`; the client-demand child must
+  not import `session.rs` merely to call through `EvalContext`.
+- Preserve resumable exact dependencies, result publication after unlock,
+  explicit abandonment, and the external handle's ownership of waiting.
+
+##### Phase 4C.3 — Sparks
+
+- Move spark payload/claim/retirement and queue/release/abandon transitions to
+  `evaluation/coordinator/spark.rs`.
+- Preserve best-effort semantics, worker-only selection, exact wait/promise
+  subscription, session-close cleanup, and truthful busy state for a claimed
+  spark.
+
+##### Phase 4C.4 — Reflection work
+
+- Move reflection payload/claim/release/cancellation/snapshot and its
+  task/wait indexes to `evaluation/coordinator/reflection.rs` only insofar as
+  the common record and common ready queue remain coordinator-owned.
+- Preserve dormant/reserved/queued/running/blocked/exit-waiting/
+  terminalizing transitions and late task-handle observation.
+
+##### Phase 4C.5 — Deferred work and lazy cycles
+
+- Move deferred payload/claim/promotion/release/abandonment, producer indexes,
+  and pure-lazy-cycle discovery/terminalization together to
+  `evaluation/coordinator/deferred.rs`.
+- Keep promise-containing cycles retryable, pure lazy cycles canonical, and
+  reusable lazy claims unpoisoned by owner closure or forced kill.
+
+Each 4C checkpoint must move its focused tests with the implementation. Common
+fairness, closure, cross-kind terminalization, and forced-order tests stay at
+the coordinator's nearest common owner.
+
+#### Phase 4D — Settlement and session orchestration
+
+##### Phase 4D.1 — Readiness and settlement
+
+- Move internal readiness snapshots, validation, selected terminal
+  obligations, and `RuntimeSettlementRelease` to
+  `evaluation/coordinator/settlement.rs` as one lifecycle.
+- Preserve exclusive settlement admission, stale-generation rejection,
+  observational readiness, no implicit commit of divergent exit votes, and
+  post-unlock wake/drop order.
+
+##### Phase 4D.2 — Session, profile, and evaluation context
+
+- Move session report types, `EvaluationSession`, `OwnedEvalContext`, and
+  `EvalContext` construction and admission policy to `evaluation/session.rs`.
+- Leave `EvaluationDemandState`, `ReflectionTaskLauncher`, and
+  `ReflectionTaskProfile` in the facade as the explicit shared bridge. The
+  state stores the profile and is retained by coordinator-owned spark and
+  client-demand records; moving either side would create a sibling cycle or a
+  synthetic abstraction. Do not let an escaped context recover the external
+  owner lease.
+
+##### Phase 4D.3 — Cooperative and runtime pumping
+
+- Move claimed-machine dispatch, prioritized dependency pumping,
+  reflection/deferred release, retirement, and runtime-pump adapters to
+  `evaluation/pump.rs`.
+- Keep queue selection and state transitions on the coordinator; this child
+  orchestrates claims but does not become a second scheduler.
+- Preserve same-session FIFO, cross-session dependency assistance, poll
+  budgets, lazy-cycle publication, and machine destruction outside locks.
+
+#### Phase 4E — Close the evaluation boundary
+
+- Leave `evaluation.rs` as a deliberate facade/shared-contract map, not an
+  arbitrary line-count target.
 - Relocate feature-local tests, retain concurrency and settlement tests at the
   nearest common owner, tighten visibility, and run deterministic ordering
   regressions plus the full gates.
+- Update `src/README.md` and evaluation architecture only after the final
+  module graph exists. Re-run `public_api`, effect embedding, macro protocols,
+  logger integration, worker-count equivalence, all forced-order concurrency
+  tests, Clippy, and the complete suite.
+
+There is no open semantic question blocking Phase 4B. The review deliberately
+rejects two tempting abstractions: a generic completion-wake trait where only
+one runtime coordinator exists, and separate work registries which would make
+cross-kind readiness and settlement harder to reason about. Revisit either
+only for a concrete new consumer or measured bottleneck, not for module shape.
 
 ### Phase 5 — Re-inventory and close the dated review
 
