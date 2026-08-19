@@ -76,6 +76,17 @@ registered root cell containing an inline `Value` is decided during Phase I2.
 The latter avoids allocating every number and atom merely because it crosses
 the public API.
 
+This provisional shape is not the compact tagged-word transition. That work is
+isolated in
+[`ValueRepresentationRefinement_2026-08-19.md`](ValueRepresentationRefinement_2026-08-19.md)
+and may begin only after the initial collector boundary is sound.
+
+Every representation migrated in this plan must fit one supported homogeneous
+typed-run slot. The integration does not request a large-object fallback,
+multi-run span, heterogeneous run, or managed DST. Existing large/variable leaf
+storage remains audited external ownership until a later representation plan
+chooses to decompose it.
+
 ## Phase I0 — Ownership and Mutation Ledger
 
 Create a dated graph inventory beside this plan. For every graph-bearing type,
@@ -87,9 +98,13 @@ record:
 - current synchronization and lock order;
 - whether it can live outside an evaluator call or worker quantum;
 - whether it can cross threads;
+- Rust `TypeId`, managed size/alignment, and selected allocation class;
+- visitor-based outgoing edge enumeration;
 - required trace strategy;
 - required generational barrier;
-- destruction behavior; and
+- whether its homogeneous run metadata contains `Drop`;
+- confirmation that it fits the collector's documented managed-layout limit;
+  and
 - migration phase.
 
 The inventory must explicitly cover every `core::Value` variant, every type
@@ -125,6 +140,10 @@ classified optimistically.
 - Do not create a `heap -> runtime state -> heap` ownership cycle.
 - Give the value factory a narrow allocation/rooting handle, not raw collector
   internals.
+- Let runtime/value-factory construction discover and retain reusable
+  `AllocationClass<T>` handles for common managed representations. Rare classes
+  may use first-use discovery, but ordinary value allocation must not hash
+  `TypeId` on every object.
 - Add runtime-local tuning with collection disabled by default.
 - Verify the earlier sibling allocation of runtime state and immutable profile
   remains acyclic once both can retain rooted values.
@@ -174,9 +193,9 @@ Introduce region boundaries before managed pointers require them:
 - diagnostic enrichment and rendering access.
 
 Prefer one outer region per meaningful quantum. Nested helpers reuse the
-current same-runtime region and its local allocation buffer. Do not enter/exit
-or touch shared allocation state for every pointer access or ordinary
-allocation.
+current same-runtime region and worker-local typed-run cursor cache. Do not
+enter/exit or touch shared allocation state for every pointer access or
+ordinary allocation.
 
 Determine how `Mutator` authority travels through `EvalContext`, the core value
 factory, reflection contexts, and net specialization without exposing it in
@@ -192,15 +211,18 @@ Verify that:
 - semantic mutex guards do not escape the region which authorizes their value
   references;
 - recursive evaluator and reflection entry does not count as another mutator;
-- recursive entry does not reserve an independent allocation region, while
-  outer exit commits and releases the shared region before the worker becomes
-  eligible to sleep or service another runtime; and
+- recursive entry does not create an independent class cache, while outer exit
+  commits allocation bits and publishes/returns every local run cursor before
+  the worker becomes eligible to sleep or service another runtime; and
 - collection requests can stop every worker at a bounded quantum boundary.
 
 ## Phase I4 — Core Trace Vocabulary and Leaf Policy
 
 - Implement exact tracing for `core::Value`, keys which contain values, lists,
   dictionaries, argument arrays, evaluation failures, and context frames.
+- Implement those traces as representation-aware edge visitors. Do not encode
+  fixed field-offset tables: list nodes, immediate-like shells, and persistent
+  collection adapters report only the managed edges they actually contain.
 - Treat `Bytes`, numbers, atoms, static builtins, IDs, and similar data as
   leaves unless they actually contain managed edges.
 - Trace RPDS/FingerTree contents logically. Document that duplicate traversal
@@ -351,10 +373,11 @@ For `OpaqueValue`:
   available, outside collector locks. It may allocate, evaluate or schedule
   work, emit diagnostics, and publish a fresh equivalent of itself, but it
   cannot root or otherwise resurrect the completed dead allocation;
-- classify every opaque payload family by destruction policy. A payload whose
-  final `Drop` requires the runtime must remain collector-owned until that
-  phase. A mutator-independent payload may continue using an external shared
-  owner when its eventual destruction location is irrelevant;
+- place every collector-owned opaque payload in a typed run whose metadata has
+  one erased `Drop` operation. All such destructors run with the finalizer
+  mutator installed; the collector does not distinguish passive from
+  mutator-capable Rust destruction. An explicitly external sidecar remains
+  outside this guarantee and must document that fact;
 - replace or narrow the current
   `OpaqueValue::downcast<T>() -> Option<Arc<T>>` boundary for
   mutator-finalized payloads. Cloning the `Arc` can move the last `Drop` outside
@@ -429,8 +452,9 @@ is stable.
 
 For every mutable graph edge in the I0 ledger:
 
-- identify owner generation and publication operation;
-- ensure the edge is dirtied before a minor collector can miss it;
+- identify the owner's typed run, generation, card, and publication operation;
+- ensure the old-run card is dirtied before a minor collector can miss the
+  edge;
 - force publication versus collection ordering with deterministic barriers;
   and
 - run differential full-only versus minor/full histories.
@@ -474,6 +498,8 @@ Additional required modes:
 - minor/full differential histories after I13;
 - zero workers and several workers;
 - public roots moved among threads and dropped in forced orders;
+- every production allocation class fitting the collector's supported layout
+  table, plus explicit rejection tests for a deliberately oversized fixture;
 - Miri for focused root, trace, lazy, promise, collection, and net graphs;
 - Loom or deterministic barrier tests for mutator/root/barrier coordination;
 - address/thread sanitizers where supported; and
@@ -491,6 +517,8 @@ semantics.
 - Public `Value` is a real runtime-local external root and remains convenient
   to clone and share.
 - Workers access managed pointers only within bounded mutator regions.
+- Every managed representation fits one documented typed-run class; there is
+  no hidden large-object or multi-run fallback.
 - Fixpoint, promise, metadata, collection, function, and net cycles are
   reclaimed after their last root disappears.
 - Reflection, diagnostics, stores, events, and task handles retain exactly the

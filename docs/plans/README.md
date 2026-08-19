@@ -18,3 +18,10 @@ when their historical value no longer justifies keeping them.
   builds and verifies the standalone collector subcrate.
 - [`GarbageCollectorIntegration_2026-08-19.md`](GarbageCollectorIntegration_2026-08-19.md)
   migrates Glam values, roots, workers, reflection, and interaction nets.
+
+## Preliminary and Deferred Plans
+
+- [`ValueRepresentationRefinement_2026-08-19.md`](ValueRepresentationRefinement_2026-08-19.md)
+  records the compact tagged-value and representation-splitting transition to
+  pursue after the initial collector boundary works. It is deliberately not a
+  prerequisite for the current GC plans.

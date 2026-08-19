@@ -15,6 +15,12 @@ The plans are separate because collector soundness and evaluator migration are
 independently difficult. This roadmap owns the requirements which neither plan
 may weaken merely to simplify its local work.
 
+Compact tagged values and representation-specific 32-byte nodes belong to the
+deferred
+[`ValueRepresentationRefinement_2026-08-19.md`](ValueRepresentationRefinement_2026-08-19.md)
+plan. The collector must preserve a usable alignment and run-owner lookup
+boundary for that work, but compact representation is not a collector gate.
+
 ## Purpose
 
 Replace recursive `Arc` ownership which can leak fixpoint, promise, metadata,
@@ -24,13 +30,15 @@ function, collection, or interaction-net cycles with one exact tracing heap per
 The collector is specialized for Glam:
 
 - values never cross evaluation runtimes;
-- managed pointers are non-moving, pointer-sized, cheap to copy, and shareable
-  between runtime worker threads;
+- managed pointers are initially non-moving, pointer-sized, cheap to copy, and
+  shareable between runtime worker threads;
 - copying an ordinary managed pointer performs no locking, reference-counting,
   rooting, or collector bookkeeping;
-- ordinary allocation bumps through a region local to the outer mutator entry;
-  shared synchronization is reserved for obtaining/recycling regions, large
-  objects, or acquiring another large arena page;
+- ordinary allocation uses worker-local cursors into homogeneous typed runs;
+  shared synchronization is reserved for allocation-class discovery,
+  obtaining/recycling runs, or acquiring another arena chunk;
+- managed layouts are deliberately bounded: every allocation fits one slot in
+  one supported run class, with no initial large-object or multi-run fallback;
 - collection coordination occurs at explicit mutator-region boundaries;
 - recursive entry into the same runtime is cheap and supported;
 - the initial collector may stop the whole runtime;
@@ -54,10 +62,16 @@ EvaluationRuntime
 ├── RuntimeState
 ├── immutable runtime profile
 └── RuntimeHeap
-    ├── young and old allocation pages
+    ├── arena chunks
+    │   └── aligned power-of-two typed runs
+    │       ├── one allocation class and static trace/drop metadata
+    │       ├── homogeneous aligned slots
+    │       └── allocation, mark, and card side metadata
+    ├── per-heap TypeId -> allocation-class discovery
+    ├── young and old typed-run pools
     ├── explicit external-root registry
     ├── active-mutator and safepoint coordinator
-    ├── mark work and object metadata
+    ├── mark work and sparse quarantine state
     ├── remembered-set state
     └── collection metrics and tuning
 ```
@@ -93,7 +107,7 @@ region.
    count as one active mutator. Allocation also requires mutator authority, so
    no allocation can race a stopped-world trace or sweep. Before the outermost
    exit publishes that the mutator is gone, it commits completed allocations
-   and returns or accounts for the unused tail of its local allocation region.
+   and publishes or returns every worker-local typed-run cursor.
 4. **No hidden stack scan.** Roots are explicit. Local unrooted pointers are
    safe because their entire lifetime lies within a mutator region.
 5. **No partially traced collection.** Production reclamation remains disabled
@@ -127,9 +141,12 @@ region.
    while finalization is still active. The collector-held mutator delays its
    acquisition, while writer preference intentionally makes new mutators wait:
    stop-the-world collection has become the runtime's next priority.
-8. **Stable object addresses.** The initial full and generational collectors
-   do not move allocations. Promotion changes metadata or page classification,
-   not pointer identity.
+8. **Stable addresses are an implementation phase, not a permanent API
+   promise.** The initial full and generational collectors do not move
+   allocations. Promotion changes run metadata or classification, not pointer
+   identity. Trace implementations enumerate outgoing edges through a visitor
+   rather than publishing offset tables; moving and edge rewriting remain
+   separately deferred.
 9. **Mutation gateways are structural; barrier work is phase-specific.** Every
    mutation capable of replacing a managed edge passes through a small,
    auditable mutation gateway. For the initial full stop-the-world collector,
@@ -150,20 +167,31 @@ region.
 11. **Failed collection attempts are recoverable until reclamation commits.**
     Marking and tracing reclaim nothing: an unwind guard abandons the partial
     worklist/epoch, restores the heap phase, and permits a later collection to
-    retry from all roots. Sweep and destruction use explicit object-local
-    states so a panicking destructor is never invoked twice; its original
-    allocation is quarantined while fresh allocations and already-published
-    effects from that destructor remain valid. The finalization queue and heap
-    phase must still reach a documented consistent state before unwinding.
+    retry from all roots. Sweep and destruction use run side metadata plus
+    sparse exceptional state so a panicking destructor is never invoked twice;
+    its original allocation is quarantined while fresh allocations and
+    already-published effects from that destructor remain valid. The
+    finalization queue and heap phase must still reach a documented consistent
+    state before unwinding.
     Heap-wide poison or abort is reserved for detected allocator/metadata
     corruption or an unsafe contract violation whose effects cannot be
     bounded.
 12. **Collection is operational only.** Scheduling and collection timing may
     vary, but successful assembly values remain governed by Glam semantics.
+13. **Unsupported layouts remain unsupported.** Class creation rejects a type
+    whose size, alignment, or representation cannot fit one supported typed-run
+    slot. The bootstrap does not silently add a large-object path, multi-run
+    span, DST allocator, or heterogeneous object header to accommodate it.
 
 ## Shared Terminology
 
 - **Heap** — one runtime-local arena and collector state.
+- **Arena chunk** — a large heap-owned reservation divided into typed runs; it
+  is an allocation source, not an object-size exception mechanism.
+- **Typed run** — one aligned power-of-two allocation unit whose slots share
+  one allocation class, trace visitor, optional drop function, and size.
+- **Allocation class** — a per-heap dense identity discovered from a Rust
+  `TypeId`, retaining immutable object metadata and pools of typed runs.
 - **Managed pointer** — a cheap, non-rooting pointer between collected values.
 - **External root** — a shareable handle retaining a value from Rust code
   outside a mutator-local managed graph, including public `Value` handles and
@@ -250,6 +278,8 @@ The following must remain sequential:
 
 - concurrent marking, concurrent sweeping, or parallel tracing;
 - moving, copying, or compacting collection;
+- large-object allocation, multi-run object spans, heterogeneous runs, and
+  arbitrary dynamically sized managed objects;
 - weak pointers, ephemerons, and user-visible weak-key semantics;
 - first-class Glam finalizer declarations, resurrection of a completed dead
   allocation, or access to the dying allocation through the managed-pointer
