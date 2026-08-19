@@ -1,0 +1,17 @@
+[package]
+name = "glam-gc"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "GPL-3.0-only"
+
+[features]
+default = []
+# Private verification surface. This is not a supported downstream feature.
+deterministic-test-hooks = []
+
+[dev-dependencies]
+loom = "0.7.2"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"

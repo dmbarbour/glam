@@ -15,7 +15,7 @@ Concurrent marking is a later plan.
 
 | Phase | Status | Outcome |
 | --- | --- | --- |
-| C0 | pending | crate, provenance, safety, and test scaffold |
+| C0 | completed | crate, provenance, safety, and test scaffold |
 | C1 | pending | trace, pointer, root, and mutator access contract |
 | C2A | pending | arena chunks, typed-run geometry, and layout limits |
 | C2B | pending | type metadata and per-heap allocation-class discovery |
@@ -122,6 +122,22 @@ Verification:
   surface; and
 - an empty heap can be created, entered, and dropped on one and several
   threads.
+
+C0 completed on 2026-08-19 with these deliberately narrow decisions:
+
+- the root package became the default member of a workspace which also
+  contains `crates/glam-gc`, preserving the behavior of unqualified root Cargo
+  commands;
+- `glam-gc` has no normal dependency and contains no copied or adapted
+  third-party source; Loom is an unmodified development dependency;
+- the empty `Heap` is a cheaply cloned shared ownership shell, while its scoped
+  `Mutator` is non-`Send` and non-`Sync` but offers no operation. C1 may still
+  change token and provenance representation before managed pointers exist;
+- `SAFETY.md` records an empty unsafe inventory, latched by compiling every
+  crate target and feature with `unsafe_code` forbidden; and
+- stable checks and the Loom API smoke model run through the crate-local
+  verification script. Miri and sanitizer scripts are present but require an
+  appropriately installed nightly toolchain.
 
 ## Phase C1 — Trace and Access Contract Spike
 
