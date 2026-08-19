@@ -12,6 +12,12 @@ In evaluation lifecycle terminology, **foreign** means another
 `EvaluationRuntime`. An owner session, observer session, non-owner session, or
 cross-session dependency always refers to sessions within one runtime.
 
+Public runtime construction and observational lifecycle projection are owned
+outside this subsystem by `api/runtime.rs` and
+`api/runtime/readiness.rs`. Evaluation owns demand sessions, waits, tasks,
+promises, work records, scheduling, and settlement validation; it does not own
+the embedding report shapes or transactional host-event transport.
+
 ## Context and Session
 
 `EvaluationRuntime` is the allocation and construction boundary. It owns the

@@ -24,7 +24,11 @@ not define language semantics or collect subsystem invariants.
 | `bin/glam/command_line/` | Private bootstrap command grammar, validated command models, help, and shell completion |
 | `bin/glam/command_line/configured/` | `conf.cli` effects, isolated search, path policy, and nested token parsing |
 | `source.rs` | Source artifacts, digests, relative resolvers, tracked local files |
-| `lib.rs`, `api.rs` | Embedding facade, runtime construction, modules, diagnostics, extraction |
+| `lib.rs`, `api.rs` | Stable embedding facade and re-exports |
+| `api/value.rs`, `api/evaluator.rs`, `api/error.rs` | Runtime-rooted value construction, explicit demand/extraction, privileged inspection, and structured embedding failures |
+| `api/diagnostics.rs` | Diagnostic values, buses, subscriptions, enrichment, and runtime ingress |
+| `api/runtime.rs`, `api/runtime/` | Runtime ownership, transactional events, delivery, readiness, deadlock reports, and settlement |
+| `api/assembly.rs` | Assembler/reasoning construction, protected volumes, sources, imports, and module builds |
 | `g_source.rs` | Non-evaluating public `.g` inspection summary |
 | `compiler.rs` | Per-source compiler capabilities and hidden provenance |
 | `g_syntax.rs` | Private built-in `.g` compiler facade |
@@ -51,7 +55,7 @@ not define language semantics or collect subsystem invariants.
 | `eval/builtins/net/construction.rs` | Source interaction-net construction search |
 | `eval/sequence.rs` | Lazy sequence and binary extraction |
 | `list.rs`, `number.rs` | Persistent list ropes and exact numbers |
-| `diagnostic.rs`, `api.rs` diagnostic facade | Diagnostic values, buses, ingress, enrichment |
+| `diagnostic.rs`, `api/diagnostics.rs` | Semantic diagnostic shapes plus embedding buses, ingress, and enrichment |
 | `reflection.rs`, `reflection/protocol.rs` | Reflection facade and specialization/host transaction protocol |
 | `reflection/lifecycle.rs` | Effect lifecycle, scheduled runs, and task launchers |
 | `reflection/machine.rs`, `reflection/requests.rs`, `reflection/search.rs` | Persistent effect machine, request interpretation, isolated search |
@@ -125,8 +129,11 @@ focused [interaction-net invariants](../docs/agent_context/interaction_nets.md).
   `interaction_net/runtime/tests.rs`.
 - Evaluator integration tests live in `eval/tests.rs`; fixtures are in
   `eval/test_support.rs`.
-- `evaluation.rs`, `evaluation/coordinator.rs`, `reflection.rs`, and `api.rs`
-  contain focused lifecycle and concurrency tests beside private machinery.
+- `evaluation.rs`, `evaluation/coordinator.rs`, and the focused reflection
+  modules contain lifecycle and concurrency tests beside private machinery.
+- `api/tests.rs` retains cross-facade value/assembly tests;
+  `api/tests/runtime_tests.rs` and `api/tests/diagnostic_tests.rs` own runtime
+  event/readiness and diagnostic transport integration tests.
 - Binary command-line and logger unit tests live below `bin/glam/`; `tests/cli.rs`
   covers the executable process contract.
 - `tests/` also covers the public library facade, valid samples, and invalid

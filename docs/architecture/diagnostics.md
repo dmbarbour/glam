@@ -29,6 +29,11 @@ without becoming diagnostic bus events themselves.
 
 ## Diagnostic Bus
 
+The embedding implementation for this section lives in
+`api/diagnostics.rs`; runtime FIFO routing and outbox delivery live in
+`api/runtime/events.rs`. This direction keeps publication policy independent
+of runtime storage while preserving one runtime-owned transaction boundary.
+
 Each reasoning role owns a non-buffering `DiagnosticBus`. A committed
 publication:
 

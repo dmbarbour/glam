@@ -1,6 +1,6 @@
 # Module Split Plan — 2026-08-18
 
-Status: Phase 2 complete; Phase 3A is next.
+Status: Phase 3 complete; Phase 4A is next.
 
 This is a dated review and transition plan. Module shape will continue to
 change as the bootstrap grows, so a later review should create a new dated
@@ -866,6 +866,8 @@ dependency from the value facade to interpreter internals.
 
 #### Phase 3A — Exact dependency and ownership map
 
+Status: complete (2026-08-18).
+
 - Map value/evaluator/net construction, diagnostic bus/ingress, runtime
   lifecycle/readiness reports, transactional input/output state, runtime
   resources, assembler construction, and module building.
@@ -875,7 +877,50 @@ dependency from the value facade to interpreter internals.
 - Inventory every public export and internal test helper so paths and
   visibility can be preserved intentionally.
 
+The pre-split `api.rs` contains 10,795 lines and 106 inline tests. Its
+production ownership map is:
+
+| Current range | Responsibility | Target owner |
+| --- | --- | --- |
+| `64-932` | runtime-rooted values, construction, effect tokens, promises, value kinds, and checked core-net construction | `api/value.rs` |
+| `933-1841` | diagnostic envelopes, enrichment, counts, bus/subscription, and runtime FIFO ingress | `api/diagnostics.rs` |
+| `1842-2111` | assembler reflection host and per-module compilation execution | `api/assembly.rs` |
+| `2112-2701` | public runtime readiness/disposition/deadlock projections | `api/runtime/readiness.rs` |
+| `2702-3427` | runtime-owned transaction/event state, FIFO journals and endpoints, output delivery and failures | `api/runtime/events.rs` |
+| `3428-4895` | runtime value roots, shared resources, task capabilities, runtime construction, combined commit, observation, pumping, and settlement | `api/runtime.rs` |
+| `4896-4999`, `5186-6267` | reasoning session, module inputs/results, environment and volume capabilities, assembler builder, source/module construction | `api/assembly.rs` |
+| `5000-5185` | embedding error plus retained reasoning-failure projection | `api/error.rs` (`ReasoningFailure` is re-exported through runtime/assembly policy) |
+| `5268-5376` | deterministic WHNF evaluator and privileged reflection inspector | `api/evaluator.rs` |
+| `6268-6314` | legacy test-only semantic facade | nearest test support; do not expose in production |
+| `6315-end` | 106 value, runtime-event, readiness, diagnostics, and assembly integration tests | divide by owning module, retaining only irreducibly cross-layer tests under `api/tests.rs` |
+
+Runtime events are owned below the runtime module, not as a sibling service.
+Their authoritative state is part of `RuntimeSharedResources`, combined commit
+must validate reflection and event journals under one transaction mutex, and
+readiness must observe delivery activity. `runtime/events.rs` and
+`runtime/readiness.rs` are directed children of that owner so Phase 3D does
+not replace `api.rs` with another monolith. Diagnostics own ingress policy,
+but ingress reaches the FIFO through the runtime's narrow event operations;
+the runtime retains only the weak lifecycle registration required by that
+bridge.
+
+The extraction order is common error/value primitives, evaluator facade,
+diagnostics, runtime children and owner, then assembler construction. Public
+paths stay rooted at `api::*` and crate-root re-exports remain unchanged.
+Sibling-only visibility is acceptable during mechanical moves, then must be
+tightened after tests relocate.
+
 #### Phase 3B — Extract value and evaluator facade
+
+Status: complete (2026-08-18).
+
+Split this checkpoint into:
+
+- **3B.1:** common embedding error and value construction, including checked
+  net construction and promise resolution; and
+- **3B.2:** `ValueEvaluator` and `ReflectionInspector`, which depend on the
+  assembler's selected reasoning context but expose only the established
+  construction/demand/reflection boundary.
 
 - Move `Value`, `EvaluatedValue`, `Values`, promise resolver, checked net
   builder, evaluator, and reflection inspector according to the approved map.
@@ -885,13 +930,43 @@ dependency from the value facade to interpreter internals.
 If the dependency map gives checked nets or promise resolution an independent
 owner, split this checkpoint rather than forcing an oversized `value` child.
 
+Result: `api/value.rs` owns runtime-rooted value construction, evaluated WHNF
+witnesses, effect-token domains, affine promise resolution, value kinds, and
+the checked core-net builder. These form one construction boundary and did not
+warrant extra net/promise modules. `api/error.rs` owns the shared embedding
+error and retained reasoning-failure projection. `api/evaluator.rs` owns the
+assembler-selected deterministic evaluator and privileged reflection
+inspector, keeping construction, demand, and reflection visibly distinct.
+All 106 focused API tests pass after the extraction.
+
 #### Phase 3C — Extract diagnostic publication infrastructure
+
+Status: complete (2026-08-18).
 
 - Move diagnostic envelopes/events/counts, bus/subscription, ingress, and
   routing ownership without changing callback or buffering semantics.
 - Keep diagnostic value projection separate from default rendering policy.
 
+Result: `api/diagnostics.rs` owns diagnostic envelopes and enrichment,
+sequence/count snapshots, the non-buffering bus and subscriptions, and the
+long-lived runtime FIFO ingress. It contains no terminal rendering policy.
+The assembler and runtime retain only the sibling-visible construction and
+lifecycle hooks needed to publish and register ingress. All 106 focused API
+tests pass after the move.
+
 #### Phase 3D — Extract runtime events and lifecycle reports
+
+Status: complete (2026-08-18).
+
+Split this checkpoint into:
+
+- **3D.1:** `runtime/events.rs`, including transaction snapshots/journals,
+  endpoints, delivery records, and durable failures;
+- **3D.2:** `runtime/readiness.rs`, containing only observational public report
+  and settlement-proposal types; and
+- **3D.3:** `runtime.rs`, owning shared resources, runtime construction,
+  combined commit, pumping, settlement, and the interface between its two
+  children.
 
 - Move input/output endpoint state, journals, delivery records/failures,
   readiness/deadlock/settlement reports, and the relevant runtime methods in
@@ -902,19 +977,60 @@ owner, split this checkpoint rather than forcing an oversized `value` child.
 Split event transport from readiness/settlement if the map shows two directed
 owners; do not create a monolithic replacement for `api.rs`.
 
+Result: `api/runtime/events.rs` owns transactional FIFO snapshots and
+journals, endpoint capabilities, outbox claims, diagnostic routes, and durable
+delivery failures. `api/runtime/readiness.rs` owns the observational public
+readiness, deadlock, disposition, and settlement projections.
+`api/runtime.rs` remains their directed owner: it contains runtime allocation,
+shared resources, combined reflection/event commit, observation publication,
+pumping, and settlement. The event state still shares one authoritative
+transaction mutex with the reflection store, and all callback delivery remains
+outside runtime locks and mutation admission.
+
 #### Phase 3E — Extract assembler and module construction
+
+Status: complete (2026-08-18).
 
 - Move assembler builder/host/profile wiring, source/module construction, and
   compilation execution behind the public facade.
 - Retain all current public paths and builder staging rules.
 
+Result: `api/assembly.rs` owns the reasoning host and session, compilation
+execution, protected volumes, assembler/builder staging, source preparation,
+recursive module loading, and built-module results. `api.rs` re-exports the
+established embedding surface without owning construction policy. Moving the
+code required no change to runtime selection, immutable profile sealing,
+environment construction, or source ordering.
+
 #### Phase 3F — Public boundary and test audit
+
+Status: complete (2026-08-18).
 
 - Partition the large inline tests according to their new owners while keeping
   integration-like facade tests at the root.
 - Verify exported paths, narrow visibility, run `public_api`, CLI, macro,
   diagnostics, runtime-event, and full repository tests.
 - Refresh the evaluation/coordinator dossier after the runtime types move.
+
+Result: `api.rs` is an 85-line facade. Every production child has explicit
+imports; cross-child construction hooks are restricted to `api`, `pub(super)`,
+or test-only visibility rather than entering the public embedding API. The 106
+former inline tests now live under `api/tests`: runtime/event/readiness tests
+and diagnostic transport tests have focused files, while value, evaluator,
+error, and assembler-composition tests remain at the facade's common owner.
+Public paths and the binary's use of the library remain unchanged.
+
+Post-Phase-3 drift review: Phase 4 must not pull public runtime reports or
+transactional event transport back into the evaluation coordinator. Those
+projections now have explicit owners in `api/runtime/readiness.rs` and
+`api/runtime/events.rs`. The combined Phase 4A map should therefore start from
+the still-current 8,065-line `evaluation.rs` and 7,547-line
+`evaluation/coordinator.rs`: session/task/wait/promise/client-demand protocols
+remain in the former, while subscription epochs, work records and queues,
+runtime-local coordinator snapshots, and settlement validation remain in the
+latter. `evaluation/executor.rs` is already a small worker-lifecycle owner.
+Phase 4A should decide their internal extraction order without changing the
+now-established API/runtime ownership boundary.
 
 ### Phase 4 — Partition evaluation sessions and work coordination
 

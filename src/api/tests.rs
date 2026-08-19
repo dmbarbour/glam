@@ -1,0 +1,1905 @@
+use super::*;
+use std::ops::Range;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+
+use crate::core::{
+    Dict, EvaluationHalt, Key, LazyValue, List, OpaqueValue, Value as CoreValue, keys,
+};
+use crate::diagnostic::{CompilationInvocationId, CompilationTrace, Severity};
+use crate::eval;
+use crate::evaluation::{EvaluationMachinePoll, EvaluationTaskMachine, ReflectionTaskProfile};
+use crate::number::Number;
+use crate::reflection::{ReflectionEffects, coordinator_task_launcher};
+use crate::source::{SourceArtifact, SourceIdentity};
+
+mod diagnostic_tests;
+mod runtime_tests;
+
+use runtime_tests::{decode_test_integer, input_transaction};
+
+struct FailedReasoningTask;
+
+fn access_path(assembler: &Assembler, root: &Value, path: &str) -> Result<Value, Error> {
+    let values = assembler.values();
+    let mut value = root.clone();
+    for part in path.split('.') {
+        value = values.access(&value, values.atom_from_text(part))?;
+    }
+    Ok(value)
+}
+
+fn binary_at(assembler: &Assembler, root: &Value, path: &str) -> Result<Bytes, Error> {
+    assembler.to_binary(&access_path(assembler, root, path)?)
+}
+
+fn assert_unclaimed_lazy(value: &Value) {
+    let CoreValue::Lazy(lazy) = value.as_core() else {
+        panic!(
+            "expected a lazy value, received {}",
+            value.as_core().diagnostic_kind_name()
+        );
+    };
+    assert!(
+        lazy.cached().is_none(),
+        "constructor must not cache a result"
+    );
+    assert!(
+        lazy.source_snapshot().is_some(),
+        "constructor must leave the lazy producer available"
+    );
+}
+
+fn assert_unobserved_promise(value: &Value) {
+    let CoreValue::Promised(promise) = value.as_core() else {
+        panic!(
+            "expected a promised value, received {}",
+            value.as_core().diagnostic_kind_name()
+        );
+    };
+    assert!(
+        promise.assignment().is_none(),
+        "constructor must not assign the promise"
+    );
+    assert_eq!(
+        promise.exact_subscription_count(),
+        0,
+        "constructor must not subscribe demand to the promise"
+    );
+}
+
+impl EvaluationTaskMachine for FailedReasoningTask {
+    fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+        EvaluationMachinePoll::Failed(Arc::new(crate::core::EvaluationFailure::message(
+            "public reasoning failure",
+        )))
+    }
+}
+
+fn test_compilation_trace(source: &str) -> CompilationTrace {
+    let source = SourceArtifact::new(Bytes::from_static(b"source"), SourceIdentity::file(source));
+    CompilationTrace::root(
+        CompilationInvocationId::new(1),
+        &source,
+        Arc::from(["test".to_owned()]),
+    )
+}
+
+fn definition_context(value: &CoreValue) -> Option<&Dict> {
+    let CoreValue::Dict(frame) = value else {
+        return None;
+    };
+    let CoreValue::Dict(context) = frame.get(&*keys::G)? else {
+        return None;
+    };
+    Some(context)
+}
+
+fn diagnostic_contexts(assembler: &Assembler, diagnostic: &Diagnostic) -> Vec<CoreValue> {
+    let emission = eval::eval_value(&assembler.eval_context(), diagnostic.emission().as_core())
+        .expect("diagnostic emission should evaluate");
+    let CoreValue::Dict(emission) = emission else {
+        panic!("diagnostic emission should be a dictionary");
+    };
+    let message = eval::eval_value(
+        &assembler.eval_context(),
+        emission
+            .get(&*keys::MSG)
+            .expect("diagnostic should define msg"),
+    )
+    .expect("diagnostic msg should evaluate");
+    let CoreValue::Dict(message) = message else {
+        panic!("diagnostic msg should be a dictionary");
+    };
+    let contexts = eval::eval_value(
+        &assembler.eval_context(),
+        message
+            .get(&*keys::CONTEXT)
+            .expect("diagnostic msg should define context"),
+    )
+    .expect("diagnostic context should evaluate");
+    let CoreValue::List(contexts) = contexts else {
+        panic!("diagnostic context should be a list");
+    };
+    eval::list_to_value_items(&assembler.eval_context(), &contexts)
+        .expect("diagnostic contexts should be concrete values")
+}
+
+#[test]
+fn runtimes_own_independent_local_identity_domains_and_value_factories() {
+    let first = EvaluationRuntime::new(0).expect("first runtime should build");
+    let second = EvaluationRuntime::new(0).expect("second runtime should build");
+    assert_ne!(first.id(), second.id());
+
+    let allocate_one_of_each = |runtime: &EvaluationRuntime| {
+        let ids = &runtime.state.shared_resources.ids;
+        (
+            ids.evaluation_session().get(),
+            ids.evaluation_task().unwrap().get(),
+            ids.evaluation_wait().unwrap().get(),
+            ids.deferred_value().get(),
+            ids.reasoning_session().get(),
+            ids.input_endpoint().unwrap().get(),
+            ids.output_endpoint().unwrap().get(),
+            ids.delivery().unwrap().get(),
+        )
+    };
+    assert_eq!(allocate_one_of_each(&first), allocate_one_of_each(&second));
+
+    assert_eq!(first.values().runtime_id(), first.id());
+    assert_eq!(second.values().runtime_id(), second.id());
+    let assembler = Assembler::builder()
+        .evaluation_runtime(first.clone())
+        .build()
+        .expect("assembler should retain its selected runtime");
+    assert_eq!(assembler.values().runtime_id(), first.id());
+
+    let first_values = first.values().core;
+    let first_unit = first_values.unit();
+    let first_lazy = LazyValue::deferred(&first_values, "first runtime", move |_| {
+        Ok(first_unit.clone())
+    });
+    let second_values = second.values().core;
+    let second_unit = second_values.unit();
+    let second_lazy = LazyValue::deferred(&second_values, "second runtime", move |_| {
+        Ok(second_unit.clone())
+    });
+    assert_eq!(first_lazy.id().get(), second_lazy.id().get());
+}
+
+#[test]
+fn runtime_shared_resources_do_not_retain_runtime_lifecycle_owners() {
+    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+    let runtime_id = runtime.id();
+    let state = Arc::downgrade(&runtime.state);
+    let coordinator = Arc::downgrade(&runtime.state.work);
+    let executor = Arc::downgrade(&runtime.state.executor);
+    let profile = Arc::downgrade(&runtime.default_reflection_profile);
+    let resources = runtime.state.shared_resources.clone();
+    let retained_resources = Arc::downgrade(&resources);
+
+    drop(runtime);
+
+    assert!(state.upgrade().is_none());
+    assert!(coordinator.upgrade().is_none());
+    assert!(executor.upgrade().is_none());
+    assert!(profile.upgrade().is_none());
+    assert!(resources.work.upgrade().is_none());
+    assert_eq!(resources.id, runtime_id);
+    assert_eq!(resources.values.core().runtime_id(), runtime_id);
+
+    let before = resources.observations.current();
+    let mutation = resources.mutation_admission.mutation_guard();
+    publish_runtime_observation(&resources, mutation);
+    assert!(resources.observations.current() > before);
+    assert!(resources.ids.reasoning_session().get() > 0);
+    let _snapshot = resources
+        .transactions
+        .state
+        .lock()
+        .expect("runtime transaction mutex should not be poisoned")
+        .reflection
+        .snapshot();
+
+    drop(resources);
+    assert!(retained_resources.upgrade().is_none());
+}
+
+#[test]
+fn public_value_factories_reject_foreign_composite_members() {
+    let owner = EvaluationRuntime::new(0).expect("owner runtime should build");
+    let foreign = EvaluationRuntime::new(0).expect("foreign runtime should build");
+    let values = owner.values();
+    let foreign_value = foreign.values().integer(7);
+
+    assert!(values.list([foreign_value.clone()]).is_err());
+    assert!(values.record([("value", foreign_value.clone())]).is_err());
+    assert!(
+        values
+            .dictionary([(values.atom_from_text("key"), foreign_value.clone())])
+            .is_err()
+    );
+    assert!(values.empty_object(foreign_value.clone()).is_err());
+    assert!(
+        values
+            .access(&values.empty_dict(), foreign_value.clone())
+            .is_err()
+    );
+    assert!(values.access(&foreign_value, values.text("key")).is_err());
+    assert!(
+        values
+            .apply(&values.integer(0), [foreign_value.clone()])
+            .is_err()
+    );
+    assert!(
+        values
+            .access_path(&values.empty_dict(), [foreign_value.clone()])
+            .is_err()
+    );
+    assert!(
+        values
+            .access_path(&foreign_value, std::iter::empty::<Value>())
+            .is_err()
+    );
+    assert!(values.access_names(&foreign_value, ["member"]).is_err());
+    assert!(values.list_slice(&foreign_value, 0..1).is_err());
+    assert!(values.anno_binary(foreign_value.clone()).is_err());
+    assert!(values.anno_array(foreign_value.clone()).is_err());
+    assert!(values.anno_deque(foreign_value.clone()).is_err());
+    assert!(
+        values
+            .anno(foreign_value.clone(), values.empty_dict())
+            .is_err()
+    );
+    assert!(
+        values
+            .anno(values.atom_from_text("binary"), foreign_value.clone())
+            .is_err()
+    );
+    assert!(
+        values
+            .after_reflection(foreign_value.clone(), values.text("target"))
+            .is_err()
+    );
+    assert!(
+        values
+            .after_reflection(values.empty_dict(), foreign_value)
+            .is_err()
+    );
+}
+
+#[test]
+fn access_and_annotation_construction_do_not_demand_inputs() {
+    let assembler = Assembler::new();
+    let values = assembler.values();
+    let demanded = Arc::new(AtomicBool::new(false));
+    let demanded_by_thunk = demanded.clone();
+    let core_values = assembler.core_values();
+    let unit = core_values.unit();
+    let lazy = Value::from_core(
+        &core_values,
+        CoreValue::Lazy(LazyValue::deferred(
+            &core_values,
+            "no-demand facade fixture",
+            move |_| {
+                demanded_by_thunk.store(true, Ordering::SeqCst);
+                Ok(unit.clone())
+            },
+        )),
+    );
+    let (promise, resolver) = assembler.promise("no-demand facade fixture");
+
+    let access = values
+        .access(&lazy, values.atom_from_text("member"))
+        .expect("same-runtime access construction should succeed");
+    let annotation = values
+        .anno(lazy.clone(), promise.clone())
+        .expect("same-runtime annotation construction should succeed");
+
+    assert!(!demanded.load(Ordering::SeqCst));
+    assert_unclaimed_lazy(&lazy);
+    assert_unobserved_promise(&promise);
+    assert_unclaimed_lazy(&access);
+    assert_unclaimed_lazy(&annotation);
+
+    resolver
+        .fail_message("fixture complete")
+        .expect("an unobserved promise remains independently resolvable");
+}
+
+#[test]
+fn values_apply_is_lazy_and_matches_source_application_order() {
+    let assembler = Assembler::new();
+    let values = assembler.values();
+    let module = assembler
+        .module(["values_apply"])
+        .script(
+            "g",
+            concat!(
+                "language g0\n",
+                "difference = \\ left right -> left - right\n",
+                "direct = difference 50 8\n",
+            ),
+        )
+        .build()
+        .expect("application fixture should compile");
+    let function = access_path(&assembler, module.value(), "difference")
+        .expect("fixture should define its function");
+    let direct = access_path(&assembler, module.value(), "direct")
+        .expect("fixture should define its direct result");
+
+    let applied = values
+        .apply(&function, [values.integer(50), values.integer(8)])
+        .expect("same-runtime application should construct");
+    assert_unclaimed_lazy(&applied);
+    assert_eq!(
+        assembler
+            .evaluate(&applied)
+            .expect("constructed application should evaluate"),
+        assembler
+            .evaluate(&direct)
+            .expect("source application should evaluate")
+    );
+
+    let partial = values
+        .apply(&function, [values.integer(50)])
+        .expect("partial application should construct");
+    let nested = values
+        .apply(&partial, [values.integer(8)])
+        .expect("nested application should construct");
+    assert_eq!(
+        assembler
+            .evaluate(&nested)
+            .expect("nested application should evaluate"),
+        assembler
+            .evaluate(&direct)
+            .expect("source application should remain reusable")
+    );
+
+    let (promise, resolver) = assembler.promise("lazy function application");
+    let promised_application = values
+        .apply(&promise, [values.integer(1)])
+        .expect("a promised function may be applied lazily");
+    assert_unobserved_promise(&promise);
+    assert_unclaimed_lazy(&promised_application);
+    resolver
+        .fail_message("fixture complete")
+        .expect("the promised function was not observed");
+}
+
+#[test]
+fn value_paths_preserve_complete_names_and_empty_identity() {
+    let assembler = Assembler::new();
+    let values = assembler.values();
+    let root = values
+        .dictionary([(values.atom_from_text("a.b"), values.integer(42))])
+        .expect("immediate dictionary should construct");
+
+    let complete_name = values
+        .access_names(&root, ["a.b"])
+        .and_then(|value| assembler.evaluate(&value))
+        .expect("a dotted complete name should remain one atom");
+    assert_eq!(complete_name.as_i64(), Some(42));
+
+    let split_name = values
+        .access_names(&root, ["a", "b"])
+        .and_then(|value| assembler.evaluate(&value))
+        .expect("a missing semantic path returns undefined");
+    assert!(split_name.is_undefined());
+
+    assert_eq!(
+        values
+            .access_path(&root, std::iter::empty::<Value>())
+            .expect("an empty path should preserve its root"),
+        root
+    );
+    assert_eq!(
+        values
+            .apply(&root, std::iter::empty::<Value>())
+            .expect("an empty application should preserve its function"),
+        root
+    );
+}
+
+#[test]
+fn list_and_representation_constructors_are_lazy_semantic_operations() {
+    let assembler = Assembler::new();
+    let values = assembler.values();
+    let (promise, resolver) = assembler.promise("lazy list facade fixture");
+
+    let slice = values
+        .list_slice(&promise, 1..3)
+        .expect("a promised list may be sliced lazily");
+    let binary = values
+        .anno_binary(promise.clone())
+        .expect("binary annotation should construct lazily");
+    let array = values
+        .anno_array(promise.clone())
+        .expect("array annotation should construct lazily");
+    let deque = values
+        .anno_deque(promise.clone())
+        .expect("deque annotation should construct lazily");
+
+    assert_unobserved_promise(&promise);
+    for constructed in [&slice, &binary, &array, &deque] {
+        assert_unclaimed_lazy(constructed);
+    }
+    resolver
+        .fail_message("fixture complete")
+        .expect("none of the constructors observed the promise");
+
+    let compact = values.bytes(Bytes::from_static(b"abcdef"));
+    let compact_slice = values
+        .list_slice(&compact, 1..5)
+        .and_then(|slice| values.anno_binary(slice))
+        .expect("binary slice pipeline should construct");
+    assert_eq!(
+        assembler
+            .to_binary(&compact_slice)
+            .expect("binary slice pipeline should evaluate"),
+        b"bcde".as_slice()
+    );
+    let reversed = Range { start: 5, end: 3 };
+    assert!(
+        values
+            .list_slice(&compact, reversed)
+            .and_then(|slice| assembler.evaluate(&slice))
+            .is_err(),
+        "range ordering remains a semantic slice failure"
+    );
+}
+
+#[test]
+fn array_and_deque_annotations_preserve_lazy_elements() {
+    let assembler = Assembler::new();
+    let values = assembler.values();
+    let core_values = assembler.core_values();
+    let element = Value::from_core(
+        &core_values,
+        CoreValue::Lazy(LazyValue::deferred(
+            &core_values,
+            "lazy list element",
+            |_| Ok(CoreValue::Number(Number::integer(7))),
+        )),
+    );
+    let list = values
+        .list([element.clone(), values.integer(8)])
+        .expect("strict list spine should construct");
+
+    let array = values
+        .anno_array(list.clone())
+        .and_then(|array| assembler.evaluate(&array))
+        .expect("array annotation should normalize the spine");
+    let CoreValue::List(array) = array.as_core() else {
+        panic!("array annotation must return a list");
+    };
+    let items = eval::list_to_value_items(&assembler.eval_context(), array)
+        .expect("array representation should enumerate immediately");
+    assert_eq!(items.len(), 2);
+    assert!(matches!(&items[0], CoreValue::Lazy(_)));
+    assert_unclaimed_lazy(&element);
+
+    let deque = values
+        .anno_deque(list)
+        .and_then(|deque| assembler.evaluate(&deque))
+        .expect("deque annotation should normalize the spine");
+    let CoreValue::List(deque) = deque.as_core() else {
+        panic!("deque annotation must return a list");
+    };
+    let items = eval::list_to_value_items(&assembler.eval_context(), deque)
+        .expect("balanced deque should enumerate after normalization");
+    assert_eq!(items.len(), 2);
+    assert!(matches!(&items[0], CoreValue::Lazy(_)));
+    assert_unclaimed_lazy(&element);
+}
+
+#[test]
+fn dictionary_composition_is_lazy_and_rejects_foreign_members() {
+    let assembler = Assembler::new();
+    let values = assembler.values();
+    let (promise, resolver) = assembler.promise("lazy dictionary facade fixture");
+
+    let singleton = values
+        .dict_singleton(promise.clone(), promise.clone())
+        .expect("singleton construction should remain lazy");
+    let union = values
+        .dict_union(promise.clone(), values.empty_dict())
+        .expect("union construction should remain lazy");
+    let update = values
+        .dict_update(promise.clone(), promise.clone(), promise.clone())
+        .expect("update construction should remain lazy");
+
+    assert_unobserved_promise(&promise);
+    for constructed in [&singleton, &union, &update] {
+        assert_unclaimed_lazy(constructed);
+    }
+    resolver
+        .fail_message("fixture complete")
+        .expect("dictionary constructors did not observe the promise");
+
+    let foreign = EvaluationRuntime::new(0).expect("foreign runtime should build");
+    let foreign = foreign.values().integer(1);
+    assert!(
+        values
+            .dict_singleton(values.atom_from_text("key"), foreign.clone())
+            .is_err()
+    );
+    assert!(
+        values
+            .dict_union(values.empty_dict(), foreign.clone())
+            .is_err()
+    );
+    assert!(
+        values
+            .dict_update(values.empty_dict(), values.list([]).unwrap(), foreign)
+            .is_err()
+    );
+}
+
+#[test]
+fn dictionary_composition_matches_source_literals_union_and_updates() {
+    let assembler = Assembler::new();
+    let values = assembler.values();
+    let module = assembler
+        .module(["dictionary_facade"])
+        .script(
+            "g",
+            concat!(
+                "language g0\n",
+                "left = {base:1, nested:{x:2}}\n",
+                "right = {added:3, nested:{y:4}}\n",
+                "source_union = {left, right}\n",
+                "source_conflict = {left, {base:3}}\n",
+                "source_update = left with { base := 5; nested.z = 6 }\n",
+                "source_remove = source_update with { base := {} }\n",
+            ),
+        )
+        .build()
+        .expect("dictionary facade fixture should compile");
+
+    let left = access_path(&assembler, module.value(), "left").unwrap();
+    let right = access_path(&assembler, module.value(), "right").unwrap();
+    let union = values
+        .dict_union(left.clone(), right)
+        .expect("same-runtime union should construct");
+    let update = values
+        .dict_update(
+            left,
+            values
+                .list([values.atom_from_text("base")])
+                .expect("static path should construct"),
+            values.integer(5),
+        )
+        .and_then(|dictionary| {
+            values.dict_update(
+                dictionary,
+                values.list([values.atom_from_text("nested"), values.atom_from_text("z")])?,
+                values.integer(6),
+            )
+        })
+        .expect("same-runtime nested update should construct");
+    let removed = values
+        .dict_update(
+            update.clone(),
+            values.list([values.atom_from_text("base")]).unwrap(),
+            values.empty_dict(),
+        )
+        .expect("update to undefined should construct removal");
+
+    let assert_field = |actual: &Value, source: &str, path: &[&str]| {
+        let expected = access_path(&assembler, module.value(), source).unwrap();
+        let actual = values
+            .access_names(actual, path.iter().copied())
+            .and_then(|value| assembler.evaluate(&value))
+            .unwrap();
+        let expected = values
+            .access_names(&expected, path.iter().copied())
+            .and_then(|value| assembler.evaluate(&value))
+            .unwrap();
+        assert_eq!(actual, expected, "field path {path:?} should match");
+    };
+
+    for path in [
+        ["base"].as_slice(),
+        ["added"].as_slice(),
+        ["nested", "x"].as_slice(),
+        ["nested", "y"].as_slice(),
+    ] {
+        assert_field(&union, "source_union", path);
+    }
+    let conflict = values
+        .dict_union(
+            access_path(&assembler, module.value(), "left").unwrap(),
+            values
+                .dict_singleton(values.atom_from_text("base"), values.integer(3))
+                .unwrap(),
+        )
+        .unwrap();
+    let source_conflict = access_path(&assembler, module.value(), "source_conflict").unwrap();
+    assert!(
+        values
+            .access_names(&conflict, ["base"])
+            .and_then(|value| assembler.evaluate(&value))
+            .is_err()
+    );
+    assert!(
+        values
+            .access_names(&source_conflict, ["base"])
+            .and_then(|value| assembler.evaluate(&value))
+            .is_err()
+    );
+    for path in [
+        ["base"].as_slice(),
+        ["nested", "x"].as_slice(),
+        ["nested", "z"].as_slice(),
+    ] {
+        assert_field(&update, "source_update", path);
+    }
+    assert_field(&removed, "source_remove", &["base"]);
+
+    let singleton = values
+        .dict_singleton(values.atom_from_text("only"), values.integer(9))
+        .expect("singleton should construct");
+    assert_eq!(
+        values
+            .access_names(&singleton, ["only"])
+            .and_then(|value| assembler.evaluate(&value))
+            .unwrap()
+            .as_i64(),
+        Some(9)
+    );
+    let identity = values
+        .dict_union(values.empty_dict(), singleton.clone())
+        .expect("empty dictionary should be union identity");
+    assert_field(&identity, "source_remove", &["missing"]);
+    assert_eq!(
+        values
+            .access_names(&identity, ["only"])
+            .and_then(|value| assembler.evaluate(&value))
+            .unwrap()
+            .as_i64(),
+        Some(9)
+    );
+}
+
+#[test]
+fn cached_defined_selection_helpers_match_glam_undefined_semantics() {
+    let assembler = Assembler::new();
+    let values = assembler.values();
+    let core_values = assembler.core_values();
+    let defined_or = Value::from_core(
+        &core_values,
+        crate::g_syntax::defined_or_value(&core_values),
+    );
+    let require_defined = Value::from_core(
+        &core_values,
+        crate::g_syntax::require_defined_value(&core_values),
+    );
+    let fallback = values.integer(7);
+
+    for undefined in [
+        values.empty_dict(),
+        values
+            .record([("nested", values.empty_dict())])
+            .expect("logical undefined fixture should construct"),
+    ] {
+        let selected = values
+            .apply(&defined_or, [fallback.clone(), undefined])
+            .and_then(|value| assembler.evaluate(&value))
+            .expect("defined-or should select its fallback");
+        assert_eq!(selected.as_i64(), Some(7));
+    }
+
+    let selected = values
+        .apply(&defined_or, [fallback, values.integer(9)])
+        .and_then(|value| assembler.evaluate(&value))
+        .expect("defined-or should preserve a defined candidate");
+    assert_eq!(selected.as_i64(), Some(9));
+
+    let required = values
+        .apply(
+            &require_defined,
+            [values.text("required.value"), values.integer(11)],
+        )
+        .and_then(|value| assembler.evaluate(&value))
+        .expect("required helper should preserve a defined value");
+    assert_eq!(required.as_i64(), Some(11));
+    assert!(
+        values
+            .apply(
+                &require_defined,
+                [values.text("required.value"), values.empty_dict()],
+            )
+            .and_then(|value| assembler.evaluate(&value))
+            .is_err(),
+        "required helper should reject a logically undefined value"
+    );
+}
+
+#[test]
+fn evaluated_values_preserve_whnf_identity_and_scalar_views() {
+    let assembler = Assembler::new();
+    let values = assembler.values();
+
+    for integer in [i64::MIN, -1, 0, 1, i64::MAX] {
+        let original = values.integer(integer);
+        let evaluated = EvaluatedValue::from_whnf(original.clone());
+        assert_eq!(evaluated.as_value(), &original);
+        assert_eq!(evaluated.clone().into_value(), original);
+        assert_eq!(Value::from(evaluated.clone()), original);
+        assert_eq!(evaluated.as_i64(), Some(integer));
+        assert_eq!(evaluated.number_text(), Some(integer.to_string()));
+        assert_eq!(evaluated.as_value().runtime_id(), values.runtime_id());
+    }
+
+    let rational = EvaluatedValue::from_whnf(
+        values
+            .rational(-3, 4)
+            .expect("nonzero denominator should construct"),
+    );
+    assert_eq!(rational.as_rational_i64(), Some((-3, 4)));
+    assert_eq!(rational.number_text().as_deref(), Some("-3/4"));
+    assert_eq!(rational.as_f64(), Some(-0.75));
+
+    let large = EvaluatedValue::from_whnf(
+        values
+            .number_from_text("123456789012345678901234567890")
+            .expect("arbitrary precision integer should parse"),
+    );
+    assert_eq!(large.as_i64(), None);
+    assert_eq!(
+        large.number_text().as_deref(),
+        Some("123456789012345678901234567890")
+    );
+
+    let bytes = EvaluatedValue::from_whnf(values.bytes(Bytes::from_static(b"bytes")));
+    assert_eq!(bytes.as_bytes(), Some(b"bytes".as_slice()));
+    assert_eq!(bytes.as_i64(), None);
+}
+
+#[test]
+fn effect_tokens_are_domain_scoped_unforgeable_and_revoked_with_the_domain() {
+    let runtime = EvaluationRuntime::new(0).unwrap();
+    let values = runtime.values();
+    let assembler = Assembler::builder()
+        .evaluation_runtime(runtime.clone())
+        .build()
+        .unwrap();
+    let domain = EffectTokenDomain::new(&values);
+    let other = EffectTokenDomain::<String>::new(&values);
+    let state = Arc::downgrade(&domain.state);
+    let token = domain.issue("path payload".to_owned());
+    let evaluated = assembler.evaluator().eval(&token).unwrap();
+
+    assert_eq!(
+        domain.resolve(&evaluated).as_deref(),
+        Some(&"path payload".to_owned())
+    );
+    assert!(other.resolve(&evaluated).is_none());
+    assert!(
+        domain
+            .resolve(&assembler.evaluator().eval(&values.unit()).unwrap())
+            .is_none()
+    );
+
+    drop(domain);
+    assert!(
+        state.upgrade().is_none(),
+        "escaped tokens weakly reference and do not retain their issuing domain"
+    );
+}
+
+#[test]
+fn evaluated_array_items_accept_only_one_strict_value_leaf() {
+    let assembler = Assembler::new();
+    let values = assembler.values();
+    let core_values = assembler.core_values();
+    let lazy_element = Value::from_core(
+        &core_values,
+        CoreValue::Lazy(LazyValue::deferred(
+            &core_values,
+            "unevaluated array member",
+            |_| Ok(CoreValue::Number(Number::integer(1))),
+        )),
+    );
+    let array = EvaluatedValue::from_whnf(
+        values
+            .list([lazy_element.clone(), values.integer(2)])
+            .expect("strict value leaf should construct"),
+    );
+    assert_eq!(
+        values
+            .anno_array(array.as_value().clone())
+            .expect("strict array annotation should succeed"),
+        array.as_value().clone(),
+        "an existing strict array should not allocate new demand work"
+    );
+    let items = array
+        .array_items()
+        .expect("strict value leaf should extract as an array");
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0], lazy_element);
+    assert_unclaimed_lazy(&items[0]);
+
+    assert_eq!(
+        EvaluatedValue::from_whnf(values.list([]).unwrap()).array_items(),
+        Some(Vec::new())
+    );
+    assert!(
+        EvaluatedValue::from_whnf(values.bytes(Bytes::from_static(b"bytes")))
+            .array_items()
+            .is_none()
+    );
+
+    let concatenated = Value::from_core(
+        &core_values,
+        CoreValue::List(List::concat(
+            List::from_values(vec![CoreValue::Number(Number::integer(1))]),
+            List::from_values(vec![CoreValue::Number(Number::integer(2))]),
+        )),
+    );
+    assert!(
+        EvaluatedValue::from_whnf(concatenated)
+            .array_items()
+            .is_none()
+    );
+
+    let deque = values
+        .anno_deque(values.list([values.integer(1), values.integer(2)]).unwrap())
+        .and_then(|value| assembler.evaluate(&value))
+        .expect("deque should evaluate");
+    assert!(EvaluatedValue::from_whnf(deque).array_items().is_none());
+
+    let (promise, resolver) = assembler.promise("deferred array spine");
+    let CoreValue::Promised(promise_core) = promise.as_core() else {
+        unreachable!("public promise must contain a promised core value")
+    };
+    let deferred_spine = Value::from_core(
+        &core_values,
+        CoreValue::List(List::from_thunk(promise_core.clone().into())),
+    );
+    assert!(
+        EvaluatedValue::from_whnf(deferred_spine)
+            .array_items()
+            .is_none()
+    );
+    assert_unobserved_promise(&promise);
+    resolver
+        .fail_message("fixture complete")
+        .expect("array inspection did not observe the deferred spine");
+}
+
+#[test]
+fn value_evaluator_returns_a_runtime_rooted_whnf_witness() {
+    let assembler = Assembler::new();
+    let value = assembler.values().integer(42);
+    let foreign = EvaluationRuntime::new(0).expect("foreign runtime should build");
+    assert!(
+        assembler
+            .evaluator()
+            .eval(&foreign.values().integer(42))
+            .is_err()
+    );
+
+    let evaluated = assembler
+        .evaluator()
+        .eval(&value)
+        .expect("an immediate value should evaluate");
+    assert_eq!(evaluated.as_i64(), Some(42));
+    assert_eq!(evaluated.as_value().runtime_id(), value.runtime_id());
+    drop(assembler);
+    assert_eq!(evaluated.as_i64(), Some(42));
+    assert_eq!(evaluated.into_value(), value);
+}
+
+#[test]
+fn value_evaluator_resumes_a_retained_resolver_promise_subscription() {
+    let assembler = Assembler::new();
+    let values = assembler.values();
+    let (promise, resolver) = assembler.promise("public evaluator wait fixture");
+    let CoreValue::Promised(promise_core) = promise.as_core() else {
+        unreachable!("public promise must contain a promised core value")
+    };
+    let promise_core = promise_core.clone();
+    let waiting = values
+        .anno_binary(promise)
+        .expect("binary annotation should wrap the promise without observing it");
+    let error = assembler
+        .evaluator()
+        .eval(&waiting)
+        .expect_err("a resolver-owned promise has no runtime-owned progress source");
+    assert!(error.to_string().contains("blocked on wait token"));
+    assert_eq!(promise_core.exact_subscription_count(), 1);
+    resolver
+        .resolve(values.text("resolved"))
+        .expect("resolver should publish the promised value");
+    let evaluated = assembler
+        .evaluator()
+        .eval(&waiting)
+        .expect("promise completion should resume evaluation");
+    assert_eq!(evaluated.as_bytes(), Some(b"resolved".as_slice()));
+    assert_eq!(promise_core.exact_subscription_count(), 0);
+}
+
+#[test]
+fn value_evaluator_caches_lazy_success_and_preserves_structured_failure() {
+    let assembler = Assembler::new();
+    let values = assembler.values();
+    let core_values = assembler.core_values();
+    let evaluations = Arc::new(AtomicUsize::new(0));
+    let evaluations_by_thunk = evaluations.clone();
+    let lazy = Value::from_core(
+        &core_values,
+        CoreValue::Lazy(LazyValue::deferred(
+            &core_values,
+            "one evaluation",
+            move |_| {
+                evaluations_by_thunk.fetch_add(1, Ordering::SeqCst);
+                Ok(CoreValue::Number(Number::integer(42)))
+            },
+        )),
+    );
+    assert_eq!(
+        assembler.evaluator().eval(&lazy).unwrap().as_i64(),
+        Some(42)
+    );
+    assert_eq!(
+        assembler.evaluator().eval(&lazy).unwrap().as_i64(),
+        Some(42)
+    );
+    assert_eq!(evaluations.load(Ordering::SeqCst), 1);
+
+    let failure = values
+        .anno(
+            values.atom_from_text("error"),
+            values
+                .record([
+                    (
+                        "msg",
+                        values
+                            .record([("text", values.text("structured"))])
+                            .unwrap(),
+                    ),
+                    ("detail", values.text("preserved")),
+                ])
+                .unwrap(),
+        )
+        .unwrap();
+    let error = assembler
+        .evaluator()
+        .eval(&failure)
+        .expect_err("error annotation should fail evaluation");
+    assert_eq!(error.to_string(), "structured");
+    assert!(error.structured_diagnostic().is_some());
+}
+
+#[test]
+fn semantic_binary_slice_does_not_force_an_unused_poisoned_tail() {
+    let assembler = Assembler::new();
+    let values = assembler.values();
+    let core_values = assembler.core_values();
+    let poison = LazyValue::deferred(&core_values, "unused binary tail", |_| {
+        Err(EvaluationHalt::new("unused binary tail was forced"))
+    });
+    let source = Value::from_core(
+        &core_values,
+        CoreValue::List(List::concat(
+            List::from_bytes(Bytes::from_static(b"ok")),
+            List::from_thunk(poison.clone().into()),
+        )),
+    );
+    let binary = values
+        .list_slice(&source, 0..2)
+        .and_then(|slice| values.anno_binary(slice))
+        .expect("slice and binary assertion should construct lazily");
+    let evaluated = assembler
+        .evaluator()
+        .eval(&binary)
+        .expect("prefix extraction should not observe the tail");
+    assert_eq!(evaluated.as_bytes(), Some(b"ok".as_slice()));
+    assert!(poison.cached().is_none());
+    assert!(poison.source_snapshot().is_some());
+}
+
+#[test]
+fn semantic_array_materialization_replaces_reflective_list_enumeration() {
+    let assembler = Assembler::new();
+    let values = assembler.values();
+    let list = values
+        .list([values.integer(1), values.text("two")])
+        .expect("list fixture should construct");
+    let semantic = values
+        .anno_array(list)
+        .and_then(|array| assembler.evaluator().eval(&array))
+        .expect("semantic array should evaluate")
+        .array_items()
+        .expect("array annotation should produce one strict value leaf");
+    assert_eq!(semantic.len(), 2);
+    assert_eq!(
+        assembler.evaluator().eval(&semantic[0]).unwrap().as_i64(),
+        Some(1)
+    );
+    assert_eq!(
+        assembler.evaluator().eval(&semantic[1]).unwrap().as_bytes(),
+        Some(b"two".as_slice())
+    );
+
+    let bytes = values
+        .anno_array(values.bytes(Bytes::from_static(&[0, 255])))
+        .and_then(|array| assembler.evaluator().eval(&array))
+        .expect("compact binary should materialize as an array")
+        .array_items()
+        .expect("binary array should use a strict value leaf");
+    assert_eq!(bytes[0].as_i64(), Some(0));
+    assert_eq!(bytes[1].as_i64(), Some(255));
+}
+
+#[test]
+fn reflection_kind_observes_an_unresolved_promise_without_demand() {
+    let assembler = Assembler::new();
+    let (promise, resolver) = assembler.promise("reflection kind fixture");
+    assert_eq!(
+        assembler.reflection().kind(&promise).unwrap(),
+        ValueKind::Lazy
+    );
+    assert_unobserved_promise(&promise);
+
+    let foreign = EvaluationRuntime::new(0).expect("foreign runtime should build");
+    assert!(
+        assembler
+            .reflection()
+            .kind(&foreign.values().integer(1))
+            .is_err()
+    );
+    resolver
+        .fail_message("fixture complete")
+        .expect("representation inspection did not observe the promise");
+}
+
+#[test]
+fn assembler_boundaries_reject_foreign_values_before_evaluation_or_storage() {
+    let runtime = EvaluationRuntime::new(0).expect("owner runtime should build");
+    let foreign = EvaluationRuntime::new(0).expect("foreign runtime should build");
+    let assembler = Assembler::builder()
+        .evaluation_runtime(runtime.clone())
+        .build()
+        .expect("owner assembler should build");
+    let foreign_value = foreign.values().text("foreign");
+
+    assert!(assembler.evaluator().eval(&foreign_value).is_err());
+    assert!(
+        assembler
+            .values()
+            .apply(&assembler.values().integer(0), [foreign_value.clone()])
+            .is_err()
+    );
+    assert!(
+        assembler
+            .values()
+            .access_names(&foreign_value, ["member"])
+            .is_err()
+    );
+    assert!(
+        assembler
+            .values()
+            .anno_binary(foreign_value.clone())
+            .is_err()
+    );
+    assert!(assembler.values().list_slice(&foreign_value, 0..1).is_err());
+    assert!(access_path(&assembler, &foreign_value, "member").is_err());
+    assert!(assembler.create_volume(foreign_value.clone()).is_err());
+    assert!(
+        assembler
+            .net(|builder| builder.data(foreign_value.clone()))
+            .is_err()
+    );
+    assert!(
+        assembler
+            .module(["foreign_initial_definitions"])
+            .initial_definitions(foreign.values().empty_dict())
+            .build()
+            .is_err()
+    );
+
+    let (promise, resolver) = assembler.promise("foreign assignment");
+    assert!(resolver.resolve(foreign_value.clone()).is_err());
+    let CoreValue::Promised(unassigned) = promise.as_core() else {
+        panic!("public promise should retain its core promise cell")
+    };
+    assert!(
+        unassigned.assignment().is_none(),
+        "rejecting a foreign value must not terminalize the promise"
+    );
+    assert!(
+        assembler
+            .evaluate(&promise)
+            .expect_err("a rejected foreign resolution must leave the promise pending")
+            .to_string()
+            .contains("before initialization")
+    );
+    let (failed, resolver) = assembler.promise("foreign failure");
+    assert!(resolver.fail(foreign_value).is_err());
+    let CoreValue::Promised(unassigned) = failed.as_core() else {
+        panic!("public promise should retain its core promise cell")
+    };
+    assert!(
+        unassigned.assignment().is_none(),
+        "rejecting a foreign failure must not terminalize the promise"
+    );
+}
+
+#[test]
+fn runtime_event_boundaries_reject_foreign_converted_and_output_values() {
+    let runtime = EvaluationRuntime::new(0).expect("owner runtime should build");
+    let foreign = EvaluationRuntime::new(0).expect("foreign runtime should build");
+    let foreign_values = foreign.values();
+    let input = runtime
+        .input_endpoint(move |_: ()| Ok(foreign_values.integer(1)))
+        .expect("input endpoint should register");
+    assert!(input.sender().admit(()).is_err());
+
+    let output = runtime
+        .output_endpoint(decode_test_integer, |_: i64| Ok(()))
+        .expect("output endpoint should register");
+    let (_, mut events) = input_transaction(&runtime);
+    assert!(
+        events
+            .write(&output.writer(), foreign.values().integer(2))
+            .is_err()
+    );
+    assert!(!runtime.has_delivery_activity());
+}
+
+#[test]
+fn public_error_contexts_prepend_without_rewriting_the_message() {
+    let assembler = Assembler::new();
+    let values = assembler.values();
+    let inner = values.record([("inner", values.text("first"))]).unwrap();
+    let outer = values.record([("outer", values.text("second"))]).unwrap();
+
+    let error = Error::new("original")
+        .with_context(&assembler.values(), inner.clone())
+        .unwrap()
+        .with_context(&assembler.values(), outer.clone())
+        .unwrap();
+
+    assert_eq!(error.to_string(), "original");
+    assert_eq!(
+        diagnostic_contexts(&assembler, &error.diagnostic(&values).unwrap()),
+        [outer.into_core(), inner.into_core()]
+    );
+}
+
+#[test]
+fn binary_annotation_preserves_a_nested_failure_context() {
+    let assembler = Assembler::new();
+    let module = assembler
+        .module(["binary_context"])
+        .script(
+            "g",
+            concat!(
+                "language g0\n",
+                "import 'std\n",
+                "result = anno 'error {msg:{text:\"original\"}, detail:\"kept\"}\n",
+            ),
+        )
+        .build()
+        .expect("binary context fixture should compile");
+
+    let error = binary_at(&assembler, module.value(), "result")
+        .expect_err("binary observation should demand the failed definition");
+
+    assert_eq!(error.to_string(), "original");
+    let contexts = diagnostic_contexts(&assembler, &error.diagnostic(&assembler.values()).unwrap());
+    assert!(
+        contexts.first().and_then(definition_context).is_some(),
+        "semantic binary conversion should preserve the target's source context without a host-only frame"
+    );
+    assert_eq!(
+        assembler
+            .get(
+                error.diagnostic(&assembler.values()).unwrap().emission(),
+                "detail",
+            )
+            .expect("ad hoc diagnostic fields should survive contextualization")
+            .as_binary(),
+        Some(b"kept".as_slice())
+    );
+}
+
+#[test]
+fn callers_can_attach_path_context_to_semantic_access() {
+    let assembler = Assembler::new();
+    let values = assembler.values();
+    let root = Value::from_core(
+        &assembler.core_values(),
+        CoreValue::Dict(Dict::new_sync().insert(
+            Key::atom_from_text("broken"),
+            CoreValue::error(&assembler.core_values(), "path target failed"),
+        )),
+    );
+
+    let frame = values
+        .record([(
+            "eval",
+            values
+                .record([
+                    ("op", values.atom_from_text("path_lookup")),
+                    (
+                        "args",
+                        values
+                            .record([("path", values.text("broken.member"))])
+                            .unwrap(),
+                    ),
+                ])
+                .unwrap(),
+        )])
+        .unwrap();
+    let candidate = values
+        .access_names(&root, ["broken", "member"])
+        .and_then(|candidate| {
+            values.anno(
+                values.record([("context", frame.clone())]).unwrap(),
+                candidate,
+            )
+        })
+        .unwrap();
+    let error = assembler
+        .evaluator()
+        .eval(&candidate)
+        .expect_err("forcing an intermediate path value should fail");
+    assert_eq!(error.to_string(), "path target failed");
+    assert_eq!(
+        diagnostic_contexts(&assembler, &error.diagnostic(&assembler.values()).unwrap()),
+        [frame.into_core()]
+    );
+
+    let missing = values
+        .access_names(&root, ["missing", "member"])
+        .expect("an absent path remains an ordinary semantic access");
+    assert!(
+        assembler
+            .evaluator()
+            .eval(&missing)
+            .unwrap()
+            .as_value()
+            .is_undefined()
+    );
+}
+
+#[test]
+fn semantic_binary_conversion_preserves_structured_failures() {
+    let assembler = Assembler::new();
+    let missing = binary_at(&assembler, &assembler.values().empty_dict(), "missing")
+        .expect_err("missing binary path should fail");
+    assert!(missing.to_string().contains("requires a list or binary"));
+    assert!(missing.structured_diagnostic().is_some());
+
+    let invalid = assembler
+        .to_binary(&assembler.values().integer(42))
+        .expect_err("a number is not binary text data");
+    assert!(invalid.to_string().contains("requires a list or binary"));
+    assert!(invalid.structured_diagnostic().is_some());
+
+    let invalid_item = assembler
+        .to_binary(
+            &assembler
+                .values()
+                .list([assembler.values().integer(256)])
+                .expect("invalid byte fixture should still be a list"),
+        )
+        .expect_err("an out-of-range list member is not binary text data");
+    assert!(
+        invalid_item
+            .to_string()
+            .contains("cannot encode number `256`")
+    );
+    assert!(invalid_item.structured_diagnostic().is_some());
+}
+
+#[test]
+fn reflection_environment_explicitly_projects_compilation_origins() {
+    let assembler = Assembler::new();
+    let trace = test_compilation_trace("/workspace/source.g");
+    let origin = crate::diagnostic::opaque_compilation_origin(&trace);
+    assert_eq!(
+        Value::from_core(&assembler.core_values(), origin.clone()).kind(),
+        ValueKind::Opaque
+    );
+
+    let inspect = assembler
+        .get(&assembler.reflection_environment(), "glam.origin.inspect")
+        .expect("the reflection environment should expose origin inspection");
+    let projected = assembler
+        .apply(
+            &inspect,
+            [Value::from_core(&assembler.core_values(), origin)],
+        )
+        .and_then(|value| assembler.evaluate(&value))
+        .expect("the origin capability should inspect compilation origins");
+
+    assert_eq!(projected.as_core(), &trace.origin_value());
+}
+
+#[test]
+fn public_values_describe_metadata_carriers_only_as_sealed() {
+    let assembler = Assembler::new();
+    let value = Value::from_core(
+        &assembler.core_values(),
+        CoreValue::metadata_carrier(CoreValue::binary_from_text("private trace")),
+    );
+
+    assert_eq!(value.kind(), ValueKind::Sealed);
+    assert_eq!(format!("{value:?}"), "Value { kind: Sealed, .. }");
+}
+
+#[test]
+fn origin_inspection_rejects_unrelated_opaque_values() {
+    let assembler = Assembler::new();
+    let inspect = assembler
+        .get(&assembler.reflection_environment(), "glam.origin.inspect")
+        .expect("the reflection environment should expose origin inspection");
+    let unrelated = Value::from_core(
+        &assembler.core_values(),
+        CoreValue::Opaque(OpaqueValue::new(Arc::new(42_u64))),
+    );
+
+    let error = assembler
+        .apply(&inspect, [unrelated])
+        .and_then(|value| assembler.evaluate(&value))
+        .expect_err("unrelated opaque values must not be disclosed");
+    assert!(
+        error
+            .to_string()
+            .contains("origin inspection requires an opaque compilation origin"),
+        "{error}"
+    );
+}
+
+#[test]
+fn source_definitions_add_shallow_opaque_origin_context() {
+    let assembler = Assembler::new();
+    let module = assembler
+        .module(["definition_context"])
+        .script(
+            "g",
+            concat!(
+                "language g0\n",
+                "import 'std\n",
+                "broken = 1 / 0\n",
+                "later x = x / 0\n",
+                "object container with\n",
+                "  broken = 1 / 0\n",
+                "manual = anno context:{manual:module_origin} (1 / 0)\n",
+            ),
+        )
+        .build()
+        .expect("definition context fixture should compile");
+
+    let broken =
+        access_path(&assembler, module.value(), "broken").expect("fixture should define broken");
+    let error = eval::eval_value(&assembler.eval_context(), broken.as_core())
+        .expect_err("the broken definition should fail");
+    let failure = error.into_permanent_failure();
+    let context = failure
+        .contexts()
+        .iter()
+        .find_map(definition_context)
+        .expect("definition initialization should carry source context");
+    assert_eq!(
+        context.get(&*keys::DEFINITION),
+        Some(&CoreValue::binary_from_text("broken"))
+    );
+    assert_eq!(
+        context.get(&*keys::LINE),
+        Some(&CoreValue::Number(Number::from_usize(3)))
+    );
+    let automatic_origin = context
+        .get(&*keys::ORIGIN)
+        .expect("source context should contain an origin")
+        .clone();
+    assert!(
+        matches!(&automatic_origin, CoreValue::Opaque(_)),
+        "source origins should remain opaque until a reflection capability inspects them"
+    );
+
+    let later =
+        access_path(&assembler, module.value(), "later").expect("fixture should define later");
+    let call = assembler
+        .apply(&later, [assembler.values().integer(1)])
+        .expect("calling a source function should remain lazy");
+    let error = eval::eval_value(&assembler.eval_context(), call.as_core())
+        .expect_err("the function body should fail when called");
+    let failure = error.into_permanent_failure();
+    assert!(
+        failure
+            .contexts()
+            .iter()
+            .all(|context| definition_context(context).is_none()),
+        "shallow definition context must not capture arguments or follow later calls"
+    );
+
+    let object_member = access_path(&assembler, module.value(), "container.broken")
+        .expect("fixture should define the nested object member");
+    let error = eval::eval_value(&assembler.eval_context(), object_member.as_core())
+        .expect_err("the nested object member should fail");
+    let failure = error.into_permanent_failure();
+    let context = failure
+        .contexts()
+        .iter()
+        .find_map(definition_context)
+        .expect("object member initialization should carry source context");
+    assert_eq!(
+        context.get(&*keys::DEFINITION),
+        Some(&CoreValue::binary_from_text("broken"))
+    );
+    assert_eq!(
+        context.get(&*keys::LINE),
+        Some(&CoreValue::Number(Number::from_usize(6)))
+    );
+
+    let manual = access_path(&assembler, module.value(), "manual")
+        .expect("fixture should define a manual context");
+    let error = eval::eval_value(&assembler.eval_context(), manual.as_core())
+        .expect_err("the manually contextualized expression should fail");
+    let failure = error.into_permanent_failure();
+    let manual_origin = failure.contexts().iter().find_map(|frame| {
+        let CoreValue::Dict(frame) = eval::eval_value(&assembler.eval_context(), frame).ok()?
+        else {
+            return None;
+        };
+        frame.get(&Key::atom_from_text("manual")).cloned()
+    });
+    assert_eq!(
+        manual_origin.as_ref(),
+        Some(&automatic_origin),
+        "module_origin should expose the same opaque token used by automatic frames; contexts: {:?}",
+        failure.contexts()
+    );
+}
+
+#[test]
+fn assembler_clones_share_one_evaluation_session() {
+    let assembler = Assembler::new();
+    let clone = assembler.clone();
+
+    assert!(
+        assembler
+            .eval_context()
+            .shares_session_with(&clone.eval_context())
+    );
+    assert!(
+        !assembler
+            .eval_context()
+            .shares_session_with(&Assembler::new().eval_context())
+    );
+}
+
+#[test]
+fn builder_seals_the_environment_into_one_reasoning_session() {
+    let assembler = Assembler::builder()
+        .reflection_environment(|environment| {
+            let values = environment.values();
+            values.record([("client", values.text("new environment"))])
+        })
+        .expect("configured environment should be valid");
+    let assembler = assembler.build().expect("assembler should build");
+
+    assert_eq!(
+        assembler
+            .get(&assembler.reflection_environment(), "client")
+            .expect("configured environment should be installed")
+            .as_binary(),
+        Some(b"new environment".as_slice())
+    );
+}
+
+#[test]
+fn builder_environment_promise_can_resolve_after_early_observation() {
+    let mut resolver = None;
+    let assembler = Assembler::builder()
+        .reflection_environment(|environment| {
+            let (value, promise_resolver) = environment.promise("late environment value");
+            resolver = Some(promise_resolver);
+            environment.values().record([("late", value)])
+        })
+        .expect("environment should build")
+        .build()
+        .expect("assembler should build");
+    let promised = access_path(&assembler, &assembler.reflection_environment(), "late")
+        .expect("promise should be present");
+
+    assert!(assembler.evaluate(&promised).is_err());
+    resolver
+        .take()
+        .expect("resolver should escape the builder")
+        .resolve(assembler.values().text("ready"))
+        .expect("promise should resolve once");
+    assert_eq!(
+        assembler
+            .evaluate(&promised)
+            .expect("resolved promise should evaluate")
+            .as_binary(),
+        Some(b"ready".as_slice())
+    );
+}
+
+#[test]
+fn dropped_builder_environment_resolver_fails_its_promise() {
+    let assembler = Assembler::builder()
+        .reflection_environment(|environment| {
+            let (value, resolver) = environment.promise("abandoned environment value");
+            drop(resolver);
+            environment.values().record([("abandoned", value)])
+        })
+        .expect("environment should build")
+        .build()
+        .expect("assembler should build");
+    let promised = access_path(&assembler, &assembler.reflection_environment(), "abandoned")
+        .expect("promise should be present");
+
+    assert!(
+        assembler
+            .evaluate(&promised)
+            .expect_err("dropped resolver must fail its promise")
+            .to_string()
+            .contains("was dropped before completion")
+    );
+}
+
+#[test]
+fn builder_environment_promise_does_not_complete_through_self_dependency() {
+    let mut resolver = None;
+    let assembler = Assembler::builder()
+        .reflection_environment(|environment| {
+            let (value, promise_resolver) = environment.promise("self-dependent value");
+            resolver = Some(promise_resolver);
+            environment.values().record([("self", value)])
+        })
+        .expect("environment should build")
+        .build()
+        .expect("assembler should build");
+    let promised = access_path(&assembler, &assembler.reflection_environment(), "self")
+        .expect("promise should be present");
+    resolver
+        .take()
+        .expect("resolver should escape the builder")
+        .resolve(promised.clone())
+        .expect("the host may assign a self-dependent value");
+
+    let error = assembler
+        .evaluate(&promised)
+        .expect_err("self dependency cannot reach weak head normal form");
+    assert!(
+        error.to_string().contains("blocked on wait token"),
+        "{error}"
+    );
+}
+
+#[test]
+fn synchronous_assembler_evaluation_waits_for_a_worker_claim() {
+    let runtime = EvaluationRuntime::new(1).expect("worker runtime should build");
+    let assembler = Assembler::builder()
+        .evaluation_runtime(runtime)
+        .build()
+        .expect("assembler should build");
+    let release = Arc::new((Mutex::new(false), Condvar::new()));
+    let producer_release = release.clone();
+    let (started_sender, started_receiver) = std::sync::mpsc::channel();
+    let lazy = crate::core::LazyValue::deferred(
+        &assembler.core_values(),
+        "worker-claimed public value",
+        move |_| {
+            started_sender
+                .send(())
+                .expect("test should still await the worker claim");
+            let (lock, changed) = &*producer_release;
+            let mut released = lock.lock().expect("test release lock was poisoned");
+            while !*released {
+                released = changed
+                    .wait(released)
+                    .expect("test release lock was poisoned");
+            }
+            Ok(CoreValue::Number(42.into()))
+        },
+    );
+    let value = Value::from_core(&assembler.core_values(), CoreValue::Lazy(lazy));
+    assembler.eval_context().spark(value.as_core().clone());
+    started_receiver
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("worker should claim the sparked value");
+
+    let (result_sender, result_receiver) = std::sync::mpsc::channel();
+    let evaluator = std::thread::spawn({
+        let assembler = assembler.clone();
+        let value = value.clone();
+        move || {
+            result_sender
+                .send(assembler.evaluate(&value))
+                .expect("test should still await the result");
+        }
+    });
+    assert!(
+        result_receiver
+            .recv_timeout(std::time::Duration::from_millis(50))
+            .is_err(),
+        "synchronous evaluation must wait while the worker owns the value"
+    );
+
+    let (lock, changed) = &*release;
+    *lock.lock().expect("test release lock was poisoned") = true;
+    changed.notify_all();
+    let result = result_receiver
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("worker completion should wake synchronous evaluation")
+        .expect("worker-computed value should succeed");
+    assert_eq!(result, assembler.values().number_from_text("42").unwrap());
+    evaluator.join().expect("evaluator thread should finish");
+}
+
+#[test]
+fn builder_fixes_conflict_analysis_before_reasoning_starts() {
+    let assembler = Assembler::builder()
+        .conflict_analysis(Arc::new(crate::reflection::CoarseConflictAnalysis))
+        .build()
+        .expect("assembler should build");
+
+    assert_eq!(assembler.conflict_analysis().name(), "coarse");
+}
+
+#[test]
+fn attached_runtime_conflict_analysis_cannot_be_replaced() {
+    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+    let result = Assembler::builder()
+        .evaluation_runtime(runtime.clone())
+        .conflict_analysis(Arc::new(crate::reflection::CoarseConflictAnalysis))
+        .build();
+    let Err(error) = result else {
+        panic!("an attached runtime must retain its conflict policy")
+    };
+
+    assert!(error.to_string().contains("already owns"));
+    assert_eq!(runtime.conflict_analysis().name(), "exact");
+}
+
+#[test]
+fn attached_runtime_default_reflection_profile_cannot_be_replaced() {
+    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+    let error = runtime
+        .new_evaluation_session()
+        .expect_err("an unsealed runtime must not expose a runnable session");
+    assert!(error.to_string().contains("must be sealed"));
+    let assembler = Assembler::builder()
+        .evaluation_runtime(runtime.clone())
+        .build()
+        .expect("first assembler should seal the runtime profile");
+    let replacement = Arc::new(AssemblerReflectionHost::new_unsealed(
+        &runtime,
+        DiagnosticBus::new(),
+    ));
+    replacement
+        .seal_environment(
+            authoritative_reflection_environment(runtime.values().empty_dict(), "replacement")
+                .unwrap()
+                .0,
+        )
+        .unwrap();
+
+    let error = runtime
+        .seal_default_reflection_profile(coordinator_task_launcher(ReflectionEffects, replacement))
+        .expect_err("a sealed runtime profile must reject replacement");
+    assert!(error.to_string().contains("already sealed"));
+
+    let runtime_state = Arc::downgrade(&runtime.state);
+    drop(assembler);
+    drop(runtime);
+    assert!(
+        runtime_state.upgrade().is_none(),
+        "the sealed launcher must not form an Arc cycle through its host"
+    );
+}
+
+#[test]
+fn retained_reflection_profile_keeps_only_shared_resources_alive() {
+    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+    let state = Arc::downgrade(&runtime.state);
+    let coordinator = Arc::downgrade(&runtime.state.work);
+    let executor = Arc::downgrade(&runtime.state.executor);
+    let default_profile = Arc::downgrade(&runtime.default_reflection_profile);
+    let resources = Arc::downgrade(&runtime.state.shared_resources);
+    let host = Arc::new(AssemblerReflectionHost::new_unsealed(
+        &runtime,
+        DiagnosticBus::for_runtime(&runtime),
+    ));
+    host.seal_environment(
+        authoritative_reflection_environment(runtime.values().empty_dict(), "retained")
+            .unwrap()
+            .0,
+    )
+    .unwrap();
+    let profile = Arc::new(ReflectionTaskProfile::sealed(coordinator_task_launcher(
+        ReflectionEffects,
+        host.clone(),
+    )));
+    drop(host);
+    drop(runtime);
+
+    assert!(state.upgrade().is_none());
+    assert!(coordinator.upgrade().is_none());
+    assert!(executor.upgrade().is_none());
+    assert!(default_profile.upgrade().is_none());
+
+    let retained = resources
+        .upgrade()
+        .expect("the retained profile host should keep runtime resources alive");
+    let (_, snapshot) = retained.reflection_snapshot();
+    assert_eq!(snapshot.root(), &retained.values().empty_dict());
+    let initial = retained.values().empty_dict();
+    let volume = retained
+        .create_volume(initial.clone())
+        .expect("retained resources should still create volumes");
+    assert_eq!(retained.revoke_volume(volume).unwrap(), initial);
+    drop(retained);
+
+    drop(profile);
+    assert!(resources.upgrade().is_none());
+}
+
+#[test]
+fn evaluation_context_retains_runtime_cache_and_profile_without_a_cycle() {
+    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+    let state = Arc::downgrade(&runtime.state);
+    let resources = Arc::downgrade(&runtime.state.shared_resources);
+    let profile = Arc::downgrade(&runtime.default_reflection_profile);
+    let assembler = Assembler::builder()
+        .evaluation_runtime(runtime.clone())
+        .build()
+        .expect("assembler should seal the runtime profile");
+    let context = assembler.eval_context();
+    let unit = context.values().unit();
+
+    drop(assembler);
+    drop(runtime);
+    assert!(state.upgrade().is_none());
+    assert!(resources.upgrade().is_some());
+    assert!(profile.upgrade().is_some());
+    assert_eq!(eval::eval_value(&context, &unit).unwrap(), unit);
+
+    drop(context);
+    assert!(resources.upgrade().is_none());
+    assert!(profile.upgrade().is_none());
+}
+
+#[test]
+fn closed_runtime_cache_builders_do_not_register_scheduler_demand() {
+    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+    let before = runtime.state.work.cache_builder_scheduler_snapshot();
+    let values = runtime.state.shared_resources.values.core();
+
+    crate::g_syntax::initialize_cached_compiler_values(values);
+    let formatter = crate::g_syntax::default_diagnostic_formatter(values);
+
+    assert!(matches!(formatter, CoreValue::Function(_)));
+    assert_eq!(
+        runtime.state.work.cache_builder_scheduler_snapshot(),
+        before,
+        "closed cache construction must not alter runtime work generation, demand registrations, or work records"
+    );
+}
+
+#[test]
+fn builder_selects_runtime_before_exposing_runtime_bound_state() {
+    let mut builder = Assembler::builder();
+    let initial = builder.runtime.values().empty_dict();
+    let _volume = builder
+        .create_volume(initial)
+        .expect("the initial runtime should create the volume");
+    let replacement = EvaluationRuntime::new(0).expect("replacement runtime should build");
+    let result = builder.evaluation_runtime(replacement).build();
+    let Err(error) = result else {
+        panic!("runtime replacement after state construction must be rejected")
+    };
+
+    assert!(error.to_string().contains("must be selected before"));
+}
+
+#[test]
+fn reflection_annotations_launch_tasks_and_return_their_targets() {
+    let assembler = Assembler::new();
+    let module = assembler
+        .module(["annotation_test"])
+        .script(
+            "g",
+            "language g0\nimport 'std\neffect = .r ()\nresult = anno { refl:effect } \"ready\"\n",
+        )
+        .build()
+        .expect("reflection annotation fixture should compile");
+    let result =
+        access_path(&assembler, module.value(), "result").expect("fixture should define result");
+
+    assert_eq!(
+        assembler
+            .to_binary(&assembler.evaluate(&result).unwrap())
+            .unwrap(),
+        b"ready".as_slice()
+    );
+}
+
+#[test]
+fn reflection_annotations_require_their_tasks_to_return_unit() {
+    let assembler = Assembler::new();
+    let module = assembler
+            .module(["annotation_test"])
+            .script(
+                "g",
+                "language g0\nimport 'std\neffect = .r \"not unit\"\nresult = anno { refl:effect } \"unreachable\"\n",
+            )
+            .build()
+            .expect("reflection annotation fixture should compile");
+    let result =
+        access_path(&assembler, module.value(), "result").expect("fixture should define result");
+
+    assert!(
+        assembler
+            .to_binary(&result)
+            .unwrap_err()
+            .to_string()
+            .contains("reflection annotation result: unit expected, received Binary")
+    );
+}
+
+#[test]
+fn reflection_annotation_logs_use_the_assembler_diagnostic_bus() {
+    let diagnostics = Arc::new(Mutex::new(Vec::new()));
+    let received = diagnostics.clone();
+    let assembler = Assembler::new().with_diagnostic_callback(move |diagnostic| {
+        received
+            .lock()
+            .expect("diagnostic collection mutex should not be poisoned")
+            .push(diagnostic);
+    });
+    let module = assembler
+            .module(["annotation_test"])
+            .script(
+                "g",
+                "language g0\nimport 'std\neffect = .log 'warn { msg:{ text:\"from annotation\" } }\nresult = anno { refl:effect } \"ready\"\n",
+            )
+            .build()
+            .expect("reflection annotation fixture should compile");
+    let result = assembler
+        .get(module.value(), "result")
+        .expect("fixture should define result");
+
+    assert_eq!(
+        assembler
+            .to_binary(&result)
+            .expect("logging annotation should complete"),
+        b"ready".as_slice()
+    );
+    let diagnostics = diagnostics
+        .lock()
+        .expect("diagnostic collection mutex should not be poisoned");
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].severity(), Severity::Warning);
+    assert_eq!(diagnostics[0].message(), "from annotation");
+}
+
+#[test]
+fn failed_reflection_branch_does_not_publish_its_diagnostic() {
+    let assembler = Assembler::new();
+    let module = assembler
+            .module(["annotation_test"])
+            .script(
+                "g",
+                "language g0\nimport 'std\neffect = .cut (.alt ((.log 'error { msg:{ text:\"discarded\" } }) =>> .fail) (.r ()))\nresult = anno { refl:effect } \"ready\"\n",
+            )
+            .build()
+            .expect("reflection annotation fixture should compile");
+
+    assert_eq!(
+        binary_at(&assembler, module.value(), "result")
+            .expect("winning reflection branch should complete"),
+        b"ready".as_slice()
+    );
+    assert_eq!(assembler.diagnostic_bus().counts().total(), 0);
+}

@@ -17,6 +17,13 @@ volumes, work coordinator, and executor attachment. Clients choose module
 paths and inputs; the library does not assign special meaning to
 `configuration` or `assembly`.
 
+The Rust facade is intentionally thin. `api/assembly.rs` owns assembler and
+module construction, `api/runtime.rs` and its `events`/`readiness` children own
+runtime lifecycle and transactional host events, `api/diagnostics.rs` owns
+generic publication and ingress, and `api/value.rs` plus `api/evaluator.rs`
+separate value construction from demand and extraction. `api.rs` preserves the
+public paths without becoming another implementation owner.
+
 The embedding value boundary has three explicit roles. `Assembler::values`
 constructs runtime-local literals and lazy semantic composition without
 demand. `Assembler::evaluator().eval` performs ordinary outer-WHNF demand and
