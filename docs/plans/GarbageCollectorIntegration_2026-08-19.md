@@ -97,6 +97,11 @@ containing a core or public `Value`, every `Arc<dyn Fn...>` which can capture a
 value, every `OpaqueValue` payload family owned by Glam, and every interaction-
 net specialization carrying core data.
 
+For each opaque payload family, the inventory records either `no managed edge`
+or the exact runtime/public root wrapper it may retain. Discovering a bare
+`Gc<T>`, unrooted recursive `core::Value`, or equivalent internal managed
+pointer is a boundary defect, not a conservative-tracing classification.
+
 Add tests which latch current semantics before changing representation:
 
 - public value clone, equality, and cross-runtime rejection;
@@ -169,7 +174,9 @@ Introduce region boundaries before managed pointers require them:
 - diagnostic enrichment and rendering access.
 
 Prefer one outer region per meaningful quantum. Nested helpers reuse the
-current same-runtime region. Do not enter/exit for every pointer access.
+current same-runtime region and its local allocation buffer. Do not enter/exit
+or touch shared allocation state for every pointer access or ordinary
+allocation.
 
 Determine how `Mutator` authority travels through `EvalContext`, the core value
 factory, reflection contexts, and net specialization without exposing it in
@@ -185,7 +192,9 @@ Verify that:
 - semantic mutex guards do not escape the region which authorizes their value
   references;
 - recursive evaluator and reflection entry does not count as another mutator;
-  and
+- recursive entry does not reserve an independent allocation region, while
+  outer exit commits and releases the shared region before the worker becomes
+  eligible to sleep or service another runtime; and
 - collection requests can stop every worker at a bounded quantum boundary.
 
 ## Phase I4 — Core Trace Vocabulary and Leaf Policy
@@ -212,8 +221,9 @@ Migrate the principal cyclic identities first:
 - trace lazy sources, terminal evaluated values, permanent failures, promise
   assignments, and producer-owned data;
 - clear/release lazy sources after terminal publication as today;
-- route source replacement and terminal assignment through the collector
-  barrier API; and
+- route source replacement and terminal assignment through the managed-edge
+  mutation gateway; its collector action is empty in full stop-the-world mode
+  and becomes an old-to-young barrier only when generations are enabled; and
 - preserve exact wait, cancellation, abandonment, and resolver semantics.
 
 Focused tests must construct and reclaim:
@@ -237,8 +247,8 @@ production runtime still does not collect.
 - Ensure evaluation failures and context frames are traced without forcing
   their contained values.
 - Preserve referential equality where current semantics rely on identity.
-- Apply write barriers only to actually mutable fields; immutable argument
-  arrays need tracing but no barrier.
+- Route only actually mutable managed edges through the mutation gateway;
+  immutable argument arrays need tracing but no gateway or barrier.
 
 Verify cycles through each family and confirm that tracing does not evaluate,
 force, lock, or format a value.
@@ -268,8 +278,9 @@ updates into whole-map copies.
 - Decide whether the shared runtime net remains an external synchronized
   allocation traced under a stopped mutator world or becomes a managed outer
   node. Do not rewrite generic topology merely for GC aesthetics.
-- Require all net mutation which can publish a young value into an old net to
-  use the barrier API.
+- Require all net mutation which can replace a managed value edge to use the
+  mutation gateway. It is a no-op for full collection and records young values
+  only after generational collection is enabled.
 - Preserve the Cursor-WHNF ownership and normalization-batch invariants.
 
 Because collection waits for all mutators, acquiring a net lock while tracing
@@ -322,8 +333,38 @@ checks both terminal observability and eventual reclamation.
 For `OpaqueValue`:
 
 - ordinary arbitrary host payloads are tracing barriers;
-- payloads may hold public rooted `Value`s, which are safe but can
+- payloads may hold public/runtime-rooted `Value`s, which are safe but can
   conservatively retain a cycle;
+- payloads must never hold bare `Gc<T>`, an unrooted recursive `core::Value`,
+  or any equivalent managed pointer which could escape its mutator region;
+- preserve that rule structurally: keep opaque construction private, do not
+  re-export collector pointers, and require an audited sealed/unsafe marker or
+  an external sidecar for each allowed payload family rather than retaining
+  the current unconstrained `Any + Send + Sync` constructor;
+- generic embedding payloads should remain in host-owned side tables whose
+  opaque Glam token contains only identity/provenance; any Glam values in the
+  host payload use public roots;
+- unreachable opaque payloads still receive ordinary Rust destruction. A
+  client-defined `Drop` may release host resources or otherwise be visible to
+  the embedding client, but its timing and order are outside Glam evaluation
+  semantics. It runs in the collector's `Finalizing` phase with a mutator
+  available, outside collector locks. It may allocate, evaluate or schedule
+  work, emit diagnostics, and publish a fresh equivalent of itself, but it
+  cannot root or otherwise resurrect the completed dead allocation;
+- classify every opaque payload family by destruction policy. A payload whose
+  final `Drop` requires the runtime must remain collector-owned until that
+  phase. A mutator-independent payload may continue using an external shared
+  owner when its eventual destruction location is irrelevant;
+- replace or narrow the current
+  `OpaqueValue::downcast<T>() -> Option<Arc<T>>` boundary for
+  mutator-finalized payloads. Cloning the `Arc` can move the last `Drop` outside
+  collector finalization. Prefer a collector-owned payload with a scoped
+  downcast/borrow valid only in a mutator region, or an explicitly classified
+  sidecar whose destruction does not require the finalization guarantee;
+- ensure a finalizable opaque payload cannot obtain a managed pointer or root
+  to its containing allocation. Public roots to other values remain valid and
+  keep those values alive independently. Constructing a fresh equivalent
+  during `Drop` produces a new allocation identity rather than resurrection;
 - Glam-owned opaque payload families are individually audited and may receive
   a private traceable representation instead; and
 - no unsafe downcast or heap scan attempts to discover hidden pointers.
@@ -342,6 +383,17 @@ opaque family, or value-bearing runtime record.
 - Prove that collection does not alter task readiness, diagnostic counts,
   observation epochs, transaction conflicts, net revisions, or assembly
   results.
+- Force opaque finalization while logger supervision and workers are active.
+  Diagnostics and tasks produced by `Drop` must be pumped normally before the
+  runtime reports quiescence, and a fresh value published by a quining
+  destructor must survive independently of the reclaimed identity.
+- Request another collection from finalizer-driven work and prove it is
+  deferred until the current finalization set drains rather than deadlocking
+  or recursively collecting.
+- Force a finalizer to wait for work on another runtime worker, request a
+  collection concurrently, and distinguish both policies: uncommitted pressure
+  permits that worker to enter, while a committed next collection queues its
+  writer and deliberately blocks a later mutator until collection completes.
 - Exercise runtime drop both before and after collection.
 
 Gate G3 requires the full test suite under ordinary execution plus the
@@ -354,6 +406,17 @@ unsafe/trace audit.
   expose raw heap internals.
 - Initially collect at controlled batch/idle boundaries.
 - Add allocation-pressure requests which are serviced at outer mutator exits.
+- Count queued and running finalizers as runtime operational activity. A
+  readiness probe must pump consequences of finalizer diagnostics, event
+  output, and newly launched tasks before returning a stable report.
+- Do not begin a requested collection while the heap is in `Finalizing`.
+  Record follow-up pressure on the current coordinator; allocations made during
+  finalization were not covered by the completed mark. Uncommitted heuristic
+  pressure remains coalesced. An explicit or heuristically committed request
+  may queue the next writer immediately: the collector-held mutator prevents
+  premature acquisition, while writer preference intentionally blocks new
+  mutators. The next trace begins only after finalizer activity drains and all
+  active mutator leases are released.
 - Ensure a request cannot make a worker spin, hold settlement admission, or
   publish semantic activity merely because collection ran.
 - Report metrics for debugging and profiling without making them observable to
@@ -423,6 +486,8 @@ semantics.
 ## Integration Completion Criteria
 
 - Every production managed edge is exact or deliberately conservative.
+- Every opaque payload is audited to contain no managed edge or only ordinary
+  runtime/public roots; no bare collector pointer crosses that boundary.
 - Public `Value` is a real runtime-local external root and remains convenient
   to clone and share.
 - Workers access managed pointers only within bounded mutator regions.

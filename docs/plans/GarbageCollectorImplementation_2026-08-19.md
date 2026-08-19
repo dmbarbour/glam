@@ -21,7 +21,7 @@ Concurrent marking is a later plan.
 | C3 | pending | recursive mutator regions and STW handshake |
 | C4 | pending | explicit external roots |
 | C5 | pending | exact full marking |
-| C6 | pending | sweeping, destruction, and poisoning |
+| C6 | pending | sweeping, mutator finalization, retry, and quarantine |
 | C7 | pending | shared-pointer and worker-shaped stress |
 | C8 | pending | generational metadata and barrier API |
 | C9 | pending | minor collection and promotion |
@@ -85,8 +85,10 @@ pub unsafe trait Trace {
 }
 ```
 
-The API must not promise `Deref`, finalizers, moving collection, weak pointers,
-or arbitrary cross-heap conversion.
+The API must not promise `Deref`, Glam-visible finalizer declarations,
+resurrection of a completed dead allocation, moving collection, weak pointers,
+or arbitrary cross-heap conversion. It must still run ordinary Rust
+destruction for managed payloads inside a collector-controlled mutator phase.
 
 ## Phase C0 — Provenance, License, and Verification Scaffold
 
@@ -124,6 +126,13 @@ Implement only enough allocation leakage to test the public safety shape.
   `Sync` only under documented `T` bounds.
 - Define the unsafe `Trace` contract, including interior mutability, no hidden
   managed pointers, panic behavior, and destructor restrictions.
+- Require tracing to be observational: it may report edges but may not mutate
+  the managed graph or collector metadata except through its visitor. A panic
+  from an otherwise conforming trace may abort that collection attempt without
+  making the graph unsafe to trace again.
+- Define a small managed-edge mutation gateway whose collector action is an
+  inline no-op for full stop-the-world collection. This latches the API shape
+  without imposing remembered-set or concurrent-marking work prematurely.
 - Prototype manual tracing and a derive macro. Approve a derive crate only if
   generated implementations are inspectable and cover enums, arrays, options,
   tuples, and common containers without broad unsafe escape hatches.
@@ -154,14 +163,41 @@ an unacceptable semantic or visibility change.
   collection.
 - Support sized allocations first. Keep byte arrays and other DSTs outside the
   managed heap until a concrete Glam need justifies them.
-- Make allocation local to a mutator; use per-mutator bump state or page leases
-  so ordinary allocation does not take one global lock.
+- Require mutator authority for every managed allocation.
+- Give each outer mutator entry a lazily acquired local allocation region.
+  Recursive same-heap entries share it. Ordinary objects bump an aligned local
+  cursor without locks or atomic operations.
+- Obtain another region only when the local region is first needed or becomes
+  exhausted. Prefer an atomic reservation from the current large arena page;
+  use `HeapState` synchronization for slow paths such as installing another
+  large page, recycled-span coordination, and oversized allocations.
+- Keep arena-page and mutator-region sizes tunable. Values such as 8–64 MiB for
+  a large page are plausible starting measurements, not semantic constants;
+  the local region should be much smaller so one short-lived mutator cannot
+  strand an arena page.
+- Accept or otherwise construct the payload before making it collector-visible,
+  reserve aligned storage by advancing the private cursor, initialize its
+  header and payload, and only then mark that object committed. Reserved but
+  unused or uncommitted bytes contain no traceable object. On outermost mutator
+  exit, publish the completed-region watermark/metadata and return or account
+  for the unused tail before decrementing the active-mutator count.
+- Charge collection pressure when regions or large objects are reserved, then
+  reconcile useful and unused bytes at outer exit. Ordinary allocation should
+  not increment a shared byte counter.
+- Permit a simple mutex-backed slow path initially, but do not put the global
+  heap mutex on every ordinary allocation. Changing reservation and recycling
+  algorithms later must not change the mutator or pointer contract.
 
 Verification:
 
 - mixed sizes and alignments retain stable addresses;
 - page rollover and large-object fallback are correct;
 - allocation from several mutators never overlaps;
+- allocations within one reserved region require no shared synchronization;
+- recursive entries consume the outer entry's region and only its outer exit
+  returns the unused tail;
+- panic unwinding returns or safely abandons a partially used region without
+  exposing uninitialized storage as an object;
 - pointer ownership checks distinguish heaps in debug/test builds; and
 - dropping the heap without collection destroys every allocation exactly once.
 
@@ -169,13 +205,68 @@ Verification:
 
 - Implement outer `enter`/`exit` admission with a heap phase mutex/condition
   variable or equivalent state machine.
+- If admission and allocation slow paths share one `HeapState` mutex, keep
+  their fields and transitions separately documented. The mutex belongs to
+  shared page, region-recycling, and phase state; it is not held by a
+  mutator's local bump allocator. The collector sets its request under that
+  mutex, waits for the active count to reach zero, and then has exclusive
+  access to allocation state without retaining a mutator-region lock.
 - Support recursive same-heap entry through thread-local depth without
   incrementing the global active-mutator count.
+- Provide a scoped current-mutator accessor for reviewed destructor and
+  runtime-integration code, for example an HRTB closure API rather than a
+  borrow which can escape. A destructor invoked by the collector sees its
+  finalizer mutator as current; a same-heap public runtime operation therefore
+  re-enters recursively instead of acquiring independent admission.
 - Reject or explicitly diagnose nested entry into a different heap.
 - A collection request prevents new outer entries, then waits for every active
   mutator to exit.
+- Give the collector a privileged collector-to-mutator handoff. After marking
+  fixes the dead set, and before releasing exclusive mutator admission, the
+  collector acquires one ordinary mutator lease for its own thread. With an
+  `RwLock`-shaped barrier this is an atomic write-to-read downgrade; with an
+  active-count state machine it increments the active count and publishes
+  `Finalizing` while still holding the coordinator lock. There must be no
+  interval in which neither collector exclusion nor the finalizer mutator is
+  authoritative.
+- The collector thread holds that mutator for the complete `Finalizing` phase.
+  Releasing exclusive admission makes finalization concurrent by default:
+  ordinary workers may acquire their own mutators, while the collector's held
+  mutator prevents another collection from beginning.
+- A requester which observes `Collecting` or `Finalizing` records follow-up
+  pressure on the active collector coordinator; the completed mark does not
+  cover allocations made during finalization. Uncommitted heuristic pressure
+  remains coalesced. An explicit request or a heuristic decision which commits
+  the next collection may queue its exclusive waiter immediately, although the
+  collector-held mutator prevents acquisition until finalization ends. The
+  coordinator serializes collector ownership; no second trace or sweep starts
+  concurrently.
+- Once a collection is committed, queuing for exclusive admission may
+  deliberately use writer preference. New mutators then wait behind the
+  collection because the heuristic has selected stop-the-world work as the
+  runtime's next priority. Do not weaken that priority merely to improve reader
+  throughput; tune when collection is committed instead.
+- Consequently, an already-admitted mutator must be able to reach its outer
+  exit without synchronously depending on a new outer mutator admission.
+  Recursive same-thread entry remains available. Work which truly requires a
+  new worker must either establish that admission before commitment, be left
+  scheduled for after collection, or keep the heuristic from committing yet.
+  This is a general stop-the-world mutator contract, not a finalizer-specific
+  exception.
+- Mutators admitted before the request may continue allocating while they
+  finish their bounded region; those allocations remain part of the heap which
+  the collector sees after the active count reaches zero. A pending request
+  must not strand an admitted mutator before it can exit.
+- Outermost exit publishes allocation-region metadata before publishing the
+  active-count decrement. That release/acquire edge is part of the collector's
+  visibility proof and must be exercised under Loom or deterministic barriers.
 - Allocation thresholds request collection but do not synchronously collect
   from the middle of a mutator region.
+- Allocation pressure during `Finalizing` records follow-up pressure. Before
+  commitment it does not block finalizer allocation. If the heuristic commits,
+  its writer may block new mutators immediately, but cannot begin collection
+  before the finalization queue drains and the held finalizer mutator is
+  released.
 - Elect exactly one collector; other requesters wait for or observe its epoch.
 - Specify panic unwinding from a mutator closure and ensure outer exit still
   publishes quiescence.
@@ -186,8 +277,11 @@ Deterministic tests must force:
 2. request while one or several mutators are active;
 3. nested entry while a request is pending;
 4. last mutator exit racing a second requester;
-5. a panicking mutator; and
-6. heap drop while collection waiters exist.
+5. collector-to-mutator handoff racing coalesced collection pressure;
+6. a finalizer waiting for a worker mutator before that pressure is committed;
+7. commitment of the next collection blocking a new mutator behind its writer;
+8. a panicking mutator; and
+9. heap drop while collection waiters exist.
 
 Use Loom for the coordination state where feasible. Repeated stress is
 supplementary, not proof.
@@ -220,28 +314,98 @@ bare pointer while mutators are stopped.
   and test configurations.
 - Choose an epoch or bitmap reset strategy which cannot confuse an old mark
   with the current collection.
+- Wrap the attempt in an unwind guard. If tracing or mark-work allocation
+  panics, discard the worklist, leave every allocation intact, restore a usable
+  non-collecting phase, and let the panic continue to its caller. A retry uses
+  a fresh epoch, so marks from the abandoned attempt are irrelevant.
+- Do not consume roots, remembered-set entries, or other reachability evidence
+  while marking. Commit their retirement only after the corresponding
+  collection succeeds.
 
 Verification includes randomized graph comparison against a simple reference
 reachability implementation and million-edge depth tests which cannot overflow
-the Rust stack.
+the Rust stack. Deterministic hooks panic after zero, one, and many traced edges;
+the caller catches the panic, ordinary mutation resumes, and a later full
+collection produces the same survivors as a collection which never failed. A
+trace which deliberately panics once must succeed on retry without heap-wide
+poisoning.
 
-## Phase C6 — Sweep, Destruction, and Heap Poisoning
+## Phase C6 — Sweep, Mutator Finalization, Retry, and Quarantine
 
 - Identify unreachable allocations only after marking completes.
-- Reclaim slots/pages without moving survivors.
-- Invoke erased Rust destruction exactly once under a documented phase which
-  permits no managed allocation, evaluation, host callback, or collector
-  re-entry.
-- Do not run user-visible finalization.
-- Decide and test panic policy. The preferred bootstrap policy is to poison and
-  conservatively leak uncertain allocations during unwinding, then reject
-  further use; abort is acceptable if recovery cannot be proved sound.
+- While the world is stopped, partition the completed dead set into storage
+  which needs no Rust destruction and allocations requiring finalization.
+  Reclaim the former without moving survivors. Detach the latter into a
+  `FinalizationQueued` set whose identities can no longer be rooted or returned
+  to `Allocated`, but whose storage remains intact until its destructor runs.
+- Before releasing exclusive admission, atomically hand the collector thread
+  one ordinary mutator lease and enter `Finalizing`. Then release allocator and
+  coordinator locks and reopen shared mutator admission. Invoke each erased
+  Rust destructor exactly once under that held mutator. Recursive runtime
+  operations reuse it, while worker threads may enter independent mutator
+  regions concurrently. No collection may begin until the finalization set is
+  drained and the collector releases its finalizer mutator.
+- Install that mutator in the scoped current-mutator slot before invoking
+  `Drop`. This is how ordinary Rust `Drop`, whose signature cannot accept a
+  context argument, may allocate through reviewed GC/runtime APIs without
+  receiving an escapable mutator reference.
+- Support `Drop` for Rust implementation values and embedding-client payloads
+  stored in opaque values. This operational cleanup is not a Glam-visible
+  finalizer: its thread, relative order, and collection time are unspecified.
+- A destructor may allocate new values, evaluate or schedule work, publish
+  diagnostics or host events, retain public roots it already owns, and build a
+  fresh equivalent of its payload. Every such managed value is a fresh
+  allocation outside the completed dead set and is eligible only for a later
+  collection.
+- Enforce non-resurrection structurally. `Root::from_gc` (or its equivalent)
+  rejects every identity in the completed dead set, and an opaque payload has
+  no managed handle to its containing allocation. A destructor may inspect its
+  Rust payload while `Drop` owns it, but cannot obtain a `Gc` or root for the
+  dying allocation. The same rule prevents rescuing another
+  `FinalizationQueued` allocation through a stale internal pointer.
+- Give each finalizable allocation an explicit transition such as `Allocated
+  -> FinalizationQueued -> Finalizing -> Free` (exact names provisional). A
+  panic in one payload's destructor transitions that allocation to a terminal
+  non-reusable `Quarantined` state and never invokes its destructor again.
+  Fresh allocations and already-published effects from the destructor remain
+  valid.
+- Specify and test how a destructor panic drains or preserves the remaining
+  finalization queue. Before resuming the panic, the implementation must leave
+  no allocation ambiguously owned and must restore an ordinary heap phase; a
+  queued collection may run only after this recovery. The bootstrap should
+  prefer quarantining the failed allocation and safely draining the remaining
+  queue, while retaining the first panic for propagation.
+- Treat a panic or assertion showing that shared allocator metadata may be
+  partially mutated as an internal collector defect. Poison or abort only when
+  an attempt guard cannot prove a consistent phase, page, object-state, and
+  free-list boundary.
 - Reuse reclaimed storage only after destruction and metadata retirement are
   complete.
+- Expose queued and running finalizers as operational heap activity so runtime
+  quiescence and shutdown cannot race their diagnostics, tasks, or host
+  effects. A synchronous `collect_full` report completes only after its
+  finalization set has reached terminal object states.
+- On completion, publish the post-finalization phase and any remaining
+  coalesced collection pressure before releasing the collector's mutator
+  lease. A writer for an already-committed collection may already be waiting
+  and intentionally preventing new mutator admission; it acquires exclusivity
+  after the finalizer and other active mutators exit. Otherwise the heuristic
+  may reevaluate the pressure at this boundary. Active mutators follow the
+  normal safepoint protocol.
 
 Verification uses drop counters, destructors containing ordinary `Arc`,
-`Mutex`, and `OnceLock` values, address reuse tests, and Miri checks for stale
-references and double destruction.
+`Mutex`, `OnceLock`, and opaque host payloads, scoped current-mutator access,
+recursive same-heap entry, address reuse tests, and Miri checks for stale
+references and double destruction. One opaque destructor allocates and
+publishes a fresh quine and a diagnostic; the original identity is reclaimed
+while the published value survives the next collection. Another schedules work
+that enters the same heap from a worker. Uncommitted pressure raised during
+that finalizer remains coalesced. A separate deterministic test commits the
+next collection during finalization and proves that writer priority blocks a
+later mutator, without beginning its trace until the finalizer exits. A
+panicking opaque destructor quarantines only its allocation; allocations and
+effects it published before panicking remain valid, and after the caller
+catches the panic another allocation and full collection must succeed.
 
 Gate G1 passes after C6 plus a focused unsafe-code audit.
 
@@ -263,14 +427,21 @@ semantics beyond the shape needed to validate shared values.
 
 - Divide allocation state into young and old generations without moving
   objects.
+- Treat ordinary mutator-local allocation regions as young. Old-generation
+  allocation is limited to promotion policy and any reviewed large-object
+  path, rather than selected independently by each ordinary allocation.
 - Select per-object aging versus whole-page promotion through a measured design
   checkpoint. Mixed-generation pages are acceptable if their metadata and
   sweep cost remain clear.
 - Add a small write-barrier API which can dirty an old owner before or while a
-  young edge becomes visible.
+  young edge becomes visible. This activates generational behavior in the
+  mutation gateway established by C1; it is required for minor collection even
+  though the collector still stops all mutators while tracing.
 - Provide collector-aware wrappers or helper operations for the publication
   patterns Glam actually uses: replaceable fields, `Mutex`-protected fields,
   and one-time cells.
+- Do not implement an already-marked-object barrier in this phase. That belongs
+  to a separately planned incremental or concurrent marker.
 - Keep barriers idempotent and thread-safe; no barrier is required for fields
   which cannot contain managed pointers.
 
@@ -285,7 +456,9 @@ mutations.
 - Reclaim unreachable young objects and promote survivors according to the C8
   policy.
 - Retire remembered entries only when their owner is rescanned or no longer
-  contains a young edge.
+  contains a young edge, and commit that retirement only after the minor
+  collection succeeds. A failed minor mark retains all prior reachability
+  evidence for retry.
 - Fall back to full collection on generation overflow, remembered-set pressure,
   or an invariant check which cannot be answered cheaply.
 
