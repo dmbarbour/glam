@@ -1,6 +1,6 @@
 # Module Split Plan — 2026-08-18
 
-Status: Phase 4B.1 complete; Phase 4B.2 is next.
+Status: Phase 4 complete; Phase 5 is next.
 
 This is a dated review and transition plan. Module shape will continue to
 change as the bootstrap grows, so a later review should create a new dated
@@ -1131,6 +1131,8 @@ Status: complete (2026-08-19).
 
 ##### Phase 4B.2 — Exact completion subscriptions
 
+Status: complete (2026-08-19).
+
 - Move `WorkDependencyKey`, `WakeRegistration`, `DependencyWakeBatch`,
   `CompletionSubscriptions`, `CompletionWake`, and
   `CompletionSubscriptionOutcome` together under
@@ -1147,6 +1149,8 @@ Status: complete (2026-08-19).
 
 ##### Phase 4C.1 — Task and wait protocol
 
+Status: complete (2026-08-19).
+
 - First move scalar/passive task protocol—IDs, status/policy enums, exit
   intent, machine poll/trait, result policy, and status wake wrappers—to
   `evaluation/coordinator/task.rs` without changing behavior. Re-export that
@@ -1160,6 +1164,8 @@ Status: complete (2026-08-19).
 
 ##### Phase 4C.2 — Client demand
 
+Status: complete (2026-08-19).
+
 - Move the operation data, result cell, sink/handle, coordinator payload/claim,
   and claim/release/abandon/kill transitions together to
   `evaluation/coordinator/client_demand.rs`.
@@ -1170,13 +1176,27 @@ Status: complete (2026-08-19).
 
 ##### Phase 4C.3 — Sparks
 
+Status: complete (2026-08-19).
+
 - Move spark payload/claim/retirement and queue/release/abandon transitions to
   `evaluation/coordinator/spark.rs`.
 - Preserve best-effort semantics, worker-only selection, exact wait/promise
   subscription, session-close cleanup, and truthful busy state for a claimed
   spark.
 
+Result: `evaluation/coordinator/spark.rs` owns spark demand, claimed work,
+poll and retirement records, admission, queueing, exact dependency release,
+quiescent abandonment, and detachment. Common dependency subscription and
+cross-kind coordinator state remain with the coordinator. The extraction
+does not change best-effort retirement, worker-only claims, or demand-session
+cleanup.
+
+Verification: formatting, full-feature Clippy, all spark-filtered tests, and
+the complete `cargo test -q` suite pass after the extraction.
+
 ##### Phase 4C.4 — Reflection work
+
+Status: complete (2026-08-19).
 
 - Move reflection payload/claim/release/cancellation/snapshot and its
   task/wait indexes to `evaluation/coordinator/reflection.rs` only insofar as
@@ -1184,13 +1204,35 @@ Status: complete (2026-08-19).
 - Preserve dormant/reserved/queued/running/blocked/exit-waiting/
   terminalizing transitions and late task-handle observation.
 
+Result: `evaluation/coordinator/reflection.rs` owns the reflection payload,
+task/wait indexes, claims and snapshots, failure acknowledgement, reservation
+and activation, cancellation, release and exact subscription, exit waiting,
+and retirement. `WorkCoordinatorState` retains one child-owned index value;
+the common work registry, task ready queue, closure, dependency publication,
+and settlement paths remain at the nearest cross-kind owner.
+
+Verification: formatting, all reflection-filtered tests, full-feature Clippy,
+and the complete `cargo test -q` suite pass after the extraction.
+
 ##### Phase 4C.5 — Deferred work and lazy cycles
+
+Status: complete (2026-08-19).
 
 - Move deferred payload/claim/promotion/release/abandonment, producer indexes,
   and pure-lazy-cycle discovery/terminalization together to
   `evaluation/coordinator/deferred.rs`.
 - Keep promise-containing cycles retryable, pure lazy cycles canonical, and
   reusable lazy claims unpoisoned by owner closure or forced kill.
+
+Result: `evaluation/coordinator/deferred.rs` owns deferred producer payloads,
+task/wait/value indexes, canonical reservation, demand promotion, claims and
+release, abandonment and retirement, plus dependency-cycle discovery and
+pure-lazy-cycle terminalization. Cross-kind task lookup, promise ownership,
+closure, and settlement remain with the common coordinator.
+
+Verification: formatting, deferred- and lazy-cycle-filtered tests,
+full-feature Clippy, and the complete `cargo test -q` suite pass after the
+extraction.
 
 Each 4C checkpoint must move its focused tests with the implementation. Common
 fairness, closure, cross-kind terminalization, and forced-order tests stay at
@@ -1200,6 +1242,8 @@ the coordinator's nearest common owner.
 
 ##### Phase 4D.1 — Readiness and settlement
 
+Status: complete (2026-08-19).
+
 - Move internal readiness snapshots, validation, selected terminal
   obligations, and `RuntimeSettlementRelease` to
   `evaluation/coordinator/settlement.rs` as one lifecycle.
@@ -1207,7 +1251,19 @@ the coordinator's nearest common owner.
   observational readiness, no implicit commit of divergent exit votes, and
   post-unlock wake/drop order.
 
+Result: `evaluation/coordinator/settlement.rs` owns scheduler-readiness and
+deadlock snapshots, disposition validation, selected terminal obligations,
+atomic exit/kill publication, and the detached settlement release. Common
+work records and producer obligations remain in the coordinator because all
+work kinds construct or consume them outside runtime settlement as well.
+
+Verification: formatting, settlement- and readiness-filtered tests,
+full-feature Clippy, and the complete `cargo test -q` suite pass after the
+extraction.
+
 ##### Phase 4D.2 — Session, profile, and evaluation context
+
+Status: complete (2026-08-19).
 
 - Move session report types, `EvaluationSession`, `OwnedEvalContext`, and
   `EvalContext` construction and admission policy to `evaluation/session.rs`.
@@ -1218,7 +1274,21 @@ the coordinator's nearest common owner.
   synthetic abstraction. Do not let an escaped context recover the external
   owner lease.
 
+Result: `evaluation/session.rs` owns session reports and unfinished-work
+projections, the external demand-session lease, the owner-retaining direct
+context wrapper, evaluation-context construction, and task/deferred/promise
+admission policy. `EvaluationDemandState` and the immutable reflection profile
+remain in the facade as the deliberate bridge shared with coordinator-owned
+records. Sibling access is restricted to the `evaluation` module family, and
+an escaped `EvalContext` still retains no route back to its external owner.
+
+Verification: formatting, session- and client-demand-filtered tests,
+full-feature Clippy, and the complete `cargo test -q` suite pass after the
+extraction.
+
 ##### Phase 4D.3 — Cooperative and runtime pumping
+
+Status: complete (2026-08-19).
 
 - Move claimed-machine dispatch, prioritized dependency pumping,
   reflection/deferred release, retirement, and runtime-pump adapters to
@@ -1228,7 +1298,21 @@ the coordinator's nearest common owner.
 - Preserve same-session FIFO, cross-session dependency assistance, poll
   budgets, lazy-cycle publication, and machine destruction outside locks.
 
+Result: `evaluation/pump.rs` owns client-demand polling, cooperative target
+pumping, cross-session dependency prioritization, claimed reflection/deferred
+dispatch and release, pure-lazy-cycle publication, and runtime-pump adapters.
+Queue selection and lifecycle mutation remain methods of the authoritative
+coordinator; the pump only orchestrates detached claims. Session-owned report
+construction remains beside the pump because it derives scheduler state for
+the cooperative run boundary rather than defining session admission policy.
+
+Verification: formatting, pump-, quiescence-, and cross-session-filtered
+tests, full-feature Clippy, and the complete `cargo test -q` suite pass after
+the extraction.
+
 #### Phase 4E — Close the evaluation boundary
+
+Status: complete (2026-08-19).
 
 - Leave `evaluation.rs` as a deliberate facade/shared-contract map, not an
   arbitrary line-count target.
@@ -1239,6 +1323,25 @@ the coordinator's nearest common owner.
   module graph exists. Re-run `public_api`, effect embedding, macro protocols,
   logger integration, worker-count equivalence, all forced-order concurrency
   tests, Clippy, and the complete suite.
+
+Result: `evaluation.rs` is now a 202-line shared-contract facade rather than a
+mixed 8,000-line implementation/test owner. `evaluation/coordinator.rs` keeps
+the one authoritative cross-kind registry, indexes, queues, dependency model,
+and generation/condition-variable state; lifecycle-specific state and
+transitions live in focused children. The common evaluation and coordinator
+test suites moved to `evaluation/tests.rs` and
+`evaluation/coordinator/tests.rs`, preserving their original module scope and
+private access without obscuring production ownership. Production session and
+pump modules use explicit imports, and sibling construction/polling hooks are
+restricted to the `evaluation` family. `src/README.md` and the evaluation
+architecture document now describe the final module graph and mutation
+boundary.
+
+Verification: public API and external effect-host tests, macro and logger
+coverage, worker-count, completion, and settlement filters all pass. Final
+`cargo fmt --check`, full-feature Clippy with warnings denied, and the complete
+`cargo test -q` suite pass (1,121 library tests plus every integration test
+binary).
 
 There is no open semantic question blocking Phase 4B. The review deliberately
 rejects two tempting abstractions: a generic completion-wake trait where only

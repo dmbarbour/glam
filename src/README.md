@@ -49,7 +49,9 @@ not define language semantics or collect subsystem invariants.
 | `core_net.rs` | Core specialization of generic interaction nets |
 | `interaction_net/model.rs`, `builder.rs` | Generic topology and checked construction |
 | `interaction_net/runtime/` | Mutable graph, active-pair reduction, logical copies |
-| `evaluation.rs`, `evaluation/coordinator.rs`, `evaluation/executor.rs` | Demand ownership, runtime work records, workers |
+| `evaluation.rs`, `evaluation/session.rs`, `evaluation/pump.rs` | Shared demand/profile contracts, session admission, cooperative and runtime pumping |
+| `evaluation/coordinator.rs`, `evaluation/coordinator/` | Authoritative work registry/queues plus task, completion, client-demand, spark, reflection, deferred, and settlement lifecycles |
+| `evaluation/observation.rs`, `evaluation/executor.rs` | Semantic observation epochs and worker lifecycle |
 | `eval/value.rs`, `application.rs`, `operator.rs`, `net.rs` | Value forcing and semantic execution |
 | `eval/builtins/` | Builtin implementations by semantic family |
 | `eval/builtins/net/construction.rs` | Source interaction-net construction search |
@@ -129,8 +131,10 @@ focused [interaction-net invariants](../docs/agent_context/interaction_nets.md).
   `interaction_net/runtime/tests.rs`.
 - Evaluator integration tests live in `eval/tests.rs`; fixtures are in
   `eval/test_support.rs`.
-- `evaluation.rs`, `evaluation/coordinator.rs`, and the focused reflection
-  modules contain lifecycle and concurrency tests beside private machinery.
+- `evaluation/tests.rs` and `evaluation/coordinator/tests.rs` contain the
+  cross-session and cross-kind lifecycle/concurrency suites; focused
+  coordinator children and reflection modules retain tests beside their
+  private machinery.
 - `api/tests.rs` retains cross-facade value/assembly tests;
   `api/tests/runtime_tests.rs` and `api/tests/diagnostic_tests.rs` own runtime
   event/readiness and diagnostic transport integration tests.

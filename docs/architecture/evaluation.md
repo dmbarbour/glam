@@ -18,6 +18,30 @@ outside this subsystem by `api/runtime.rs` and
 promises, work records, scheduling, and settlement validation; it does not own
 the embedding report shapes or transactional host-event transport.
 
+## Module Ownership
+
+`evaluation.rs` is the shared-contract facade. It owns the deliberately common
+`EvaluationDemandState` and immutable reflection-task profile, then preserves
+crate-private paths for consumers without becoming another scheduler.
+
+- `evaluation/session.rs` owns the external session lease, session reports,
+  evaluation-context construction, and task/deferred/promise admission policy.
+- `evaluation/pump.rs` owns cooperative target pumping, claimed-machine
+  dispatch and release, cross-session dependency assistance, lazy-cycle
+  publication, and runtime-pump adapters.
+- `evaluation/observation.rs` owns the semantic observation epoch, while
+  `evaluation/executor.rs` owns worker activation and thread lifecycle.
+- `evaluation/coordinator.rs` owns the common work registry, indexes, ready
+  queues, dependency representation, and generation/condition variable.
+  Its `completion`, `task`, `client_demand`, `spark`, `reflection`, `deferred`,
+  and `settlement` children keep each lifecycle's state and transitions
+  together without introducing separate registries.
+
+The coordinator remains the sole mutation authority. The pump claims and
+orchestrates work through coordinator transitions; it does not own a second
+queue or terminal state. Session/context code owns policy and construction,
+not executable machine storage.
+
 ## Context and Session
 
 `EvaluationRuntime` is the allocation and construction boundary. It owns the
