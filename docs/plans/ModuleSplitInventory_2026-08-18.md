@@ -7,6 +7,10 @@ approximate production/test lines (`P/T`): a terminal inline `mod tests` is
 separated mechanically, while dedicated test files are counted wholly as
 tests.
 
+This remains the historical pre-split baseline. The post-Phase-4 census and
+secondary-candidate decisions are recorded under Phase 5A of the plan rather
+than rewriting this inventory after the fact.
+
 Assessment codes: **C** cohesive, **F** deliberate facade/root, **M** mixed
 responsibilities worth deeper review, **TH** cohesive production obscured by
 large inline tests, and **TO** test-only organization.

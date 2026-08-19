@@ -1,6 +1,6 @@
 # Module Split Plan — 2026-08-18
 
-Status: Phase 4 complete; Phase 5 is next.
+Status: Phase 5A complete; Phase 5B is next.
 
 This is a dated review and transition plan. Module shape will continue to
 change as the bootstrap grows, so a later review should create a new dated
@@ -1353,6 +1353,8 @@ only for a concrete new consumer or measured bottleneck, not for module shape.
 
 #### Phase 5A — Secondary-candidate decision
 
+Status: complete (2026-08-19).
+
 - Recompute file/production/test sizes and dependency directions after the four
   primary hotspots settle.
 - Revisit only the secondary candidates recorded in the inventory.
@@ -1362,7 +1364,78 @@ only for a concrete new consumer or measured bottleneck, not for module shape.
 - Keep `core.rs` deferred unless a separate GC/value-model transition has
   established its replacement boundary.
 
-#### Phase 5B — Architecture and cleanup-review closure
+The Phase 5 review found no drift that invalidates this scope. The four primary
+hotspots now have narrow roots and responsibility-owned children: the binary
+root has 294 production lines; `reflection.rs` has 42; `api.rs` has 83; and
+`evaluation.rs` has 200. Their remaining large files are implementation or
+test owners rather than the former catch-all roots. In particular,
+`reflection/machine.rs` owns the persistent effect machine,
+`api/assembly.rs` owns assembly construction, and
+`evaluation/coordinator.rs` owns the common work registry. Reopening those
+completed splits during this phase would conflate a new ownership review with
+the dated plan.
+
+The mechanical refresh found 160 Rust files and 106,206 lines: approximately
+62,462 production lines and 43,744 test lines under the inventory's original
+counting convention. The increase from 127 files is the intended result of the
+four primary splits, not newly discovered fragmentation.
+
+| Secondary candidate | Current size | Dependency finding | Decision |
+| --- | ---: | --- | --- |
+| `reflection/store.rs` | 1,051 production + 497 inline test lines | Snapshots, journals, and commit consume a self-contained conflict-address/index policy. The policy needs only store key and volume identity; query lifetime does not belong to it. | Approve the conflict-analysis extraction in Phase 5B. Keep query allocation, private-volume state, polling, completion, and retirement with the store. |
+| `interaction_net/runtime.rs` | 1,859 production + 2,891 dedicated test lines | Frontier observations and cursor dependencies retain `SharedRuntimeNet`, while shared runtime state owns the claims and revisions represented by those protocol values. Splitting either side would broaden private state or create forwarding without a one-way owner. | Defer. Existing `cursor`, `graph`, and `rewrite` children are the useful seams; future net scheduling/normalization work may create another. |
+| `g_syntax/parser/logical.rs` | 1,016 production + 131 inline test lines | `DeclarationMacroWork`, macro input discovery, output rendering, and declaration replay form one live declaration-scoped pipeline. The apparent original/generated representation seam is false: `LogicalSource` is used only by a debug round-trip assertion and its own tests, while production expansion re-lexes declaration text. | Do not split. Remove the dormant token mirror and redundant generated-token arenas in Phase 5C, leaving the live replay pipeline cohesive. |
+| `g_syntax/parser/structural.rs` | 1,487 production + 438 dedicated test lines | `let`/`where`/`using` and object/`with` syntax share expression floors, resume boundaries, braced/layout body discovery, and helpers consumed by the expression, conditional, pattern, declaration, and `do` parsers. | Keep cohesive. A family split would need a catch-all structural-common module or circular sibling ownership. |
+| `g_syntax/parser/source.rs` | 727 production lines | One `StagedSourceParser` owns declaration order, macro lookup and execution, diagnostic framing, reparsing, and language-position validation. | Keep cohesive. Extracting macro staging would leave the source owner as a forwarding shell around the same mutable lifecycle. |
+| `g_syntax/resolve/expression.rs` | 1,075 production lines | Dict/path and operator lowering recursively re-enter the general expression resolver. Several small effect/path helpers are deliberately shared by pattern, conditional, `do`, and module lowering. | Defer. A split presently changes navigation but not dependency direction or visibility. Revisit if a semantic IR boundary makes one family independent. |
+| `g_syntax/compiler_values.rs` | 802 production + 203 inline test lines | Built-in modules, conditional runners, macro environment, object helpers, and effect paths are constructed as one runtime-local closed-value cache and share lowering/application helpers. | Keep cohesive. Family files would expose cache construction internals without creating independent ownership. |
+| `core.rs` | 1,678 production + 516 inline test lines | Values, deferred cells, factory/cache, and functions remain recursively tied to the pending runtime-owned GC/value representation. | Continue the explicit deferral. Do not fossilize the current `Arc` representation as a module boundary. |
+
+This leaves two low-risk follow-ups. One is a genuine ownership extraction;
+the other removes an abandoned representation which otherwise makes a false
+module seam look architectural. Neither changes Glam semantics.
+
+#### Phase 5B — Extract reflection-store conflict analysis
+
+- Move `ConflictPath`, `ConflictAddress`, the strategy/index traits, and the
+  exact, fingerprint, and coarse implementations to
+  `reflection/store/conflict.rs`.
+- Keep `VolumeId`, query identity/lifetime, snapshots, journals, edits, roots,
+  and commits owned by `store.rs`. The conflict child may depend on the
+  parent's scalar `VolumeId`; store state depends only on the child's public
+  policy surface, not its concrete indexes.
+- Re-export the existing public conflict types through `store.rs` and
+  `reflection.rs`, preserving every public path. Do not expose the child module
+  or widen concrete index visibility.
+- Move the store's inline tests to `reflection/store/tests.rs`; keep strategy
+  overlap/conservatism tests beside the conflict owner or clearly grouped in
+  the store test child. Test movement must not substitute for production
+  ownership improvement.
+- Verify exact overlap in both directions, volume disjointness, conservative
+  fingerprints, coarse invalidation, custom strategy construction through the
+  public facade, and the existing snapshot/rebase/query/store suite before the
+  full repository gates.
+
+#### Phase 5C — Remove the dormant logical-token mirror
+
+- First latch generated-output validation for reserved `@`/`#`, invalid
+  numbers, and unbalanced or mismatched delimiter structure.
+- Delete `LogicalSource`, `LogicalToken`, `LogicalTokenKind`, `LogicalIndex`,
+  `LogicalGroup`, and their debug-only source round-trip assertion. They do not
+  participate in macro expansion or parser input.
+- Replace `GeneratedText::classify` and its copied token/number/text arenas
+  with a narrow generated-text validator over the authoritative lexer result.
+  Preserve the lexical diagnostics and structural-balance behavior without
+  retaining a second representation.
+- Keep `DeclarationMacroWork`, macro invocation discovery, normalized macro
+  input/layout construction, output rendering, embedded values, and replay
+  together in `logical.rs`; update its module comment to describe that actual
+  role.
+- Run the focused logical-parser and macro protocol suites, followed by the
+  repository gates. This checkpoint is a representation cleanup, not a macro
+  semantics change.
+
+#### Phase 5D — Architecture and cleanup-review closure
 
 - Update `src/README.md` and relevant architecture docs with only the module
   ownership that now exists.
