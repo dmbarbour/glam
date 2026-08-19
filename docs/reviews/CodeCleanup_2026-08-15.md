@@ -1078,11 +1078,49 @@ without either broad wakeups or incomplete settlement validation.
 3. **Event-state rewrite:** CCR-005 and CCR-006 are complete.
 4. **Repeated mechanism:** CCR-010 is complete; its prototype removed all four
    concrete lifecycle implementations and reduced the Rust source.
-5. **Semantic facade cleanup:** stage CCR-011 after the main/configuration call
-   sites have composition helpers.
-6. **Module splitting:** only after the representations above settle. Split
-   large files along the remaining ownership boundaries, not around mechanisms
-   scheduled for deletion.
+5. **Semantic facade cleanup:** CCR-011 is complete through the linked value
+   facade transition.
+6. **Module splitting:** complete through the dated module inventory and
+   transition described below.
+
+## Module-splitting resolution
+
+**Resolution (2026-08-19): complete.** The dated
+[`ModuleSplitPlan_2026-08-18.md`](../plans/ModuleSplitPlan_2026-08-18.md)
+inventoried every Rust file before approving changes, then split the four
+genuine catch-all roots along existing ownership seams:
+
+- executable command, configuration, logger, rendering, and batch policy moved
+  under the private directory-form `src/bin/glam/` binary crate;
+- `reflection.rs`, `api.rs`, and `evaluation.rs` became small facades over
+  protocol-, lifecycle-, value-, runtime-, session-, and work-kind owners;
+- reflection-store conflict analysis moved to one private strategy child while
+  preserving the public `glam::reflection` extension contract; and
+- the apparent logical-source split was rejected in favor of deleting the
+  dormant second token/group representation and retaining one cohesive live
+  macro-rewrite pipeline.
+
+The final audit counts 162 Rust files and 105,837 source lines. The growth from
+the original 127-file inventory is deliberate responsibility partitioning;
+the later logical cleanup removed 392 net lines. Current root sizes are 1,022
+lines for `bin/glam/main.rs` including its large cross-component test module,
+42 for `reflection.rs`, 85 for `api.rs`, and 202 for `evaluation.rs`.
+
+All new library implementation children remain private or crate-private. The
+only planned public removal was the executable-owned `glam::cli` surface; the
+store strategy types still resolve through `glam::reflection`, as latched by
+an external custom-strategy test. The dependency audit found no new sibling or
+crate-layer cycle. The conflict child has the preplanned narrow dependency on
+its parent's scalar `VolumeId`, while store state depends on the child's policy
+contract. No `common`, `util`, or `helpers` catch-all module was introduced.
+Current ownership documentation now reflects the live lexical, logical,
+parser-input, store, and conflict modules rather than the pre-split shape.
+
+Focused closure verification passed 24 store/conflict tests, six logical-parser
+tests, 31 macro-expansion tests, five external macro-protocol tests, and all 45
+external public-facade tests. `cargo fmt --check`, full-feature Clippy with
+warnings denied, and the complete `cargo test -q` suite also pass (1,121
+library tests plus every integration-test target).
 
 ## Verification baseline
 

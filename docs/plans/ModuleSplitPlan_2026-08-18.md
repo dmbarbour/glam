@@ -1,6 +1,6 @@
 # Module Split Plan — 2026-08-18
 
-Status: Phase 5C complete; Phase 5D is next.
+Status: complete (2026-08-19).
 
 This is a dated review and transition plan. Module shape will continue to
 change as the bootstrap grows, so a later review should create a new dated
@@ -1493,6 +1493,8 @@ Clippy with warnings denied, and the complete `cargo test -q` suite passed
 
 #### Phase 5D — Architecture and cleanup-review closure
 
+Status: complete (2026-08-19).
+
 - Update `src/README.md` and relevant architecture docs with only the module
   ownership that now exists.
 - Record the result under the module-splitting item in
@@ -1503,3 +1505,33 @@ Clippy with warnings denied, and the complete `cargo test -q` suite passed
   test gates.
 - Mark this dated plan complete while leaving future growth to a new dated
   module review.
+
+Result: `src/README.md` now distinguishes the authoritative lexer, the live
+declaration-scoped macro rewrite pipeline, and the Chumsky token-input adapter.
+It also distinguishes reflection-store snapshot/journal/query ownership from
+the private conflict-strategy child and directs store tests to their new
+responsibility-local homes. The enduring front-end and reflection architecture
+notes carry the same current ownership boundaries. The cleanup review records
+the completed transition rather than leaving module splitting as future work.
+
+The final mechanical census contains 162 Rust files and 105,837 lines. Public
+facade inspection confirms that implementation children remain private or
+crate-private. The intentionally removed `glam::cli` policy surface has no
+remaining source reference, while the conflict strategy extension types remain
+available through `glam::reflection` and are exercised by an external client.
+No new sibling or crate-layer dependency cycle was found; the one narrow
+parent/child relationship in the store is the planned conflict child's use of
+the parent-owned scalar `VolumeId`. No `common`, `util`, or `helpers` dumping
+ground was introduced. Searches also found no live-code references to the
+removed logical-source/token mirrors or their test-only construction helpers.
+
+Verification: the focused closure run passed 24 reflection-store/conflict
+tests, six logical-parser tests, 31 macro-expansion tests, five external macro
+protocol tests, and all 45 external public-facade tests. `cargo fmt --check`,
+`cargo clippy --all-targets --all-features -- -D warnings`, and the complete
+`cargo test -q` suite passed (1,121 library tests plus every integration-test
+target).
+
+This dated module review is closed. Future size growth or new ownership seams
+should begin with a new census and dated review rather than amending these
+decisions as if they were permanent file-size rules.

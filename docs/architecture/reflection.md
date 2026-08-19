@@ -93,16 +93,18 @@ blocked only when an existing state observation can rewind its checkpoint; it
 does not advance `.alt`. The scheduler receives only the dependency token,
 coarse retry generation, and retained structured evaluation failure.
 
-`reflection/store.rs` owns a persistent map of shared volumes independently of
-host wake state. Transactions record volume-qualified hierarchical read paths
-and one ordered edit overlay; commits rebase edits onto the current persistent
-roots. The store retains exact changed addresses. Blind sets and rewrites,
-including overlapping parent and child paths, serialize in commit order while
-their target volume exists. The runtime-selected
+`reflection/store.rs` owns the persistent shared-volume roots, query lifetime,
+transaction snapshots, ordered edit overlays, rebasing, and commit. Its private
+`reflection/store/conflict.rs` child owns volume-qualified hierarchical conflict
+paths and the pluggable observation strategy/index contract. The store retains
+exact changed addresses independently of host wake state. Blind sets and
+rewrites, including overlapping parent and child paths, serialize in commit
+order while their target volume exists. The runtime-selected
 `Arc<dyn ConflictAnalysisStrategy>` controls only how reads are summarized.
 The bootstrap supplies exact, conservative fingerprint, and fully coarse
-strategies. `EvaluationRuntime` fixes the strategy at construction; an
-assembler which attaches that runtime cannot replace it.
+strategies; clients may implement the public strategy contract without access
+to the private child module. `EvaluationRuntime` fixes the strategy at
+construction, and an assembler which attaches that runtime cannot replace it.
 
 Heap paths are ordinary lazy value operations rather than a store schema.
 `.heap.set` stages a replacement without inspecting the old heap.

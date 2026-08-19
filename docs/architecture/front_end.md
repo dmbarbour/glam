@@ -52,6 +52,13 @@ text payloads, delimiter groups, indentation facts, and declaration sections.
 parsers. Production parsers receive `TokenView` ranges and do not re-lex source
 substrings.
 
+`parser/logical.rs` owns the declaration-scoped macro rewrite pipeline. It
+discovers original invocations, constructs normalized macro input and layout
+views, validates generated output with the authoritative lexer, preserves
+embedded values while rendering, and replays the completed declaration into
+ordinary parsing. It does not retain a second token or group representation of
+the source or generated output.
+
 `StagedSourceParser` and `ModuleLowerer` alternate parsing and lowering in
 source order. This staging lets a declaration's macro resolve against the
 correct prior namespace, while definitions produced by that declaration become

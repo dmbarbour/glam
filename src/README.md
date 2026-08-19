@@ -33,7 +33,9 @@ not define language semantics or collect subsystem invariants.
 | `compiler.rs` | Per-source compiler capabilities and hidden provenance |
 | `g_syntax.rs` | Private built-in `.g` compiler facade |
 | `g_syntax/parser/source.rs` | Staged source parsing, macro expansion, declaration orchestration |
-| `g_syntax/parser/lexical.rs`, `logical.rs`, `input.rs` | Shared lexical structure and parser-token views |
+| `g_syntax/parser/lexical.rs` | Authoritative source-wide tokens, delimiter groups, declaration sections, and lexical payload arenas |
+| `g_syntax/parser/logical.rs` | Declaration-scoped macro input/layout discovery, generated-output validation, embedded-value rendering, and source replay |
+| `g_syntax/parser/input.rs` | Checked token views and Chumsky input over the authoritative lexical structure |
 | `g_syntax/parser/layout.rs`, `expression_context.rs` | Layout ownership, floors, and expression boundaries |
 | `g_syntax/parser/expression.rs`, `structural.rs`, `do_expr.rs`, `conditional.rs` | Expression and structural syntax |
 | `g_syntax/parser/declaration.rs`, `declaration/` | Top-level and recursive declarations |
@@ -61,7 +63,8 @@ not define language semantics or collect subsystem invariants.
 | `reflection.rs`, `reflection/protocol.rs` | Reflection facade and specialization/host transaction protocol |
 | `reflection/lifecycle.rs` | Effect lifecycle, scheduled runs, and task launchers |
 | `reflection/machine.rs`, `reflection/requests.rs`, `reflection/search.rs` | Persistent effect machine, request interpretation, isolated search |
-| `reflection/store.rs` | Journaled volumes, conflict analysis, query state |
+| `reflection/store.rs` | Journaled volume roots, edits, snapshots, commits, and query lifetime |
+| `reflection/store/conflict.rs` | Conflict paths plus exact, fingerprint, coarse, and client-defined observation strategies |
 | `runtime.rs` | Runtime identity, mutation admission, activity accounting |
 
 `interaction_net.rs`, `eval.rs`, `g_syntax.rs`, and `reflection.rs` are facades
@@ -135,6 +138,9 @@ focused [interaction-net invariants](../docs/agent_context/interaction_nets.md).
   cross-session and cross-kind lifecycle/concurrency suites; focused
   coordinator children and reflection modules retain tests beside their
   private machinery.
+- Reflection-store query, volume, journal, rewrite, and commit tests live in
+  `reflection/store/tests.rs`; strategy-specific tests remain beside
+  `reflection/store/conflict.rs`.
 - `api/tests.rs` retains cross-facade value/assembly tests;
   `api/tests/runtime_tests.rs` and `api/tests/diagnostic_tests.rs` own runtime
   event/readiness and diagnostic transport integration tests.
