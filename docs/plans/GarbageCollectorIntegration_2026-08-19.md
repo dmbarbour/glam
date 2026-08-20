@@ -1,6 +1,7 @@
 # Glam GC Integration Plan — 2026-08-19
 
-Status: planned; blocked on collector Gate G1 before managed ownership changes.
+Status: planned; Phase I0 may proceed now, while managed ownership changes are
+blocked on collector Gate G1.
 
 This plan integrates the collector defined by
 [`GarbageCollectorImplementation_2026-08-19.md`](GarbageCollectorImplementation_2026-08-19.md)
@@ -17,6 +18,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I2 | pending | public value and external-root prototype |
 | I3 | pending | bounded evaluator/worker mutator regions |
 | I4 | pending | core trace vocabulary and leaf policy |
+| I4B | pending | closure and opaque managed-edge containment |
 | I5 | pending | managed lazies and promises |
 | I6 | pending | functions, applications, metadata, failures |
 | I7 | pending | persistent list and dictionary tracing |
@@ -81,11 +83,11 @@ isolated in
 [`ValueRepresentationRefinement_2026-08-19.md`](ValueRepresentationRefinement_2026-08-19.md)
 and may begin only after the initial collector boundary is sound.
 
-Every representation migrated in this plan must fit one supported homogeneous
-typed-run slot. The integration does not request a large-object fallback,
-multi-run span, heterogeneous run, or managed DST. Existing large/variable leaf
-storage remains audited external ownership until a later representation plan
-chooses to decompose it.
+Every representation migrated in this plan must fit one slot in the
+collector's fixed-size homogeneous typed-run geometry. The integration does
+not request a large-object fallback, multi-run span, heterogeneous run, or
+managed DST. Existing large/variable leaf storage remains audited external
+ownership until a later representation plan chooses to decompose it.
 
 ## Phase I0 — Ownership and Mutation Ledger
 
@@ -99,7 +101,8 @@ record:
 - whether it can live outside an evaluator call or worker quantum;
 - whether it can cross threads;
 - Rust `TypeId`, canonical object-metadata pointer, managed size/alignment, and
-  selected heap-local allocation class;
+  selected heap-local allocation class, including its derived slot stride and
+  slots-per-fixed-run geometry;
 - visitor-based outgoing edge enumeration;
 - required trace strategy;
 - required generational barrier;
@@ -114,9 +117,17 @@ value, every `OpaqueValue` payload family owned by Glam, and every interaction-
 net specialization carrying core data.
 
 For each opaque payload family, the inventory records either `no managed edge`
-or the exact runtime/public root wrapper it may retain. Discovering a bare
-`Gc<T>`, unrooted recursive `core::Value`, or equivalent internal managed
-pointer is a boundary defect, not a conservative-tracing classification.
+or the exact same-runtime public root wrapper it may retain. Discovering a bare
+`Gc<T>`, unrooted recursive `core::Value`, foreign-runtime root, or equivalent
+internal managed pointer is a boundary defect, not a conservative-tracing
+classification.
+
+I0 can begin before collector class discovery exists. At that point, record
+Rust type/layout and projected trace/drop policy; mark metadata addresses,
+dense class IDs, and derived fixed-run geometry as provisional. Reconcile and
+latch those fields after C2B and I1, before Gate G2. This sequencing lets the
+layout inventory inform C2A without pretending that heap-local classes already
+exist.
 
 Add tests which latch current semantics before changing representation:
 
@@ -147,6 +158,10 @@ classified optimistically.
   or otherwise look up `TypeId` on every object. Once a class is retained,
   allocation uses its dense ID and canonical metadata pointer directly.
 - Add runtime-local tuning with collection disabled by default.
+- Construct the heap with an explicit slot-alignment policy supplied by the
+  current runtime representation. The initial enum representation may request
+  only the collector's neutral/default floor; the later tagged-value plan owns
+  and supplies any stronger guarantee it requires.
 - Verify the earlier sibling allocation of runtime state and immutable profile
   remains acyclic once both can retain rooted values.
 
@@ -159,25 +174,30 @@ and tests must remain unchanged.
   node.
 - Select the representation which keeps public scalar construction cheap while
   ensuring one public `Value` clone cannot lose liveness.
-- Make `RuntimeValueRoot` obtain runtime provenance from its heap/root rather
-  than maintaining independently forgeable duplicated provenance.
+- Specify and prototype how `RuntimeValueRoot` will obtain runtime provenance
+  from its heap/root rather than maintaining independently forgeable duplicated
+  provenance. Do not place the production `core::Value` in a collector root
+  until I4 supplies its exact trace; I2 uses collector-local fixtures or a
+  non-collecting compatibility envelope.
+- Ensure every safe root/public-value access validates or establishes the
+  matching heap in release builds before invoking the collector's private
+  unsafe `Gc<T>` gateway. Debug-only owner assertions are diagnostics for
+  internal invariants, not the safety basis of the public API.
 - Keep `api::Value` freely cloneable and `Send + Sync` when its contents are.
 - Preserve the current public equality and debug semantics deliberately.
   Root-pointer identity is not a substitute for `core::Value` equality, and
   debug formatting must remain non-forcing. If these operations enter a
   mutator region internally, test their recursion and collection-request
   behavior explicitly.
-- Replace direct `as_core` escape paths with scoped access under the correct
-  mutator authority.
-- Eliminate ownership-taking `into_core` paths which could let an unrooted
-  managed pointer escape its region. Internal consumers borrow or clone the
-  compact core shell within an enclosing mutator scope instead.
+- Prototype scoped core access under the correct mutator authority and record
+  the production `as_core`/`into_core` call sites which I4 must migrate.
 - Preserve the public `EvaluatedValue` WHNF witness without making it a second
   root model.
 
-Verification includes public API tests moving roots between threads, dropping
-the runtime facade before the last value, rejecting roots from another
-runtime, and nesting construction/evaluation entries recursively.
+Verification includes prototype-facade tests moving roots between threads,
+dropping the owning heap facade before the last value, rejecting roots from
+another heap, and nesting construction/evaluation entries recursively. Existing
+public `Value` tests remain unchanged until the production switch in I4.
 
 Collection remains disabled for the production graph.
 
@@ -220,8 +240,13 @@ Verify that:
 
 ## Phase I4 — Core Trace Vocabulary and Leaf Policy
 
-- Implement exact tracing for `core::Value`, keys which contain values, lists,
-  dictionaries, argument arrays, evaluation failures, and context frames.
+- Implement exact tracing for every then-current `core::Value` variant and all
+  transitively owned structures which may contain a managed edge, including
+  keys, lists, dictionaries, argument arrays, function/lazy/promise/net
+  payloads, evaluation failures, and context frames. A recursive subgraph may
+  remain `Arc`-owned, but its trace adapter must still visit any managed values
+  it contains; collection being disabled does not permit an incomplete unsafe
+  `Trace` implementation.
 - Implement those traces as representation-aware edge visitors. Do not encode
   fixed field-offset tables: list nodes, immediate-like shells, and persistent
   collection adapters report only the managed edges they actually contain.
@@ -231,9 +256,45 @@ Verify that:
   of shared spines is correct but may be expensive.
 - Add trace-count instrumentation to quantify repeated logical traversal.
 - Do not fork or replace persistent collections in this plan.
+- Once the current production value graph has an exact trace and I3's region
+  boundaries are in place, enact I2's selected `RuntimeValueRoot`
+  representation and heap-derived runtime provenance. Keep collection disabled.
+- Replace direct `as_core` escape paths with scoped access under the correct
+  mutator authority. Eliminate ownership-taking `into_core` paths which could
+  let an unrooted managed pointer escape its region; internal consumers borrow
+  or clone the core shell inside an enclosing mutator scope.
+- Repeat I2's root movement, runtime-facade drop, foreign-runtime rejection,
+  equality, debug, and scalar-cost tests against the real public `Value`.
 
 This phase establishes traversal definitions but does not enable collection
-while recursive identity cells remain `Arc`-owned.
+while recursive identity cells remain `Arc`-owned. From I4 onward, every
+representation change in I5–I10 updates its exact visitor or root classification
+in the same checkpoint; later collection gates are not permission to carry a
+knowingly incomplete unsafe `Trace` implementation.
+
+## Phase I4B — Closure and Opaque Managed-Edge Containment
+
+Close non-traceable storage before the first recursive identity becomes a bare
+managed pointer:
+
+- use I0's constructor inventory to find every deferred Rust closure and opaque
+  payload which can retain an internal `core::Value`;
+- replace Glam-owned closure captures with explicit traceable computation state
+  where practical;
+- otherwise attach an explicit bundle of same-runtime public roots, accepting
+  that a backedge through such a bundle is conservative retention rather than
+  exact cycle collection;
+- narrow opaque construction so an arbitrary payload may contain no managed
+  edge, while audited families may contain same-runtime public roots but never
+  a bare `Gc`, unrooted recursive `core::Value`, or foreign-runtime root; and
+- add construction-time and compile-time tests proving each admitted closure
+  and opaque family cannot smuggle a bare managed pointer after I5 changes the
+  representation of captured values.
+
+This checkpoint need not move opaque storage into collector-owned finalizable
+cells. It establishes edge safety; I10 later completes ownership, scoped
+downcast, destruction, and conservative-retention policy. I5 is blocked until
+I4B passes.
 
 ## Phase I5 — Lazies and Promises
 
@@ -248,6 +309,9 @@ Migrate the principal cyclic identities first:
 - route source replacement and terminal assignment through the managed-edge
   mutation gateway; its collector action is empty in full stop-the-world mode
   and becomes an old-to-young barrier only when generations are enabled; and
+- update the already-exact I4 visitors in the same checkpoint as each edge
+  changes from external/`Arc` ownership to `Gc`; no phase may leave a trace
+  placeholder merely because collection is disabled; and
 - preserve exact wait, cancellation, abandonment, and resolver semantics.
 
 Focused tests must construct and reclaim:
@@ -277,11 +341,13 @@ production runtime still does not collect.
 Verify cycles through each family and confirm that tracing does not evaluate,
 force, lock, or format a value.
 
-## Phase I7 — Persistent Lists and Dictionaries
+## Phase I7 — Persistent List and Dictionary Trace Audit
 
 - Keep RPDS and FingerTree/`Arc` spines initially.
-- Implement exact logical tracing of keys, values, list chunks, lazy list
-  thunks, concatenation nodes, and shared slices.
+- Audit and extend I4's exact logical tracing of keys, values, list chunks, lazy
+  list thunks, concatenation nodes, and shared slices against the concrete
+  representation inventory. A missing node is a soundness defect, not work
+  intentionally deferred from I4.
 - Verify a public persistent collection retains all contained managed objects
   across full collection.
 - Verify dropping the final external collection permits a backedge cycle to be
@@ -293,10 +359,11 @@ Logical duplicate visits are a performance issue in a mark collector, not an
 edge-counting soundness problem. This phase must not silently turn collection
 updates into whole-map copies.
 
-## Phase I8 — Interaction Nets
+## Phase I8 — Interaction-Net Migration and Trace Audit
 
-- Inventory every core value stored in net templates, agents, active pairs,
-  stuck pairs, cursors, logical copies, and normalization state.
+- Reconcile I0/I4's inventory of every core value stored in net templates,
+  agents, active pairs, stuck pairs, cursors, logical copies, and normalization
+  state against the concrete migration.
 - Make `NetValue`, function stages, and `SharedRuntimeNet` expose those edges
   without reducing the net or materializing a cursor.
 - Decide whether the shared runtime net remains an external synchronized
@@ -341,10 +408,12 @@ checks both terminal observability and eventual reclamation.
 
 `Arc<dyn Fn(&EvalContext) -> ...>` cannot be traced automatically.
 
-- Enumerate every production deferred closure constructor.
+- Reconcile every production deferred closure constructor with I4B's
+  containment ledger and close any remaining conservative escape hatch which
+  can be represented exactly.
 - Prefer replacing captured value state with an explicit traceable computation
   object.
-- Where a Rust closure remains valuable, attach an explicit external-root
+- Where a Rust closure remains valuable, retain I4B's explicit external-root
   bundle for every captured value and verify the closure cannot smuggle a bare
   managed pointer.
 - A runtime-created lazy/deferred computation which can participate in the
@@ -357,17 +426,19 @@ checks both terminal observability and eventual reclamation.
 For `OpaqueValue`:
 
 - ordinary arbitrary host payloads are tracing barriers;
-- payloads may hold public/runtime-rooted `Value`s, which are safe but can
-  conservatively retain a cycle;
+- payloads may hold public/runtime-rooted `Value`s from the same runtime, which
+  are safe but can conservatively retain a cycle;
 - payloads must never hold bare `Gc<T>`, an unrooted recursive `core::Value`,
-  or any equivalent managed pointer which could escape its mutator region;
+  a foreign-runtime root, or any equivalent managed pointer which could escape
+  its mutator region;
 - preserve that rule structurally: keep opaque construction private, do not
   re-export collector pointers, and require an audited sealed/unsafe marker or
   an external sidecar for each allowed payload family rather than retaining
   the current unconstrained `Any + Send + Sync` constructor;
 - generic embedding payloads should remain in host-owned side tables whose
-  opaque Glam token contains only identity/provenance; any Glam values in the
-  host payload use public roots;
+  opaque Glam token contains only identity/provenance. Same-runtime Glam values
+  in the host payload use public roots; cross-runtime associations remain host
+  state outside either runtime's value graph;
 - unreachable opaque payloads still receive ordinary Rust destruction. A
   client-defined `Drop` may release host resources or otherwise be visible to
   the embedding client, but its timing and order are outside Glam evaluation
@@ -490,7 +561,13 @@ checks:
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test -q
+cargo test --workspace -q
 ```
+
+The ordinary commands preserve the repository's established root-package
+contract. The workspace run (plus the current `glam-gc` verification script)
+ensures the default-member configuration does not accidentally omit collector
+tests.
 
 Additional required modes:
 
@@ -500,8 +577,8 @@ Additional required modes:
 - minor/full differential histories after I13;
 - zero workers and several workers;
 - public roots moved among threads and dropped in forced orders;
-- every production allocation class fitting the collector's supported layout
-  table, plus explicit rejection tests for a deliberately oversized fixture;
+- every production allocation class fitting the collector's fixed-run slot
+  geometry, plus explicit rejection tests for a deliberately oversized fixture;
 - Miri for focused root, trace, lazy, promise, collection, and net graphs;
 - Loom or deterministic barrier tests for mutator/root/barrier coordination;
 - address/thread sanitizers where supported; and
@@ -519,8 +596,8 @@ semantics.
 - Public `Value` is a real runtime-local external root and remains convenient
   to clone and share.
 - Workers access managed pointers only within bounded mutator regions.
-- Every managed representation fits one documented typed-run class; there is
-  no hidden large-object or multi-run fallback.
+- Every managed representation fits one slot in the documented fixed-size
+  typed-run geometry; there is no hidden large-object or multi-run fallback.
 - Fixpoint, promise, metadata, collection, function, and net cycles are
   reclaimed after their last root disappears.
 - Reflection, diagnostics, stores, events, and task handles retain exactly the

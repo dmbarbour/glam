@@ -1,6 +1,6 @@
 # Glam GC Subcrate Implementation Plan — 2026-08-19
 
-Status: planned.
+Status: in progress; Phase C0 is complete.
 
 This plan implements an exact, non-moving, runtime-local tracing collector
 without depending on Glam value semantics. The governing requirements and
@@ -16,8 +16,8 @@ Concurrent marking is a later plan.
 | Phase | Status | Outcome |
 | --- | --- | --- |
 | C0 | completed | crate, provenance, safety, and test scaffold |
-| C1 | pending | trace, pointer, root, and mutator access contract |
-| C2A | pending | arena chunks, typed-run geometry, and layout limits |
+| C1 | pending | trace, pointer, and mutator access contract |
+| C2A | pending | arena chunks, fixed typed-run geometry, and layout limits |
 | C2B | pending | type metadata and per-heap allocation-class discovery |
 | C2C | pending | worker-local typed-run allocation and reuse |
 | C3 | pending | recursive mutator regions and STW handshake |
@@ -139,7 +139,15 @@ C0 completed on 2026-08-19 with these deliberately narrow decisions:
 
 ## Phase C1 — Trace and Access Contract Spike
 
-Implement only enough allocation leakage to test the public safety shape.
+Implement only enough allocation leakage to test the internal pointer and
+mutator safety shape.
+
+Before introducing unsafe pointer operations, complete and record roadmap Gate
+G0's semantic, memory, and representative timing baseline. C0's crate and
+verification scaffold does not by itself satisfy that gate. Replace C0's
+temporary whole-crate `unsafe_code` prohibition check with an explicit expected
+unsafe inventory which fails on unreviewed modules or sites, and update
+`SAFETY.md` as each site is introduced.
 
 - Represent `Gc<T>` as one typed non-null managed pointer with no carried heap,
   domain, class, or debug token. `T` prevents ordinary accidental type confusion;
@@ -178,23 +186,32 @@ Implement only enough allocation leakage to test the public safety shape.
   synchronization cells, roots, external storage, and immediate fields require
   explicit edge policy.
 - Specify equality, pointer identity, debugging, and heap-mismatch behavior.
-- Keep raw `Gc<T>` construction private and unsafe. Specify the obligations
-  shared by allocator implementations and any future representation decoder:
-  the address is non-null and properly aligned, identifies a live managed slot
-  in the protected heap, and the slot's canonical metadata describes `T`.
-  `glam-gc` does not specify a tagged value, tag-to-type mapping, or serialized
-  representation.
-- Reserve a bounded run-size-class representation in the pointer/access layer
-  without assigning Glam immediate tags. The collector API accepts untagged
-  aligned addresses plus its own run-owner information and does not expose the
-  eventual Glam `Value` encoding.
+- Keep raw `Gc<T>` construction crate-private and unsafe throughout this GC
+  plan. Specify the obligations shared by allocator implementations and any
+  future representation decoder: the address is non-null and properly aligned,
+  identifies a live managed slot in the protected heap, and the slot's
+  canonical metadata describes `T`. A later tagged-value phase may add one
+  separately reviewed unsafe cross-crate integration gateway; because
+  `glam-gc` is not a supported embedding API, that does not make raw
+  construction a general client facility. `glam-gc` does not specify a tagged
+  value, tag-to-type mapping, or serialized representation.
+- Reserve an abstract run-owner lookup boundary independent of payload-slot
+  alignment and without assigning Glam immediate tags. C2A may establish a
+  small collector-internal alignment floor for allocator mechanics, and must
+  let heap construction request a stronger uniform floor, but the GC crate does
+  not select Glam's value-tag alignment. Do not encode a run size or class in
+  `Gc<T>`: the collector recovers the owner from the untagged address and its
+  fixed run geometry. Variable run sizes and pointer-encoded run classes remain
+  a profiled representation alternative, not a C1 commitment.
 
 Verification:
 
 - compile-fail tests show that references cannot escape a mutator region and a
   mutator cannot be sent to another thread;
-- shared `Gc` and `Root` handles may move between threads;
-- a pointer cannot be safely dereferenced with authority from another heap;
+- shared `Gc` handles may move between threads; registered `Root` sharing is
+  deferred to C4;
+- there is no safe bare-`Gc` dereference API, and the unsafe operation's result
+  lifetime remains bounded by its mutator token;
 - forced wrong-heap and wrong-representation accesses trip debug assertions at
   the unsafe gateway without adding fields or release checks to `Gc<T>`;
 - tracing a duplicate pointer is harmless; and
@@ -205,23 +222,44 @@ Checkpoint: freeze the internal API before building the allocator. Revisit the
 integration plan if using the token in real evaluator call paths would require
 an unacceptable semantic or visibility change.
 
-## Phase C2A — Arena Chunks, Typed-Run Geometry, and Layout Limits
+## Phase C2A — Arena Chunks, Fixed Typed-Run Geometry, and Layout Limits
 
-- Reserve large heap-owned arena chunks and divide them into a bounded table of
-  power-of-two run sizes. Every run is aligned to its own size and contains one
-  homogeneous slot layout.
-- Require at least 32-byte managed-slot alignment. Select the exact run-size
-  table through a checkpoint, with at most the run-class count reserved by C1;
-  8–16 classes are the intended scale, not a semantic requirement.
-- Given an untagged managed address and its run-size class, recover the run
-  header by masking. The safe access layer validates that the run belongs to
-  the expected heap and allocation class in debug/test configurations.
+- Reserve large heap-owned arena chunks whose address and size are multiples of
+  one fixed, power-of-two `RUN_SIZE`. Divide each chunk into runs of exactly
+  that size. Every run contains one homogeneous allocation class and slot
+  layout.
+- Select one provisional `RUN_SIZE` at this checkpoint from measured
+  header/bitmap overhead, cold-class fragmentation, and representative object
+  layouts. Comparing other fixed sizes is tuning; supporting several sizes is
+  deferred.
+- Define a heap-construction slot-alignment policy. The collector may impose
+  only the lower bound required by its own allocator representation; callers
+  may request a stronger power-of-two heap-wide floor. The effective class
+  alignment is `max(Layout::align(), collector_floor, requested_floor)`.
+  Owner lookup from an untagged pointer depends on fixed run alignment, not on
+  this slot floor. The collector reports the guaranteed floor but assigns no
+  semantic meaning or tag budget to it.
+- Given an untagged managed address, recover the run header by masking with the
+  fixed `RUN_SIZE`. In debug/test configurations, first validate the numeric
+  address against the mutator heap's arena-chunk ranges without dereferencing a
+  candidate header, then validate the recovered run and allocation class. Raw
+  construction still forbids arbitrary or stale addresses in every build.
+- Implement a pure checked geometry calculation from Rust `Layout` plus the
+  effective slot-alignment floor to slot stride, first-slot offset, slot count,
+  and bitmap geometry. It accounts for its own side metadata and either yields
+  at least one valid slot or rejects the layout. C2B applies this calculation
+  to `ObjectMetadata::layout` when it creates the heap-local allocation class.
+- Consume I0's preliminary production layout inventory when selecting the
+  provisional run size. If I0 is not yet complete, record equivalent
+  representative layout measurements here and reconcile them with I0 before
+  any production ownership migration.
 - Store allocation and mark state in run-side bitmaps. Reserve run-side card
   metadata and a generation field without implementing minor collection.
-- Set a documented maximum managed size and alignment derived from the largest
-  supported slot/run class. Reject an unsupported type when creating its
-  allocation class. Do not implement a large-object fallback, multi-run object,
-  heterogeneous run, or arbitrary DST path.
+- Set a documented maximum managed size and alignment derived from the fixed
+  run geometry. Reject unsupported layouts in the geometry calculation; C2B
+  propagates that result from allocation-class creation. Do not implement a
+  large-object fallback, multi-run object, heterogeneous run, or arbitrary DST
+  path.
 - Keep variable-sized byte buffers, arbitrary host payloads, and other values
   which do not fit the limit in audited external storage or decompose them in a
   later Glam representation project.
@@ -230,12 +268,19 @@ an unacceptable semantic or visibility change.
 
 Verification:
 
-- every boundary address in every run-size class maps to exactly one header;
+- every valid address in every arena chunk maps to exactly one fixed-size run
+  header, including the first and last slots of adjacent runs;
 - adjacent runs and arena chunks never alias;
-- bitmap indices match 32-byte slot quanta and reject interior/non-slot
-  addresses;
-- unsupported size/alignment/DST layouts fail class creation without partially
-  allocating storage;
+- derived slot indices match the stride and reject header,
+  padding, interior, and non-slot addresses;
+- representative layouts use the same run byte size while deriving independent
+  slot strides and counts;
+- several requested alignment floors, including layouts producing 16-, 24-,
+  and 32-byte strides, yield correct slot and bitmap geometry;
+- smaller slots measure and report their larger bitmap overhead rather than
+  being rejected merely to preserve a value-layer tag budget;
+- unsupported size/alignment/DST layouts fail geometry derivation without
+  partially allocating storage;
 - pointer ownership checks distinguish heaps in debug/test builds; and
 - Miri and property tests cover mask arithmetic, alignment, and the maximum
   supported address range.
@@ -248,6 +293,11 @@ Verification:
   `&'static ObjectMetadata` address as the operational type identity. `TypeId`
   is a cold discovery key, not a run-header field or hot-path comparison. Do
   not add relocation operations while moving collection is deferred.
+- Keep placement policy out of `ObjectMetadata`: it does not select a run size
+  or carry a run-size/alignment hint. The heap-local allocation class combines
+  its canonical metadata layout with the heap's C2A alignment policy, then
+  derives slot geometry for the collector's one fixed run size. An unsupported
+  result fails class creation before a class ID or run is published.
 - Give each typed run one metadata/allocation-class identity in its header;
   ordinary slots contain payload only, with no GC header, metadata pointer,
   mark byte, or finalizer byte.
@@ -260,6 +310,10 @@ Verification:
 - Return a reusable `AllocationClass<T>` handle after discovery. Its heap
   provenance, metadata pointer, and dense class ID make subsequent worker
   allocation independent of `TypeId` lookup or hashing.
+- Because `Mutator::alloc` is safe, an allocation-class handle from another
+  heap must be rejected in release builds (or made unrepresentable by the
+  final API) before it reaches raw run state. Debug assertions may add detail,
+  but may not be the safety boundary.
 - Serialize concurrent first metadata interning and per-heap class discovery so
   all contenders observe one metadata address and one class/run pool per heap.
   It is acceptable for immutable metadata candidates to be constructed
@@ -277,6 +331,8 @@ Verification:
   distinct heap-local classes;
 - every run header resolves to the expected trace/drop/layout metadata;
 - repeated allocation through a retained class performs no `TypeId` lookup;
+- safe allocation with a class from another heap is rejected before either
+  heap's run state changes;
 - no-drop and drop types receive the correct metadata without per-slot policy;
   and
 - failed or panicking metadata/class construction publishes no partial entry.
@@ -285,14 +341,16 @@ Verification:
 
 - Require mutator authority and an `AllocationClass<T>` for every managed
   allocation.
-- Give each outer mutator entry a small local cache from dense class ID to its
-  current run cursor. Recursive same-heap entries share that cache.
+- Give each C2C mutator entry a small local cache from dense class ID to its
+  current run cursor. C3 later makes same-heap entry recursive and moves this
+  cache to the outermost region so nested entry shares it.
 - Allocate ordinary slots from the cached run using only worker-local cursor or
   free-bitmap state. Do not look up or hash `TypeId`, acquire a shared lock, or
   increment a shared byte counter on the ordinary hot path.
 - On cache miss or run exhaustion, use the class's synchronized slow path to
-  obtain a reusable partial run or reserve a new typed run from an arena chunk.
-  Return/publish partial cursors in a batch at outer mutator exit.
+  obtain a reusable partial fixed-size run or reserve a new typed run from an
+  arena chunk.
+  Return/publish partial cursors in a batch when the C2C mutator entry exits.
 - Initialize the payload completely before setting its allocation bit. A
   reserved but uncommitted slot is not traceable. Panic unwinding returns the
   slot to local free state without invoking `Drop` on uninitialized bytes.
@@ -307,13 +365,13 @@ Verification:
 - allocation from several mutators never overlaps;
 - instrumentation proves repeated allocations in a cached class perform no
   hash lookup or shared synchronization;
-- recursive entries reuse the outer cache and only its outer exit publishes
-  partial runs;
 - cold types do not lose their partial runs permanently when a mutator exits;
 - reused slots are correctly reinitialized and marked allocated;
 - panic unwinding never exposes uninitialized storage as an object; and
 - dropping the heap without collection destroys every allocated drop-type slot
-  exactly once.
+  exactly once for C2C's non-reentrant test payloads. C6 replaces this
+  provisional teardown path with collector-controlled mutator finalization
+  before client/production drop types are admitted.
 
 ## Phase C3 — Regional Mutators and Stop-the-World Handshake
 
@@ -327,6 +385,8 @@ Verification:
   access to allocation state without retaining a mutator-region lock.
 - Support recursive same-heap entry through thread-local depth without
   incrementing the global active-mutator count.
+- Move the C2C local run-cursor cache to the outermost same-heap region. Nested
+  entry reuses it, and only outermost exit publishes/returns partial runs.
 - Provide a scoped current-mutator accessor for reviewed destructor and
   runtime-integration code, for example an HRTB closure API rather than a
   borrow which can escape. A destructor invoked by the collector sees its
@@ -343,6 +403,8 @@ Verification:
   `Finalizing` while still holding the coordinator lock. There must be no
   interval in which neither collector exclusion nor the finalizer mutator is
   authoritative.
+- Exercise this handoff in C3 from a synthetic completed-collection state; C6
+  connects it to a real fixed dead set and destructor queue.
 - The collector thread holds that mutator for the complete `Finalizing` phase.
   Releasing exclusive admission makes finalization concurrent by default:
   ordinary workers may acquire their own mutators, while the collector's held
@@ -406,17 +468,34 @@ supplementary, not proof.
 - Implement a shareable root cell registered once with its heap.
 - Cloning a root may use ordinary atomic ownership at this external boundary;
   internal `Gc` copies remain free of that cost.
+- Publish the registry's weak cell before returning the first root. Collection
+  snapshots strong root-cell references under root-registry synchronization,
+  releases that synchronization, and retains the snapshot through marking.
+  Concurrent clone/drop then changes only the strong count of an already
+  registered cell: a successfully upgraded snapshot keeps it live for that
+  collection, while a failed upgrade proves no public root remained at that
+  instant.
 - Root destruction must not acquire an allocator lock or race into premature
   reclamation.
 - Root creation from `Gc` is permitted only within a mutator region.
-- Root access enters or requires the correct heap.
+- Safe root creation validates in release builds that the pointer is a live,
+  rootable allocation in the mutator's heap. In particular it rejects a
+  foreign-heap pointer and any identity in the completed dead/finalization set
+  before registering a root.
+- Root access enters or requires the correct heap. If the API accepts an
+  explicit mutator, a foreign-heap mutator is rejected in release builds before
+  the private unsafe `Gc` gateway is invoked; debug assertions only enrich that
+  boundary.
 - The registry may retain weak root slots and prune them during a pause; it
   must not retain dead root payloads indefinitely.
+- Keep the ownership graph acyclic: a public root handle retains both its root
+  cell and heap, while the heap registry retains only weak root-cell entries.
 
-Verification forces root creation, cloning, final drop, and registry pruning
-around every root-snapshot boundary. A root cloned from an existing root during
-a pause remains safe; no new root can arise from an otherwise unreachable
-bare pointer while mutators are stopped.
+Verification forces root creation, cloning, cross-thread sharing, foreign-heap
+access rejection, final drop, and registry pruning around every root-snapshot
+boundary. A root cloned from an existing root during a pause remains safe; no
+new root can arise from an otherwise unreachable bare pointer while mutators
+are stopped.
 
 ## Phase C5 — Exact Full Marking
 
@@ -433,7 +512,7 @@ bare pointer while mutators are stopped.
 - Validate that every traced pointer belongs to the collecting heap in debug
   and test configurations.
 - Maintain enough per-run live summary to recognize a run with no marked slots
-  without enumerating its payloads. Marking may touch page/run metadata, but its
+  without enumerating its payloads. Marking may touch chunk/run metadata, but its
   graph traversal remains proportional to reachable managed edges.
 - Wrap the attempt in an unwind guard. If tracing or mark-work allocation
   panics, discard the worklist, leave every allocation intact, restore a usable
@@ -512,6 +591,16 @@ tests.
   and free-slot boundary.
 - Reuse reclaimed storage only after destruction and metadata retirement are
   complete.
+- Before admitting production mutator-capable drop types, settle terminal heap
+  teardown as an explicit C6 checkpoint. The preferred shape begins a final
+  drain while a runtime/value-domain owner lease is still strong, so ordinary
+  finalizer mutation is valid and creation of a fresh external root can cancel
+  terminal teardown. Do not try to reconstruct or resurrect an `Arc` owner
+  after its last strong reference has entered `Drop`. If the public ownership
+  representation cannot initiate such a drain, keep last-owner teardown a
+  restricted non-reentrant path and document which payload families it may
+  destroy; it may not silently invoke a mutator-capable production destructor
+  without its promised context.
 - Expose queued and running finalizers as operational heap activity so runtime
   quiescence and shutdown cannot race their diagnostics, tasks, or host
   effects. A synchronous `collect_full` report completes only after its
@@ -552,7 +641,10 @@ Gate G1 passes after C6 plus a focused unsafe-code audit.
 - Confirm that collection never waits on a pointer-local lock.
 - Add metrics for mutator entries, recursive entries, pauses, arena chunks,
   typed runs, class-cache hits/misses, traced objects, reclaimed runs/slots,
-  lazy sweeps, and deferred requests.
+  lazy sweeps, deferred requests, fixed-run utilization, and partial-run
+  fragmentation. Track cold `TypeId`/metadata discovery separately from
+  retained-class allocations so the intended hot-path boundary can be
+  profiled.
 
 This phase tests collector mechanisms only. It does not imitate Glam scheduler
 semantics beyond the shape needed to validate shared values.
@@ -604,10 +696,14 @@ also pass.
 
 ## Phase C10 — Tuning Surface and Final Collector Audit
 
-- Expose internal tuning for arena-chunk size, the bounded run-size table,
-  worker class-cache capacity, card size, collection thresholds, nursery size,
-  promotion, and full/minor selection without exposing collector jargon as a
-  stable Glam public API.
+- Expose internal tuning for arena-chunk size, the single fixed run size,
+  collector-internal and caller-requested slot-alignment floors, worker class-
+  cache capacity, card size, collection thresholds, nursery size, promotion,
+  and full/minor selection without exposing collector jargon as a stable Glam
+  public API. Comparing candidate fixed run sizes may require separate heap
+  construction or builds; C10 does not introduce variable-size runs. Report
+  bitmap bytes and internal fragmentation by slot stride so the value layer can
+  choose its own alignment policy from evidence.
 - Make an explicit collection report suitable for tests and future runtime
   metrics.
 - Audit every unsafe block against `SAFETY.md`.
@@ -629,11 +725,17 @@ cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test -p glam-gc
 cargo test -p glam-gc --features deterministic-test-hooks
-cargo +nightly miri test -p glam-gc
+cargo +nightly miri test --package glam-gc --lib --all-features
+cargo test --workspace -q
 ```
 
 Run supported address/thread sanitizers in CI or a documented local script.
-Every concurrency defect receives a forced-order regression before repair.
+The crate-local verification script remains the authoritative focused entry
+point and must evolve when C1 replaces C0's blanket unsafe prohibition. The
+workspace command is additional evidence that the path crate and root package
+still coexist; it does not replace the focused Miri, Loom, sanitizer, or unsafe
+inventory runs. Every concurrency defect receives a forced-order regression
+before repair.
 
 ## Collector Completion Criteria
 
@@ -641,8 +743,8 @@ Every concurrency defect receives a forced-order regression before repair.
 - One heap supports multiple concurrent mutators and shared roots.
 - Full collection is exact, non-moving, and cycle collecting.
 - Minor collection is observationally equivalent to full collection.
-- Every managed allocation fits one documented typed-run class; unsupported
-  layouts are rejected without a hidden fallback.
+- Every managed allocation fits one slot in the documented fixed-size typed-run
+  geometry; unsupported layouts are rejected without a hidden fallback.
 - Unsafe contracts and copied-code provenance are auditable in the subcrate.
 - No collector API depends on Glam `Value`, scheduling, reflection, or host I/O.
 - Concurrent marking is possible without changing pointer representation, but

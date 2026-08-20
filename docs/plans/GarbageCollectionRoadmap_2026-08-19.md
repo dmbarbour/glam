@@ -1,6 +1,7 @@
 # Glam-Owned Garbage Collection Roadmap — 2026-08-19
 
-Status: planned.
+Status: in progress; collector Phase C0 is complete. Gate G0 still requires an
+explicit baseline record before unsafe pointer work begins.
 
 This roadmap keeps two large transitions aligned:
 
@@ -15,11 +16,13 @@ The plans are separate because collector soundness and evaluator migration are
 independently difficult. This roadmap owns the requirements which neither plan
 may weaken merely to simplify its local work.
 
-Compact tagged values and representation-specific 32-byte nodes belong to the
-deferred
+Compact tagged values, their pointer-alignment policy, and representation-
+specific node-size targets belong to the deferred
 [`ValueRepresentationRefinement_2026-08-19.md`](ValueRepresentationRefinement_2026-08-19.md)
-plan. The collector must preserve a usable alignment and run-owner lookup
-boundary for that work, but compact representation is not a collector gate.
+plan. The collector must support a caller-selected heap-wide slot-alignment
+floor and preserve a run-owner lookup boundary independent of that floor, but
+it does not choose Glam's tag budget or node sizes. Compact representation is
+not a collector gate.
 
 ## Purpose
 
@@ -38,7 +41,7 @@ The collector is specialized for Glam:
   shared synchronization is reserved for allocation-class discovery,
   obtaining/recycling runs, or acquiring another arena chunk;
 - managed layouts are deliberately bounded: every allocation fits one slot in
-  one supported run class, with no initial large-object or multi-run fallback;
+  a fixed-size typed run, with no initial large-object or multi-run fallback;
 - collection coordination occurs at explicit mutator-region boundaries;
 - recursive entry into the same runtime is cheap and supported;
 - the initial collector may stop the whole runtime;
@@ -63,7 +66,7 @@ EvaluationRuntime
 ├── immutable runtime profile
 └── RuntimeHeap
     ├── arena chunks
-    │   └── aligned power-of-two typed runs
+    │   └── fixed-size aligned power-of-two typed runs
     │       ├── one allocation class and static trace/drop metadata
     │       ├── homogeneous aligned slots
     │       └── allocation, mark, and card side metadata
@@ -82,19 +85,22 @@ in exactly that heap. An internal `Gc<T>` is not a root and is usable only while
 the current thread has entered that heap as a mutator. A root or mutator guard
 retains the heap allocation; a bare `Gc<T>` never does.
 
-The primary safe access shape is token-based:
+The primary supported Glam access shape is token-based:
 
 ```rust
 runtime.with_mutator(|mutator| {
     let value = root.get(mutator);
-    let child = pointer.get(mutator);
+    let child = managed_node.get(mutator);
 });
 ```
 
-The collector implementation plan must prototype this shape before freezing
-it. A thread-local current-mutator assertion may support internal ergonomics,
-but it must not become the only safety story or permit dereference outside a
-region.
+Here `root` and `managed_node` are checked runtime-owned wrappers, not a promise
+that bare `Gc<T>` has a safe dereference operation. The collector's raw
+`Gc<T>` access is a private unsafe gateway whose caller proves heap, liveness,
+and representation; supported Glam wrappers discharge that proof from their
+root/provenance invariants. A thread-local current-mutator assertion may
+support internal ergonomics, but it must not become the only safety story or
+permit dereference outside a region.
 
 ## Cross-Plan Semantic and Safety Invariants
 
@@ -128,7 +134,10 @@ region.
    It cannot recover a root to any allocation in the completed dead set or
    transition its original identity back to `Allocated`. This is quining, not
    resurrection. Finalizer timing and order remain operational rather than
-   part of Glam evaluation semantics.
+   part of Glam evaluation semantics. This describes collection while a value-
+   domain owner lease remains live. C6 must separately settle how the last
+   external heap owner initiates terminal destruction without pretending a
+   fresh public root can retain an owner which has already been dropped.
 7. **No collector lock in callbacks or destructors.** Destruction, wakes,
    diagnostics, host callbacks, and scheduler callbacks occur only in phases
    whose lock and re-entry rules are explicit. No arbitrary callback or Rust
@@ -160,11 +169,14 @@ region.
 10. **Opaque values contain roots, never bare managed pointers.** Type-erased
     host data is not inspected by the collector. Construction must therefore
     ensure an opaque payload contains either no managed value edge or only an
-    ordinary runtime/public root. It must not contain `Gc<T>`, an unrooted
-    recursive `core::Value`, or another internal pointer which could escape a
-    mutator region. Roots retained inside an opaque payload appear
-    independently in the heap root registry; a backedge through one may
-    conservatively leak, but can never be reclaimed prematurely.
+    ordinary runtime/public root from the same value domain. It must not
+    contain `Gc<T>`, an unrooted recursive `core::Value`, a foreign-runtime
+    root, or another internal pointer which could escape a mutator region.
+    Same-runtime roots retained inside an opaque payload appear independently
+    in the heap root registry; a backedge through one may conservatively leak,
+    but can never be reclaimed prematurely. Cross-runtime host associations
+    stay outside the value payload and communicate through validated Rust-layer
+    data/effect boundaries.
 11. **Failed collection attempts are recoverable until reclamation commits.**
     Marking and tracing reclaim nothing: an unwind guard abandons the partial
     worklist/epoch, restores the heap phase, and permits a later collection to
@@ -180,22 +192,26 @@ region.
 12. **Collection is operational only.** Scheduling and collection timing may
     vary, but successful assembly values remain governed by Glam semantics.
 13. **Unsupported layouts remain unsupported.** Class creation rejects a type
-    whose size, alignment, or representation cannot fit one supported typed-run
-    slot. The bootstrap does not silently add a large-object path, multi-run
-    span, DST allocator, or heterogeneous object header to accommodate it.
+    whose size, alignment, or representation cannot fit one slot in the fixed
+    typed-run geometry. The bootstrap does not silently add a large-object
+    path, multi-run span, DST allocator, or heterogeneous object header to
+    accommodate it.
 
 ## Shared Terminology
 
 - **Heap** — one runtime-local arena and collector state.
 - **Arena chunk** — a large heap-owned reservation divided into typed runs; it
   is an allocation source, not an object-size exception mechanism.
-- **Typed run** — one aligned power-of-two allocation unit whose slots share
-  one allocation class, trace visitor, optional drop function, and size.
+- **Typed run** — one fixed-size, aligned power-of-two allocation unit. All
+  initial runs have the same byte size, while the owning allocation class
+  derives a homogeneous slot stride and slot count from its object metadata.
 - **Object metadata** — one process-interned immutable descriptor for a Rust
   managed type. Its stable address is the operational type identity; `TypeId`
   is only the cold-path key used to intern it.
 - **Allocation class** — a per-heap dense identity discovered from canonical
-  object metadata, retaining pools of typed runs for that type.
+  object metadata, retaining pools of typed runs for that type. Its effective
+  slot alignment is the maximum of the Rust layout, collector-internal needs,
+  and the heap policy requested by the caller.
 - **Managed pointer** — a cheap, non-rooting pointer between collected values.
 - **External root** — a shareable handle retaining a value from Rust code
   outside a mutator-local managed graph, including public `Value` handles and
@@ -218,11 +234,12 @@ region.
 
 ### Gate G0 — requirements latched
 
-Before collector code, preserve tests for current runtime provenance,
-cross-runtime rejection, lazy and promise cycles, concurrent worker use,
-interaction-net sharing, runtime settlement, and release of fulfilled lazy
-sources. Record current memory and representative assembly timings as
-comparison data, not pass/fail performance contracts.
+Before unsafe managed-pointer or allocator code, preserve tests for current
+runtime provenance, cross-runtime rejection, lazy and promise cycles,
+concurrent worker use, interaction-net sharing, runtime settlement, and release
+of fulfilled lazy sources. Record current memory and representative assembly
+timings as comparison data, not pass/fail performance contracts. The safe C0
+crate scaffold may precede this record; C1 may not.
 
 ### Gate G1 — isolated collector soundness
 
@@ -266,9 +283,12 @@ this transition.
 
 ## Work Which May Proceed in Parallel
 
-After G1, integration inventory and API adaptation may proceed while the GC
-subcrate adds generational storage and metrics. These streams may not jointly
-enable collection until their shared gate passes.
+Integration Phase I0 is a read-only ownership/layout inventory and may proceed
+before G1; its measurements should inform the fixed-run geometry chosen in C2A.
+Managed ownership changes remain blocked on G1. After G1, integration API
+adaptation may proceed while the GC subcrate adds generational storage and
+metrics. These streams may not jointly enable collection until their shared
+gate passes.
 
 The following must remain sequential:
 
@@ -278,10 +298,28 @@ The following must remain sequential:
 - barrier inventory precedes minor collection; and
 - full collection correctness precedes concurrent marking.
 
+## Remaining Phase Checkpoints
+
+These choices are intentionally unresolved rather than accidental drift:
+
+- C2A selects the numeric fixed run size from the I0/layout measurements and
+  records fragmentation/bitmap tradeoffs;
+- I2 chooses whether a public root points directly at a managed value or at a
+  registered root cell containing an inline value;
+- C6 selects a last-owner terminal teardown protocol which does not manufacture
+  an already-dropped heap owner and does not run mutator-capable destructors
+  without their promised context; and
+- I8 decides whether `SharedRuntimeNet` remains synchronized external storage
+  with an exact visitor or becomes a managed outer node.
+
+Each choice must be resolved and latched by the named phase. None permits
+weakening runtime locality, exact tracing, or the collection-admission gates.
+
 ## Explicitly Deferred
 
 - concurrent marking, concurrent sweeping, or parallel tracing;
 - moving, copying, or compacting collection;
+- variable run sizes and pointer-encoded run-size classes;
 - large-object allocation, multi-run object spans, heterogeneous runs, and
   arbitrary dynamically sized managed objects;
 - weak pointers, ephemerons, and user-visible weak-key semantics;

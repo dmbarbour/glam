@@ -9,8 +9,9 @@ integration gates merely to obtain a compact value representation.
 Replace the current large Rust `core::Value` enum with a compact internal value
 handle after runtime-local tracing ownership is established. The intended
 direction is a tagged immediate-or-managed-pointer word, with common managed
-nodes occupying approximately 32-byte slots and exceptional values using
-larger allocation classes.
+nodes using measured compact slot sizes. Plausible 16-, 24-, and 32-byte nodes
+must be compared rather than fixing one target in advance; exceptional values
+may use larger allocation classes.
 
 This is a performance and representation transition. It must preserve Glam
 evaluation, identity, confluence, reflection, diagnostics, and public API
@@ -23,13 +24,16 @@ The collector needs to know how to:
 - enumerate managed edges through a visitor without freezing a public offset
   representation;
 - find allocation/run metadata from an untagged managed pointer;
-- provide a documented minimum managed-pointer alignment; and
+- accept a caller-selected heap-wide slot-alignment floor and report the
+  resulting guarantee; and
 - root values at the Rust API boundary.
 
 It does not need to know Glam's immediate tags, numeric encoding, builtin
-encoding, or semantic node taxonomy. Conversely, this plan may rely on the
-collector's public alignment and owner-lookup contract, but must not reach into
-collector-private page tables or bitmap representations.
+encoding, semantic node taxonomy, or how many low pointer bits Glam wants.
+Conversely, this plan selects the stronger alignment it needs through the
+collector's heap policy and may rely on the resulting guarantee and owner-
+lookup contract, but must not reach into collector-private run tables or bitmap
+representations.
 
 The GC implementation may begin with ordinary typed `Gc<T>` pointers and a
 larger `core::Value`. Compact tagged values are not a prerequisite for exact
@@ -67,9 +71,11 @@ Public api::Value
    collections, functions, deferred cells, nets, metadata, and opaque payloads
    use distinct managed representations rather than variants of one large
    allocation enum.
-5. **Pointer tags are a Glam concern.** The collector accepts and returns
-   untagged aligned managed pointers. Glam removes tags before invoking GC
-   access APIs.
+5. **Pointer tags and their alignment are a Glam concern.** The collector
+   accepts and returns untagged managed pointers and supports a requested heap-
+   wide slot-alignment floor without interpreting it. This plan chooses the
+   value-domain floor, removes tags before invoking GC access APIs, and may
+   revise that policy only when constructing a new heap.
 6. **Run ownership is recoverable.** Given an untagged managed pointer, the
    collector can find its run/page header and static trace metadata without an
    object-local metadata pointer in the compact representation.
@@ -88,8 +94,15 @@ Public api::Value
 
 ## Provisional Encoding Direction
 
-Assuming at least 32-byte managed-pointer alignment, five low bits are
-available for the combined pointer-run-class and Glam immediate tag scheme.
+This plan will choose a power-of-two managed-pointer alignment and request it
+when constructing the runtime heap. An 8-byte floor offers three low zero bits,
+16 bytes offers four, and 32 bytes offers five. Typed-run metadata identifies
+the concrete managed representation after a word has been recognized as a
+pointer, so pointer encodings need not spend low bits distinguishing every node
+family. Do not assume that five bits are worth rounding 16- or 24-byte nodes to
+32-byte strides. A later encoded variable-run alternative would consume part
+of whichever budget is selected and must justify changing both the collector
+and representation plans.
 Candidate immediates include:
 
 - signed small integers; small rationals;
@@ -107,28 +120,33 @@ Values outside an immediate range become managed objects. In particular:
 - opaque values use a collector-owned finalizable cell or an explicitly
   external sidecar.
 
-The five-bit budget is provisional. Do not assign permanent public encodings
-until the run-owner lookup and immediate inventory are measured together.
+The alignment and tag budget are provisional. Do not assign permanent public
+encodings until immediate frequency, node layouts, bitmap overhead, internal
+fragmentation, and run-owner lookup have been measured together.
 
 ## GC-Facing Run Lookup Decision
 
-Two compatible owner-lookup shapes remain under consideration:
+The selected initial baseline and one deferred alternative are:
 
-1. **Fixed aligned base runs.** Mask the untagged pointer to a fixed run
-   boundary; the header supplies slot size and static type metadata. Objects
-   which do not fit one supported slot remain unsupported by the collector.
-2. **Encoded variable run class.** Reserve part of the tagged pointer budget for
-   one of a small number of power-of-two run-size classes, then mask according
-   to that class.
+1. **Fixed aligned base runs (initial collector).** Mask the untagged pointer to
+   a fixed run boundary; the header supplies slot size and static type metadata.
+   Objects which do not fit one supported slot remain unsupported by the
+   collector.
+2. **Encoded variable run class (deferred alternative).** Reserve part of the
+   tagged pointer budget for one of a small number of power-of-two run-size
+   classes, then mask according to that class.
 
 A fixed base-run directory can alternatively map every base address to its
 typed-run header without encoding run size in every `Value`. It does not imply
 multi-run objects. Prefer this if pointer-tag pressure outweighs the extra
 directory access.
 
-The initial GC must expose an owner-lookup abstraction and minimum alignment,
-not its header-address formula. This plan selects the concrete encoding only
-after measuring that abstraction.
+The initial GC uses fixed aligned runs and must expose an owner-lookup
+abstraction plus a way to request and inspect a heap-wide slot-alignment floor,
+not its header-address formula. This plan owns the requested value alignment.
+It may compare the implemented fixed-run lookup with encoded variable run
+classes only as a later representation change, after measuring the abstraction;
+the GC transition does not reserve tag bits or multiple run sizes for it.
 
 ## Candidate Managed Node Families
 
@@ -145,11 +163,12 @@ The inventory should consider at least:
 - evaluation failure/context nodes; and
 - interaction-net values and data wrappers.
 
-Common immutable structural nodes should target a 32-byte allocation class.
-Synchronization-heavy identities may use larger classes without being treated
-as representation failures, but every node must still fit one collector run
-slot. Variable-sized or oversized storage remains external or is decomposed;
-this plan does not request a collector large-object fallback.
+Common immutable structural nodes should compare dense 16-, 24-, and 32-byte
+layouts under the candidate value-alignment policies. Synchronization-heavy
+identities may use larger classes without being treated as representation
+failures, but every node must still fit one collector run slot. Variable-sized
+or oversized storage remains external or is decomposed; this plan does not
+request a collector large-object fallback.
 
 ## Transition Phases
 
@@ -161,6 +180,9 @@ this plan does not request a collector large-object fallback.
   representation-sensitive tests.
 - Record which small scalar ranges dominate actual samples and tests.
 - Build allocation histograms before fixing a slot-size target.
+- For candidate 8-, 16-, and 32-byte value-alignment floors, measure tag budget,
+  effective stride by node family, slots per run, bitmap bytes, and internal
+  fragmentation. Include 24-byte node layouts explicitly.
 
 ### V1 — Isolated Tagged-Word Prototype
 
@@ -168,18 +190,22 @@ this plan does not request a collector large-object fallback.
 - Define the private unsafe conversion from a pointer-bearing internal word to
   `Gc<T>`. The value layer owns tag removal and the tag-to-representation
   mapping, then must discharge `glam-gc`'s raw-construction obligations before
-  invoking its constructor.
+  invoking a narrowly exposed, separately audited cross-crate integration
+  gateway. That gateway remains outside the supported embedding API.
 - In debug builds, compare the mock or real run's canonical metadata pointer
   with the representation selected by the tag. Treat this as an invariant
   diagnostic rather than a release-mode validation policy.
 - Prove encode/decode behavior under Miri and property tests.
 - Exercise small integers, reserved tags, pointer round trips, and invalid
   encodings.
+- Prototype at least the viable 8-, 16-, and 32-byte alignment policies rather
+  than making the mock allocator silently assume five low tag bits.
 - Keep arbitrary host and serialized bits outside the live-value decoder.
   Persistence and IPC reconstruct semantic values through validated public
   constructors rather than transmuting stored words into runtime pointers.
-- Compare fixed-run masking with an encoded run-size class before selecting the
-  tag budget.
+- Measure the implemented fixed-run masking path before deciding whether an
+  encoded variable run-size class would justify changing both the collector
+  geometry and tag budget.
 
 ### V2 — Split Scalar and Leaf Representations
 
@@ -198,6 +224,9 @@ this plan does not request a collector large-object fallback.
 
 ### V4 — Runtime and Public-Root Integration
 
+- Construct each new runtime heap with the value alignment selected by V0/V1
+  before allocating any managed value. Do not attempt to change the floor of an
+  existing heap.
 - Make runtime roots contain the compact internal value.
 - Replace V1's mock validation with real heap/run ownership, live-slot, and
   canonical-metadata assertions at the private decoding boundary. Public value
@@ -224,6 +253,8 @@ Each phase compares old and new representations over:
 - lazy, promise, metadata, function, and collection cycles;
 - public root cloning and cross-runtime rejection;
 - reflection inspection and diagnostic rendering;
+- each selected/candidate alignment policy's pointer decoding, slot geometry,
+  and semantic equivalence;
 - forced full and minor collection histories; and
 - Miri, deterministic concurrency tests, and the standard repository checks.
 
