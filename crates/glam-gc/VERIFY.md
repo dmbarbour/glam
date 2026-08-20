@@ -26,3 +26,23 @@ every developer environment has installed those tools.
 The Loom test is currently a tooling and API smoke model. C0 has no shared
 collector state. A later phase must replace or supplement it with models of
 each real coordination state machine; ordinary threaded stress is not a proof.
+
+## Gate G0 Baseline
+
+Before changing the unsafe surface in C1, recheck the focused pre-GC semantic
+contracts with:
+
+```sh
+crates/glam-gc/scripts/check-g0-semantics.sh
+```
+
+The operational comparison data can be recaptured on Linux with:
+
+```sh
+crates/glam-gc/scripts/capture-g0-baseline.sh
+```
+
+That script reports release-process timing and peak RSS; it does not enforce
+performance thresholds. The dated measurements, environment, methodology, and
+known pre-GC worker-stack observation are recorded in
+[`GarbageCollectionGateG0Baseline_2026-08-20.md`](../../docs/plans/GarbageCollectionGateG0Baseline_2026-08-20.md).

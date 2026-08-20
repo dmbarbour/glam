@@ -142,9 +142,11 @@ C0 completed on 2026-08-19 with these deliberately narrow decisions:
 Implement only enough allocation leakage to test the internal pointer and
 mutator safety shape.
 
-Before introducing unsafe pointer operations, complete and record roadmap Gate
-G0's semantic, memory, and representative timing baseline. C0's crate and
-verification scaffold does not by itself satisfy that gate. Replace C0's
+Roadmap Gate G0 was established on 2026-08-20 in
+[`GarbageCollectionGateG0Baseline_2026-08-20.md`](GarbageCollectionGateG0Baseline_2026-08-20.md).
+C0's crate and verification scaffold did not by itself satisfy that gate;
+the baseline now latches semantics, memory, and representative timings before
+unsafe pointer work. Replace C0's
 temporary whole-crate `unsafe_code` prohibition check with an explicit expected
 unsafe inventory which fails on unreviewed modules or sites, and update
 `SAFETY.md` as each site is introduced.

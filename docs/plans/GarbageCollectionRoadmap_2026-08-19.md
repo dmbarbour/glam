@@ -1,7 +1,7 @@
 # Glam-Owned Garbage Collection Roadmap — 2026-08-19
 
-Status: in progress; collector Phase C0 is complete. Gate G0 still requires an
-explicit baseline record before unsafe pointer work begins.
+Status: in progress; collector Phase C0 and integration Phase I0 are complete,
+and Gate G0 is established. Collector Phase C1 may proceed.
 
 This roadmap keeps two large transitions aligned:
 
@@ -233,6 +233,12 @@ permit dereference outside a region.
 ## Sequencing and Admission Gates
 
 ### Gate G0 — requirements latched
+
+Established on 2026-08-20 in
+[`GarbageCollectionGateG0Baseline_2026-08-20.md`](GarbageCollectionGateG0Baseline_2026-08-20.md).
+The record names the preserved semantic regressions, captures repeatable
+release timing and peak-RSS observations, and records a schedule-sensitive
+pre-GC worker stack overflow without treating it as intended semantics.
 
 Before unsafe managed-pointer or allocator code, preserve tests for current
 runtime provenance, cross-runtime rejection, lazy and promise cycles,
