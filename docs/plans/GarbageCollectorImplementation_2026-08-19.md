@@ -50,14 +50,12 @@ crates/
       sweep.rs               # reclamation and destruction
       generation.rs          # age, remembered sets, minor collection
       metrics.rs             # operational counters and test inspection
-  glam-gc-derive/            # only if the derive checkpoint approves it
 ```
 
 The root manifest becomes a Cargo workspace containing `.` and the approved
 path crates while retaining the existing Glam package, library, and binary.
-This is implementation support, not a split of the Glam product. The derive
-crate joins the workspace only if C1 approves it. Neither collector crate is a
-supported embedding API during this transition.
+This is implementation support, not a split of the Glam product. The collector
+crate is not a supported embedding API during this transition.
 
 ## Initial API Sketch
 
@@ -82,7 +80,7 @@ impl Mutator<'_> {
 }
 
 impl<T: Trace> Gc<T> {
-    pub fn get<'h>(&self, mutator: &'h Mutator<'h>) -> &'h T;
+    pub unsafe fn get_unchecked<'h>(&self, mutator: &'h Mutator<'h>) -> &'h T;
 }
 
 impl<T: Trace> Root<T> {
@@ -143,10 +141,19 @@ C0 completed on 2026-08-19 with these deliberately narrow decisions:
 
 Implement only enough allocation leakage to test the public safety shape.
 
-- Decide whether `Gc<T>` carries a heap/domain debug token or relies on typed-run
-  ownership checks. Runtime provenance must not enlarge every release pointer
-  without measured justification.
-- Require a `Mutator` token for safe dereference and allocation.
+- Represent `Gc<T>` as one typed non-null managed pointer with no carried heap,
+  domain, class, or debug token. `T` prevents ordinary accidental type confusion;
+  only the allocator and later reviewed tagged-value casts may construct it.
+- Require a `Mutator` token for every dereference and allocation. Bare managed
+  dereference is an internal unsafe primitive: the caller must prove that the
+  pointer is live, belongs to the mutator's heap, and has representation `T`.
+  The supported Glam embedding API never exposes that primitive.
+- In debug/test builds, have the unsafe gateway verify every fact available
+  from the prototype allocation record and, once typed runs exist, assert heap
+  ownership, allocated slot alignment/state, and canonical object-metadata
+  pointer equality. These assertions diagnose violations; release correctness
+  must follow from construction, rooting, and mutator invariants rather than
+  from a runtime check.
 - Make `Mutator` non-`Send` and non-`Sync`; make `Gc<T>` `Copy`, `Send`, and
   `Sync` only under documented `T` bounds.
 - Define the unsafe `Trace` contract, including interior mutability, no hidden
@@ -162,10 +169,21 @@ Implement only enough allocation leakage to test the public safety shape.
 - Define a small managed-edge mutation gateway whose collector action is an
   inline no-op for full stop-the-world collection. This latches the API shape
   without imposing remembered-set or concurrent-marking work prematurely.
-- Prototype manual tracing and a derive macro. Approve a derive crate only if
-  generated implementations are inspectable and cover enums, arrays, options,
-  tuples, and common containers without broad unsafe escape hatches.
+- Implement tracing manually for the C1 representative graph types. Provide
+  narrowly reviewed structural implementations or visitor helpers for wrappers
+  which contribute no representation policy of their own, initially options,
+  fixed arrays, tuples, and slices as actual use requires. Do not add a derive
+  crate or generic field-reflection abstraction in this plan: Glam has a
+  bounded representation inventory, and persistent collections,
+  synchronization cells, roots, external storage, and immediate fields require
+  explicit edge policy.
 - Specify equality, pointer identity, debugging, and heap-mismatch behavior.
+- Keep raw `Gc<T>` construction private and unsafe. Specify the obligations
+  shared by allocator implementations and any future representation decoder:
+  the address is non-null and properly aligned, identifies a live managed slot
+  in the protected heap, and the slot's canonical metadata describes `T`.
+  `glam-gc` does not specify a tagged value, tag-to-type mapping, or serialized
+  representation.
 - Reserve a bounded run-size-class representation in the pointer/access layer
   without assigning Glam immediate tags. The collector API accepts untagged
   aligned addresses plus its own run-owner information and does not expose the
@@ -177,9 +195,11 @@ Verification:
   mutator cannot be sent to another thread;
 - shared `Gc` and `Root` handles may move between threads;
 - a pointer cannot be safely dereferenced with authority from another heap;
+- forced wrong-heap and wrong-representation accesses trip debug assertions at
+  the unsafe gateway without adding fields or release checks to `Gc<T>`;
 - tracing a duplicate pointer is harmless; and
-- derived and manual traces visit the same edge multiset in representative
-  recursive enums.
+- manual traces visit an independently stated expected edge multiset for
+  representative structs, recursive enums, and each admitted structural helper.
 
 Checkpoint: freeze the internal API before building the allocator. Revisit the
 integration plan if using the token in real evaluator call paths would require
@@ -223,31 +243,40 @@ Verification:
 ## Phase C2B — Type Metadata and Per-Heap Allocation-Class Discovery
 
 - Define immutable object metadata containing layout, visitor dispatch, and an
-  optional erased `Drop` operation. Do not add relocation operations while
-  moving collection is deferred.
+  optional erased `Drop` operation. Intern exactly one descriptor per Rust type
+  in a process-wide registry keyed on `TypeId`, and use the winning
+  `&'static ObjectMetadata` address as the operational type identity. `TypeId`
+  is a cold discovery key, not a run-header field or hot-path comparison. Do
+  not add relocation operations while moving collection is deferred.
 - Give each typed run one metadata/allocation-class identity in its header;
   ordinary slots contain payload only, with no GC header, metadata pointer,
   mark byte, or finalizer byte.
-- Maintain a per-heap `HashMap<TypeId, AllocationClassId>` for first-use
-  discovery and a stable dense class table containing metadata and typed-run
-  pools. Metadata function bodies are monomorphized for `T`; the heap-local
-  class entry is the canonical runtime identity.
+- Maintain a per-heap map from canonical metadata pointer to
+  `AllocationClassId` for first-use class discovery and a stable dense class
+  table containing that metadata pointer and typed-run pools. Metadata function
+  bodies are monomorphized for `T`; the metadata address is the canonical Rust
+  type identity while the dense class entry is the canonical heap-local
+  allocation identity.
 - Return a reusable `AllocationClass<T>` handle after discovery. Its heap
-  provenance and dense class ID make subsequent worker allocation independent
-  of `TypeId` hashing.
-- Serialize concurrent first discovery of one type so all contenders observe
-  one class and one run pool. It is acceptable for metadata candidates to be
-  constructed redundantly before one entry wins; no run or callback may be
-  published by a loser.
+  provenance, metadata pointer, and dense class ID make subsequent worker
+  allocation independent of `TypeId` lookup or hashing.
+- Serialize concurrent first metadata interning and per-heap class discovery so
+  all contenders observe one metadata address and one class/run pool per heap.
+  It is acceptable for immutable metadata candidates to be constructed
+  redundantly before one entry wins; only the winner is leaked for process
+  lifetime, and no run or callback may be published by a loser.
 - Treat `needs_drop::<T>()` as an all-or-none property of the homogeneous run.
   There is one destruction mode: if metadata contains `drop`, unreachable
   allocated slots run it later with the finalizer mutator installed.
 
 Verification:
 
-- repeated and concurrent discovery returns one class ID per `(heap, TypeId)`;
-- the same Rust type in two heaps receives distinct heap-local classes;
+- repeated and concurrent discovery returns one metadata address per `TypeId`
+  and one class ID per `(heap, metadata pointer)`;
+- the same Rust type in two heaps shares canonical metadata but receives
+  distinct heap-local classes;
 - every run header resolves to the expected trace/drop/layout metadata;
+- repeated allocation through a retained class performs no `TypeId` lookup;
 - no-drop and drop types receive the correct metadata without per-slot policy;
   and
 - failed or panicking metadata/class construction publishes no partial entry.
@@ -259,8 +288,8 @@ Verification:
 - Give each outer mutator entry a small local cache from dense class ID to its
   current run cursor. Recursive same-heap entries share that cache.
 - Allocate ordinary slots from the cached run using only worker-local cursor or
-  free-bitmap state. Do not hash `TypeId`, acquire a shared lock, or increment a
-  shared byte counter on the ordinary hot path.
+  free-bitmap state. Do not look up or hash `TypeId`, acquire a shared lock, or
+  increment a shared byte counter on the ordinary hot path.
 - On cache miss or run exhaustion, use the class's synchronized slow path to
   obtain a reusable partial run or reserve a new typed run from an arena chunk.
   Return/publish partial cursors in a batch at outer mutator exit.
@@ -619,3 +648,7 @@ Every concurrency defect receives a forced-order regression before repair.
 - Concurrent marking is possible without changing pointer representation, but
   remains disabled and unimplemented until separately planned. Moving remains
   a separate future design rather than a completion claim of this plan.
+
+Trace derive macros remain deferred. Reconsider one only if the Glam integration
+inventory demonstrates substantial mechanical visitor repetition, and treat it
+as an independently audited maintenance tool rather than a collector gate.

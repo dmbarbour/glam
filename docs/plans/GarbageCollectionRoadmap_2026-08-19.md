@@ -67,7 +67,8 @@ EvaluationRuntime
     │       ├── one allocation class and static trace/drop metadata
     │       ├── homogeneous aligned slots
     │       └── allocation, mark, and card side metadata
-    ├── per-heap TypeId -> allocation-class discovery
+    ├── process-wide TypeId -> canonical object-metadata interning
+    ├── per-heap metadata pointer -> allocation-class discovery
     ├── young and old typed-run pools
     ├── explicit external-root registry
     ├── active-mutator and safepoint coordinator
@@ -190,8 +191,11 @@ region.
   is an allocation source, not an object-size exception mechanism.
 - **Typed run** — one aligned power-of-two allocation unit whose slots share
   one allocation class, trace visitor, optional drop function, and size.
-- **Allocation class** — a per-heap dense identity discovered from a Rust
-  `TypeId`, retaining immutable object metadata and pools of typed runs.
+- **Object metadata** — one process-interned immutable descriptor for a Rust
+  managed type. Its stable address is the operational type identity; `TypeId`
+  is only the cold-path key used to intern it.
+- **Allocation class** — a per-heap dense identity discovered from canonical
+  object metadata, retaining pools of typed runs for that type.
 - **Managed pointer** — a cheap, non-rooting pointer between collected values.
 - **External root** — a shareable handle retaining a value from Rust code
   outside a mutator-local managed graph, including public `Value` handles and

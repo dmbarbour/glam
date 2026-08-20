@@ -98,7 +98,8 @@ record:
 - current synchronization and lock order;
 - whether it can live outside an evaluator call or worker quantum;
 - whether it can cross threads;
-- Rust `TypeId`, managed size/alignment, and selected allocation class;
+- Rust `TypeId`, canonical object-metadata pointer, managed size/alignment, and
+  selected heap-local allocation class;
 - visitor-based outgoing edge enumeration;
 - required trace strategy;
 - required generational barrier;
@@ -143,7 +144,8 @@ classified optimistically.
 - Let runtime/value-factory construction discover and retain reusable
   `AllocationClass<T>` handles for common managed representations. Rare classes
   may use first-use discovery, but ordinary value allocation must not hash
-  `TypeId` on every object.
+  or otherwise look up `TypeId` on every object. Once a class is retained,
+  allocation uses its dense ID and canonical metadata pointer directly.
 - Add runtime-local tuning with collection disabled by default.
 - Verify the earlier sibling allocation of runtime state and immutable profile
   remains acyclic once both can retain rooted values.

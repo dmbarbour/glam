@@ -73,6 +73,10 @@ Public api::Value
 6. **Run ownership is recoverable.** Given an untagged managed pointer, the
    collector can find its run/page header and static trace metadata without an
    object-local metadata pointer in the compact representation.
+   The canonical `&'static ObjectMetadata` address is the operational Rust-type
+   identity. A later tagged-pointer cast checks that identity in debug builds;
+   release correctness follows from the private tag constructors and managed
+   representation invariants.
 7. **Moving is not accidentally forbidden.** Trace implementations use an edge
    visitor rather than public offset tables, external roots are enumerable, and
    no public contract promises that a numeric address is permanent identity.
@@ -88,7 +92,7 @@ Assuming at least 32-byte managed-pointer alignment, five low bits are
 available for the combined pointer-run-class and Glam immediate tag scheme.
 Candidate immediates include:
 
-- a signed small integer;
+- signed small integers; small rationals;
 - builtin and other compact enumerations;
 - unit, empty list, and empty dictionary constants;
 - compact atom or intern-table identities; and
@@ -161,9 +165,19 @@ this plan does not request a collector large-object fallback.
 ### V1 — Isolated Tagged-Word Prototype
 
 - Implement a non-production tagged value module against mock aligned objects.
+- Define the private unsafe conversion from a pointer-bearing internal word to
+  `Gc<T>`. The value layer owns tag removal and the tag-to-representation
+  mapping, then must discharge `glam-gc`'s raw-construction obligations before
+  invoking its constructor.
+- In debug builds, compare the mock or real run's canonical metadata pointer
+  with the representation selected by the tag. Treat this as an invariant
+  diagnostic rather than a release-mode validation policy.
 - Prove encode/decode behavior under Miri and property tests.
 - Exercise small integers, reserved tags, pointer round trips, and invalid
   encodings.
+- Keep arbitrary host and serialized bits outside the live-value decoder.
+  Persistence and IPC reconstruct semantic values through validated public
+  constructors rather than transmuting stored words into runtime pointers.
 - Compare fixed-run masking with an encoded run-size class before selecting the
   tag budget.
 
@@ -185,6 +199,9 @@ this plan does not request a collector large-object fallback.
 ### V4 — Runtime and Public-Root Integration
 
 - Make runtime roots contain the compact internal value.
+- Replace V1's mock validation with real heap/run ownership, live-slot, and
+  canonical-metadata assertions at the private decoding boundary. Public value
+  APIs must provide no route to forge or reinterpret pointer-bearing words.
 - Update evaluator, reflection, event, diagnostic, and task boundaries.
 - Preserve cheap cross-thread public-root cloning and runtime provenance
   checks.
