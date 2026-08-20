@@ -19,10 +19,10 @@ may weaken merely to simplify its local work.
 Compact tagged values, their pointer-alignment policy, and representation-
 specific node-size targets belong to the deferred
 [`ValueRepresentationRefinement_2026-08-19.md`](ValueRepresentationRefinement_2026-08-19.md)
-plan. The collector must support a caller-selected heap-wide slot-alignment
-floor and preserve a run-owner lookup boundary independent of that floor, but
-it does not choose Glam's tag budget or node sizes. Compact representation is
-not a collector gate.
+plan. The collector honors each type's Rust alignment and an optional larger
+slot size recorded in canonical object metadata, while preserving run-owner
+lookup independently of either. It does not choose Glam's tag budget, type
+alignment, or node-size policy. Compact representation is not a collector gate.
 
 ## Purpose
 
@@ -209,9 +209,9 @@ permit dereference outside a region.
   managed type. Its stable address is the operational type identity; `TypeId`
   is only the cold-path key used to intern it.
 - **Allocation class** — a per-heap dense identity discovered from canonical
-  object metadata, retaining pools of typed runs for that type. Its effective
-  slot alignment is the maximum of the Rust layout, collector-internal needs,
-  and the heap policy requested by the caller.
+  object metadata, retaining pools of typed runs for that type. Its slot
+  alignment is the Rust type alignment; its stride is the requested metadata
+  size, if larger than the Rust size, rounded up to that alignment.
 - **Managed pointer** — a cheap, non-rooting pointer between collected values.
 - **External root** — a shareable handle retaining a value from Rust code
   outside a mutator-local managed graph, including public `Value` handles and

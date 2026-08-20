@@ -24,16 +24,19 @@ The collector needs to know how to:
 - enumerate managed edges through a visitor without freezing a public offset
   representation;
 - find allocation/run metadata from an untagged managed pointer;
-- accept a caller-selected heap-wide slot-alignment floor and report the
-  resulting guarantee; and
+- honor Rust payload layout plus an optional larger slot size in canonical
+  object metadata; and
 - root values at the Rust API boundary.
 
 It does not need to know Glam's immediate tags, numeric encoding, builtin
 encoding, semantic node taxonomy, or how many low pointer bits Glam wants.
-Conversely, this plan selects the stronger alignment it needs through the
-collector's heap policy and may rely on the resulting guarantee and owner-
-lookup contract, but must not reach into collector-private run tables or bitmap
-representations.
+Conversely, this plan expresses stronger pointer alignment through its Rust
+node types or common wrappers, and expresses extra slot padding through object
+metadata. It may rely on those layouts and the owner-lookup contract, but must
+not reach into collector-private run tables or bitmap representations.
+Because Rust alignment attributes are part of a concrete type's layout, a
+common managed-node wrapper or declaration macro is the central policy point;
+the alignment is not a runtime-global variable.
 
 The GC implementation may begin with ordinary typed `Gc<T>` pointers and a
 larger `core::Value`. Compact tagged values are not a prerequisite for exact
@@ -72,10 +75,10 @@ Public api::Value
    use distinct managed representations rather than variants of one large
    allocation enum.
 5. **Pointer tags and their alignment are a Glam concern.** The collector
-   accepts and returns untagged managed pointers and supports a requested heap-
-   wide slot-alignment floor without interpreting it. This plan chooses the
-   value-domain floor, removes tags before invoking GC access APIs, and may
-   revise that policy only when constructing a new heap.
+   accepts and returns untagged managed pointers. This plan chooses alignment
+   through Rust node representations such as common `repr(align(N))` wrappers,
+   removes tags before invoking GC access APIs, and does not ask the heap to
+   reinterpret an already-declared type layout.
 6. **Run ownership is recoverable.** Given an untagged managed pointer, the
    collector can find its run/page header and static trace metadata without an
    object-local metadata pointer in the compact representation.
@@ -94,15 +97,15 @@ Public api::Value
 
 ## Provisional Encoding Direction
 
-This plan will choose a power-of-two managed-pointer alignment and request it
-when constructing the runtime heap. An 8-byte floor offers three low zero bits,
-16 bytes offers four, and 32 bytes offers five. Typed-run metadata identifies
-the concrete managed representation after a word has been recognized as a
-pointer, so pointer encodings need not spend low bits distinguishing every node
-family. Do not assume that five bits are worth rounding 16- or 24-byte nodes to
-32-byte strides. A later encoded variable-run alternative would consume part
-of whichever budget is selected and must justify changing both the collector
-and representation plans.
+This plan will choose a power-of-two managed-pointer alignment and express it
+in the managed Rust node representations. Eight-byte alignment offers three
+low zero bits, 16 bytes offers four, and 32 bytes offers five. Typed-run
+metadata identifies the concrete managed representation after a word has been
+recognized as a pointer, so pointer encodings need not spend low bits
+distinguishing every node family. Do not assume that five bits are worth
+rounding 16- or 24-byte nodes to 32-byte strides. A later encoded variable-run
+alternative would consume part of whichever budget is selected and must
+justify changing both the collector and representation plans.
 Candidate immediates include:
 
 - signed small integers; small rationals;
@@ -142,11 +145,13 @@ multi-run objects. Prefer this if pointer-tag pressure outweighs the extra
 directory access.
 
 The initial GC uses fixed aligned runs and must expose an owner-lookup
-abstraction plus a way to request and inspect a heap-wide slot-alignment floor,
-not its header-address formula. This plan owns the requested value alignment.
-It may compare the implemented fixed-run lookup with encoded variable run
-classes only as a later representation change, after measuring the abstraction;
-the GC transition does not reserve tag bits or multiple run sizes for it.
+abstraction, not its header-address formula. It also accepts canonical metadata
+whose requested slot size may exceed the Rust payload size without changing
+the payload's alignment. This plan owns both the Rust node alignment and the
+requested metadata size. It may compare the implemented fixed-run lookup with
+encoded variable run classes only as a later representation change, after
+measuring the abstraction; the GC transition does not reserve tag bits or
+multiple run sizes for it.
 
 ## Candidate Managed Node Families
 
@@ -164,7 +169,7 @@ The inventory should consider at least:
 - interaction-net values and data wrappers.
 
 Common immutable structural nodes should compare dense 16-, 24-, and 32-byte
-layouts under the candidate value-alignment policies. Synchronization-heavy
+layouts under the candidate Rust wrapper-alignment choices. Synchronization-heavy
 identities may use larger classes without being treated as representation
 failures, but every node must still fit one collector run slot. Variable-sized
 or oversized storage remains external or is decomposed; this plan does not
@@ -180,9 +185,9 @@ request a collector large-object fallback.
   representation-sensitive tests.
 - Record which small scalar ranges dominate actual samples and tests.
 - Build allocation histograms before fixing a slot-size target.
-- For candidate 8-, 16-, and 32-byte value-alignment floors, measure tag budget,
-  effective stride by node family, slots per run, bitmap bytes, and internal
-  fragmentation. Include 24-byte node layouts explicitly.
+- For candidate 8-, 16-, and 32-byte Rust node alignments, measure tag budget,
+  effective metadata-requested stride by node family, slots per run, bitmap
+  bytes, and internal fragmentation. Include 24-byte node layouts explicitly.
 
 ### V1 — Isolated Tagged-Word Prototype
 
@@ -198,8 +203,9 @@ request a collector large-object fallback.
 - Prove encode/decode behavior under Miri and property tests.
 - Exercise small integers, reserved tags, pointer round trips, and invalid
   encodings.
-- Prototype at least the viable 8-, 16-, and 32-byte alignment policies rather
-  than making the mock allocator silently assume five low tag bits.
+- Prototype at least the viable 8-, 16-, and 32-byte Rust wrapper-alignment
+  choices rather than making the mock allocator silently assume five low tag
+  bits.
 - Keep arbitrary host and serialized bits outside the live-value decoder.
   Persistence and IPC reconstruct semantic values through validated public
   constructors rather than transmuting stored words into runtime pointers.
@@ -224,9 +230,10 @@ request a collector large-object fallback.
 
 ### V4 — Runtime and Public-Root Integration
 
-- Construct each new runtime heap with the value alignment selected by V0/V1
-  before allocating any managed value. Do not attempt to change the floor of an
-  existing heap.
+- Instantiate the managed node wrappers and canonical metadata policy selected
+  by V0/V1 before allocating values. A canonical Rust type retains one layout
+  and requested slot size; use another wrapper type rather than changing the
+  policy of an existing metadata identity.
 - Make runtime roots contain the compact internal value.
 - Replace V1's mock validation with real heap/run ownership, live-slot, and
   canonical-metadata assertions at the private decoding boundary. Public value
@@ -253,8 +260,8 @@ Each phase compares old and new representations over:
 - lazy, promise, metadata, function, and collection cycles;
 - public root cloning and cross-runtime rejection;
 - reflection inspection and diagnostic rendering;
-- each selected/candidate alignment policy's pointer decoding, slot geometry,
-  and semantic equivalence;
+- each selected/candidate Rust alignment and metadata size policy's pointer
+  decoding, slot geometry, and semantic equivalence;
 - forced full and minor collection histories; and
 - Miri, deterministic concurrency tests, and the standard repository checks.
 

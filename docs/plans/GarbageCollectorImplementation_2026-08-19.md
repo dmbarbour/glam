@@ -196,13 +196,12 @@ unsafe inventory which fails on unreviewed modules or sites, and update
   construction a general client facility. `glam-gc` does not specify a tagged
   value, tag-to-type mapping, or serialized representation.
 - Reserve an abstract run-owner lookup boundary independent of payload-slot
-  alignment and without assigning Glam immediate tags. C2A may establish a
-  small collector-internal alignment floor for allocator mechanics, and must
-  let heap construction request a stronger uniform floor, but the GC crate does
-  not select Glam's value-tag alignment. Do not encode a run size or class in
-  `Gc<T>`: the collector recovers the owner from the untagged address and its
-  fixed run geometry. Variable run sizes and pointer-encoded run classes remain
-  a profiled representation alternative, not a C1 commitment.
+  alignment and without assigning Glam immediate tags. Managed payloads retain
+  their Rust type alignment, including any `repr(align)` selected by their
+  defining crate. Do not encode a run size or class in `Gc<T>`: the collector
+  recovers the owner from the untagged address and its fixed run geometry.
+  Variable run sizes and pointer-encoded run classes remain a profiled
+  representation alternative, not a C1 commitment.
 
 Verification:
 
@@ -232,23 +231,22 @@ an unacceptable semantic or visibility change.
   header/bitmap overhead, cold-class fragmentation, and representative object
   layouts. Comparing other fixed sizes is tuning; supporting several sizes is
   deferred.
-- Define a heap-construction slot-alignment policy. The collector may impose
-  only the lower bound required by its own allocator representation; callers
-  may request a stronger power-of-two heap-wide floor. The effective class
-  alignment is `max(Layout::align(), collector_floor, requested_floor)`.
-  Owner lookup from an untagged pointer depends on fixed run alignment, not on
-  this slot floor. The collector reports the guaranteed floor but assigns no
-  semantic meaning or tag budget to it.
+- Let the pure geometry input contain the Rust payload `Layout` and an optional
+  requested slot size which is at least the payload size. The requested size
+  may pad a run's slots without raising payload alignment. Round the resulting
+  stride up to `Layout::align()`. Owner lookup from an untagged pointer depends
+  only on fixed run alignment, not on payload alignment or stride. The
+  collector assigns no semantic meaning or tag budget to either.
 - Given an untagged managed address, recover the run header by masking with the
   fixed `RUN_SIZE`. In debug/test configurations, first validate the numeric
   address against the mutator heap's arena-chunk ranges without dereferencing a
   candidate header, then validate the recovered run and allocation class. Raw
   construction still forbids arbitrary or stale addresses in every build.
 - Implement a pure checked geometry calculation from Rust `Layout` plus the
-  effective slot-alignment floor to slot stride, first-slot offset, slot count,
+  metadata-requested slot size to slot stride, first-slot offset, slot count,
   and bitmap geometry. It accounts for its own side metadata and either yields
-  at least one valid slot or rejects the layout. C2B applies this calculation
-  to `ObjectMetadata::layout` when it creates the heap-local allocation class.
+  at least one valid slot or rejects the request. C2B applies this calculation
+  to `ObjectMetadata` when it creates the heap-local allocation class.
 - Consume I0's preliminary production layout inventory when selecting the
   provisional run size. If I0 is not yet complete, record equivalent
   representative layout measurements here and reconcile them with I0 before
@@ -275,8 +273,8 @@ Verification:
   padding, interior, and non-slot addresses;
 - representative layouts use the same run byte size while deriving independent
   slot strides and counts;
-- several requested alignment floors, including layouts producing 16-, 24-,
-  and 32-byte strides, yield correct slot and bitmap geometry;
+- Rust layouts and requested slot sizes producing 16-, 24-, and 32-byte
+  strides yield correct slot and bitmap geometry;
 - smaller slots measure and report their larger bitmap overhead rather than
   being rejected merely to preserve a value-layer tag budget;
 - unsupported size/alignment/DST layouts fail geometry derivation without
@@ -293,10 +291,12 @@ Verification:
   `&'static ObjectMetadata` address as the operational type identity. `TypeId`
   is a cold discovery key, not a run-header field or hot-path comparison. Do
   not add relocation operations while moving collection is deferred.
-- Keep placement policy out of `ObjectMetadata`: it does not select a run size
-  or carry a run-size/alignment hint. The heap-local allocation class combines
-  its canonical metadata layout with the heap's C2A alignment policy, then
-  derives slot geometry for the collector's one fixed run size. An unsupported
+- Store both the Rust payload layout and an optional larger requested slot size
+  in `ObjectMetadata`. The request does not change Rust alignment or select a
+  run size. Because metadata remains canonical per `TypeId`, one Rust type has
+  one requested slot-size policy; callers needing another policy use a distinct
+  wrapper type. The heap-local allocation class derives its stride and slot
+  geometry for the collector's one fixed run size. An invalid or unsupported
   result fails class creation before a class ID or run is published.
 - Give each typed run one metadata/allocation-class identity in its header;
   ordinary slots contain payload only, with no GC header, metadata pointer,
@@ -697,13 +697,13 @@ also pass.
 ## Phase C10 — Tuning Surface and Final Collector Audit
 
 - Expose internal tuning for arena-chunk size, the single fixed run size,
-  collector-internal and caller-requested slot-alignment floors, worker class-
-  cache capacity, card size, collection thresholds, nursery size, promotion,
-  and full/minor selection without exposing collector jargon as a stable Glam
-  public API. Comparing candidate fixed run sizes may require separate heap
-  construction or builds; C10 does not introduce variable-size runs. Report
-  bitmap bytes and internal fragmentation by slot stride so the value layer can
-  choose its own alignment policy from evidence.
+  worker class-cache capacity, card size, collection thresholds, nursery size,
+  promotion, and full/minor selection without exposing collector jargon as a
+  stable Glam public API. Comparing candidate fixed run sizes may require
+  separate heap construction or builds; C10 does not introduce variable-size
+  runs. Report bitmap bytes and internal fragmentation by metadata-requested
+  slot stride so the value layer can choose its own type layouts and size
+  policy from evidence.
 - Make an explicit collection report suitable for tests and future runtime
   metrics.
 - Audit every unsafe block against `SAFETY.md`.

@@ -158,10 +158,13 @@ classified optimistically.
   or otherwise look up `TypeId` on every object. Once a class is retained,
   allocation uses its dense ID and canonical metadata pointer directly.
 - Add runtime-local tuning with collection disabled by default.
-- Construct the heap with an explicit slot-alignment policy supplied by the
-  current runtime representation. The initial enum representation may request
-  only the collector's neutral/default floor; the later tagged-value plan owns
-  and supplies any stronger guarantee it requires.
+- Centralize Glam's node-size policy when constructing canonical object
+  metadata. That policy may request a slot size larger than the Rust payload;
+  allocation-class creation then applies it independently for each typed run.
+  Type alignment remains expressed by the Rust node or a common aligned
+  wrapper, not by runtime heap configuration. A shared managed-node wrapper or
+  declaration macro is Glam's central alignment-policy point; the collector
+  does not provide a mutable or per-heap alignment setting.
 - Verify the earlier sibling allocation of runtime state and immutable profile
   remains acyclic once both can retain rooted values.
 
