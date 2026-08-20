@@ -1904,6 +1904,23 @@ mod tests {
     }
 
     #[test]
+    fn metadata_and_collections_can_participate_in_a_deferred_value_cycle() {
+        // This intentionally latches a graph that Arc ownership cannot reclaim.
+        // The GC integration suite will retain this shape and add reclamation.
+        let promise = PromisedValue::new(&values(), "metadata collection cycle");
+        let metadata =
+            Value::metadata_carrier(Value::List(List::from_values(vec![Value::Promised(
+                promise.clone(),
+            )])));
+        let cycle = Value::Dict(Dict::new_sync().insert(Key::atom_from_text("metadata"), metadata));
+
+        promise
+            .set(cycle)
+            .expect("an unresolved promise should accept a recursive value graph");
+        assert!(matches!(promise.assignment(), Some(Ok(Value::Dict(_)))));
+    }
+
+    #[test]
     fn semantic_values_can_hold_lazy_errors() {
         let value = Value::error(&values(), "ambiguous key");
 

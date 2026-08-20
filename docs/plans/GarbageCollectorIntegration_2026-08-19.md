@@ -1,6 +1,6 @@
 # Glam GC Integration Plan — 2026-08-19
 
-Status: planned; Phase I0 may proceed now, while managed ownership changes are
+Status: in progress; Phase I0 is complete, while managed ownership changes are
 blocked on collector Gate G1.
 
 This plan integrates the collector defined by
@@ -13,7 +13,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 
 | Phase | Status | Outcome |
 | --- | --- | --- |
-| I0 | pending | complete ownership and mutation ledger |
+| I0 | complete | complete ownership and mutation ledger |
 | I1 | pending | runtime-owned heap, collection disabled |
 | I2 | pending | public value and external-root prototype |
 | I3 | pending | bounded evaluator/worker mutator regions |
@@ -90,6 +90,13 @@ managed DST. Existing large/variable leaf storage remains audited external
 ownership until a later representation plan chooses to decompose it.
 
 ## Phase I0 — Ownership and Mutation Ledger
+
+Completed in
+[`GarbageCollectorOwnershipLedger_2026-08-20.md`](GarbageCollectorOwnershipLedger_2026-08-20.md).
+The ledger records the pre-GC graph, current layout baseline, synchronization
+and mutation policy, semantic regression matrix, and the boundary defects that
+must remain Gate G2 blockers. Its collector metadata/class geometry is
+deliberately provisional until C2B and I1 exist.
 
 Create a dated graph inventory beside this plan. For every graph-bearing type,
 record:
