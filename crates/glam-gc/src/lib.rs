@@ -1,12 +1,19 @@
 //! Runtime-local garbage collection support for Glam.
 //!
-//! Phase C1A adds a deliberately leaking prototype allocation path so the
-//! managed-pointer and mutator access contracts can be tested before the real
-//! allocator, tracing, or collection exist.
+//! C2A provides managed-pointer contracts, pure fixed-run geometry, and
+//! heap-owned arena/run topology. Payload allocation still uses C1A's
+//! deliberately leaking prototype until C2C; tracing and collection remain
+//! disabled.
 
 #![deny(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
+#[expect(unsafe_code, reason = "reviewed C2A arena and run topology")]
+#[allow(
+    dead_code,
+    reason = "C2A arenas remain collector-private until class discovery consumes them"
+)]
+mod arena;
 mod heap;
 #[expect(unsafe_code, reason = "reviewed C1C mutation boundary")]
 mod mutation;
@@ -14,6 +21,11 @@ mod mutation;
 mod mutator;
 #[expect(unsafe_code, reason = "reviewed C1A pointer boundary")]
 mod pointer;
+#[allow(
+    dead_code,
+    reason = "C2A geometry remains collector-private until class discovery consumes it"
+)]
+mod run;
 #[expect(unsafe_code, reason = "reviewed C1B trace boundary")]
 mod trace;
 

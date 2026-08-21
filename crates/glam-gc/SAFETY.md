@@ -4,14 +4,17 @@ This file is the authoritative inventory of unsafe code and collector safety
 invariants for the Glam-owned garbage collector. Update it in the same change
 which adds or changes an unsafe operation.
 
-## Phase C1 Status
+## Implemented Phase Status
 
 C1A introduced a pointer-only `Gc<T>` and a deliberately leaking prototype
 allocation path. C1B adds the visitor-based `Trace` contract and representative
 manual implementations. C1C adds the structural edge-replacement gateway and
-freezes this boundary for the initial non-moving collector. There is still no
-root registry, collection, marking, reclamation, finalization, callback, or
-collector coordination.
+freezes this boundary for the initial non-moving collector. C2A.1 adds pure
+fixed-run geometry, and C2A.2 adds heap-owned aligned arena chunks plus checked
+numeric owner recovery. C2A.3 initializes integer-only run headers and
+allocation, lease, and mark side metadata, but still adds no payload
+allocation. There is no root registry, collection, marking, reclamation,
+finalization, callback, or collector coordination.
 
 The crate denies unsafe code by default. `src/lib.rs` gives the reviewed
 `pointer`, `mutator`, `trace`, `mutation`, and unit-test modules named lint
@@ -19,6 +22,46 @@ expectations for unsafe code. The exact module expectations and every unsafe
 function, implementation, and block are checked into
 `scripts/unsafe-modules.txt` and `scripts/unsafe-sites.txt`;
 `scripts/audit-unsafe.sh` fails when either inventory changes.
+
+## Arena Ownership Invariants
+
+- Every arena chunk is one 8 MiB allocation with size and alignment equal to
+  8 MiB. It therefore contains exactly 128 aligned 64 KiB runs.
+- `HeapInner` owns its arena behind the heap mutex. A chunk is never published
+  until allocation and overlap validation both succeed; dropping either a
+  rejected candidate or its arena returns the allocation exactly once.
+- Owner lookup first compares an integer address with live chunk ranges. Only
+  a successful range check derives a run pointer from the original chunk
+  pointer, preserving allocation provenance without dereferencing a guessed
+  header.
+- Live chunks are required not to overlap. Run recovery masks a validated
+  address by the fixed run size, and checked pointer arithmetic remains inside
+  the owning chunk.
+- Arena bytes are zeroed but untyped in C2A.2. No `RunHeader`, payload, bitmap,
+  or Rust reference exists in them at that checkpoint. C2A.3 initializes every
+  run header before chunk publication, then initializes side metadata only
+  while the arena is exclusively borrowed.
+
+## Run Topology Invariants
+
+- `RunHeader` is an integer-only, 64-byte, 64-byte-aligned representation at
+  the start of every run. All bit patterns are valid Rust values, and the
+  header magic distinguishes initialized collector topology from corruption.
+- Every newly reserved chunk initializes all 128 empty headers before the
+  chunk enters its arena. A run becomes class-owned only after its geometry is
+  structurally revalidated and its three disjoint side-bitmap ranges are
+  cleared.
+- Failed geometry, missing-run, invalid-header, and repeated-initialization
+  paths publish no new class identity. Initialization contains no payload
+  write and no operation which can fail after bitmap clearing begins.
+- The header stores a provisional nonzero 64-bit dense class identity and the
+  checked slot/bitmap geometry needed by C2B. It does not yet store canonical
+  type metadata; C2B owns that representation decision.
+- Checked slot-owner recovery first finds the owning live chunk and run, then
+  reads its already initialized header, validates its class and reconstructed
+  geometry, and accepts only an exact slot-start address. Header bytes,
+  metadata, alignment padding, slot interiors, run ends, free runs, and other
+  heaps all fail without producing an owner.
 
 ## Prototype Representation Invariants
 
@@ -93,6 +136,40 @@ The safe prototype allocator calls `Gc::from_raw` in one unsafe block. Its
 local proof is the initialization, leak, pointer derivation, and registration
 sequence described above. A panic before pointer return can leak more memory
 but cannot expose an invalid handle.
+
+### `arena::ArenaChunk` allocation and destruction
+
+`alloc_zeroed` receives one checked nonzero `Layout` whose size and alignment
+are both the fixed arena-chunk size. A null result becomes `AllocationFailed`
+before any chunk is published. The successful pointer remains uniquely owned
+by its `ArenaChunk`, whose `Drop` returns it through `dealloc` with the identical
+layout.
+
+The two `NonNull::add` sites derive aligned run starts. Both are preceded by
+either a checked run index or numeric membership and mask validation, proving
+the result remains within the live chunk. Neither site dereferences or creates
+a Rust reference.
+
+### `Send for arena::ArenaChunk`
+
+An arena chunk owns raw untyped bytes and exposes no Rust reference. Moving the
+owner between threads transfers the one deallocation obligation without
+accessing those bytes. Sharing remains mediated by the heap's arena mutex; no
+independent `Sync` implementation is needed.
+
+### Run-header and side-metadata access
+
+Fresh-chunk setup derives each disjoint aligned run start and writes one valid
+`RunHeader::empty` before publishing the chunk. Checked lookup forms a shared
+header reference only after numeric chunk membership and run-alignment
+validation; the reference remains bounded by the arena borrow.
+
+Run initialization takes an exclusive arena borrow. It reads the existing
+integer-only header, validates all geometry before pointer arithmetic, clears
+the allocation, lease, and mark byte ranges, and then overwrites the empty
+header with the initialized representation. The test-only slice construction
+copies those same already initialized metadata bytes without returning a
+borrow. No unsafe site touches payload storage.
 
 ### Test call sites
 
@@ -183,9 +260,16 @@ mutation closure runs.
   recursive edge sequences with duplicate pointers, full retracing after an
   injected visitor panic, exact edge replacement, and rejection before
   foreign-heap mutation.
+- Arena tests cover first, last, and adjacent run boundaries, live chunk
+  non-aliasing, separate-arena and separate-heap ownership, and mask arithmetic
+  at the highest representable complete chunk range.
+- Run-topology tests cover every empty header, independent adjacent class
+  identities and geometry, zeroed bitmap ranges, exact first and last slots,
+  rejection of non-slot addresses, and non-publication after invalid or
+  repeated initialization.
 - The ordinary crate checks, exact unsafe inventory, focused Miri run, and
   repository-wide checks are required for completed C1.
-- Miri passes all C1 tests with `-Zmiri-ignore-leaks`. That flag suppresses only
+- Miri passes all implemented tests with `-Zmiri-ignore-leaks`. That flag suppresses only
   the prototype allocator's deliberate `Box::leak`; C2 must remove it when it
   introduces arena ownership.
 - The C1 pointer/access/trace/mutation surface is reviewed and frozen for the

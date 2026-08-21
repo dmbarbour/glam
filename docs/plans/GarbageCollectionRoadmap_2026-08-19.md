@@ -1,8 +1,8 @@
 # Glam-Owned Garbage Collection Roadmap — 2026-08-19
 
-Status: in progress; collector Phases C0 and C1 and integration Phase I0 are
-complete, Gate G0 is established, and the mandatory post-C1 review is complete.
-Collector Phase C2A.1 may proceed.
+Status: in progress; collector Phases C0, C1, and C2A and integration Phase I0
+are complete, Gate G0 is established, and the mandatory post-C1 review is
+complete. Collector Phase C2B may proceed.
 
 This roadmap keeps two large transitions aligned:
 
@@ -323,8 +323,6 @@ The following must remain sequential:
 
 These choices are intentionally unresolved rather than accidental drift:
 
-- C2A selects the numeric fixed run size from the I0/layout measurements and
-  records fragmentation/bitmap tradeoffs;
 - I2 chooses whether a public root points directly at a managed value or at a
   registered root cell containing an inline value;
 - C6 selects a last-owner terminal teardown protocol which does not manufacture

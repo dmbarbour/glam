@@ -1,17 +1,16 @@
 #[cfg(debug_assertions)]
 use std::any::{TypeId, type_name};
 use std::ptr::NonNull;
-use std::sync::Arc;
-#[cfg(debug_assertions)]
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
-use crate::Mutator;
+use crate::{Mutator, arena::Arena};
 
 /// One shareable, runtime-local managed-value domain.
 ///
-/// C1A's heap owns only a debug/test allocation registry. Prototype payloads
-/// are deliberately leaked, so this still does not commit the collector to an
-/// allocator, a reclamation policy, or coordination state.
+/// C2A's heap owns aligned arena/run topology plus C1A's debug/test prototype
+/// allocation registry. Prototype payloads remain deliberately leaked outside
+/// those arenas, so the heap still has no managed payload allocator,
+/// reclamation policy, or collector coordination state.
 #[derive(Clone, Default)]
 pub struct Heap {
     inner: Arc<HeapInner>,
@@ -26,8 +25,9 @@ impl Heap {
 
     /// Runs `operation` inside a scoped mutator region for this heap.
     ///
-    /// C1A has no collector to exclude. The token is nevertheless qualified by
-    /// this heap and is required for every prototype allocation and access.
+    /// C2A still has no collector to exclude. The token is nevertheless
+    /// qualified by this heap and is required for every prototype allocation
+    /// and access.
     pub fn with_mutator<R>(&self, operation: impl for<'heap> FnOnce(&Mutator<'heap>) -> R) -> R {
         let mutator = Mutator::new(&self.inner);
         operation(&mutator)
@@ -36,6 +36,11 @@ impl Heap {
 
 #[derive(Default)]
 pub(crate) struct HeapInner {
+    #[allow(
+        dead_code,
+        reason = "C2A reserves heap-owned arenas before C2B class discovery consumes them"
+    )]
+    arena: Mutex<Arena>,
     #[cfg(debug_assertions)]
     prototype_allocations: Mutex<Vec<PrototypeAllocationRecord>>,
 }
@@ -91,4 +96,51 @@ struct PrototypeAllocationRecord {
     address: usize,
     type_id: TypeId,
     type_name: &'static str,
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::arena::Arena;
+
+    use super::Heap;
+
+    #[test]
+    fn heap_owned_arenas_reject_another_heaps_addresses() {
+        let first = Heap::new();
+        let second = Heap::new();
+
+        let address = {
+            let mut arena = first
+                .inner
+                .arena
+                .lock()
+                .expect("test arena should not be poisoned");
+            let chunk = arena.reserve_chunk().unwrap();
+            arena.run_address(chunk, 0).unwrap().address()
+        };
+
+        assert!(
+            first
+                .inner
+                .arena
+                .lock()
+                .unwrap()
+                .find_run(address)
+                .is_some()
+        );
+        assert!(
+            second
+                .inner
+                .arena
+                .lock()
+                .unwrap()
+                .find_run(address)
+                .is_none()
+        );
+    }
+
+    const _: fn() = || {
+        fn assert_send<T: Send>() {}
+        assert_send::<Arena>();
+    };
 }

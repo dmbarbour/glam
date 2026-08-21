@@ -1,7 +1,7 @@
 # Glam GC Subcrate Implementation Plan — 2026-08-19
 
-Status: in progress; Phases C0 and C1 are complete. The mandatory post-C1
-review is complete, and C2A.1 is next.
+Status: in progress; Phases C0, C1, and C2A are complete. The mandatory
+post-C1 review is complete, and C2B is next.
 
 This plan implements an exact, non-moving, runtime-local tracing collector
 without depending on Glam value semantics. The governing requirements and
@@ -20,9 +20,9 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C1A | completed | prototype managed pointer and access boundary |
 | C1B | completed | trace visitor and representative structural traces |
 | C1C | completed | mutation gateway, unsafe audit, and API freeze |
-| C2A.1 | pending | pure run/slot/bitmap geometry and provisional run size |
-| C2A.2 | pending | aligned arena chunks and checked owner-address recovery |
-| C2A.3 | pending | run headers, side bitmaps, and topology verification |
+| C2A.1 | completed | pure run/slot/bitmap geometry and provisional run size |
+| C2A.2 | completed | aligned arena chunks and checked owner-address recovery |
+| C2A.3 | completed | run headers, side bitmaps, and topology verification |
 | C2B | pending | type metadata and per-heap allocation-class discovery |
 | C2C | pending | worker-local bitmap-range allocation and reuse |
 | C3A | pending | ordinary admission and same-heap recursion integration |
@@ -451,11 +451,76 @@ Verification:
   strides yield correct slot and bitmap geometry;
 - smaller slots measure and report their larger bitmap overhead rather than
   being rejected merely to preserve a value-layer tag budget;
-- unsupported size/alignment/DST layouts fail geometry derivation without
-  partially allocating storage;
+- unsupported size/alignment layouts fail geometry derivation without
+  partially allocating storage; dynamically sized types have no class-entry
+  path because the planned `AllocationClass<T: Trace>` keeps its implicit
+  `Sized` bound;
 - pointer ownership checks distinguish heaps in debug/test builds; and
 - Miri and property tests cover mask arithmetic, alignment, and the maximum
   supported address range.
+
+### C2A.1 Completion
+
+C2A.1 completed on 2026-08-21:
+
+- The provisional fixed run size is 64 KiB. It bounds cold-class waste to one
+  modest run while giving the I0 representative 16-, 24-, 32-, 144-, 192-,
+  and 256-byte layouts respectively 4,028, 2,699, 2,029, 453, 340, and 255
+  slots. Allocation, lease, and mark side metadata consumes about 1.55%,
+  1.06%, 0.79%, 0.21%, 0.16%, and 0.11% of those runs. A deliberately tiny
+  one-byte class remains supported with about 20.1% bitmap overhead rather
+  than defining value-layer alignment policy in the collector.
+- Pure checked geometry derives allocation, allocation-word lease, and mark
+  bitmap ranges, aligned first-slot offset, stride, count, and exact slot
+  indices. Binary search selects the greatest fitting slot count without
+  allocating or mutating heap state.
+- The geometry exposes a minimally aligned maximum managed size of 65,448
+  bytes and maximum supported power-of-two alignment of 32 KiB. Larger or
+  overflowing layouts, zero-sized payloads, and undersized slot requests fail
+  derivation without state.
+- Focused boundary and sampled-layout tests, the exact unsafe audit, the full
+  collector check, and Miri all pass. C2A.1 adds no unsafe code or arena
+  allocation.
+
+### C2A.2 Completion
+
+C2A.2 completed on 2026-08-21:
+
+- Each heap now owns an arena capable of reserving zeroed 8 MiB chunks aligned
+  to their full size. Each chunk contains exactly 128 logical 64 KiB runs and
+  returns its storage exactly once through RAII; no payload or run-header type
+  is initialized yet.
+- Numeric owner recovery validates a candidate address against live chunk
+  ranges before masking it to a run boundary and deriving a pointer from the
+  original allocation. Addresses at both ends of every run, the final chunk
+  byte, and the highest representable complete chunk range are covered.
+- Chunk publication rejects an allocation failure or any overlap before
+  changing arena state. Separate live chunks, arenas, and heap-owned arenas
+  cannot claim one another's addresses.
+- The allocation/deallocation, in-chunk pointer arithmetic, and chunk `Send`
+  proofs are recorded in the exact unsafe inventory and safety ledger. Focused
+  arena/heap tests, the full collector check, and Miri all pass.
+
+### C2A.3 Completion
+
+C2A.3 completed on 2026-08-21:
+
+- Every run now begins with a valid integer-only 64-byte header initialized
+  before its chunk is published. A nonzero 64-bit class ID and compact checked
+  geometry fit in that header; canonical type metadata remains C2B's
+  responsibility.
+- Exclusive run initialization revalidates geometry, clears allocation,
+  allocation-word lease, and mark bitmap ranges, and publishes the class
+  header only after all rejection points. Repeated, invalid, or out-of-range
+  initialization leaves the prior header and class publication unchanged.
+- Private checked owner lookup validates arena range, run header, class,
+  reconstructed geometry, and exact slot-start offset in that order. It
+  rejects header and bitmap bytes, alignment padding, slot interiors, free
+  runs, run ends, and addresses owned by another heap.
+- Tests cover all empty headers, poisoned-to-zero side metadata, first/last
+  slots, adjacent run and chunk topology, independent class identities, and
+  failure atomicity. The complete collector check, exact unsafe audit, and
+  Miri all pass. Payload allocation remains disabled until C2C.
 
 ## Phase C2B — Type Metadata and Per-Heap Allocation-Class Discovery
 

@@ -1,3 +1,16 @@
+crates/glam-gc/src/arena.rs:            NonNull::new(unsafe { alloc_zeroed(layout) }).ok_or(ArenaError::AllocationFailed)?;
+crates/glam-gc/src/arena.rs:            let range = unsafe { std::slice::from_raw_parts(start.as_ptr(), bitmap.byte_len()) };
+crates/glam-gc/src/arena.rs:            let start = unsafe { address.pointer().add(bitmap.offset) };
+crates/glam-gc/src/arena.rs:            let start = unsafe { address.pointer().add(bitmap.offset) };
+crates/glam-gc/src/arena.rs:            unsafe { header.write(RunHeader::empty()) };
+crates/glam-gc/src/arena.rs:            unsafe { std::ptr::write_bytes(start.as_ptr(), value, bitmap.byte_len()) };
+crates/glam-gc/src/arena.rs:        Some(unsafe { run.pointer().cast::<RunHeader>().as_ref() })
+crates/glam-gc/src/arena.rs:        let header = unsafe { header_pointer.as_ref() };
+crates/glam-gc/src/arena.rs:        let pointer = unsafe { self.base.add(offset) };
+crates/glam-gc/src/arena.rs:        let pointer = unsafe { self.base.add(offset) };
+crates/glam-gc/src/arena.rs:        unsafe { dealloc(self.base.as_ptr(), chunk_layout()) };
+crates/glam-gc/src/arena.rs:        unsafe { header_pointer.write(RunHeader::initialized(class_id, geometry)) };
+crates/glam-gc/src/arena.rs:unsafe impl Send for ArenaChunk {}
 crates/glam-gc/src/lib.rs:                let _ = unsafe { value.get_unchecked(mutator) };
 crates/glam-gc/src/lib.rs:                let first = unsafe { *first.get_unchecked(first_mutator) };
 crates/glam-gc/src/lib.rs:                let second = unsafe { *second.get_unchecked(second_mutator) };
