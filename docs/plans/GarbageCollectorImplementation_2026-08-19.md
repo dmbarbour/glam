@@ -255,8 +255,10 @@ an unacceptable semantic or visibility change.
 C1A completed on 2026-08-21 with the following deliberately temporary shape:
 
 - `Gc<T>` is exactly one typed `NonNull<T>`. It carries no heap identity,
-  allocation record, class, or debug token; equality and hashing observe only
-  managed-pointer identity, and there is no `Deref` implementation.
+  allocation record, class, or debug token; equality observes only managed-
+  pointer identity, and there is no `Deref` or `Hash` implementation. Omitting
+  `Hash` avoids promising stable address hashes which a later moving collector
+  would have to preserve or rebuild inside hashed containers.
 - `Mutator::alloc` accepts `T: Send + Sync + 'static`, fully initializes and
   leaks a `Box<T>`, registers its address in debug/test builds, and returns a
   non-rooting `Gc<T>`. Zero-sized types are rejected. C2 replaces this path

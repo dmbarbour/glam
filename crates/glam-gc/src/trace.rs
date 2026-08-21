@@ -52,7 +52,7 @@ impl<'visit> Visitor<'visit> {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ErasedGc {
     pointer: NonNull<()>,
 }

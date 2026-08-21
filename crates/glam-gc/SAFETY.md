@@ -21,7 +21,9 @@ implementation, and block are checked into
 ## Prototype Representation Invariants
 
 - `Gc<T>` contains exactly one `NonNull<T>`. It carries no heap, domain, class,
-  allocation-record, or debug field and is not a root.
+  allocation-record, or debug field and is not a root. It supports pointer-
+  identity equality but deliberately does not implement `Hash`, because an
+  address hash could not remain stable across later moving collection.
 - `Mutator<'heap>` contains a reference to exactly one `HeapInner`. Its
   `Rc<()>` phantom makes the token neither `Send` nor `Sync`; the lifetime
   prevents it from outliving that heap entry.

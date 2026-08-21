@@ -1,5 +1,4 @@
 use std::fmt;
-use std::hash::{Hash, Hasher};
 use std::ptr::NonNull;
 
 use crate::{Mutator, Trace, trace::ErasedGc};
@@ -100,12 +99,6 @@ impl<T: Trace> PartialEq for Gc<T> {
 }
 
 impl<T: Trace> Eq for Gc<T> {}
-
-impl<T: Trace> Hash for Gc<T> {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.pointer.hash(state);
-    }
-}
 
 impl<T: Trace> fmt::Debug for Gc<T> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
