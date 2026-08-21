@@ -91,11 +91,12 @@ mod tests {
     }
 
     #[test]
-    fn zero_sized_prototype_allocations_still_have_distinct_identity() {
+    #[should_panic(expected = "zero-sized managed types are unsupported")]
+    fn zero_sized_prototype_allocations_are_rejected() {
         let heap = Heap::new();
-        let (first, second) = heap.with_mutator(|mutator| (mutator.alloc(()), mutator.alloc(())));
-
-        assert_ne!(first, second);
+        heap.with_mutator(|mutator| {
+            let _ = mutator.alloc(());
+        });
     }
 
     #[test]

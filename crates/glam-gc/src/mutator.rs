@@ -43,27 +43,22 @@ impl<'heap> Mutator<'heap> {
     /// This is not the collector allocator. It exists only to verify pointer,
     /// lifetime, heap-authority, and thread-sharing contracts before C2.
     pub fn alloc<T: Send + Sync + 'static>(&self, value: T) -> Gc<T> {
-        let slot = Box::leak(Box::new(PrototypeSlot {
-            value,
-            _unique_address: 0,
-        }));
-        let pointer = NonNull::from(&mut slot.value);
+        assert!(
+            std::mem::size_of::<T>() != 0,
+            "zero-sized managed types are unsupported"
+        );
+
+        let value = Box::leak(Box::new(value));
+        let pointer = NonNull::from(value);
         self.heap.register_prototype(pointer);
 
-        // SAFETY: the leaked slot provides a live, aligned, initialized `T`;
-        // the immediately preceding registration associates it with this heap
-        // and records the same representation.
+        // SAFETY: the leaked box provides a live, aligned, initialized `T`; the
+        // immediately preceding registration associates it with this heap and
+        // records the same representation.
         unsafe { Gc::from_raw(pointer) }
     }
 
     pub(crate) fn debug_assert_access<T: 'static>(&self, pointer: NonNull<T>) {
         self.heap.debug_assert_access(pointer);
     }
-}
-
-/// The extra byte gives even a zero-sized `T` a distinct leaked allocation.
-#[repr(C)]
-struct PrototypeSlot<T> {
-    value: T,
-    _unique_address: u8,
 }

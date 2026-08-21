@@ -214,11 +214,11 @@ permit dereference outside a region.
     bounded.
 12. **Collection is operational only.** Scheduling and collection timing may
     vary, but successful assembly values remain governed by Glam semantics.
-13. **Unsupported layouts remain unsupported.** Class creation rejects a type
-    whose size, alignment, or representation cannot fit one slot in the fixed
-    typed-run geometry. The bootstrap does not silently add a large-object
-    path, multi-run span, DST allocator, or heterogeneous object header to
-    accommodate it.
+13. **Unsupported layouts remain unsupported.** Class creation rejects
+    zero-sized types and any type whose size, alignment, or representation
+    cannot fit one slot in the fixed typed-run geometry. The bootstrap does not
+    silently add a large-object path, multi-run span, DST allocator, or
+    heterogeneous object header to accommodate it.
 
 ## Shared Terminology
 

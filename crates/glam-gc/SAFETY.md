@@ -24,10 +24,9 @@ and block are checked into
 - `Mutator<'heap>` contains a reference to exactly one `HeapInner`. Its
   `Rc<()>` phantom makes the token neither `Send` nor `Sync`; the lifetime
   prevents it from outliving that heap entry.
-- `Mutator::alloc` accepts only `T: Send + Sync + 'static`. It initializes a
-  boxed `PrototypeSlot<T>`, leaks the box, obtains a pointer to its `T` field,
-  registers that address, and only then constructs `Gc<T>`. The slot's extra
-  byte ensures that zero-sized `T` values also have distinct addresses.
+- `Mutator::alloc` accepts only `T: Send + Sync + 'static` and rejects
+  zero-sized types before allocation. It initializes and leaks a `Box<T>`,
+  registers its address, and only then constructs `Gc<T>`.
 - Prototype payloads never move and are never destroyed. The allocation record
   is diagnostic metadata and may disappear with its heap; no access is valid
   without a live mutator for the owning heap.
@@ -101,9 +100,9 @@ with an invalid type or provenance.
 - Compile-fail doctests prove that a borrowed managed value cannot escape its
   mutator region, a mutator cannot enter a scoped worker, and `Gc<T>` has no
   `Deref` path.
-- Unit tests cover pointer size, pointer identity, distinct zero-sized
-  allocations, cross-thread handle transfer, nested separate heaps, and debug
-  rejection of wrong heap and representation.
+- Unit tests cover pointer size, pointer identity, zero-sized-type rejection,
+  cross-thread handle transfer, nested separate heaps, and debug rejection of
+  wrong heap and representation.
 - The ordinary crate checks, exact unsafe inventory, and the repository-wide
   checks are required for C1A.
 - These sites are reviewed for the C1A leaking prototype. C1C performs the

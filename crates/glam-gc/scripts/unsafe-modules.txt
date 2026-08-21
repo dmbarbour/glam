@@ -1,0 +1,3 @@
+crates/glam-gc/src/lib.rs:#[expect(unsafe_code, reason = "reviewed C1A allocation boundary")]
+crates/glam-gc/src/lib.rs:#[expect(unsafe_code, reason = "reviewed C1A boundary verification")]
+crates/glam-gc/src/lib.rs:#[expect(unsafe_code, reason = "reviewed C1A pointer boundary")]

@@ -258,10 +258,9 @@ C1A completed on 2026-08-21 with the following deliberately temporary shape:
   allocation record, class, or debug token; equality and hashing observe only
   managed-pointer identity, and there is no `Deref` implementation.
 - `Mutator::alloc` accepts `T: Send + Sync + 'static`, fully initializes and
-  leaks a boxed prototype slot, registers its payload address in debug/test
-  builds, and returns a non-rooting `Gc<T>`. The extra byte in the prototype
-  slot gives even zero-sized values distinct leaked addresses. C2 replaces
-  this path rather than extending it into an allocator.
+  leaks a `Box<T>`, registers its address in debug/test builds, and returns a
+  non-rooting `Gc<T>`. Zero-sized types are rejected. C2 replaces this path
+  rather than extending it into an allocator.
 - A mutator retains a direct reference to its creating `HeapInner`, so all
   allocation and access checks are heap-qualified. One thread can nest regions
   from separate heaps without either token gaining authority over the other.
@@ -303,6 +302,9 @@ contract and representative structural traces described above.
   address against the mutator heap's arena-chunk ranges without dereferencing a
   candidate header, then validate the recovered run and allocation class. Raw
   construction still forbids arbitrary or stale addresses in every build.
+- Reject zero-sized payload layouts. Glam has no managed zero-sized
+  representation, and allocation identity must always correspond to a real
+  slot address.
 - Implement a pure checked geometry calculation from Rust `Layout` plus the
   metadata-requested slot size to slot stride, first-slot offset, slot count,
   and bitmap geometry. It accounts for its own side metadata and either yields
