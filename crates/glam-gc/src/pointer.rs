@@ -34,6 +34,18 @@ use crate::{Mutator, Trace, trace::ErasedGc};
 /// let value = heap.with_mutator(|mutator| mutator.alloc(42_u64));
 /// let _ = *value;
 /// ```
+///
+/// Address identity deliberately does not implement `Hash`, because moving a
+/// managed allocation must not silently invalidate hashed containers:
+///
+/// ```compile_fail
+/// use std::collections::HashSet;
+/// use glam_gc::Heap;
+///
+/// let heap = Heap::new();
+/// let value = heap.with_mutator(|mutator| mutator.alloc(42_u64));
+/// let _ = HashSet::from([value]);
+/// ```
 #[must_use = "a managed pointer does not itself keep its allocation alive"]
 pub struct Gc<T: Trace> {
     pointer: NonNull<T>,
@@ -59,6 +71,10 @@ impl<T: Trace> Gc<T> {
 
     pub(crate) fn erase(self) -> ErasedGc {
         ErasedGc::new(self.pointer.cast())
+    }
+
+    pub(crate) fn debug_assert_owned_by(self, mutator: &Mutator<'_>) {
+        mutator.debug_assert_access(self.pointer);
     }
 }
 

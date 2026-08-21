@@ -1,6 +1,7 @@
 # Glam GC Subcrate Implementation Plan — 2026-08-19
 
-Status: in progress; Phases C0, C1A, and C1B are complete.
+Status: in progress; Phases C0 and C1 are complete. The mandatory post-C1
+review is complete, and C2A.1 is next.
 
 This plan implements an exact, non-moving, runtime-local tracing collector
 without depending on Glam value semantics. The governing requirements and
@@ -18,8 +19,10 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C0 | completed | crate, provenance, safety, and test scaffold |
 | C1A | completed | prototype managed pointer and access boundary |
 | C1B | completed | trace visitor and representative structural traces |
-| C1C | pending | mutation gateway, unsafe audit, and API freeze |
-| C2A | pending | arena chunks, fixed typed-run geometry, and layout limits |
+| C1C | completed | mutation gateway, unsafe audit, and API freeze |
+| C2A.1 | pending | pure run/slot/bitmap geometry and provisional run size |
+| C2A.2 | pending | aligned arena chunks and checked owner-address recovery |
+| C2A.3 | pending | run headers, side bitmaps, and topology verification |
 | C2B | pending | type metadata and per-heap allocation-class discovery |
 | C2C | pending | worker-local bitmap-range allocation and reuse |
 | C3A | pending | ordinary admission and same-heap recursion integration |
@@ -309,7 +312,79 @@ C1B adds no root discovery, mark state, worklist, collection, sweep, or
 production ownership migration. C1C may now add the no-op structural mutation
 gateway and perform the planned boundary audit before allocator work.
 
+C1C completed on 2026-08-21:
+
+- `Mutator::replace_edge` is the raw managed-edge mutation gateway. Its caller
+  identifies the owner plus old and new edge, proves all three belong to the
+  mutator heap, and performs the exact replacement inside one closure. Debug
+  builds reject foreign pointers before invoking the closure. The current
+  always-inlined collector hook is empty; future concurrent or generational
+  plans may conservatively process both edges before mutation.
+- The raw gateway remains unsafe because pointer-only `Gc<T>` cannot validate
+  heap provenance at zero release cost. Production integration must provide
+  representation-local safe wrappers which own that proof rather than expose
+  the raw operation as an ordinary value API.
+- `Gc<T>` remains pointer-sized, non-rooting, non-`Deref`, and deliberately
+  non-`Hash`. Pointer equality and debug addresses are operational identities,
+  not stable serialized data. The supported access path remains a scoped
+  mutator plus a runtime-owned wrapper which discharges the raw access proof.
+- `Trace` and its erased visitor are frozen for the initial non-moving
+  collector. They enumerate edges observationally and expose a private erased
+  address for typed-run lookup. Moving collection remains free to add a
+  separate rewriting/relocation contract; C1 does not claim that observational
+  tracing alone can rewrite pointer slots.
+- Nested regions from two heaps prove that mutator authority remains heap-
+  qualified. The exact unsafe-site and module inventories pass, and Miri
+  passes all 14 unit tests with only the documented C1 prototype-leak check
+  disabled. C2 must remove that exception when it removes `Box::leak`.
+
+### Mandatory Post-C1 Review
+
+The 2026-08-21 review found the later non-moving collector phases semantically
+aligned with the C1 boundary, with these precision and partition updates:
+
+- Split C2A into C2A.1 pure geometry, C2A.2 aligned arena ownership, and C2A.3
+  concrete run-header/bitmap topology. Each checkpoint has an independent
+  unsafe surface and verification story; payload allocation still waits for
+  C2C.
+- C2B owns monomorphized erased trace/drop dispatch and replacement of C1's
+  debug `TypeId` allocation records with canonical metadata pointers. It does
+  not add relocation dispatch while moving collection is deferred.
+- C2C replaces the leaking prototype allocator, changes allocation to require
+  a heap-local class, and removes Miri's leak exception. Its existing
+  `ThreadHeapState` checkpoint remains the correct precursor to C3.
+- C3A-C3D remain appropriately separated by ordinary admission, single-heap
+  exclusion, cross-heap dependent admission, and finalizer handoff. C1's
+  nested-heap test is only a token-shape regression, not a substitute for
+  those state-machine tests.
+- C4-C6 continue to own release-validating safe roots, exact marking, sweep,
+  and finalization. The observational C1 visitor is sufficient for this
+  non-moving plan; moving pointer-slot rewriting remains deferred explicitly.
+- Integration I4 and later mutable representations must wrap C1C's unsafe raw
+  gateway at the representation boundary and keep exact tracing synchronized
+  with every managed-edge change.
+
+No additional design question blocks C2A.1.
+
 ## Phase C2A — Arena Chunks, Fixed Typed-Run Geometry, and Layout Limits
+
+Execute C2A as three independently verified checkpoints:
+
+- **C2A.1 — pure geometry.** Define checked header/side-metadata/slot geometry,
+  reject unsupported layouts, reconcile I0's measurements, and select one
+  provisional fixed `RUN_SIZE`. Allocate no arena memory.
+- **C2A.2 — arena ownership.** Reserve and release aligned arena chunks, divide
+  them into fixed runs, and implement numeric range validation plus checked
+  run-owner address recovery. Do not initialize allocation classes or payload
+  slots.
+- **C2A.3 — run topology.** Initialize run headers and allocation, lease, and
+  mark side bitmaps from C2A.1 geometry; verify adjacent run/chunk topology and
+  expose only the private checked owner/class boundary needed by C2B. Payload
+  allocation remains disabled.
+
+Run focused tests, the exact unsafe inventory, and Miri after each checkpoint.
+Do not begin C2B until all three leave arena destruction and failed
+initialization paths fully owned.
 
 - Reserve large heap-owned arena chunks whose address and size are multiples of
   one fixed, power-of-two `RUN_SIZE`. Divide each chunk into runs of exactly

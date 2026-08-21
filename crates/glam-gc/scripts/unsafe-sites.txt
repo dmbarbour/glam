@@ -2,6 +2,12 @@ crates/glam-gc/src/lib.rs:                let _ = unsafe { value.get_unchecked(m
 crates/glam-gc/src/lib.rs:                let first = unsafe { *first.get_unchecked(first_mutator) };
 crates/glam-gc/src/lib.rs:                let second = unsafe { *second.get_unchecked(second_mutator) };
 crates/glam-gc/src/lib.rs:                unsafe { *value.get_unchecked(mutator) }
+crates/glam-gc/src/mutation.rs:                unsafe {
+crates/glam-gc/src/mutation.rs:            let owner_value = unsafe { owner.get_unchecked(mutator) };
+crates/glam-gc/src/mutation.rs:            unsafe {
+crates/glam-gc/src/mutation.rs:    pub unsafe fn replace_edge<Owner: Trace, Edge: Trace, Result>(
+crates/glam-gc/src/mutation.rs:    unsafe impl Trace for Leaf {
+crates/glam-gc/src/mutation.rs:    unsafe impl Trace for MutableNode {
 crates/glam-gc/src/mutator.rs:        unsafe { Gc::from_raw(pointer) }
 crates/glam-gc/src/pointer.rs:                let _ = unsafe { reinterpreted.get_unchecked(mutator) };
 crates/glam-gc/src/pointer.rs:        unsafe { self.pointer.as_ref() }

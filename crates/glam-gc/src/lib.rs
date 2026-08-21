@@ -8,6 +8,8 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 mod heap;
+#[expect(unsafe_code, reason = "reviewed C1C mutation boundary")]
+mod mutation;
 #[expect(unsafe_code, reason = "reviewed C1A allocation boundary")]
 mod mutator;
 #[expect(unsafe_code, reason = "reviewed C1A pointer boundary")]

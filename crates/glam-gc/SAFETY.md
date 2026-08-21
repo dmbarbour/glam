@@ -4,17 +4,19 @@ This file is the authoritative inventory of unsafe code and collector safety
 invariants for the Glam-owned garbage collector. Update it in the same change
 which adds or changes an unsafe operation.
 
-## Phase C1B Status
+## Phase C1 Status
 
 C1A introduced a pointer-only `Gc<T>` and a deliberately leaking prototype
 allocation path. C1B adds the visitor-based `Trace` contract and representative
-manual implementations. There is still no root registry, collection, marking,
-reclamation, finalization, callback, or collector coordination.
+manual implementations. C1C adds the structural edge-replacement gateway and
+freezes this boundary for the initial non-moving collector. There is still no
+root registry, collection, marking, reclamation, finalization, callback, or
+collector coordination.
 
 The crate denies unsafe code by default. `src/lib.rs` gives the reviewed
-`pointer`, `mutator`, `trace`, and unit-test modules named lint expectations for
-unsafe code. The exact module expectations and every unsafe function,
-implementation, and block are checked into
+`pointer`, `mutator`, `trace`, `mutation`, and unit-test modules named lint
+expectations for unsafe code. The exact module expectations and every unsafe
+function, implementation, and block are checked into
 `scripts/unsafe-modules.txt` and `scripts/unsafe-sites.txt`;
 `scripts/audit-unsafe.sh` fails when either inventory changes.
 
@@ -27,9 +29,9 @@ implementation, and block are checked into
 - `Mutator<'heap>` contains a reference to exactly one `HeapInner`. Its
   `Rc<()>` phantom makes the token neither `Send` nor `Sync`; the lifetime
   prevents it from outliving that heap entry.
-- `Mutator::alloc` accepts only `T: Send + Sync + 'static` and rejects
-  zero-sized types before allocation. It initializes and leaks a `Box<T>`,
-  registers its address, and only then constructs `Gc<T>`.
+- `Mutator::alloc` accepts only `T: Trace` and rejects zero-sized types before
+  allocation. It initializes and leaks a `Box<T>`, registers its address, and
+  only then constructs `Gc<T>`.
 - Prototype payloads never move and are never destroyed. The allocation record
   is diagnostic metadata and may disappear with its heap; no access is valid
   without a live mutator for the owning heap.
@@ -92,11 +94,12 @@ but cannot expose an invalid handle.
 
 ### Test call sites
 
-The remaining inventoried unsafe blocks call `get_unchecked` from focused
-tests. Correct-access sites state their heap, liveness, and representation
-proofs inline. The two mismatch sites run only with debug assertions and test
-that the gateway panics before dereference. No test creates a Rust reference
-with an invalid type or provenance.
+The remaining inventoried unsafe blocks call `get_unchecked` or `replace_edge`
+from focused tests. Correct-access sites state their heap, liveness,
+representation, and replacement proofs inline. Mismatch sites run only with
+debug assertions and test that the relevant gateway panics before dereference
+or mutation. No test creates a Rust reference with an invalid type or
+provenance.
 
 ### `trace::Trace`
 
@@ -139,20 +142,48 @@ type metadata. Later typed-run lookup must recover and validate those facts.
 The receiver may panic; no visitor or traversal state is stored in the traced
 object.
 
+### `mutation::Mutator::replace_edge`
+
+The raw mutation gateway is unsafe because pointer-only `Gc<T>` does not carry
+release-visible heap provenance and because the collector cannot infer which
+representation slot the closure changes. The caller must prove that owner, old
+edge, and new edge are live allocations in the mutator heap; that old describes
+the slot before the closure; and that new describes it if the closure returns.
+The closure performs one logical replacement and leaves the containing
+representation valid even if it panics after mutation.
+
+Debug/test builds validate every supplied pointer before running the closure.
+The separate always-inlined collector hook receives erased owner/old/new
+pointers and is empty for the initial stop-the-world collector. Therefore it
+adds no optimized collector action today while preserving one auditable site
+for a later Dijkstra-, SATB-, or generation-specific barrier. A future barrier
+may conservatively retain both old and new edges if the mutation closure
+panics.
+
+The mutation fixtures access a managed `Mutex<Option<Gc<_>>>` only under its
+owner mutator. Its manual trace snapshots and releases the mutex before calling
+the visitor, so visitor panic neither poisons the mutex nor changes the graph's
+retraceability. The foreign-heap test proves debug rejection occurs before its
+mutation closure runs.
+
 ## Verification and Review Status
 
 - Compile-fail doctests prove that a borrowed managed value cannot escape its
-  mutator region, a mutator cannot enter a scoped worker, and `Gc<T>` has no
-  `Deref` path.
+  mutator region, a mutator cannot enter a scoped worker, `Gc<T>` has no
+  `Deref` path, and address identity does not implement `Hash`.
 - Unit tests cover pointer size, pointer identity, zero-sized-type rejection,
   cross-thread handle transfer, nested separate heaps, debug rejection of
   wrong heap and representation, exact recursive edge sequences with duplicate
-  pointers, and full retracing after an injected visitor panic.
-- The ordinary crate checks, exact unsafe inventory, and the repository-wide
-  checks are required for C1A.
-- These sites are reviewed for the C1A leaking prototype and C1B observational
-  trace spike. C1C performs the complete pointer/access/trace audit before
-  allocator work starts.
+  pointers, full retracing after an injected visitor panic, exact edge
+  replacement, and rejection before foreign-heap mutation.
+- The ordinary crate checks, exact unsafe inventory, focused Miri run, and
+  repository-wide checks are required for completed C1.
+- Miri passes all C1 tests with `-Zmiri-ignore-leaks`. That flag suppresses only
+  the prototype allocator's deliberate `Box::leak`; C2 must remove it when it
+  introduces arena ownership.
+- The C1 pointer/access/trace/mutation surface is reviewed and frozen for the
+  initial non-moving collector. A moving collector may add a distinct edge-
+  rewriting contract; this observational visitor does not promise relocation.
 
 ## Governing Invariants
 

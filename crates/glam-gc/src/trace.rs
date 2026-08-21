@@ -61,6 +61,14 @@ impl ErasedGc {
     pub(crate) fn new(pointer: NonNull<()>) -> Self {
         Self { pointer }
     }
+
+    #[allow(
+        dead_code,
+        reason = "typed-run lookup first consumes erased addresses in C2"
+    )]
+    pub(crate) fn as_ptr(self) -> NonNull<()> {
+        self.pointer
+    }
 }
 
 // SAFETY: `Gc<T>` contains exactly one managed edge, which is reported once.

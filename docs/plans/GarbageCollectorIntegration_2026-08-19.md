@@ -329,7 +329,10 @@ Migrate the principal cyclic identities first:
 - clear/release lazy sources after terminal publication as today;
 - route source replacement and terminal assignment through the managed-edge
   mutation gateway; its collector action is empty in full stop-the-world mode
-  while preserving an auditable site for separately planned collectors; and
+  while preserving an auditable site for separately planned collectors;
+- discharge the raw gateway's unsafe same-heap, current-old-edge, and exact-
+  replacement obligations inside representation-local safe methods rather
+  than exposing raw `Gc` mutation to evaluator callers;
 - update the already-exact I4 visitors in the same checkpoint as each edge
   changes from external/`Arc` ownership to `Gc`; no phase may leave a trace
   placeholder merely because collection is disabled; and
