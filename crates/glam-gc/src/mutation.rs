@@ -1,7 +1,7 @@
 use crate::{Gc, Mutator, Trace, trace::ErasedGc};
 
 impl Mutator<'_> {
-    /// Runs one replacement of a managed edge through the collector gateway.
+    /// Reports one managed-edge transition while a closure performs it.
     ///
     /// The initial stop-the-world collector performs no barrier action. The
     /// explicit owner/old/new shape preserves one audited integration point
@@ -18,7 +18,7 @@ impl Mutator<'_> {
     /// must leave the containing representation valid; a future barrier may
     /// conservatively retain both the old and new targets.
     #[inline(always)]
-    pub unsafe fn replace_edge<Owner: Trace, Edge: Trace, Result>(
+    pub unsafe fn with_edge_replacement<Owner: Trace, Edge: Trace, Result>(
         &self,
         owner: Gc<Owner>,
         old: Option<Gc<Edge>>,
@@ -36,7 +36,7 @@ impl Mutator<'_> {
             }
         }
 
-        self.before_edge_replacement(owner.erase(), old.map(Gc::erase), new.map(Gc::erase));
+        self.observe_edge_replacement(owner.erase(), old.map(Gc::erase), new.map(Gc::erase));
         replace()
     }
 
@@ -46,7 +46,7 @@ impl Mutator<'_> {
     /// no-op policy explicit. Optimized STW builds erase the call and all three
     /// pointer arguments.
     #[inline(always)]
-    fn before_edge_replacement(
+    fn observe_edge_replacement(
         &self,
         _owner: ErasedGc,
         _old: Option<ErasedGc>,
@@ -107,7 +107,7 @@ mod tests {
             // contains `old` before the closure and `new` after its single
             // replacement.
             unsafe {
-                mutator.replace_edge(owner, Some(old), Some(new), || {
+                mutator.with_edge_replacement(owner, Some(old), Some(new), || {
                     replacements += 1;
                     *owner_value
                         .edge
@@ -144,7 +144,7 @@ mod tests {
                 // SAFETY: this deliberately violates the owner-heap
                 // precondition to verify rejection before the closure runs.
                 unsafe {
-                    mutator.replace_edge::<_, Leaf, _>(owner, None, None, || {
+                    mutator.with_edge_replacement::<_, Leaf, _>(owner, None, None, || {
                         ran.store(true, Ordering::Relaxed);
                     });
                 }

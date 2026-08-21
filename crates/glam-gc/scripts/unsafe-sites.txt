@@ -5,7 +5,7 @@ crates/glam-gc/src/lib.rs:                unsafe { *value.get_unchecked(mutator)
 crates/glam-gc/src/mutation.rs:                unsafe {
 crates/glam-gc/src/mutation.rs:            let owner_value = unsafe { owner.get_unchecked(mutator) };
 crates/glam-gc/src/mutation.rs:            unsafe {
-crates/glam-gc/src/mutation.rs:    pub unsafe fn replace_edge<Owner: Trace, Edge: Trace, Result>(
+crates/glam-gc/src/mutation.rs:    pub unsafe fn with_edge_replacement<Owner: Trace, Edge: Trace, Result>(
 crates/glam-gc/src/mutation.rs:    unsafe impl Trace for Leaf {
 crates/glam-gc/src/mutation.rs:    unsafe impl Trace for MutableNode {
 crates/glam-gc/src/mutator.rs:        unsafe { Gc::from_raw(pointer) }

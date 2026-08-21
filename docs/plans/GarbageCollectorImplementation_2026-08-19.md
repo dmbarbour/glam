@@ -314,12 +314,14 @@ gateway and perform the planned boundary audit before allocator work.
 
 C1C completed on 2026-08-21:
 
-- `Mutator::replace_edge` is the raw managed-edge mutation gateway. Its caller
-  identifies the owner plus old and new edge, proves all three belong to the
-  mutator heap, and performs the exact replacement inside one closure. Debug
-  builds reject foreign pointers before invoking the closure. The current
-  always-inlined collector hook is empty; future concurrent or generational
-  plans may conservatively process both edges before mutation.
+- `Mutator::with_edge_replacement` is the raw managed-edge mutation gateway.
+  It reports the transition to the collector and then invokes the caller's
+  closure; the gateway does not itself rewrite the represented storage. Its
+  caller identifies the owner plus old and new edge, proves all three belong
+  to the mutator heap, and performs the exact replacement inside one closure.
+  Debug builds reject foreign pointers before invoking the closure. The
+  current always-inlined collector hook is empty; future concurrent or
+  generational plans may conservatively process both edges before mutation.
 - The raw gateway remains unsafe because pointer-only `Gc<T>` cannot validate
   heap provenance at zero release cost. Production integration must provide
   representation-local safe wrappers which own that proof rather than expose

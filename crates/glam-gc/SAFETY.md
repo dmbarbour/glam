@@ -94,12 +94,12 @@ but cannot expose an invalid handle.
 
 ### Test call sites
 
-The remaining inventoried unsafe blocks call `get_unchecked` or `replace_edge`
-from focused tests. Correct-access sites state their heap, liveness,
-representation, and replacement proofs inline. Mismatch sites run only with
-debug assertions and test that the relevant gateway panics before dereference
-or mutation. No test creates a Rust reference with an invalid type or
-provenance.
+The remaining inventoried unsafe blocks call `get_unchecked` or
+`with_edge_replacement` from focused tests. Correct-access sites state their
+heap, liveness, representation, and replacement proofs inline. Mismatch sites
+run only with debug assertions and test that the relevant gateway panics
+before dereference or mutation. No test creates a Rust reference with an
+invalid type or provenance.
 
 ### `trace::Trace`
 
@@ -142,15 +142,18 @@ type metadata. Later typed-run lookup must recover and validate those facts.
 The receiver may panic; no visitor or traversal state is stored in the traced
 object.
 
-### `mutation::Mutator::replace_edge`
+### `mutation::Mutator::with_edge_replacement`
 
-The raw mutation gateway is unsafe because pointer-only `Gc<T>` does not carry
-release-visible heap provenance and because the collector cannot infer which
-representation slot the closure changes. The caller must prove that owner, old
-edge, and new edge are live allocations in the mutator heap; that old describes
-the slot before the closure; and that new describes it if the closure returns.
-The closure performs one logical replacement and leaves the containing
-representation valid even if it panics after mutation.
+The raw mutation gateway is named for the operation it encloses rather than an
+edge write it performs. It reports the owner, old edge, and new edge to the
+collector, then invokes the caller's closure; the closure performs the actual
+storage mutation. The gateway is unsafe because pointer-only `Gc<T>` does not
+carry release-visible heap provenance and because the collector cannot infer
+which representation slot the closure changes. The caller must prove that
+owner, old edge, and new edge are live allocations in the mutator heap; that
+old describes the slot before the closure; and that new describes it if the
+closure returns. The closure performs one logical replacement and leaves the
+containing representation valid even if it panics after mutation.
 
 Debug/test builds validate every supplied pointer before running the closure.
 The separate always-inlined collector hook receives erased owner/old/new
