@@ -47,9 +47,12 @@ use crate::{Mutator, Trace, trace::ErasedGc};
 /// let _ = HashSet::from([value]);
 /// ```
 #[must_use = "a managed pointer does not itself keep its allocation alive"]
+#[repr(transparent)]
 pub struct Gc<T: Trace> {
     pointer: NonNull<T>,
 }
+
+const _: () = assert!(std::mem::size_of::<Gc<u64>>() == std::mem::size_of::<*const u64>());
 
 impl<T: Trace> Gc<T> {
     /// Constructs a managed pointer from an allocator-validated address.

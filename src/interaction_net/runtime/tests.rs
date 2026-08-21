@@ -436,20 +436,6 @@ fn fan_commutation_records_dynamic_duplication_history() {
 }
 
 #[test]
-fn ids_ports_and_their_options_are_one_word() {
-    assert_eq!(std::mem::size_of::<NodeId>(), std::mem::size_of::<u64>());
-    assert_eq!(
-        std::mem::size_of::<Option<NodeId>>(),
-        std::mem::size_of::<u64>()
-    );
-    assert_eq!(std::mem::size_of::<Port>(), std::mem::size_of::<u64>());
-    assert_eq!(
-        std::mem::size_of::<Option<Port>>(),
-        std::mem::size_of::<u64>()
-    );
-}
-
-#[test]
 fn active_pair_key_is_the_lower_node_id_and_recovers_its_partner() {
     let mut net = RuntimeNet::<()>::empty();
     let lower = net.add_node(RuntimeNode::Data(()));

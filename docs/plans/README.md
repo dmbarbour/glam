@@ -19,6 +19,12 @@ when their historical value no longer justifies keeping them.
 - [`GarbageCollectorIntegration_2026-08-19.md`](GarbageCollectorIntegration_2026-08-19.md)
   migrates Glam values, roots, workers, reflection, and interaction nets.
 
+## Recent Completed Plans
+
+- [`CompileTimeAssertionPolicy_2026-08-21.md`](CompileTimeAssertionPolicy_2026-08-21.md)
+  moved hard layout and unsupported-representation checks from runtime to
+  compile time without turning performance budgets into build requirements.
+
 ## Preliminary and Deferred Plans
 
 - [`ValueRepresentationRefinement_2026-08-19.md`](ValueRepresentationRefinement_2026-08-19.md)

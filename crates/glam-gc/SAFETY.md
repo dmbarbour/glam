@@ -22,16 +22,18 @@ function, implementation, and block are checked into
 
 ## Prototype Representation Invariants
 
-- `Gc<T>` contains exactly one `NonNull<T>`. It carries no heap, domain, class,
+- `Gc<T>` is transparent over exactly one `NonNull<T>`. An unconditional const
+  assertion latches its one-pointer width. It carries no heap, domain, class,
   allocation-record, or debug field and is not a root. It supports pointer-
   identity equality but deliberately does not implement `Hash`, because an
   address hash could not remain stable across later moving collection.
 - `Mutator<'heap>` contains a reference to exactly one `HeapInner`. Its
   `Rc<()>` phantom makes the token neither `Send` nor `Sync`; the lifetime
   prevents it from outliving that heap entry.
-- `Mutator::alloc` accepts only `T: Trace` and rejects zero-sized types before
-  allocation. It initializes and leaks a `Box<T>`, registers its address, and
-  only then constructs `Gc<T>`.
+- `Mutator::alloc` accepts only `T: Trace`. Its inline const assertion rejects
+  zero-sized types while compiling an invalid monomorphization, before any
+  allocation can run. It initializes and leaks a `Box<T>`, registers its
+  address, and only then constructs `Gc<T>`.
 - Prototype payloads never move and are never destroyed. The allocation record
   is diagnostic metadata and may disappear with its heap; no access is valid
   without a live mutator for the owning heap.
@@ -123,8 +125,8 @@ reclamation through this interface.
 - `[T; N]` visits every element once in index order.
 - `(First, Second)` visits both fields in order.
 - `()`, `u32`, and `u64` report no edges. Unit remains unallocatable because
-  the collector rejects zero-sized payloads; its implementation exists only so
-  the C1A rejection fixture can instantiate the generic allocation boundary.
+  the collector rejects zero-sized payloads; its implementation exists so the
+  compile-fail fixture can instantiate the generic allocation boundary.
 - The test-only `Leaf`, recursive `Node`, and `RepresentativeStruct` manually
   report all their declared managed fields. They exercise the same contract but
   do not become collector API.
@@ -172,13 +174,15 @@ mutation closure runs.
 ## Verification and Review Status
 
 - Compile-fail doctests prove that a borrowed managed value cannot escape its
-  mutator region, a mutator cannot enter a scoped worker, `Gc<T>` has no
-  `Deref` path, and address identity does not implement `Hash`.
-- Unit tests cover pointer size, pointer identity, zero-sized-type rejection,
-  cross-thread handle transfer, nested separate heaps, debug rejection of
-  wrong heap and representation, exact recursive edge sequences with duplicate
-  pointers, full retracing after an injected visitor panic, exact edge
-  replacement, and rejection before foreign-heap mutation.
+  mutator region, a mutator cannot enter a scoped worker, zero-sized managed
+  allocation is rejected by const evaluation, `Gc<T>` has no `Deref` path, and
+  address identity does not implement `Hash`.
+- Unconditional const assertions enforce the `Gc<T>` pointer-width contract.
+  Unit tests cover pointer identity, cross-thread handle transfer, nested
+  separate heaps, debug rejection of wrong heap and representation, exact
+  recursive edge sequences with duplicate pointers, full retracing after an
+  injected visitor panic, exact edge replacement, and rejection before
+  foreign-heap mutation.
 - The ordinary crate checks, exact unsafe inventory, focused Miri run, and
   repository-wide checks are required for completed C1.
 - Miri passes all C1 tests with `-Zmiri-ignore-leaks`. That flag suppresses only

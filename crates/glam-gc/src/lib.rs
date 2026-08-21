@@ -85,23 +85,10 @@ mod tests {
     }
 
     #[test]
-    fn managed_pointer_is_one_pointer_wide() {
+    fn managed_pointer_is_send_and_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
 
-        assert_eq!(
-            std::mem::size_of::<Gc<u64>>(),
-            std::mem::size_of::<*const u64>()
-        );
         assert_send_sync::<Gc<u64>>();
-    }
-
-    #[test]
-    #[should_panic(expected = "zero-sized managed types are unsupported")]
-    fn zero_sized_prototype_allocations_are_rejected() {
-        let heap = Heap::new();
-        heap.with_mutator(|mutator| {
-            let _ = mutator.alloc(());
-        });
     }
 
     #[test]

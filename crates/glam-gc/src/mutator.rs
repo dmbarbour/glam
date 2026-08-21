@@ -42,11 +42,24 @@ impl<'heap> Mutator<'heap> {
     ///
     /// This is not the collector allocator. It exists only to verify pointer,
     /// lifetime, heap-authority, and thread-sharing contracts before C2.
+    ///
+    /// Zero-sized managed types are unsupported:
+    ///
+    /// ```compile_fail,E0080
+    /// use glam_gc::Heap;
+    ///
+    /// let heap = Heap::new();
+    /// heap.with_mutator(|mutator| {
+    ///     let _ = mutator.alloc(());
+    /// });
+    /// ```
     pub fn alloc<T: Trace>(&self, value: T) -> Gc<T> {
-        assert!(
-            std::mem::size_of::<T>() != 0,
-            "zero-sized managed types are unsupported"
-        );
+        const {
+            assert!(
+                std::mem::size_of::<T>() != 0,
+                "zero-sized managed types are unsupported"
+            );
+        }
 
         let value = Box::leak(Box::new(value));
         let pointer = NonNull::from(value);

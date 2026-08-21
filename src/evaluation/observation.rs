@@ -17,6 +17,9 @@ use std::sync::{Arc, Condvar, Mutex};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct RuntimeObservationEpoch(NonZeroU64);
 
+const _: () =
+    assert!(std::mem::size_of::<Option<RuntimeObservationEpoch>>() == std::mem::size_of::<u64>());
+
 impl RuntimeObservationEpoch {
     pub(crate) fn from_raw(epoch: u64) -> Self {
         Self(NonZeroU64::new(epoch).expect("runtime observation epochs must be nonzero"))
@@ -104,12 +107,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn observation_epochs_are_nonzero_and_option_niche_optimized() {
-        assert_eq!(
-            std::mem::size_of::<Option<RuntimeObservationEpoch>>(),
-            std::mem::size_of::<u64>()
-        );
-
+    fn observation_epochs_begin_nonzero_and_advance() {
         let observations = RuntimeObservationState::new();
         assert_eq!(observations.current().get(), 1);
         assert_eq!(observations.advance().get(), 2);

@@ -16,6 +16,9 @@ const PORT_MASK: u64 = (1 << PORT_BITS) - 1;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NodeId(NonZeroU64);
 
+const _: () = assert!(std::mem::size_of::<NodeId>() == std::mem::size_of::<u64>());
+const _: () = assert!(std::mem::size_of::<Option<NodeId>>() == std::mem::size_of::<u64>());
+
 impl NodeId {
     pub(super) fn from_index(index: usize) -> Self {
         Self::from_zero_based(
@@ -123,6 +126,9 @@ pub enum Callable<S: NetSpecialization> {
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Port(NonZeroU64);
+
+const _: () = assert!(std::mem::size_of::<Port>() == std::mem::size_of::<u64>());
+const _: () = assert!(std::mem::size_of::<Option<Port>>() == std::mem::size_of::<u64>());
 
 impl Port {
     pub fn principal(node: NodeId) -> Self {
