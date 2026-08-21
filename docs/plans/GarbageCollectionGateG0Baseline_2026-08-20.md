@@ -104,5 +104,5 @@ G0 is satisfied because:
 4. the discovered worker-stack limitation is preserved as an explicit
    pre-existing observation rather than hidden or promoted into semantics.
 
-C1 may now introduce its reviewed unsafe trace/access spike. G0 does not
+C1A may now introduce its reviewed unsafe pointer/access boundary. G0 does not
 authorize production Glam ownership migration; that remains gated by G1.

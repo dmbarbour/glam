@@ -16,14 +16,22 @@ to a later performance plan. Concurrent marking is also a later plan.
 | Phase | Status | Outcome |
 | --- | --- | --- |
 | C0 | completed | crate, provenance, safety, and test scaffold |
-| C1 | pending | trace, pointer, and mutator access contract |
+| C1A | pending | prototype managed pointer and access boundary |
+| C1B | pending | trace visitor and representative structural traces |
+| C1C | pending | mutation gateway, unsafe audit, and API freeze |
 | C2A | pending | arena chunks, fixed typed-run geometry, and layout limits |
 | C2B | pending | type metadata and per-heap allocation-class discovery |
 | C2C | pending | worker-local bitmap-range allocation and reuse |
-| C3 | pending | recursive mutator regions and STW handshake |
+| C3A | pending | ordinary admission and same-heap recursion integration |
+| C3B | pending | collector election and single-heap STW quiescence |
+| C3C | pending | cross-heap dependent admission |
+| C3D | pending | finalizer handoff, pressure, panic, and teardown races |
 | C4 | pending | explicit external roots |
 | C5 | pending | exact full marking |
-| C6 | pending | sweeping, mutator finalization, retry, and quarantine |
+| C6A | pending | no-drop sweep and run-state publication |
+| C6B | pending | finalizer detachment, mutator execution, and non-resurrection |
+| C6C | pending | destructor panic, quarantine, retry, and activity |
+| C6D | pending | terminal heap teardown and final safety audit |
 | C7 | pending | shared-pointer and worker-shaped stress |
 | C8 | pending | tuning and final collector audit |
 
@@ -56,7 +64,7 @@ crate is not a supported embedding API during this transition.
 
 ## Initial API Sketch
 
-Names remain provisional until Phase C1:
+Names remain provisional until Phase C1C:
 
 ```rust
 pub struct Heap { /* shared heap ownership */ }
@@ -126,7 +134,7 @@ C0 completed on 2026-08-19 with these deliberately narrow decisions:
 - `glam-gc` has no normal dependency and contains no copied or adapted
   third-party source; Loom is an unmodified development dependency;
 - the empty `Heap` is a cheaply cloned shared ownership shell, while its scoped
-  `Mutator` is non-`Send` and non-`Sync` but offers no operation. C1 may still
+  `Mutator` is non-`Send` and non-`Sync` but offers no operation. C1A may still
   change token and provenance representation before managed pointers exist;
 - `SAFETY.md` records an empty unsafe inventory, latched by compiling every
   crate target and feature with `unsafe_code` forbidden; and
@@ -138,6 +146,25 @@ C0 completed on 2026-08-19 with these deliberately narrow decisions:
 
 Implement only enough allocation leakage to test the internal pointer and
 mutator safety shape.
+
+Execute C1 as three independently verified checkpoints:
+
+- **C1A — pointer and access boundary.** Introduce the prototype allocation
+  record, pointer-only `Gc<T>`, heap-qualified `Mutator` access, compile-fail
+  lifetime/thread tests, debug wrong-heap/type checks, and the first explicit
+  unsafe-ledger entries. No trace traversal is required to pass C1A.
+- **C1B — trace contract.** Add `Trace`, its edge visitor and erasure boundary,
+  representative manual recursive traces, and only the structural helpers
+  justified by those fixtures. Prove tracing is observational and retryable
+  after panic; do not add marking or sweeping.
+- **C1C — boundary audit and freeze.** Add the structural no-op mutation
+  gateway, verify multi-heap token coexistence, run the focused Miri/unsafe
+  inventory, and freeze the internal pointer/access/visitor surface before
+  allocator work.
+
+Each checkpoint runs its focused tests and the crate verification script. C1C
+also performs the complete unsafe-ledger review for everything introduced by
+C1A-C1C.
 
 Roadmap Gate G0 was established on 2026-08-20 in
 [`GarbageCollectionGateG0Baseline_2026-08-20.md`](GarbageCollectionGateG0Baseline_2026-08-20.md).
@@ -179,7 +206,7 @@ unsafe inventory which fails on unreviewed modules or sites, and update
 - Define a small managed-edge mutation gateway whose collector action is an
   inline no-op for full stop-the-world collection. This latches the API shape
   without imposing remembered-set or concurrent-marking work prematurely.
-- Implement tracing manually for the C1 representative graph types. Provide
+- Implement tracing manually for the C1B representative graph types. Provide
   narrowly reviewed structural implementations or visitor helpers for wrappers
   which contribute no representation policy of their own, initially options,
   fixed arrays, tuples, and slices as actual use requires. Do not add a derive
@@ -203,7 +230,7 @@ unsafe inventory which fails on unreviewed modules or sites, and update
   defining crate. Do not encode a run size or class in `Gc<T>`: the collector
   recovers the owner from the untagged address and its fixed run geometry.
   Variable run sizes and pointer-encoded run classes remain a profiled
-  representation alternative, not a C1 commitment.
+  representation alternative, not a C1C commitment.
 
 Verification:
 
@@ -357,6 +384,12 @@ Verification:
 
 ## Phase C2C — Worker-Local Bitmap-Range Allocation and Reuse
 
+C2C owns the first implementation of `ThreadHeapState`: the heap-specific TLS
+entry, recursive depth, allocation-lease epoch, and cursor map work while
+collection is still disabled. C3 later connects that existing state to global
+mutator admission and collection phases; it must not introduce a competing TLS
+representation.
+
 - Require mutator authority and an `AllocationClass<T>` for every managed
   allocation.
 - Give each thread a heap-specific cache containing one captured
@@ -438,11 +471,31 @@ Verification:
 - reused slots are correctly reinitialized and marked allocated;
 - panic unwinding never exposes uninitialized storage as an object; and
 - dropping the heap without collection destroys every allocated drop-type slot
-  exactly once for C2C's non-reentrant test payloads. C6 replaces this
-  provisional teardown path with collector-controlled mutator finalization
-  before client/production drop types are admitted.
+  exactly once for C2C's non-reentrant test payloads. C6B and C6D replace this
+  provisional teardown path with collector-controlled mutator finalization and
+  terminal teardown before client/production drop types are admitted.
 
 ## Phase C3 — Regional Mutators and Stop-the-World Handshake
+
+Execute C3 as four checkpoints over the `ThreadHeapState` established by C2C:
+
+- **C3A — ordinary admission.** Add active-mutator accounting, same-heap
+  recursive entry/exit, panic-safe quiescence publication, and cache activation
+  without any collector election.
+- **C3B — single-heap STW.** Add collection request/coalescing, writer
+  commitment, collector election, active-count drain, exclusive phase entry,
+  and release back to ordinary admission for one heap.
+- **C3C — cross-heap admission.** Add several simultaneously active
+  heap-qualified TLS entries and the dependent-admission exception for queued
+  writers. Force A-then-B/B-then-A schedules and the already-exclusive target
+  case.
+- **C3D — finalizer handoff and recovery.** Add the exclusive-to-finalizer-
+  mutator transition, follow-up pressure, writer preference around
+  finalization, panic unwinding, waiter teardown, and the complete coordination
+  audit required by later sweep/finalization phases.
+
+Do not begin a later checkpoint until the preceding state machine and its
+forced-order tests pass independently.
 
 - Implement outer `enter`/`exit` admission with a heap phase mutex/condition
   variable or equivalent state machine.
@@ -452,8 +505,8 @@ Verification:
   by a mutator's local bitmap-range cursor. The collector sets its request under
   that mutex, waits for the active count to reach zero, and then has exclusive
   access to allocation state without retaining a mutator-region lock.
-- Maintain one `ThreadHeapState` per heap identity in TLS. It contains that
-  heap's recursive mutator depth, allocation-lease epoch, and bitmap-range
+- Extend C2C's `ThreadHeapState` with collection admission. It already contains
+  that heap's recursive mutator depth, allocation-lease epoch, and bitmap-range
   cursor map. A thread may have several such states active concurrently;
   entering another runtime heap activates its independent state and admission
   count rather than replacing a singular current-mutator slot.
@@ -497,7 +550,7 @@ Verification:
   `Finalizing` while still holding the coordinator lock. There must be no
   interval in which neither collector exclusion nor the finalizer mutator is
   authoritative.
-- Exercise this handoff in C3 from a synthetic completed-collection state; C6
+- Exercise this handoff in C3D from a synthetic completed-collection state; C6B
   connects it to a real fixed dead set and destructor queue.
 - The collector thread holds that mutator for the complete `Finalizing` phase.
   Releasing exclusive admission makes finalization concurrent by default:
@@ -654,6 +707,24 @@ tests.
 
 ## Phase C6 — Sweep, Mutator Finalization, Retry, and Quarantine
 
+Execute C6 as four checkpoints:
+
+- **C6A — no-drop sweep.** Derive dead sets from allocation/mark bitmaps,
+  reclaim wholly dead no-drop runs, publish partially live lazy-sweep state,
+  and prove storage is not reused before metadata retirement.
+- **C6B — finalizer execution.** Detach dead drop-type slots into the non-
+  rootable finalization batch, perform the C3D mutator handoff, run ordinary
+  Rust destruction outside collector locks, and enforce non-resurrection.
+- **C6C — panic and activity.** Add sparse quarantine, deterministic destructor
+  panic recovery, safe draining policy, finalizer activity reporting, and
+  follow-up collection-pressure publication.
+- **C6D — terminal teardown and audit.** Resolve the last-owner drain protocol
+  or explicitly restricted fallback, exercise runtime/heap drop, and perform
+  the focused unsafe/finalization audit which closes Gate G1.
+
+Each checkpoint must leave the heap in a usable documented phase after every
+recoverable panic injected by its own tests.
+
 - Identify unreachable allocations only after marking completes.
 - Do not eagerly enumerate every allocated payload. Inspect run summaries and
   bitmaps:
@@ -749,7 +820,7 @@ destructor quarantines only its slot; allocations and effects it published
 before panicking remain valid, and after the caller catches the panic another
 allocation and full collection must succeed.
 
-Gate G1 passes after C6 plus a focused unsafe-code audit.
+Gate G1 passes after C6D plus its focused unsafe-code audit.
 
 ## Phase C7 — Shared-Pointer and Worker-Shaped Stress
 

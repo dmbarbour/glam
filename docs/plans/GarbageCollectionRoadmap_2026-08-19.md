@@ -1,7 +1,7 @@
 # Glam-Owned Garbage Collection Roadmap — 2026-08-19
 
 Status: in progress; collector Phase C0 and integration Phase I0 are complete,
-and Gate G0 is established. Collector Phase C1 may proceed.
+and Gate G0 is established. Collector Phase C1A may proceed.
 
 This roadmap keeps two large transitions aligned:
 
@@ -266,7 +266,7 @@ runtime provenance, cross-runtime rejection, lazy and promise cycles,
 concurrent worker use, interaction-net sharing, runtime settlement, and release
 of fulfilled lazy sources. Record current memory and representative assembly
 timings as comparison data, not pass/fail performance contracts. The safe C0
-crate scaffold may precede this record; C1 may not.
+crate scaffold may precede this record; C1A may not.
 
 ### Gate G1 — isolated collector soundness
 
@@ -362,11 +362,18 @@ pay their synchronization cost before profiling supports them.
 
 ## Plan Maintenance
 
-Each completed phase is marked in its owning plan with the verification run and
-any semantic decision. Before beginning another major phase, review all later
-phases for drift against the current implementation. If a checkpoint grows to
-touch several independent unsafe or scheduler boundaries, divide it before
-implementation.
+Each completed checkpoint is marked in its owning plan with the verification
+run and any semantic decision. Completion of every major parent phase triggers
+a mandatory review of all later phases before the next parent phase begins;
+that review reconciles implementation drift, dependencies, checkpoint size,
+and newly settled semantics. If a checkpoint grows to touch several
+independent unsafe or scheduler boundaries, divide it before implementation
+rather than waiting for the following review.
+
+For the current collector plan, the mandatory review points are after C1C,
+C2C, C3D, C4, C5, C6D, C7, and C8. Review and partition the integration phases
+again when Gate G1 permits that work; their present breakdown is not frozen by
+the collector implementation plan.
 
 Completion of both child plans requires a final audit against every invariant
 above. Passing tests alone does not establish an unexamined trace edge.
