@@ -244,8 +244,10 @@ Verify that:
   references;
 - recursive evaluator and reflection entry does not count as another mutator;
 - recursive entry does not create an independent class cache, while outer exit
-  commits allocation bits and publishes/returns every local run cursor before
-  the worker becomes eligible to sleep or service another runtime; and
+  retains or returns every local run cursor and makes its thread cache quiescent
+  before the worker becomes eligible to sleep or service another runtime;
+- allocation payload and allocation-bit initialization completes before the
+  managed pointer is returned, rather than at the outer-region boundary; and
 - collection requests can stop every worker at a bounded quantum boundary.
 
 ## Phase I4 — Core Trace Vocabulary and Leaf Policy

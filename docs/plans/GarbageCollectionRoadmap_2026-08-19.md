@@ -112,9 +112,15 @@ permit dereference outside a region.
 3. **No collection during mutation.** The baseline collector reclaims only
    after every active mutator region has exited. Nested same-runtime regions
    count as one active mutator. Allocation also requires mutator authority, so
-   no allocation can race a stopped-world trace or sweep. Before the outermost
-   exit publishes that the mutator is gone, it commits completed allocations
-   and publishes or returns every worker-local typed-run cursor.
+   no allocation can race a stopped-world trace or sweep. Every successful
+   allocation is fully initialized and marked allocated before its managed
+   pointer is returned; sharing that pointer does not wait for mutator exit.
+   Before outermost exit makes the mutator inactive, it retains or returns every
+   worker-local typed-run cursor and makes its registered thread cache
+   collector-accessible. The heap owns and enumerates every run independently
+   of those caches. Cursors carry no separate active/parked state: thread-local
+   recursive depth governs use, and exclusive collector admission proves every
+   cache is quiescent.
 4. **No hidden stack scan.** Roots are explicit. Local unrooted pointers are
    safe because their entire lifetime lies within a mutator region.
 5. **No partially traced collection.** Production reclamation remains disabled

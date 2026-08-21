@@ -303,6 +303,14 @@ Verification:
 - Give each typed run one metadata/allocation-class identity in its header;
   ordinary slots contain payload only, with no GC header, metadata pointer,
   mark byte, or finalizer byte.
+- Keep every typed run owned and directly enumerable by its heap for its entire
+  lifetime. A thread-local allocator may hold an exclusive allocation lease
+  and cursor for a run, but the run is never owned or discoverable only through
+  thread-local state. The class/run tables distinguish pooled runs from runs
+  leased to a registered thread cache. A cursor needs no separate active versus
+  parked state: the owning thread's recursive mutator depth says whether it is
+  currently usable, while exclusive collector admission proves that no thread
+  cache is in use. A lease never becomes reachability for the run's objects.
 - Maintain a per-heap map from canonical metadata pointer to
   `AllocationClassId` for first-use class discovery and a stable dense class
   table containing that metadata pointer and typed-run pools. Metadata function
@@ -332,6 +340,8 @@ Verification:
 - the same Rust type in two heaps shares canonical metadata but receives
   distinct heap-local classes;
 - every run header resolves to the expected trace/drop/layout metadata;
+- heap enumeration finds every run independently of thread-local allocation
+  leases;
 - repeated allocation through a retained class performs no `TypeId` lookup;
 - safe allocation with a class from another heap is rejected before either
   heap's run state changes;
@@ -343,31 +353,59 @@ Verification:
 
 - Require mutator authority and an `AllocationClass<T>` for every managed
   allocation.
-- Give each C2C mutator entry a small local cache from dense class ID to its
-  current run cursor. C3 later makes same-heap entry recursive and moves this
-  cache to the outermost region so nested entry shares it.
+- Give each thread a heap-specific local cache from dense class ID to its
+  current run cursor. The thread-local registry is keyed by collector heap
+  identity because one host thread may enter more than one heap. A cache keeps
+  only a weak association to its heap, so an idle thread cannot retain a dead
+  heap; a stale cursor is never dereferenced unless entry has reacquired that
+  heap and validated the cursor's lease/epoch.
+- Register each live thread cache weakly with its heap. The heap uses that
+  registry to revoke or recover allocation leases, not to discover runs or
+  object reachability. Correctness must not depend on thread-local destructor
+  order; a cooperative thread exit may return leases promptly, while a later
+  full collection can recover expired or retained leases.
 - Allocate ordinary slots from the cached run using only worker-local cursor or
   free-bitmap state. Do not look up or hash `TypeId`, acquire a shared lock, or
   increment a shared byte counter on the ordinary hot path.
 - On cache miss or run exhaustion, use the class's synchronized slow path to
   obtain a reusable partial fixed-size run or reserve a new typed run from an
   arena chunk.
-  Return/publish partial cursors in a batch when the C2C mutator entry exits.
 - Initialize the payload completely before setting its allocation bit. A
   reserved but uncommitted slot is not traceable. Panic unwinding returns the
-  slot to local free state without invoking `Drop` on uninitialized bytes.
+  slot to local free state without invoking `Drop` on uninitialized bytes. Set
+  the allocation bit before returning `Gc<T>`. Sharing that pointer through
+  ordinary Rust synchronization makes it visible to another mutator; nothing
+  about object visibility is deferred until mutator exit.
+- On outer mutator exit, leave each reusable partial cursor retained in the
+  registered thread cache or return it to the class pool according to cache
+  eviction policy. Releasing mutator admission makes the cache quiescent and
+  collector-accessible; retaining its cursor does not publish an allocation or
+  root its slots. Re-entry may reuse a valid retained lease without the shared
+  class-pool slow path.
 - Charge allocation pressure when runs are obtained and reconcile unused slots
-  when partial runs are returned. Tune the number and representation of local
-  class cursors only after allocation histograms exist.
+  when partial runs are returned or revoked. Bound or evict cold class cursors
+  so `threads × classes × partial-run size` does not become unbounded
+  fragmentation, but select the initial bound only after allocation histograms
+  exist.
 - Permit a mutex-backed run-turnover path initially. Changing run-pool or local
-  cache policy later must not change pointer, trace, or mutator semantics.
+  cache policy later must not change pointer, trace, or mutator semantics. One
+  cache lock at outer entry is acceptable; ordinary allocations through the
+  held cache do not reacquire it.
+- Do not choose synchronization for possible future debug reads of allocation
+  bitmaps in this phase. Such observations are non-semantic and may lag
+  allocation activity. Any later implementation must remain data-race-free,
+  but need not provide a transactional bitmap snapshot.
 
 Verification:
 
 - allocation from several mutators never overlaps;
 - instrumentation proves repeated allocations in a cached class perform no
   hash lookup or shared synchronization;
-- cold types do not lose their partial runs permanently when a mutator exits;
+- a cursor retained after one outer entry is reused by a later entry on the same
+  thread without class-pool synchronization;
+- a thread cache does not retain its heap, and stale cache entries are rejected
+  before dereferencing a run;
+- cold or expired caches do not lose their partial runs permanently;
 - reused slots are correctly reinitialized and marked allocated;
 - panic unwinding never exposes uninitialized storage as an object; and
 - dropping the heap without collection destroys every allocated drop-type slot
@@ -387,8 +425,13 @@ Verification:
   access to allocation state without retaining a mutator-region lock.
 - Support recursive same-heap entry through thread-local depth without
   incrementing the global active-mutator count.
-- Move the C2C local run-cursor cache to the outermost same-heap region. Nested
-  entry reuses it, and only outermost exit publishes/returns partial runs.
+- Activate the persistent C2C thread cache at the outermost same-heap entry.
+  Nested entry reuses that cache. Only outermost exit makes the cache quiescent,
+  leaving reusable cursors retained and returning evicted cursors.
+- Do not maintain a cross-thread active/parked flag for a cursor. Recursive
+  depth is local to its owning thread. The collector need not inspect another
+  thread's depth: acquiring exclusive mutator admission proves that every
+  registered cache is quiescent before the collector inspects or revokes it.
 - Provide a scoped current-mutator accessor for reviewed destructor and
   runtime-integration code, for example an HRTB closure API rather than a
   borrow which can escape. A destructor invoked by the collector sees its
@@ -435,10 +478,13 @@ Verification:
   finish their bounded region; those allocations remain part of the heap which
   the collector sees after the active count reaches zero. A pending request
   must not strand an admitted mutator before it can exit.
-- Outermost exit publishes completed allocation bits and returns/publishes all
-  local typed-run cursors before publishing the active-count decrement. That
-  release/acquire edge is part of the collector's visibility proof and must be
-  exercised under Loom or deterministic barriers.
+- Every successful allocation has initialized its payload and set its
+  allocation bit before returning its pointer, independently of mutator exit.
+  Outermost exit retains or returns every local typed-run cursor and releases
+  the cache's active access before decrementing the active-mutator count. The
+  admission release/acquire edge makes prior allocator metadata writes visible
+  to the collector; it is not a Glam value-publication or transactional
+  boundary. Exercise this ordering under Loom or deterministic barriers.
 - Allocation thresholds request collection but do not synchronously collect
   from the middle of a mutator region.
 - Allocation pressure during `Finalizing` records follow-up pressure. Before
@@ -502,6 +548,12 @@ are stopped.
 ## Phase C5 — Exact Full Marking
 
 - Stop all mutators and snapshot/visit external roots.
+- Enumerate runs directly from the heap, never by discovering them through
+  thread caches. For the initial full collector, revoke every cache-retained
+  thread-local cursor lease at the start of the exclusive phase and advance an
+  allocation epoch. A later mutator discards the stale cursor and reacquires a
+  run from the post-sweep class pool. Retaining selected hot leases across a
+  collection is deferred profiling work.
 - Mark through each allocation class's edge visitor; do not derive outgoing
   edges from fixed byte offsets. Immediate/non-edge fields are invisible to the
   collector.
