@@ -2,7 +2,7 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::ptr::NonNull;
 
-use crate::Mutator;
+use crate::{Mutator, Trace, trace::ErasedGc};
 
 /// A typed, non-rooting pointer to one managed allocation.
 ///
@@ -36,11 +36,11 @@ use crate::Mutator;
 /// let _ = *value;
 /// ```
 #[must_use = "a managed pointer does not itself keep its allocation alive"]
-pub struct Gc<T> {
+pub struct Gc<T: Trace> {
     pointer: NonNull<T>,
 }
 
-impl<T> Gc<T> {
+impl<T: Trace> Gc<T> {
     /// Constructs a managed pointer from an allocator-validated address.
     ///
     /// # Safety
@@ -57,9 +57,13 @@ impl<T> Gc<T> {
     pub fn ptr_eq(self, other: Self) -> bool {
         self.pointer == other.pointer
     }
+
+    pub(crate) fn erase(self) -> ErasedGc {
+        ErasedGc::new(self.pointer.cast())
+    }
 }
 
-impl<T: 'static> Gc<T> {
+impl<T: Trace> Gc<T> {
     /// Borrows the managed value under one heap-qualified mutator token.
     ///
     /// # Safety
@@ -81,29 +85,29 @@ impl<T: 'static> Gc<T> {
     }
 }
 
-impl<T> Copy for Gc<T> {}
+impl<T: Trace> Copy for Gc<T> {}
 
-impl<T> Clone for Gc<T> {
+impl<T: Trace> Clone for Gc<T> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<T> PartialEq for Gc<T> {
+impl<T: Trace> PartialEq for Gc<T> {
     fn eq(&self, other: &Self) -> bool {
         self.pointer == other.pointer
     }
 }
 
-impl<T> Eq for Gc<T> {}
+impl<T: Trace> Eq for Gc<T> {}
 
-impl<T> Hash for Gc<T> {
+impl<T: Trace> Hash for Gc<T> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.pointer.hash(state);
     }
 }
 
-impl<T> fmt::Debug for Gc<T> {
+impl<T: Trace> fmt::Debug for Gc<T> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.debug_tuple("Gc").field(&self.pointer).finish()
     }
@@ -112,11 +116,11 @@ impl<T> fmt::Debug for Gc<T> {
 // SAFETY: a `Gc<T>` grants no access without a non-`Send`, heap-qualified
 // mutator. Moving a handle between threads is valid when the eventual shared
 // access and destruction of `T` are both thread-safe.
-unsafe impl<T: Send + Sync> Send for Gc<T> {}
+unsafe impl<T: Trace> Send for Gc<T> {}
 
 // SAFETY: sharing a `Gc<T>` grants no access without a non-`Sync`,
 // heap-qualified mutator. Shared access to `T` is valid under this bound.
-unsafe impl<T: Send + Sync> Sync for Gc<T> {}
+unsafe impl<T: Trace> Sync for Gc<T> {}
 
 #[cfg(test)]
 mod tests {

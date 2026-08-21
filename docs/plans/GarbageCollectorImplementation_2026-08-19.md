@@ -1,6 +1,6 @@
 # Glam GC Subcrate Implementation Plan — 2026-08-19
 
-Status: in progress; Phases C0 and C1A are complete.
+Status: in progress; Phases C0, C1A, and C1B are complete.
 
 This plan implements an exact, non-moving, runtime-local tracing collector
 without depending on Glam value semantics. The governing requirements and
@@ -17,7 +17,7 @@ to a later performance plan. Concurrent marking is also a later plan.
 | --- | --- | --- |
 | C0 | completed | crate, provenance, safety, and test scaffold |
 | C1A | completed | prototype managed pointer and access boundary |
-| C1B | pending | trace visitor and representative structural traces |
+| C1B | completed | trace visitor and representative structural traces |
 | C1C | pending | mutation gateway, unsafe audit, and API freeze |
 | C2A | pending | arena chunks, fixed typed-run geometry, and layout limits |
 | C2B | pending | type metadata and per-heap allocation-class discovery |
@@ -280,6 +280,32 @@ C1A completed on 2026-08-21 with the following deliberately temporary shape:
 C1A adds no trace contract, roots, reclamation, safepoint coordination, or
 production Glam integration. C1B may now add only the visitor-based trace
 contract and representative structural traces described above.
+
+C1B completed on 2026-08-21 with these boundaries:
+
+- `Trace` is an unsafe `Send + Sync + 'static` contract. Implementations must
+  synchronously report every represented managed edge, may report duplicates,
+  must not mutate observable graph state, and must remain safely retraceable
+  from the beginning after either implementation or visitor panic.
+- `Visitor::visit` erases only the Rust pointer type. The erased pointer gains
+  no heap, class, allocation, or trace metadata; typed runs remain responsible
+  for recovering those facts later. Visitor construction stays crate-private
+  until marking consumes the boundary.
+- `Gc<T>` and prototype allocation now require `T: Trace`. The admitted
+  structural implementations are only `Gc<T>`, `Option<T>`, fixed arrays, and
+  pairs, plus the immediate `()`, `u32`, and `u64` types required by C1A's
+  fixtures. Slices, general containers, derive support, and representation-
+  specific persistent structures remain deliberately absent.
+- Representative manual struct and recursive-enum implementations have exact
+  independently stated edge-sequence tests. Those tests include repeated
+  pointers and all admitted structural helpers.
+- A visitor which panics partway through a trace leaves the same object able to
+  reproduce its complete original edge sequence on a fresh attempt. Tracing
+  creates no retained traversal state in either the object or collector.
+
+C1B adds no root discovery, mark state, worklist, collection, sweep, or
+production ownership migration. C1C may now add the no-op structural mutation
+gateway and perform the planned boundary audit before allocator work.
 
 ## Phase C2A — Arena Chunks, Fixed Typed-Run Geometry, and Layout Limits
 

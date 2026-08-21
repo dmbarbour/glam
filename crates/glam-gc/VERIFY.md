@@ -1,6 +1,6 @@
 # Collector Verification
 
-Run the stable C1A checks from the repository root:
+Run the stable C1B checks from the repository root:
 
 ```sh
 crates/glam-gc/scripts/check.sh
@@ -21,7 +21,7 @@ crates/glam-gc/scripts/check-sanitizer.sh thread
 ```
 
 These scripts deliberately fail with the underlying toolchain diagnostic when
-nightly, Miri, `rust-src`, or a sanitizer is unavailable. C1A does not claim
+nightly, Miri, `rust-src`, or a sanitizer is unavailable. C1B does not claim
 that every developer environment has installed those tools; the focused Miri
 and complete unsafe review remain C1C acceptance work.
 

@@ -4,16 +4,17 @@ This file is the authoritative inventory of unsafe code and collector safety
 invariants for the Glam-owned garbage collector. Update it in the same change
 which adds or changes an unsafe operation.
 
-## Phase C1A Status
+## Phase C1B Status
 
-C1A introduces a pointer-only `Gc<T>` and a deliberately leaking prototype
-allocation path. There is still no tracing, root registry, collection,
+C1A introduced a pointer-only `Gc<T>` and a deliberately leaking prototype
+allocation path. C1B adds the visitor-based `Trace` contract and representative
+manual implementations. There is still no root registry, collection, marking,
 reclamation, finalization, callback, or collector coordination.
 
 The crate denies unsafe code by default. `src/lib.rs` gives the reviewed
-`pointer`, `mutator`, and unit-test modules named lint expectations for unsafe
-code. The exact module expectations and every unsafe function, implementation,
-and block are checked into
+`pointer`, `mutator`, `trace`, and unit-test modules named lint expectations for
+unsafe code. The exact module expectations and every unsafe function,
+implementation, and block are checked into
 `scripts/unsafe-modules.txt` and `scripts/unsafe-sites.txt`;
 `scripts/audit-unsafe.sh` fails when either inventory changes.
 
@@ -73,12 +74,12 @@ Those checks are not part of the release-build proof.
 ### `Send` and `Sync` for `Gc<T>`
 
 `NonNull<T>` does not grant these auto traits. The unsafe implementations are
-restricted to `T: Send + Sync`. Copying or sharing `Gc<T>` does not grant
-access: dereference still requires a non-`Send`, non-`Sync`, heap-qualified
-mutator. `T: Sync` permits the resulting shared reference on another thread;
-`T: Send` permits eventual collector-thread destruction. The cross-thread
-prototype test moves a `Gc<u64>` and accesses it only after entering its owner
-heap on that thread.
+restricted to `T: Trace`, which itself requires `Send + Sync`. Copying or
+sharing `Gc<T>` does not grant access: dereference still requires a non-`Send`,
+non-`Sync`, heap-qualified mutator. `T: Sync` permits the resulting shared
+reference on another thread; `T: Send` permits eventual collector-thread
+destruction. The cross-thread prototype test moves a `Gc<u64>` and accesses it
+only after entering its owner heap on that thread.
 
 ### `mutator::Mutator::alloc`
 
@@ -95,18 +96,61 @@ proofs inline. The two mismatch sites run only with debug assertions and test
 that the gateway panics before dereference. No test creates a Rust reference
 with an invalid type or provenance.
 
+### `trace::Trace`
+
+`Trace` is unsafe because omitting one managed edge can make a later exact
+collector reclaim a reachable allocation. Implementations must synchronously
+visit every `Gc<_>` represented by the value, must not invent invalid edges or
+retain the visitor, and must not hide a managed pointer in another
+representation. Reporting a valid edge more than once is permitted.
+
+Tracing is observational. An implementation may inspect immediate fields to
+select edges but may not mutate the managed graph, collector metadata, or
+interior state in a way that changes a later trace. If either the
+implementation or visitor panics, the value remains valid and can be traced
+again from the beginning. C1B invokes no allocation, callback, destruction, or
+reclamation through this interface.
+
+### Structural `Trace` implementations
+
+- `Gc<T>` reports its one managed pointer.
+- `Option<T>` reports exactly its present payload, if any.
+- `[T; N]` visits every element once in index order.
+- `(First, Second)` visits both fields in order.
+- `()`, `u32`, and `u64` report no edges. Unit remains unallocatable because
+  the collector rejects zero-sized payloads; its implementation exists only so
+  the C1A rejection fixture can instantiate the generic allocation boundary.
+- The test-only `Leaf`, recursive `Node`, and `RepresentativeStruct` manually
+  report all their declared managed fields. They exercise the same contract but
+  do not become collector API.
+
+These are the complete admitted implementations for C1B. In particular, there
+is no generic container, slice, persistent-collection, derive, raw-pointer, or
+opaque-value escape hatch.
+
+### Visitor erasure boundary
+
+`Visitor::visit` converts `Gc<T>` to a private pointer-only `ErasedGc` and
+synchronously invokes its collector-owned receiver. Erasure preserves the
+managed address but neither constructs a reference nor adds or guesses heap or
+type metadata. Later typed-run lookup must recover and validate those facts.
+The receiver may panic; no visitor or traversal state is stored in the traced
+object.
+
 ## Verification and Review Status
 
 - Compile-fail doctests prove that a borrowed managed value cannot escape its
   mutator region, a mutator cannot enter a scoped worker, and `Gc<T>` has no
   `Deref` path.
 - Unit tests cover pointer size, pointer identity, zero-sized-type rejection,
-  cross-thread handle transfer, nested separate heaps, and debug rejection of
-  wrong heap and representation.
+  cross-thread handle transfer, nested separate heaps, debug rejection of
+  wrong heap and representation, exact recursive edge sequences with duplicate
+  pointers, and full retracing after an injected visitor panic.
 - The ordinary crate checks, exact unsafe inventory, and the repository-wide
   checks are required for C1A.
-- These sites are reviewed for the C1A leaking prototype. C1C performs the
-  complete pointer/access/trace audit before allocator work starts.
+- These sites are reviewed for the C1A leaking prototype and C1B observational
+  trace spike. C1C performs the complete pointer/access/trace audit before
+  allocator work starts.
 
 ## Governing Invariants
 

@@ -7,5 +7,16 @@ crates/glam-gc/src/pointer.rs:                let _ = unsafe { reinterpreted.get
 crates/glam-gc/src/pointer.rs:        unsafe { self.pointer.as_ref() }
 crates/glam-gc/src/pointer.rs:    pub unsafe fn get_unchecked<'access>(&self, mutator: &'access Mutator<'_>) -> &'access T {
 crates/glam-gc/src/pointer.rs:    pub(crate) unsafe fn from_raw(pointer: NonNull<T>) -> Self {
-crates/glam-gc/src/pointer.rs:unsafe impl<T: Send + Sync> Send for Gc<T> {}
-crates/glam-gc/src/pointer.rs:unsafe impl<T: Send + Sync> Sync for Gc<T> {}
+crates/glam-gc/src/pointer.rs:unsafe impl<T: Trace> Send for Gc<T> {}
+crates/glam-gc/src/pointer.rs:unsafe impl<T: Trace> Sync for Gc<T> {}
+crates/glam-gc/src/trace.rs:    unsafe impl Trace for Leaf {
+crates/glam-gc/src/trace.rs:    unsafe impl Trace for Node {
+crates/glam-gc/src/trace.rs:    unsafe impl Trace for RepresentativeStruct {
+crates/glam-gc/src/trace.rs:pub unsafe trait Trace: Send + Sync + 'static {
+crates/glam-gc/src/trace.rs:unsafe impl Trace for () {
+crates/glam-gc/src/trace.rs:unsafe impl Trace for u32 {
+crates/glam-gc/src/trace.rs:unsafe impl Trace for u64 {
+crates/glam-gc/src/trace.rs:unsafe impl<First: Trace, Second: Trace> Trace for (First, Second) {
+crates/glam-gc/src/trace.rs:unsafe impl<T: Trace, const N: usize> Trace for [T; N] {
+crates/glam-gc/src/trace.rs:unsafe impl<T: Trace> Trace for Gc<T> {
+crates/glam-gc/src/trace.rs:unsafe impl<T: Trace> Trace for Option<T> {

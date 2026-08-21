@@ -2,7 +2,7 @@ use std::marker::PhantomData;
 use std::ptr::NonNull;
 use std::rc::Rc;
 
-use crate::{Gc, heap::HeapInner};
+use crate::{Gc, Trace, heap::HeapInner};
 
 /// Scoped authority to access one [`crate::Heap`].
 ///
@@ -42,7 +42,7 @@ impl<'heap> Mutator<'heap> {
     ///
     /// This is not the collector allocator. It exists only to verify pointer,
     /// lifetime, heap-authority, and thread-sharing contracts before C2.
-    pub fn alloc<T: Send + Sync + 'static>(&self, value: T) -> Gc<T> {
+    pub fn alloc<T: Trace>(&self, value: T) -> Gc<T> {
         assert!(
             std::mem::size_of::<T>() != 0,
             "zero-sized managed types are unsupported"

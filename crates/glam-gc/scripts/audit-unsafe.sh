@@ -9,7 +9,7 @@ actual_modules="$(mktemp)"
 trap 'rm -f "$actual_sites" "$actual_modules"' EXIT
 
 rg --with-filename --no-line-number \
-  'unsafe[[:space:]]+(fn|impl)|unsafe[[:space:]]*\{' \
+  'unsafe[[:space:]]+(fn|impl|trait)|unsafe[[:space:]]*\{' \
   crates/glam-gc/src -g '*.rs' \
   | grep -v ':[[:space:]]*///' \
   | sort >"$actual_sites"

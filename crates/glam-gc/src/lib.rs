@@ -12,6 +12,8 @@ mod heap;
 mod mutator;
 #[expect(unsafe_code, reason = "reviewed C1A pointer boundary")]
 mod pointer;
+#[expect(unsafe_code, reason = "reviewed C1B trace boundary")]
+mod trace;
 
 #[cfg(feature = "deterministic-test-hooks")]
 mod deterministic;
@@ -19,6 +21,7 @@ mod deterministic;
 pub use heap::Heap;
 pub use mutator::Mutator;
 pub use pointer::Gc;
+pub use trace::{Trace, Visitor};
 
 #[cfg(test)]
 #[expect(unsafe_code, reason = "reviewed C1A boundary verification")]
