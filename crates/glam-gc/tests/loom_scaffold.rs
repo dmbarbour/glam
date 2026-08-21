@@ -1,9 +1,8 @@
-//! Loom smoke model for the C0 heap API.
+//! Loom smoke model for the C1A heap-entry API.
 //!
-//! The empty heap has no collector synchronization to prove yet. This model
-//! verifies that the crate and its shareable entry surface run under Loom; the
-//! first substantive state-machine model belongs to the phase which adds that
-//! state.
+//! The prototype heap still has no collector synchronization to prove. This
+//! model verifies that the crate and its shareable entry surface run under
+//! Loom; the first substantive state-machine model belongs to C3.
 
 use glam_gc::Heap;
 

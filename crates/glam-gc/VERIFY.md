@@ -1,15 +1,16 @@
 # Collector Verification
 
-Run the stable C0 checks from the repository root:
+Run the stable C1A checks from the repository root:
 
 ```sh
 crates/glam-gc/scripts/check.sh
 ```
 
-The script formats, lints, tests the crate (including the Loom smoke model), and
-forbids unsafe code to latch the C0 baseline. Once reviewed unsafe code is
-introduced, `audit-unsafe.sh` must be replaced by an auditable unsafe-surface
-report rather than silently removed.
+The script formats, lints, and tests the crate, including compile-fail doctests
+and the Loom smoke model. `audit-unsafe.sh` then compares every unsafe construct
+and every module-level unsafe opt-in with the checked-in inventories before
+building all crate targets and features under the crate's default
+`unsafe_code` denial.
 
 Optional toolchain checks:
 
@@ -20,12 +21,15 @@ crates/glam-gc/scripts/check-sanitizer.sh thread
 ```
 
 These scripts deliberately fail with the underlying toolchain diagnostic when
-nightly, Miri, `rust-src`, or a sanitizer is unavailable. C0 does not claim that
-every developer environment has installed those tools.
+nightly, Miri, `rust-src`, or a sanitizer is unavailable. C1A does not claim
+that every developer environment has installed those tools; the focused Miri
+and complete unsafe review remain C1C acceptance work.
 
-The Loom test is currently a tooling and API smoke model. C0 has no shared
-collector state. A later phase must replace or supplement it with models of
-each real coordination state machine; ordinary threaded stress is not a proof.
+The Loom test remains a tooling and API smoke model. C1A's debug allocation
+registry is not collector coordination, and the leaking prototype has no
+collection state machine to model. C3 must replace or supplement this with
+models of each real admission and stop-the-world transition; ordinary threaded
+stress is not a proof.
 
 ## Gate G0 Baseline
 

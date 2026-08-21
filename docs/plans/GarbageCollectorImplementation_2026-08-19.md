@@ -1,6 +1,6 @@
 # Glam GC Subcrate Implementation Plan — 2026-08-19
 
-Status: in progress; Phase C0 is complete.
+Status: in progress; Phases C0 and C1A are complete.
 
 This plan implements an exact, non-moving, runtime-local tracing collector
 without depending on Glam value semantics. The governing requirements and
@@ -16,7 +16,7 @@ to a later performance plan. Concurrent marking is also a later plan.
 | Phase | Status | Outcome |
 | --- | --- | --- |
 | C0 | completed | crate, provenance, safety, and test scaffold |
-| C1A | pending | prototype managed pointer and access boundary |
+| C1A | completed | prototype managed pointer and access boundary |
 | C1B | pending | trace visitor and representative structural traces |
 | C1C | pending | mutation gateway, unsafe audit, and API freeze |
 | C2A | pending | arena chunks, fixed typed-run geometry, and layout limits |
@@ -251,6 +251,36 @@ Verification:
 Checkpoint: freeze the internal API before building the allocator. Revisit the
 integration plan if using the token in real evaluator call paths would require
 an unacceptable semantic or visibility change.
+
+C1A completed on 2026-08-21 with the following deliberately temporary shape:
+
+- `Gc<T>` is exactly one typed `NonNull<T>`. It carries no heap identity,
+  allocation record, class, or debug token; equality and hashing observe only
+  managed-pointer identity, and there is no `Deref` implementation.
+- `Mutator::alloc` accepts `T: Send + Sync + 'static`, fully initializes and
+  leaks a boxed prototype slot, registers its payload address in debug/test
+  builds, and returns a non-rooting `Gc<T>`. The extra byte in the prototype
+  slot gives even zero-sized values distinct leaked addresses. C2 replaces
+  this path rather than extending it into an allocator.
+- A mutator retains a direct reference to its creating `HeapInner`, so all
+  allocation and access checks are heap-qualified. One thread can nest regions
+  from separate heaps without either token gaining authority over the other.
+- The debug/test allocation record stores an address, `TypeId`, and type name.
+  It verifies the facts available before typed runs exist, and is dropped with
+  the heap even though prototype payloads remain intentionally leaked. This is
+  not the canonical object-metadata design planned for C2B.
+- Raw construction remains crate-private and unsafe. Raw access is an unsafe
+  surface of the unsupported transition crate; its reference lifetime is tied
+  to a mutator borrow, while compile-fail examples prove that neither the
+  reference nor a mutator can escape its region in the prohibited ways.
+- The crate denies unsafe code by default. Reviewed implementation and test
+  modules opt in explicitly, while `scripts/audit-unsafe.sh` compares every
+  unsafe construct and every module opt-in with checked-in exact inventories.
+  [`SAFETY.md`](../../crates/glam-gc/SAFETY.md) records the proof obligations.
+
+C1A adds no trace contract, roots, reclamation, safepoint coordination, or
+production Glam integration. C1B may now add only the visitor-based trace
+contract and representative structural traces described above.
 
 ## Phase C2A — Arena Chunks, Fixed Typed-Run Geometry, and Layout Limits
 
