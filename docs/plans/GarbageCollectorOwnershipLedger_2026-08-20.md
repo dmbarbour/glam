@@ -24,9 +24,10 @@ blocking defects rather than conservative roots.
   same-runtime root before collection.
 
 Mutation is **immutable**, **replaceable** under the named lock, **one-write**,
-or **free** under the named exclusive guard. “Barrier” names the integration
-phase which must either install a generational barrier or prove that the edge
-is initialized before publication and never changes.
+or **free** under the named exclusive guard. “Mutation gateway” names the
+integration phase which routes a replaceable managed edge through the initial
+collector's structural no-op gateway. This records the relevant write sites
+without installing generational or concurrent-collector machinery.
 
 `TypeId::of::<T>()` is the provisional type identity for every typed row. A
 canonical `ObjectMetadata` pointer, dense heap-local class ID, requested slot
@@ -64,9 +65,9 @@ multi-run exception.
 
 ## `core::Value` Variant Ledger
 
-| Variant | Current owner and outgoing edges | Mutation, threading, and longevity | Exact visitor / barrier / migration |
+| Variant | Current owner and outgoing edges | Mutation, threading, and longevity | Exact visitor / mutation gateway / migration |
 | --- | --- | --- | --- |
-| `Atom` | Interned `Key`; no `Value` edge. | Immutable, `Send + Sync`, long-lived. | Leaf; no barrier; I4. |
+| `Atom` | Interned `Key`; no `Value` edge. | Immutable, `Send + Sync`, long-lived. | Leaf; no mutation gateway; I4. |
 | `Number` | Number-owned integer/rational storage; no `Value` edge. | Immutable, thread-safe, long-lived. | Leaf initially; I4. |
 | `Binary` | `bytes::Bytes`; no managed edge. | Immutable shared leaf. | Leaf/external allocation; I4. |
 | `List` | Persistent list nodes; value chunks and lazy/promise thunks are outgoing edges. | Immutable/persistent and thread-safe; may escape all evaluator calls. | Logical item/thunk visitor, including shared spines; no post-publication mutation; I7. |
@@ -74,26 +75,26 @@ multi-run exception.
 | `Builtin` | Static enum only. | Immutable leaf. | Leaf; I4. |
 | `PartialBuiltin` | `BuiltinCall.arguments: Arc<[Value]>`. | Immutable, shared across threads. | Visit every supplied argument; I6. |
 | `Function` | `FunctionValue -> NetValue -> CoreRuntimeNet`; the net carries data/operator values. | Immutable shell over synchronized shared net; long-lived. | Visit the net boundary selected in I8; I6/I8. |
-| `Net` | `NetValue -> CoreRuntimeNet`. | Immutable shell over freely mutable net state protected by that net's mutex. | Exact synchronized net visitor and mutation barriers; I8. |
+| `Net` | `NetValue -> CoreRuntimeNet`. | Immutable shell over freely mutable net state protected by that net's mutex. | Exact synchronized net visitor and managed-edge gateways; I8. |
 | `Lazy` | `Arc<LazyCell>`; source and terminal result graphs. | Identity-bearing, thread-safe, long-lived; source/result publication races are supported. | Managed cell visitor; one-write result plus replaceable source protocol; I5. |
-| `Promised` | `Arc<PromiseCell>`; successful assignment root and producer obligation. | Identity-bearing, thread-safe, long-lived; assignment is one-write. | Managed cell visitor; assignment publication barrier; I5. |
+| `Promised` | `Arc<PromiseCell>`; successful assignment root and producer obligation. | Identity-bearing, thread-safe, long-lived; assignment is one-write. | Managed cell visitor; assignment mutation gateway; I5. |
 | `Metadata` | `MetadataCarrier.metadata: Arc<Value>`. | Immutable identity-bearing sealed value, thread-safe. | Visit exactly one metadata value; I6. |
 | `Opaque` | `Arc<dyn Any + Send + Sync>`; payload-dependent. | Pointer-identity shell; arbitrary longevity/thread transfer. | No conservative trace. Each family must be leaf or hold an exact same-runtime public root; I4B/I10. |
 
 ## Recursive Core Nodes
 
-| Type and source | Outgoing edges | Mutation and synchronization | Drop / trace / barrier / phase |
+| Type and source | Outgoing edges | Mutation and synchronization | Drop / trace / mutation gateway / phase |
 | --- | --- | --- | --- |
 | `EvaluationFailure` (`core.rs`) | Emission `Value` or cycle IDs; `Arc<[Value]>` contexts. | Immutable, thread-safe, retained in task/report ledgers. | Visit emission and contexts; ordinary Rust drop initially; I6. |
-| `LazyCell` / `LazySource` (`core.rs`) | Sources include fixpoint, deferred closure, reflection computation, access arguments, application, builtin call, net construction/computation, and function call. Terminal `LazyResult` contains evaluated value or failure. | `source` is replaceable only under its mutex; `result` is one-write and published before source removal. Lock order is result check, source mutex, result recheck; destruction occurs after unlock. | Exact source/result visitor. Initial source needs no barrier; result publication does. Deferred/opaque captures block I5 until I4B. Managed drop required because source/result own Rust resources. |
-| `PromiseCell` (`core.rs`) | One successful `RuntimeValueRoot`; failure; weak/coordinator producer state and subscriptions. | Assignment and producer are one-write. Coordinator mutation admission encloses task-owned publication; resolver publication uses its local path. Notifications occur after guarded publication. | Visit successful assignment through its root representation; publication barrier; managed drop/finalization policy for unresolved producer ownership; I5. |
-| `MetadataCarrier` (`core.rs`) | One `Value`. | Immutable after construction. | Visit one edge; no barrier after publication; I6. |
+| `LazyCell` / `LazySource` (`core.rs`) | Sources include fixpoint, deferred closure, reflection computation, access arguments, application, builtin call, net construction/computation, and function call. Terminal `LazyResult` contains evaluated value or failure. | `source` is replaceable only under its mutex; `result` is one-write and published before source removal. Lock order is result check, source mutex, result recheck; destruction occurs after unlock. | Exact source/result visitor. Initial construction needs no gateway; result publication uses one. Deferred/opaque captures block I5 until I4B. Managed drop required because source/result own Rust resources. |
+| `PromiseCell` (`core.rs`) | One successful `RuntimeValueRoot`; failure; weak/coordinator producer state and subscriptions. | Assignment and producer are one-write. Coordinator mutation admission encloses task-owned publication; resolver publication uses its local path. Notifications occur after guarded publication. | Visit successful assignment through its root representation; assignment gateway; managed drop/finalization policy for unresolved producer ownership; I5. |
+| `MetadataCarrier` (`core.rs`) | One `Value`. | Immutable after construction. | Visit one edge; no post-construction gateway; I6. |
 | `BuiltinCall`, `Access`, `FunctionCall`, `LazyApplication` (`core.rs`) | Supplied function, arguments, and/or path leaf data. | Immutable `Arc` payloads; thread-safe. | Exact ordered visitors; I6. |
 | `FixpointComputation` (`core.rs`) | Function or object-instance `Value`. | Immutable. | Visit one value; I6. |
-| `ReflectionComputation` and gate target (`core.rs`) | Effect and gate target values; installed task result may carry a failure. | Effect/target immutable; task one-write. Cross-thread and may outlive original demand. | Visit values and failure; task publication barrier if node is managed; I6. |
+| `ReflectionComputation` and gate target (`core.rs`) | Effect and gate target values; installed task result may carry a failure. | Effect/target immutable; task one-write. Cross-thread and may outlive original demand. | Visit values and failure; task-result gateway if the node is managed; I6. |
 | `DeferredComputation` (`core.rs`) | Type-erased `Arc<dyn Fn(&EvalContext) -> ...>` may capture arbitrary raw core values. | Immutable closure, callable across workers. | **D:** cannot be traced. Contain captures behind exact nodes/roots or replace production closures; I4B/I10. |
 | `FunctionCode`, `FunctionValue`, `NetValue` (`core.rs`) | Shared net plus scalar arity/capture state. | Immutable shells, synchronized net interior. | Net visitor in I8; I6. |
-| `CoreOperator` variants (`core_net.rs`) | Supplied values, function code, builtin call, applicable value; keys/path elements are leaves. | Immutable operator payloads stored in mutable nets. | Variant visitor; insertion/replacement barriers at net mutation sites; I8. |
+| `CoreOperator` variants (`core_net.rs`) | Supplied values, function code, builtin call, applicable value; keys/path elements are leaves. | Immutable operator payloads stored in mutable nets. | Variant visitor; insertion/replacement gateways at net mutation sites; I8. |
 | `CoreValues`, `RuntimeValueCache`, extension map (`core.rs`) | Cached singleton values and type-erased `Arc<T>` compiler caches such as `GCompilerValues`. | Runtime-long-lived; core set initialized once, extension map replaceable under mutex, harmless duplicate construction permitted. | Exact registered roots or managed runtime cache. Type-erased extensions are **D** until constrained; I9/I10. |
 
 ## Persistent Collections
@@ -103,8 +104,8 @@ multi-run exception.
 shared spines are ordinary Rust `Arc` ownership today. The initial collector
 will trace them logically through public/internal item visitors, even if this
 revisits a shared spine more than once. No element insertion occurs after a
-node is published, so no generational barrier is required unless I7 later
-chooses managed mutable spines. `ListThunk::{Lazy, Promised}` visits its one
+node is published, so no post-construction mutation gateway is required unless
+I7 later chooses managed mutable spines. `ListThunk::{Lazy, Promised}` visits its one
 deferred cell. Bytes chunks and empty nodes are leaves.
 
 Collection constructors in `Values`, `CoreValueFactory`, evaluator builtins,
@@ -122,7 +123,7 @@ The core specialization fixes `Data = core::Value`,
 | --- | --- | --- |
 | `InteractionNet<CoreSpecialization>` template | Immutable node array; data nodes contain `Value`, operator nodes contain `CoreOperator`. | Exact template visitor; construction-local until published; I8. |
 | `SharedRuntimeNetInner` / `SharedRuntimeNetState` | Own mutable `RuntimeNet`, revision/subscriber/normalization state. | One net mutex is the exclusive graph mutation boundary. No callback or destruction while locked. I8 chooses whether the outer allocation is managed or remains synchronized external storage with exact rooted contents. |
-| `RuntimeNet`, `RuntimeEntry`, `RuntimeNode` | Data/operator values, ports, active-pair and cursor state. | Free mutation only under the owning net mutex. Every value-installing rewrite requires the I8 barrier. Exact visitor runs under stopped mutators and the reviewed net-lock protocol. |
+| `RuntimeNet`, `RuntimeEntry`, `RuntimeNode` | Data/operator values, ports, active-pair and cursor state. | Free mutation only under the owning net mutex. Every value-installing rewrite requires the I8 mutation gateway. Exact visitor runs under stopped mutators and the reviewed net-lock protocol. |
 | `CopyState`, `CursorClaim`, `PreparedCopySource`, `FrontierObservation` | `SharedRuntimeNet` source references and cursor topology. | Cross-net references are hierarchical copies, but value-level fixpoints/promises can still make the surrounding value graph cyclic. Visit source net exactly if it becomes managed; I8. |
 | `NormalizationRequest`, `RequestRoot`, `Cursor`, `ActivePair`, `ResumeCursorDependency`, `NetDriverWorklist` (`eval/net.rs`) | Temporary/shared runtime-net handles. | Evaluator/work-quantum owners, movable between workers; T until enclosed by I3 mutator scope. |
 
@@ -178,27 +179,30 @@ An opaque value may not contain `Gc<T>`, an unrooted recursive core value, or a
 root belonging to another runtime. The collector will not inspect `Any` or a
 closure environment for hidden pointers.
 
-## Synchronization and Barrier Ledger
+## Synchronization and Managed-Edge Ledger
 
 1. Runtime mutation admission is the outer settlement barrier. Component
    updates take at most one semantic mutex at a time; observation-epoch
    publication occurs after releasing that mutex but before releasing mutation
    admission. Wakes, callbacks, and value destruction happen afterward.
 2. `LazyCell.result`, `PromiseCell.assignment`, reflection task installation,
-   and promise producer installation are one-write edges. They require an
-   initialization/publication barrier once their target can be young.
+   and promise producer installation are one-write edges. Their existing
+   synchronization publishes fully initialized targets; once managed, the
+   write sites also pass through the structural mutation gateway.
 3. `LazyCell.source` is the only replaceable core-cell edge today. Its mutex
-   guards removal; terminal result is published first. I5 must barrier the
-   result and treat source removal as ordinary edge deletion.
+   guards removal; terminal result is published first. I5 routes result
+   installation through the gateway and treats source removal as ordinary edge
+   deletion.
 4. Persistent list/dictionary nodes and immutable argument arrays need only
-   initialization barriers before publication.
+   their existing safe initialization before publication; they have no
+   post-construction managed-edge gateway.
 5. Interaction-net data/operator replacement is freely mutable under one net
-   mutex and is the high-volume I8 barrier surface. Cursor/reduction helpers may
-   not bypass it.
+   mutex and is the high-volume I8 mutation-gateway surface. Cursor/reduction
+   helpers may not bypass it.
 6. Reflection store, event state, coordinator ledgers, caches, and diagnostic
    buses are Rust sidecars. Their entries are registered roots, not interior
    managed pointers; updating them changes root membership rather than invoking
-   an object-field barrier.
+   an object-field mutation gateway.
 7. No trace visitor may call user code, allocate, lock unrelated components,
    or force a lazy/promise/net value. Visitors enumerate representation edges
    only.
@@ -242,7 +246,7 @@ guessing/conservative classification:
    potentially effectful work and need explicit I3 mutator bounds.
 5. RPDS and FingerTree/list nodes need reviewed exact logical visitors.
 6. `SharedRuntimeNet` needs an exact synchronized trace and complete
-   value-installing barrier inventory.
+   value-installing mutation-gateway inventory.
 7. Public opaque construction needs a closed leaf/root registration boundary.
 
 After C2B and I1, update every M row with its canonical metadata pointer,

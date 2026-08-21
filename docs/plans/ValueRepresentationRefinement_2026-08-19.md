@@ -262,7 +262,7 @@ Each phase compares old and new representations over:
 - reflection inspection and diagnostic rendering;
 - each selected/candidate Rust alignment and metadata size policy's pointer
   decoding, slot geometry, and semantic equivalence;
-- forced full and minor collection histories; and
+- forced full-collection histories; and
 - Miri, deterministic concurrency tests, and the standard repository checks.
 
 Differential tests should evaluate the same constructed values through both

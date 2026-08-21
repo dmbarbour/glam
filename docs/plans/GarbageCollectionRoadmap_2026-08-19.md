@@ -16,6 +16,12 @@ The plans are separate because collector soundness and evaluator migration are
 independently difficult. This roadmap owns the requirements which neither plan
 may weaken merely to simplify its local work.
 
+Scope decision, 2026-08-21: this roadmap ends with a non-moving,
+stop-the-world full collector integrated across Glam. Its purpose is controlled
+ownership and reclamation of recursive graphs such as fixpoints, not a complete
+performance-oriented GC hierarchy. Moving and generational collection return
+only under a later plan, after higher-priority performance work and profiling.
+
 Compact tagged values, their pointer-alignment policy, and representation-
 specific node-size targets belong to the deferred
 [`ValueRepresentationRefinement_2026-08-19.md`](ValueRepresentationRefinement_2026-08-19.md)
@@ -37,16 +43,18 @@ The collector is specialized for Glam:
   shareable between runtime worker threads;
 - copying an ordinary managed pointer performs no locking, reference-counting,
   rooting, or collector bookkeeping;
-- ordinary allocation uses worker-local cursors into homogeneous typed runs;
-  shared synchronization is reserved for allocation-class discovery,
+- ordinary allocation uses worker-local cursors over exclusively leased ranges
+  of allocation-bitmap words in homogeneous typed runs; shared synchronization
+  is reserved for allocation-class discovery, claiming another range,
   obtaining/recycling runs, or acquiring another arena chunk;
 - managed layouts are deliberately bounded: every allocation fits one slot in
   a fixed-size typed run, with no initial large-object or multi-run fallback;
 - collection coordination occurs at explicit mutator-region boundaries;
 - recursive entry into the same runtime is cheap and supported;
-- the initial collector may stop the whole runtime;
-- storage anticipates young and old generations, but correct full collection
-  precedes minor collection;
+- the initial collector stops the whole runtime while tracing and sweeping;
+- the initial storage model serves only exact full collection; it does not pay
+  for generations, remembered sets, or promotion before a moving nursery is a
+  justified performance project;
 - persistent Rust collections may initially be traced logically even when that
   revisits shared spines; collector-aware spines remain a performance project;
 - evaluation synchronization inside lazies, promises, tasks, and nets remains
@@ -69,14 +77,13 @@ EvaluationRuntime
     │   └── fixed-size aligned power-of-two typed runs
     │       ├── one allocation class and static trace/drop metadata
     │       ├── homogeneous aligned slots
-    │       └── allocation, mark, and card side metadata
+    │       └── allocation and mark side metadata
     ├── process-wide TypeId -> canonical object-metadata interning
     ├── per-heap metadata pointer -> allocation-class discovery
-    ├── young and old typed-run pools
+    ├── typed-run pools
     ├── explicit external-root registry
     ├── active-mutator and safepoint coordinator
     ├── mark work and sparse quarantine state
-    ├── remembered-set state
     └── collection metrics and tuning
 ```
 
@@ -108,19 +115,32 @@ permit dereference outside a region.
    root belongs to exactly one `EvaluationRuntime` heap.
 2. **No cross-runtime managed edge.** Public boundaries reject a foreign
    `Value` before exposing its core representation. Internal construction
-   obtains both the target heap and mutator authority from one runtime.
+   obtains both the target heap and mutator authority from one runtime. A
+   thread may concurrently hold mutator authority for several runtime heaps,
+   but each authority, recursive depth, and allocation cache remains a separate
+   heap-qualified TLS entry and grants no cross-runtime edge.
 3. **No collection during mutation.** The baseline collector reclaims only
    after every active mutator region has exited. Nested same-runtime regions
    count as one active mutator. Allocation also requires mutator authority, so
    no allocation can race a stopped-world trace or sweep. Every successful
    allocation is fully initialized and marked allocated before its managed
    pointer is returned; sharing that pointer does not wait for mutator exit.
-   Before outermost exit makes the mutator inactive, it retains or returns every
-   worker-local typed-run cursor and makes its registered thread cache
-   collector-accessible. The heap owns and enumerates every run independently
-   of those caches. Cursors carry no separate active/parked state: thread-local
-   recursive depth governs use, and exclusive collector admission proves every
-   cache is quiescent.
+   Before outermost exit makes the mutator inactive, it leaves worker-local
+   bitmap-range cursors retained and makes its heap-specific thread cache
+   quiescent. TLS destruction or eviction may forget cursors but never returns
+   their ranges or touches the heap. The heap owns and enumerates every run and
+   full collection clears all range leases without walking those caches. Each
+   cache captures one heap-wide allocation-lease epoch; after a full collection,
+   one epoch comparison discards its entire cursor map rather than validating
+   cursors individually. Cursors carry no separate active/parked state: thread-
+   local recursive depth governs use, and exclusive collector admission proves
+   every cache is quiescent.
+   Pending collection uses writer preference for ordinary entrants, while a
+   thread already active in another heap may make a dependent entry before the
+   target collector becomes exclusive. This prevents opposite cross-heap
+   nesting orders from deadlocking on queued writers. An exclusive collector
+   never enters another heap or invokes callbacks; cross-heap entry waits until
+   that exclusive phase ends.
 4. **No hidden stack scan.** Roots are explicit. Local unrooted pointers are
    safe because their entire lifetime lies within a mutator region.
 5. **No partially traced collection.** Production reclamation remains disabled
@@ -158,20 +178,17 @@ permit dereference outside a region.
    acquisition, while writer preference intentionally makes new mutators wait:
    stop-the-world collection has become the runtime's next priority.
 8. **Stable addresses are an implementation phase, not a permanent API
-   promise.** The initial full and generational collectors do not move
-   allocations. Promotion changes run metadata or classification, not pointer
-   identity. Trace implementations enumerate outgoing edges through a visitor
-   rather than publishing offset tables; moving and edge rewriting remain
-   separately deferred.
+   promise.** The initial full collector does not move allocations. Trace
+   implementations enumerate outgoing edges through a visitor rather than
+   publishing offset tables, so a later moving collector can add edge
+   rewriting without making object layouts part of the public contract.
 9. **Mutation gateways are structural; barrier work is phase-specific.** Every
    mutation capable of replacing a managed edge passes through a small,
    auditable mutation gateway. For the initial full stop-the-world collector,
-   its collector barrier is empty. Generational minor collection activates
-   old-to-young remembered-set work even though collection remains
-   stop-the-world. A future incremental or concurrent marker would separately
-   add the insertion, deletion, or shading work required by its chosen
-   Dijkstra/SATB-style invariant. Ordinary pointer reads and copies remain
-   barrier-free in every mode.
+   its collector action is empty. A future moving nursery, incremental marker,
+   or concurrent marker may extend the gateway according to its own relocation
+   or Dijkstra/SATB-style invariant. Ordinary pointer reads and copies remain
+   barrier-free in the initial collector.
 10. **Opaque values contain roots, never bare managed pointers.** Type-erased
     host data is not inspected by the collector. Construction must therefore
     ensure an opaque payload contains either no managed value edge or only an
@@ -230,9 +247,7 @@ permit dereference outside a region.
   outside collector locks.
 - **Safepoint** — an outer mutator exit or explicit cooperative check at which
   a requested collection may stop progress.
-- **Full collection** — traces all generations.
-- **Minor collection** — traces young objects from roots and remembered
-  old-to-young edges.
+- **Full collection** — traces the complete managed heap from explicit roots.
 - **Collector-ready graph** — the whole production root graph has passed the
   traceability inventory and forced-collection verification.
 
@@ -279,13 +294,7 @@ Forced full collections pass the complete semantic, concurrency, and drop
 tests. Full collection is then enabled at explicit runtime maintenance points.
 Automatic threshold collection remains disabled until those points are stable.
 
-### Gate G4 — generational collection enabled
-
-The barrier audit is complete, minor collections agree with full collections
-under differential tests, and old-to-young publication races are forced.
-Minor collection may then become the default threshold response.
-
-### Gate G5 — old ownership retired
+### Gate G4 — legacy ownership retired
 
 Cycle-bearing `Arc` scaffolding made redundant by the collector is removed;
 remaining `Arc`s have a deliberate role such as immutable bytes, external
@@ -298,7 +307,7 @@ this transition.
 Integration Phase I0 is a read-only ownership/layout inventory and may proceed
 before G1; its measurements should inform the fixed-run geometry chosen in C2A.
 Managed ownership changes remain blocked on G1. After G1, integration API
-adaptation may proceed while the GC subcrate adds generational storage and
+adaptation may proceed while the GC subcrate adds full-collection stress and
 metrics. These streams may not jointly enable collection until their shared
 gate passes.
 
@@ -307,7 +316,6 @@ The following must remain sequential:
 - the collector trace contract precedes production `Trace` implementations;
 - mutator-region integration precedes managed-pointer dereference;
 - full-graph tracing precedes any production sweep;
-- barrier inventory precedes minor collection; and
 - full collection correctness precedes concurrent marking.
 
 ## Remaining Phase Checkpoints
@@ -331,6 +339,9 @@ weakening runtime locality, exact tracing, or the collection-admission gates.
 
 - concurrent marking, concurrent sweeping, or parallel tracing;
 - moving, copying, or compacting collection;
+- generational storage, minor collection, promotion, remembered sets, and card
+  tables; these should return with a moving-nursery plan rather than precede
+  one;
 - variable run sizes and pointer-encoded run-size classes;
 - large-object allocation, multi-run object spans, heterogeneous runs, and
   arbitrary dynamically sized managed objects;

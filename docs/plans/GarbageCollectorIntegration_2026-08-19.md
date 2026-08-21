@@ -22,13 +22,12 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I5 | pending | managed lazies and promises |
 | I6 | pending | functions, applications, metadata, failures |
 | I7 | pending | persistent list and dictionary tracing |
-| I8 | pending | interaction-net tracing and barriers |
+| I8 | pending | interaction-net tracing and mutation gateways |
 | I9 | pending | runtime-owned root surfaces |
 | I10 | pending | deferred closures and opaque boundaries |
 | I11 | pending | whole-production-graph forced collection |
 | I12 | pending | runtime maintenance and threshold collection |
-| I13 | pending | barrier audit and minor collection |
-| I14 | pending | redundant ownership removal and documentation |
+| I13 | pending | redundant ownership removal and documentation |
 
 ## Current Boundary
 
@@ -112,7 +111,7 @@ record:
   slots-per-fixed-run geometry;
 - visitor-based outgoing edge enumeration;
 - required trace strategy;
-- required generational barrier;
+- managed-edge mutation gateway, if the edge is replaceable;
 - whether its homogeneous run metadata contains `Drop`;
 - confirmation that it fits the collector's documented managed-layout limit;
   and
@@ -225,9 +224,12 @@ Introduce region boundaries before managed pointers require them:
 - diagnostic enrichment and rendering access.
 
 Prefer one outer region per meaningful quantum. Nested helpers reuse the
-current same-runtime region and worker-local typed-run cursor cache. Do not
-enter/exit or touch shared allocation state for every pointer access or
-ordinary allocation.
+current same-runtime region and heap-specific bitmap-range cursor cache. The
+outer entry validates that cache once against the heap's allocation-lease
+epoch. Do not enter/exit or touch shared allocation state for every pointer
+access or ordinary allocation. A thread entering another `EvaluationRuntime`
+activates another heap-qualified TLS entry; it does not replace or reuse the
+first runtime's mutator or allocator cache.
 
 Determine how `Mutator` authority travels through `EvalContext`, the core value
 factory, reflection contexts, and net specialization without exposing it in
@@ -244,8 +246,15 @@ Verify that:
   references;
 - recursive evaluator and reflection entry does not count as another mutator;
 - recursive entry does not create an independent class cache, while outer exit
-  retains or returns every local run cursor and makes its thread cache quiescent
-  before the worker becomes eligible to sleep or service another runtime;
+  retains local bitmap-range cursors and makes its thread cache quiescent before
+  the worker becomes eligible to sleep or service another runtime; TLS exit or
+  eviction only forgets cursors, leaving full collection to recover ranges;
+- one thread can nest work in two runtimes while retaining separate mutator
+  tokens, recursive depths, epochs, and caches, and cannot construct a managed
+  edge between them;
+- opposite A-then-B and B-then-A nesting does not deadlock when collection is
+  pending on both heaps, while entry waits safely if the target collector is
+  already exclusive;
 - allocation payload and allocation-bit initialization completes before the
   managed pointer is returned, rather than at the outer-region boundary; and
 - collection requests can stop every worker at a bounded quantum boundary.
@@ -320,7 +329,7 @@ Migrate the principal cyclic identities first:
 - clear/release lazy sources after terminal publication as today;
 - route source replacement and terminal assignment through the managed-edge
   mutation gateway; its collector action is empty in full stop-the-world mode
-  and becomes an old-to-young barrier only when generations are enabled; and
+  while preserving an auditable site for separately planned collectors; and
 - update the already-exact I4 visitors in the same checkpoint as each edge
   changes from external/`Arc` ownership to `Gc`; no phase may leave a trace
   placeholder merely because collection is disabled; and
@@ -348,7 +357,7 @@ production runtime still does not collect.
   their contained values.
 - Preserve referential equality where current semantics rely on identity.
 - Route only actually mutable managed edges through the mutation gateway;
-  immutable argument arrays need tracing but no gateway or barrier.
+  immutable argument arrays need tracing but no gateway.
 
 Verify cycles through each family and confirm that tracing does not evaluate,
 force, lock, or format a value.
@@ -382,8 +391,8 @@ updates into whole-map copies.
   allocation traced under a stopped mutator world or becomes a managed outer
   node. Do not rewrite generic topology merely for GC aesthetics.
 - Require all net mutation which can replace a managed value edge to use the
-  mutation gateway. It is a no-op for full collection and records young values
-  only after generational collection is enabled.
+  mutation gateway. It is a no-op for the full collector; future moving or
+  concurrent collectors may extend it under their own plans.
 - Preserve the Cursor-WHNF ownership and normalization-batch invariants.
 
 Because collection waits for all mutators, acquiring a net lock while tracing
@@ -533,25 +542,7 @@ unsafe/trace audit.
 Automatic full collection is enabled only after controlled-boundary operation
 is stable.
 
-## Phase I13 — Generational Barrier Audit and Minor Collection
-
-For every mutable graph edge in the I0 ledger:
-
-- identify the owner's typed run, generation, card, and publication operation;
-- ensure the old-run card is dirtied before a minor collector can miss the
-  edge;
-- force publication versus collection ordering with deterministic barriers;
-  and
-- run differential full-only versus minor/full histories.
-
-High-value surfaces include lazy result/source publication, promise
-assignment, metadata updates, mutable net data, reflection store root changes,
-and any managed task/deferred state.
-
-Enable minor collection only after both collector Phase C9 and this audit pass
-Gate G4.
-
-## Phase I14 — Retire Redundant Ownership and Document the Boundary
+## Phase I13 — Retire Redundant Ownership and Document the Boundary
 
 - Remove `Arc` wrappers whose only remaining role was recursive value
   lifetime. Retain intentional `Arc`s for public roots, immutable leaf buffers,
@@ -561,8 +552,8 @@ Gate G4.
 - Remove temporary collection-disable gates and migration-only adapters.
 - Update `docs/architecture/evaluation.md`, `docs/AgentContext.md`, focused
   agent notes, and `src/README.md` with current ownership and safepoint rules.
-- Mark the roadmap and both plans complete only after a final invariant and
-  trace-edge audit.
+- Pass roadmap Gate G4 and mark the roadmap and both plans complete only after
+  a final invariant and trace-edge audit.
 
 ## Integration Verification Matrix
 
@@ -586,13 +577,12 @@ Additional required modes:
 - collector disabled, to preserve a comparison baseline;
 - forced full collection at selected stable points;
 - aggressive full collection at outer mutator exits;
-- minor/full differential histories after I13;
 - zero workers and several workers;
 - public roots moved among threads and dropped in forced orders;
 - every production allocation class fitting the collector's fixed-run slot
   geometry, plus explicit rejection tests for a deliberately oversized fixture;
 - Miri for focused root, trace, lazy, promise, collection, and net graphs;
-- Loom or deterministic barrier tests for mutator/root/barrier coordination;
+- Loom or deterministic forced-order tests for mutator/root coordination;
 - address/thread sanitizers where supported; and
 - memory/drop counters proving both retention and reclamation.
 
@@ -614,7 +604,7 @@ semantics.
   reclaimed after their last root disappears.
 - Reflection, diagnostics, stores, events, and task handles retain exactly the
   values their semantics require.
-- Full and minor collection preserve assembly results and runtime coordination.
+- Full collection preserves assembly results and runtime coordination.
 - No pointer-local GC locking or atomic reference count remains on internal
   managed edges.
 - Remaining leaks through arbitrary opaque payloads are documented,

@@ -7,9 +7,9 @@ without depending on Glam value semantics. The governing requirements and
 integration gates live in
 [`GarbageCollectionRoadmap_2026-08-19.md`](GarbageCollectionRoadmap_2026-08-19.md).
 
-The initial deliverable is a stop-the-world full collector. Generational
-storage and minor collection follow as separately admitted functionality.
-Concurrent marking is a later plan.
+The deliverable is a stop-the-world full collector. Moving and generational
+collection, including a moving nursery, remembered sets, and promotion, belong
+to a later performance plan. Concurrent marking is also a later plan.
 
 ## Phase Status
 
@@ -19,15 +19,13 @@ Concurrent marking is a later plan.
 | C1 | pending | trace, pointer, and mutator access contract |
 | C2A | pending | arena chunks, fixed typed-run geometry, and layout limits |
 | C2B | pending | type metadata and per-heap allocation-class discovery |
-| C2C | pending | worker-local typed-run allocation and reuse |
+| C2C | pending | worker-local bitmap-range allocation and reuse |
 | C3 | pending | recursive mutator regions and STW handshake |
 | C4 | pending | explicit external roots |
 | C5 | pending | exact full marking |
 | C6 | pending | sweeping, mutator finalization, retry, and quarantine |
 | C7 | pending | shared-pointer and worker-shaped stress |
-| C8 | pending | generational metadata and barrier API |
-| C9 | pending | minor collection and promotion |
-| C10 | pending | tuning and final collector audit |
+| C8 | pending | tuning and final collector audit |
 
 ## Intended Crate Shape
 
@@ -48,7 +46,6 @@ crates/
       roots.rs               # explicit root registry
       mark.rs                # full tracing
       sweep.rs               # reclamation and destruction
-      generation.rs          # age, remembered sets, minor collection
       metrics.rs             # operational counters and test inspection
 ```
 
@@ -166,6 +163,9 @@ unsafe inventory which fails on unreviewed modules or sites, and update
   from a runtime check.
 - Make `Mutator` non-`Send` and non-`Sync`; make `Gc<T>` `Copy`, `Send`, and
   `Sync` only under documented `T` bounds.
+- Permit one thread to hold mutator tokens for several heaps concurrently.
+  Token authority and every ambient lookup remain heap-qualified; there is no
+  process- or thread-global singular "current heap" assumption.
 - Define the unsafe `Trace` contract, including interior mutability, no hidden
   managed pointers, panic behavior, and destructor restrictions.
 - Make tracing visitor-based. Implementations submit the managed edges selected
@@ -209,6 +209,8 @@ Verification:
 
 - compile-fail tests show that references cannot escape a mutator region and a
   mutator cannot be sent to another thread;
+- nested closures may hold distinct non-`Send` mutator tokens for two heaps at
+  once without making either token authoritative for the other heap;
 - shared `Gc` handles may move between threads; registered `Root` sharing is
   deferred to C4;
 - there is no safe bare-`Gc` dereference API, and the unsafe operation's result
@@ -253,8 +255,10 @@ an unacceptable semantic or visibility change.
   provisional run size. If I0 is not yet complete, record equivalent
   representative layout measurements here and reconcile them with I0 before
   any production ownership migration.
-- Store allocation and mark state in run-side bitmaps. Reserve run-side card
-  metadata and a generation field without implementing minor collection.
+- Store allocation, allocation-range leases, and mark state in run-side
+  bitmaps. The lease bitmap has one bit per allocation-bitmap word and is part
+  of the checked geometry. Do not reserve card metadata or generation fields
+  for the initial collector.
 - Set a documented maximum managed size and alignment derived from the fixed
   run geometry. Reject unsupported layouts in the geometry calculation; C2B
   propagates that result from allocation-class creation. Do not implement a
@@ -304,13 +308,15 @@ Verification:
   ordinary slots contain payload only, with no GC header, metadata pointer,
   mark byte, or finalizer byte.
 - Keep every typed run owned and directly enumerable by its heap for its entire
-  lifetime. A thread-local allocator may hold an exclusive allocation lease
-  and cursor for a run, but the run is never owned or discoverable only through
-  thread-local state. The class/run tables distinguish pooled runs from runs
-  leased to a registered thread cache. A cursor needs no separate active versus
-  parked state: the owning thread's recursive mutator depth says whether it is
-  currently usable, while exclusive collector admission proves that no thread
-  cache is in use. A lease never becomes reachability for the run's objects.
+  lifetime. A thread-local allocator may hold exclusive allocation leases over
+  integral ranges of that run's allocation-bitmap words; several thread caches
+  may therefore allocate from nonoverlapping ranges in one run. Run-side lease
+  metadata records which bitmap-word ranges are unavailable to the synchronized
+  class slow path, but the run is never owned or discoverable only through
+  thread-local state. A cursor needs no separate active versus parked state:
+  the owning thread's recursive mutator depth says whether it is currently
+  usable, while exclusive collector admission proves that no thread cache is
+  in use. A range lease never becomes reachability for the run's objects.
 - Maintain a per-heap map from canonical metadata pointer to
   `AllocationClassId` for first-use class discovery and a stable dense class
   table containing that metadata pointer and typed-run pools. Metadata function
@@ -349,48 +355,67 @@ Verification:
   and
 - failed or panicking metadata/class construction publishes no partial entry.
 
-## Phase C2C — Worker-Local Typed-Run Allocation and Reuse
+## Phase C2C — Worker-Local Bitmap-Range Allocation and Reuse
 
 - Require mutator authority and an `AllocationClass<T>` for every managed
   allocation.
-- Give each thread a heap-specific local cache from dense class ID to its
-  current run cursor. The thread-local registry is keyed by collector heap
-  identity because one host thread may enter more than one heap. A cache keeps
-  only a weak association to its heap, so an idle thread cannot retain a dead
-  heap; a stale cursor is never dereferenced unless entry has reacquired that
-  heap and validated the cursor's lease/epoch.
-- Register each live thread cache weakly with its heap. The heap uses that
-  registry to revoke or recover allocation leases, not to discover runs or
-  object reachability. Correctness must not depend on thread-local destructor
-  order; a cooperative thread exit may return leases promptly, while a later
-  full collection can recover expired or retained leases.
-- Allocate ordinary slots from the cached run using only worker-local cursor or
-  free-bitmap state. Do not look up or hash `TypeId`, acquire a shared lock, or
+- Give each thread a heap-specific cache containing one captured
+  `allocation_lease_epoch` and a dense-class-ID map of current
+  bitmap-word-range cursors. The thread-local registry is keyed by collector
+  heap identity because one host thread may enter more than one heap. The entry
+  retains a weak heap identity but no strong heap owner, so it cannot retain a
+  dead heap or its arenas. Keeping the weak allocation identity alive prevents
+  address reuse from making stale cursor records appear to belong to a newly
+  created heap. The heap retains no back-reference to the cache and never walks
+  it.
+- Validate the heap-specific cache once at outer mutator entry, after mutator
+  admission. If its captured epoch differs from the heap's current epoch,
+  replace the entire class-to-cursor map with an empty map and capture the new
+  epoch. Do not walk or validate individual cursors. Discarding stale cursor
+  records is inert: it must not dereference their runs or attempt to return
+  leases which the collector may already have reassigned. The epoch remains
+  stable for the whole mutator region.
+- Never return a range from TLS destruction, cache eviction, or ordinary
+  mutator exit. These paths only retain or forget inert cursor records and do
+  not dereference the heap. Full collection is the sole reclamation protocol:
+  it clears run-side lease metadata directly without finding or walking thread-
+  local caches. Correctness therefore has no TLS destructor-order, heap-owned
+  cache registry, or cross-thread cache-lock dependency.
+- Allocate ordinary slots from the cached bitmap-word range using only its
+  worker-local cursor and free mask. Integral word ownership lets that thread
+  update the authoritative allocation bits without contending with another
+  allocator. Do not look up or hash `TypeId`, acquire a shared lock, or
   increment a shared byte counter on the ordinary hot path.
-- On cache miss or run exhaustion, use the class's synchronized slow path to
-  obtain a reusable partial fixed-size run or reserve a new typed run from an
-  arena chunk.
+- On cache miss or range exhaustion, use the class's synchronized slow path to
+  claim a nonoverlapping range from a reusable partial fixed-size run or
+  reserve a new typed run from an arena chunk. A small run-side lease bitmap,
+  separate from the object allocation bitmap, owns allocation-bitmap words
+  rather than individual slots. Initialize the range cursor's local free mask
+  from the inverse of those authoritative allocation words, with invalid tail
+  slots masked out; do not lease a range containing no free slot.
 - Initialize the payload completely before setting its allocation bit. A
   reserved but uncommitted slot is not traceable. Panic unwinding returns the
   slot to local free state without invoking `Drop` on uninitialized bytes. Set
   the allocation bit before returning `Gc<T>`. Sharing that pointer through
   ordinary Rust synchronization makes it visible to another mutator; nothing
   about object visibility is deferred until mutator exit.
-- On outer mutator exit, leave each reusable partial cursor retained in the
-  registered thread cache or return it to the class pool according to cache
-  eviction policy. Releasing mutator admission makes the cache quiescent and
-  collector-accessible; retaining its cursor does not publish an allocation or
-  root its slots. Re-entry may reuse a valid retained lease without the shared
-  class-pool slow path.
-- Charge allocation pressure when runs are obtained and reconcile unused slots
-  when partial runs are returned or revoked. Bound or evict cold class cursors
-  so `threads × classes × partial-run size` does not become unbounded
-  fragmentation, but select the initial bound only after allocation histograms
-  exist.
+- On outer mutator exit, leave each reusable range cursor retained in its
+  heap-specific thread cache. Cache eviction merely forgets a cursor and leaves
+  that range leased until full collection. Releasing mutator admission makes
+  the cache quiescent; retaining or forgetting a range does not publish an
+  allocation or root its slots. Re-entry may reuse the whole cache after one
+  epoch comparison without the shared class-pool slow path.
+- Charge allocation pressure in batches when ranges or runs are claimed and
+  reconcile unused slots only when full collection revokes all leases. Bound
+  the retained class-cursor map, charge forgotten ranges as unavailable
+  capacity, and request collection before accumulated abandoned ranges become
+  unbounded. The unit of temporary fragmentation is a range rather than a
+  partial run, but select the initial range size, cache bound, and pressure
+  threshold only after allocation histograms exist.
 - Permit a mutex-backed run-turnover path initially. Changing run-pool or local
-  cache policy later must not change pointer, trace, or mutator semantics. One
-  cache lock at outer entry is acceptable; ordinary allocations through the
-  held cache do not reacquire it.
+  cache policy later must not change pointer, trace, or mutator semantics. The
+  heap-specific cache is owned by its thread and needs no mutex; ordinary
+  allocations through it do not synchronize.
 - Do not choose synchronization for possible future debug reads of allocation
   bitmaps in this phase. Such observations are non-semantic and may lag
   allocation activity. Any later implementation must remain data-race-free,
@@ -401,11 +426,15 @@ Verification:
 - allocation from several mutators never overlaps;
 - instrumentation proves repeated allocations in a cached class perform no
   hash lookup or shared synchronization;
-- a cursor retained after one outer entry is reused by a later entry on the same
-  thread without class-pool synchronization;
-- a thread cache does not retain its heap, and stale cache entries are rejected
-  before dereferencing a run;
-- cold or expired caches do not lose their partial runs permanently;
+- nonoverlapping bitmap-word ranges let several mutators allocate from one run
+  without overlapping or sharing an allocation word;
+- a cache retained after one outer entry is reused by a later entry on the same
+  thread after one cache-level epoch comparison and without class-pool
+  synchronization;
+- a thread cache does not retain its heap, and an epoch mismatch replaces its
+  entire cursor map without dereferencing any stale run;
+- TLS destruction and cache eviction do not access the heap or return ranges;
+- full collection recovers ranges abandoned by cache eviction and thread exit;
 - reused slots are correctly reinitialized and marked allocated;
 - panic unwinding never exposes uninitialized storage as an object; and
 - dropping the heap without collection destroys every allocated drop-type slot
@@ -420,26 +449,46 @@ Verification:
 - If admission and allocation slow paths share one `HeapState` mutex, keep
   their fields and transitions separately documented. The mutex belongs to
   arena-chunk, typed-run-pool, class-discovery, and phase state; it is not held
-  by a mutator's local run cursor. The collector sets its request under that
-  mutex, waits for the active count to reach zero, and then has exclusive
+  by a mutator's local bitmap-range cursor. The collector sets its request under
+  that mutex, waits for the active count to reach zero, and then has exclusive
   access to allocation state without retaining a mutator-region lock.
-- Support recursive same-heap entry through thread-local depth without
-  incrementing the global active-mutator count.
+- Maintain one `ThreadHeapState` per heap identity in TLS. It contains that
+  heap's recursive mutator depth, allocation-lease epoch, and bitmap-range
+  cursor map. A thread may have several such states active concurrently;
+  entering another runtime heap activates its independent state and admission
+  count rather than replacing a singular current-mutator slot.
+- Support recursive same-heap entry through that heap's thread-local depth
+  without incrementing its active-mutator count again.
 - Activate the persistent C2C thread cache at the outermost same-heap entry.
   Nested entry reuses that cache. Only outermost exit makes the cache quiescent,
-  leaving reusable cursors retained and returning evicted cursors.
+  leaving reusable cursors retained; eviction and exit never return a range.
 - Do not maintain a cross-thread active/parked flag for a cursor. Recursive
   depth is local to its owning thread. The collector need not inspect another
   thread's depth: acquiring exclusive mutator admission proves that every
-  registered cache is quiescent before the collector inspects or revokes it.
-- Provide a scoped current-mutator accessor for reviewed destructor and
-  runtime-integration code, for example an HRTB closure API rather than a
-  borrow which can escape. A destructor invoked by the collector sees its
-  finalizer mutator as current; a same-heap public runtime operation therefore
-  re-enters recursively instead of acquiring independent admission.
-- Reject or explicitly diagnose nested entry into a different heap.
-- A collection request prevents new outer entries, then waits for every active
-  mutator to exit.
+  TLS cache is quiescent. It then revokes ranges by clearing heap-owned run
+  lease bitmaps, without inspecting any cache.
+- Provide a heap-qualified scoped current-mutator accessor for reviewed
+  destructor and runtime-integration code, for example an HRTB closure API
+  rather than a borrow which can escape. An unqualified "current mutator" API
+  is invalid because several heaps may be active. A destructor invoked by the
+  collector sees its finalizer mutator as current for that heap; a same-heap
+  public runtime operation therefore re-enters recursively instead of
+  acquiring independent admission.
+- Permit nested entry into a different heap. It activates a separate cache and
+  active-mutator obligation; holding heap A's mutator neither authorizes heap B
+  access nor permits a managed edge between them.
+- A collection request prevents ordinary new outer entries, then waits for
+  every active mutator of that heap to exit. There is one narrow dependent-
+  admission exception: a thread already holding another heap's mutator may
+  enter a target heap whose collector is requested or queued but has not yet
+  acquired exclusive `Collecting` state. Under the target phase lock, either
+  the dependent entry increments its active count or it observes that the
+  collector is already exclusive and waits; there is no gap between those
+  outcomes.
+- Encode that distinction in explicit phase/admission state. A bare
+  writer-preferring `RwLock` is not, by itself, the admission implementation:
+  it cannot distinguish an ordinary new reader from a dependent cross-heap
+  entrant which must bypass a merely queued writer.
 - Give the collector a privileged collector-to-mutator handoff. After marking
   fixes the dead set, and before releasing exclusive mutator admission, the
   collector acquires one ordinary mutator lease for its own thread. With an
@@ -463,28 +512,38 @@ Verification:
   coordinator serializes collector ownership; no second trace or sweep starts
   concurrently.
 - Once a collection is committed, queuing for exclusive admission may
-  deliberately use writer preference. New mutators then wait behind the
-  collection because the heuristic has selected stop-the-world work as the
-  runtime's next priority. Do not weaken that priority merely to improve reader
-  throughput; tune when collection is committed instead.
+  deliberately use writer preference. New ordinary mutators then wait behind
+  the collection because the heuristic has selected stop-the-world work as the
+  runtime's next priority. A dependent cross-heap entry from an already active
+  mutator bypasses only a pending writer, not an active collector. This bounded
+  exception prevents two threads holding A then B and B then A from deadlocking
+  merely because collectors queue on both heaps. Tune commitment rather than
+  weakening ordinary writer priority.
 - Consequently, an already-admitted mutator must be able to reach its outer
-  exit without synchronously depending on a new outer mutator admission.
-  Recursive same-thread entry remains available. Work which truly requires a
-  new worker must either establish that admission before commitment, be left
-  scheduled for after collection, or keep the heuristic from committing yet.
-  This is a general stop-the-world mutator contract, not a finalizer-specific
-  exception.
+  exit without synchronously depending on a new ordinary outer mutator
+  admission. Recursive same-heap and dependent cross-heap entry remain
+  available on that thread. Work which truly requires a new worker must either
+  establish that admission before commitment, be left scheduled for after
+  collection, or keep the heuristic from committing yet. This is a general
+  stop-the-world mutator contract, not a finalizer-specific exception.
+- Exclusive mark and sweep code may not enter another heap, invoke a callback,
+  or wait for foreign runtime work. Thus, a thread holding heap A while waiting
+  for an already-active heap B collector cannot form the reverse dependency.
+  Mutator-capable finalization begins only after B leaves exclusive collection
+  and installs its ordinary finalizer mutator, so it follows the dependent-
+  admission rule like any other active mutator.
 - Mutators admitted before the request may continue allocating while they
   finish their bounded region; those allocations remain part of the heap which
   the collector sees after the active count reaches zero. A pending request
   must not strand an admitted mutator before it can exit.
 - Every successful allocation has initialized its payload and set its
   allocation bit before returning its pointer, independently of mutator exit.
-  Outermost exit retains or returns every local typed-run cursor and releases
-  the cache's active access before decrementing the active-mutator count. The
-  admission release/acquire edge makes prior allocator metadata writes visible
-  to the collector; it is not a Glam value-publication or transactional
-  boundary. Exercise this ordering under Loom or deterministic barriers.
+  Outermost exit retains its local bitmap-range cursors, makes the cache
+  quiescent by leaving its recursive region, and then decrements the active-
+  mutator count. The admission release/acquire edge makes prior allocator
+  metadata writes visible to the collector; it is not a Glam value-publication
+  or transactional boundary. Exercise this ordering under Loom or
+  deterministic barriers.
 - Allocation thresholds request collection but do not synchronously collect
   from the middle of a mutator region.
 - Allocation pressure during `Finalizing` records follow-up pressure. Before
@@ -500,13 +559,18 @@ Deterministic tests must force:
 
 1. request immediately before a mutator enters;
 2. request while one or several mutators are active;
-3. nested entry while a request is pending;
+3. same-heap nested entry while a request is pending;
 4. last mutator exit racing a second requester;
 5. collector-to-mutator handoff racing coalesced collection pressure;
 6. a finalizer waiting for a worker mutator before that pressure is committed;
 7. commitment of the next collection blocking a new mutator behind its writer;
-8. a panicking mutator; and
-9. heap drop while collection waiters exist.
+8. a panicking mutator;
+9. two heaps nested on one thread with independent recursive depths and caches;
+10. two threads entering A then B and B then A while collectors are pending on
+    both heaps, proving dependent admission breaks the wait cycle;
+11. a cross-heap entry waiting for an already-exclusive collector without that
+    collector reaching into the held heap; and
+12. heap drop while collection waiters exist.
 
 Use Loom for the coordination state where feasible. Repeated stress is
 supplementary, not proof.
@@ -549,11 +613,14 @@ are stopped.
 
 - Stop all mutators and snapshot/visit external roots.
 - Enumerate runs directly from the heap, never by discovering them through
-  thread caches. For the initial full collector, revoke every cache-retained
-  thread-local cursor lease at the start of the exclusive phase and advance an
-  allocation epoch. A later mutator discards the stale cursor and reacquires a
-  run from the post-sweep class pool. Retaining selected hot leases across a
-  collection is deferred profiling work.
+  thread caches. For the initial full collector, clear every run's allocation-
+  range lease bitmap at the start of the exclusive phase and advance one
+  heap-wide `allocation_lease_epoch`. On its next outer entry, each
+  heap-specific thread cache compares that one epoch and replaces its entire
+  class-to-range-cursor map on mismatch; neither the collector nor the mutator
+  validates cursors individually. Post-sweep allocation claims fresh ranges
+  from the rebuilt run state. Retaining selected hot leases across a collection
+  is deferred profiling work.
 - Mark through each allocation class's edge visitor; do not derive outgoing
   edges from fixed byte offsets. Immediate/non-edge fields are invisible to the
   collector.
@@ -572,9 +639,8 @@ are stopped.
   panics, discard the worklist, leave every allocation intact, restore a usable
   non-collecting phase, and let the panic continue to its caller. A retry uses
   a fresh epoch, so marks from the abandoned attempt are irrelevant.
-- Do not consume roots, remembered-set entries, or other reachability evidence
-  while marking. Commit their retirement only after the corresponding
-  collection succeeds.
+- Do not consume roots or other reachability evidence while marking. Commit
+  their retirement only after the corresponding collection succeeds.
 
 Verification includes randomized graph comparison against a simple reference
 reachability implementation and million-edge depth tests which cannot overflow
@@ -703,61 +769,15 @@ Gate G1 passes after C6 plus a focused unsafe-code audit.
 This phase tests collector mechanisms only. It does not imitate Glam scheduler
 semantics beyond the shape needed to validate shared values.
 
-## Phase C8 — Generational Metadata and Barrier API
-
-- Divide typed runs into young and old generations without moving objects.
-  Ordinary newly obtained runs are young.
-- Use whole-run generation and promotion initially. A promoted partial run may
-  serve only old allocation or remain closed to new allocation; do not mix
-  young and old slots merely to recover space.
-- Add a card bitmap to old runs. Select a coarse card size from the same
-  measured run geometry rather than adding remembered state to every object.
-- Add a small write-barrier API which can dirty an old owner before or while a
-  young edge becomes visible. This activates generational behavior in the
-  mutation gateway established by C1; it is required for minor collection even
-  though the collector still stops all mutators while tracing.
-- Provide collector-aware wrappers or helper operations for the publication
-  patterns Glam actually uses: replaceable fields, `Mutex`-protected fields,
-  and one-time cells.
-- Do not implement an already-marked-object barrier in this phase. That belongs
-  to a separately planned incremental or concurrent marker.
-- Keep barriers idempotent and thread-safe; no barrier is required for fields
-  which cannot contain managed pointers.
-
-Verification proves card publication ordering with deterministic barriers,
-checks boundary writes for every run/card size, and compares full tracing with
-a reference graph after arbitrary mutations.
-
-## Phase C9 — Minor Collection and Promotion
-
-- Stop all mutators.
-- Trace young objects from external roots and dirty cards in old runs.
-- Reclaim wholly dead young runs, lazily recover dead slots in partial no-drop
-  runs, finalize dead drop-type slots, and promote survivors according to the
-  whole-run C8 policy.
-- Clear card bits only when the corresponding old region has been rescanned and
-  commit that clearing only after the minor collection succeeds. A failed
-  minor mark retains all prior reachability evidence for retry.
-- Fall back to full collection on generation overflow, remembered-set pressure,
-  or an invariant check which cannot be answered cheaply.
-
-Differential verification runs the same generated allocation/mutation history
-through minor collections and full-only collections, then compares reachable
-payloads, destruction counts, and pointer identities.
-
-Gate G4 cannot pass here alone; the Glam integration barrier inventory must
-also pass.
-
-## Phase C10 — Tuning Surface and Final Collector Audit
+## Phase C8 — Tuning Surface and Final Collector Audit
 
 - Expose internal tuning for arena-chunk size, the single fixed run size,
-  worker class-cache capacity, card size, collection thresholds, nursery size,
-  promotion, and full/minor selection without exposing collector jargon as a
-  stable Glam public API. Comparing candidate fixed run sizes may require
-  separate heap construction or builds; C10 does not introduce variable-size
-  runs. Report bitmap bytes and internal fragmentation by metadata-requested
-  slot stride so the value layer can choose its own type layouts and size
-  policy from evidence.
+  worker class-cache capacity, and full-collection thresholds without exposing
+  collector jargon as a stable Glam public API. Comparing candidate fixed run
+  sizes may require separate heap construction or builds; C8 does not
+  introduce variable-size runs. Report bitmap bytes and internal fragmentation
+  by metadata-requested slot stride so the value layer can choose its own type
+  layouts and size policy from evidence.
 - Make an explicit collection report suitable for tests and future runtime
   metrics.
 - Audit every unsafe block against `SAFETY.md`.
@@ -796,14 +816,14 @@ before repair.
 - Pointer copying and reading acquire no pointer-local collector lock.
 - One heap supports multiple concurrent mutators and shared roots.
 - Full collection is exact, non-moving, and cycle collecting.
-- Minor collection is observationally equivalent to full collection.
 - Every managed allocation fits one slot in the documented fixed-size typed-run
   geometry; unsupported layouts are rejected without a hidden fallback.
 - Unsafe contracts and copied-code provenance are auditable in the subcrate.
 - No collector API depends on Glam `Value`, scheduling, reflection, or host I/O.
-- Concurrent marking is possible without changing pointer representation, but
-  remains disabled and unimplemented until separately planned. Moving remains
-  a separate future design rather than a completion claim of this plan.
+- Moving, generational, and concurrent collection remain separate future
+  designs rather than completion claims of this plan. The visitor and mutation
+  gateways must not obstruct them, but the initial collector carries no
+  generation or remembered-set machinery merely in anticipation.
 
 Trace derive macros remain deferred. Reconsider one only if the Glam integration
 inventory demonstrates substantial mechanical visitor repetition, and treat it
