@@ -23,4 +23,5 @@ RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-Zsanitizer=$sanitizer" \
     -Zbuild-std \
     --target "$target" \
     --package glam-gc \
-    --all-features
+    --all-features \
+    --lib

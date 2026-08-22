@@ -20,6 +20,13 @@ crates/glam-gc/scripts/check-sanitizer.sh address
 crates/glam-gc/scripts/check-sanitizer.sh thread
 ```
 
+The sanitizer scripts exercise the collector library rather than the separate
+Loom scaffold. Even an empty `loom::model(|| {})` currently retains one
+256-byte Loom allocation under LeakSanitizer and emits the documented ASan
+stack-switch warning; that tool incompatibility is independent of Glam heap
+entry and explicit TLS release. The ordinary stable check continues to run the
+Loom model separately.
+
 These scripts deliberately fail with the underlying toolchain diagnostic when
 nightly, Miri, `rust-src`, or a sanitizer is unavailable. Every checkpoint
 which changes the unsafe allocation or access surface records a focused Miri
@@ -32,13 +39,14 @@ terminal payload destruction, so `check-miri.sh` now keeps leak checking
 enabled alongside pointer provenance, aliasing, initialization, thread access,
 and mismatch gateways.
 
-The Loom test remains a tooling and API smoke model. C2C's slow path leases
-whole allocation words under the heap mutex, after which a worker mutates only
-its own word; there is still no collection state machine to model. C3 must
-replace or supplement this smoke test with models of each real admission and
-stop-the-world transition. C2C's forced native schedules and Miri validate the
-current disjoint-word implementation, but ordinary threaded stress alone is
-not a proof of the later coordinator.
+The Loom tests retain the heap-entry tooling/API smoke model and model C2C.5's
+atomic lease-bit claim transition. Raw arena-pointer integration remains under
+native forced schedules, sanitizers, and Miri. C2C.5 claims whole allocation
+words through atomic lease bitmaps and consults the heap mutex only when a
+class frontier is exhausted; after a claim, a worker mutates only its own
+ordinary word. There is still no collection state machine to model. C3 must
+add models of each real admission and stop-the-world transition; ordinary
+threaded stress alone is not a proof of that later coordinator.
 
 ## Gate G0 Baseline
 

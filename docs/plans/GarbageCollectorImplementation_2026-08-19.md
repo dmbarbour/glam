@@ -1,10 +1,8 @@
 # Glam GC Subcrate Implementation Plan — 2026-08-19
 
-Status: in progress; Phases C0, C1, C2A, C2B, and the C2C correctness baseline
-through C2C.4 are complete. The mandatory post-C1 review is complete. The
-C2C.5 lease-claim, typed-run-pressure, class-frontier, and TLS-lifecycle
-optimization and the
-mandatory post-C2C review precede C3A.
+Status: in progress; Phases C0, C1, C2A, C2B, and C2C are complete. The
+mandatory post-C1 review is complete. The mandatory post-C2C review precedes
+C3A.
 
 This plan implements an exact, non-moving, runtime-local tracing collector
 without depending on Glam value semantics. The governing requirements and
@@ -34,10 +32,10 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C2C.2 | completed | heap-specific TLS identity, epochs, and cache lifecycle |
 | C2C.3 | completed | allocation-word leasing and worker-local hot allocation |
 | C2C.4 | completed | pressure, panic, teardown, and allocator audit |
-| C2C.5a | pending | atomic hierarchical lease-word claiming |
-| C2C.5b | pending | typed-run-publication collection pressure |
-| C2C.5c | pending | stable class run frontier and lock-free cursor refill |
-| C2C.5d | pending | explicit thread-local cache release without eager pruning |
+| C2C.5a | completed | atomic hierarchical lease-word claiming |
+| C2C.5b | completed | typed-run-publication collection pressure |
+| C2C.5c | completed | stable class run frontier and lock-free cursor refill |
+| C2C.5d | completed | explicit thread-local cache release without eager pruning |
 | C3A | pending | ordinary admission and same-heap recursion integration |
 | C3B | pending | collector election and single-heap STW quiescence |
 | C3C | pending | cross-heap dependent admission |
@@ -1374,6 +1372,43 @@ Verification for C2C.5d:
 - focused lifecycle tests, multi-heap nesting, Clippy, the exact unsafe audit,
   Miri, and available sanitizer checks pass before the mandatory post-C2C
   review begins.
+
+#### C2C.5 Completion
+
+C2C.5 completed on 2026-08-22:
+
+- Every lease word is now initialized and accessed as `AtomicU64`. Compile-
+  time assertions latch its size and the stronger bitmap alignment contract.
+  Claimers scan lease words, race with compare-exchange, retain a claimed full
+  allocation word as unavailable, and never claim the invalid suffix of the
+  final lease word.
+- Allocation pressure no longer participates in word leasing. One centralized
+  heap-state operation publishes a run into the arena and class pool, then
+  charges one saturating typed-run event. The 128th publication latches the
+  provisional request; neither a failed publication nor any lease, slot,
+  cursor, or TLS transition adds an event.
+- Each class handle and heap entry share one frontier cell. It release-publishes
+  a pointer to a separately boxed, heap-owned run record, so ordinary cursor
+  refill claims directly without heap state. Exhaustion rechecks under the
+  mutex, advances monotonically through already published records, and
+  publishes a new run only when no later record exists.
+- Mutator entry performs only the direct TLS registry lookup for its heap. Dead
+  weak records remain inert until thread exit or explicit
+  `Heap::release_current_thread_caches`; explicit release validates all depths
+  before clearing anything and never upgrades a heap, returns a lease, changes
+  pressure, or invokes a callback.
+- Focused verification covers concurrent hierarchical claims, full and partial
+  lease words, lock-free refill, one-run publication under racing allocators,
+  monotonic frontier advancement, publication failure, pressure thresholds,
+  dead and live TLS records, and panic-atomic explicit release. The exact
+  unsafe inventory records the new atomic raw-storage and stable-frontier
+  boundary.
+- The collector check passes with 72 unit tests, two Loom models, and six
+  compile-fail doctests. Full leak-checking Miri passes all 72 unit tests, and
+  both AddressSanitizer and ThreadSanitizer pass the collector library suite.
+  Sanitizers deliberately exclude the separate Loom scaffold because even an
+  empty Loom model retains one 256-byte tool-owned allocation under
+  LeakSanitizer; the stable collector check continues to run both Loom models.
 
 ## Phase C3 — Regional Mutators and Stop-the-World Handshake
 

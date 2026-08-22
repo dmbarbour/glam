@@ -11,7 +11,7 @@ use crate::{
     thread_cache::{AllocationCursor, AllocationLeaseEpoch, ThreadHeapEntry},
 };
 
-const INITIAL_COLLECTION_PRESSURE_BYTES: usize = crate::arena::ARENA_CHUNK_SIZE;
+const INITIAL_RUN_PUBLICATION_ALLOWANCE: usize = crate::arena::RUNS_PER_CHUNK;
 
 /// One shareable, runtime-local managed-value domain.
 ///
@@ -28,6 +28,17 @@ impl Heap {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Releases every inactive Glam GC cache retained by the calling thread.
+    ///
+    /// This is optional maintenance for long-lived host threads which outlive
+    /// one or more heaps. It never returns leases to a live heap: forgotten
+    /// leases remain unavailable until a future full collection. Calling it
+    /// while this thread holds a mutator for any heap is a contract violation
+    /// and panics before releasing any record.
+    pub fn release_current_thread_caches() -> usize {
+        crate::thread_cache::release_current_thread_caches()
     }
 
     /// Runs `operation` inside a scoped mutator region for this heap.
@@ -58,6 +69,8 @@ pub(crate) struct HeapInner {
     allocation_lease_epoch: AtomicU64,
     #[cfg(test)]
     allocation_cursor_claims: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    allocation_cursor_slow_paths: std::sync::atomic::AtomicUsize,
 }
 
 impl Default for HeapInner {
@@ -67,6 +80,8 @@ impl Default for HeapInner {
             allocation_lease_epoch: AtomicU64::new(AllocationLeaseEpoch::INITIAL.get()),
             #[cfg(test)]
             allocation_cursor_claims: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            allocation_cursor_slow_paths: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 }
@@ -85,18 +100,36 @@ struct HeapState {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct AllocationPressure {
-    claimed_ranges: usize,
-    leased_capacity_bytes: usize,
+    published_runs: usize,
     collection_requested: bool,
 }
 
 impl AllocationPressure {
-    fn record_claim(&mut self, claimed_slots: usize, slot_stride: usize) {
-        let claimed_bytes = claimed_slots.saturating_mul(slot_stride);
-        self.claimed_ranges = self.claimed_ranges.saturating_add(1);
-        self.leased_capacity_bytes = self.leased_capacity_bytes.saturating_add(claimed_bytes);
-        self.collection_requested |=
-            self.leased_capacity_bytes >= INITIAL_COLLECTION_PRESSURE_BYTES;
+    fn record_run_publication(&mut self) {
+        self.published_runs = self.published_runs.saturating_add(1);
+        self.collection_requested |= self.published_runs >= INITIAL_RUN_PUBLICATION_ALLOWANCE;
+    }
+}
+
+impl HeapState {
+    fn publish_run(
+        &mut self,
+        class_index: usize,
+        class_id: AllocationClassId,
+        geometry: RunGeometry,
+    ) -> Result<RunLocation, RunPublicationError> {
+        // Reserve the class-pool entry before publishing arena state. After a
+        // successful arena publication, all remaining operations are
+        // infallible and the pressure event is recorded exactly once.
+        self.classes[class_index].reserve_run();
+        let location = self.arena.publish_run(class_id, geometry)?;
+        let target = self
+            .arena
+            .run_claim_target(location)
+            .expect("published typed run must expose stable claim topology");
+        self.classes[class_index].publish_run(target);
+        self.allocation_pressure.record_run_publication();
+        Ok(location)
     }
 }
 
@@ -170,15 +203,17 @@ impl HeapInner {
         make_candidate: impl FnOnce() -> AllocationClassEntry,
     ) -> AllocationClass<T> {
         let identity = MetadataIdentity::new(metadata);
-        if let Some(id) = self
-            .state
-            .lock()
-            .expect("heap state should not be poisoned")
-            .classes_by_metadata
-            .get(&identity)
-            .copied()
         {
-            return AllocationClass::new(Arc::clone(self), metadata, id);
+            let state = self
+                .state
+                .lock()
+                .expect("heap state should not be poisoned");
+            if let Some(id) = state.classes_by_metadata.get(&identity).copied() {
+                let shared = Arc::clone(
+                    state.classes[class_index(id).expect("known class ID must be valid")].shared(),
+                );
+                return AllocationClass::new(Arc::clone(self), metadata, id, shared);
+            }
         }
 
         // As with process metadata, immutable candidate construction remains
@@ -200,7 +235,10 @@ impl HeapInner {
             .lock()
             .expect("heap state should not be poisoned");
         if let Some(id) = state.classes_by_metadata.get(&identity).copied() {
-            return AllocationClass::new(Arc::clone(self), metadata, id);
+            let shared = Arc::clone(
+                state.classes[class_index(id).expect("known class ID must be valid")].shared(),
+            );
+            return AllocationClass::new(Arc::clone(self), metadata, id, shared);
         }
 
         let next = state
@@ -219,10 +257,13 @@ impl HeapInner {
             .try_reserve(1)
             .expect("allocation-class index capacity exhausted");
         state.classes.push(candidate);
+        let shared = Arc::clone(
+            state.classes[class_index(next).expect("new class ID must be valid")].shared(),
+        );
         let replaced = state.classes_by_metadata.insert(identity, next);
         debug_assert!(replaced.is_none());
 
-        AllocationClass::new(Arc::clone(self), metadata, next)
+        AllocationClass::new(Arc::clone(self), metadata, next, shared)
     }
 
     #[allow(
@@ -251,14 +292,9 @@ impl HeapInner {
         }
         let geometry = entry.geometry();
 
-        // Reserve the class-pool entry before publishing arena state. After a
-        // successful arena publication, pushing the location is infallible.
-        state.classes[index].reserve_run();
         let location = state
-            .arena
-            .publish_run(class.id(), geometry)
+            .publish_run(index, class.id(), geometry)
             .map_err(PrepareRunError::Publication)?;
-        state.classes[index].publish_run(location);
         Ok(location)
     }
 
@@ -283,62 +319,66 @@ impl HeapInner {
         self.allocation_cursor_claims
             .fetch_add(1, Ordering::Relaxed);
 
+        if let Some(claimed) = class.claim_frontier() {
+            return allocation_cursor(class.id(), claimed);
+        }
+
+        #[cfg(test)]
+        self.allocation_cursor_slow_paths
+            .fetch_add(1, Ordering::Relaxed);
         let mut state = self
             .state
             .lock()
             .expect("heap state should not be poisoned");
         let index = class_index(class.id()).expect("allocation class has an invalid ID");
-        let HeapState {
-            arena,
-            classes,
-            allocation_pressure,
-            ..
-        } = &mut *state;
-        let entry = classes
-            .get_mut(index)
-            .expect("allocation class is absent from its heap");
-        assert!(
-            std::ptr::eq(entry.metadata(), class.metadata()),
-            "allocation class metadata does not match its heap entry"
-        );
-        let geometry = entry.geometry();
+        let geometry = {
+            let entry = state
+                .classes
+                .get(index)
+                .expect("allocation class is absent from its heap");
+            assert!(
+                std::ptr::eq(entry.metadata(), class.metadata()),
+                "allocation class metadata does not match its heap entry"
+            );
+            assert!(
+                Arc::ptr_eq(entry.shared(), class.shared()),
+                "allocation class shared state does not match its heap entry"
+            );
+            entry.geometry()
+        };
 
-        let claimed = entry
-            .runs()
-            .iter()
-            .find_map(|&location| arena.claim_allocation_word(location))
-            .unwrap_or_else(|| {
-                entry.reserve_run();
-                let location = arena
-                    .publish_run(class.id(), geometry)
-                    .unwrap_or_else(|error| panic!("managed run allocation failed: {error:?}"));
-                entry.publish_run(location);
-                arena
-                    .claim_allocation_word(location)
-                    .expect("fresh typed run must provide one allocation word")
-            });
-        assert_eq!(
-            claimed.geometry, geometry,
-            "claimed allocation range has the wrong geometry"
-        );
-        allocation_pressure.record_claim(
-            claimed.free_mask.count_ones() as usize,
-            claimed.geometry.slot_stride,
-        );
+        // Another publisher may have advanced the frontier before this thread
+        // acquired heap state. Recheck before changing authoritative topology.
+        if let Some(claimed) = class.claim_frontier() {
+            return allocation_cursor(class.id(), claimed);
+        }
 
-        AllocationCursor {
-            class_id: class.id(),
-            location: claimed.location,
-            run: claimed.run,
-            geometry: claimed.geometry,
-            word_index: claimed.word_index,
-            free_mask: claimed.free_mask,
+        loop {
+            if let Some(target) = state.classes[index].advance_frontier() {
+                if let Some(claimed) = target.claim_allocation_word() {
+                    return allocation_cursor(class.id(), claimed);
+                }
+                continue;
+            }
+
+            state
+                .publish_run(index, class.id(), geometry)
+                .unwrap_or_else(|error| panic!("managed run allocation failed: {error:?}"));
+            let target = state.classes[index].activate_last_run();
+            if let Some(claimed) = target.claim_allocation_word() {
+                return allocation_cursor(class.id(), claimed);
+            }
         }
     }
 
     #[cfg(test)]
     fn allocation_cursor_claim_count(&self) -> usize {
         self.allocation_cursor_claims.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    fn allocation_cursor_slow_path_count(&self) -> usize {
+        self.allocation_cursor_slow_paths.load(Ordering::Relaxed)
     }
 
     #[cfg(test)]
@@ -376,23 +416,18 @@ impl HeapInner {
         );
         let geometry = entry.geometry();
 
-        let selected = entry.runs().iter().find_map(|&location| {
+        let selected = entry.runs().iter().find_map(|run| {
             state
                 .arena
-                .first_free_slot(location)
-                .map(|slot_index| (location, slot_index))
+                .first_free_slot(run.location)
+                .map(|slot_index| (run.location, slot_index))
         });
         let (location, slot_index) = if let Some(selected) = selected {
             selected
         } else {
-            // Reserve the class-pool entry before publishing arena state. The
-            // eventual push is then infallible under this same heap-state lock.
-            state.classes[index].reserve_run();
             let location = state
-                .arena
-                .publish_run(class.id(), geometry)
+                .publish_run(index, class.id(), geometry)
                 .unwrap_or_else(|error| panic!("managed run allocation failed: {error:?}"));
-            state.classes[index].publish_run(location);
             (location, 0)
         };
 
@@ -429,7 +464,7 @@ impl HeapInner {
             .into_iter()
             .filter_map(|run| {
                 let entry = state.classes.get(class_index(run.class_id)?)?;
-                if entry.geometry() != run.geometry || !entry.runs().contains(&run.location) {
+                if entry.geometry() != run.geometry || !entry.contains_run(run.location) {
                     return None;
                 }
                 Some(ResolvedRun {
@@ -473,7 +508,7 @@ impl HeapInner {
 fn resolve_slot_in_state(state: &HeapState, address: usize) -> Option<ResolvedSlot> {
     let owner = state.arena.checked_slot_owner(address)?;
     let entry = state.classes.get(class_index(owner.class_id)?)?;
-    if entry.geometry() != owner.geometry || !entry.runs().contains(&owner.location) {
+    if entry.geometry() != owner.geometry || !entry.contains_run(owner.location) {
         return None;
     }
     Some(ResolvedSlot {
@@ -495,8 +530,8 @@ impl Drop for HeapInner {
             if !metadata.needs_drop() {
                 continue;
             }
-            for &location in entry.runs() {
-                for pointer in state.arena.allocated_slot_pointers(location) {
+            for run in entry.runs() {
+                for pointer in state.arena.allocated_slot_pointers(run.location) {
                     // SAFETY: the allocation bitmap is published only after a
                     // value with this run's canonical metadata is initialized.
                     // Final heap ownership is exclusive, and this provisional
@@ -515,6 +550,20 @@ impl Drop for HeapInner {
 )]
 fn class_index(id: AllocationClassId) -> Option<usize> {
     usize::try_from(id.get().checked_sub(1)?).ok()
+}
+
+fn allocation_cursor(
+    class_id: AllocationClassId,
+    claimed: crate::arena::ClaimedAllocationWord,
+) -> AllocationCursor {
+    AllocationCursor {
+        class_id,
+        location: claimed.location,
+        run: claimed.run,
+        geometry: claimed.geometry,
+        word_index: claimed.word_index,
+        free_mask: claimed.free_mask,
+    }
 }
 
 #[cfg(test)]
@@ -537,8 +586,8 @@ mod tests {
     };
 
     use super::{
-        AllocationPressure, Heap, INITIAL_COLLECTION_PRESSURE_BYTES, PrepareRunError, RunLocation,
-        class_index,
+        AllocationPressure, Heap, INITIAL_RUN_PUBLICATION_ALLOWANCE, PrepareRunError, RunLocation,
+        RunPublicationError, class_index,
     };
 
     struct FirstType {
@@ -971,7 +1020,12 @@ mod tests {
         };
         let runs = state.classes[class_index(class.id()).unwrap()].runs();
         assert_eq!(runs.len(), 1);
-        assert!(state.arena.allocated_slot_pointers(runs[0]).is_empty());
+        assert!(
+            state
+                .arena
+                .allocated_slot_pointers(runs[0].location)
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1004,6 +1058,7 @@ mod tests {
                 .collect::<Vec<_>>()
         });
         assert_eq!(heap.inner.allocation_cursor_claim_count(), 1);
+        assert_eq!(heap.inner.allocation_cursor_slow_path_count(), 1);
 
         let second = heap.with_mutator(|mutator| {
             (32..64_u64)
@@ -1014,19 +1069,18 @@ mod tests {
         assert_eq!(
             heap.inner.allocation_pressure(),
             AllocationPressure {
-                claimed_ranges: 1,
-                leased_capacity_bytes: 64 * std::mem::size_of::<u64>(),
+                published_runs: 1,
                 collection_requested: false,
             }
         );
 
         let next = heap.with_mutator(|mutator| mutator.alloc(&class, 64_u64));
         assert_eq!(heap.inner.allocation_cursor_claim_count(), 2);
+        assert_eq!(heap.inner.allocation_cursor_slow_path_count(), 1);
         assert_eq!(
             heap.inner.allocation_pressure(),
             AllocationPressure {
-                claimed_ranges: 2,
-                leased_capacity_bytes: 128 * std::mem::size_of::<u64>(),
+                published_runs: 1,
                 collection_requested: false,
             }
         );
@@ -1083,6 +1137,11 @@ mod tests {
             .collect::<HashSet<_>>();
         assert_eq!(locations.len(), THREADS * VALUES_PER_THREAD);
         assert_eq!(heap.inner.resolved_runs().len(), 1);
+        assert_eq!(heap.inner.allocation_pressure().published_runs, 1);
+        assert_eq!(
+            class.shared().frontier(),
+            Some(RunLocation { chunk: 0, run: 0 })
+        );
 
         let observed = heap.with_mutator(|mutator| {
             values
@@ -1095,6 +1154,23 @@ mod tests {
                 .collect::<HashSet<_>>()
         });
         assert_eq!(observed.len(), THREADS * VALUES_PER_THREAD);
+    }
+
+    #[test]
+    fn exhausted_frontier_advances_through_prepublished_runs() {
+        let heap = Heap::new();
+        let class = heap.allocation_class::<u64>().unwrap();
+        let runs = (0..3)
+            .map(|_| heap.inner.prepare_run(&class).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(class.shared().frontier(), Some(runs[0]));
+
+        while class.claim_frontier().is_some() {}
+        let cursor = heap.inner.claim_allocation_cursor(&class);
+
+        assert_eq!(cursor.location, runs[1]);
+        assert_eq!(class.shared().frontier(), Some(runs[1]));
+        assert_eq!(heap.inner.allocation_pressure().published_runs, 3);
     }
 
     #[test]
@@ -1135,29 +1211,89 @@ mod tests {
             .into_iter()
             .collect::<HashSet<_>>();
         assert_eq!(slots, HashSet::from([0, 64, 128, 192]));
-        assert_eq!(heap.inner.allocation_pressure().claimed_ranges, 4);
+        assert_eq!(heap.inner.allocation_pressure().published_runs, 1);
+    }
+
+    #[test]
+    fn pressure_request_uses_saturating_typed_run_publications() {
+        let mut pressure = AllocationPressure::default();
+        for _ in 0..INITIAL_RUN_PUBLICATION_ALLOWANCE - 1 {
+            pressure.record_run_publication();
+        }
         assert_eq!(
-            heap.inner.allocation_pressure().leased_capacity_bytes,
-            4 * 64 * std::mem::size_of::<u64>()
+            pressure.published_runs,
+            INITIAL_RUN_PUBLICATION_ALLOWANCE - 1
+        );
+        assert!(!pressure.collection_requested);
+
+        pressure.record_run_publication();
+        assert_eq!(pressure.published_runs, INITIAL_RUN_PUBLICATION_ALLOWANCE);
+        assert!(pressure.collection_requested);
+
+        pressure.published_runs = usize::MAX;
+        pressure.record_run_publication();
+        assert_eq!(pressure.published_runs, usize::MAX);
+        assert!(pressure.collection_requested);
+    }
+
+    #[test]
+    fn authoritative_run_publication_records_exactly_one_pressure_event() {
+        let heap = Heap::new();
+        let class = heap.allocation_class::<FirstType>().unwrap();
+
+        for _ in 0..INITIAL_RUN_PUBLICATION_ALLOWANCE - 1 {
+            heap.inner.prepare_run(&class).unwrap();
+        }
+        assert_eq!(
+            heap.inner.allocation_pressure(),
+            AllocationPressure {
+                published_runs: INITIAL_RUN_PUBLICATION_ALLOWANCE - 1,
+                collection_requested: false,
+            }
+        );
+
+        heap.inner.prepare_run(&class).unwrap();
+        assert_eq!(
+            heap.inner.allocation_pressure(),
+            AllocationPressure {
+                published_runs: INITIAL_RUN_PUBLICATION_ALLOWANCE,
+                collection_requested: true,
+            }
+        );
+        assert_eq!(
+            heap.inner.resolved_runs().len(),
+            INITIAL_RUN_PUBLICATION_ALLOWANCE
         );
     }
 
     #[test]
-    fn pressure_request_uses_batched_leased_capacity() {
-        let mut pressure = AllocationPressure::default();
-        pressure.record_claim(63, 8);
-        assert_eq!(pressure.claimed_ranges, 1);
-        assert_eq!(pressure.leased_capacity_bytes, 504);
-        assert!(!pressure.collection_requested);
+    fn failed_run_publication_exposes_no_frontier_or_pressure() {
+        let heap = Heap::new();
+        let class = heap.allocation_class::<FirstType>().unwrap();
+        let index = class_index(class.id()).unwrap();
+        let mut invalid = heap.inner.state.lock().unwrap().classes[index].geometry();
+        invalid.slot_count = 0;
 
-        pressure.record_claim(1, INITIAL_COLLECTION_PRESSURE_BYTES);
-        assert_eq!(pressure.claimed_ranges, 2);
-        assert!(pressure.collection_requested);
+        let error = heap
+            .inner
+            .state
+            .lock()
+            .unwrap()
+            .publish_run(index, class.id(), invalid)
+            .unwrap_err();
 
-        pressure.record_claim(usize::MAX, usize::MAX);
-        assert_eq!(pressure.claimed_ranges, 3);
-        assert_eq!(pressure.leased_capacity_bytes, usize::MAX);
-        assert!(pressure.collection_requested);
+        assert!(matches!(
+            error,
+            RunPublicationError::Initialization(
+                crate::arena::RunInitializationError::InvalidGeometry
+            )
+        ));
+        assert_eq!(class.shared().frontier(), None);
+        assert!(heap.inner.resolved_runs().is_empty());
+        assert_eq!(
+            heap.inner.allocation_pressure(),
+            AllocationPressure::default()
+        );
     }
 
     #[test]
@@ -1309,7 +1445,8 @@ mod tests {
     }
 
     #[test]
-    fn dead_heap_tls_identity_is_weak_and_pruned_on_later_entry() {
+    fn dead_heap_tls_identity_remains_weak_until_explicit_release() {
+        let _ = Heap::release_current_thread_caches();
         let heap = Heap::new();
         let address = Arc::as_ptr(&heap.inner) as usize;
         let weak = Arc::downgrade(&heap.inner);
@@ -1322,7 +1459,55 @@ mod tests {
 
         let other = Heap::new();
         other.with_mutator(|_| {});
+        assert!(registry_contains(address));
+        assert_eq!(Heap::release_current_thread_caches(), 2);
         assert!(!registry_contains(address));
+        assert!(cache_snapshot(&other.inner).is_none());
+    }
+
+    #[test]
+    fn explicit_cache_release_validates_all_depths_before_mutation() {
+        let _ = Heap::release_current_thread_caches();
+        let first = Heap::new();
+        let second = Heap::new();
+        first.with_mutator(|_| {});
+
+        second.with_mutator(|_| {
+            let panic = catch_unwind(AssertUnwindSafe(Heap::release_current_thread_caches));
+            assert!(panic.is_err());
+            assert!(cache_snapshot(&first.inner).is_some());
+            assert_eq!(cache_snapshot(&second.inner).unwrap().recursive_depth, 1);
+        });
+
+        assert_eq!(Heap::release_current_thread_caches(), 2);
+        assert!(cache_snapshot(&first.inner).is_none());
+        assert!(cache_snapshot(&second.inner).is_none());
+    }
+
+    #[test]
+    fn releasing_live_cache_forgets_cursor_without_changing_run_pressure() {
+        let _ = Heap::release_current_thread_caches();
+        let heap = Heap::new();
+        let class = heap.allocation_class::<u64>().unwrap();
+        let first = heap.with_mutator(|mutator| mutator.alloc(&class, 1_u64));
+        assert_eq!(heap.inner.allocation_cursor_claim_count(), 1);
+        assert_eq!(heap.inner.allocation_pressure().published_runs, 1);
+
+        assert_eq!(Heap::release_current_thread_caches(), 1);
+        let second = heap.with_mutator(|mutator| mutator.alloc(&class, 2_u64));
+
+        assert_eq!(heap.inner.allocation_cursor_claim_count(), 2);
+        assert_eq!(heap.inner.allocation_pressure().published_runs, 1);
+        assert_eq!(
+            [first, second].map(|value| {
+                heap.inner
+                    .resolve_slot(value.erase().as_ptr().as_ptr() as usize)
+                    .unwrap()
+                    .slot_index
+            }),
+            [0, 64]
+        );
+        assert_eq!(Heap::release_current_thread_caches(), 1);
     }
 
     #[test]

@@ -259,13 +259,6 @@ impl ThreadHeapEntry {
     pub(crate) fn enter(heap: &Arc<HeapInner>, epoch: AllocationLeaseEpoch) -> Self {
         let key = HeapCacheKey::new(heap);
         let state = THREAD_HEAPS.with_borrow_mut(|registry| {
-            // Dropping a cache record is inert and drops only its weak heap
-            // identity plus numeric cursor state. Prune dead heaps whenever a
-            // thread next enters any heap.
-            registry.retain(|_, state| {
-                let state = state.borrow();
-                state.recursive_depth != 0 || state.heap.strong_count() != 0
-            });
             Rc::clone(
                 registry
                     .entry(key)
@@ -300,6 +293,25 @@ impl ThreadHeapEntry {
             state: Rc::clone(&self.state),
         }
     }
+}
+
+pub(crate) fn release_current_thread_caches() -> usize {
+    THREAD_HEAPS.with_borrow_mut(|registry| {
+        // Validate the complete registry before mutation. A caller which is
+        // still inside any mutator region gets a contract panic while every
+        // cache record remains available for normal unwinding and exit.
+        for state in registry.values() {
+            assert_eq!(
+                state.borrow().recursive_depth,
+                0,
+                "cannot release thread caches while a mutator is active"
+            );
+        }
+
+        let released = registry.len();
+        registry.clear();
+        released
+    })
 }
 
 impl Drop for ThreadHeapEntry {

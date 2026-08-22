@@ -1,14 +1,20 @@
+crates/glam-gc/src/arena.rs:                match unsafe { lease.as_ref() }.compare_exchange_weak(
 crates/glam-gc/src/arena.rs:                unsafe { address.pointer().add(offset).cast() }
 crates/glam-gc/src/arena.rs:            NonNull::new(unsafe { alloc_zeroed(layout) }).ok_or(ArenaError::AllocationFailed)?;
+crates/glam-gc/src/arena.rs:            let mut observed = unsafe { lease.as_ref() }.load(Ordering::Acquire);
+crates/glam-gc/src/arena.rs:            let range = unsafe { std::slice::from_raw_parts(start.as_ptr(), bitmap.byte_len()) };
 crates/glam-gc/src/arena.rs:            let range = unsafe { std::slice::from_raw_parts(start.as_ptr(), bitmap.byte_len()) };
 crates/glam-gc/src/arena.rs:            let start = unsafe { address.pointer().add(bitmap.offset) };
 crates/glam-gc/src/arena.rs:            let start = unsafe { address.pointer().add(bitmap.offset) };
+crates/glam-gc/src/arena.rs:            let start = unsafe { address.pointer().add(bitmap.offset) };
+crates/glam-gc/src/arena.rs:            let word = unsafe { pointer.as_ref() }.load(Ordering::Acquire);
 crates/glam-gc/src/arena.rs:            unsafe { header.write(RunHeader::empty()) };
+crates/glam-gc/src/arena.rs:            unsafe { pointer.write(AtomicU64::new(lease_value)) };
 crates/glam-gc/src/arena.rs:            unsafe { std::ptr::write_bytes(start.as_ptr(), value, bitmap.byte_len()) };
 crates/glam-gc/src/arena.rs:        Some(unsafe { run.pointer().cast::<RunHeader>().as_ref() })
 crates/glam-gc/src/arena.rs:        let current = unsafe { pointer.read() };
-crates/glam-gc/src/arena.rs:        let current = unsafe { pointer.read() };
 crates/glam-gc/src/arena.rs:        let header = unsafe { header_pointer.as_ref() };
+crates/glam-gc/src/arena.rs:        let lease = unsafe { lease.as_ref() }.load(Ordering::Acquire);
 crates/glam-gc/src/arena.rs:        let pointer = unsafe {
 crates/glam-gc/src/arena.rs:        let pointer = unsafe { address.pointer().add(offset).cast::<T>() };
 crates/glam-gc/src/arena.rs:        let pointer = unsafe { self.base.add(offset) };
@@ -17,16 +23,23 @@ crates/glam-gc/src/arena.rs:        let word = unsafe {
 crates/glam-gc/src/arena.rs:        unsafe {
 crates/glam-gc/src/arena.rs:        unsafe { allocation_word.write(published_word) };
 crates/glam-gc/src/arena.rs:        unsafe { dealloc(self.base.as_ptr(), chunk_layout()) };
+crates/glam-gc/src/arena.rs:        unsafe { first_allocation.write(u64::MAX) };
 crates/glam-gc/src/arena.rs:        unsafe { header_pointer.write(RunHeader::initialized(class_id, geometry)) };
 crates/glam-gc/src/arena.rs:        unsafe { pointer.read() }
-crates/glam-gc/src/arena.rs:        unsafe { pointer.write(current | (1_u64 << lease_bit_index)) };
 crates/glam-gc/src/arena.rs:        unsafe { pointer.write(value) };
+crates/glam-gc/src/arena.rs:    let allocation = unsafe { allocation.read() };
+crates/glam-gc/src/arena.rs:    unsafe {
+crates/glam-gc/src/arena.rs:    unsafe {
 crates/glam-gc/src/arena.rs:unsafe impl Send for ArenaChunk {}
+crates/glam-gc/src/arena.rs:unsafe impl Send for RunClaimTarget {}
+crates/glam-gc/src/arena.rs:unsafe impl Sync for RunClaimTarget {}
 crates/glam-gc/src/class.rs:            unsafe {
+crates/glam-gc/src/class.rs:        Some(unsafe { pointer.as_ref() }.location)
 crates/glam-gc/src/class.rs:        unsafe impl Trace for PanickingCandidate {
 crates/glam-gc/src/class.rs:        unsafe { (self.trace)(pointer, visitor) };
 crates/glam-gc/src/class.rs:        unsafe { drop(pointer) };
 crates/glam-gc/src/class.rs:        unsafe { metadata_for::<DropProbe>().drop_in_place(pointer.cast()) };
+crates/glam-gc/src/class.rs:        unsafe { target.as_ref() }.claim_allocation_word()
 crates/glam-gc/src/class.rs:    let value = unsafe { pointer.cast::<T>().as_ref() };
 crates/glam-gc/src/class.rs:    pub(crate) unsafe fn drop_in_place(&self, pointer: NonNull<()>) {
 crates/glam-gc/src/class.rs:    pub(crate) unsafe fn trace(&self, pointer: NonNull<()>, visitor: &mut Visitor<'_>) {

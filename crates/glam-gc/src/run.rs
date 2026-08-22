@@ -1,5 +1,6 @@
 use std::alloc::Layout;
 use std::num::NonZeroU64;
+use std::sync::atomic::AtomicU64;
 
 pub(crate) const RUN_SIZE: usize = 64 * 1024;
 pub(crate) const RUN_HEADER_SIZE: usize = 64;
@@ -14,7 +15,10 @@ pub(crate) const MAX_MANAGED_SIZE: usize = RUN_SIZE - METADATA_PAYLOAD_ALIGNMENT
 pub(crate) const MAX_MANAGED_ALIGNMENT: usize = RUN_SIZE / 2;
 
 const _: () = assert!(RUN_SIZE.is_power_of_two());
+const _: () = assert!(std::mem::size_of::<AtomicU64>() == std::mem::size_of::<u64>());
+const _: () = assert!(BITMAP_WORD_SIZE.is_multiple_of(std::mem::align_of::<AtomicU64>()));
 const _: () = assert!(RUN_HEADER_SIZE.is_multiple_of(BITMAP_WORD_SIZE));
+const _: () = assert!(RUN_HEADER_SIZE.is_multiple_of(std::mem::align_of::<AtomicU64>()));
 const _: () = assert!(METADATA_PAYLOAD_ALIGNMENT.is_power_of_two());
 const _: () = assert!(RUN_HEADER_SIZE + 3 * BITMAP_WORD_SIZE <= METADATA_PAYLOAD_ALIGNMENT);
 

@@ -24,6 +24,9 @@ C2C.2 adds weak heap-specific TLS cache identity and lifecycle. C2C.3 leases
 disjoint allocation-bitmap words and makes the worker-local cursor the ordinary
 allocation path. C2C.4 adds batched leased-capacity pressure, deterministic
 pre-initialization unwind verification, and last-owner teardown latches.
+C2C.5 replaces the baseline lease scan with atomic hierarchical claiming,
+moves pressure to authoritative typed-run publication, adds stable atomic class
+frontiers, and removes eager TLS pruning in favor of explicit inert release.
 There is no root registry, collection, marking, reclamation, finalization,
 callback, or collector coordination.
 
@@ -237,9 +240,10 @@ C6 later owns collector-driven destruction.
   allocation-lease epoch, recursive depth, and a fixed 64-entry direct-mapped
   cursor array. The heap has no cache registry or TLS back-reference.
 - The weak Arc identity prevents its allocation address from being reused while
-  a stale TLS record exists without keeping the dead heap alive. A later heap
-  entry prunes dead inactive records; TLS destruction merely drops weak and
-  numeric state.
+  a stale TLS record exists without keeping the dead heap alive. Ordinary heap
+  entry never scans or prunes unrelated records. Thread exit drops the complete
+  registry, while `Heap::release_current_thread_caches` validates that every
+  recursive depth is zero before clearing all records without heap access.
 - Same-heap recursive regions share one TLS entry and checked depth. An RAII
   entry guard balances normal return and unwinding. Different heaps use
   independent records even when their mutator regions are nested on one host
@@ -252,26 +256,31 @@ C6 later owns collector-driven destruction.
   not inflate a mutator caller's stack. Dense class ID selects the entry and
   the retained full ID detects collisions; no hash or allocation occurs on a
   lookup.
-- A cursor becomes authoritative only after the synchronized heap path sets
-  the corresponding run-side lease bit. C2C.3 leases one complete allocation
-  word per cursor. Separate cursors never own the same word, and eviction or
-  TLS destruction forgets the pointer without clearing its lease.
+- A cursor becomes authoritative only after one atomic run-side lease-bit CAS
+  succeeds. C2C leases one complete allocation word per cursor. Separate
+  cursors never own the same word, and eviction, explicit cache release, or TLS
+  destruction forgets the pointer without clearing its lease.
 
 ## Worker-Local Allocation-Word Invariants
 
-- A cache miss holds the heap-state mutex while validating exact class
-  provenance, selecting an unleased word with at least one free valid slot,
-  and setting its lease bit. A fresh run is fully published into both arena
-  and class pool before its first lease is returned.
+- A cache miss first loads the allocation class's stable frontier with Acquire
+  ordering and scans its atomic lease bitmap without heap state. Only an
+  exhausted frontier enters the synchronized slow path, where exact class
+  provenance is revalidated and the frontier advances to an existing run or a
+  newly published typed run. A fresh run is fully published into the arena,
+  class pool, and run-pressure state before its frontier pointer is stored with
+  Release ordering.
 - The cursor carries the stable owning `RunAddress`, validated `RunGeometry`,
   one allocation-word index, and a local free mask. Its mask is the inverse of
   the authoritative allocation word intersected with the exact slot-count
   mask, so tail padding can never become a payload address.
 - While a lease is live, only its worker-local cursor reads or writes that
-  allocation word. Other claims inspect the lease bitmap under heap state and
-  skip the word before reading its allocation bits. Distinct word-sized `u64`
-  objects occupy disjoint memory, so concurrent allocation within one run is
-  data-race-free.
+  allocation word. Other claims inspect `AtomicU64` lease words and read an
+  ordinary allocation word only after winning its lease bit. Distinct word-
+  sized `u64` objects occupy disjoint memory, so concurrent allocation within
+  one run is data-race-free. Lease-word size and alignment suitability are
+  compile-time assertions; raw lease storage is initialized directly as
+  `AtomicU64`, not reinterpreted from a live `u64`.
 - The hot path performs every bounds, size, alignment, and free-bit assertion
   before initializing the payload. Its two final operations are an infallible
   payload write followed by an infallible allocation-bit write; no unwind can
@@ -281,13 +290,12 @@ C6 later owns collector-driven destruction.
   occurs only after bitmap publication, and ordinary Rust synchronization may
   immediately share it with another mutator. Collection remains disabled in
   C2C, so the payload then stays live through terminal heap teardown.
-- Allocation pressure is charged once under heap state when a word is leased,
-  using its valid free-slot count and slot stride. It is never incremented on
-  the local object path and never decremented by cache eviction or thread exit.
-  Saturating totals therefore conservatively include abandoned leases without
-  requiring TLS callbacks. One chunk of leased capacity records the
-  provisional pending collection request; C3B owns acting on that request and
-  C5 owns resetting it when leases are revoked.
+- Allocation pressure is charged exactly once under heap state after a typed
+  run becomes authoritative in both arena and class pool. Word claims, local
+  object allocation, cursor eviction, explicit cache release, and thread exit
+  do not touch it. A saturating count latches the provisional request after
+  `RUNS_PER_CHUNK` publications, currently 128; C3B owns acting on the request
+  and C6 owns rearming the allowance after successful sweep.
 - The deterministic pre-initialization hook exists only in test builds at the
   last point before the two publication writes. An unwind there owns and drops
   the input normally while leaving both local and authoritative bit state
@@ -305,22 +313,22 @@ only after entering its owner heap on that thread.
 
 ### `mutator::Mutator::alloc`
 
-The safe allocator first attempts the worker-local cursor and otherwise claims
-and installs one allocation word through the synchronized slow path. Both
-successful branches call `Gc::from_raw` only after the exact payload has been
-initialized and its allocation bit published. The class-provenance check
-precedes either path, and neither path contains a panicking operation between
-the payload write and bit publication.
+The safe allocator first attempts the worker-local cursor and then the class's
+atomic run frontier. Only frontier exhaustion enters the synchronized topology
+slow path. Every successful branch calls `Gc::from_raw` only after the exact
+payload has been initialized and its allocation bit published. The class-
+provenance check precedes allocation, and neither payload path contains a
+panicking operation between the payload write and bit publication.
 
 ### `thread_cache::AllocationCursor` raw run and bitmap access
 
 The cursor's raw pointer arithmetic, payload initialization, and bitmap access
-are justified by the synchronized lease operation: it validates a stable typed
-run and geometry, masks invalid tail bits, and grants this thread exclusive
-ownership of every represented allocation word. The cursor checks the selected
-slot, payload size, and alignment before writing. No other allocator may read
-or mutate its allocation word until a future full collection revokes all
-leases after stopping mutators and advancing the heap epoch.
+are justified by the atomic lease operation over a published stable run record:
+it carries validated typed-run geometry, masks invalid tail bits, and grants
+this thread exclusive ownership of one represented allocation word. The cursor
+checks the selected slot, payload size, and alignment before writing. No other
+allocator may read or mutate its allocation word until a future full collection
+revokes all leases after stopping mutators and advancing the heap epoch.
 
 ### `arena::ArenaChunk` allocation and destruction
 
@@ -332,9 +340,10 @@ layout.
 
 The `NonNull::add` sites derive aligned run starts, side-metadata words, or
 bounded payload slots. Each is preceded by checked run membership and validated
-geometry, proving the result remains within the live chunk. Payload and bitmap
-writes occur only under exclusive arena access; read-only recovery does not
-create a payload reference.
+geometry, proving the result remains within the live chunk. Payload and
+ordinary bitmap writes occur only under exclusive arena or leased-word access.
+Lease words are the exception: after run publication they are accessed only
+through `AtomicU64`. Read-only recovery does not create a payload reference.
 
 ### `Send for arena::ArenaChunk`
 
@@ -342,6 +351,16 @@ An arena chunk owns raw untyped bytes and exposes no Rust reference. Moving the
 owner between threads transfers the one deallocation obligation without
 accessing those bytes. Sharing remains mediated by the heap's arena mutex; no
 independent `Sync` implementation is needed.
+
+### `Send` and `Sync` for `arena::RunClaimTarget`
+
+The target contains a raw address but never owns arena storage. It is created
+only from a fully initialized published run and remains private to callers
+which retain the heap. Its only shared mutation is an atomic lease-word CAS;
+after a successful claim, the corresponding ordinary allocation word has one
+exclusive worker. Boxed target records retain stable addresses until heap
+teardown, and an allocation-class handle keeps that heap alive while loading
+or copying the current target.
 
 ### Run-header and side-metadata access
 

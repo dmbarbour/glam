@@ -1,9 +1,9 @@
 //! Runtime-local garbage collection support for Glam.
 //!
 //! C2C provides managed-pointer contracts, canonical object metadata,
-//! heap-local allocation classes, and synchronized arena allocation. Payloads
-//! remain live until terminal heap teardown; tracing collection remains
-//! disabled.
+//! heap-local allocation classes, atomic allocation-word leasing, lock-free
+//! class-frontier refill, and synchronized run publication. Payloads remain
+//! live until terminal heap teardown; tracing collection remains disabled.
 
 #![deny(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]

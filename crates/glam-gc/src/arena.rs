@@ -3,6 +3,7 @@ use std::alloc::{Layout, alloc_zeroed, dealloc};
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::Trace;
 use crate::run::{AllocationClassId, RUN_SIZE, RunGeometry, RunHeader};
@@ -94,6 +95,78 @@ pub(crate) struct ClaimedAllocationWord {
     pub(crate) word_index: usize,
     pub(crate) free_mask: u64,
 }
+
+/// Stable, heap-owned topology needed to claim allocation words from one run.
+///
+/// The record itself does not retain its arena. It remains private to allocator
+/// paths which retain the owning heap for the complete claim operation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct RunClaimTarget {
+    pub(crate) location: RunLocation,
+    pub(crate) run: RunAddress,
+    pub(crate) geometry: RunGeometry,
+}
+
+impl RunClaimTarget {
+    pub(crate) fn claim_allocation_word(self) -> Option<ClaimedAllocationWord> {
+        for lease_word_index in 0..self.geometry.lease_bitmap.word_len {
+            let lease = lease_word_pointer(self.run, self.geometry.lease_bitmap, lease_word_index);
+            // Acquire pairs with publication of a stable run record. The CAS
+            // is the ownership transition for the selected allocation word.
+            let mut observed = unsafe { lease.as_ref() }.load(Ordering::Acquire);
+            loop {
+                let candidates = !observed;
+                if candidates == 0 {
+                    break;
+                }
+                let lease_bit_index = candidates.trailing_zeros() as usize;
+                let word_index = lease_word_index * u64::BITS as usize + lease_bit_index;
+                if word_index >= self.geometry.lease_bitmap.bit_len {
+                    // Invalid bits form only the suffix of the final lease
+                    // word. Reaching one proves every valid candidate in this
+                    // word was already claimed.
+                    break;
+                }
+                let bit = 1_u64 << lease_bit_index;
+                match unsafe { lease.as_ref() }.compare_exchange_weak(
+                    observed,
+                    observed | bit,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => {
+                        let free_mask = free_mask_for_word(self.run, self.geometry, word_index);
+                        if free_mask != 0 {
+                            return Some(ClaimedAllocationWord {
+                                location: self.location,
+                                run: self.run,
+                                geometry: self.geometry,
+                                word_index,
+                                free_mask,
+                            });
+                        }
+
+                        // A full allocation word stays leased. Continue from
+                        // the state this worker just published rather than
+                        // making it available for repeated futile claims.
+                        observed |= bit;
+                    }
+                    Err(actual) => observed = actual,
+                }
+            }
+        }
+        None
+    }
+}
+
+// SAFETY: `RunClaimTarget` is constructed only for a published run in stable
+// heap-owned arena storage. Shared operations mutate lease words atomically;
+// one successful lease bit grants one thread exclusive access to the matching
+// ordinary allocation word. Private callers retain the heap while using it.
+unsafe impl Send for RunClaimTarget {}
+// SAFETY: the same published-run and atomic-lease invariants permit concurrent
+// claims through shared copies of this immutable topology record.
+unsafe impl Sync for RunClaimTarget {}
 
 impl Arena {
     pub(crate) fn reserve_chunk(&mut self) -> Result<usize, ArenaError> {
@@ -237,19 +310,20 @@ impl Arena {
     }
 
     pub(crate) fn claim_allocation_word(
-        &mut self,
+        &self,
         location: RunLocation,
     ) -> Option<ClaimedAllocationWord> {
-        let claimed = self
-            .chunks
-            .get_mut(location.chunk)?
-            .claim_allocation_word(location.run)?;
-        Some(ClaimedAllocationWord {
+        self.run_claim_target(location)?.claim_allocation_word()
+    }
+
+    pub(crate) fn run_claim_target(&self, location: RunLocation) -> Option<RunClaimTarget> {
+        let chunk = self.chunks.get(location.chunk)?;
+        let run = chunk.run_address(location.run)?;
+        let geometry = chunk.header_for(run)?.geometry()?;
+        Some(RunClaimTarget {
             location,
-            run: claimed.run,
-            geometry: claimed.geometry,
-            word_index: claimed.word_index,
-            free_mask: claimed.free_mask,
+            run,
+            geometry,
         })
     }
 
@@ -498,64 +572,6 @@ impl ArenaChunk {
             .collect()
     }
 
-    fn claim_allocation_word(&mut self, run: usize) -> Option<ChunkAllocationWord> {
-        let address = self.run_address(run)?;
-        let geometry = self.header_for(address)?.geometry()?;
-
-        for word_index in 0..geometry.allocation_bitmap.word_len {
-            if self.lease_bit_is_set(address, geometry, word_index) {
-                continue;
-            }
-            let free_mask = self.free_mask_for_word(address, geometry, word_index);
-            if free_mask == 0 {
-                continue;
-            }
-
-            self.set_lease_bit(address, geometry, word_index);
-            return Some(ChunkAllocationWord {
-                run: address,
-                geometry,
-                word_index,
-                free_mask,
-            });
-        }
-        None
-    }
-
-    fn free_mask_for_word(&self, run: RunAddress, geometry: RunGeometry, word_index: usize) -> u64 {
-        let allocation = self.read_bitmap_word(run, geometry.allocation_bitmap, word_index);
-        !allocation & valid_slot_mask(geometry.slot_count, word_index)
-    }
-
-    fn lease_bit_is_set(
-        &self,
-        run: RunAddress,
-        geometry: RunGeometry,
-        allocation_word_index: usize,
-    ) -> bool {
-        let lease_word_index = allocation_word_index / u64::BITS as usize;
-        let lease_bit_index = allocation_word_index % u64::BITS as usize;
-        let word = self.read_bitmap_word(run, geometry.lease_bitmap, lease_word_index);
-        word & (1_u64 << lease_bit_index) != 0
-    }
-
-    fn set_lease_bit(
-        &mut self,
-        run: RunAddress,
-        geometry: RunGeometry,
-        allocation_word_index: usize,
-    ) {
-        let lease_word_index = allocation_word_index / u64::BITS as usize;
-        let lease_bit_index = allocation_word_index % u64::BITS as usize;
-        let pointer = self.bitmap_word_pointer(run, geometry.lease_bitmap, lease_word_index);
-        // SAFETY: the pointer names one initialized aligned lease-bitmap word
-        // under exclusive arena access.
-        let current = unsafe { pointer.read() };
-        debug_assert_eq!(current & (1_u64 << lease_bit_index), 0);
-        // SAFETY: the same exclusive validated word may publish this lease bit.
-        unsafe { pointer.write(current | (1_u64 << lease_bit_index)) };
-    }
-
     fn read_bitmap_word(
         &self,
         run: RunAddress,
@@ -661,17 +677,21 @@ impl ArenaChunk {
         let address = self
             .run_address(run)
             .expect("validated run must belong to its chunk");
-        for bitmap in [
-            geometry.allocation_bitmap,
-            geometry.lease_bitmap,
-            geometry.mark_bitmap,
-        ] {
+        for bitmap in [geometry.allocation_bitmap, geometry.mark_bitmap] {
             // SAFETY: validated geometry keeps each side-bitmap range within
             // this live run and disjoint from its header and payload slots.
             let start = unsafe { address.pointer().add(bitmap.offset) };
             // SAFETY: the same validated byte range is live untyped arena
             // storage and may be initialized to the requested byte value.
             unsafe { std::ptr::write_bytes(start.as_ptr(), value, bitmap.byte_len()) };
+        }
+        let lease_value = u64::from_ne_bytes([value; std::mem::size_of::<u64>()]);
+        for word_index in 0..geometry.lease_bitmap.word_len {
+            let pointer = lease_word_pointer(address, geometry.lease_bitmap, word_index);
+            // SAFETY: the run is exclusively borrowed and not yet published
+            // with this geometry. Each aligned raw lease-word destination is
+            // initialized exactly once as an atomic value before publication.
+            unsafe { pointer.write(AtomicU64::new(lease_value)) };
         }
     }
 
@@ -680,11 +700,23 @@ impl ArenaChunk {
         debug_assert!(geometry.is_structurally_valid());
         let address = self.run_address(run).unwrap();
         let mut bytes = Vec::new();
-        for bitmap in [
-            geometry.allocation_bitmap,
-            geometry.lease_bitmap,
-            geometry.mark_bitmap,
-        ] {
+        {
+            let bitmap = geometry.allocation_bitmap;
+            // SAFETY: the chunk remains borrowed, and validated geometry names
+            // initialized bytes inside this run's side metadata.
+            let start = unsafe { address.pointer().add(bitmap.offset) };
+            // SAFETY: `start` and `byte_len` describe that live initialized
+            // side-metadata range; it is copied before the borrow ends.
+            let range = unsafe { std::slice::from_raw_parts(start.as_ptr(), bitmap.byte_len()) };
+            bytes.extend_from_slice(range);
+        }
+        for word_index in 0..geometry.lease_bitmap.word_len {
+            let pointer = lease_word_pointer(address, geometry.lease_bitmap, word_index);
+            let word = unsafe { pointer.as_ref() }.load(Ordering::Acquire);
+            bytes.extend_from_slice(&word.to_ne_bytes());
+        }
+        {
+            let bitmap = geometry.mark_bitmap;
             // SAFETY: the chunk remains borrowed, and validated geometry names
             // initialized bytes inside this run's side metadata.
             let start = unsafe { address.pointer().add(bitmap.offset) };
@@ -697,12 +729,45 @@ impl ArenaChunk {
     }
 }
 
-#[derive(Clone, Copy)]
-struct ChunkAllocationWord {
+fn free_mask_for_word(run: RunAddress, geometry: RunGeometry, word_index: usize) -> u64 {
+    let allocation = bitmap_word_pointer(run, geometry.allocation_bitmap, word_index);
+    // SAFETY: winning the corresponding lease bit grants exclusive access to
+    // this initialized ordinary allocation word.
+    let allocation = unsafe { allocation.read() };
+    !allocation & valid_slot_mask(geometry.slot_count, word_index)
+}
+
+fn bitmap_word_pointer(
     run: RunAddress,
-    geometry: RunGeometry,
+    bitmap: crate::run::BitmapGeometry,
     word_index: usize,
-    free_mask: u64,
+) -> NonNull<u64> {
+    assert!(word_index < bitmap.word_len, "bitmap word is out of range");
+    // SAFETY: validated bitmap geometry places every aligned word wholly
+    // inside this live run.
+    unsafe {
+        run.pointer()
+            .add(bitmap.offset)
+            .cast::<u64>()
+            .add(word_index)
+    }
+}
+
+fn lease_word_pointer(
+    run: RunAddress,
+    bitmap: crate::run::BitmapGeometry,
+    word_index: usize,
+) -> NonNull<AtomicU64> {
+    assert!(word_index < bitmap.word_len, "lease word is out of range");
+    // SAFETY: compile-time geometry assertions make the run boundary and word
+    // stride suitable for `AtomicU64`; validated bitmap geometry keeps this
+    // particular aligned word wholly inside the run.
+    unsafe {
+        run.pointer()
+            .add(bitmap.offset)
+            .cast::<AtomicU64>()
+            .add(word_index)
+    }
 }
 
 // SAFETY: an arena chunk is exclusive owned storage with no exposed Rust
@@ -774,6 +839,8 @@ fn valid_slot_mask(slot_count: usize, word_index: usize) -> u64 {
 #[cfg(test)]
 mod tests {
     use std::alloc::Layout;
+    use std::collections::HashSet;
+    use std::sync::{Arc, Barrier, Mutex};
 
     use super::*;
 
@@ -1062,6 +1129,72 @@ mod tests {
 
         assert_eq!(claims.len(), geometry.allocation_bitmap.word_len);
         assert!(arena.claim_allocation_word(location).is_none());
+    }
+
+    #[test]
+    fn concurrent_claimers_atomically_partition_one_run() {
+        const THREADS: usize = 12;
+
+        let mut arena = Arena::default();
+        let geometry = geometry(1, 1);
+        assert!(geometry.lease_bitmap.word_len > 1);
+        assert!(
+            !geometry
+                .lease_bitmap
+                .bit_len
+                .is_multiple_of(u64::BITS as usize)
+        );
+        let location = arena.publish_run(class(1), geometry).unwrap();
+        let target = arena.run_claim_target(location).unwrap();
+        let barrier = Arc::new(Barrier::new(THREADS));
+        let claimed = Arc::new(Mutex::new(Vec::new()));
+
+        std::thread::scope(|scope| {
+            for _ in 0..THREADS {
+                let barrier = Arc::clone(&barrier);
+                let claimed = Arc::clone(&claimed);
+                scope.spawn(move || {
+                    barrier.wait();
+                    let mut local = Vec::new();
+                    while let Some(word) = target.claim_allocation_word() {
+                        local.push(word.word_index);
+                    }
+                    claimed.lock().unwrap().extend(local);
+                });
+            }
+        });
+
+        let claimed = claimed.lock().unwrap();
+        assert_eq!(claimed.len(), geometry.allocation_bitmap.word_len);
+        assert_eq!(
+            claimed.iter().copied().collect::<HashSet<_>>().len(),
+            geometry.allocation_bitmap.word_len
+        );
+        assert!(
+            claimed
+                .iter()
+                .all(|&word| word < geometry.allocation_bitmap.word_len)
+        );
+    }
+
+    #[test]
+    fn full_word_stays_leased_and_claiming_continues() {
+        let mut arena = Arena::default();
+        let geometry = geometry(16, 8);
+        assert!(geometry.allocation_bitmap.word_len > 1);
+        let location = arena.publish_run(class(1), geometry).unwrap();
+        let target = arena.run_claim_target(location).unwrap();
+        let first_allocation =
+            bitmap_word_pointer(target.run, target.geometry.allocation_bitmap, 0);
+        // SAFETY: the run is not shared yet, and the first ordinary allocation
+        // word is initialized, unleased storage in this test-owned arena.
+        unsafe { first_allocation.write(u64::MAX) };
+
+        let claimed = target.claim_allocation_word().unwrap();
+        assert_eq!(claimed.word_index, 1);
+        let lease = lease_word_pointer(target.run, target.geometry.lease_bitmap, 0);
+        let lease = unsafe { lease.as_ref() }.load(Ordering::Acquire);
+        assert_eq!(lease & 0b11, 0b11);
     }
 
     #[test]

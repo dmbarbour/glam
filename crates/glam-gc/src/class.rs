@@ -5,11 +5,12 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::{
     Trace, Visitor,
-    arena::RunLocation,
+    arena::{ClaimedAllocationWord, RunClaimTarget, RunLocation},
     heap::HeapInner,
     run::{AllocationClassId, GeometryError, RunGeometry},
 };
@@ -121,6 +122,7 @@ pub struct AllocationClass<T: Trace> {
     heap: Arc<HeapInner>,
     metadata: &'static ObjectMetadata,
     id: AllocationClassId,
+    shared: Arc<AllocationClassShared>,
     marker: PhantomData<fn() -> T>,
 }
 
@@ -129,11 +131,13 @@ impl<T: Trace> AllocationClass<T> {
         heap: Arc<HeapInner>,
         metadata: &'static ObjectMetadata,
         id: AllocationClassId,
+        shared: Arc<AllocationClassShared>,
     ) -> Self {
         Self {
             heap,
             metadata,
             id,
+            shared,
             marker: PhantomData,
         }
     }
@@ -149,6 +153,14 @@ impl<T: Trace> AllocationClass<T> {
     pub(crate) fn id(&self) -> AllocationClassId {
         self.id
     }
+
+    pub(crate) fn shared(&self) -> &Arc<AllocationClassShared> {
+        &self.shared
+    }
+
+    pub(crate) fn claim_frontier(&self) -> Option<ClaimedAllocationWord> {
+        self.shared.claim_frontier()
+    }
 }
 
 impl<T: Trace> Clone for AllocationClass<T> {
@@ -157,6 +169,7 @@ impl<T: Trace> Clone for AllocationClass<T> {
             heap: Arc::clone(&self.heap),
             metadata: self.metadata,
             id: self.id,
+            shared: Arc::clone(&self.shared),
             marker: PhantomData,
         }
     }
@@ -212,7 +225,47 @@ impl UnsupportedLayout {
 pub(crate) struct AllocationClassEntry {
     metadata: MetadataIdentity,
     geometry: RunGeometry,
-    runs: Vec<RunLocation>,
+    shared: Arc<AllocationClassShared>,
+    #[allow(
+        clippy::vec_box,
+        reason = "frontier atomics require stable run-record addresses across vector growth"
+    )]
+    runs: Vec<Box<RunClaimTarget>>,
+    frontier_index: Option<usize>,
+}
+
+pub(crate) struct AllocationClassShared {
+    frontier: AtomicPtr<RunClaimTarget>,
+}
+
+impl AllocationClassShared {
+    fn new() -> Self {
+        Self {
+            frontier: AtomicPtr::new(std::ptr::null_mut()),
+        }
+    }
+
+    pub(crate) fn claim_frontier(&self) -> Option<ClaimedAllocationWord> {
+        let pointer = self.frontier.load(Ordering::Acquire);
+        let target = NonNull::new(pointer)?;
+        // SAFETY: the allocation-class handle which reaches this shared state
+        // also retains the heap. The heap owns every boxed run record until all
+        // such handles are gone, and frontier publication uses `Release`.
+        unsafe { target.as_ref() }.claim_allocation_word()
+    }
+
+    fn publish_frontier(&self, target: &RunClaimTarget) {
+        self.frontier
+            .store(std::ptr::from_ref(target).cast_mut(), Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn frontier(&self) -> Option<RunLocation> {
+        let pointer = NonNull::new(self.frontier.load(Ordering::Acquire))?;
+        // SAFETY: test callers retain an allocation class and therefore its
+        // heap while inspecting this stable record.
+        Some(unsafe { pointer.as_ref() }.location)
+    }
 }
 
 impl AllocationClassEntry {
@@ -220,7 +273,9 @@ impl AllocationClassEntry {
         Self {
             metadata: MetadataIdentity::new(metadata),
             geometry,
+            shared: Arc::new(AllocationClassShared::new()),
             runs: Vec::new(),
+            frontier_index: None,
         }
     }
 
@@ -232,8 +287,16 @@ impl AllocationClassEntry {
         self.geometry
     }
 
-    pub(crate) fn runs(&self) -> &[RunLocation] {
+    pub(crate) fn shared(&self) -> &Arc<AllocationClassShared> {
+        &self.shared
+    }
+
+    pub(crate) fn runs(&self) -> &[Box<RunClaimTarget>] {
         &self.runs
+    }
+
+    pub(crate) fn contains_run(&self, location: RunLocation) -> bool {
+        self.runs.iter().any(|run| run.location == location)
     }
 
     pub(crate) fn reserve_run(&mut self) {
@@ -242,8 +305,32 @@ impl AllocationClassEntry {
             .expect("allocation-class run pool capacity exhausted");
     }
 
-    pub(crate) fn publish_run(&mut self, run: RunLocation) {
-        self.runs.push(run);
+    pub(crate) fn publish_run(&mut self, run: RunClaimTarget) {
+        self.runs.push(Box::new(run));
+        if self.frontier_index.is_none() {
+            self.publish_frontier(0);
+        }
+    }
+
+    pub(crate) fn advance_frontier(&mut self) -> Option<&RunClaimTarget> {
+        let next = self.frontier_index.map_or(0, |index| index + 1);
+        (next < self.runs.len()).then(|| self.publish_frontier(next))
+    }
+
+    pub(crate) fn activate_last_run(&mut self) -> &RunClaimTarget {
+        let last = self
+            .runs
+            .len()
+            .checked_sub(1)
+            .expect("cannot activate an absent allocation run");
+        self.publish_frontier(last)
+    }
+
+    fn publish_frontier(&mut self, index: usize) -> &RunClaimTarget {
+        self.frontier_index = Some(index);
+        let target = self.runs[index].as_ref();
+        self.shared.publish_frontier(target);
+        target
     }
 }
 
