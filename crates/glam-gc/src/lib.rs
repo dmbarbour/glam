@@ -1,7 +1,7 @@
 //! Runtime-local garbage collection support for Glam.
 //!
-//! C4A adds checked direct roots to C3's regional mutator admission and
-//! stop-the-world coordination boundary. Root publication, marking, and
+//! C4B adds checked direct roots and weak-registry publication to C3's regional
+//! mutator admission and stop-the-world coordination boundary. Marking and
 //! reclamation remain disabled, so payloads stay live until terminal heap
 //! teardown.
 
@@ -28,7 +28,7 @@ mod mutation;
 mod mutator;
 #[expect(unsafe_code, reason = "reviewed C1A pointer boundary")]
 mod pointer;
-#[expect(unsafe_code, reason = "reviewed C4A root access boundary")]
+#[expect(unsafe_code, reason = "reviewed C4 root access boundary")]
 mod root;
 #[allow(
     dead_code,

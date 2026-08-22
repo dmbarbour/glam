@@ -34,12 +34,13 @@ word. C3 adds the heap-local mutator-admission coordinator, moves allocation-
 class discovery behind mutator authority, and orders TLS entry as prepare,
 admit, then activate. Production request epochs now elect one collector, drain
 mutators, establish exclusive access, and perform a synthetic finalizer-mutator
-handoff. There is still no root registry, tracing, reclamation, managed-payload
-finalization, or collector callback. C4A converts allocation words to atomic
-single-writer/multi-reader publication, adds the one-word typed `Root<T>` and
-weak-heap `RootCell`, and checks heap ownership, canonical representation, and
-the allocation bit in every root construction. Root construction remains
-crate-private until C4B publishes each cell in the weak registry.
+handoff. There is still no tracing, reclamation, managed-payload finalization,
+or collector callback. C4A converts allocation words to atomic single-writer/
+multi-reader publication, adds the one-word typed `Root<T>` and weak-heap
+`RootCell`, and checks heap ownership, canonical representation, and the
+allocation bit in every root construction. C4B publishes each new cell as one
+weak registry entry before returning its public root, then adds stable
+exclusive traversal and in-place pruning without a strong-root snapshot.
 
 The crate denies unsafe code by default. `src/lib.rs` gives the reviewed
 `pointer`, `root`, `mutator`, `trace`, `mutation`, `thread_cache`, and unit-test
@@ -511,11 +512,14 @@ metadata checks required before dereference.
 
 ### `root::Root<T>` construction and access
 
-`Mutator::root` remains crate-private in C4A. It resolves the candidate address
-through the heap's indexed chunk, run, class, and slot topology under heap
-state, compares the run's canonical metadata with `metadata_for::<T>()`, and
-loads the atomic allocation bit with Acquire ordering. Only after all three
-release-build checks pass does it seal the erased pointer into a root cell.
+`Mutator::root` resolves the candidate address through the heap's indexed
+chunk, run, class, and slot topology under heap state, compares the run's
+canonical metadata with `metadata_for::<T>()`, and loads the atomic allocation
+bit with Acquire ordering. It publishes one `Weak<RootCell>` into the same
+locked heap state before returning the first public root. Rejected input is
+reported only after releasing the mutex, so a caller contract violation does
+not poison an otherwise valid heap. Clones share the existing cell and neither
+clone nor drop touches the registry.
 
 `Root<T>` contains one `Arc<RootCell>` plus a zero-sized typed marker. The
 non-generic cell contains a `Weak<HeapInner>` and one `ErasedGc`. The weak
@@ -528,10 +532,18 @@ value, and a root does not retain or re-enter its value domain.
 the private typed `Gc<T>` and invoking its existing unsafe access gateway. The
 private constructor established the representation, allocation, and heap
 invariants; the live matching mutator prevents reclamation for the returned
-reference's lifetime. C4A performs no reclamation, and C4B must register the
-same cell before making construction public. Dropping `RootCell` releases only
-its weak heap reference and pointer bits; it never dereferences or destroys the
-managed payload and invokes no user code.
+reference's lifetime. C4 performs no reclamation. Dropping `RootCell` releases
+only its weak heap reference and pointer bits; it never dereferences or destroys
+the managed payload and invokes no user code.
+
+Exclusive root traversal holds the existing heap-state mutex after the
+coordinator has stopped every mutator. No new root cell can therefore be
+validated or published during the walk. `Vec::retain` upgrades each weak entry
+for exactly one visit, drops that temporary strong reference before advancing,
+and compacts failed upgrades in place while preserving registration order. A
+successful upgrade conservatively keeps its seed live for that collection even
+if the final public root is dropped concurrently; a failed upgrade cannot later
+become live because no strong cell reference remains.
 
 ### `mutation::Mutator::with_edge_replacement`
 
@@ -596,6 +608,9 @@ mutation closure runs.
   rejection during construction and access, later-region and cross-thread
   access with a live heap, concurrent allocation-word observation, and heap
   teardown while a root cell remains escaped.
+- C4B tests one registry entry per cell rather than per clone, publication only
+  after successful validation and mutator admission, stable ordered visitation,
+  and in-place removal of dead weak entries through the exclusive walk.
 - The ordinary crate checks, exact unsafe inventory, focused Miri run, and
   repository-wide checks are required at completed checkpoints.
 - Miri passes all implemented tests with leak checking enabled. C1's temporary

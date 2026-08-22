@@ -1,8 +1,8 @@
 # Glam GC Subcrate Implementation Plan — 2026-08-19
 
-Status: in progress; Phases C0 through C4A are complete, including the C2C.6
+Status: in progress; Phases C0 through C4B are complete, including the C2C.6
 verification follow-up. The mandatory post-C1, post-C2C, and post-C3E
-downstream reviews are complete. C4B is next.
+downstream reviews are complete. C4C is next.
 
 This plan implements an exact, non-moving, runtime-local tracing collector
 without depending on Glam value semantics. The governing requirements and
@@ -45,7 +45,7 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C3D | completed | finalizer handoff, pressure, panic, and teardown races |
 | C3E | completed | entry-serviced collection and coordinator simplification |
 | C4A | completed | checked direct-root construction and access |
-| C4B | pending | weak registry publication and stable root traversal |
+| C4B | completed | weak registry publication and stable root traversal |
 | C4C | pending | concurrent root lifetime and boundary audit |
 | C5A | pending | mark bitmap and checked-slot substrate |
 | C5B | pending | exact root-to-edge traversal |
@@ -2087,6 +2087,30 @@ C4A completed on 2026-08-22 with the following boundary:
   only by unit tests. C4B must publish the cell into the heap's weak registry
   before exposing that constructor; C4A adds neither root scanning nor
   reclamation.
+
+#### C4B Completion
+
+C4B completed on 2026-08-22 with the following boundary:
+
+- `HeapState` owns one `Vec<Weak<RootCell>>`. Public `Mutator::root` constructs
+  a candidate cell, then validates its heap, canonical representation, and
+  allocation state and publishes exactly one weak entry under the existing
+  heap-state mutex before returning the root. Cloning a root publishes
+  nothing.
+- Invalid root construction releases the heap mutex before raising its
+  contract panic, leaving the heap usable and the registry unchanged. A
+  mutator blocked behind exclusive collection authority cannot publish a root
+  until ordinary admission resumes.
+- Collector-private traversal requires exclusive authority and zero active
+  outer mutators. It uses `Vec::retain` to upgrade and visit each live cell in
+  registration order, release that temporary strong reference before the next
+  entry, and compact dead weak entries in place without constructing a strong
+  snapshot.
+- Focused tests cover per-cell rather than per-clone publication, failed
+  validation without partial publication or mutex poisoning, publication
+  exclusion during a collection pause, ordered visitation, and dead-entry
+  pruning. C4B does not yet invoke the traversal from a production collection;
+  C4C owns that integration and the concurrent lifetime audit.
 
 ## Phase C5 — Exact Full Marking
 

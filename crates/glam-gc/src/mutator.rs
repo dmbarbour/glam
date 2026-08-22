@@ -103,18 +103,13 @@ impl<'heap> Mutator<'heap> {
         unsafe { Gc::from_raw(pointer) }
     }
 
-    /// Constructs a checked external root for one managed allocation.
+    /// Constructs and publishes an external root for one managed allocation.
     ///
-    /// C4A keeps this operation collector-private until C4B can publish the
-    /// root cell into the heap's weak registry before returning it.
-    #[allow(
-        dead_code,
-        reason = "C4A root construction remains private until C4B registry publication"
-    )]
-    pub(crate) fn root<T: Trace>(&self, value: Gc<T>) -> Root<T> {
-        self.heap
-            .assert_rootable(value.erase().as_ptr().cast::<T>());
-        Root::new(self.heap, value)
+    /// The value must belong to this mutator's heap and have the canonical
+    /// representation for `T`. Publication into the heap's weak root registry
+    /// completes before this method returns.
+    pub fn root<T: Trace>(&self, value: Gc<T>) -> Root<T> {
+        self.heap.register_root(value)
     }
 
     #[cfg(test)]

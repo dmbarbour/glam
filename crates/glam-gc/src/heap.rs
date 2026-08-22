@@ -2,12 +2,13 @@ use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, Weak};
 
 use crate::{
-    AllocationClass, Mutator, Trace,
+    AllocationClass, Mutator, Root, Trace,
     arena::{Arena, RunLocation, RunPublicationError},
     class::{AllocationClassEntry, MetadataIdentity, ObjectMetadata, metadata_for},
+    root::RootCell,
     run::{AllocationClassId, RunGeometry},
     thread_cache::{
         AllocationCursor, AllocationLeaseEpoch, ThreadHeapEntry, remove_inactive_thread_cache,
@@ -208,6 +209,7 @@ struct HeapState {
     classes_by_metadata: HashMap<MetadataIdentity, AllocationClassId>,
     classes: Vec<AllocationClassEntry>,
     allocation_pressure: AllocationPressure,
+    roots: Vec<Weak<RootCell>>,
     coordinator: MutatorCoordinator,
 }
 
@@ -1040,31 +1042,94 @@ impl HeapInner {
         let _ = pointer;
     }
 
-    #[allow(
-        dead_code,
-        reason = "C4A validation becomes a production path when C4B publishes roots"
-    )]
-    pub(crate) fn assert_rootable<T: Trace>(&self, pointer: NonNull<T>) {
+    pub(crate) fn register_root<T: Trace>(self: &Arc<Self>, value: crate::Gc<T>) -> Root<T> {
+        let (root, registration) = Root::candidate(self, value);
         let expected = metadata_for::<T>();
-        let address = pointer.as_ptr().cast::<()>() as usize;
-        let state = self
+        let address = value.erase().as_ptr().as_ptr() as usize;
+        let mut state = self
             .state
             .lock()
             .expect("heap state should not be poisoned");
-        let resolved = resolve_slot_in_state(&state, address)
-            .unwrap_or_else(|| panic!("managed pointer does not belong to this heap"));
-
-        assert!(
-            std::ptr::eq(resolved.metadata, expected),
-            "managed pointer has representation `{}`, not requested `{}`",
-            resolved.metadata.type_name(),
-            expected.type_name()
-        );
-        assert!(
-            resolved.allocated,
-            "managed pointer does not identify an allocated value"
-        );
+        if let Err(error) = validate_rootable_in_state(&state, address, expected) {
+            drop(state);
+            error.raise();
+        }
+        state
+            .roots
+            .try_reserve(1)
+            .expect("root registry capacity exhausted");
+        state.roots.push(registration);
+        root
     }
+
+    #[allow(
+        dead_code,
+        reason = "C4B traversal is integrated into collection by C4C"
+    )]
+    fn visit_registered_roots(&self, mut visit: impl FnMut(crate::trace::ErasedGc)) -> usize {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(
+            state.coordinator.phase,
+            AdmissionPhase::Exclusive,
+            "root traversal requires exclusive collection authority"
+        );
+        assert_eq!(state.coordinator.active_outer_mutators, 0);
+
+        let mut visited = 0;
+        state.roots.retain(|registration| {
+            let Some(cell) = registration.upgrade() else {
+                return false;
+            };
+            visit(cell.value());
+            drop(cell);
+            visited += 1;
+            true
+        });
+        visited
+    }
+}
+
+enum RootValidationError {
+    ForeignHeap,
+    Representation {
+        actual: &'static str,
+        expected: &'static str,
+    },
+    Unallocated,
+}
+
+impl RootValidationError {
+    fn raise(self) -> ! {
+        match self {
+            Self::ForeignHeap => panic!("managed pointer does not belong to this heap"),
+            Self::Representation { actual, expected } => {
+                panic!("managed pointer has representation `{actual}`, not requested `{expected}`")
+            }
+            Self::Unallocated => panic!("managed pointer does not identify an allocated value"),
+        }
+    }
+}
+
+fn validate_rootable_in_state(
+    state: &HeapState,
+    address: usize,
+    expected: &'static ObjectMetadata,
+) -> Result<(), RootValidationError> {
+    let resolved = resolve_slot_in_state(state, address).ok_or(RootValidationError::ForeignHeap)?;
+
+    if !std::ptr::eq(resolved.metadata, expected) {
+        return Err(RootValidationError::Representation {
+            actual: resolved.metadata.type_name(),
+            expected: expected.type_name(),
+        });
+    }
+    if !resolved.allocated {
+        return Err(RootValidationError::Unallocated);
+    }
+    Ok(())
 }
 
 struct CollectionAttempt<'heap> {
@@ -1203,7 +1268,8 @@ mod tests {
 
     use super::{
         AdmissionPhase, AllocationPressure, Heap, INITIAL_RUN_PUBLICATION_ALLOWANCE,
-        PrepareRunError, RunLocation, RunPublicationError, class_index,
+        PrepareRunError, RootValidationError, RunLocation, RunPublicationError, class_index,
+        validate_rootable_in_state,
     };
 
     struct FirstType {
@@ -2481,14 +2547,113 @@ mod tests {
                 .geometry
                 .slot_offset(slot_index)
                 .expect("test slot must have an in-run offset");
-            std::ptr::NonNull::new((owner.run.address() + offset) as *mut u64).unwrap()
+            // SAFETY: the selected slot offset was derived from this run's
+            // validated geometry and remains inside the live run allocation.
+            unsafe { owner.run.pointer().add(offset).cast::<u64>() }
         };
 
+        let state = heap.inner.state.lock().unwrap();
+        assert!(matches!(
+            validate_rootable_in_state(
+                &state,
+                unallocated.as_ptr() as usize,
+                metadata_for::<u64>()
+            ),
+            Err(RootValidationError::Unallocated)
+        ));
+    }
+
+    #[test]
+    fn root_registry_publishes_once_per_cell_and_not_per_clone() {
+        let heap = Heap::new();
+        let class = heap
+            .with_mutator(|mutator| mutator.allocation_class::<u64>())
+            .unwrap();
+        let value = heap.with_mutator(|mutator| mutator.alloc(&class, 42_u64));
+        let first = heap.with_mutator(|mutator| mutator.root(value));
+        let first_clone = first.clone();
+
+        assert_eq!(heap.inner.state.lock().unwrap().roots.len(), 1);
+
+        let second = heap.with_mutator(|mutator| mutator.root(value));
+        assert_eq!(heap.inner.state.lock().unwrap().roots.len(), 2);
+
+        drop((first, first_clone, second));
+    }
+
+    #[test]
+    fn exclusive_root_walk_visits_live_cells_in_order_and_prunes_dead_cells() {
+        let heap = Heap::new();
+        let class = heap
+            .with_mutator(|mutator| mutator.allocation_class::<u64>())
+            .unwrap();
+        let values = heap.with_mutator(|mutator| {
+            [
+                mutator.alloc(&class, 11_u64),
+                mutator.alloc(&class, 22_u64),
+                mutator.alloc(&class, 33_u64),
+            ]
+        });
+        let [first, middle, last] =
+            heap.with_mutator(|mutator| values.map(|value| mutator.root(value)));
+        drop(middle);
+
+        let exclusive = heap.inner.enter_synthetic_exclusive();
+        let mut visited = Vec::new();
+        let count = heap
+            .inner
+            .visit_registered_roots(|value| visited.push(value.as_ptr().as_ptr() as usize));
+
+        assert_eq!(count, 2);
+        assert_eq!(
+            visited,
+            [values[0], values[2]].map(|value| value.erase().as_ptr().as_ptr() as usize)
+        );
+        assert_eq!(heap.inner.state.lock().unwrap().roots.len(), 2);
+
+        drop((first, last));
+        assert_eq!(heap.inner.visit_registered_roots(|_| {}), 0);
+        assert!(heap.inner.state.lock().unwrap().roots.is_empty());
+        drop(exclusive);
+    }
+
+    #[test]
+    fn root_publication_waits_for_exclusive_collection_authority() {
+        let heap = Heap::new();
+        let class = heap
+            .with_mutator(|mutator| mutator.allocation_class::<u64>())
+            .unwrap();
+        let value = heap.with_mutator(|mutator| mutator.alloc(&class, 42_u64));
+        let exclusive = heap.inner.enter_synthetic_exclusive();
+        let worker = std::thread::spawn({
+            let heap = heap.clone();
+            move || heap.with_mutator(|mutator| mutator.root(value))
+        });
+
+        heap.inner.wait_for_blocked_outer_mutators(1);
+        assert!(heap.inner.state.lock().unwrap().roots.is_empty());
+
+        drop(exclusive);
+        let root = worker.join().expect("root publisher panicked");
+        assert_eq!(heap.inner.state.lock().unwrap().roots.len(), 1);
+        heap.with_mutator(|mutator| assert_eq!(*root.get(mutator), 42));
+    }
+
+    #[test]
+    fn failed_root_validation_publishes_no_registry_entry() {
+        let owner = Heap::new();
+        let observer = Heap::new();
+        let class = owner
+            .with_mutator(|mutator| mutator.allocation_class::<u64>())
+            .unwrap();
+        let value = owner.with_mutator(|mutator| mutator.alloc(&class, 42_u64));
+
         let panic = catch_unwind(AssertUnwindSafe(|| {
-            heap.inner.assert_rootable(unallocated);
+            let _ = observer.with_mutator(|mutator| mutator.root(value));
         }));
 
         assert!(panic.is_err());
+        assert!(observer.inner.state.lock().unwrap().roots.is_empty());
     }
 
     #[test]

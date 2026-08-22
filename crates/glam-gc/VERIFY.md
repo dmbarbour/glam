@@ -57,7 +57,9 @@ and unwind restoration. The collection body remains synthetic: C4 through C6
 separately own roots, exact tracing, reclamation, and destructor recovery. C4A
 adds release-checked direct roots and makes allocation-bit publication atomic
 so root validation can inspect a word while its leased writer advances other
-slots. Root construction remains private until C4B adds registry publication.
+slots. C4B publishes each cell into a weak heap registry before returning its
+public root and adds exclusive, stable, in-place traversal and pruning. C4C
+next integrates that walk with collection and audits lifetime races.
 Ordinary threaded stress remains supplementary rather than proof of coordinator
 ordering.
 

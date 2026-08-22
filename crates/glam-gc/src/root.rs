@@ -17,24 +17,25 @@ pub struct Root<T: Trace> {
 
 const _: () = assert!(std::mem::size_of::<Root<u64>>() == std::mem::size_of::<Arc<()>>());
 
-struct RootCell {
+pub(crate) struct RootCell {
     heap: Weak<HeapInner>,
     value: ErasedGc,
 }
 
 impl<T: Trace> Root<T> {
-    #[allow(
-        dead_code,
-        reason = "C4A root construction remains private until C4B registry publication"
-    )]
-    pub(crate) fn new(heap: &Arc<HeapInner>, value: Gc<T>) -> Self {
-        Self {
-            cell: Arc::new(RootCell {
-                heap: Arc::downgrade(heap),
-                value: value.erase(),
-            }),
-            marker: PhantomData,
-        }
+    pub(crate) fn candidate(heap: &Arc<HeapInner>, value: Gc<T>) -> (Self, Weak<RootCell>) {
+        let cell = Arc::new(RootCell {
+            heap: Arc::downgrade(heap),
+            value: value.erase(),
+        });
+        let registration = Arc::downgrade(&cell);
+        (
+            Self {
+                cell,
+                marker: PhantomData,
+            },
+            registration,
+        )
     }
 
     /// Borrows the rooted value under its live heap's mutator authority.
@@ -52,12 +53,18 @@ impl<T: Trace> Root<T> {
         // canonical-metadata, and heap-provenance validation before sealing
         // this erased pointer behind `Root<T>`. The matching mutator keeps the
         // heap live and excludes reclamation for the returned reference's
-        // lifetime. C4A reclaims nothing; C4B registers this same cell before
-        // making construction public.
+        // lifetime. C4 reclaims nothing; registry publication completed before
+        // this root became observable.
         let value = unsafe { Gc::from_raw(self.cell.value.as_ptr().cast::<T>()) };
         // SAFETY: the root invariant above proves liveness and representation,
         // and the release-visible heap identity check proves ownership.
         unsafe { value.get_unchecked(mutator) }
+    }
+}
+
+impl RootCell {
+    pub(crate) fn value(&self) -> ErasedGc {
+        self.value
     }
 }
 
