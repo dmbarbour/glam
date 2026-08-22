@@ -92,13 +92,18 @@ mod tests {
     #[test]
     fn replacement_gateway_executes_the_reported_edge_update_once() {
         let heap = Heap::new();
+        let leaf_class = heap.allocation_class::<Leaf>().unwrap();
+        let node_class = heap.allocation_class::<MutableNode>().unwrap();
         heap.with_mutator(|mutator| {
-            let old = mutator.alloc(Leaf { _value: 1 });
-            let new = mutator.alloc(Leaf { _value: 2 });
-            let owner = mutator.alloc(MutableNode {
-                edge: Mutex::new(Some(old)),
-            });
-            // SAFETY: `owner` was allocated in this live prototype heap with
+            let old = mutator.alloc(&leaf_class, Leaf { _value: 1 });
+            let new = mutator.alloc(&leaf_class, Leaf { _value: 2 });
+            let owner = mutator.alloc(
+                &node_class,
+                MutableNode {
+                    edge: Mutex::new(Some(old)),
+                },
+            );
+            // SAFETY: `owner` was allocated in this live arena heap with
             // representation `MutableNode`.
             let owner_value = unsafe { owner.get_unchecked(mutator) };
 
@@ -132,10 +137,14 @@ mod tests {
     fn replacement_gateway_rejects_a_foreign_heap_before_mutation() {
         let owner_heap = Heap::new();
         let other_heap = Heap::new();
+        let owner_class = owner_heap.allocation_class::<MutableNode>().unwrap();
         let owner = owner_heap.with_mutator(|mutator| {
-            mutator.alloc(MutableNode {
-                edge: Mutex::new(None),
-            })
+            mutator.alloc(
+                &owner_class,
+                MutableNode {
+                    edge: Mutex::new(None),
+                },
+            )
         });
         let ran = AtomicBool::new(false);
 

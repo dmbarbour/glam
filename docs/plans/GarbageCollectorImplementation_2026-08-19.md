@@ -1,7 +1,8 @@
 # Glam GC Subcrate Implementation Plan — 2026-08-19
 
-Status: in progress; Phases C0, C1, C2A, and C2B are complete. The mandatory
-post-C1 review is complete, and C2C.1a is next.
+Status: in progress; Phases C0, C1, C2A, C2B, C2C.1a, C2C.1b, C2C.2, and C2C.3 are
+complete. The mandatory post-C1 review is complete. C2C is complete, and its
+mandatory review precedes C3A.
 
 This plan implements an exact, non-moving, runtime-local tracing collector
 without depending on Glam value semantics. The governing requirements and
@@ -26,11 +27,11 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C2B.1 | completed | canonical process-wide object metadata and erased dispatch |
 | C2B.2 | completed | heap-local allocation-class discovery and typed handles |
 | C2B.3 | completed | typed-run publication, enumeration, and metadata resolution |
-| C2C.1a | pending | indexed chunk ownership and checked owner lookup |
-| C2C.1b | pending | synchronized arena allocation and prototype access transition |
-| C2C.2 | pending | heap-specific TLS identity, epochs, and cache lifecycle |
-| C2C.3 | pending | bitmap-range leasing and worker-local hot allocation |
-| C2C.4 | pending | pressure, panic, teardown, and allocator audit |
+| C2C.1a | completed | indexed chunk ownership and checked owner lookup |
+| C2C.1b | completed | synchronized arena allocation and prototype access transition |
+| C2C.2 | completed | heap-specific TLS identity, epochs, and cache lifecycle |
+| C2C.3 | completed | bitmap-range leasing and worker-local hot allocation |
+| C2C.4 | completed | pressure, panic, teardown, and allocator audit |
 | C3A | pending | ordinary admission and same-heap recursion integration |
 | C3B | pending | collector election and single-heap STW quiescence |
 | C3C | pending | cross-heap dependent admission |
@@ -764,6 +765,29 @@ Verification for C2C.1a:
 - focused tests, the exact unsafe inventory, and Miri pass before any payload
   allocation or access transition begins.
 
+#### C2C.1a Completion
+
+C2C.1a completed on 2026-08-22:
+
+- `Arena` keeps its chunks in the stable owning vector and now maintains one
+  authoritative `HashMap` from each aligned 8 MiB base to that vector index.
+  Fixed size and alignment make equal bases the only overlap case.
+- Chunk publication checks absence and reserves both vector and map capacity
+  before changing either logical collection. The candidate remains uniquely
+  owned and is dropped on every preceding failure; successful insertion occurs
+  while the arena is exclusively borrowed under heap state.
+- `find_run` and checked slot-owner recovery mask an integer address to one
+  candidate chunk base, perform one index lookup, validate the resulting range,
+  and only then derive a run pointer from the owning allocation. Typed-run
+  selection for allocation remains the deliberate C2B slow path.
+- Focused instrumentation proves one ownership-index lookup independent of
+  live chunk count and query order. Tests cover exact first/last slots across
+  several chunks, foreign and arbitrary addresses, non-slot regions, and
+  vector/index consistency after rejected publication.
+- The collector check passes with 45 unit tests and six compile-fail doctests;
+  the exact unsafe inventory and Miri pass unchanged. Payload allocation and
+  the prototype access registry remain untouched for C2C.1b.
+
 ### C2C.1b Synchronized Arena Allocation and Access Transition
 
 - Add a synchronized reference allocator before the TLS optimization. It
@@ -802,8 +826,43 @@ Verification for C2C.1b:
   exact unsafe inventory passes, and Miri reports no leak without its former
   exception before TLS cache work begins.
 
+#### C2C.1b Completion
+
+C2C.1b completed on 2026-08-22:
+
+- `Mutator::alloc(&AllocationClass<T>, T)` is the synchronized correctness
+  allocator. It rejects a foreign class before mutation, searches the class's
+  authoritative run pool, publishes a typed run only when needed, and holds
+  heap state through unique slot selection, payload initialization, and
+  allocation-bit publication.
+- Slot selection itself publishes nothing. A deterministic hook panics after
+  selection and proves the allocation bit remains clear and the input value is
+  destroyed normally. Production performs no panicking operation between its
+  typed payload write and the allocation bitmap write.
+- `Gc<T>` construction now receives only initialized arena pointers. The
+  prototype address registry, `register_prototype`, payload `Box::leak`, and
+  allocation-history scan are gone. Debug access resolves indexed
+  chunk/run/slot/class topology and compares canonical metadata without using
+  `TypeId` or promising allocation-liveness checks.
+- Provisional terminal heap teardown enumerates allocation bits and invokes
+  each homogeneous class destructor exactly once before arena RAII releases
+  its chunks. Collection remains disabled, so all payloads stay live until
+  this terminal path; reentrant finalization and destructor-panic hardening
+  remain C2C.4/C6 work.
+- Tests force allocation through every run in a chunk and into later chunks,
+  validate boundary topology and values, reject foreign classes before state
+  changes, latch pre-publication unwind behavior, and count exact destruction.
+  Native tests retain a three-chunk boundary fixture; Miri uses its two-chunk
+  form to keep interpretation bounded while exercising the same transition.
+- The collector check passes with 49 unit tests and six compile-fail doctests;
+  the exact unsafe inventory passes. Miri passes all 49 unit tests with leak
+  checking enabled and no prototype exception.
+
 - Require mutator authority and an `AllocationClass<T>` for every managed
   allocation.
+
+### C2C.2 Heap-Specific TLS Identity and Lifecycle
+
 - Give each thread a heap-specific cache containing one captured
   `allocation_lease_epoch` and a dense-class-ID map of current
   bitmap-word-range cursors. The thread-local registry is keyed by collector
@@ -826,6 +885,55 @@ Verification for C2C.1b:
   it clears run-side lease metadata directly without finding or walking thread-
   local caches. Correctness therefore has no TLS destructor-order, heap-owned
   cache registry, or cross-thread cache-lock dependency.
+
+Use a bounded, hash-free class cursor lookup so C2C.3 does not have to replace
+the lifecycle representation when it activates local allocation. Cursor
+records remain inert numeric topology until that checkpoint.
+
+Verification for C2C.2:
+
+- same-heap recursive regions balance one TLS depth while nested different
+  heaps retain independent cache entries;
+- user panic unwinding returns the recursive depth to zero without clearing a
+  still-current cache;
+- an epoch change leaves the inactive record untouched, then the next outer
+  entry clears the entire cursor cache before use and captures the new epoch;
+- class-cache capacity remains fixed and a collision forgets only the prior
+  inert record;
+- TLS keeps only a weak heap identity, a dead heap is collectible before TLS
+  destruction, and a later entry prunes the dead record without heap access;
+  and
+- focused tests, the exact unsafe inventory, and Miri pass before cached
+  cursors claim or modify any run-side lease.
+
+#### C2C.2 Completion
+
+C2C.2 completed on 2026-08-22:
+
+- Every host thread now owns a TLS registry keyed by the numeric address of a
+  weak `HeapInner` identity. The retained `Weak` keeps a dead Arc allocation's
+  identity from being reused while a stale record exists, but cannot retain the
+  heap or its arenas. Entering any heap prunes dead, inactive records.
+- `Heap::with_mutator` installs an unwind-safe same-thread entry guard.
+  Same-heap recursion increments one checked depth; different heaps receive
+  independent records. Ordinary outer exit retains current cache state and
+  only decrements depth.
+- Each heap has a nonzero atomic allocation-lease epoch. Only outer entry
+  compares it with the captured epoch; mismatch clears all cursor records
+  without inspecting a run or returning a lease. C3 later places real mutator
+  admission before this already-defined validation point.
+- The cursor cache is a 64-entry direct-mapped array. Dense class ID selects a
+  slot and the stored full ID distinguishes collisions, so lookup is bounded
+  and hash-free; replacement merely forgets inert numeric cursor topology.
+  C2C.3 activates the prepared run/range/free-mask fields.
+- Deterministic tests cover recursion, cross-heap nesting, panic balancing,
+  whole-cache epoch invalidation, collision eviction, weak heap release, and
+  dead-record pruning. The collector check passes with 54 unit tests and six
+  compile-fail doctests; the exact unsafe inventory and full leak-checking Miri
+  run pass. No allocation yet reads or writes a TLS cursor.
+
+### C2C.3 Bitmap-Range Leasing and Hot Allocation
+
 - Allocate ordinary slots from the cached bitmap-word range using only its
   worker-local cursor and free mask. Integral word ownership lets that thread
   update the authoritative allocation bits without contending with another
@@ -879,13 +987,125 @@ Verification:
 - a thread cache does not retain its heap, and an epoch mismatch replaces its
   entire cursor map without dereferencing any stale run;
 - TLS destruction and cache eviction do not access the heap or return ranges;
-- full collection recovers ranges abandoned by cache eviction and thread exit;
-- reused slots are correctly reinitialized and marked allocated;
+- cache eviction and thread exit leave their ranges leased and unavailable;
+  C5 verifies that the first full collection clears those leases and advances
+  the cache epoch without finding the departed thread;
+- every newly selected free slot is initialized before its allocation bit is
+  published; actual dead-slot reuse begins with C6 and is verified there;
 - panic unwinding never exposes uninitialized storage as an object; and
 - dropping the heap without collection destroys every allocated drop-type slot
   exactly once for C2C's non-reentrant test payloads. C6B and C6D replace this
   provisional teardown path with collector-controlled mutator finalization and
   terminal teardown before client/production drop types are admitted.
+
+#### C2C.3 Completion
+
+C2C.3 completed on 2026-08-22:
+
+- Each slow-path claim leases exactly one complete allocation-bitmap word,
+  giving one worker sole authority over at most 64 object slots. The
+  half-open word-range representation remains in the cursor so later profiling
+  can justify larger ranges without changing cache lifecycle semantics.
+- A mutator obtains one hash-free `ThreadCacheHandle` at region entry. A cache
+  hit borrows only its thread-local state, selects a local free bit, writes the
+  payload, and publishes the allocation bit. It performs no `TypeId`, chunk,
+  class-map, or shared-lock lookup. Re-entering the same heap on the same
+  thread retains this cursor after the one outer-entry epoch comparison.
+- The synchronized miss path holds heap state while validating the class,
+  finding or publishing a typed run, reading an unleased allocation word, and
+  setting its lease bit. Distinct workers can then mutate distinct words of
+  the same run without data races or allocator contention.
+- The fixed 64-entry direct-mapped cache moved its backing array to heap
+  storage. This keeps mutator-entry stack usage independent of cache width and
+  lets the existing small-stack Loom smoke model continue exercising the
+  entry boundary; lookup remains bounded and allocation-free.
+- Tests force retained hot-path reuse across mutator regions, exact turnover
+  at 64 slots, eight concurrent workers allocating from disjoint words in one
+  run, tail-bit masking, collision eviction, thread exit, and the retained
+  synchronized reference allocator. Instrumentation proves only cache misses
+  increment the shared claim count.
+- Forgotten cursors deliberately leave their lease bits set. Recovery cannot
+  be tested before collection exists; that latching test now belongs to C5,
+  alongside epoch advancement. Likewise, reclaimed-slot reuse belongs to C6.
+- The collector check passes with 60 unit tests, the Loom smoke test, and six
+  compile-fail doctests. Clippy, the exact unsafe inventory, and full
+  leak-checking Miri all pass.
+
+### C2C.4 Pressure, Panic, Teardown, and Allocator Audit
+
+- Record allocation pressure only when the synchronized slow path leases a
+  word. Charge the complete free capacity handed to that cursor, not each
+  object it later initializes. The hot path must remain free of shared
+  counters.
+- Do not make eviction or TLS destruction call back into the heap merely to
+  classify a lease as abandoned. Claimed capacity is monotonic until a full
+  collection revokes every lease, so the same conservative total already
+  includes retained, evicted, and departed-thread cursors. C5 resets the total
+  and advances the lease epoch together.
+- Until allocation histograms can tune policy, set the provisional collection-
+  pressure threshold to one arena chunk. Reaching it records a pending request;
+  C3B connects that request to collector election. Arithmetic saturates so a
+  diagnostic counter cannot unwind after a lease has become authoritative.
+- Add a deterministic worker-local hook at the final pre-initialization point.
+  An injected unwind must leave the free mask and allocation word unchanged,
+  drop the still-owned input normally, and let the same cursor reuse that
+  exact slot without another synchronized claim.
+- Latch the teardown ownership boundary: an active mutator region necessarily
+  retains an owning `Heap` or `AllocationClass`, so last-owner teardown cannot
+  race it. A stale TLS cache remains weak and inert after teardown.
+- Keep C2C's terminal destructor path explicitly provisional. It supports the
+  non-reentrant, non-panicking fixtures required to avoid leaks while
+  collection is disabled. Destructor panic recovery, quarantine,
+  mutator-capable finalization, and the final last-owner protocol remain the
+  already specified C6B–C6D work; C2C must not invent a competing policy.
+- Close C2C with a focused review of the raw allocation path, lease/data-race
+  proof, bitmap publication order, weak-cache lifecycle, pressure accounting,
+  terminal ownership, exact unsafe inventory, and Miri behavior.
+
+Verification for C2C.4:
+
+- a retained word incurs one pressure charge while 64 small hot allocations
+  incur none, and turnover incurs exactly one additional charge;
+- evicted and departed-thread words remain included in leased capacity;
+- the threshold and saturating arithmetic latch a pending request without an
+  allocation-time overflow panic;
+- injected unwind immediately before payload initialization republishes
+  nothing and the next allocation reuses the selected slot;
+- forced owner handoff keeps the heap live through an active mutator, then
+  permits terminal teardown only after that worker releases its last owners;
+- all allocated non-panicking drop fixtures are destroyed exactly once; and
+- focused tests, Loom smoke coverage, exact unsafe inventory, Clippy, and full
+  leak-checking Miri pass.
+
+#### C2C.4 Completion
+
+C2C.4 completed on 2026-08-22:
+
+- Heap state now counts claimed ranges and their leased free capacity only on
+  the synchronized claim path. It uses saturating arithmetic and latches a
+  pending collection request at one arena chunk. Sixty-four small allocations
+  in a retained word add no shared accounting traffic; the sixty-fifth claims
+  and charges exactly one more word.
+- The charge is intentionally conservative and monotonic. Evicted and exited-
+  thread cursors remain included without weak upgrades, TLS callbacks, or a
+  second abandoned-range protocol. C5 must clear the lease bitmaps, reset this
+  pressure, and advance the cache epoch as one exclusive transition.
+- A deterministic hook immediately before local payload initialization proves
+  that unwind drops the input, publishes no allocation bit, leaves the heap
+  mutex usable, and lets the retained cursor reuse the same slot without a new
+  claim. The production path invokes no callback there and has only its two
+  infallible publication writes afterward.
+- A forced owner-handoff test holds a worker inside its mutator after the
+  initiating `Heap` and class handles are dropped. The owning `Arc` remains
+  live through its final access, and terminal teardown occurs only when that
+  worker releases its last heap and class owners.
+- Review found no reason to duplicate C6's destructor-panic and mutator-
+  finalization design. C2C's provisional terminal path remains explicitly
+  limited to non-reentrant, non-panicking payload destruction, which is enough
+  to keep the pre-collector implementation leak-free.
+- The final C2C verification passes 63 unit tests, one Loom smoke model, and
+  six compile-fail doctests. Formatting, Clippy with warnings denied, the exact
+  unsafe inventory, and full leak-checking Miri all pass.
 
 ## Phase C3 — Regional Mutators and Stop-the-World Handshake
 

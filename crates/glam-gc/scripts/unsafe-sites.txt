@@ -1,3 +1,4 @@
+crates/glam-gc/src/arena.rs:                unsafe { address.pointer().add(offset).cast() }
 crates/glam-gc/src/arena.rs:            NonNull::new(unsafe { alloc_zeroed(layout) }).ok_or(ArenaError::AllocationFailed)?;
 crates/glam-gc/src/arena.rs:            let range = unsafe { std::slice::from_raw_parts(start.as_ptr(), bitmap.byte_len()) };
 crates/glam-gc/src/arena.rs:            let start = unsafe { address.pointer().add(bitmap.offset) };
@@ -5,11 +6,21 @@ crates/glam-gc/src/arena.rs:            let start = unsafe { address.pointer().a
 crates/glam-gc/src/arena.rs:            unsafe { header.write(RunHeader::empty()) };
 crates/glam-gc/src/arena.rs:            unsafe { std::ptr::write_bytes(start.as_ptr(), value, bitmap.byte_len()) };
 crates/glam-gc/src/arena.rs:        Some(unsafe { run.pointer().cast::<RunHeader>().as_ref() })
+crates/glam-gc/src/arena.rs:        let current = unsafe { pointer.read() };
+crates/glam-gc/src/arena.rs:        let current = unsafe { pointer.read() };
 crates/glam-gc/src/arena.rs:        let header = unsafe { header_pointer.as_ref() };
+crates/glam-gc/src/arena.rs:        let pointer = unsafe {
+crates/glam-gc/src/arena.rs:        let pointer = unsafe { address.pointer().add(offset).cast::<T>() };
 crates/glam-gc/src/arena.rs:        let pointer = unsafe { self.base.add(offset) };
 crates/glam-gc/src/arena.rs:        let pointer = unsafe { self.base.add(offset) };
+crates/glam-gc/src/arena.rs:        let word = unsafe {
+crates/glam-gc/src/arena.rs:        unsafe {
+crates/glam-gc/src/arena.rs:        unsafe { allocation_word.write(published_word) };
 crates/glam-gc/src/arena.rs:        unsafe { dealloc(self.base.as_ptr(), chunk_layout()) };
 crates/glam-gc/src/arena.rs:        unsafe { header_pointer.write(RunHeader::initialized(class_id, geometry)) };
+crates/glam-gc/src/arena.rs:        unsafe { pointer.read() }
+crates/glam-gc/src/arena.rs:        unsafe { pointer.write(current | (1_u64 << lease_bit_index)) };
+crates/glam-gc/src/arena.rs:        unsafe { pointer.write(value) };
 crates/glam-gc/src/arena.rs:unsafe impl Send for ArenaChunk {}
 crates/glam-gc/src/class.rs:            unsafe {
 crates/glam-gc/src/class.rs:        unsafe impl Trace for PanickingCandidate {
@@ -27,10 +38,18 @@ crates/glam-gc/src/class.rs:type ErasedDrop = unsafe fn(NonNull<()>);
 crates/glam-gc/src/class.rs:type ErasedTrace = for<'visit> unsafe fn(NonNull<()>, &mut Visitor<'visit>);
 crates/glam-gc/src/class.rs:unsafe fn drop_erased<T: Trace>(pointer: NonNull<()>) {
 crates/glam-gc/src/class.rs:unsafe fn trace_erased<T: Trace>(pointer: NonNull<()>, visitor: &mut Visitor<'_>) {
+crates/glam-gc/src/heap.rs:                    unsafe { *value.get_unchecked(mutator) }
+crates/glam-gc/src/heap.rs:                    unsafe { *value.get_unchecked(mutator) }
+crates/glam-gc/src/heap.rs:                    unsafe { metadata.drop_in_place(pointer) };
+crates/glam-gc/src/heap.rs:                assert_eq!(unsafe { *value.get_unchecked(mutator) }, expected as u64);
+crates/glam-gc/src/heap.rs:                assert_eq!(unsafe { value.get_unchecked(mutator) }.value, index as u64);
+crates/glam-gc/src/heap.rs:        assert_eq!(unsafe { pointer.as_ref() }._value, 73);
+crates/glam-gc/src/heap.rs:    unsafe impl Trace for DropCounter {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for DroppingType {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for FirstType {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for OverflowingSlot {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for SecondType {
+crates/glam-gc/src/heap.rs:    unsafe impl Trace for WideSlot {
 crates/glam-gc/src/lib.rs:                let _ = unsafe { value.get_unchecked(mutator) };
 crates/glam-gc/src/lib.rs:                let first = unsafe { *first.get_unchecked(first_mutator) };
 crates/glam-gc/src/lib.rs:                let second = unsafe { *second.get_unchecked(second_mutator) };
@@ -41,6 +60,8 @@ crates/glam-gc/src/mutation.rs:            unsafe {
 crates/glam-gc/src/mutation.rs:    pub unsafe fn with_edge_replacement<Owner: Trace, Edge: Trace, Result>(
 crates/glam-gc/src/mutation.rs:    unsafe impl Trace for Leaf {
 crates/glam-gc/src/mutation.rs:    unsafe impl Trace for MutableNode {
+crates/glam-gc/src/mutator.rs:                return unsafe { Gc::from_raw(pointer) };
+crates/glam-gc/src/mutator.rs:        unsafe { Gc::from_raw(pointer) }
 crates/glam-gc/src/mutator.rs:        unsafe { Gc::from_raw(pointer) }
 crates/glam-gc/src/pointer.rs:                let _ = unsafe { reinterpreted.get_unchecked(mutator) };
 crates/glam-gc/src/pointer.rs:        unsafe { self.pointer.as_ref() }
@@ -48,6 +69,12 @@ crates/glam-gc/src/pointer.rs:    pub unsafe fn get_unchecked<'access>(&self, mu
 crates/glam-gc/src/pointer.rs:    pub(crate) unsafe fn from_raw(pointer: NonNull<T>) -> Self {
 crates/glam-gc/src/pointer.rs:unsafe impl<T: Trace> Send for Gc<T> {}
 crates/glam-gc/src/pointer.rs:unsafe impl<T: Trace> Sync for Gc<T> {}
+crates/glam-gc/src/thread_cache.rs:        let allocation = unsafe { pointer.read() };
+crates/glam-gc/src/thread_cache.rs:        let current = unsafe { allocation_word.read() };
+crates/glam-gc/src/thread_cache.rs:        let pointer = unsafe { self.run.pointer().add(offset).cast::<T>() };
+crates/glam-gc/src/thread_cache.rs:        unsafe {
+crates/glam-gc/src/thread_cache.rs:        unsafe { allocation_word.write(published) };
+crates/glam-gc/src/thread_cache.rs:        unsafe { pointer.write(value) };
 crates/glam-gc/src/trace.rs:    unsafe impl Trace for Leaf {
 crates/glam-gc/src/trace.rs:    unsafe impl Trace for Node {
 crates/glam-gc/src/trace.rs:    unsafe impl Trace for RepresentativeStruct {

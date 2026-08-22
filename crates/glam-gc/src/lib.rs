@@ -1,9 +1,9 @@
 //! Runtime-local garbage collection support for Glam.
 //!
-//! C2B provides managed-pointer contracts, canonical object metadata,
-//! heap-local allocation classes, and heap-owned typed-run topology. Payload
-//! allocation still uses C1A's deliberately leaking prototype until C2C;
-//! tracing and collection remain disabled.
+//! C2C provides managed-pointer contracts, canonical object metadata,
+//! heap-local allocation classes, and synchronized arena allocation. Payloads
+//! remain live until terminal heap teardown; tracing collection remains
+//! disabled.
 
 #![deny(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]
@@ -20,6 +20,7 @@ mod arena;
     reason = "C2B.1 metadata operations remain collector-private until class discovery consumes them"
 )]
 mod class;
+#[expect(unsafe_code, reason = "reviewed C2C terminal payload destruction")]
 mod heap;
 #[expect(unsafe_code, reason = "reviewed C1C mutation boundary")]
 mod mutation;
@@ -32,6 +33,8 @@ mod pointer;
     reason = "C2A geometry remains collector-private until class discovery consumes it"
 )]
 mod run;
+#[expect(unsafe_code, reason = "reviewed C2C worker-local allocation")]
+mod thread_cache;
 #[expect(unsafe_code, reason = "reviewed C1B trace boundary")]
 mod trace;
 
@@ -113,13 +116,15 @@ mod tests {
     #[test]
     fn managed_pointer_can_cross_threads_when_its_value_can() {
         let heap = Heap::new();
-        let value = heap.with_mutator(|mutator| mutator.alloc(42_u64));
+        let class = heap.allocation_class::<u64>().unwrap();
+        let value = heap.with_mutator(|mutator| mutator.alloc(&class, 42_u64));
         let worker_heap = heap.clone();
 
         let observed = std::thread::spawn(move || {
             worker_heap.with_mutator(|mutator| {
-                // SAFETY: `value` was allocated by `worker_heap`, prototype
-                // allocations remain live forever, and its type is `u64`.
+                // SAFETY: `value` was allocated by `worker_heap`, arena
+                // allocations remain live until heap teardown, and its type is
+                // `u64`.
                 unsafe { *value.get_unchecked(mutator) }
             })
         })
@@ -133,14 +138,16 @@ mod tests {
     fn nested_heap_entries_keep_their_authority_separate() {
         let first_heap = Heap::new();
         let second_heap = Heap::new();
+        let first_class = first_heap.allocation_class::<u64>().unwrap();
+        let second_class = second_heap.allocation_class::<u64>().unwrap();
 
         first_heap.with_mutator(|first_mutator| {
-            let first = first_mutator.alloc(11_u64);
+            let first = first_mutator.alloc(&first_class, 11_u64);
             second_heap.with_mutator(|second_mutator| {
-                let second = second_mutator.alloc(22_u64);
+                let second = second_mutator.alloc(&second_class, 22_u64);
 
                 // SAFETY: each pointer is paired with the mutator for the heap
-                // which allocated it, and both prototype allocations are live.
+                // which allocated it, and both arena allocations are live.
                 let first = unsafe { *first.get_unchecked(first_mutator) };
                 // SAFETY: as above, for the second heap and allocation.
                 let second = unsafe { *second.get_unchecked(second_mutator) };
@@ -154,12 +161,14 @@ mod tests {
     fn wrong_heap_access_fails_before_dereference() {
         let owner = Heap::new();
         let other = Heap::new();
-        let value = owner.with_mutator(|mutator| mutator.alloc(42_u64));
+        let class = owner.allocation_class::<u64>().unwrap();
+        let value = owner.with_mutator(|mutator| mutator.alloc(&class, 42_u64));
 
         let panic = std::panic::catch_unwind(|| {
             other.with_mutator(|mutator| {
                 // SAFETY: this deliberately violates the heap precondition to
-                // verify that C1A's debug gateway rejects it before dereference.
+                // verify that indexed arena ownership rejects it before
+                // dereference.
                 let _ = unsafe { value.get_unchecked(mutator) };
             });
         })

@@ -1,6 +1,10 @@
 use std::alloc::{Layout, alloc_zeroed, dealloc};
+#[cfg(test)]
+use std::cell::Cell;
+use std::collections::HashMap;
 use std::ptr::NonNull;
 
+use crate::Trace;
 use crate::run::{AllocationClassId, RUN_SIZE, RunGeometry, RunHeader};
 
 pub(crate) const ARENA_CHUNK_SIZE: usize = 8 * 1024 * 1024;
@@ -49,11 +53,21 @@ impl RunAddress {
     pub(crate) fn pointer(self) -> NonNull<u8> {
         self.pointer
     }
+
+    #[cfg(test)]
+    pub(crate) fn dangling_for_cache_test() -> Self {
+        Self {
+            pointer: NonNull::dangling(),
+        }
+    }
 }
 
 #[derive(Default)]
 pub(crate) struct Arena {
     chunks: Vec<ArenaChunk>,
+    chunk_indices: HashMap<usize, usize>,
+    #[cfg(test)]
+    indexed_lookup_count: Cell<usize>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -72,20 +86,20 @@ pub(crate) struct InitializedRun {
     pub(crate) geometry: RunGeometry,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ClaimedAllocationRange {
+    pub(crate) location: RunLocation,
+    pub(crate) run: RunAddress,
+    pub(crate) geometry: RunGeometry,
+    pub(crate) first_word: usize,
+    pub(crate) end_word: usize,
+    pub(crate) free_mask: u64,
+}
+
 impl Arena {
     pub(crate) fn reserve_chunk(&mut self) -> Result<usize, ArenaError> {
         let candidate = ArenaChunk::allocate()?;
-        if self
-            .chunks
-            .iter()
-            .any(|chunk| chunk.range().overlaps(candidate.range()))
-        {
-            return Err(ArenaError::AddressOverlap);
-        }
-
-        let index = self.chunks.len();
-        self.chunks.push(candidate);
-        Ok(index)
+        self.publish_chunk(candidate)
     }
 
     pub(crate) fn run_address(&self, chunk: usize, run: usize) -> Option<RunAddress> {
@@ -97,9 +111,7 @@ impl Arena {
     }
 
     pub(crate) fn find_run(&self, address: usize) -> Option<RunAddress> {
-        self.chunks
-            .iter()
-            .find_map(|chunk| chunk.run_containing(address))
+        self.chunk_containing(address)?.1.run_containing(address)
     }
 
     pub(crate) fn initialize_run(
@@ -145,15 +157,9 @@ impl Arena {
         candidate
             .initialize_run(0, class_id, geometry)
             .map_err(RunPublicationError::Initialization)?;
-        if self
-            .chunks
-            .iter()
-            .any(|chunk| chunk.range().overlaps(candidate.range()))
-        {
-            return Err(RunPublicationError::Arena(ArenaError::AddressOverlap));
-        }
-        let chunk = self.chunks.len();
-        self.chunks.push(candidate);
+        let chunk = self
+            .publish_chunk(candidate)
+            .map_err(RunPublicationError::Arena)?;
         Ok(RunLocation { chunk, run: 0 })
     }
 
@@ -185,11 +191,7 @@ impl Arena {
     }
 
     pub(crate) fn checked_slot_owner(&self, address: usize) -> Option<RunOwner> {
-        let (chunk_index, chunk) = self
-            .chunks
-            .iter()
-            .enumerate()
-            .find(|(_, chunk)| chunk.range().contains(address))?;
+        let (chunk_index, chunk) = self.chunk_containing(address)?;
         let run = chunk.run_containing(address)?;
         let header = chunk.header_for(run)?;
         let class_id = header.class_id()?;
@@ -206,6 +208,89 @@ impl Arena {
             geometry,
             slot_index,
         })
+    }
+
+    pub(crate) fn first_free_slot(&self, location: RunLocation) -> Option<usize> {
+        self.chunks
+            .get(location.chunk)?
+            .first_free_slot(location.run)
+    }
+
+    pub(crate) fn initialize_slot<T: Trace>(
+        &mut self,
+        location: RunLocation,
+        class_id: AllocationClassId,
+        geometry: RunGeometry,
+        slot_index: usize,
+        value: T,
+    ) -> NonNull<T> {
+        self.chunks
+            .get_mut(location.chunk)
+            .expect("published run must retain its arena chunk")
+            .initialize_slot(location.run, class_id, geometry, slot_index, value)
+    }
+
+    pub(crate) fn allocated_slot_pointers(&self, location: RunLocation) -> Vec<NonNull<()>> {
+        self.chunks
+            .get(location.chunk)
+            .expect("published run must retain its arena chunk")
+            .allocated_slot_pointers(location.run)
+    }
+
+    pub(crate) fn claim_allocation_word(
+        &mut self,
+        location: RunLocation,
+    ) -> Option<ClaimedAllocationRange> {
+        let claimed = self
+            .chunks
+            .get_mut(location.chunk)?
+            .claim_allocation_word(location.run)?;
+        Some(ClaimedAllocationRange {
+            location,
+            run: claimed.run,
+            geometry: claimed.geometry,
+            first_word: claimed.first_word,
+            end_word: claimed.end_word,
+            free_mask: claimed.free_mask,
+        })
+    }
+
+    fn publish_chunk(&mut self, candidate: ArenaChunk) -> Result<usize, ArenaError> {
+        let base = candidate.range().start;
+        if self.chunk_indices.contains_key(&base) {
+            return Err(ArenaError::AddressOverlap);
+        }
+
+        // Reserve both fallible allocations before either collection exposes
+        // the candidate. From here through insertion, the operations cannot
+        // allocate, and the arena is exclusively borrowed under the heap-state
+        // mutex. Equal aligned bases are the only way fixed-size chunks can
+        // overlap.
+        self.chunks
+            .try_reserve(1)
+            .map_err(|_| ArenaError::AllocationFailed)?;
+        self.chunk_indices
+            .try_reserve(1)
+            .map_err(|_| ArenaError::AllocationFailed)?;
+
+        let index = self.chunks.len();
+        self.chunks.push(candidate);
+        let prior = self.chunk_indices.insert(base, index);
+        debug_assert!(prior.is_none());
+        debug_assert_eq!(self.chunks.len(), self.chunk_indices.len());
+        Ok(index)
+    }
+
+    fn chunk_containing(&self, address: usize) -> Option<(usize, &ArenaChunk)> {
+        #[cfg(test)]
+        self.indexed_lookup_count
+            .set(self.indexed_lookup_count.get() + 1);
+
+        let base = address & !(ARENA_CHUNK_SIZE - 1);
+        let index = *self.chunk_indices.get(&base)?;
+        let chunk = self.chunks.get(index)?;
+        debug_assert_eq!(chunk.range().start, base);
+        chunk.range().contains(address).then_some((index, chunk))
     }
 
     #[cfg(test)]
@@ -233,6 +318,16 @@ impl Arena {
     #[cfg(test)]
     fn side_metadata_for_test(&self, chunk: usize, run: usize, geometry: RunGeometry) -> Vec<u8> {
         self.chunks[chunk].side_metadata(run, geometry)
+    }
+
+    #[cfg(test)]
+    fn reset_indexed_lookup_count(&self) {
+        self.indexed_lookup_count.set(0);
+    }
+
+    #[cfg(test)]
+    fn indexed_lookup_count(&self) -> usize {
+        self.indexed_lookup_count.get()
     }
 }
 
@@ -311,6 +406,233 @@ impl ArenaChunk {
         (0..RUNS_PER_CHUNK).find(|&run| self.header_for_index(run).is_some_and(RunHeader::is_empty))
     }
 
+    fn first_free_slot(&self, run: usize) -> Option<usize> {
+        let address = self.run_address(run)?;
+        let geometry = self.header_for(address)?.geometry()?;
+        (0..geometry.slot_count)
+            .find(|&slot_index| !self.slot_is_allocated(address, geometry, slot_index))
+    }
+
+    fn initialize_slot<T: Trace>(
+        &mut self,
+        run: usize,
+        class_id: AllocationClassId,
+        geometry: RunGeometry,
+        slot_index: usize,
+        value: T,
+    ) -> NonNull<T> {
+        let address = self
+            .run_address(run)
+            .expect("published run must belong to its arena chunk");
+        let header = self
+            .header_for(address)
+            .expect("published run must have a valid header");
+        assert_eq!(
+            header.class_id(),
+            Some(class_id),
+            "allocation run has the wrong class"
+        );
+        assert_eq!(
+            header.geometry(),
+            Some(geometry),
+            "allocation run has the wrong geometry"
+        );
+        assert!(
+            slot_index < geometry.slot_count,
+            "allocation slot is outside its run"
+        );
+        assert!(
+            !self.slot_is_allocated(address, geometry, slot_index),
+            "allocation slot is already occupied"
+        );
+        assert!(
+            std::mem::size_of::<T>() <= geometry.slot_stride,
+            "allocation payload exceeds its slot"
+        );
+
+        let offset = geometry
+            .slot_offset(slot_index)
+            .expect("validated slot must have an in-run offset");
+        // SAFETY: validated run geometry places this exact slot wholly inside
+        // the live chunk, aligned for the class payload. The allocation bit is
+        // still clear and the arena is exclusively borrowed under heap state,
+        // so no initialized `T` aliases this storage.
+        let pointer = unsafe { address.pointer().add(offset).cast::<T>() };
+        assert_eq!(
+            pointer.addr().get() % std::mem::align_of::<T>(),
+            0,
+            "allocation slot has the wrong payload alignment"
+        );
+        let (allocation_word, published_word) =
+            self.allocation_word_update(address, geometry, slot_index);
+
+        // No panicking operation is permitted between payload initialization
+        // and publication. Both raw writes are infallible for the validated,
+        // exclusively held, disjoint ranges.
+        // SAFETY: the proof above establishes a unique initialized destination
+        // for `T`.
+        unsafe { pointer.write(value) };
+        // SAFETY: `allocation_word` identifies the initialized allocation
+        // bitmap word for this run, and exclusive arena access serializes the
+        // synchronized allocator.
+        unsafe { allocation_word.write(published_word) };
+        pointer
+    }
+
+    fn allocated_slot_pointers(&self, run: usize) -> Vec<NonNull<()>> {
+        let address = self
+            .run_address(run)
+            .expect("published run must belong to its arena chunk");
+        let geometry = self
+            .header_for(address)
+            .and_then(RunHeader::geometry)
+            .expect("published run must have valid geometry");
+        (0..geometry.slot_count)
+            .filter(|&slot_index| self.slot_is_allocated(address, geometry, slot_index))
+            .map(|slot_index| {
+                let offset = geometry
+                    .slot_offset(slot_index)
+                    .expect("allocated slot must have an in-run offset");
+                // SAFETY: validated geometry and a bounded slot index place
+                // the pointer at an initialized payload start inside the run.
+                unsafe { address.pointer().add(offset).cast() }
+            })
+            .collect()
+    }
+
+    fn claim_allocation_word(&mut self, run: usize) -> Option<ChunkAllocationRange> {
+        let address = self.run_address(run)?;
+        let geometry = self.header_for(address)?.geometry()?;
+
+        for first_word in 0..geometry.allocation_bitmap.word_len {
+            if self.lease_bit_is_set(address, geometry, first_word) {
+                continue;
+            }
+            let free_mask = self.free_mask_for_word(address, geometry, first_word);
+            if free_mask == 0 {
+                continue;
+            }
+
+            // C2C.3 deliberately claims one complete allocation word. The
+            // cursor retains a half-open range representation so later
+            // profiling may tune this without changing TLS lifecycle rules.
+            let end_word = first_word + 1;
+            self.set_lease_bit(address, geometry, first_word);
+            return Some(ChunkAllocationRange {
+                run: address,
+                geometry,
+                first_word,
+                end_word,
+                free_mask,
+            });
+        }
+        None
+    }
+
+    fn free_mask_for_word(&self, run: RunAddress, geometry: RunGeometry, word_index: usize) -> u64 {
+        let allocation = self.read_bitmap_word(run, geometry.allocation_bitmap, word_index);
+        !allocation & valid_slot_mask(geometry.slot_count, word_index)
+    }
+
+    fn lease_bit_is_set(
+        &self,
+        run: RunAddress,
+        geometry: RunGeometry,
+        allocation_word_index: usize,
+    ) -> bool {
+        let lease_word_index = allocation_word_index / u64::BITS as usize;
+        let lease_bit_index = allocation_word_index % u64::BITS as usize;
+        let word = self.read_bitmap_word(run, geometry.lease_bitmap, lease_word_index);
+        word & (1_u64 << lease_bit_index) != 0
+    }
+
+    fn set_lease_bit(
+        &mut self,
+        run: RunAddress,
+        geometry: RunGeometry,
+        allocation_word_index: usize,
+    ) {
+        let lease_word_index = allocation_word_index / u64::BITS as usize;
+        let lease_bit_index = allocation_word_index % u64::BITS as usize;
+        let pointer = self.bitmap_word_pointer(run, geometry.lease_bitmap, lease_word_index);
+        // SAFETY: the pointer names one initialized aligned lease-bitmap word
+        // under exclusive arena access.
+        let current = unsafe { pointer.read() };
+        debug_assert_eq!(current & (1_u64 << lease_bit_index), 0);
+        // SAFETY: the same exclusive validated word may publish this lease bit.
+        unsafe { pointer.write(current | (1_u64 << lease_bit_index)) };
+    }
+
+    fn read_bitmap_word(
+        &self,
+        run: RunAddress,
+        bitmap: crate::run::BitmapGeometry,
+        word_index: usize,
+    ) -> u64 {
+        let pointer = self.bitmap_word_pointer(run, bitmap, word_index);
+        // SAFETY: the pointer names one initialized aligned bitmap word. Heap
+        // state excludes lease mutation, and an unleased allocation word has
+        // no worker-local writer.
+        unsafe { pointer.read() }
+    }
+
+    fn bitmap_word_pointer(
+        &self,
+        run: RunAddress,
+        bitmap: crate::run::BitmapGeometry,
+        word_index: usize,
+    ) -> NonNull<u64> {
+        assert!(word_index < bitmap.word_len, "bitmap word is out of range");
+        // SAFETY: validated bitmap geometry places every aligned word wholly
+        // inside this live run.
+        unsafe {
+            run.pointer()
+                .add(bitmap.offset)
+                .cast::<u64>()
+                .add(word_index)
+        }
+    }
+
+    fn slot_is_allocated(&self, run: RunAddress, geometry: RunGeometry, slot_index: usize) -> bool {
+        let word_index = slot_index / u64::BITS as usize;
+        let bit_index = slot_index % u64::BITS as usize;
+        debug_assert!(word_index < geometry.allocation_bitmap.word_len);
+        // SAFETY: validated geometry places the aligned allocation bitmap word
+        // inside this initialized live run. Shared reads occur only while the
+        // heap-state mutex excludes bitmap mutation.
+        let word = unsafe {
+            run.pointer()
+                .add(geometry.allocation_bitmap.offset)
+                .cast::<u64>()
+                .add(word_index)
+                .read()
+        };
+        word & (1_u64 << bit_index) != 0
+    }
+
+    fn allocation_word_update(
+        &mut self,
+        run: RunAddress,
+        geometry: RunGeometry,
+        slot_index: usize,
+    ) -> (NonNull<u64>, u64) {
+        let word_index = slot_index / u64::BITS as usize;
+        let bit_index = slot_index % u64::BITS as usize;
+        debug_assert!(word_index < geometry.allocation_bitmap.word_len);
+        // SAFETY: validated geometry places the aligned allocation bitmap word
+        // inside this exclusively borrowed, initialized run.
+        let pointer = unsafe {
+            run.pointer()
+                .add(geometry.allocation_bitmap.offset)
+                .cast::<u64>()
+                .add(word_index)
+        };
+        // SAFETY: the pointer proof above permits reading this initialized
+        // integer bitmap word under exclusive arena access.
+        let current = unsafe { pointer.read() };
+        (pointer, current | (1_u64 << bit_index))
+    }
+
     fn initialize_run(
         &mut self,
         run: usize,
@@ -382,6 +704,15 @@ impl ArenaChunk {
     }
 }
 
+#[derive(Clone, Copy)]
+struct ChunkAllocationRange {
+    run: RunAddress,
+    geometry: RunGeometry,
+    first_word: usize,
+    end_word: usize,
+    free_mask: u64,
+}
+
 // SAFETY: an arena chunk is exclusive owned storage with no exposed Rust
 // references. Moving ownership between threads does not access its bytes, and
 // its one eventual deallocation still occurs exactly once from `Drop`.
@@ -434,6 +765,18 @@ impl AddressRange {
 fn chunk_layout() -> Layout {
     Layout::from_size_align(ARENA_CHUNK_SIZE, ARENA_CHUNK_SIZE)
         .expect("fixed arena chunk geometry must be a valid Rust layout")
+}
+
+fn valid_slot_mask(slot_count: usize, word_index: usize) -> u64 {
+    let first_slot = word_index * u64::BITS as usize;
+    let remaining = slot_count.saturating_sub(first_slot);
+    if remaining >= u64::BITS as usize {
+        u64::MAX
+    } else if remaining == 0 {
+        0
+    } else {
+        (1_u64 << remaining) - 1
+    }
 }
 
 #[cfg(test)]
@@ -494,6 +837,28 @@ mod tests {
             assert_eq!(arena.find_run(first_run.address()), Some(first_run));
             assert_eq!(arena.find_run(second_run.address()), Some(second_run));
         }
+    }
+
+    #[test]
+    fn indexed_lookup_cost_is_independent_of_chunk_count_and_order() {
+        let mut arena = Arena::default();
+        let chunks = (0..4)
+            .map(|_| arena.reserve_chunk().unwrap())
+            .collect::<Vec<_>>();
+
+        for chunk in chunks.into_iter().rev() {
+            let range = arena.chunk_range(chunk).unwrap();
+            for address in [range.start, range.end - 1] {
+                arena.reset_indexed_lookup_count();
+                assert!(arena.find_run(address).is_some());
+                assert_eq!(arena.indexed_lookup_count(), 1);
+            }
+        }
+
+        let arbitrary = 1usize;
+        arena.reset_indexed_lookup_count();
+        assert_eq!(arena.find_run(arbitrary), None);
+        assert_eq!(arena.indexed_lookup_count(), 1);
     }
 
     #[test]
@@ -600,6 +965,34 @@ mod tests {
     }
 
     #[test]
+    fn indexed_owner_lookup_resolves_boundary_slots_across_chunks() {
+        let mut arena = Arena::default();
+        let chunks = (0..3)
+            .map(|_| arena.reserve_chunk().unwrap())
+            .collect::<Vec<_>>();
+        let geometry = geometry(24, 8);
+
+        for (ordinal, &chunk) in chunks.iter().enumerate() {
+            for run in [0, RUNS_PER_CHUNK - 1] {
+                let class_id = class((ordinal * 2 + usize::from(run != 0) + 1) as u64);
+                arena
+                    .initialize_run(chunk, run, class_id, geometry)
+                    .unwrap();
+                let run_address = arena.run_address(chunk, run).unwrap();
+                for slot_index in [0, geometry.slot_count - 1] {
+                    let address = run_address.address() + geometry.slot_offset(slot_index).unwrap();
+                    arena.reset_indexed_lookup_count();
+                    let owner = arena.checked_slot_owner(address).unwrap();
+                    assert_eq!(owner.location, RunLocation { chunk, run });
+                    assert_eq!(owner.class_id, class_id);
+                    assert_eq!(owner.slot_index, slot_index);
+                    assert_eq!(arena.indexed_lookup_count(), 1);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn failed_or_repeated_initialization_does_not_republish_a_run() {
         let mut arena = Arena::default();
         let chunk = arena.reserve_chunk().unwrap();
@@ -645,10 +1038,55 @@ mod tests {
             ))
         );
         assert!(arena.chunks.is_empty());
+        assert!(arena.chunk_indices.is_empty());
         assert!(arena.initialized_runs().is_empty());
 
         let published = arena.publish_run(class(1), geometry(32, 8)).unwrap();
         assert_eq!(published, RunLocation { chunk: 0, run: 0 });
+        assert_eq!(arena.chunks.len(), arena.chunk_indices.len());
         assert_eq!(arena.initialized_runs().len(), 1);
+    }
+
+    #[test]
+    fn allocation_word_leases_are_disjoint_and_exhaust_the_run() {
+        let mut arena = Arena::default();
+        let geometry = geometry(16, 8);
+        let location = arena.publish_run(class(1), geometry).unwrap();
+
+        let claims = (0..geometry.allocation_bitmap.word_len)
+            .map(|expected_word| {
+                let claimed = arena
+                    .claim_allocation_word(location)
+                    .expect("each allocation word should be claimable once");
+                assert_eq!(claimed.location, location);
+                assert_eq!(claimed.first_word, expected_word);
+                assert_eq!(claimed.end_word, expected_word + 1);
+                assert_eq!(
+                    claimed.free_mask,
+                    valid_slot_mask(geometry.slot_count, expected_word)
+                );
+                claimed
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(claims.len(), geometry.allocation_bitmap.word_len);
+        assert!(arena.claim_allocation_word(location).is_none());
+    }
+
+    #[test]
+    fn allocation_word_tail_mask_never_exposes_padding_as_a_slot() {
+        let mut arena = Arena::default();
+        let geometry = geometry(24, 8);
+        assert!(!geometry.slot_count.is_multiple_of(u64::BITS as usize));
+        let location = arena.publish_run(class(1), geometry).unwrap();
+
+        let last = (0..geometry.allocation_bitmap.word_len)
+            .map_while(|_| arena.claim_allocation_word(location))
+            .last()
+            .unwrap();
+        let expected = valid_slot_mask(geometry.slot_count, last.first_word);
+        assert_eq!(last.free_mask, expected);
+        assert_ne!(expected, u64::MAX);
+        assert_eq!(last.free_mask & !expected, 0);
     }
 }

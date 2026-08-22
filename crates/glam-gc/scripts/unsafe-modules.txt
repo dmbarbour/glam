@@ -6,3 +6,5 @@ crates/glam-gc/src/lib.rs:#[expect(unsafe_code, reason = "reviewed C1B trace bou
 crates/glam-gc/src/lib.rs:#[expect(unsafe_code, reason = "reviewed C1C mutation boundary")]
 crates/glam-gc/src/lib.rs:#[expect(unsafe_code, reason = "reviewed C2A arena and run topology")]
 crates/glam-gc/src/lib.rs:#[expect(unsafe_code, reason = "reviewed C2B canonical metadata dispatch")]
+crates/glam-gc/src/lib.rs:#[expect(unsafe_code, reason = "reviewed C2C terminal payload destruction")]
+crates/glam-gc/src/lib.rs:#[expect(unsafe_code, reason = "reviewed C2C worker-local allocation")]

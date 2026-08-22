@@ -211,11 +211,13 @@ mod tests {
     #[test]
     fn manual_struct_and_recursive_enum_traces_match_expected_edges() {
         let heap = Heap::new();
+        let leaf_class = heap.allocation_class::<Leaf>().unwrap();
+        let node_class = heap.allocation_class::<Node>().unwrap();
         heap.with_mutator(|mutator| {
-            let first_leaf = mutator.alloc(Leaf { _value: 1 });
-            let second_leaf = mutator.alloc(Leaf { _value: 2 });
-            let first_node = mutator.alloc(Node::Leaf(first_leaf));
-            let second_node = mutator.alloc(Node::Leaf(second_leaf));
+            let first_leaf = mutator.alloc(&leaf_class, Leaf { _value: 1 });
+            let second_leaf = mutator.alloc(&leaf_class, Leaf { _value: 2 });
+            let first_node = mutator.alloc(&node_class, Node::Leaf(first_leaf));
+            let second_node = mutator.alloc(&node_class, Node::Leaf(second_leaf));
 
             let branch = Node::Branch {
                 children: [first_node, second_node],
@@ -249,9 +251,11 @@ mod tests {
     #[test]
     fn visitor_panic_leaves_the_value_traceable_from_the_beginning() {
         let heap = Heap::new();
+        let leaf_class = heap.allocation_class::<Leaf>().unwrap();
+        let node_class = heap.allocation_class::<Node>().unwrap();
         heap.with_mutator(|mutator| {
-            let leaf = mutator.alloc(Leaf { _value: 1 });
-            let node = mutator.alloc(Node::Leaf(leaf));
+            let leaf = mutator.alloc(&leaf_class, Leaf { _value: 1 });
+            let node = mutator.alloc(&node_class, Node::Leaf(leaf));
             let branch = Node::Branch {
                 children: [node, node],
                 ornaments: (Some(leaf), [leaf, leaf]),

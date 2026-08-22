@@ -14,14 +14,21 @@ fixed-run geometry, and C2A.2 adds heap-owned aligned arena chunks plus checked
 numeric owner recovery. C2A.3 initializes integer-only run headers and
 allocation, lease, and mark side metadata, but still adds no payload
 allocation. C2B.1 adds canonical process-wide object metadata and erased
-trace/drop dispatch, but no heap-local allocation class or typed run. There is
-C2B.2 adds heap-local dense allocation classes and typed class handles. C2B.3
+trace/drop dispatch, but no heap-local allocation class or typed run. C2B.2
+adds heap-local dense allocation classes and typed class handles. C2B.3
 publishes typed runs, authoritative class pools, and checked metadata
-resolution, but no payload allocation. There is no root registry, collection,
-marking, reclamation, finalization, callback, or collector coordination.
+resolution, but no payload allocation. C2C.1a adds indexed chunk ownership and
+constant-cost checked chunk lookup. C2C.1b replaces the leaking prototype with
+synchronized arena allocation and provisional terminal payload destruction.
+C2C.2 adds weak heap-specific TLS cache identity and lifecycle. C2C.3 leases
+disjoint allocation-bitmap words and makes the worker-local cursor the ordinary
+allocation path. C2C.4 adds batched leased-capacity pressure, deterministic
+pre-initialization unwind verification, and last-owner teardown latches.
+There is no root registry, collection, marking, reclamation, finalization,
+callback, or collector coordination.
 
 The crate denies unsafe code by default. `src/lib.rs` gives the reviewed
-`pointer`, `mutator`, `trace`, `mutation`, and unit-test modules named lint
+`pointer`, `mutator`, `trace`, `mutation`, `thread_cache`, and unit-test modules named lint
 expectations for unsafe code. The exact module expectations and every unsafe
 function, implementation, and block are checked into
 `scripts/unsafe-modules.txt` and `scripts/unsafe-sites.txt`;
@@ -31,16 +38,18 @@ function, implementation, and block are checked into
 
 - Every arena chunk is one 8 MiB allocation with size and alignment equal to
   8 MiB. It therefore contains exactly 128 aligned 64 KiB runs.
-- `HeapInner` owns its arena behind the heap mutex. A chunk is never published
-  until allocation and overlap validation both succeed; dropping either a
+- `HeapInner` owns its arena behind the heap mutex. The stable owning vector and
+  an authoritative map from aligned chunk base to vector index are updated
+  together. Both collections reserve capacity before publication; dropping a
   rejected candidate or its arena returns the allocation exactly once.
-- Owner lookup first compares an integer address with live chunk ranges. Only
-  a successful range check derives a run pointer from the original chunk
-  pointer, preserving allocation provenance without dereferencing a guessed
-  header.
-- Live chunks are required not to overlap. Run recovery masks a validated
-  address by the fixed run size, and checked pointer arithmetic remains inside
-  the owning chunk.
+- Owner lookup masks an integer address to a candidate 8 MiB base and queries
+  the owning heap's chunk index. Only a successful index and range check derive
+  a run pointer from the original chunk pointer, preserving allocation
+  provenance without dereferencing a guessed header.
+- Live chunks are required not to overlap. Equal masked bases are the only way
+  fixed-size, fixed-alignment chunks can overlap. Run recovery then masks the
+  validated address by the fixed run size, and checked pointer arithmetic
+  remains inside the owning chunk.
 - Arena bytes are zeroed but untyped in C2A.2. No `RunHeader`, payload, bitmap,
   or Rust reference exists in them at that checkpoint. C2A.3 initializes every
   run header before chunk publication, then initializes side metadata only
@@ -67,7 +76,7 @@ function, implementation, and block are checked into
   metadata, alignment padding, slot interiors, run ends, free runs, and other
   heaps all fail without producing an owner.
 
-## Prototype Representation Invariants
+## Managed Pointer and Access Invariants
 
 - `Gc<T>` is transparent over exactly one `NonNull<T>`. An unconditional const
   assertion latches its one-pointer width. It carries no heap, domain, class,
@@ -77,19 +86,21 @@ function, implementation, and block are checked into
 - `Mutator<'heap>` contains a reference to exactly one `HeapInner`. Its
   `Rc<()>` phantom makes the token neither `Send` nor `Sync`; the lifetime
   prevents it from outliving that heap entry.
-- `Mutator::alloc` accepts only `T: Trace`. Its inline const assertion rejects
+- `Mutator::alloc` accepts only `T: Trace` and requires a reusable
+  `AllocationClass<T>` from the same heap. Its inline const assertion rejects
   zero-sized types while compiling an invalid monomorphization, before any
-  allocation can run. It initializes and leaks a `Box<T>`, registers its
-  address, and only then constructs `Gc<T>`.
-- Prototype payloads never move and are never destroyed. The allocation record
-  is diagnostic metadata and may disappear with its heap; no access is valid
-  without a live mutator for the owning heap.
-- In debug/test builds, each heap records an allocation address and canonical
-  object-metadata pointer under one mutex. Access copies the matching record
-  and releases the mutex before asserting heap ownership or metadata identity,
-  so a deliberately caught contract panic does not poison the registry.
-- Converting a pointer to `usize` is used only to compare registry keys. No
-  managed pointer or Rust reference is reconstructed from that integer.
+  allocation can run. A foreign class is rejected in every build before either
+  heap's run state changes.
+- Before collection exists, arena payloads never move and remain live until
+  their heap's terminal teardown. No access is valid without a live mutator for
+  the owning heap.
+- In debug/test builds, access masks the address into the owning heap's indexed
+  chunk set, validates run/slot/class topology, and compares the resolved
+  canonical metadata pointer. It intentionally diagnoses ownership, shape, and
+  representation rather than concurrently changing allocation liveness.
+- Converting a pointer to `usize` is used only for indexed ownership and exact
+  slot geometry. A managed pointer is rederived only from the original owning
+  chunk pointer after successful numeric validation.
 - `Gc<T>` exposes only shared access. `T: Sync` makes such access valid across
   threads; the additional `T: Send` bound reserves safe destruction on a
   collector thread. Managed interior mutation will require a later reviewed
@@ -105,9 +116,9 @@ explicit allocator obligation.
 
 The caller must prove that the address is non-null, aligned, initialized as
 `T`, registered to the allocating heap, and live for the collector-defined
-period. C1A's only caller is `Mutator::alloc`, which obtains the pointer from a
-fully initialized leaked box and registers the same address and type before the
-call. A future allocator or representation decoder must discharge the same
+period. `Mutator::alloc` obtains the pointer only after its synchronized arena
+allocator has initialized the payload and published the exact allocation bit.
+A future fast allocator or representation decoder must discharge the same
 obligations independently.
 
 ### `pointer::Gc::get_unchecked` and its pointer dereference
@@ -116,13 +127,15 @@ obligations independently.
 of liveness, heap ownership, representation, or alias validity. The caller
 must prove that the pointer is a live initialized `T` in the supplied mutator's
 heap and that no mutation invalidates the returned shared reference. The
-implementation performs the available debug/test heap and `TypeId` checks
-before `as_ref`; its result lifetime is bounded by the mutator borrow.
+implementation performs the available debug/test indexed heap and canonical
+metadata checks before `as_ref`; its result lifetime is bounded by the mutator
+borrow.
 
-Correct prototype calls satisfy the proof because C1A never reclaims or mutates
-payloads. Wrong-heap and wrong-representation tests deliberately arrange a
-diagnostic mismatch and establish that the check panics before `as_ref` runs.
-Those checks are not part of the release-build proof.
+Correct C2C calls satisfy the proof because collection remains disabled and
+arena payloads stay live until heap teardown. Wrong-heap and
+wrong-representation tests deliberately arrange a diagnostic mismatch and
+establish that indexed validation panics before `as_ref` runs. Those checks are
+not part of the release-build proof.
 
 ### Canonical object metadata and erased dispatch
 
@@ -146,9 +159,9 @@ Erased trace and drop calls cast only after the caller proves that the pointer
 names a live initialized allocation whose run resolves to that exact metadata.
 The trace dispatcher forms a shared `T` reference only for the duration of the
 synchronous visit. The drop dispatcher invokes `drop_in_place::<T>` exactly
-once and does not deallocate the slot. C2B.1 tests these functions with
-prototype allocations; C2B.3 makes typed-run metadata resolution the ordinary
-proof source, and C6 owns actual destruction.
+once and does not deallocate the slot. Typed-run metadata resolution is the
+ordinary proof source, terminal heap teardown is the provisional caller, and
+C6 later owns collector-driven destruction.
 
 ## Heap-Local Allocation-Class Invariants
 
@@ -192,6 +205,89 @@ proof source, and C6 owns actual destruction.
   any run state is changed. A foreign handle therefore cannot allocate or
   publish a run even when its numeric dense ID happens to equal a local ID.
 
+## Synchronized Payload Allocation and Terminal Destruction
+
+- The correctness allocator holds the heap-state mutex while selecting a free
+  allocation bit, initializing its typed payload, and publishing that bit. The
+  payload and bitmap word are disjoint validated run ranges, and no operation
+  capable of unwinding occurs between their raw writes.
+- Selecting a slot changes no persistent state. An injected unwind after
+  selection but before initialization leaves the allocation bit clear and the
+  input value is destroyed normally. The already published empty typed run may
+  remain available for later allocation.
+- Allocation-bit reads and writes use initialized aligned `u64` side metadata
+  under heap-state exclusion. The synchronized path may scan run pools and
+  slots; C2C.3 replaces this correctness baseline with disjoint worker-local
+  bitmap-word leases.
+- Terminal `HeapInner::drop` has exclusive ownership. It enumerates every set
+  allocation bit, dispatches the owning class's destructor exactly once when
+  required, and then lets each arena chunk deallocate exactly once. This path
+  is provisionally non-reentrant and non-panicking. C2C.4 proves it cannot race
+  an active owner region; C6 replaces terminal enumeration with collector-
+  controlled finalization, quarantine, and destructor-panic recovery.
+
+## Thread-Local Allocation Cache Lifecycle
+
+- Each thread's registry holds only a weak heap identity, a nonzero captured
+  allocation-lease epoch, recursive depth, and a fixed 64-entry direct-mapped
+  cursor array. The heap has no cache registry or TLS back-reference.
+- The weak Arc identity prevents its allocation address from being reused while
+  a stale TLS record exists without keeping the dead heap alive. A later heap
+  entry prunes dead inactive records; TLS destruction merely drops weak and
+  numeric state.
+- Same-heap recursive regions share one TLS entry and checked depth. An RAII
+  entry guard balances normal return and unwinding. Different heaps use
+  independent records even when their mutator regions are nested on one host
+  thread.
+- Only outer entry compares the heap's current lease epoch. Mismatch clears the
+  entire cursor array and captures the new epoch. Clearing, collision eviction,
+  ordinary exit, and TLS destruction do not dereference runs, return leases, or
+  mutate heap state.
+- The cache's fixed 64 logical entries use one boxed slice so cache width does
+  not inflate a mutator caller's stack. Dense class ID selects the entry and
+  the retained full ID detects collisions; no hash or allocation occurs on a
+  lookup.
+- A cursor becomes authoritative only after the synchronized heap path sets
+  the corresponding run-side lease bit. C2C.3 leases one complete allocation
+  word per cursor. Separate cursors never own the same word, and eviction or
+  TLS destruction forgets the pointer without clearing its lease.
+
+## Worker-Local Allocation-Word Invariants
+
+- A cache miss holds the heap-state mutex while validating exact class
+  provenance, selecting an unleased word with at least one free valid slot,
+  and setting its lease bit. A fresh run is fully published into both arena
+  and class pool before its first lease is returned.
+- The cursor carries the stable owning `RunAddress`, validated `RunGeometry`,
+  half-open word range, and local free mask. Its initial mask is the inverse of
+  the authoritative allocation word intersected with the exact slot-count
+  mask, so tail padding can never become a payload address.
+- While a lease is live, only its worker-local cursor reads or writes that
+  allocation word. Other claims inspect the lease bitmap under heap state and
+  skip the word before reading its allocation bits. Distinct word-sized `u64`
+  objects occupy disjoint memory, so concurrent allocation within one run is
+  data-race-free.
+- The hot path performs every bounds, size, alignment, and free-bit assertion
+  before initializing the payload. Its two final operations are an infallible
+  payload write followed by an infallible allocation-bit write; no unwind can
+  expose uninitialized storage as allocated. It updates the local free mask
+  only after both writes.
+- Allocation visibility is not delayed until mutator exit. Returning `Gc<T>`
+  occurs only after bitmap publication, and ordinary Rust synchronization may
+  immediately share it with another mutator. Collection remains disabled in
+  C2C, so the payload then stays live through terminal heap teardown.
+- Allocation pressure is charged once under heap state when a word is leased,
+  using its valid free-slot count and slot stride. It is never incremented on
+  the local object path and never decremented by cache eviction or thread exit.
+  Saturating totals therefore conservatively include abandoned leases without
+  requiring TLS callbacks. One chunk of leased capacity records the
+  provisional pending collection request; C3B owns acting on that request and
+  C5 owns resetting it when leases are revoked.
+- The deterministic pre-initialization hook exists only in test builds at the
+  last point before the two publication writes. An unwind there owns and drops
+  the input normally while leaving both local and authoritative bit state
+  unchanged. Production has no callback at that boundary.
+
 ### `Send` and `Sync` for `Gc<T>`
 
 `NonNull<T>` does not grant these auto traits. The unsafe implementations are
@@ -199,15 +295,27 @@ restricted to `T: Trace`, which itself requires `Send + Sync`. Copying or
 sharing `Gc<T>` does not grant access: dereference still requires a non-`Send`,
 non-`Sync`, heap-qualified mutator. `T: Sync` permits the resulting shared
 reference on another thread; `T: Send` permits eventual collector-thread
-destruction. The cross-thread prototype test moves a `Gc<u64>` and accesses it
+destruction. The cross-thread test moves a `Gc<u64>` and accesses it
 only after entering its owner heap on that thread.
 
 ### `mutator::Mutator::alloc`
 
-The safe prototype allocator calls `Gc::from_raw` in one unsafe block. Its
-local proof is the initialization, leak, pointer derivation, and registration
-sequence described above. A panic before pointer return can leak more memory
-but cannot expose an invalid handle.
+The safe allocator first attempts the worker-local cursor and otherwise claims
+and installs one allocation word through the synchronized slow path. Both
+successful branches call `Gc::from_raw` only after the exact payload has been
+initialized and its allocation bit published. The class-provenance check
+precedes either path, and neither path contains a panicking operation between
+the payload write and bit publication.
+
+### `thread_cache::AllocationCursor` raw run and bitmap access
+
+The cursor's raw pointer arithmetic, payload initialization, and bitmap access
+are justified by the synchronized lease operation: it validates a stable typed
+run and geometry, masks invalid tail bits, and grants this thread exclusive
+ownership of every represented allocation word. The cursor checks the selected
+slot, payload size, and alignment before writing. No other allocator may read
+or mutate its allocation word until a future full collection revokes all
+leases after stopping mutators and advancing the heap epoch.
 
 ### `arena::ArenaChunk` allocation and destruction
 
@@ -217,10 +325,11 @@ before any chunk is published. The successful pointer remains uniquely owned
 by its `ArenaChunk`, whose `Drop` returns it through `dealloc` with the identical
 layout.
 
-The two `NonNull::add` sites derive aligned run starts. Both are preceded by
-either a checked run index or numeric membership and mask validation, proving
-the result remains within the live chunk. Neither site dereferences or creates
-a Rust reference.
+The `NonNull::add` sites derive aligned run starts, side-metadata words, or
+bounded payload slots. Each is preceded by checked run membership and validated
+geometry, proving the result remains within the live chunk. Payload and bitmap
+writes occur only under exclusive arena access; read-only recovery does not
+create a payload reference.
 
 ### `Send for arena::ArenaChunk`
 
@@ -241,7 +350,8 @@ integer-only header, validates all geometry before pointer arithmetic, clears
 the allocation, lease, and mark byte ranges, and then overwrites the empty
 header with the initialized representation. The test-only slice construction
 copies those same already initialized metadata bytes without returning a
-borrow. No unsafe site touches payload storage.
+  borrow. C2C.1b's payload access additionally validates class identity,
+  geometry, slot bounds, size, and alignment before its raw initialization.
 
 ### Test call sites
 
@@ -333,17 +443,20 @@ mutation closure runs.
   injected visitor panic, exact edge replacement, and rejection before
   foreign-heap mutation.
 - Arena tests cover first, last, and adjacent run boundaries, live chunk
-  non-aliasing, separate-arena and separate-heap ownership, and mask arithmetic
-  at the highest representable complete chunk range.
+  non-aliasing, separate-arena and separate-heap ownership, mask arithmetic at
+  the highest representable complete chunk range, one indexed lookup
+  independent of chunk count/order, and exact boundary-slot ownership across
+  several chunks.
 - Run-topology tests cover every empty header, independent adjacent class
   identities and geometry, zeroed bitmap ranges, exact first and last slots,
   rejection of non-slot addresses, and non-publication after invalid or
   repeated initialization.
 - The ordinary crate checks, exact unsafe inventory, focused Miri run, and
-  repository-wide checks are required for completed C1.
-- Miri passes all implemented tests with `-Zmiri-ignore-leaks`. That flag suppresses only
-  the prototype allocator's deliberate `Box::leak`; C2 must remove it when it
-  introduces arena ownership.
+  repository-wide checks are required at completed checkpoints.
+- Miri passes all implemented tests with leak checking enabled. C1's temporary
+  `-Zmiri-ignore-leaks` exception was removed with the last payload
+  `Box::leak`; the process-wide canonical metadata registry remains reachable
+  static state.
 - The C1 pointer/access/trace/mutation surface is reviewed and frozen for the
   initial non-moving collector. A moving collector may add a distinct edge-
   rewriting contract; this observational visitor does not promise relocation.

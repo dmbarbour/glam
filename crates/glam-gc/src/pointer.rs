@@ -6,9 +6,9 @@ use crate::{Mutator, Trace, trace::ErasedGc};
 /// A typed, non-rooting pointer to one managed allocation.
 ///
 /// `Gc<T>` carries only the pointer. It does not retain or identify its heap,
-/// keep its allocation alive, or permit safe dereference. C1A prototype
-/// allocations happen to be leaked; later phases replace that temporary
-/// liveness rule with roots, mutator regions, and collection invariants.
+/// keep its allocation alive, or permit safe dereference. Before collection is
+/// enabled, arena allocations remain live until their heap is dropped; later
+/// phases replace that temporary rule with roots and collection invariants.
 ///
 /// A reference cannot escape the mutator region which authorizes access:
 ///
@@ -16,8 +16,9 @@ use crate::{Mutator, Trace, trace::ErasedGc};
 /// use glam_gc::Heap;
 ///
 /// let heap = Heap::new();
+/// let class = heap.allocation_class::<u64>().unwrap();
 /// let escaped = heap.with_mutator(|mutator| {
-///     let value = mutator.alloc(42_u64);
+///     let value = mutator.alloc(&class, 42_u64);
 ///     // SAFETY: deliberately attempting to return this reference demonstrates
 ///     // that the API binds it to the mutator borrow.
 ///     unsafe { value.get_unchecked(mutator) }
@@ -31,7 +32,8 @@ use crate::{Mutator, Trace, trace::ErasedGc};
 /// use glam_gc::Heap;
 ///
 /// let heap = Heap::new();
-/// let value = heap.with_mutator(|mutator| mutator.alloc(42_u64));
+/// let class = heap.allocation_class::<u64>().unwrap();
+/// let value = heap.with_mutator(|mutator| mutator.alloc(&class, 42_u64));
 /// let _ = *value;
 /// ```
 ///
@@ -43,7 +45,8 @@ use crate::{Mutator, Trace, trace::ErasedGc};
 /// use glam_gc::Heap;
 ///
 /// let heap = Heap::new();
-/// let value = heap.with_mutator(|mutator| mutator.alloc(42_u64));
+/// let class = heap.allocation_class::<u64>().unwrap();
+/// let value = heap.with_mutator(|mutator| mutator.alloc(&class, 42_u64));
 /// let _ = HashSet::from([value]);
 /// ```
 #[must_use = "a managed pointer does not itself keep its allocation alive"]
@@ -90,8 +93,8 @@ impl<T: Trace> Gc<T> {
     /// initialized value whose representation is exactly `T`. No mutation may
     /// invalidate the returned shared reference during its lifetime.
     ///
-    /// Debug and test builds verify heap ownership and representation against
-    /// C1A's prototype allocation record before dereferencing. Those checks are
+    /// Debug and test builds verify heap ownership and representation through
+    /// indexed arena/run/class metadata before dereferencing. Those checks are
     /// diagnostics, not the release-build safety proof.
     pub unsafe fn get_unchecked<'access>(&self, mutator: &'access Mutator<'_>) -> &'access T {
         mutator.debug_assert_access(self.pointer);
@@ -145,9 +148,10 @@ mod tests {
     #[test]
     fn pointer_identity_is_all_gc_equality_observes() {
         let heap = Heap::new();
+        let class = heap.allocation_class::<u64>().unwrap();
         let (first, alias, equal_value) = heap.with_mutator(|mutator| {
-            let first = mutator.alloc(42_u64);
-            (first, first, mutator.alloc(42_u64))
+            let first = mutator.alloc(&class, 42_u64);
+            (first, first, mutator.alloc(&class, 42_u64))
         });
 
         assert_eq!(first, alias);
@@ -159,7 +163,8 @@ mod tests {
     #[test]
     fn wrong_representation_fails_before_dereference() {
         let heap = Heap::new();
-        let value = heap.with_mutator(|mutator| mutator.alloc(42_u64));
+        let class = heap.allocation_class::<u64>().unwrap();
+        let value = heap.with_mutator(|mutator| mutator.alloc(&class, 42_u64));
         let reinterpreted = Gc::<u32> {
             pointer: value.pointer.cast(),
         };

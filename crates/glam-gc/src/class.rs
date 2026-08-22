@@ -391,14 +391,16 @@ mod tests {
     #[test]
     fn erased_trace_dispatch_uses_the_canonical_representation() {
         let heap = Heap::new();
+        let leaf_class = heap.allocation_class::<Leaf>().unwrap();
+        let holder_class = heap.allocation_class::<Holder>().unwrap();
         heap.with_mutator(|mutator| {
-            let edge = mutator.alloc(Leaf { _value: 1 });
-            let holder = mutator.alloc(Holder { edge });
+            let edge = mutator.alloc(&leaf_class, Leaf { _value: 1 });
+            let holder = mutator.alloc(&holder_class, Holder { edge });
             let mut observed = Vec::new();
             let mut collect = |edge| observed.push(edge);
             let mut visitor = Visitor::new(&mut collect);
 
-            // SAFETY: `holder` is a live initialized prototype allocation of
+            // SAFETY: `holder` is a live initialized arena allocation of
             // `Holder`, and the selected metadata is canonical for `Holder`.
             unsafe {
                 metadata_for::<Holder>().trace(holder.erase().as_ptr(), &mut visitor);

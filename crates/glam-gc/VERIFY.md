@@ -1,6 +1,6 @@
 # Collector Verification
 
-Run the stable C1 checks from the repository root:
+Run the stable collector checks from the repository root:
 
 ```sh
 crates/glam-gc/scripts/check.sh
@@ -21,21 +21,24 @@ crates/glam-gc/scripts/check-sanitizer.sh thread
 ```
 
 These scripts deliberately fail with the underlying toolchain diagnostic when
-nightly, Miri, `rust-src`, or a sanitizer is unavailable. C1 completion
-requires one recorded focused Miri pass; later routine runs remain optional
-when the local toolchain component is unavailable.
+nightly, Miri, `rust-src`, or a sanitizer is unavailable. Every checkpoint
+which changes the unsafe allocation or access surface records a focused Miri
+pass; later routine runs remain optional when the local toolchain component is
+unavailable.
 
-During C1 only, `check-miri.sh` passes `-Zmiri-ignore-leaks` because the
-prototype allocator deliberately uses `Box::leak`. Miri still checks pointer
-provenance, aliasing, initialization, thread access, and the mismatch gateways.
-C2 must remove this exception when arena-owned allocation replaces the
-prototype; it is not permission for the collector to leak.
+C1 temporarily passed `-Zmiri-ignore-leaks` because its prototype allocator
+used `Box::leak`. C2C.1b replaced that path with arena-owned allocation and
+terminal payload destruction, so `check-miri.sh` now keeps leak checking
+enabled alongside pointer provenance, aliasing, initialization, thread access,
+and mismatch gateways.
 
-The Loom test remains a tooling and API smoke model. C1A's debug allocation
-registry is not collector coordination, and the leaking prototype has no
-collection state machine to model. C3 must replace or supplement this with
-models of each real admission and stop-the-world transition; ordinary threaded
-stress is not a proof.
+The Loom test remains a tooling and API smoke model. C2C's slow path leases
+whole allocation words under the heap mutex, after which a worker mutates only
+its own word; there is still no collection state machine to model. C3 must
+replace or supplement this smoke test with models of each real admission and
+stop-the-world transition. C2C's forced native schedules and Miri validate the
+current disjoint-word implementation, but ordinary threaded stress alone is
+not a proof of the later coordinator.
 
 ## Gate G0 Baseline
 
