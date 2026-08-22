@@ -1,8 +1,8 @@
 # Glam GC Subcrate Implementation Plan — 2026-08-19
 
-Status: in progress; Phases C0, C1, C2A, C2B, and C2C are complete. The
-mandatory post-C1 review is complete. The mandatory post-C2C review precedes
-C3A.
+Status: in progress; Phases C0, C1, C2A, C2B, C2C, and the C2C.6 verification
+follow-up are complete. The mandatory post-C1 and post-C2C reviews are
+complete. C3A.1 is next.
 
 This plan implements an exact, non-moving, runtime-local tracing collector
 without depending on Glam value semantics. The governing requirements and
@@ -36,7 +36,10 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C2C.5b | completed | typed-run-publication collection pressure |
 | C2C.5c | completed | stable class run frontier and lock-free cursor refill |
 | C2C.5d | completed | explicit thread-local cache release without eager pruning |
-| C3A | pending | ordinary admission and same-heap recursion integration |
+| C2C.6 | completed | forced concurrent exhausted-frontier verification |
+| C3A.1 | pending | coordinator state and mutator-gated class discovery |
+| C3A.2 | pending | prepare/admit/activate TLS integration and recursion |
+| C3A.3 | pending | visibility proof, forced schedules, and Loom model |
 | C3B | pending | collector election and single-heap STW quiescence |
 | C3C | pending | cross-heap dependent admission |
 | C3D | pending | finalizer handoff, pressure, panic, and teardown races |
@@ -89,12 +92,12 @@ pub struct AllocationClass<T: Trace> { /* heap-local dense class identity */ }
 
 impl Heap {
     pub fn with_mutator<R>(&self, f: impl for<'h> FnOnce(&Mutator<'h>) -> R) -> R;
-    pub fn allocation_class<T: Trace>(&self) -> Result<AllocationClass<T>, UnsupportedLayout>;
     pub fn request_collection(&self);
     pub fn collect_full(&self) -> Result<CollectionReport, CollectionError>;
 }
 
 impl Mutator<'_> {
+    pub fn allocation_class<T: Trace>(&self) -> Result<AllocationClass<T>, UnsupportedLayout>;
     pub fn alloc<T: Trace>(&self, class: &AllocationClass<T>, value: T) -> Gc<T>;
 }
 
@@ -616,6 +619,11 @@ publication each remain all-or-nothing before the next layer is added.
 - Return a reusable `AllocationClass<T>` handle after discovery. Its heap
   provenance, metadata pointer, and dense class ID make subsequent worker
   allocation independent of `TypeId` lookup or hashing.
+- Discover a new or existing heap-local allocation class only through an
+  admitted `Mutator`. The returned handle does not borrow the mutator and may
+  be cached or shared afterward. This makes class-table and metadata-index
+  topology part of the state frozen when collection drains all mutators,
+  without introducing a separate topology admission counter.
 - Because `Mutator::alloc` is safe, an allocation-class handle from another
   heap must be rejected in release builds (or made unrepresentable by the
   final API) before it reaches raw run state. Debug assertions may add detail,
@@ -633,6 +641,9 @@ Verification:
 
 - repeated and concurrent discovery returns one metadata address per `TypeId`
   and one class ID per `(heap, metadata pointer)`;
+- class discovery cannot enter while an exclusive collector owns the heap,
+  recursive same-heap mutator entry may discover a class, and a retained class
+  remains usable after its discovery region exits;
 - the same Rust type in two heaps shares canonical metadata but receives
   distinct heap-local classes;
 - every run header resolves to the expected trace/drop/layout metadata;
@@ -1242,18 +1253,11 @@ Verification for C2C.5a:
   publication naturally. That publication supplies the pressure event. Full
   collection revokes the leases regardless of how they became unreachable
   from a thread cache.
-- After a successful sweep publishes reusable run state, reset the publication
-  count and admit another `RUNS_PER_CHUNK` successful publications. Do not
-  reset it after an abandoned or panicking collection attempt. Publications
-  made by finalizer-held mutators occur after this new baseline and count
-  toward a follow-up request; the finalizer handoff must not erase them.
-  Survivor-sensitive growth factors and minimum headroom remain later tuning.
-  Releasing wholly empty chunks is separate storage-reclamation work.
-- An explicit `request_collection` is allowed before the run allowance is
-  crossed. It uses the same coalesced request state but does not mutate the
-  current publication count or allowance. This lets embedding code request
-  reclamation at a known batch boundary without first forcing another typed-
-  run publication.
+
+Scope boundary: C2C.5b ends after latching and inspecting its provisional
+automatic request. It does not service collection, implement an explicit
+request API, publish sweep results, or account for finalizer allocation. Those
+requirements are stated under the owning C3 and C6 phases below.
 
 Verification for C2C.5b:
 
@@ -1264,15 +1268,10 @@ Verification for C2C.5b:
   chunk-publication charge;
 - 127 successful publications leave the automatic request clear, while the
   128th latches exactly one request and later publications leave it coalesced;
-- an explicit request before the budget is crossed latches the same coordinator
-  state without publishing a run or changing the publication allowance;
 - candidate chunk allocation, run initialization, overlap, and publication
   failure add neither an authoritative typed run nor a pressure event;
 - abandoned leases can force later run publication without requiring direct
   classification or double-counting;
-- a successful sweep resets the counter before finalizer mutators run, a
-  failed collection does not, and subsequent finalizer publications can latch
-  a follow-up request;
 - pressure observation and mutation remain under the existing heap-state lock,
   with no atomic counter added to the lease-claim path; and
 - focused threshold, failure-atomicity, and existing allocator tests, Clippy,
@@ -1411,13 +1410,83 @@ C2C.5 completed on 2026-08-22:
   empty Loom model retains one 256-byte tool-owned allocation under
   LeakSanitizer; the stable collector check continues to run both Loom models.
 
+### C2C.6 Forced Exhausted-Frontier Verification
+
+C2C.6 is a verification-only follow-up from the mandatory post-C2C review. It
+does not change allocator semantics or introduce another post-phase review
+gate. Complete it before C3A.1 so a frontier race cannot be confused with the
+new mutator-admission coordinator.
+
+- Add a deterministic test hook after `claim_allocation_cursor` observes an
+  exhausted atomic frontier and before it acquires heap state for the
+  synchronized recheck.
+- Pre-exhaust one class's current run, release several claimers together at
+  that hook, and force every participant to enter the synchronized slow path
+  from the same stale frontier observation.
+- Prove exactly one contender advances to or publishes the next run. Every
+  loser must recheck under heap state, observe the winner's frontier, and claim
+  a distinct allocation word from it.
+- Latch instrumentation showing that an already published successor produces
+  no pressure event, a newly published successor produces exactly one event,
+  and no contender rescans the exhausted prefix.
+- Keep the hook test-only and outside the production fast path. An abstract
+  Loom refinement is optional; the required fixture exercises the production
+  atomic frontier pointer, heap mutex, run pool, and pressure counter.
+- Correct the existing lease-word comment and C2C safety proof: initial run
+  topology is published either by the class frontier's Release store paired
+  with its Acquire load, or by the heap mutex on the synchronized path. The
+  lease-word Acquire is atomic word-ownership machinery at this stage; it does
+  not pair with publication through a different atomic object.
+
+Verification for C2C.6 runs the focused forced schedule repeatedly, followed
+by the collector check, exact unsafe inventory, Miri, and available sanitizer
+checks. Passing this checkpoint resolves GC2C-004 directly; it does not trigger
+another mandatory C2 review.
+
+#### C2C.6 Completion
+
+C2C.6 completed on 2026-08-22:
+
+- A test-only barrier pauses every participating claimant after its atomic
+  frontier miss and before heap-state acquisition. Two production-path
+  fixtures force eight claimers through the same stale observation, once with
+  a prepublished successor and once requiring a new run.
+- Both fixtures return eight distinct allocation words from one successor.
+  Instrumentation proves exactly one frontier advance attempt, seven
+  successful locked rechecks of the winner's frontier, no exhausted-prefix
+  rescan, no pressure change for prepublished activation, and exactly one
+  pressure event for new-run publication.
+- The lease-word comment and safety ledger now distinguish initial run
+  publication through the frontier Release/Acquire pair or heap mutex from
+  C5's future same-atomic Release-reset/Acquire-claim edge. The test hook and
+  counters are absent from production builds and add no unsafe operation.
+- The stable collector check passes with 74 unit tests, two Loom models, and
+  six compile-fail doctests. Full leak-checking Miri and both AddressSanitizer
+  and ThreadSanitizer pass all 74 collector unit tests. Workspace formatting,
+  Clippy with warnings denied, and the complete workspace test suite pass.
+
 ## Phase C3 — Regional Mutators and Stop-the-World Handshake
 
-Execute C3 as four checkpoints over the `ThreadHeapState` established by C2C:
+Execute C3 as the following checkpoints over the `ThreadHeapState` established
+by C2C:
 
-- **C3A — ordinary admission.** Add active-mutator accounting, same-heap
-  recursive entry/exit, panic-safe quiescence publication, and cache activation
-  without any collector election.
+- **C3A.1 — coordinator and topology boundary.** Add the ordinary/exclusive
+  phase representation and active-mutator accounting to the existing
+  heap-state `Mutex`, plus one sibling `Condvar`, without collector election.
+  Move allocation-class discovery from `Heap` to `Mutator`; an already
+  discovered handle remains independently reusable. Have `Mutator` borrow the
+  heap's existing shared owner rather than cloning it per admitted region.
+  Force discovery against a synthetic exclusive phase before building
+  collection on this invariant.
+- **C3A.2 — ordinary admission integration.** Split entry into
+  prepare/admit/activate, integrate heap-qualified TLS activation, same-heap
+  recursive entry/exit, panic-safe rollback and outer quiescence publication,
+  and cache activation without collector election.
+- **C3A.3 — admission proof.** Add release/acquire visibility tests,
+  deterministic request/entry and unwind schedules, and the first real Loom
+  model for the coordinator state. Record that completed mutator work becomes
+  visible to the exclusive collector through the mutex-protected admission
+  transition, not through an unrelated lease-word load.
 - **C3B — single-heap STW.** Add collection request/coalescing, writer
   commitment, collector election, active-count drain, exclusive phase entry,
   release back to ordinary admission for one heap, and replace C2C.5b's
@@ -1435,8 +1504,31 @@ Execute C3 as four checkpoints over the `ThreadHeapState` established by C2C:
 Do not begin a later checkpoint until the preceding state machine and its
 forced-order tests pass independently.
 
-- Implement outer `enter`/`exit` admission with a heap phase mutex/condition
-  variable or equivalent state machine.
+#### Pressure Constraints Carried into C3
+
+- `Heap::request_collection` is the first explicit request API. It coalesces
+  with the automatic request without changing the typed-run-publication count
+  or allowance.
+- Keep the provisional publication count and request latched through C3's
+  synthetic collection and C5 marking. Neither phase has reclaimed or
+  republished reusable storage, so neither has a sound event at which to reset
+  the C2C history.
+- Verify explicit requests below the automatic threshold, request coalescing,
+  successful exclusive admission, and abandoned or panicking synthetic
+  collection without treating any of those transitions as a typed-run
+  publication.
+
+- Implement outer `enter`/`exit` admission as an explicit state machine under
+  the existing heap-state `Mutex`, with one sibling `Condvar`. Store the phase,
+  active-mutator count, collection request/commit state, and later collector
+  identity or epoch under that mutex. Waiters always loop and recheck their
+  complete predicate after a wake.
+- An admitted mutator is a logical reader, not an `RwLockReadGuard`: admission
+  increments the active count and then releases the mutex before user or
+  allocator work begins. Parallel admitted mutators therefore run without
+  coordinator serialization. Outermost exit reacquires the mutex only long
+  enough to retire its obligation and notify waiters; recursive same-heap
+  entry does not add another active obligation.
 - Make `Heap::request_collection` an idempotent nonblocking transition into the
   coordinator's coalesced request state. Calling it from an admitted mutator
   never attempts collection recursively and never waits for that same region
@@ -1463,12 +1555,14 @@ forced-order tests pass independently.
   the heap-qualified TLS entry and return `CollectionError::ActiveMutator`
   rather than deadlocking. Other active threads may finish normally while the
   synchronous caller participates in the standard request/election protocol.
-- If admission and run-publication slow paths share one `HeapState` mutex, keep
-  their fields and transitions separately documented. The mutex belongs to
-  arena-chunk, typed-run-pool, class-discovery, and phase state; it is not held
-  by a mutator's local allocation-word cursor. The collector sets its request
-  under that mutex, waits for the active count to reach zero, and then has
-  exclusive access to allocation state without retaining a mutator-region lock.
+- Admission and run-publication slow paths deliberately share the existing
+  `HeapState` mutex. Keep their fields and transitions separately documented.
+  The mutex belongs to arena-chunk, typed-run-pool, class-discovery, and phase
+  state; it is not held by a mutator's local allocation-word cursor or for the
+  lifetime of a mutator. The collector sets its request under that mutex, waits
+  on the condition variable—which releases the mutex—until the active count
+  reaches zero, then atomically publishes `Collecting`. The phase grants
+  exclusive allocation access after the mutex is released.
 - Extend C2C's `ThreadHeapState` with collection admission. It already contains
   that heap's recursive mutator depth, allocation-lease epoch, and allocation-
   word cursor map. A thread may have several such states active concurrently;
@@ -1504,15 +1598,16 @@ forced-order tests pass independently.
   collector is already exclusive and waits; there is no gap between those
   outcomes.
 - Encode that distinction in explicit phase/admission state. A bare
-  writer-preferring `RwLock` is not, by itself, the admission implementation:
-  it cannot distinguish an ordinary new reader from a dependent cross-heap
-  entrant which must bypass a merely queued writer.
+  `RwLock` is not the admission implementation: standard reader/writer
+  priority is not a portable policy boundary, and an `RwLock` cannot
+  distinguish an ordinary new reader from a dependent cross-heap entrant which
+  must bypass a merely queued writer. Do not layer a redundant `RwLock` over
+  the mutex/condition-variable coordinator.
 - Give the collector a privileged collector-to-mutator handoff. After marking
   fixes the dead set, and before releasing exclusive mutator admission, the
   collector acquires one ordinary mutator lease for its own thread. With an
-  `RwLock`-shaped barrier this is an atomic write-to-read downgrade; with an
   active-count state machine it increments the active count and publishes
-  `Finalizing` while still holding the coordinator lock. There must be no
+  `Finalizing` while still holding the heap-state mutex. There must be no
   interval in which neither collector exclusion nor the finalizer mutator is
   authoritative.
 - Exercise this handoff in C3D from a synthetic completed-collection state; C6B
@@ -1640,12 +1735,19 @@ are stopped.
   words with free capacity and set bits for completely full allocation words.
   Reset each class's stable run frontier, then advance one heap-wide
   `allocation_lease_epoch`. Keep the typed-run-pressure request latched until
-  C6 sweep has completed and rearmed the publication allowance.
+  C6 sweep has completed and atomically replaced publication history with the
+  assigned-run occupancy policy.
   On its next outer entry, each heap-specific thread cache compares that one
   epoch and replaces its entire class-to-word-cursor map on mismatch; neither
   the collector nor the mutator validates cursors individually. Post-sweep
   allocation claims fresh words from the rebuilt run state. Retaining selected
   hot leases across a collection is deferred profiling work.
+- Rebuild each lease word with a Release store after the collector has
+  published the corresponding post-mark allocation/free state. The next
+  winning claimant's Acquire load/CAS on that same lease word observes the
+  rebuilt word state. Add this distinct post-collection synchronization edge
+  to the exact unsafe inventory and `SAFETY.md`; do not describe it as initial
+  run-topology publication.
 - Mark through each allocation class's edge visitor; do not derive outgoing
   edges from fixed byte offsets. Immediate/non-edge fields are invisible to the
   collector.
@@ -1655,8 +1757,17 @@ are stopped.
 - Use an explicit mark stack or queue rather than recursive Rust calls.
 - Trace cycles, diamonds, deep chains, wide graphs, and shared logical
   collection spines.
-- Validate that every traced pointer belongs to the collecting heap in debug
-  and test configurations.
+- Treat same-heap edges as a managed-representation invariant: every edge
+  reported from an object allocated by heap H must identify a live allocation
+  in H. Do not add a validation trace before ordinary `pointer.write`; Glam's
+  construction wrappers and the unsafe mutation/`Trace` contract own that
+  invariant on the mutation path.
+- During the marking trace already required for each reachable object, perform
+  an all-build checked owner/slot lookup before dereferencing every reported
+  edge. A foreign, stale, non-slot, or otherwise invalid edge is an invariant
+  violation and panics rather than returning a recoverable graph error. Debug
+  builds may attach richer class and address detail, but the release check is
+  mandatory.
 - Maintain enough per-run live summary to recognize a run with no marked slots
   without enumerating its payloads. Marking may touch chunk/run metadata, but its
   graph traversal remains proportional to reachable managed edges.
@@ -1664,6 +1775,12 @@ are stopped.
   panics, discard the worklist, leave every allocation intact, restore a usable
   non-collecting phase, and let the panic continue to its caller. A retry uses
   a fresh epoch, so marks from the abandoned attempt are irrelevant.
+- Apply that same unwind path to an invalid-edge panic. Marking performs no
+  reclamation or destruction, so detection must precede dereference and sweep;
+  after unwind both heaps remain intact and ordinary mutation may resume. A
+  later collection is expected to panic again until the reachable invariant
+  violation is removed. Under `panic = "abort"`, the process terminates without
+  collector-induced undefined behavior.
 - Do not consume roots or other reachability evidence while marking. Commit
   their retirement only after the corresponding collection succeeds.
 
@@ -1675,16 +1792,22 @@ collection produces the same survivors as a collection which never failed. A
 trace which deliberately panics once must succeed on retry without heap-wide
 poisoning. Bitmap-color wrap/toggle histories, allocation during the prior
 finalization phase, and runs with zero, one, and all slots live receive focused
-tests.
+tests. A safe generic fixture stores a live pointer from heap B in an object in
+heap A; collection of A must panic through a checked lookup before dereferencing
+the edge or reclaiming anything in either heap. Catching that panic must restore
+ordinary admission, while collecting again with the edge still reachable must
+panic again. A forced post-reset fixture publishes rebuilt allocation and free
+state through a lease-word Release reset, then proves the first successful
+Acquire claimant observes that exact state before allocating.
 
 ## Phase C6 — Sweep, Mutator Finalization, Retry, and Quarantine
 
 Execute C6 as four checkpoints:
 
 - **C6A — no-drop sweep.** Derive dead sets from allocation/mark bitmaps,
-  reclaim wholly dead no-drop runs, publish partially live lazy-sweep state,
-  rearm typed-run-publication pressure, and prove storage is not reused before
-  metadata retirement.
+  retire wholly dead no-drop runs into a heap-wide free list, publish partially
+  live lazy-sweep state, replace publication pressure with assigned-run
+  occupancy, and prove storage is not reused before metadata retirement.
 - **C6B — finalizer execution.** Detach dead drop-type slots into the non-
   rootable finalization batch, perform the C3D mutator handoff, run ordinary
   Rust destruction outside collector locks, and enforce non-resurrection.
@@ -1698,16 +1821,73 @@ Execute C6 as four checkpoints:
 Each checkpoint must leave the heap in a usable documented phase after every
 recoverable panic injected by its own tests.
 
+#### Pressure and Reuse Constraints Carried into C6
+
+- The first successful sweep replaces C2C's historical publication count with
+  assigned-run occupancy and the heap-wide recycled-run list described below.
+  Do not reset the historical counter earlier and then silently reuse reclaimed
+  capacity without another pressure opportunity.
+- An abandoned or panicking mark or sweep publishes neither a replacement
+  pressure baseline nor recycled capacity. The last known-good request and
+  occupancy state remains authoritative.
+- Runs activated by finalizers consume the new headroom. Publish any resulting
+  follow-up request only with the consistent post-finalization baseline; never
+  begin another collection while the heap is in `Finalizing`.
+- Verify successful and failed sweep publication, free-run reactivation,
+  finalizer allocation around the trigger, and panic/quarantine recovery as
+  C6 behavior rather than retroactive C2C.5b requirements.
+
 - Identify unreachable allocations only after marking completes.
-- After a successful sweep publishes reusable run state, reset the typed-run-
-  publication count and rearm C3B's `RUNS_PER_CHUNK * 7 / 8` automatic trigger.
-  Do this before handing a collector mutator to finalizers so their run
-  publications count toward the next cycle. This does not require deallocating
-  an empty arena chunk; future allocations reuse reclaimed runs before another
-  run-publication event.
+- Maintain a heap-wide free-run list under heap state. A run enters it only
+  after it has no live allocation, every required destructor has completed,
+  no quarantined slot remains, its old class frontier and run-pool membership
+  are retired, and its header and side bitmaps are safe to reinitialize. A
+  no-drop run may reach that state during exclusive sweep; a drop-type run
+  cannot enter the list until finalization completes successfully.
+- Allocate a new typed run from the free list before consuming a virgin run in
+  an existing chunk, and consume existing chunk capacity before allocating a
+  new chunk. Reinitialize the run for its new class and geometry before
+  publishing a new stable frontier record. The run's numeric location remains
+  stable, but no old class handle, frontier, or stale TLS cursor may retain
+  authority over its new contents.
+- Replace typed-run-publication history with `assigned_runs`, the number of
+  runs currently attached to allocation classes, and compare it with
+  `arena_chunks * RUNS_PER_CHUNK`. Assigning either a virgin or recycled run is
+  one occupancy event; returning a cleared run to the free list decrements the
+  occupancy; slot allocation and reuse within an assigned run are invisible to
+  this heuristic.
+- After a completed collection retains `S` assigned survivor runs, set the next
+  automatic high-water mark to the saturating equivalent of
+  `S + (RUNS_PER_CHUNK * 7 / 8) + ceil(S * survivor_growth_ratio)`. The fixed
+  term preserves C3B's initial 112-run trigger for an empty baseline; the
+  proportional term gives high-survivor heaps increasing headroom instead of
+  repeating GC after one more run. Keep the ratio as an internal rational
+  tuning constant whose initial value is selected before C6 implementation and
+  measured in C8; neither the ratio nor this run-level heuristic is public Glam
+  semantics.
+- Trigger on the first run activation which reaches or crosses that absolute
+  assigned-run mark. The target may exceed current committed chunk capacity;
+  allocate and retain ordinary chunks as required rather than forcing another
+  collection merely because the previous capacity was nearly full. Explicit
+  requests remain independent of the target.
+- Compute the marked-survivor contribution before finalization, but publish
+  the final target when the finalization batch drains. Runs activated by
+  finalizers consume the calculated headroom and may therefore latch one
+  follow-up request at completion; they do not inflate the survivor baseline.
+  A run retained by quarantine does join the baseline because it remains
+  assigned and unavailable for recycling. No collection begins during
+  `Finalizing`.
+- An abandoned or panicking mark or sweep publishes neither free-list
+  membership nor a new pressure baseline. Finalizer-panic recovery publishes
+  the consistent survivor/quarantine baseline only after every run has an
+  unambiguous assigned, free, or quarantined state.
+- Retain every arena chunk until heap destruction, even when all of its runs
+  are free. Its capacity remains available to the occupancy calculation and
+  free list. Returning or decommitting empty chunks is deferred; the bootstrap
+  does not complicate stable chunk indexing for an expected rare case.
 - Do not eagerly enumerate every allocated payload. Inspect run summaries and
   bitmaps:
-  - a no-drop run with no marked slots is reclaimed wholesale;
+  - a no-drop run with no marked slots is retired wholesale to the free list;
   - a partially live no-drop run becomes unswept and recovers dead slots lazily
     when an allocator next acquires it; and
   - a drop-type run computes its dead slots from `allocated & !marked` and
@@ -1799,6 +1979,17 @@ destructor quarantines only its slot; allocations and effects it published
 before panicking remain valid, and after the caller catches the panic another
 allocation and full collection must succeed.
 
+Free-run and pressure verification additionally proves that a wholly cleared
+run is detached from its old class before reuse, recycled runs are preferred
+to virgin capacity, each activation changes assigned occupancy exactly once,
+and partial or quarantined runs never enter the free list. Forced threshold
+tests cover the empty-baseline 112-run trigger, exact rounding and saturation
+of the survivor-growth term, recycled-run crossings, and a high-survivor
+collection receiving both fixed and proportional headroom. Finalizer
+activations consume rather than redefine that headroom, while quarantine is
+included in the retained baseline. Heap destruction releases retained empty
+chunks; ordinary collection does not.
+
 Gate G1 passes after C6D plus its focused unsafe-code audit.
 
 ## Phase C7 — Shared-Pointer and Worker-Shaped Stress
@@ -1810,11 +2001,11 @@ Gate G1 passes after C6D plus its focused unsafe-code audit.
   block on semantic locks, or unwind.
 - Confirm that collection never waits on a pointer-local lock.
 - Add metrics for mutator entries, recursive entries, pauses, arena chunks,
-  typed runs, class-cache hits/misses, traced objects, reclaimed runs/slots,
-  lazy sweeps, deferred requests, fixed-run utilization, and partial-run
-  fragmentation. Track cold `TypeId`/metadata discovery separately from
-  retained-class allocations so the intended hot-path boundary can be
-  profiled.
+  assigned typed runs, recycled and virgin run activations, free runs,
+  class-cache hits/misses, traced objects, reclaimed runs/slots, lazy sweeps,
+  deferred requests, fixed-run utilization, and partial-run fragmentation.
+  Track cold `TypeId`/metadata discovery separately from retained-class
+  allocations so the intended hot-path boundary can be profiled.
 
 This phase tests collector mechanisms only. It does not imitate Glam scheduler
 semantics beyond the shape needed to validate shared values.

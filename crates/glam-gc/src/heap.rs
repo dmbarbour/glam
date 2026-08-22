@@ -71,6 +71,19 @@ pub(crate) struct HeapInner {
     allocation_cursor_claims: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
     allocation_cursor_slow_paths: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    allocation_cursor_locked_recheck_hits: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    allocation_cursor_frontier_advance_attempts: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    allocation_cursor_slow_path_hook: Mutex<Option<AllocationCursorSlowPathHook>>,
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+struct AllocationCursorSlowPathHook {
+    arrived: Arc<std::sync::Barrier>,
+    release: Arc<std::sync::Barrier>,
 }
 
 impl Default for HeapInner {
@@ -82,6 +95,12 @@ impl Default for HeapInner {
             allocation_cursor_claims: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             allocation_cursor_slow_paths: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            allocation_cursor_locked_recheck_hits: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            allocation_cursor_frontier_advance_attempts: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            allocation_cursor_slow_path_hook: Mutex::new(None),
         }
     }
 }
@@ -326,6 +345,8 @@ impl HeapInner {
         #[cfg(test)]
         self.allocation_cursor_slow_paths
             .fetch_add(1, Ordering::Relaxed);
+        #[cfg(test)]
+        self.pause_before_allocation_cursor_slow_path();
         let mut state = self
             .state
             .lock()
@@ -350,10 +371,16 @@ impl HeapInner {
         // Another publisher may have advanced the frontier before this thread
         // acquired heap state. Recheck before changing authoritative topology.
         if let Some(claimed) = class.claim_frontier() {
+            #[cfg(test)]
+            self.allocation_cursor_locked_recheck_hits
+                .fetch_add(1, Ordering::Relaxed);
             return allocation_cursor(class.id(), claimed);
         }
 
         loop {
+            #[cfg(test)]
+            self.allocation_cursor_frontier_advance_attempts
+                .fetch_add(1, Ordering::Relaxed);
             if let Some(target) = state.classes[index].advance_frontier() {
                 if let Some(claimed) = target.claim_allocation_word() {
                     return allocation_cursor(class.id(), claimed);
@@ -379,6 +406,55 @@ impl HeapInner {
     #[cfg(test)]
     fn allocation_cursor_slow_path_count(&self) -> usize {
         self.allocation_cursor_slow_paths.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    fn allocation_cursor_locked_recheck_hit_count(&self) -> usize {
+        self.allocation_cursor_locked_recheck_hits
+            .load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    fn allocation_cursor_frontier_advance_attempt_count(&self) -> usize {
+        self.allocation_cursor_frontier_advance_attempts
+            .load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    fn install_allocation_cursor_slow_path_hook(
+        &self,
+        arrived: Arc<std::sync::Barrier>,
+        release: Arc<std::sync::Barrier>,
+    ) {
+        let replaced = self
+            .allocation_cursor_slow_path_hook
+            .lock()
+            .expect("allocation-cursor test hook should not be poisoned")
+            .replace(AllocationCursorSlowPathHook { arrived, release });
+        assert!(replaced.is_none(), "allocation-cursor test hook is active");
+    }
+
+    #[cfg(test)]
+    fn clear_allocation_cursor_slow_path_hook(&self) {
+        let removed = self
+            .allocation_cursor_slow_path_hook
+            .lock()
+            .expect("allocation-cursor test hook should not be poisoned")
+            .take();
+        assert!(removed.is_some(), "allocation-cursor test hook is absent");
+    }
+
+    #[cfg(test)]
+    fn pause_before_allocation_cursor_slow_path(&self) {
+        let hook = self
+            .allocation_cursor_slow_path_hook
+            .lock()
+            .expect("allocation-cursor test hook should not be poisoned")
+            .clone();
+        if let Some(hook) = hook {
+            hook.arrived.wait();
+            hook.release.wait();
+        }
     }
 
     #[cfg(test)]
@@ -1154,6 +1230,103 @@ mod tests {
                 .collect::<HashSet<_>>()
         });
         assert_eq!(observed.len(), THREADS * VALUES_PER_THREAD);
+    }
+
+    fn force_concurrent_exhausted_frontier_claims(
+        heap: &Heap,
+        class: &crate::AllocationClass<u64>,
+        threads: usize,
+    ) -> Vec<(RunLocation, usize)> {
+        let arrived = Arc::new(Barrier::new(threads + 1));
+        let release = Arc::new(Barrier::new(threads + 1));
+        heap.inner
+            .install_allocation_cursor_slow_path_hook(Arc::clone(&arrived), Arc::clone(&release));
+
+        let workers = (0..threads)
+            .map(|_| {
+                let heap = heap.clone();
+                let class = class.clone();
+                std::thread::spawn(move || {
+                    let cursor = heap.inner.claim_allocation_cursor(&class);
+                    (cursor.location, cursor.word_index)
+                })
+            })
+            .collect::<Vec<_>>();
+
+        // Every worker has observed the same exhausted atomic frontier, but
+        // none may acquire heap state until the test releases this barrier.
+        arrived.wait();
+        assert_eq!(heap.inner.allocation_cursor_claim_count(), threads);
+        assert_eq!(heap.inner.allocation_cursor_slow_path_count(), threads);
+        release.wait();
+
+        let claims = workers
+            .into_iter()
+            .map(|worker| worker.join().expect("frontier claimant panicked"))
+            .collect::<Vec<_>>();
+        heap.inner.clear_allocation_cursor_slow_path_hook();
+        claims
+    }
+
+    #[test]
+    fn concurrent_exhausted_frontier_activates_one_prepublished_successor() {
+        const THREADS: usize = 8;
+
+        let heap = Heap::new();
+        let class = heap.allocation_class::<u64>().unwrap();
+        let runs = (0..2)
+            .map(|_| heap.inner.prepare_run(&class).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(class.shared().frontier(), Some(runs[0]));
+        while class.claim_frontier().is_some() {}
+
+        let claims = force_concurrent_exhausted_frontier_claims(&heap, &class, THREADS);
+        let unique = claims.iter().copied().collect::<HashSet<_>>();
+
+        assert_eq!(unique.len(), THREADS);
+        assert!(claims.iter().all(|(location, _)| *location == runs[1]));
+        assert_eq!(class.shared().frontier(), Some(runs[1]));
+        assert_eq!(heap.inner.resolved_runs().len(), 2);
+        assert_eq!(heap.inner.allocation_pressure().published_runs, 2);
+        assert_eq!(
+            heap.inner.allocation_cursor_locked_recheck_hit_count(),
+            THREADS - 1
+        );
+        assert_eq!(
+            heap.inner
+                .allocation_cursor_frontier_advance_attempt_count(),
+            1
+        );
+    }
+
+    #[test]
+    fn concurrent_exhausted_frontier_publishes_one_successor() {
+        const THREADS: usize = 8;
+
+        let heap = Heap::new();
+        let class = heap.allocation_class::<u64>().unwrap();
+        let first = heap.inner.prepare_run(&class).unwrap();
+        assert_eq!(class.shared().frontier(), Some(first));
+        while class.claim_frontier().is_some() {}
+
+        let claims = force_concurrent_exhausted_frontier_claims(&heap, &class, THREADS);
+        let unique = claims.iter().copied().collect::<HashSet<_>>();
+        let successor = RunLocation { chunk: 0, run: 1 };
+
+        assert_eq!(unique.len(), THREADS);
+        assert!(claims.iter().all(|(location, _)| *location == successor));
+        assert_eq!(class.shared().frontier(), Some(successor));
+        assert_eq!(heap.inner.resolved_runs().len(), 2);
+        assert_eq!(heap.inner.allocation_pressure().published_runs, 2);
+        assert_eq!(
+            heap.inner.allocation_cursor_locked_recheck_hit_count(),
+            THREADS - 1
+        );
+        assert_eq!(
+            heap.inner
+                .allocation_cursor_frontier_advance_attempt_count(),
+            1
+        );
     }
 
     #[test]

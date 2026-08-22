@@ -7,7 +7,7 @@ crates/glam-gc/scripts/check.sh
 ```
 
 The script formats, lints, and tests the crate, including compile-fail doctests
-and the Loom smoke model. `audit-unsafe.sh` then compares every unsafe construct
+and the Loom models. `audit-unsafe.sh` then compares every unsafe construct
 and every module-level unsafe opt-in with the checked-in inventories before
 building all crate targets and features under the crate's default
 `unsafe_code` denial.
@@ -25,7 +25,7 @@ Loom scaffold. Even an empty `loom::model(|| {})` currently retains one
 256-byte Loom allocation under LeakSanitizer and emits the documented ASan
 stack-switch warning; that tool incompatibility is independent of Glam heap
 entry and explicit TLS release. The ordinary stable check continues to run the
-Loom model separately.
+Loom models separately.
 
 These scripts deliberately fail with the underlying toolchain diagnostic when
 nightly, Miri, `rust-src`, or a sanitizer is unavailable. Every checkpoint
@@ -44,9 +44,12 @@ atomic lease-bit claim transition. Raw arena-pointer integration remains under
 native forced schedules, sanitizers, and Miri. C2C.5 claims whole allocation
 words through atomic lease bitmaps and consults the heap mutex only when a
 class frontier is exhausted; after a claim, a worker mutates only its own
-ordinary word. There is still no collection state machine to model. C3 must
-add models of each real admission and stop-the-world transition; ordinary
-threaded stress alone is not a proof of that later coordinator.
+ordinary word. C2C.6's native barrier fixtures force eight production claimers
+past the same exhausted-frontier observation and verify one synchronized
+advance or publication plus seven winner-frontier rechecks. There is still no
+collection state machine to model. C3 must add models of each real admission
+and stop-the-world transition; ordinary threaded stress alone is not a proof
+of that later coordinator.
 
 ## Gate G0 Baseline
 

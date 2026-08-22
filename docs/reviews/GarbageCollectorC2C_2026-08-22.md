@@ -6,6 +6,9 @@ ledger, and verification surface. The current working plan additionally
 contains the subsequent decision to lower C3B's automatic trigger from 128 to
 112 typed-run publications.
 
+Status: closed on 2026-08-22. Accepted forward requirements remain assigned to
+their owning phases; no unresolved C2C defect blocks C3A.1.
+
 ## Outcome
 
 C2C establishes a credible non-moving allocation foundation. Chunks and runs
@@ -18,23 +21,23 @@ inventory, full leak-checking Miri, AddressSanitizer, ThreadSanitizer, and the
 native concurrent fixtures found no current allocation-path race or invalid
 payload lifetime.
 
-The review did find one forward safety boundary and one coordination exception
+The review did find one forward safety boundary and one coordination boundary
 which must be made explicit before collection can become real:
 
 1. allocation-class discovery currently mutates the class registry without
-   mutator admission; it is safe to leave concurrent only if collection treats
-   it as metadata-only and never retains class-table borrows outside the heap
-   lock; and
+   mutator admission; C3 will move discovery behind an admitted mutator so an
+   exclusive collector sees stable heap-local class topology; and
 2. the safe generic collector API can construct a cross-heap managed edge, so
-   C5 must reject foreign traced edges in every build before reclamation,
-   rather than validate them only in debug and tests.
+   C5 must detect foreign traced edges in every build and panic safely before
+   reclamation, rather than validate them only in debug and tests.
 
 Neither issue makes C2C unsafe while collection remains disabled. The first is
-a C3 design decision; the second is a C5 release-safety requirement. One
-material C2C verification gap also remains: current tests do not force several
-threads through the exhausted-frontier slow-path recheck. Close that gap before
-starting C3A, then partition C3 around the admission transitions described
-below.
+a C3 design decision; the second is a C5 release-safety requirement. The one
+material C2C verification gap found by the review has been closed by C2C.6's
+forced exhausted-frontier schedules. The forward requirements are now recorded
+under their owning phases, and the immediately actionable C3A work has been
+partitioned around the admission transitions described below. The review also
+records the recommended partitions for later C3 checkpoints.
 
 ## Reviewed Representation
 
@@ -51,11 +54,13 @@ below.
 
 ## Findings
 
-### GC2C-001 — C3 must classify concurrent allocation-class discovery
+### GC2C-001 — C3 must gate allocation-class discovery with a mutator
 
 **Priority:** medium  
 **Confidence:** high  
 **Classification:** forward coordination precision
+
+**Decision:** accepted; implement in C3A.1
 
 [`Heap::allocation_class`](../../crates/glam-gc/src/heap.rs#L51) is a safe
 operation which may discover and publish a new heap-local class. It requires no
@@ -67,36 +72,40 @@ C3 currently plans to infer exclusive allocator access after the active
 mutator count reaches zero, then release the phase/state mutex while tracing
 or sweeping. Class discovery can still enter independently and mutate the
 class vector and metadata index, so “no active mutators” does not literally
-mean that every `HeapState` field is immutable.
+mean that every heap-local topology field is immutable.
 
-Class discovery does not publish a run, allocation bit, payload, root, or
-edge. Because payload allocation still requires a mutator, a class discovered
-during collection is empty and cannot appear in the fixed root graph. The
-cheapest policy is therefore to preserve the useful pre-discovery API and
-classify class discovery as metadata-only concurrency:
+The settled policy is to make discovery itself a mutator capability:
 
-1. every collector traversal snapshots the run location, geometry, and static
-   metadata it needs while holding heap state;
-2. no borrow or pointer into the movable class vector survives release of that
-   lock;
-3. collector mutation of class run pools reacquires heap state; and
-4. only run/payload/root mutation, not publication of an empty class entry, is
-   excluded by mutator admission.
+```rust
+let class = heap.with_mutator(|mutator| {
+    mutator.allocation_class::<Node>()
+})?;
+```
 
-If later implementation wants to retain class-table references across the
-pause, use a short topology-admission obligation instead. Do not add that
-counter preemptively. Tests should discover a new class during a synthetic
-exclusive phase and prove that it remains empty, does not enter the collector
-snapshot, and becomes allocatable after ordinary admission reopens.
+An already discovered `AllocationClass<T>` remains a reusable, cacheable
+heap-provenance handle and does not borrow the mutator. Requiring admission
+only for discovery gives C3 the stronger and simpler invariant that the class
+table, metadata index, and run topology cannot change once all mutators drain.
+It also avoids a second topology counter, collector snapshots designed around
+concurrent class-vector growth, and a hidden mutator acquisition inside a
+seemingly cheap `Heap` query.
 
-This is a C3A/C3B plan prerequisite, not a reason to change C2C allocation
-semantics.
+Implementation should let `Mutator` borrow the heap's existing `Arc<HeapInner>`
+so discovery can construct the retained typed handle without cloning an Arc
+for each mutator region. Tests must prove that discovery blocks behind an
+exclusive synthetic collection, recursive admission can discover a class,
+and a retained handle remains usable after its discovery mutator exits.
 
-### GC2C-002 — C5 foreign-edge validation must be release-enforced
+This is a C3A API/admission prerequisite. C2C's current public method remains
+historical implementation state, not the intended collector boundary.
+
+### GC2C-002 — C5 must panic safely on a foreign traced edge
 
 **Priority:** high  
 **Confidence:** high  
 **Classification:** future reclamation safety
+
+**Decision:** accepted; enforce as a collector invariant in C5
 
 The roadmap correctly requires one heap per runtime and no cross-runtime
 managed edge. Production Glam wrappers will reject foreign `Value` inputs at
@@ -120,25 +129,46 @@ That is harmless before collection: terminal destruction of a `Gc` does not
 dereference it. It becomes a soundness boundary when exact marking follows the
 edge.
 
-The C5 plan currently says to validate traced-pointer ownership only in debug
-and test configurations. Change this to an all-build checked owner lookup. A
-foreign, stale, non-slot, or otherwise invalid traced edge must abort that
-collection attempt before sweep and return a structured collection/graph
-error. All allocations remain intact and the heap returns to its ordinary
-phase. Debug builds may add richer representation assertions, but release
-marking cannot assume integration already upheld the invariant.
+The settled user contract is deliberately simpler: every managed edge stored
+in an object allocated by heap H must point to another live allocation in H.
+The collector trusts ordinary Glam construction and reviewed mutation wrappers
+to maintain that invariant. It does not perform a second validation trace
+before every payload write, and the unsafe mutation/`Trace` boundary remains
+responsible for state changed outside those wrappers.
 
-Add the safe construction above as a regression and prove that collection
-fails recoverably without dereferencing the foreign address or reclaiming from
-either heap. Glam integration should still reject the edge earlier; the
-collector check is the final safety boundary, not the desired user-facing
-diagnostic path.
+C5 nevertheless needs an all-build checked owner lookup for each edge while
+performing the trace it already requires for marking. A foreign, stale,
+non-slot, or otherwise invalid traced edge panics before the collector
+dereferences that address or begins sweep. This is an invariant panic, not a
+recoverable `CollectionError` variant.
+
+“Panic safely” has a precise collector meaning:
+
+1. pointer ownership and slot validity are checked before dereference;
+2. marking does not reclaim or run destructors;
+3. an unwind guard abandons the partial mark epoch and restores ordinary heap
+   admission; and
+4. every allocation in both heaps remains intact.
+
+If the application catches the panic, a later collection may be attempted,
+but it will panic again while the same invalid reachable edge remains. With
+`panic = "abort"`, process termination still occurs without collector-induced
+undefined behavior. Debug builds may enrich the panic with class and address
+details, but release marking must perform the ownership check.
+
+Add the safe construction above as a regression and prove the panic occurs
+before dereferencing the foreign address or reclaiming from either heap. Glam
+integration should still reject the edge earlier at its runtime-value
+boundary; the collector panic is the final invariant boundary, not a normal
+user-facing diagnostic path.
 
 ### GC2C-003 — C3 entry needs an explicit prepare/admit/activate protocol
 
 **Priority:** medium  
 **Confidence:** high  
 **Classification:** plan precision and checkpoint sizing
+
+**Decision:** accepted; use the heap-state `Mutex` plus one `Condvar`
 
 Current [`ThreadHeapEntry::enter`](../../crates/glam-gc/src/thread_cache.rs#L258)
 performs the direct TLS lookup, epoch refresh, and recursive-depth increment as
@@ -168,10 +198,26 @@ window in one direction or the other. Split the operation conceptually:
 This seam also supplies C3C with the information needed to distinguish a
 dependent cross-heap entry from an ordinary outer entry.
 
+The settled coordinator is an explicit active-count state machine protected by
+the heap-state `Mutex`, with one sibling `Condvar` for blocked entrants and
+collection waiters. An admitted mutator retains no mutex or read-lock guard:
+it increments the active count, releases the mutex, and executes concurrently
+with other admitted mutators. Every condition-variable wake rechecks the phase
+and caller classification under the mutex.
+
+A bare `RwLock` is deliberately rejected. Its reader/writer priority is not a
+portable policy boundary, and it cannot admit only a thread which already
+holds another heap's mutator while keeping an ordinary new reader behind a
+queued collector. Layering that policy over an `RwLock` would duplicate the
+active state and introduce a handoff race. Under the selected state machine,
+the final active mutator and a dependent entrant race atomically with the
+collector's transition to `Collecting` under one mutex.
+
 Partition C3 before implementation:
 
-- **C3A.1:** coordinator/phase representation and nonblocking ordinary
-  topology plus mutator admission;
+- **C3A.1:** heap-state mutex/condition-variable coordinator, phase
+  representation, ordinary mutator admission, and migration of
+  allocation-class discovery to that admitted capability;
 - **C3A.2:** prepare/admit/activate TLS integration, recursion, and unwind;
 - **C3A.3:** release/acquire visibility tests and the first real Loom model;
 - **C3B.1:** explicit request, commitment, election, and a synthetic exclusive
@@ -191,6 +237,8 @@ unsafe or scheduler boundaries should be divided before implementation.
 **Priority:** medium  
 **Confidence:** high  
 **Classification:** C2C verification gap
+
+**Resolution:** completed as verification-only Phase C2C.6; no repeat review
 
 The implementation has the correct shape: a cursor miss first claims through
 the atomic frontier, then locks heap state and rechecks the frontier before
@@ -219,13 +267,22 @@ several claimers together, and assert:
 An abstract Loom model may cover the winner/recheck state, but the native
 forced schedule should exercise the production frontier pointer and heap
 mutex. Resolve this before beginning C3A so later coordination failures are not
-confounded with an unlatched allocator race.
+confounded with an unlatched allocator race. This checkpoint changes no
+semantics and does not trigger another mandatory post-C2C review.
+
+C2C.6 now forces both successor activation and publication with eight claimers
+held after the same atomic miss. The tests latch one advance attempt, seven
+winner-frontier recheck hits, eight distinct words, and exact pressure behavior
+under the production mutex and frontier implementation. Miri, AddressSanitizer,
+ThreadSanitizer, the stable collector check, and full workspace checks pass.
 
 ### GC2C-005 — The initial pressure policy is a growth heuristic, not a reuse heuristic
 
 **Priority:** low  
 **Confidence:** high  
-**Classification:** accepted initial limitation requiring later review
+**Classification:** resolved forward C6 policy
+
+**Decision:** replace publication history with recyclable-run occupancy in C6
 
 C2C counts only successful typed-run publication
 ([`AllocationPressure`](../../crates/glam-gc/src/heap.rs#L101)). This is an
@@ -240,24 +297,52 @@ only subsequent run publication resumes the counter. With a reset-to-zero
 policy, it can then grow by roughly another trigger allowance before automatic
 collection.
 
-This does not affect correctness and need not complicate the initial collector.
-Record it explicitly as a provisional heap-growth policy. Before C6 rearms
-automatic collection, choose and test one of:
+The settled C6 policy is to recycle every fully cleared run into a heap-wide
+free-run list. A run is no longer attached to its old allocation class after
+its payloads are dead, all required destruction has completed, its frontiers
+and pool membership are retired, and its header/bitmap state is safe to
+reinitialize. Assigning either a virgin run or a recycled run to an allocation
+class is one occupancy event; allocating another object inside an assigned run
+is not.
 
-- bias the post-sweep counter from survivor/free-capacity information so the
-  first growth beyond reclaimed capacity can trigger promptly;
-- count a run's first post-sweep activation once, still avoiding per-object
-  traffic; or
-- retain growth-only automatic collection and require explicit/host requests
-  for stable-capacity churn until C8 profiling supplies a better policy.
+Automatic pressure is based on assigned typed runs and a survivor-relative
+high-water mark. With `S` assigned runs retained by the completed collection,
+the next trigger has the shape:
 
-Do not silently describe the current counter as allocation-volume pressure.
+```text
+S + (RUNS_PER_CHUNK * 7 / 8) + ceil(S * survivor_growth_ratio)
+```
+
+The fixed term preserves the initial 112-run trigger when `S == 0`; the growth
+term raises the water mark for a high-survivor collection instead of running
+GC again after one additional activation. The exact ratio remains an internal
+C8 tuning constant rather than public collector semantics. Sweep decrements
+assigned occupancy for each run returned to the free list, and later
+activation increments it again, so stable-capacity churn naturally approaches
+the next absolute trigger without per-object accounting. The target may exceed
+currently committed chunk capacity; the allocator grows by ordinary retained
+chunks as needed. Explicit collection remains available independently.
+
+For drop-type runs, compute the marked-survivor contribution before
+finalization, then finalize the trigger when the finalization batch drains.
+Finalizer allocations consume the new headroom rather than becoming part of
+the survivor baseline; a quarantined run does become retained baseline. This
+allows a sufficiently allocating finalizer to request one follow-up collection
+without attempting collection during `Finalizing`.
+
+The bootstrap does not return wholly empty chunks to the host. They retain
+stable arena indexing and contribute free runs until heap destruction. Chunk
+release or decommit is deferred because it adds address-index and free-list
+retirement complexity for a case expected to be rare.
 
 ### GC2C-006 — Lease publication ordering is sound but described imprecisely
 
 **Priority:** low  
 **Confidence:** high  
 **Classification:** unsafe-proof documentation
+
+**Resolution:** initial publication corrected in C2C.6; later C3A.3/C5 proofs
+remain planned
 
 [`RunClaimTarget::claim_allocation_word`](../../crates/glam-gc/src/arena.rs#L111)
 says its Acquire load of a lease word “pairs with publication of a stable run
@@ -285,6 +370,8 @@ C3/C5's exact reset protocol and a forced post-reset claim test.
 **Confidence:** high  
 **Classification:** documentation drift
 
+**Resolution:** completed; phase contracts and status surfaces reconciled
+
 The C2C.5b section lists explicit `request_collection`, successful/failed
 sweep rearming, and finalizer publication behavior as C2C verification
 requirements even though those operations correctly remain owned by C3 and C6
@@ -303,6 +390,13 @@ Move sweep, finalizer, and explicit-request bullets into clearly labeled
 “constraints on C3/C6” subsections, leave only implemented threshold and
 failure-atomicity checks under C2C.5b, update status after this review closes,
 and use plural “Loom models” consistently.
+
+The implementation plan now limits C2C.5b to successful typed-run publication,
+threshold latching, and failure atomicity. Explicit/coalesced requests are C3
+constraints; sweep replacement, recycled-run occupancy, and finalizer pressure
+are C6 constraints. The implementation-plan and roadmap status lines identify
+C3A.1 as next, and the verification guide consistently describes both Loom
+models.
 
 ## Intentional Drift and Accepted Boundaries
 
@@ -326,18 +420,35 @@ and use plural “Loom models” consistently.
 
 | Phase | Assessment after C2C |
 | --- | --- |
-| C3 | Semantics remain appropriate, but GC2C-001 and GC2C-003 require an explicit metadata-only class-discovery policy, ordered admission, and smaller checkpoints before implementation. |
+| C3 | Semantics remain appropriate, but GC2C-001 and GC2C-003 require mutator-gated class discovery, ordered admission, and smaller checkpoints before implementation. |
 | C4 | Root-registry ownership remains compatible with pointer-sized `Gc`; release-validating root creation is still required. |
-| C5 | Visitor/worklist design remains appropriate. Upgrade foreign-edge validation to an all-build recoverable collection error and specify lease-reset ordering per GC2C-002/006. |
-| C6 | Existing no-drop/finalizer partition is useful. Resolve the pressure-rearm limitation in GC2C-005 before claiming useful automatic repeat collection. |
-| C7 | Stress scope remains appropriate; add forced frontier exhaustion now rather than postponing it to general stress. |
+| C5 | Visitor/worklist design remains appropriate. Upgrade foreign-edge validation to an all-build checked invariant panic with unwind-safe rollback, and specify lease-reset ordering per GC2C-002/006. |
+| C6 | Existing no-drop/finalizer partition is useful. Implement GC2C-005's heap-wide free-run list and survivor-relative assigned-run high-water mark before claiming useful automatic repeat collection. |
+| C7 | Stress scope remains appropriate. C2C.6 already owns the forced frontier-exhaustion schedules, so C7 need not rediscover that allocator boundary. |
 | C8 | Keep tuning contingent on profiling, including run size, cache width, and repeat-collection pressure. |
 
-## Recommended Resolution Order
+## Resolution Ledger
 
-1. Add GC2C-004's forced exhausted-frontier race test.
-2. Update the plan for GC2C-001, GC2C-002, GC2C-003, GC2C-005, and
-   GC2C-006; divide C3 before coding.
-3. Correct GC2C-007's documentation/status drift.
-4. Re-run the collector check and ThreadSanitizer after the frontier fixture.
-5. Mark the mandatory post-C2C review complete, then begin C3A.1.
+| Finding | Review disposition | Owning checkpoint |
+| --- | --- | --- |
+| GC2C-001 | Accepted and specified; no collection exists in C2C, so implementation is intentionally forward work. | C3A.1 |
+| GC2C-002 | Accepted as an all-build checked marking invariant with unwind-safe abandonment. | C5 |
+| GC2C-003 | Accepted; coordinator primitives and prepare/admit/activate ordering are in the plan, C3A is partitioned, and later C3 partitions are recorded here for checkpoint-local review. | C3A.1–C3D |
+| GC2C-004 | Closed by deterministic production-path races for prepublished activation and new-run publication. | C2C.6, completed |
+| GC2C-005 | Accepted; free-run reuse and survivor-relative assigned-run pressure are specified as sweep policy. | C6, tuning in C8 |
+| GC2C-006 | Initial-publication proof corrected; collector visibility and lease-reset proof remain explicitly assigned. | C2C.6 completed; C3A.3 and C5 pending |
+| GC2C-007 | Closed by separating historical C2C checks from C3/C6 constraints and reconciling status/verification docs. | Documentation, completed |
+
+## Review Closure
+
+The mandatory post-C2C review is complete. C2C.6 passed the collector check
+(74 unit tests, two Loom models, and six compile-fail doctests), full
+leak-checking Miri, AddressSanitizer, ThreadSanitizer, workspace formatting,
+Clippy with warnings denied, and the complete workspace test suite. The
+remaining findings are deliberate forward obligations whose implementations
+would be premature before their owning collector phases; they are not latent
+C2C behavior.
+
+C3A.1 is the next implementation checkpoint. It introduces the coordinator
+and moves allocation-class discovery behind mutator admission without yet
+adding collector election.

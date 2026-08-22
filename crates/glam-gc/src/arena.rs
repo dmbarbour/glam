@@ -111,8 +111,11 @@ impl RunClaimTarget {
     pub(crate) fn claim_allocation_word(self) -> Option<ClaimedAllocationWord> {
         for lease_word_index in 0..self.geometry.lease_bitmap.word_len {
             let lease = lease_word_pointer(self.run, self.geometry.lease_bitmap, lease_word_index);
-            // Acquire pairs with publication of a stable run record. The CAS
-            // is the ownership transition for the selected allocation word.
+            // Initial run visibility comes from the class frontier's Acquire
+            // load or from the heap mutex, not from this distinct atomic.
+            // Acquire is retained here so C5's future Release lease reset can
+            // publish rebuilt allocation/free state to the winning claimant.
+            // The CAS is the ownership transition for the selected word.
             let mut observed = unsafe { lease.as_ref() }.load(Ordering::Acquire);
             loop {
                 let candidates = !observed;

@@ -27,6 +27,10 @@ pre-initialization unwind verification, and last-owner teardown latches.
 C2C.5 replaces the baseline lease scan with atomic hierarchical claiming,
 moves pressure to authoritative typed-run publication, adds stable atomic class
 frontiers, and removes eager TLS pruning in favor of explicit inert release.
+C2C.6 adds forced concurrent exhausted-frontier verification and corrects the
+publication proof: initial run topology is observed through the frontier
+Release/Acquire pair or heap mutex, not through a load of the separate lease
+word.
 There is no root registry, collection, marking, reclamation, finalization,
 callback, or collector coordination.
 
@@ -270,6 +274,12 @@ C6 later owns collector-driven destruction.
   newly published typed run. A fresh run is fully published into the arena,
   class pool, and run-pressure state before its frontier pointer is stored with
   Release ordering.
+- Initial run topology reaches a lock-free claimant through that frontier
+  Release/Acquire pair. A claimant reached from the synchronized path instead
+  relies on the heap mutex. The separate lease-word Acquire does not publish
+  the run record; in C2C it participates in atomic word ownership. C5 will add
+  a Release reset on that same lease word to publish rebuilt post-collection
+  allocation/free state to the next Acquire claimant.
 - The cursor carries the stable owning `RunAddress`, validated `RunGeometry`,
   one allocation-word index, and a local free mask. Its mask is the inverse of
   the authoritative allocation word intersected with the exact slot-count
