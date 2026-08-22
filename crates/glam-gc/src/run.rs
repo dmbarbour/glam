@@ -3,17 +3,20 @@ use std::num::NonZeroU64;
 
 pub(crate) const RUN_SIZE: usize = 64 * 1024;
 pub(crate) const RUN_HEADER_SIZE: usize = 64;
+pub(crate) const METADATA_PAYLOAD_ALIGNMENT: usize = 128;
 const BITMAP_WORD_BITS: usize = u64::BITS as usize;
 const BITMAP_WORD_SIZE: usize = std::mem::size_of::<u64>();
 
 /// Largest payload which can occupy a minimally aligned one-slot run.
-pub(crate) const MAX_MANAGED_SIZE: usize = RUN_SIZE - RUN_HEADER_SIZE - 3 * BITMAP_WORD_SIZE;
+pub(crate) const MAX_MANAGED_SIZE: usize = RUN_SIZE - METADATA_PAYLOAD_ALIGNMENT;
 
 /// Largest Rust alignment for which one slot can begin and end in one run.
 pub(crate) const MAX_MANAGED_ALIGNMENT: usize = RUN_SIZE / 2;
 
 const _: () = assert!(RUN_SIZE.is_power_of_two());
 const _: () = assert!(RUN_HEADER_SIZE.is_multiple_of(BITMAP_WORD_SIZE));
+const _: () = assert!(METADATA_PAYLOAD_ALIGNMENT.is_power_of_two());
+const _: () = assert!(RUN_HEADER_SIZE + 3 * BITMAP_WORD_SIZE <= METADATA_PAYLOAD_ALIGNMENT);
 
 const RUN_HEADER_MAGIC: u64 = 0x474c_414d_5255_4e31;
 
@@ -125,8 +128,11 @@ impl RunGeometry {
             bit_len: slot_count,
             word_len: allocation_words,
         };
-        let first_slot_offset = align_up(mark_bitmap.end(), payload_alignment)
-            .ok_or(GeometryError::ArithmeticOverflow)?;
+        let first_slot_offset = align_up(
+            mark_bitmap.end(),
+            payload_alignment.max(METADATA_PAYLOAD_ALIGNMENT),
+        )
+        .ok_or(GeometryError::ArithmeticOverflow)?;
         let slots_end = slot_count
             .checked_mul(slot_stride)
             .and_then(|bytes| first_slot_offset.checked_add(bytes))
@@ -206,7 +212,11 @@ impl RunGeometry {
         let Some(mark_end) = checked_bitmap_end(mark_bitmap) else {
             return false;
         };
-        if self.first_slot_offset < mark_end {
+        if self.first_slot_offset < mark_end
+            || !self
+                .first_slot_offset
+                .is_multiple_of(METADATA_PAYLOAD_ALIGNMENT)
+        {
             return false;
         }
         self.slot_count
@@ -376,6 +386,30 @@ mod tests {
             RunGeometry::derive(layout(16, 8), Some(15)),
             Err(GeometryError::RequestedSlotTooSmall)
         );
+    }
+
+    #[test]
+    fn payload_slots_do_not_share_a_128_byte_region_with_side_metadata() {
+        for payload in [layout(1, 1), layout(8, 8), layout(24, 8), layout(256, 256)] {
+            let geometry = RunGeometry::derive(payload, None).unwrap();
+            assert!(
+                geometry
+                    .first_slot_offset
+                    .is_multiple_of(METADATA_PAYLOAD_ALIGNMENT.max(payload.align()))
+            );
+            assert!(
+                (geometry.mark_bitmap.end() - 1) / METADATA_PAYLOAD_ALIGNMENT
+                    < geometry.first_slot_offset / METADATA_PAYLOAD_ALIGNMENT
+            );
+        }
+    }
+
+    #[test]
+    fn structural_validation_rejects_an_unaligned_metadata_payload_boundary() {
+        let mut geometry = RunGeometry::derive(layout(24, 8), None).unwrap();
+        geometry.first_slot_offset -= 1;
+        assert!(geometry.first_slot_offset >= geometry.mark_bitmap.end());
+        assert!(!geometry.is_structurally_valid());
     }
 
     #[test]

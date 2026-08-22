@@ -524,6 +524,10 @@ unsafe/trace audit.
 
 - Expose a narrow embedding maintenance method or runtime tuning policy; do not
   expose raw heap internals.
+- Preserve the collector crate's two-level control surface: a nonblocking,
+  coalescing request which may be issued before a known batch boundary, and a
+  synchronous full-collection operation used only outside an active mutator.
+  These are Rust runtime-maintenance controls, not Glam evaluation effects.
 - Initially collect at controlled batch/idle boundaries.
 - Add allocation-pressure requests which are serviced at outer mutator exits.
 - Count queued and running finalizers as runtime operational activity. A

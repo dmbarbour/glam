@@ -70,6 +70,11 @@ function, implementation, and block are checked into
 - The header stores a nonzero 64-bit heap-local dense allocation-class identity
   and checked slot/bitmap geometry. Canonical type metadata remains in the
   heap's dense class table rather than consuming payload or header bytes.
+- The header and three side bitmaps form one metadata prefix. The first payload
+  slot begins at the next 128-byte boundary (or its stricter Rust payload
+  alignment), so no metadata byte shares a 128-byte region with payload
+  storage. This is an explicit layout isolation grain, not a claim about the
+  host's physical cache-line size.
 - Checked slot-owner recovery first finds the owning live chunk and run, then
   reads its already initialized header, validates its class and reconstructed
   geometry, and accepts only an exact slot-start address. Header bytes,
