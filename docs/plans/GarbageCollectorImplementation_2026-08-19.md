@@ -1,8 +1,8 @@
 # Glam GC Subcrate Implementation Plan — 2026-08-19
 
-Status: in progress; Phases C0 through C3E are complete, including the C2C.6
+Status: in progress; Phases C0 through C4A are complete, including the C2C.6
 verification follow-up. The mandatory post-C1, post-C2C, and post-C3E
-downstream reviews are complete. C4A is next.
+downstream reviews are complete. C4B is next.
 
 This plan implements an exact, non-moving, runtime-local tracing collector
 without depending on Glam value semantics. The governing requirements and
@@ -44,7 +44,7 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C3C | completed | cross-heap dependent admission |
 | C3D | completed | finalizer handoff, pressure, panic, and teardown races |
 | C3E | completed | entry-serviced collection and coordinator simplification |
-| C4A | pending | checked direct-root construction and access |
+| C4A | completed | checked direct-root construction and access |
 | C4B | pending | weak registry publication and stable root traversal |
 | C4C | pending | concurrent root lifetime and boundary audit |
 | C5A | pending | mark bitmap and checked-slot substrate |
@@ -1997,13 +1997,17 @@ Execute C4 as three independently verified checkpoints:
 
 - **C4A — checked direct-root construction and access.** Add the release-build
   slot lookup needed to prove that a `Gc<T>` names an allocated slot with the
-  canonical metadata in the mutator's heap. Build the cloneable `Root<T>` and
-  its root cell on that proof. Represent `Root<T>` as an `Arc<RootCell>` plus
-  `PhantomData<Gc<T>>`; represent the non-generic cell as a `Weak<HeapInner>`
-  plus one `ErasedGc`. A root is a liveness claim within a live heap, not an
-  owner of that heap. `Root::get` therefore requires a matching live mutator,
-  rejects a different heap before invoking the private unsafe `Gc` access
-  gateway, and provides no self-entering `Root::with` operation. Root
+  canonical metadata in the mutator's heap. Because this is the first
+  concurrent reader outside an allocation-word lease, represent allocation
+  words as atomic single-writer/multi-reader state; publish initialized payloads
+  with Release and validate rootability with Acquire. Build the cloneable
+  `Root<T>` and its root cell on that proof. Represent `Root<T>` as an
+  `Arc<RootCell>` plus a zero-sized typed marker; represent the non-generic cell
+  as a `Weak<HeapInner>` plus one `ErasedGc`. A root is a liveness claim within
+  a live heap, not an owner of that heap. `Root::get` therefore requires a
+  matching live mutator, rejects a different heap before invoking the private
+  unsafe `Gc` access gateway, and provides no self-entering `Root::with`
+  operation. Root
   provenance compares the cell's weak heap identity with the mutator's heap;
   the surviving weak control block prevents address reuse from making a stale
   root appear to belong to a new heap. Latch the intended one-pointer
@@ -2057,6 +2061,32 @@ pruning on both sides of the per-entry upgrade boundary. Deterministic hooks
 prove publication precedes return, a temporary upgrade safely survives the
 last public drop through its visit, releasing the last upgraded cell is
 passive, and a failed weak upgrade cannot race a new root into existence.
+
+#### C4A Completion
+
+C4A completed on 2026-08-22 with the following boundary:
+
+- Allocation bitmap words are initialized as `AtomicU64`. Their one leased
+  writer uses a Release store after payload initialization; root checks and
+  heap-side readers use Acquire loads. Word leasing and the allocation hot
+  path otherwise retain their existing shape.
+- `Root<T>` is one `Arc<RootCell>` plus a zero-sized type marker, with its
+  one-pointer size statically asserted. `RootCell` contains only
+  `Weak<HeapInner>` and `ErasedGc`; dropping it cannot touch the payload, enter
+  the runtime, invoke user code, or retain the heap.
+- Crate-private `Mutator::root` validates exact indexed heap membership,
+  canonical type metadata, and current allocation before constructing the
+  cell. Public `Root::get` performs an all-build heap-identity check and binds
+  its borrow to a matching live mutator. The retained weak control block makes
+  that pointer identity immune to heap-address reuse while the root exists.
+- Focused tests cover the one-word and `Send + Sync` contracts, later-region
+  and cross-thread access, foreign construction and access, representation and
+  unallocated-slot rejection, observation while the leased word advances, and
+  terminal heap destruction with an escaped root.
+- Root construction deliberately remains crate-private and is currently used
+  only by unit tests. C4B must publish the cell into the heap's weak registry
+  before exposing that constructor; C4A adds neither root scanning nor
+  reclamation.
 
 ## Phase C5 — Exact Full Marking
 

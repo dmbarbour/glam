@@ -3,7 +3,7 @@ use std::ptr::NonNull;
 use std::sync::Arc;
 
 use crate::thread_cache::ThreadCacheHandle;
-use crate::{AllocationClass, Gc, Trace, UnsupportedLayout, heap::HeapInner};
+use crate::{AllocationClass, Gc, Root, Trace, UnsupportedLayout, heap::HeapInner};
 use crate::{class::metadata_for, run::RunGeometry};
 
 /// Scoped authority to access one [`crate::Heap`].
@@ -103,6 +103,20 @@ impl<'heap> Mutator<'heap> {
         unsafe { Gc::from_raw(pointer) }
     }
 
+    /// Constructs a checked external root for one managed allocation.
+    ///
+    /// C4A keeps this operation collector-private until C4B can publish the
+    /// root cell into the heap's weak registry before returning it.
+    #[allow(
+        dead_code,
+        reason = "C4A root construction remains private until C4B registry publication"
+    )]
+    pub(crate) fn root<T: Trace>(&self, value: Gc<T>) -> Root<T> {
+        self.heap
+            .assert_rootable(value.erase().as_ptr().cast::<T>());
+        Root::new(self.heap, value)
+    }
+
     #[cfg(test)]
     pub(crate) fn alloc_with_before_initialize<T: Trace>(
         &self,
@@ -125,5 +139,9 @@ impl<'heap> Mutator<'heap> {
 
     pub(crate) fn debug_assert_access<T: Trace>(&self, pointer: NonNull<T>) {
         self.heap.debug_assert_access(pointer);
+    }
+
+    pub(crate) fn heap(&self) -> &Arc<HeapInner> {
+        self.heap
     }
 }

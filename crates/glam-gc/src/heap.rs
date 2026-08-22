@@ -380,6 +380,7 @@ struct ResolvedSlot {
     class_id: AllocationClassId,
     geometry: RunGeometry,
     slot_index: usize,
+    allocated: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -1038,6 +1039,32 @@ impl HeapInner {
         #[cfg(not(debug_assertions))]
         let _ = pointer;
     }
+
+    #[allow(
+        dead_code,
+        reason = "C4A validation becomes a production path when C4B publishes roots"
+    )]
+    pub(crate) fn assert_rootable<T: Trace>(&self, pointer: NonNull<T>) {
+        let expected = metadata_for::<T>();
+        let address = pointer.as_ptr().cast::<()>() as usize;
+        let state = self
+            .state
+            .lock()
+            .expect("heap state should not be poisoned");
+        let resolved = resolve_slot_in_state(&state, address)
+            .unwrap_or_else(|| panic!("managed pointer does not belong to this heap"));
+
+        assert!(
+            std::ptr::eq(resolved.metadata, expected),
+            "managed pointer has representation `{}`, not requested `{}`",
+            resolved.metadata.type_name(),
+            expected.type_name()
+        );
+        assert!(
+            resolved.allocated,
+            "managed pointer does not identify an allocated value"
+        );
+    }
 }
 
 struct CollectionAttempt<'heap> {
@@ -1098,11 +1125,13 @@ fn resolve_slot_in_state(state: &HeapState, address: usize) -> Option<ResolvedSl
     if entry.geometry() != owner.geometry || !entry.contains_run(owner.location) {
         return None;
     }
+    let allocated = state.arena.owner_slot_is_allocated(owner);
     Some(ResolvedSlot {
         metadata: entry.metadata(),
         class_id: owner.class_id,
         geometry: owner.geometry,
         slot_index: owner.slot_index,
+        allocated,
     })
 }
 
@@ -2426,6 +2455,40 @@ mod tests {
             dropping.metadata.layout(),
             std::alloc::Layout::new::<DroppingType>()
         );
+    }
+
+    #[test]
+    fn root_validation_rejects_a_structurally_valid_unallocated_slot() {
+        let heap = Heap::new();
+        let class = heap
+            .with_mutator(|mutator| mutator.allocation_class::<u64>())
+            .unwrap();
+        let value = heap.with_mutator(|mutator| mutator.alloc(&class, 42_u64));
+        let unallocated = {
+            let state = heap.inner.state.lock().unwrap();
+            let address = value.erase().as_ptr().as_ptr() as usize;
+            let owner = state.arena.checked_slot_owner(address).unwrap();
+            let slot_index = (0..owner.geometry.slot_count)
+                .find(|&index| {
+                    index != owner.slot_index
+                        && !state.arena.owner_slot_is_allocated(crate::arena::RunOwner {
+                            slot_index: index,
+                            ..owner
+                        })
+                })
+                .expect("test run must contain another unallocated slot");
+            let offset = owner
+                .geometry
+                .slot_offset(slot_index)
+                .expect("test slot must have an in-run offset");
+            std::ptr::NonNull::new((owner.run.address() + offset) as *mut u64).unwrap()
+        };
+
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            heap.inner.assert_rootable(unallocated);
+        }));
+
+        assert!(panic.is_err());
     }
 
     #[test]

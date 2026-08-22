@@ -164,8 +164,9 @@ impl RunClaimTarget {
 
 // SAFETY: `RunClaimTarget` is constructed only for a published run in stable
 // heap-owned arena storage. Shared operations mutate lease words atomically;
-// one successful lease bit grants one thread exclusive access to the matching
-// ordinary allocation word. Private callers retain the heap while using it.
+// one successful lease bit grants one thread exclusive write access to the
+// matching atomic allocation word. Private callers retain the heap while using
+// it.
 unsafe impl Send for RunClaimTarget {}
 // SAFETY: the same published-run and atomic-lease invariants permit concurrent
 // claims through shared copies of this immutable topology record.
@@ -283,6 +284,18 @@ impl Arena {
             geometry,
             slot_index,
         })
+    }
+
+    pub(crate) fn owner_slot_is_allocated(&self, owner: RunOwner) -> bool {
+        let chunk = self
+            .chunks
+            .get(owner.location.chunk)
+            .unwrap_or_else(|| panic!("resolved allocation owner lost its arena chunk"));
+        let run = chunk
+            .run_address(owner.location.run)
+            .expect("resolved allocation owner lost its run");
+        assert_eq!(run, owner.run, "resolved allocation owner changed runs");
+        chunk.slot_is_allocated(run, owner.geometry, owner.slot_index)
     }
 
     pub(crate) fn first_free_slot(&self, location: RunLocation) -> Option<usize> {
@@ -547,10 +560,11 @@ impl ArenaChunk {
         // SAFETY: the proof above establishes a unique initialized destination
         // for `T`.
         unsafe { pointer.write(value) };
-        // SAFETY: `allocation_word` identifies the initialized allocation
-        // bitmap word for this run, and exclusive arena access serializes the
-        // synchronized allocator.
-        unsafe { allocation_word.write(published_word) };
+        // SAFETY: `allocation_word` identifies the initialized atomic
+        // allocation-bitmap word for this run. The synchronized allocator is
+        // its only writer, while release publication makes the initialized
+        // payload visible to root validation and later collection.
+        unsafe { allocation_word.as_ref() }.store(published_word, Ordering::Release);
         pointer
     }
 
@@ -575,50 +589,15 @@ impl ArenaChunk {
             .collect()
     }
 
-    fn read_bitmap_word(
-        &self,
-        run: RunAddress,
-        bitmap: crate::run::BitmapGeometry,
-        word_index: usize,
-    ) -> u64 {
-        let pointer = self.bitmap_word_pointer(run, bitmap, word_index);
-        // SAFETY: the pointer names one initialized aligned bitmap word. Heap
-        // state excludes lease mutation, and an unleased allocation word has
-        // no worker-local writer.
-        unsafe { pointer.read() }
-    }
-
-    fn bitmap_word_pointer(
-        &self,
-        run: RunAddress,
-        bitmap: crate::run::BitmapGeometry,
-        word_index: usize,
-    ) -> NonNull<u64> {
-        assert!(word_index < bitmap.word_len, "bitmap word is out of range");
-        // SAFETY: validated bitmap geometry places every aligned word wholly
-        // inside this live run.
-        unsafe {
-            run.pointer()
-                .add(bitmap.offset)
-                .cast::<u64>()
-                .add(word_index)
-        }
-    }
-
     fn slot_is_allocated(&self, run: RunAddress, geometry: RunGeometry, slot_index: usize) -> bool {
         let word_index = slot_index / u64::BITS as usize;
         let bit_index = slot_index % u64::BITS as usize;
         debug_assert!(word_index < geometry.allocation_bitmap.word_len);
-        // SAFETY: validated geometry places the aligned allocation bitmap word
-        // inside this initialized live run. Shared reads occur only while the
-        // heap-state mutex excludes bitmap mutation.
-        let word = unsafe {
-            run.pointer()
-                .add(geometry.allocation_bitmap.offset)
-                .cast::<u64>()
-                .add(word_index)
-                .read()
-        };
+        let pointer = allocation_word_pointer(run, geometry, word_index);
+        // SAFETY: validated geometry places this initialized atomic word
+        // inside the live run. Acquire observes release publication of the
+        // payload before its allocation bit.
+        let word = unsafe { pointer.as_ref() }.load(Ordering::Acquire);
         word & (1_u64 << bit_index) != 0
     }
 
@@ -627,21 +606,15 @@ impl ArenaChunk {
         run: RunAddress,
         geometry: RunGeometry,
         slot_index: usize,
-    ) -> (NonNull<u64>, u64) {
+    ) -> (NonNull<AtomicU64>, u64) {
         let word_index = slot_index / u64::BITS as usize;
         let bit_index = slot_index % u64::BITS as usize;
         debug_assert!(word_index < geometry.allocation_bitmap.word_len);
-        // SAFETY: validated geometry places the aligned allocation bitmap word
-        // inside this exclusively borrowed, initialized run.
-        let pointer = unsafe {
-            run.pointer()
-                .add(geometry.allocation_bitmap.offset)
-                .cast::<u64>()
-                .add(word_index)
-        };
-        // SAFETY: the pointer proof above permits reading this initialized
-        // integer bitmap word under exclusive arena access.
-        let current = unsafe { pointer.read() };
+        let pointer = allocation_word_pointer(run, geometry, word_index);
+        // SAFETY: the synchronized allocator is the only writer to this
+        // initialized word. Relaxed ordering is sufficient for its local
+        // read-modify-store sequence; the later store publishes with Release.
+        let current = unsafe { pointer.as_ref() }.load(Ordering::Relaxed);
         (pointer, current | (1_u64 << bit_index))
     }
 
@@ -680,22 +653,29 @@ impl ArenaChunk {
         let address = self
             .run_address(run)
             .expect("validated run must belong to its chunk");
-        for bitmap in [geometry.allocation_bitmap, geometry.mark_bitmap] {
-            // SAFETY: validated geometry keeps each side-bitmap range within
-            // this live run and disjoint from its header and payload slots.
-            let start = unsafe { address.pointer().add(bitmap.offset) };
-            // SAFETY: the same validated byte range is live untyped arena
-            // storage and may be initialized to the requested byte value.
-            unsafe { std::ptr::write_bytes(start.as_ptr(), value, bitmap.byte_len()) };
+        let word_value = u64::from_ne_bytes([value; std::mem::size_of::<u64>()]);
+        for word_index in 0..geometry.allocation_bitmap.word_len {
+            let pointer = allocation_word_pointer(address, geometry, word_index);
+            // SAFETY: the run is exclusively borrowed and not yet published
+            // with this geometry. Each aligned raw allocation-word destination
+            // is initialized exactly once as an atomic value before
+            // publication.
+            unsafe { pointer.write(AtomicU64::new(word_value)) };
         }
-        let lease_value = u64::from_ne_bytes([value; std::mem::size_of::<u64>()]);
         for word_index in 0..geometry.lease_bitmap.word_len {
             let pointer = lease_word_pointer(address, geometry.lease_bitmap, word_index);
             // SAFETY: the run is exclusively borrowed and not yet published
             // with this geometry. Each aligned raw lease-word destination is
             // initialized exactly once as an atomic value before publication.
-            unsafe { pointer.write(AtomicU64::new(lease_value)) };
+            unsafe { pointer.write(AtomicU64::new(word_value)) };
         }
+        let bitmap = geometry.mark_bitmap;
+        // SAFETY: validated geometry keeps the mark-bitmap range within this
+        // live run and disjoint from its header and payload slots.
+        let start = unsafe { address.pointer().add(bitmap.offset) };
+        // SAFETY: the same validated byte range is live untyped arena storage
+        // and may be initialized to the requested byte value.
+        unsafe { std::ptr::write_bytes(start.as_ptr(), value, bitmap.byte_len()) };
     }
 
     #[cfg(test)]
@@ -705,13 +685,11 @@ impl ArenaChunk {
         let mut bytes = Vec::new();
         {
             let bitmap = geometry.allocation_bitmap;
-            // SAFETY: the chunk remains borrowed, and validated geometry names
-            // initialized bytes inside this run's side metadata.
-            let start = unsafe { address.pointer().add(bitmap.offset) };
-            // SAFETY: `start` and `byte_len` describe that live initialized
-            // side-metadata range; it is copied before the borrow ends.
-            let range = unsafe { std::slice::from_raw_parts(start.as_ptr(), bitmap.byte_len()) };
-            bytes.extend_from_slice(range);
+            for word_index in 0..bitmap.word_len {
+                let pointer = allocation_word_pointer(address, geometry, word_index);
+                let word = unsafe { pointer.as_ref() }.load(Ordering::Acquire);
+                bytes.extend_from_slice(&word.to_ne_bytes());
+            }
         }
         for word_index in 0..geometry.lease_bitmap.word_len {
             let pointer = lease_word_pointer(address, geometry.lease_bitmap, word_index);
@@ -733,25 +711,31 @@ impl ArenaChunk {
 }
 
 fn free_mask_for_word(run: RunAddress, geometry: RunGeometry, word_index: usize) -> u64 {
-    let allocation = bitmap_word_pointer(run, geometry.allocation_bitmap, word_index);
-    // SAFETY: winning the corresponding lease bit grants exclusive access to
-    // this initialized ordinary allocation word.
-    let allocation = unsafe { allocation.read() };
+    let allocation = allocation_word_pointer(run, geometry, word_index);
+    // SAFETY: winning the corresponding lease bit grants exclusive write
+    // access to this initialized atomic allocation word. Acquire also observes
+    // any allocation state rebuilt before a future lease reset.
+    let allocation = unsafe { allocation.as_ref() }.load(Ordering::Acquire);
     !allocation & valid_slot_mask(geometry.slot_count, word_index)
 }
 
-fn bitmap_word_pointer(
+fn allocation_word_pointer(
     run: RunAddress,
-    bitmap: crate::run::BitmapGeometry,
+    geometry: RunGeometry,
     word_index: usize,
-) -> NonNull<u64> {
-    assert!(word_index < bitmap.word_len, "bitmap word is out of range");
-    // SAFETY: validated bitmap geometry places every aligned word wholly
-    // inside this live run.
+) -> NonNull<AtomicU64> {
+    let bitmap = geometry.allocation_bitmap;
+    assert!(
+        word_index < bitmap.word_len,
+        "allocation word is out of range"
+    );
+    // SAFETY: validated geometry places every aligned allocation word wholly
+    // inside this live run. Run initialization constructs an `AtomicU64` at
+    // each such destination before publication.
     unsafe {
         run.pointer()
             .add(bitmap.offset)
-            .cast::<u64>()
+            .cast::<AtomicU64>()
             .add(word_index)
     }
 }
@@ -1187,11 +1171,10 @@ mod tests {
         assert!(geometry.allocation_bitmap.word_len > 1);
         let location = arena.publish_run(class(1), geometry).unwrap();
         let target = arena.run_claim_target(location).unwrap();
-        let first_allocation =
-            bitmap_word_pointer(target.run, target.geometry.allocation_bitmap, 0);
-        // SAFETY: the run is not shared yet, and the first ordinary allocation
+        let first_allocation = allocation_word_pointer(target.run, target.geometry, 0);
+        // SAFETY: the run is not shared yet, and the first atomic allocation
         // word is initialized, unleased storage in this test-owned arena.
-        unsafe { first_allocation.write(u64::MAX) };
+        unsafe { first_allocation.as_ref() }.store(u64::MAX, Ordering::Release);
 
         let claimed = target.claim_allocation_word().unwrap();
         assert_eq!(claimed.word_index, 1);

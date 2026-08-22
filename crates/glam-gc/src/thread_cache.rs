@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::ptr::NonNull;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 
 use crate::{
@@ -75,8 +76,9 @@ impl AllocationCursor {
             "cached allocation slot has the wrong payload alignment"
         );
         let allocation_word = self.allocation_word_pointer();
-        // SAFETY: this cursor exclusively owns the initialized allocation word.
-        let current = unsafe { allocation_word.read() };
+        // SAFETY: this cursor exclusively owns writes to the initialized
+        // atomic allocation word.
+        let current = unsafe { allocation_word.as_ref() }.load(Ordering::Relaxed);
         let bit = 1_u64 << bit_index;
         assert_eq!(current & bit, 0, "cached allocation bit is already set");
         let published = current | bit;
@@ -93,24 +95,27 @@ impl AllocationCursor {
         // SAFETY: the proof above establishes a unique initialized destination
         // for `T`.
         unsafe { pointer.write(value) };
-        // SAFETY: the cursor exclusively owns this initialized bitmap word.
-        unsafe { allocation_word.write(published) };
+        // SAFETY: the cursor exclusively owns writes to this initialized
+        // bitmap word. Release publishes the initialized payload to concurrent
+        // root validation and later collection.
+        unsafe { allocation_word.as_ref() }.store(published, Ordering::Release);
         self.free_mask = remaining;
         Ok(pointer)
     }
 
-    fn allocation_word_pointer(&self) -> NonNull<u64> {
+    fn allocation_word_pointer(&self) -> NonNull<AtomicU64> {
         assert!(
             self.word_index < self.geometry.allocation_bitmap.word_len,
             "cached allocation word is out of range"
         );
-        // SAFETY: validated geometry places this aligned allocation word wholly
-        // inside the stable leased run.
+        // SAFETY: validated geometry places this aligned atomic allocation
+        // word wholly inside the stable leased run, and run publication
+        // initialized every allocation word as `AtomicU64`.
         unsafe {
             self.run
                 .pointer()
                 .add(self.geometry.allocation_bitmap.offset)
-                .cast::<u64>()
+                .cast::<AtomicU64>()
                 .add(self.word_index)
         }
     }

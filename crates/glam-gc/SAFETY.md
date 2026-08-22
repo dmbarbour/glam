@@ -35,12 +35,16 @@ class discovery behind mutator authority, and orders TLS entry as prepare,
 admit, then activate. Production request epochs now elect one collector, drain
 mutators, establish exclusive access, and perform a synthetic finalizer-mutator
 handoff. There is still no root registry, tracing, reclamation, managed-payload
-finalization, or collector callback.
+finalization, or collector callback. C4A converts allocation words to atomic
+single-writer/multi-reader publication, adds the one-word typed `Root<T>` and
+weak-heap `RootCell`, and checks heap ownership, canonical representation, and
+the allocation bit in every root construction. Root construction remains
+crate-private until C4B publishes each cell in the weak registry.
 
 The crate denies unsafe code by default. `src/lib.rs` gives the reviewed
-`pointer`, `mutator`, `trace`, `mutation`, `thread_cache`, and unit-test modules named lint
-expectations for unsafe code. The exact module expectations and every unsafe
-function, implementation, and block are checked into
+`pointer`, `root`, `mutator`, `trace`, `mutation`, `thread_cache`, and unit-test
+modules named lint expectations for unsafe code. The exact module expectations
+and every unsafe function, implementation, and block are checked into
 `scripts/unsafe-modules.txt` and `scripts/unsafe-sites.txt`;
 `scripts/audit-unsafe.sh` fails when either inventory changes.
 
@@ -339,18 +343,21 @@ C6 later owns collector-driven destruction.
   one allocation-word index, and a local free mask. Its mask is the inverse of
   the authoritative allocation word intersected with the exact slot-count
   mask, so tail padding can never become a payload address.
-- While a lease is live, only its worker-local cursor reads or writes that
-  allocation word. Other claims inspect `AtomicU64` lease words and read an
-  ordinary allocation word only after winning its lease bit. Distinct word-
-  sized `u64` objects occupy disjoint memory, so concurrent allocation within
-  one run is data-race-free. Lease-word size and alignment suitability are
-  compile-time assertions; raw lease storage is initialized directly as
-  `AtomicU64`, not reinterpreted from a live `u64`.
+- While a lease is live, only its worker-local cursor writes that allocation
+  word. Other claims read it only after winning its lease bit; checked root
+  construction and later collection may read any allocation word concurrently.
+  Both allocation and lease words are `AtomicU64`. Distinct words occupy
+  disjoint storage, so concurrent allocation within one run is data-race-free,
+  while atomic reads make allocation state safely observable outside the
+  writer. Size and alignment suitability are compile-time assertions; raw
+  allocation and lease storage is initialized directly as `AtomicU64`, not
+  reinterpreted from a live `u64`.
 - The hot path performs every bounds, size, alignment, and free-bit assertion
   before initializing the payload. Its two final operations are an infallible
-  payload write followed by an infallible allocation-bit write; no unwind can
-  expose uninitialized storage as allocated. It updates the local free mask
-  only after both writes.
+  payload write followed by a Release allocation-bit store; no unwind can
+  expose uninitialized storage as allocated. Root validation uses an Acquire
+  load before treating the payload as live. The writer updates its local free
+  mask only after both writes.
 - Allocation visibility is not delayed until mutator exit. Returning `Gc<T>`
   occurs only after bitmap publication, and ordinary Rust synchronization may
   immediately share it with another mutator. Collection remains disabled in
@@ -393,8 +400,10 @@ are justified by the atomic lease operation over a published stable run record:
 it carries validated typed-run geometry, masks invalid tail bits, and grants
 this thread exclusive ownership of one represented allocation word. The cursor
 checks the selected slot, payload size, and alignment before writing. No other
-allocator may read or mutate its allocation word until a future full collection
-revokes all leases after stopping mutators and advancing the heap epoch.
+allocator may mutate its allocation word until a future full collection revokes
+all leases after stopping mutators and advancing the heap epoch. Checked root
+construction may inspect it through an Acquire atomic load without taking the
+lease or interfering with the sole writer.
 
 ### `arena::ArenaChunk` allocation and destruction
 
@@ -407,9 +416,11 @@ layout.
 The `NonNull::add` sites derive aligned run starts, side-metadata words, or
 bounded payload slots. Each is preceded by checked run membership and validated
 geometry, proving the result remains within the live chunk. Payload and
-ordinary bitmap writes occur only under exclusive arena or leased-word access.
-Lease words are the exception: after run publication they are accessed only
-through `AtomicU64`. Read-only recovery does not create a payload reference.
+mark-bitmap writes occur only under exclusive arena access. Allocation and
+lease words are initialized and subsequently accessed as `AtomicU64`; one
+leased worker owns allocation-word writes, while root validation and later
+collector work may read them. Read-only recovery does not create a payload
+reference.
 
 ### `Send for arena::ArenaChunk`
 
@@ -423,10 +434,10 @@ independent `Sync` implementation is needed.
 The target contains a raw address but never owns arena storage. It is created
 only from a fully initialized published run and remains private to callers
 which retain the heap. Its only shared mutation is an atomic lease-word CAS;
-after a successful claim, the corresponding ordinary allocation word has one
-exclusive worker. Boxed target records retain stable addresses until heap
-teardown, and an allocation-class handle keeps that heap alive while loading
-or copying the current target.
+after a successful claim, the corresponding atomic allocation word has one
+exclusive writer but may have concurrent atomic readers. Boxed target records
+retain stable addresses until heap teardown, and an allocation-class handle
+keeps that heap alive while loading or copying the current target.
 
 ### Run-header and side-metadata access
 
@@ -493,6 +504,35 @@ type metadata. Later typed-run lookup must recover and validate those facts.
 The receiver may panic; no visitor or traversal state is stored in the traced
 object.
 
+`ErasedGc` is `Send + Sync` because it grants no pointer access and is created
+only from `Gc<T>` where `T: Trace` already requires `Send + Sync`. Sending or
+sharing the address does not bypass the later exact heap, allocation, and
+metadata checks required before dereference.
+
+### `root::Root<T>` construction and access
+
+`Mutator::root` remains crate-private in C4A. It resolves the candidate address
+through the heap's indexed chunk, run, class, and slot topology under heap
+state, compares the run's canonical metadata with `metadata_for::<T>()`, and
+loads the atomic allocation bit with Acquire ordering. Only after all three
+release-build checks pass does it seal the erased pointer into a root cell.
+
+`Root<T>` contains one `Arc<RootCell>` plus a zero-sized typed marker. The
+non-generic cell contains a `Weak<HeapInner>` and one `ErasedGc`. The weak
+control block remains allocated while the root exists, so comparing its address
+with the live mutator's `Arc` cannot mistake a reused heap allocation for the
+original heap. The cell never upgrades that weak reference merely to read a
+value, and a root does not retain or re-enter its value domain.
+
+`Root::get` rejects a nonmatching mutator in every build before reconstructing
+the private typed `Gc<T>` and invoking its existing unsafe access gateway. The
+private constructor established the representation, allocation, and heap
+invariants; the live matching mutator prevents reclamation for the returned
+reference's lifetime. C4A performs no reclamation, and C4B must register the
+same cell before making construction public. Dropping `RootCell` releases only
+its weak heap reference and pointer bits; it never dereferences or destroys the
+managed payload and invokes no user code.
+
 ### `mutation::Mutator::with_edge_replacement`
 
 The raw mutation gateway is named for the operation it encloses rather than an
@@ -551,6 +591,11 @@ mutation closure runs.
   acknowledgement, and panic restoration. Coordinator Loom models cover
   visibility, unique idle-entry election, reciprocal requested-heap admission,
   and exclusive-to-finalizer-to-entry authority transfer.
+- C4A tests the root handle's one-word and `Send + Sync` contracts, exact
+  allocated-slot and representation validation, all-build foreign-heap
+  rejection during construction and access, later-region and cross-thread
+  access with a live heap, concurrent allocation-word observation, and heap
+  teardown while a root cell remains escaped.
 - The ordinary crate checks, exact unsafe inventory, focused Miri run, and
   repository-wide checks are required at completed checkpoints.
 - Miri passes all implemented tests with leak checking enabled. C1's temporary

@@ -43,8 +43,8 @@ The Loom tests retain the heap-entry tooling/API smoke model and model C2C.5's
 atomic lease-bit claim transition. Raw arena-pointer integration remains under
 native forced schedules, sanitizers, and Miri. C2C.5 claims whole allocation
 words through atomic lease bitmaps and consults the heap mutex only when a
-class frontier is exhausted; after a claim, a worker mutates only its own
-ordinary word. C2C.6's native barrier fixtures force eight production claimers
+class frontier is exhausted; after a claim, a worker is the only writer of its
+atomic allocation word. C2C.6's native barrier fixtures force eight production claimers
 past the same exhausted-frontier observation and verify one synchronized
 advance or publication plus seven winner-frontier rechecks. C3 adds Loom models
 for mutator-exit visibility, unique idle-entry election, reciprocal nested
@@ -53,10 +53,13 @@ exclusive-to-finalizer-to-entry handoff. Native forced schedules exercise
 production request epochs, idle-entry and synchronous election, waiter
 coalescing, direct admission transfer, collector-local cache reset, the absence
 of exit-time service, the finalizer mutator, request/pressure acknowledgement,
-and unwind restoration. The collection body remains synthetic: C4
-through C6 separately own roots, exact tracing, reclamation, and destructor
-recovery. Ordinary threaded stress remains supplementary rather than proof of
-coordinator ordering.
+and unwind restoration. The collection body remains synthetic: C4 through C6
+separately own roots, exact tracing, reclamation, and destructor recovery. C4A
+adds release-checked direct roots and makes allocation-bit publication atomic
+so root validation can inspect a word while its leased writer advances other
+slots. Root construction remains private until C4B adds registry publication.
+Ordinary threaded stress remains supplementary rather than proof of coordinator
+ordering.
 
 ## Gate G0 Baseline
 

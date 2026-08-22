@@ -8,3 +8,4 @@ crates/glam-gc/src/lib.rs:#[expect(unsafe_code, reason = "reviewed C2A arena and
 crates/glam-gc/src/lib.rs:#[expect(unsafe_code, reason = "reviewed C2B canonical metadata dispatch")]
 crates/glam-gc/src/lib.rs:#[expect(unsafe_code, reason = "reviewed C2C terminal payload destruction")]
 crates/glam-gc/src/lib.rs:#[expect(unsafe_code, reason = "reviewed C2C worker-local allocation")]
+crates/glam-gc/src/lib.rs:#[expect(unsafe_code, reason = "reviewed C4A root access boundary")]

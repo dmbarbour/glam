@@ -93,14 +93,19 @@ impl ErasedGc {
         Self { pointer }
     }
 
-    #[allow(
-        dead_code,
-        reason = "typed-run lookup first consumes erased addresses in C2"
-    )]
     pub(crate) fn as_ptr(self) -> NonNull<()> {
         self.pointer
     }
 }
+
+// SAFETY: `ErasedGc` grants no pointer access. It is created only from a
+// `Gc<T>` whose `Trace` bound requires `T: Send + Sync`; any later dereference
+// must first recover and validate heap ownership and canonical metadata.
+unsafe impl Send for ErasedGc {}
+
+// SAFETY: as above, sharing the erased address grants no access and later
+// collector consumers must re-establish the complete managed-pointer proof.
+unsafe impl Sync for ErasedGc {}
 
 // SAFETY: `Gc<T>` contains exactly one managed edge, which is reported once.
 unsafe impl<T: Trace> Trace for Gc<T> {

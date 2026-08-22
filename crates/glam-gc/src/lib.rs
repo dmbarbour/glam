@@ -1,8 +1,9 @@
 //! Runtime-local garbage collection support for Glam.
 //!
-//! C3 adds regional mutator admission and the stop-the-world coordination
-//! boundary to C2C's managed-pointer and allocator foundation. Payloads remain
-//! live until terminal heap teardown; marking and reclamation remain disabled.
+//! C4A adds checked direct roots to C3's regional mutator admission and
+//! stop-the-world coordination boundary. Root publication, marking, and
+//! reclamation remain disabled, so payloads stay live until terminal heap
+//! teardown.
 
 #![deny(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]
@@ -27,6 +28,8 @@ mod mutation;
 mod mutator;
 #[expect(unsafe_code, reason = "reviewed C1A pointer boundary")]
 mod pointer;
+#[expect(unsafe_code, reason = "reviewed C4A root access boundary")]
+mod root;
 #[allow(
     dead_code,
     reason = "C2A geometry remains collector-private until class discovery consumes it"
@@ -44,6 +47,7 @@ pub use class::{AllocationClass, UnsupportedLayout};
 pub use heap::{CollectionError, CollectionReport, Heap};
 pub use mutator::Mutator;
 pub use pointer::Gc;
+pub use root::Root;
 pub use trace::{Trace, Visitor};
 
 #[cfg(test)]
