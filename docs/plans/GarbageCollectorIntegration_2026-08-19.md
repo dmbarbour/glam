@@ -529,7 +529,9 @@ unsafe/trace audit.
   synchronous full-collection operation used only outside an active mutator.
   These are Rust runtime-maintenance controls, not Glam evaluation effects.
 - Initially collect at controlled batch/idle boundaries.
-- Add allocation-pressure requests which are serviced at outer mutator exits.
+- Add allocation-pressure requests from successful typed-run publication which
+  are serviced at outer mutator exits. Lease-word claims and individual slot
+  allocations remain outside shared pressure accounting.
 - Count queued and running finalizers as runtime operational activity. A
   readiness probe must pump consequences of finalizer diagnostics, event
   output, and newly launched tasks before returning a stable report.

@@ -2,7 +2,8 @@
 
 Status: in progress; Phases C0, C1, C2A, C2B, and the C2C correctness baseline
 through C2C.4 are complete. The mandatory post-C1 review is complete. The
-C2C.5 lease-claim, arena-growth, and TLS-lifecycle optimization and the
+C2C.5 lease-claim, typed-run-pressure, class-frontier, and TLS-lifecycle
+optimization and the
 mandatory post-C2C review precede C3A.
 
 This plan implements an exact, non-moving, runtime-local tracing collector
@@ -34,7 +35,7 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C2C.3 | completed | allocation-word leasing and worker-local hot allocation |
 | C2C.4 | completed | pressure, panic, teardown, and allocator audit |
 | C2C.5a | pending | atomic hierarchical lease-word claiming |
-| C2C.5b | pending | chunk-grained collection pressure |
+| C2C.5b | pending | typed-run-publication collection pressure |
 | C2C.5c | pending | stable class run frontier and lock-free cursor refill |
 | C2C.5d | pending | explicit thread-local cache release without eager pruning |
 | C3A | pending | ordinary admission and same-heap recursion integration |
@@ -744,10 +745,10 @@ Execute C2C as nine independently verified checkpoints:
 - **C2C.5a — atomic hierarchical lease claiming.** Replace repeated per-
   allocation-word lease probes with lease-word scanning and atomic bit claims,
   independently of class run selection.
-- **C2C.5b — chunk-grained collection pressure.** Remove allocation-word and
-  leased-capacity pressure accounting. Treat successful arena-chunk publication
-  as the sole automatic allocation-pressure event and keep its provisional
-  budget in whole chunks.
+- **C2C.5b — typed-run-publication collection pressure.** Remove allocation-
+  word and leased-capacity pressure accounting. Treat each successful typed-
+  run publication as one automatic pressure event, with a provisional
+  allowance of one chunk-equivalent of runs.
 - **C2C.5c — stable class run frontier.** Publish a stable current-run record
   per class so ordinary cursor refill can claim from it without the heap-state
   mutex, retaining that mutex only for exhausted-frontier advancement and run
@@ -1128,8 +1129,8 @@ C2C.4 completed on 2026-08-22:
   second abandoned-word protocol. C5 must clear the lease bitmaps, reset this
   pressure, and advance the cache epoch as one exclusive transition.
 - This pressure model is an implemented correctness baseline rather than the
-  retained policy. C2C.5b removes it in favor of arena-chunk growth, before the
-  ordinary cursor-refill path becomes lock-free.
+  retained policy. C2C.5b removes it in favor of successful typed-run
+  publication, before the ordinary cursor-refill path becomes lock-free.
 - A deterministic hook immediately before local payload initialization proves
   that unwind drops the input, publishes no allocation bit, leaves the heap
   mutex usable, and lets the retained cursor reuse the same slot without a new
@@ -1148,7 +1149,7 @@ C2C.4 completed on 2026-08-22:
   warnings denied, the exact unsafe inventory, and full leak-checking Miri all
   pass.
 
-### C2C.5 Lock-Free Lease Claims, Chunk Pressure, Class Frontier, and TLS Release
+### C2C.5 Lock-Free Lease Claims, Run Pressure, Class Frontier, and TLS Release
 
 C2C.5 is a performance extension over the completed C2C correctness baseline.
 It must preserve one authoritative lease bit per allocation word, worker-local
@@ -1164,6 +1165,13 @@ frontier makes ordinary claims lock-free.
   every read, claim, reset, and diagnostic observation of lease words uses the
   atomic representation. Allocation and mark bitmap words remain ordinary
   `u64` storage under their existing exclusive ownership rules.
+- Make the layout assumptions compile-time explicit. Assert that
+  `size_of::<AtomicU64>() == size_of::<u64>()`, and separately assert that the
+  bitmap-word stride and run metadata boundary satisfy
+  `align_of::<AtomicU64>()`. Do not require `u64` and `AtomicU64` to have equal
+  alignment: Rust may align the atomic more strictly. Initialize lease words
+  as `AtomicU64` in their raw arena storage rather than publishing a live
+  `u64` and relying on an in-place type reinterpretation.
 - Scan the lease bitmap itself rather than iterating allocation words. One
   lease word summarizes up to 64 allocation words, so the provisional 64 KiB
   run requires at most roughly sixteen probes even for the densest supported
@@ -1191,6 +1199,8 @@ frontier makes ordinary claims lock-free.
 
 Verification for C2C.5a:
 
+- compile-time assertions reject any target on which the shared bitmap
+  geometry cannot represent correctly aligned `AtomicU64` lease words;
 - deterministic geometry tests cover one lease word, several lease words, and
   a partial final lease word without ever claiming an out-of-range bit;
 - many synchronized workers race on one run and obtain every claimable
@@ -1205,55 +1215,66 @@ Verification for C2C.5a:
 - a small Loom model exercises the compare-exchange state transition even if
   the raw arena-pointer integration remains covered by native forced schedules.
 
-#### C2C.5b Chunk-Grained Collection Pressure
+#### C2C.5b Typed-Run-Publication Collection Pressure
 
 - Remove `AllocationPressure`'s claimed-word count, leased-capacity byte total,
   and `record_claim` call. Do not replace them with atomics: claiming, retaining,
   forgetting, or revoking an allocation word is not itself a collection-
   pressure event.
-- Treat one successfully published arena chunk as the sole automatic allocation-
-  pressure event in the initial collector. Reusing another run in an existing
-  chunk, publishing a typed run there, and allocating any number of words or
-  slots inside it produce no event. A rejected candidate chunk produces no
-  event because it never becomes committed heap storage.
-- Keep the provisional policy in whole chunks under heap state, for example as
-  `next_collection_at_chunks` plus a latched request. The initial budget admits
-  the first 8 MiB chunk without requesting collection. Growth beyond that
-  budget latches one request; C3B later owns election and coalescing.
-- Permit an allocating mutator to publish the chunk which crosses its budget.
-  Collection cannot interrupt that allocation before the C3 admission protocol
-  exists, so the coarse policy may overshoot by one 8 MiB chunk. That is an
-  intentional and suitably fine-grained bootstrap tradeoff at contemporary
-  heap sizes.
+- Treat each successfully published typed run as exactly one automatic
+  allocation-pressure event in the initial collector. This applies whether
+  the run uses an empty slot in an existing chunk or is the first run in a new
+  chunk. Chunk allocation itself emits no second event. A failed candidate-run
+  initialization or publication emits no event because no typed run became
+  authoritative.
+- Keep a saturating typed-run-publication count and latched request under heap
+  state. The initial allowance is `RUNS_PER_CHUNK`, currently 128 publications
+  for 64 KiB runs in an 8 MiB chunk. The publication which reaches 128 latches
+  one request; C3B later owns election and coalescing. This normally permits an
+  outer mutator exit to service collection before allocation needs a second
+  chunk, without charging individual leases or slots.
+- Permit an allocating mutator to publish the run which crosses its allowance
+  and to continue allocating until its outermost mutator exit. The request is
+  already latched, but the initial STW design has no mid-region safepoint. A
+  long mutator can therefore overshoot by additional runs or even a chunk;
+  headroom and mid-mutator safepoints remain later tuning rather than hidden
+  complexity in the first policy.
 - Abandoned word leases need no side counter or TLS callback. They consume
-  capacity already represented by the owning chunk and can induce future chunk
-  growth naturally. Full collection revokes the leases regardless of how they
-  became unreachable from a thread cache.
-- After a successful collection, choose the next budget from the committed
-  whole-chunk count. The initial growth factor and minimum headroom remain
-  tuning policy; C6 must define one deterministic provisional rule and rearm it
-  after sweep. Releasing wholly empty chunks is not required by this pressure
-  policy and remains separate storage-reclamation work. Explicit collection
-  requests and future host-memory signals remain independent inputs rather
-  than sub-chunk allocation accounting.
-- An explicit `request_collection` is allowed before any chunk budget is
+  capacity already represented by a typed run and can induce future run
+  publication naturally. That publication supplies the pressure event. Full
+  collection revokes the leases regardless of how they became unreachable
+  from a thread cache.
+- After a successful sweep publishes reusable run state, reset the publication
+  count and admit another `RUNS_PER_CHUNK` successful publications. Do not
+  reset it after an abandoned or panicking collection attempt. Publications
+  made by finalizer-held mutators occur after this new baseline and count
+  toward a follow-up request; the finalizer handoff must not erase them.
+  Survivor-sensitive growth factors and minimum headroom remain later tuning.
+  Releasing wholly empty chunks is separate storage-reclamation work.
+- An explicit `request_collection` is allowed before the run allowance is
   crossed. It uses the same coalesced request state but does not mutate the
-  current or next chunk budget. This lets embedding code request reclamation at
-  a known batch boundary without first forcing another 8 MiB publication.
+  current publication count or allowance. This lets embedding code request
+  reclamation at a known batch boundary without first forcing another typed-
+  run publication.
 
 Verification for C2C.5b:
 
 - any number of word claims, cursor turnovers, evictions, and thread exits
-  changes no pressure state while allocation remains inside existing chunks;
-- publishing many typed runs into one existing chunk emits no pressure event;
-- the first chunk fits the initial budget, while the next successful chunk
-  publication crosses it and latches exactly one request;
+  changes no pressure state unless it ultimately requires a new typed run;
+- every successful typed-run publication increments pressure exactly once,
+  including the first run in a newly allocated chunk, without an additional
+  chunk-publication charge;
+- 127 successful publications leave the automatic request clear, while the
+  128th latches exactly one request and later publications leave it coalesced;
 - an explicit request before the budget is crossed latches the same coordinator
-  state without publishing a chunk or changing either budget;
-- candidate allocation, initialization, overlap, and publication failure adds
-  neither a chunk nor a pressure event;
-- abandoned leases can force later arena growth without requiring direct
+  state without publishing a run or changing the publication allowance;
+- candidate chunk allocation, run initialization, overlap, and publication
+  failure add neither an authoritative typed run nor a pressure event;
+- abandoned leases can force later run publication without requiring direct
   classification or double-counting;
+- a successful sweep resets the counter before finalizer mutators run, a
+  failed collection does not, and subsequent finalizer publications can latch
+  a follow-up request;
 - pressure observation and mutation remain under the existing heap-state lock,
   with no atomic counter added to the lease-claim path; and
 - focused threshold, failure-atomicity, and existing allocator tests, Clippy,
@@ -1283,9 +1304,9 @@ Verification for C2C.5b:
 - During full collection, rebuild each run's atomic lease words so full
   allocation words are preset unavailable, reset each class frontier to a run
   with claimable capacity (or no run), and then advance the one heap-wide lease
-  epoch before releasing mutator exclusion. Chunk-budget reset is the separate
-  C2C.5b/C6 policy. TLS cache records remain invalidated wholesale on their next
-  outer entry.
+  epoch before releasing mutator exclusion. Typed-run-publication allowance is
+  the separate C2C.5b/C6 policy. TLS cache records remain invalidated wholesale
+  on their next outer entry.
 
 Verification for C2C.5c:
 
@@ -1296,8 +1317,9 @@ Verification for C2C.5c:
 - instrumentation proves the class's exhausted run prefix is not rescanned;
 - run publication failure exposes neither a frontier record nor a class-pool
   entry, while a losing publisher observes and uses the winner;
-- instrumentation proves concurrent refill does not update or observe
-  collection-pressure state;
+- instrumentation proves atomic claims and refills from the published frontier
+  do not update or observe collection-pressure state, while the synchronized
+  slow path charges exactly one event after it publishes a new typed run;
 - epoch invalidation, weak TLS teardown, terminal heap destruction, and
   multi-heap nesting retain their existing behavior; and
 - focused tests, forced schedules, Clippy, the exact unsafe inventory, Miri,
@@ -1327,7 +1349,7 @@ Verification for C2C.5c:
   programmer-contract panic before changing the registry. Only after complete
   validation may a second step clear all records.
 - Clearing is inert: do not upgrade a weak heap, dereference a cached run,
-  return or clear a lease, change the chunk budget, or invoke a callback.
+  return or clear a lease, change typed-run pressure, or invoke a callback.
   Leases from a live heap become ordinary abandoned capacity inside its already
   committed chunk until C5 revokes them. Re-entry later creates a fresh record
   and cursor map.
@@ -1346,8 +1368,8 @@ Verification for C2C.5d:
 - attempting release under one or several active mutator depths panics before
   removing any record, after which those mutators can exit normally;
 - releasing a live heap's cache and re-entering it creates fresh TLS state,
-  claims a new word, and changes no collection-pressure state until arena
-  growth;
+  claims a new word, and changes no collection-pressure state unless it must
+  publish a new typed run;
 - ordinary thread exit still drops the registry without an explicit call; and
 - focused lifecycle tests, multi-heap nesting, Clippy, the exact unsafe audit,
   Miri, and available sanitizer checks pass before the mandatory post-C2C
@@ -1569,8 +1591,8 @@ are stopped.
   run's lease bitmap during the exclusive phase: clear bits for allocation
   words with free capacity and set bits for completely full allocation words.
   Reset each class's stable run frontier, then advance one heap-wide
-  `allocation_lease_epoch`. Keep the chunk-growth request latched until C6 sweep
-  has completed and rearmed the budget from the committed chunk count.
+  `allocation_lease_epoch`. Keep the typed-run-pressure request latched until
+  C6 sweep has completed and rearmed the publication allowance.
   On its next outer entry, each heap-specific thread cache compares that one
   epoch and replaces its entire class-to-word-cursor map on mismatch; neither
   the collector nor the mutator validates cursors individually. Post-sweep
@@ -1613,7 +1635,7 @@ Execute C6 as four checkpoints:
 
 - **C6A — no-drop sweep.** Derive dead sets from allocation/mark bitmaps,
   reclaim wholly dead no-drop runs, publish partially live lazy-sweep state,
-  rearm whole-chunk collection pressure, and prove storage is not reused before
+  rearm typed-run-publication pressure, and prove storage is not reused before
   metadata retirement.
 - **C6B — finalizer execution.** Detach dead drop-type slots into the non-
   rootable finalization batch, perform the C3D mutator handoff, run ordinary
@@ -1629,10 +1651,12 @@ Each checkpoint must leave the heap in a usable documented phase after every
 recoverable panic injected by its own tests.
 
 - Identify unreachable allocations only after marking completes.
-- After a successful sweep, rearm the whole-chunk collection budget from the
-  heap's current committed chunk count using C2C.5b's deterministic provisional
-  growth rule. This does not require deallocating an empty arena chunk; future
-  allocations reuse its reclaimed runs before another chunk-growth event.
+- After a successful sweep publishes reusable run state, reset the typed-run-
+  publication count and admit another `RUNS_PER_CHUNK` publications under
+  C2C.5b's deterministic provisional rule. Do this before handing a collector
+  mutator to finalizers so their run publications count toward the next cycle.
+  This does not require deallocating an empty arena chunk; future allocations
+  reuse reclaimed runs before another run-publication event.
 - Do not eagerly enumerate every allocated payload. Inspect run summaries and
   bitmaps:
   - a no-drop run with no marked slots is reclaimed wholesale;
