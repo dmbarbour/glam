@@ -1,8 +1,8 @@
 # Glam GC Subcrate Implementation Plan — 2026-08-19
 
 Status: in progress; Phases C0 through C3E are complete, including the C2C.6
-verification follow-up. The mandatory post-C1 and post-C2C reviews are
-complete. C4 is next.
+verification follow-up. The mandatory post-C1, post-C2C, and post-C3E
+downstream reviews are complete. C4A is next.
 
 This plan implements an exact, non-moving, runtime-local tracing collector
 without depending on Glam value semantics. The governing requirements and
@@ -44,14 +44,31 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C3C | completed | cross-heap dependent admission |
 | C3D | completed | finalizer handoff, pressure, panic, and teardown races |
 | C3E | completed | entry-serviced collection and coordinator simplification |
-| C4 | pending | explicit external roots |
-| C5 | pending | exact full marking |
-| C6A | pending | no-drop sweep and run-state publication |
-| C6B | pending | finalizer detachment, mutator execution, and non-resurrection |
-| C6C | pending | destructor panic, quarantine, retry, and activity |
-| C6D | pending | terminal heap teardown and final safety audit |
-| C7 | pending | shared-pointer and worker-shaped stress |
-| C8 | pending | tuning and final collector audit |
+| C4A | pending | checked direct-root ownership and access |
+| C4B | pending | weak registry publication and root snapshots |
+| C4C | pending | concurrent root lifetime and boundary audit |
+| C5A | pending | mark bitmap and checked-slot substrate |
+| C5B | pending | exact root-to-edge traversal |
+| C5C | pending | invalid-edge and panic recovery |
+| C5D | pending | marking report and audit |
+| C6A.1 | pending | dead-set classification without reuse |
+| C6A.2 | pending | wholly dead no-drop runs and free-run reuse |
+| C6A.3 | pending | partial lazy sweep and lease revocation |
+| C6A.4 | pending | assigned-run pressure |
+| C6B.1 | pending | finalization batch and non-rootability |
+| C6B.2 | pending | finalizer handoff and destruction |
+| C6B.3 | pending | non-resurrection and successful completion |
+| C6C.1 | pending | destructor panic, draining, and quarantine |
+| C6C.2 | pending | finalizer activity, reports, and pressure publication |
+| C6D.1 | pending | terminal-teardown decision and fixtures |
+| C6D.2 | pending | terminal teardown |
+| C6D.3 | pending | Gate G1 audit |
+| C7A | pending | shared-root and immutable-reader stress |
+| C7B | pending | allocation and coordinator stress |
+| C7C | pending | operational metrics |
+| C8A | pending | tuning and reporting boundary |
+| C8B | pending | measurement |
+| C8C | pending | final collector audit |
 
 ## Intended Crate Shape
 
@@ -1919,68 +1936,151 @@ Deterministic tests must force:
 Use Loom for the coordination state where feasible. Repeated stress is
 supplementary, not proof.
 
+### Post-C3E Review of C4 through C8
+
+Reviewed on 2026-08-22 against the implemented C3E coordinator, typed-run
+allocator, heap-qualified TLS caches, canonical object metadata, and trace
+visitor.
+
+The downstream structure remains sound, with these corrections:
+
+- C4 can use the existing heap-state mutex for release-validating registration
+  and collection-time root snapshots. It does not need another root-registry
+  mutex. Root clone and drop remain lock-free apart from ordinary `Arc`
+  ownership.
+- C4 introduces a direct managed root without deciding I2's public
+  `RuntimeValueRoot` representation. The erased registry entry should expose a
+  collector-private root-seed operation rather than hard-code registry
+  traversal to one `Gc` field. C4's only public seed is a direct `Gc<T>`;
+  Phase I2 may later prototype an inline traced root cell without replacing
+  the registry or changing C4's direct-root semantics.
+- C5 is mark-only. Revoking allocation-word leases, advancing the heap-wide
+  lease epoch, resetting class frontiers, and publishing free allocation state
+  belong to C6A immediately before reclaimed storage can become reusable.
+  Marking alone neither changes allocation bits nor invalidates retained
+  allocation cursors.
+- One alternating mark bitmap is adequate on successful collections, but a
+  panicking mark attempt cannot merely reuse a two-valued color. C5 must either
+  restore every mark bit to the last committed color before unwinding or adopt
+  a wider attempt generation. The provisional recommendation is the former:
+  panic is exceptional, a bitmap-only rollback is bounded and non-recursive,
+  and the ordinary successful path still touches only traced objects plus run
+  summaries.
+- C6 must refer to C3E's direct finalizer-to-entry handoff, not the superseded
+  C3D queued-drain protocol. Its previous four checkpoints were still too
+  broad, so they are divided below at free-list, lazy-sweep, finalizer,
+  quarantine, pressure, and terminal-teardown boundaries.
+- C7's `deferred_requests` metric is obsolete. Entry-elected collections,
+  coalesced request observations, pending hints, synchronous joins, and
+  collection latency describe the implemented coordinator.
+- C8 must distinguish build-time geometry experiments from per-heap tuning.
+  Arena-chunk and fixed-run sizes participate in pointer masking and layout
+  constants, so the initial collector compares them through builds or private
+  const-generic fixtures rather than runtime heap options. Thresholds and
+  reporting policy may remain per heap.
+
+The later integration plan remains intentionally provisional until Gate G1.
+In particular, C4 does not preempt I2's scalar-root representation decision,
+and C6D still owns the last-owner teardown decision. No production integration
+phase is pulled into the isolated collector plan by this review.
+
 ## Phase C4 — External Root Registry
 
-- Implement a shareable root cell registered once with its heap.
-- Cloning a root may use ordinary atomic ownership at this external boundary;
-  internal `Gc` copies remain free of that cost.
-- Publish the registry's weak cell before returning the first root. Collection
-  snapshots strong root-cell references under root-registry synchronization,
-  releases that synchronization, and retains the snapshot through marking.
-  Concurrent clone/drop then changes only the strong count of an already
-  registered cell: a successfully upgraded snapshot keeps it live for that
-  collection, while a failed upgrade proves no public root remained at that
-  instant.
-- Root destruction must not acquire an allocator lock or race into premature
-  reclamation.
-- Root creation from `Gc` is permitted only within a mutator region.
-- Safe root creation validates in release builds that the pointer is a live,
-  rootable allocation in the mutator's heap. In particular it rejects a
-  foreign-heap pointer and any identity in the completed dead/finalization set
-  before registering a root.
-- Root access enters or requires the correct heap. If the API accepts an
-  explicit mutator, a foreign-heap mutator is rejected in release builds before
-  the private unsafe `Gc` gateway is invoked; debug assertions only enrich that
-  boundary.
-- The registry may retain weak root slots and prune them during a pause; it
-  must not retain dead root payloads indefinitely.
-- Keep the ownership graph acyclic: a public root handle retains both its root
-  cell and heap, while the heap registry retains only weak root-cell entries.
+Execute C4 as three independently verified checkpoints:
 
-Verification forces root creation, cloning, cross-thread sharing, foreign-heap
-access rejection, final drop, and registry pruning around every root-snapshot
-boundary. A root cloned from an existing root during a pause remains safe; no
-new root can arise from an otherwise unreachable bare pointer while mutators
-are stopped.
+- **C4A — checked direct-root ownership and access.** Add the release-build
+  slot lookup needed to prove that a `Gc<T>` names an allocated slot with the
+  canonical metadata in the mutator's heap. Build the cloneable `Root<T>` and
+  its root cell on that proof. `Root<T>` retains the root cell and heap, while
+  `Root::get` requires the matching mutator and rejects a foreign mutator
+  before invoking the private unsafe `Gc` access gateway. Also provide a
+  scoped `Root::with` convenience which enters the retained heap and supplies
+  the mutator and borrowed value; this keeps a surviving root usable after the
+  original `Heap` facade is dropped without forcing bulk callers to enter once
+  per access. Root construction is permitted only from a live `Gc<T>` during a
+  mutator region, provisionally as `Mutator::root`. Keep the constructor
+  crate-private until C4B makes registry publication part of its return
+  invariant. C4's rootable state is simply `allocated`; C6 extends the same
+  lookup to reject completed dead and finalization-batch identities.
+- **C4B — weak registry publication and snapshots.** Register one weak erased
+  root-seed entry before returning the first root. Store the registry in
+  `HeapState`, so validation and publication share its existing mutex and no
+  second component lock is introduced. Collection upgrades and snapshots
+  strong root-cell references while holding heap state, prunes failed weak
+  entries there, then releases heap state and retains the strong snapshot for
+  the collection attempt. The direct-root seed contributes exactly one erased
+  `Gc`; the collector-private seed boundary deliberately leaves room for I2's
+  possible inline traced roots without exposing that API in C4.
+- **C4C — concurrent lifetime and boundary audit.** Integrate root snapshotting
+  into the exclusive collection path even though C4 does not trace the seeds
+  yet. Force clone, drop, snapshot, pruning, and heap-facade-drop orderings;
+  then update the safety ledger and run the complete collector verification
+  matrix. This checkpoint is a lifetime/concurrency audit, not a marking
+  implementation.
+
+Cloning a root may use ordinary atomic ownership at this external boundary;
+internal `Gc` copies remain free of that cost. Root destruction acquires no
+allocator or registry lock. The ownership graph stays acyclic: a root cell
+retains its heap, the heap registry retains only weak root-cell entries, and a
+collection snapshot temporarily retains strong cells without becoming a
+public root.
+
+Concurrent clone/drop changes only the strong count of an already registered
+cell. A successfully upgraded snapshot keeps the seed live for that
+collection; a failed upgrade proves no public root remained at that instant.
+Because creation requires mutator admission, no otherwise unreachable bare
+pointer can become a new root after exclusive collection begins. A clone made
+from an existing root during the pause is covered by the snapshot's strong
+cell.
+
+Verification forces root construction and access, representation mismatch,
+foreign-heap creation and access rejection, cloning, cross-thread sharing,
+final drop, heap-facade drop with a surviving root, and registry pruning on
+both sides of the snapshot boundary. Deterministic hooks prove publication
+precedes return, snapshot ownership survives the last public drop, and a
+failed weak upgrade cannot race a new root into existence.
 
 ## Phase C5 — Exact Full Marking
 
+Execute C5 as four independently verified checkpoints:
+
+- **C5A — mark bitmap and checked-slot substrate.** Add collector-only mark
+  color operations, per-run live summaries, all-build checked owner/slot and
+  allocation lookup, and a non-recursive attempt guard. Latch the one-bit
+  alternating-color policy by restoring all mark words to the last committed
+  color before propagating a tracing panic. Newly initialized or later reused
+  slots must carry the committed color so they begin unmarked for the next
+  opposite-color attempt.
+- **C5B — exact root-to-edge traversal.** Snapshot C4 roots, enumerate runs
+  from heap topology rather than TLS, and trace with an explicit mark stack
+  through canonical metadata and the existing edge visitor. Duplicate visits
+  terminate at the slot mark. This checkpoint covers cycles, diamonds, deep
+  chains, wide graphs, and shared logical collection spines without changing
+  allocation, lease, frontier, or pressure state.
+- **C5C — invalid-edge and panic recovery.** Make every reported edge pass the
+  all-build same-heap, exact-slot, allocated, and canonical-metadata lookup
+  before dereference. Force visitor, worklist, and invalid-edge panics at
+  several traversal depths; restore the committed mark color, coordinator
+  phase, and request hint, then prove ordinary mutation and a clean retry.
+- **C5D — marking report and audit.** Commit the new mark color only after the
+  complete worklist succeeds, attach root/traced/live-run statistics to the
+  collection report, compare randomized graphs with a simple reachability
+  oracle, run million-edge non-recursive tests, and update the safety and
+  verification ledgers. C5 still reclaims nothing.
+
 - Stop all mutators and snapshot/visit external roots.
 - Enumerate runs directly from the heap, never by discovering them through
-  thread caches. For the initial full collector, atomically rebuild every
-  run's lease bitmap during the exclusive phase: clear bits for allocation
-  words with free capacity and set bits for completely full allocation words.
-  Reset each class's stable run frontier, then advance one heap-wide
-  `allocation_lease_epoch`. Continue C3E's provisional acknowledgement of a
-  completed collection until C6 sweep can atomically replace publication
-  history with the assigned-run occupancy policy.
-  On its next outer entry, each heap-specific thread cache compares that one
-  epoch and replaces its entire class-to-word-cursor map on mismatch; neither
-  the collector nor the mutator validates cursors individually. Post-sweep
-  allocation claims fresh words from the rebuilt run state. Retaining selected
-  hot leases across a collection is deferred profiling work.
-- Rebuild each lease word with a Release store after the collector has
-  published the corresponding post-mark allocation/free state. The next
-  winning claimant's Acquire load/CAS on that same lease word observes the
-  rebuilt word state. Add this distinct post-collection synchronization edge
-  to the exact unsafe inventory and `SAFETY.md`; do not describe it as initial
-  run-topology publication.
+  thread caches. Mark-only C5 leaves allocation bits, lease bitmaps, stable
+  class frontiers, allocation-lease epochs, and provisional C3E pressure
+  acknowledgement unchanged. C6A revokes leases and advances the epoch as
+  part of the first transition which can actually reuse reclaimed storage.
 - Mark through each allocation class's edge visitor; do not derive outgoing
   edges from fixed byte offsets. Immediate/non-edge fields are invisible to the
   collector.
 - Mark by run slot in its side bitmap; duplicate visits terminate immediately.
-  Use alternating bitmap color or another epoch scheme which does not require
-  touching every slot merely to clear an old mark.
+  Use the one-bit alternating color established in C5A. Successful attempts do
+  not clear old marks; exceptional rollback restores bitmap words without
+  touching payloads.
 - Use an explicit mark stack or queue rather than recursive Rust calls.
 - Trace cycles, diamonds, deep chains, wide graphs, and shared logical
   collection spines.
@@ -1999,9 +2099,11 @@ are stopped.
   without enumerating its payloads. Marking may touch chunk/run metadata, but its
   graph traversal remains proportional to reachable managed edges.
 - Wrap the attempt in an unwind guard. If tracing or mark-work allocation
-  panics, discard the worklist, leave every allocation intact, restore a usable
-  non-collecting phase, and let the panic continue to its caller. A retry uses
-  a fresh epoch, so marks from the abandoned attempt are irrelevant.
+  panics, discard the worklist, restore every mark word to the last committed
+  color, leave every allocation intact, restore a usable non-collecting phase,
+  and let the panic continue to its caller. A retry then uses the opposite of
+  that same committed color; no partial bit from the abandoned attempt can be
+  mistaken for current reachability.
 - Apply that same unwind path to an invalid-edge panic. Marking performs no
   reclamation or destruction, so detection must precede dereference and sweep;
   after unwind both heaps remain intact and ordinary mutation may resume. A
@@ -2023,27 +2125,91 @@ tests. A safe generic fixture stores a live pointer from heap B in an object in
 heap A; collection of A must panic through a checked lookup before dereferencing
 the edge or reclaiming anything in either heap. Catching that panic must restore
 ordinary admission, while collecting again with the edge still reachable must
-panic again. A forced post-reset fixture publishes rebuilt allocation and free
-state through a lease-word Release reset, then proves the first successful
-Acquire claimant observes that exact state before allocating.
+panic again. Lease-word Release/Acquire reset verification moves to C6A, where
+the collector first publishes reclaimed allocation state.
 
 ## Phase C6 — Sweep, Mutator Finalization, Retry, and Quarantine
 
-Execute C6 as four checkpoints:
+Execute C6 as the following smaller checkpoints:
 
-- **C6A — no-drop sweep.** Derive dead sets from allocation/mark bitmaps,
-  retire wholly dead no-drop runs into a heap-wide free list, publish partially
-  live lazy-sweep state, replace publication pressure with assigned-run
-  occupancy, and prove storage is not reused before metadata retirement.
-- **C6B — finalizer execution.** Detach dead drop-type slots into the non-
-  rootable finalization batch, perform the C3D mutator handoff, run ordinary
-  Rust destruction outside collector locks, and enforce non-resurrection.
-- **C6C — panic and activity.** Add sparse quarantine, deterministic destructor
-  panic recovery, safe draining policy, finalizer activity reporting, and
-  post-collection pressure-baseline publication.
-- **C6D — terminal teardown and audit.** Resolve the last-owner drain protocol
-  or explicitly restricted fallback, exercise runtime/heap drop, and perform
-  the focused unsafe/finalization audit which closes Gate G1.
+- **C6A.1 — dead-set classification without reuse.** From one successful C5
+  mark, classify allocated slots and runs as live, no-drop dead, or
+  drop-required dead. Publish no free slot or run yet. Prove that a panic or
+  classification failure leaves allocation, class, frontier, lease, and
+  pressure state unchanged.
+- **C6A.2 — wholly dead no-drop runs and the free-run list.** Retire a wholly
+  dead no-drop run from its old class frontier and run pool, clear its
+  allocation state, reinitialize its empty header, and publish it to one
+  heap-wide free list only after no stale class record can select it. Prefer
+  these recycled runs over virgin arena capacity and verify cross-class reuse.
+- **C6A.3 — partial no-drop lazy sweep and lease revocation.** Publish
+  partially live no-drop runs as unswept, then let the first post-collection
+  claimant of an allocation word clear that word's dead no-drop slots before
+  allocating. Under exclusive collection, rebuild lease words with Release
+  stores, reset each class frontier to current runs, and only then advance the
+  one heap-wide allocation-lease epoch. The next outer cache entry performs
+  one epoch comparison and discards all stale cursors; the first Acquire
+  claimant observes the rebuilt allocation/free state.
+- **C6A.4 — assigned-run pressure.** Replace provisional run-publication
+  history with assigned-run occupancy, account for virgin and recycled
+  activation exactly once, and publish the first survivor-based high-water
+  target. This checkpoint does not yet account for allocations made by
+  finalizers; C6C.2 publishes the final post-finalization baseline.
+- **C6B.1 — finalization batch and non-rootability.** Detach drop-required dead
+  slots into a collector-owned batch while allocation bits still protect their
+  storage, and extend C4 root validation so every batch identity is
+  non-rootable. If the batch is empty, either retain the already-proven C3E
+  no-op finalizer handoff or take the direct no-finalizer completion path after
+  resolving the decision below.
+- **C6B.2 — C3E finalizer handoff and destruction.** Use C3E's no-gap
+  `Exclusive`-to-`Finalizing` handoff, install the collector's current mutator,
+  reopen ordinary admission, and run erased Rust destructors exactly once
+  outside collector locks. Successful destruction clears the slot allocation
+  bit; fresh allocations and effects remain ordinary later-collection state.
+- **C6B.3 — non-resurrection and successful completion.** Reject roots to any
+  remaining batch identity, permit quining only through fresh allocations,
+  drain the successful batch, and prove entry-elected versus synchronous
+  completion transfers or drops the finalizer admission exactly as C3E
+  specifies.
+- **C6C.1 — panic, draining, and sparse quarantine.** Quarantine a panicking
+  slot without invoking its destructor twice, safely drain or classify every
+  remaining batch item, retain the first panic for propagation, and restore a
+  usable ordinary heap phase.
+- **C6C.2 — activity, reports, and final pressure publication.** Expose queued
+  and running finalizers as heap activity, extend collection reports with
+  reclaimed/finalized/quarantined state, incorporate runs activated during
+  finalization, and atomically publish the post-finalization occupancy and
+  next high-water target.
+- **C6D.1 — terminal-teardown decision and forced fixtures.** Choose and record
+  either the preferred owner-lease drain or the restricted non-reentrant
+  fallback before changing `HeapInner::drop`. Force last-facade, last-root,
+  mutator-capable destructor, panic, and root-attempt orderings against the
+  selected ownership graph.
+- **C6D.2 — terminal teardown.** Implement only the selected protocol and
+  prove each remaining allocation is destroyed or deliberately quarantined
+  exactly once without reconstructing a dropped heap owner.
+- **C6D.3 — Gate G1 audit.** Reconcile the unsafe inventory, root and
+  finalization proofs, Miri, Loom, sanitizers, deterministic panic schedules,
+  and terminal heap release. This focused audit closes Gate G1; C7 and C8 add
+  stress, metrics, and tuning while integration API work may begin.
+
+Resolve these C6 decisions at the named checkpoint rather than before C4:
+
+1. **Empty finalization batch (C6B.1).** The current C3E pipeline always makes
+   the no-gap finalizer handoff, even when its synthetic finalizer does no
+   work. The recommended production path skips `Finalizing` when the batch is
+   empty and atomically completes `Exclusive` either into the collecting
+   entrant's one ordinary admission or into idle `Ordinary` for
+   `collect_full`. Keeping the no-op handoff is semantically valid and simpler,
+   so forced schedules and a small cost comparison should precede removal.
+2. **Survivor growth ratio (C6A.4).** Select the initial internal rational only
+   after assigned-run occupancy exists. One half is the provisional comparison
+   point, not a contract; threshold correctness tests should accept an injected
+   private ratio rather than freeze the measured default into semantics.
+3. **Last-owner teardown (C6D.1).** This remains the only blocking ownership
+   decision in the isolated collector plan. Do not infer it from ordinary
+   collection or implement mutator-capable terminal `Drop` before its forced
+   ownership fixtures exist.
 
 Each checkpoint must leave the heap in a usable documented phase after every
 recoverable panic injected by its own tests.
@@ -2091,9 +2257,9 @@ recoverable panic injected by its own tests.
   term preserves C3B's initial 112-run trigger for an empty baseline; the
   proportional term gives high-survivor heaps increasing headroom instead of
   repeating GC after one more run. Keep the ratio as an internal rational
-  tuning constant whose initial value is selected before C6 implementation and
-  measured in C8; neither the ratio nor this run-level heuristic is public Glam
-  semantics.
+  tuning constant whose initial value is selected during C6A.4 before the
+  first pressure baseline is published and measured in C8; neither the ratio
+  nor this run-level heuristic is public Glam semantics.
 - Trigger on the first run activation which reaches or crosses that absolute
   assigned-run mark. The target may exceed current committed chunk capacity;
   allocate and retain ordinary chunks as required rather than forcing another
@@ -2121,6 +2287,12 @@ recoverable panic injected by its own tests.
     when an allocator next acquires it; and
   - a drop-type run computes its dead slots from `allocated & !marked` and
     queues only those slots for immediate destruction.
+- Reclamation is the point at which C5's retained allocation leases become
+  stale. Rebuild every live assigned run's lease bitmap, remove retired runs
+  from their old class pools, republish class frontiers, and advance the
+  allocation-lease epoch as one exclusive transition before making any
+  reclaimed slot available. This is a post-sweep synchronization edge, not
+  initial run publication and not part of mark-only C5.
 - Finalizer registration is implicit in homogeneous run metadata. The initial
   design has no per-slot finalizer bitmap and no global finalizer registry.
   Keep allocation bits set, detach the computed dead slots into a
@@ -2224,38 +2396,48 @@ Gate G1 passes after C6D plus its focused unsafe-code audit.
 
 ## Phase C7 — Shared-Pointer and Worker-Shaped Stress
 
-- Exercise roots handed repeatedly between worker threads.
-- Exercise many readers of immutable objects under independent mutator
-  regions.
-- Exercise one thread requesting collection while other threads allocate,
-  block on semantic locks, or unwind.
-- Confirm that collection never waits on a pointer-local lock.
-- Add metrics for mutator entries, recursive entries, pauses, arena chunks,
-  assigned typed runs, recycled and virgin run activations, free runs,
-  class-cache hits/misses, traced objects, reclaimed runs/slots, lazy sweeps,
-  deferred requests, fixed-run utilization, and partial-run fragmentation.
-  Track cold `TypeId`/metadata discovery separately from retained-class
-  allocations so the intended hot-path boundary can be profiled.
+Execute C7 as three checkpoints:
+
+- **C7A — shared-root and immutable-reader stress.** Hand roots repeatedly
+  between workers, clone/drop them around forced collections, and run many
+  readers of immutable objects under independent mutator regions.
+- **C7B — allocation and coordinator stress.** Force one thread to request or
+  synchronously join collection while other threads allocate, block on
+  semantic locks outside mutator regions, enter another heap, or unwind. Prove
+  that collection waits only for regional mutator obligations and never for a
+  pointer-local lock. Use deterministic barriers for each discovered ordering;
+  repeated randomized stress remains supplementary.
+- **C7C — operational metrics.** Add metrics for mutator and recursive entries,
+  entry-elected collections, pending and coalesced request observations,
+  synchronous joins, pause/finalization durations, arena chunks, assigned
+  typed runs, recycled and virgin activations, free runs, class-cache
+  hits/misses, traced objects, reclaimed runs/slots, lazy sweeps, fixed-run
+  utilization, and partial-run fragmentation. Track cold `TypeId`/metadata
+  discovery separately from retained-class allocation.
 
 This phase tests collector mechanisms only. It does not imitate Glam scheduler
 semantics beyond the shape needed to validate shared values.
 
 ## Phase C8 — Tuning Surface and Final Collector Audit
 
-- Expose internal tuning for arena-chunk size, the single fixed run size,
-  worker class-cache capacity, and full-collection thresholds without exposing
-  collector jargon as a stable Glam public API. Comparing candidate fixed run
-  sizes may require separate heap construction or builds; C8 does not
-  introduce variable-size runs. Report bitmap bytes and internal fragmentation
-  by metadata-requested slot stride so the value layer can choose its own type
-  layouts and size policy from evidence.
-- Make an explicit collection report suitable for tests and future runtime
-  metrics.
-- Audit every unsafe block against `SAFETY.md`.
-- Run Miri, Loom, sanitizers, randomized graph tests, stress tests, and the full
-  repository checks.
-- Record performance and pause measurements without converting unstable
-  measurements into brittle unit tests.
+Execute C8 as three checkpoints:
+
+- **C8A — tuning and reporting boundary.** Finalize the explicit collection
+  report for tests and future runtime metrics. Keep collection thresholds and
+  similar operational policy as private per-heap tuning. Treat arena-chunk
+  size, the single fixed run size, and the direct-mapped worker class-cache
+  width as build-time/private-fixture parameters because they participate in
+  layout, pointer masking, or compiled TLS shape; do not advertise them as
+  runtime heap options. C8 does not introduce variable-size runs.
+- **C8B — measurement.** Compare selected geometry builds or private fixtures,
+  report bitmap bytes and internal fragmentation by metadata-requested slot
+  stride, and record allocation, tracing, pause, finalization, and reclamation
+  measurements. These observations guide the value layer's later type-layout
+  policy and do not become brittle unit-test thresholds.
+- **C8C — final collector audit.** Audit every unsafe block against
+  `SAFETY.md`; run Miri, Loom, sanitizers, randomized graph tests, worker stress,
+  and all repository checks; reconcile the implementation plan, roadmap,
+  verification ledger, and public crate documentation.
 
 The subcrate is ready for production enablement only when the integration plan
 also reaches Gate G2.

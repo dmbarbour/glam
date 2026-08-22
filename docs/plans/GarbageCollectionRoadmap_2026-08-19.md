@@ -2,8 +2,8 @@
 
 Status: in progress; collector Phases C0 through C3E, the C2C.6 verification
 follow-up, and integration Phase I0 are complete. Gate G0 is established, and
-the mandatory post-C1 and post-C2C reviews are complete. Collector Phase C4
-is next.
+the mandatory post-C1, post-C2C, and post-C3E downstream reviews are complete.
+Collector Phase C4A is next.
 
 This roadmap keeps two large transitions aligned:
 
@@ -326,8 +326,10 @@ The following must remain sequential:
 
 These choices are intentionally unresolved rather than accidental drift:
 
-- I2 chooses whether a public root points directly at a managed value or at a
-  registered root cell containing an inline value;
+- C4 supplies a direct managed root plus an erased collector-private root-seed
+  registry boundary. I2 still chooses whether public `Value` uses that direct
+  root or an inline traced root cell; C4 does not expose or commit to the inline
+  representation merely to keep the registry extensible;
 - C6 selects a last-owner terminal teardown protocol which does not manufacture
   an already-dropped heap owner and does not run mutator-capable destructors
   without their promised context; and

@@ -75,7 +75,9 @@ api::Value
 Whether the external root points directly at a managed `Value` or at a
 registered root cell containing an inline `Value` is decided during Phase I2.
 The latter avoids allocating every number and atom merely because it crosses
-the public API.
+the public API. Collector Phase C4 provides the direct-root API and an erased
+collector-private root-seed registry boundary, but deliberately does not expose
+the inline representation or decide this integration choice.
 
 This provisional shape is not the compact tagged-word transition. That work is
 isolated in
@@ -179,8 +181,9 @@ and tests must remain unchanged.
 
 ## Phase I2 — External Root and Public `Value` Prototype
 
-- Prototype both root representations against scalars and one recursive test
-  node.
+- Prototype both public-value representations against scalars and one
+  recursive test node: C4's direct managed root, and an inline traced root cell
+  implemented behind C4's collector-private root-seed registry boundary.
 - Select the representation which keeps public scalar construction cheap while
   ensuring one public `Value` clone cannot lose liveness.
 - Specify and prototype how `RuntimeValueRoot` will obtain runtime provenance
