@@ -137,12 +137,12 @@ permit dereference outside a region.
    cursors individually. Cursors carry no separate active/parked state: thread-
    local recursive depth governs use, and exclusive collector admission proves
    every cache is quiescent.
-   Pending collection uses writer preference for ordinary entrants, while a
-   thread already active in another heap may make a dependent entry before the
-   target collector becomes exclusive. This prevents opposite cross-heap
-   nesting orders from deadlocking on queued writers. An exclusive collector
-   never enters another heap or invokes callbacks; cross-heap entry waits until
-   that exclusive phase ends.
+   Once collection is committed, new ordinary entrants wait, while a thread
+   already active in another heap may make a dependent entry before the target
+   collector becomes exclusive. This prevents opposite cross-heap nesting
+   orders from deadlocking on pending collections. An exclusive collector never
+   enters another heap or invokes callbacks; cross-heap entry waits until that
+   exclusive phase ends.
 4. **No hidden stack scan.** Roots are explicit. Local unrooted pointers are
    safe because their entire lifetime lies within a mutator region.
 5. **No partially traced collection.** Production reclamation remains disabled
@@ -175,10 +175,11 @@ permit dereference outside a region.
    Uncommitted collection pressure arising before finalization completes is
    coalesced as a possible follow-up request on the active collector
    coordinator; it is not retroactively satisfied by the already completed
-   mark. An explicit request or heuristic commitment may queue the next writer
-   while finalization is still active. The collector-held mutator delays its
-   acquisition, while writer preference intentionally makes new mutators wait:
-   stop-the-world collection has become the runtime's next priority.
+   mark. An explicit request or heuristic commitment may commit the next
+   collection while finalization is still active. The collector-held mutator
+   delays exclusive acquisition, while the commitment intentionally makes new
+   ordinary mutators wait: stop-the-world collection has become the runtime's
+   next priority.
 8. **Stable addresses are an implementation phase, not a permanent API
    promise.** The initial full collector does not move allocations. Trace
    implementations enumerate outgoing edges through a visitor rather than

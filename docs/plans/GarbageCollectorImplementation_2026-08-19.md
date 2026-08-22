@@ -1487,17 +1487,17 @@ by C2C:
   model for the coordinator state. Record that completed mutator work becomes
   visible to the exclusive collector through the mutex-protected admission
   transition, not through an unrelated lease-word load.
-- **C3B — single-heap STW.** Add collection request/coalescing, writer
-  commitment, collector election, active-count drain, exclusive phase entry,
-  release back to ordinary admission for one heap, and replace C2C.5b's
-  full-chunk provisional pressure threshold with the initial serviced-
-  collection threshold.
+- **C3B — single-heap STW.** Add collection request/coalescing, exclusive-
+  collection commitment, collector election, active-count drain, exclusive
+  phase entry, release back to ordinary admission for one heap, and replace
+  C2C.5b's full-chunk provisional pressure threshold with the initial
+  serviced-collection threshold.
 - **C3C — cross-heap admission.** Add several simultaneously active
   heap-qualified TLS entries and the dependent-admission exception for queued
-  writers. Force A-then-B/B-then-A schedules and the already-exclusive target
-  case.
+  collections. Force A-then-B/B-then-A schedules and the already-exclusive
+  target case.
 - **C3D — finalizer handoff and recovery.** Add the exclusive-to-finalizer-
-  mutator transition, follow-up pressure, writer preference around
+  mutator transition, follow-up pressure, committed-collection priority around
   finalization, panic unwinding, waiter teardown, and the complete coordination
   audit required by later sweep/finalization phases.
 
@@ -1518,17 +1518,19 @@ forced-order tests pass independently.
   collection without treating any of those transitions as a typed-run
   publication.
 
+#### Coordination and Admission Contract
+
 - Implement outer `enter`/`exit` admission as an explicit state machine under
   the existing heap-state `Mutex`, with one sibling `Condvar`. Store the phase,
   active-mutator count, collection request/commit state, and later collector
   identity or epoch under that mutex. Waiters always loop and recheck their
   complete predicate after a wake.
-- An admitted mutator is a logical reader, not an `RwLockReadGuard`: admission
-  increments the active count and then releases the mutex before user or
-  allocator work begins. Parallel admitted mutators therefore run without
-  coordinator serialization. Outermost exit reacquires the mutex only long
-  enough to retire its obligation and notify waiters; recursive same-heap
-  entry does not add another active obligation.
+- Represent an admitted outer mutator by one coordinator obligation. Admission
+  increments the active count and releases the mutex before user or allocator
+  work begins, so parallel mutators do not retain a lock or serialize through
+  the coordinator. Outermost exit reacquires the mutex only long enough to
+  retire that obligation and notify waiters; recursive same-heap entry does
+  not add another active obligation.
 - Make `Heap::request_collection` an idempotent nonblocking transition into the
   coordinator's coalesced request state. Calling it from an admitted mutator
   never attempts collection recursively and never waits for that same region
@@ -1593,16 +1595,16 @@ forced-order tests pass independently.
   every active mutator of that heap to exit. There is one narrow dependent-
   admission exception: a thread already holding another heap's mutator may
   enter a target heap whose collector is requested or queued but has not yet
-  acquired exclusive `Collecting` state. Under the target phase lock, either
-  the dependent entry increments its active count or it observes that the
+  acquired exclusive `Collecting` state. Under the target heap-state mutex,
+  the dependent entry either increments its active count or observes that the
   collector is already exclusive and waits; there is no gap between those
   outcomes.
-- Encode that distinction in explicit phase/admission state. A bare
-  `RwLock` is not the admission implementation: standard reader/writer
-  priority is not a portable policy boundary, and an `RwLock` cannot
-  distinguish an ordinary new reader from a dependent cross-heap entrant which
-  must bypass a merely queued writer. Do not layer a redundant `RwLock` over
-  the mutex/condition-variable coordinator.
+- Encode ordinary and dependent admission as explicit coordinator inputs. A
+  committed collection denies an ordinary outer entry, permits the narrow
+  dependent entry while the collector is only queued, and denies both once
+  `Collecting` is authoritative. The heap-state mutex makes that classification
+  and transition atomic; the condition variable only supplies wakeups and
+  every waiter rechecks the full predicate.
 - Give the collector a privileged collector-to-mutator handoff. After marking
   fixes the dead set, and before releasing exclusive mutator admission, the
   collector acquires one ordinary mutator lease for its own thread. With an
@@ -1624,14 +1626,13 @@ forced-order tests pass independently.
   collector-held mutator prevents acquisition until finalization ends. The
   coordinator serializes collector ownership; no second trace or sweep starts
   concurrently.
-- Once a collection is committed, queuing for exclusive admission may
-  deliberately use writer preference. New ordinary mutators then wait behind
-  the collection because the heuristic has selected stop-the-world work as the
-  runtime's next priority. A dependent cross-heap entry from an already active
-  mutator bypasses only a pending writer, not an active collector. This bounded
-  exception prevents two threads holding A then B and B then A from deadlocking
-  merely because collectors queue on both heaps. Tune commitment rather than
-  weakening ordinary writer priority.
+- Once a collection is committed, it has priority over new ordinary mutator
+  admission because the heuristic has selected stop-the-world work as the
+  runtime's next operation. A dependent cross-heap entry from an already active
+  mutator bypasses only that pending commitment, not an active collector. This
+  bounded exception prevents two threads holding A then B and B then A from
+  deadlocking merely because collections are pending on both heaps. Tune the
+  commitment heuristic rather than weakening this admission priority.
 - Consequently, an already-admitted mutator must be able to reach its outer
   exit without synchronously depending on a new ordinary outer mutator
   admission. Recursive same-heap and dependent cross-heap entry remain
@@ -1661,9 +1662,9 @@ forced-order tests pass independently.
   from the middle of a mutator region.
 - Allocation pressure during `Finalizing` records follow-up pressure. Before
   commitment it does not block finalizer allocation. If the heuristic commits,
-  its writer may block new mutators immediately, but cannot begin collection
-  before the finalization queue drains and the held finalizer mutator is
-  released.
+  the follow-up collection may block new ordinary mutators immediately, but
+  cannot become exclusive before the finalization queue drains and the held
+  finalizer mutator is released.
 - Elect exactly one collector; other requesters wait for or observe its epoch.
 - Specify panic unwinding from a mutator closure and ensure outer exit still
   publishes quiescence.
@@ -1676,7 +1677,7 @@ Deterministic tests must force:
 4. last mutator exit racing a second requester;
 5. collector-to-mutator handoff racing coalesced collection pressure;
 6. a finalizer waiting for a worker mutator before that pressure is committed;
-7. commitment of the next collection blocking a new mutator behind its writer;
+7. commitment of the next collection blocking a new ordinary mutator;
 8. a panicking mutator;
 9. two heaps nested on one thread with independent recursive depths and caches;
 10. two threads entering A then B and B then A while collectors are pending on
@@ -1957,11 +1958,10 @@ recoverable panic injected by its own tests.
   finalization set has reached terminal object states.
 - On completion, publish the post-finalization phase and any remaining
   coalesced collection pressure before releasing the collector's mutator
-  lease. A writer for an already-committed collection may already be waiting
-  and intentionally preventing new mutator admission; it acquires exclusivity
-  after the finalizer and other active mutators exit. Otherwise the heuristic
-  may reevaluate the pressure at this boundary. Active mutators follow the
-  normal safepoint protocol.
+  lease. An already-committed collection may already be preventing new ordinary
+  mutator admission; it acquires exclusivity after the finalizer and other
+  active mutators exit. Otherwise the heuristic may reevaluate the pressure at
+  this boundary. Active mutators follow the normal safepoint protocol.
 
 Verification uses drop counters, destructors containing ordinary `Arc`,
 `Mutex`, `OnceLock`, and opaque host payloads, scoped current-mutator access,
@@ -1973,8 +1973,9 @@ quine and a diagnostic; the original identity is reclaimed while the published
 value survives the next collection. Another schedules work that enters the
 same heap from a worker. Uncommitted pressure raised during that finalizer
 remains coalesced. A separate deterministic test commits the next collection
-during finalization and proves that writer priority blocks a later mutator,
-without beginning its trace until the finalizer exits. A panicking opaque
+during finalization and proves that committed-collection priority blocks a
+later ordinary mutator without beginning its trace until the finalizer exits.
+A panicking opaque
 destructor quarantines only its slot; allocations and effects it published
 before panicking remain valid, and after the caller catches the panic another
 allocation and full collection must succeed.
