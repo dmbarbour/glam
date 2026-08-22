@@ -1,7 +1,7 @@
 # Glam GC Subcrate Implementation Plan — 2026-08-19
 
-Status: in progress; Phases C0, C1, and C2A are complete. The mandatory
-post-C1 review is complete, and C2B is next.
+Status: in progress; Phases C0, C1, C2A, and C2B are complete. The mandatory
+post-C1 review is complete, and C2C is next.
 
 This plan implements an exact, non-moving, runtime-local tracing collector
 without depending on Glam value semantics. The governing requirements and
@@ -23,7 +23,9 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C2A.1 | completed | pure run/slot/bitmap geometry and provisional run size |
 | C2A.2 | completed | aligned arena chunks and checked owner-address recovery |
 | C2A.3 | completed | run headers, side bitmaps, and topology verification |
-| C2B | pending | type metadata and per-heap allocation-class discovery |
+| C2B.1 | completed | canonical process-wide object metadata and erased dispatch |
+| C2B.2 | completed | heap-local allocation-class discovery and typed handles |
+| C2B.3 | completed | typed-run publication, enumeration, and metadata resolution |
 | C2C | pending | worker-local bitmap-range allocation and reuse |
 | C3A | pending | ordinary admission and same-heap recursion integration |
 | C3B | pending | collector election and single-heap STW quiescence |
@@ -524,6 +526,26 @@ C2A.3 completed on 2026-08-21:
 
 ## Phase C2B — Type Metadata and Per-Heap Allocation-Class Discovery
 
+Execute C2B as three independently verified checkpoints:
+
+- **C2B.1 — canonical object metadata.** Add the process-wide `TypeId`
+  discovery registry, canonical `&'static ObjectMetadata` identity, Rust and
+  requested slot layout, and monomorphized erased trace/drop dispatch. Replace
+  C1's debug prototype records with canonical metadata pointers, but do not
+  create heap-local classes or publish runs.
+- **C2B.2 — heap-local allocation classes.** Derive geometry before
+  publication, add the metadata-pointer-to-dense-class table, and return a
+  reusable typed `AllocationClass<T>` carrying heap provenance. Concurrent
+  first discovery must publish one class per heap and metadata identity.
+- **C2B.3 — typed-run integration.** Publish initialized runs into their
+  class pools, enumerate them from heap-owned state, and resolve checked slot
+  addresses through the run's dense class ID to canonical trace/drop/layout
+  metadata. C2C still owns payload allocation and thread-local leases.
+
+Run focused tests, the exact unsafe inventory, and Miri after each checkpoint.
+Failure-injection tests must establish that metadata, class, and run
+publication each remain all-or-nothing before the next layer is added.
+
 - Define immutable object metadata containing layout, visitor dispatch, and an
   optional erased `Drop` operation. Intern exactly one descriptor per Rust type
   in a process-wide registry keyed on `TypeId`, and use the winning
@@ -534,9 +556,12 @@ C2A.3 completed on 2026-08-21:
   in `ObjectMetadata`. The request does not change Rust alignment or select a
   run size. Because metadata remains canonical per `TypeId`, one Rust type has
   one requested slot-size policy; callers needing another policy use a distinct
-  wrapper type. The heap-local allocation class derives its stride and slot
-  geometry for the collector's one fixed run size. An invalid or unsupported
-  result fails class creation before a class ID or run is published.
+  wrapper type. For the bootstrap collector this policy is an associated
+  constant on the unsafe managed-representation contract, so it is fixed by
+  the same implementation which proves the type's trace layout. The heap-local
+  allocation class derives its stride and slot geometry for the collector's
+  one fixed run size. An invalid or unsupported result fails class creation
+  before a class ID or run is published.
 - Give each typed run one metadata/allocation-class identity in its header;
   ordinary slots contain payload only, with no GC header, metadata pointer,
   mark byte, or finalizer byte.
@@ -587,6 +612,74 @@ Verification:
 - no-drop and drop types receive the correct metadata without per-slot policy;
   and
 - failed or panicking metadata/class construction publishes no partial entry.
+
+### C2B.1 Completion
+
+C2B.1 completed on 2026-08-21:
+
+- `ObjectMetadata` now records canonical Rust layout, an optional larger slot
+  request, monomorphized erased trace dispatch, and optional erased drop
+  dispatch. `Trace::REQUESTED_SLOT_SIZE` binds the allocation policy to the
+  same Rust representation contract; a wrapper type is required for a second
+  policy.
+- A process-wide registry uses `TypeId` only for cold discovery. Candidate
+  construction occurs outside its mutex; one winning `&'static
+  ObjectMetadata` is deliberately retained, concurrent losers are dropped,
+  and a construction panic neither publishes an entry nor poisons later
+  discovery.
+- C1's debug prototype allocation records now compare canonical metadata
+  addresses rather than repeating `TypeId` and type-name fields. Focused tests
+  exercise exact erased trace and one-time drop dispatch, layout/drop modes,
+  repeated and concurrent identity, and recovery after an injected candidate
+  panic.
+- The collector check, exact unsafe inventory, and Miri pass with 34 unit
+  tests. No heap-local class, run publication, payload allocation, or new
+  reclamation behavior is present; C2B.2 is next.
+
+### C2B.2 Completion
+
+C2B.2 completed on 2026-08-21:
+
+- `Heap::allocation_class<T>()` derives fixed-run geometry from canonical
+  metadata before acquiring heap state, then discovers one dense class per
+  `(heap, metadata address)`. Unsupported zero-sized, undersized-request, and
+  non-fitting layouts return `UnsupportedLayout` without consuming an ID.
+- One heap-state mutex now owns the arena, metadata-address index, and dense
+  class table. Immutable candidates are constructed outside that mutex;
+  vector and map capacity is reserved before the winning entry and index are
+  published together.
+- The reusable typed `AllocationClass<T>` retains its heap provenance,
+  canonical metadata address, and dense ID. Its strong heap reference is not a
+  cycle because heap state stores only dense entries, never handles; it is not
+  a managed root and retains no payload allocation.
+- Focused tests prove repeated and concurrent same-heap discovery, shared
+  metadata but distinct provenance across heaps, no partial class after
+  invalid geometry or an injected construction panic, and `Send + Sync` typed
+  handles. The collector check, exact unsafe inventory, and Miri pass with 38
+  unit tests. C2B.3 is next.
+
+### C2B.3 Completion
+
+C2B.3 completed on 2026-08-21:
+
+- Every class entry now owns an authoritative `RunLocation` pool. A run header
+  stores only its heap-local dense class ID and geometry; checked resolution
+  validates exact slot position, class geometry, and pool membership before
+  returning the class's canonical metadata.
+- Run publication reuses an empty heap-owned run or initializes a candidate
+  chunk before publishing that chunk. The class pool reserves capacity first,
+  so successful arena publication is followed by an infallible location write
+  under the same heap-state mutex. Failure adds neither a typed run nor a pool
+  entry.
+- Focused tests cover trace/drop/layout metadata resolution from headers,
+  complete heap enumeration across multiple classes and runs, concurrent
+  publication into one class pool, and release-semantic rejection of a
+  foreign class before state changes. A direct invalid-publication test proves
+  that arena failure adds neither a chunk nor a typed run.
+- The collector check and exact unsafe inventory pass with 43 unit tests. Miri
+  covers the same run/header paths. No slot is allocated or initialized; C2C
+  remains solely responsible for replacing the prototype `Box::leak` path and
+  introducing worker-local bitmap-range allocation.
 
 ## Phase C2C — Worker-Local Bitmap-Range Allocation and Reuse
 

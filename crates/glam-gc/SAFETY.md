@@ -13,8 +13,12 @@ freezes this boundary for the initial non-moving collector. C2A.1 adds pure
 fixed-run geometry, and C2A.2 adds heap-owned aligned arena chunks plus checked
 numeric owner recovery. C2A.3 initializes integer-only run headers and
 allocation, lease, and mark side metadata, but still adds no payload
-allocation. There is no root registry, collection, marking, reclamation,
-finalization, callback, or collector coordination.
+allocation. C2B.1 adds canonical process-wide object metadata and erased
+trace/drop dispatch, but no heap-local allocation class or typed run. There is
+C2B.2 adds heap-local dense allocation classes and typed class handles. C2B.3
+publishes typed runs, authoritative class pools, and checked metadata
+resolution, but no payload allocation. There is no root registry, collection,
+marking, reclamation, finalization, callback, or collector coordination.
 
 The crate denies unsafe code by default. `src/lib.rs` gives the reviewed
 `pointer`, `mutator`, `trace`, `mutation`, and unit-test modules named lint
@@ -54,9 +58,9 @@ function, implementation, and block are checked into
 - Failed geometry, missing-run, invalid-header, and repeated-initialization
   paths publish no new class identity. Initialization contains no payload
   write and no operation which can fail after bitmap clearing begins.
-- The header stores a provisional nonzero 64-bit dense class identity and the
-  checked slot/bitmap geometry needed by C2B. It does not yet store canonical
-  type metadata; C2B owns that representation decision.
+- The header stores a nonzero 64-bit heap-local dense allocation-class identity
+  and checked slot/bitmap geometry. Canonical type metadata remains in the
+  heap's dense class table rather than consuming payload or header bytes.
 - Checked slot-owner recovery first finds the owning live chunk and run, then
   reads its already initialized header, validates its class and reconstructed
   geometry, and accepts only an exact slot-start address. Header bytes,
@@ -80,10 +84,10 @@ function, implementation, and block are checked into
 - Prototype payloads never move and are never destroyed. The allocation record
   is diagnostic metadata and may disappear with its heap; no access is valid
   without a live mutator for the owning heap.
-- In debug/test builds, each heap records allocation address, `TypeId`, and
-  type name under one mutex. Access copies the matching record and releases the
-  mutex before asserting heap ownership or representation, so a deliberately
-  caught contract panic does not poison the registry.
+- In debug/test builds, each heap records an allocation address and canonical
+  object-metadata pointer under one mutex. Access copies the matching record
+  and releases the mutex before asserting heap ownership or metadata identity,
+  so a deliberately caught contract panic does not poison the registry.
 - Converting a pointer to `usize` is used only to compare registry keys. No
   managed pointer or Rust reference is reconstructed from that integer.
 - `Gc<T>` exposes only shared access. `T: Sync` makes such access valid across
@@ -119,6 +123,71 @@ Correct prototype calls satisfy the proof because C1A never reclaims or mutates
 payloads. Wrong-heap and wrong-representation tests deliberately arrange a
 diagnostic mismatch and establish that the check panics before `as_ref` runs.
 Those checks are not part of the release-build proof.
+
+### Canonical object metadata and erased dispatch
+
+Cold discovery constructs immutable metadata outside the process registry
+mutex, then publishes exactly one process-lifetime descriptor for each
+`TypeId`. A losing candidate remains an ordinary `Box` and is dropped; an
+injected construction panic occurs before the registry is reacquired. Only the
+winning descriptor is leaked intentionally. After discovery, its static
+address is the operational representation identity.
+
+Each descriptor records the exact Rust `Layout`, the representation's one
+optional requested slot size, monomorphized erased trace dispatch, and either
+no destructor or the monomorphized erased destructor. The request is an
+associated constant of the unsafe `Trace` implementation: a different policy
+therefore requires a distinct Rust wrapper type and `TypeId`.
+
+Erased trace and drop calls cast only after the caller proves that the pointer
+names a live initialized allocation whose run resolves to that exact metadata.
+The trace dispatcher forms a shared `T` reference only for the duration of the
+synchronous visit. The drop dispatcher invokes `drop_in_place::<T>` exactly
+once and does not deallocate the slot. C2B.1 tests these functions with
+prototype allocations; C2B.3 makes typed-run metadata resolution the ordinary
+proof source, and C6 owns actual destruction.
+
+## Heap-Local Allocation-Class Invariants
+
+- Canonical metadata discovery and pure fixed-run geometry derivation finish
+  before the heap-state mutex is acquired. Unsupported layouts therefore
+  publish no heap-local state or dense ID.
+- One heap-state mutex guards the arena, metadata-identity index, and dense
+  class table. Metadata keys compare and hash only the canonical static
+  descriptor address; `TypeId` is absent from this state.
+- Immutable class candidates are constructed outside the heap lock. After the
+  second winner check, vector and map capacity is reserved before either
+  authoritative structure is changed, then the dense entry and its index are
+  published under the same mutex.
+- `AllocationClass<T>` retains its `HeapInner`, exact metadata address, and
+  dense class ID. The heap state contains class entries, not handles, so this
+  strong provenance capability creates no ownership cycle. It retains no
+  managed allocation and is not a root.
+- A class handle is constructible only inside this crate after metadata and
+  geometry agreement. C2C's safe allocator must compare its retained heap with
+  the mutator heap in release builds before accessing run state.
+
+## Typed-Run Publication and Resolution Invariants
+
+- One class entry owns a directly enumerable vector of every `RunLocation`
+  published for it. Thread-local cursors and later range leases do not own or
+  retain the run and are not required for enumeration.
+- Before arena publication, the class run vector reserves its next entry.
+  Arena publication first reuses an existing empty run, or allocates and fully
+  initializes a candidate chunk's first run before the chunk enters the arena.
+  Failed allocation, overlap validation, geometry validation, or injected
+  publication failure therefore adds neither a typed run nor a class-pool
+  location.
+- After a successful arena publication, recording the already reserved
+  `RunLocation` is infallible and occurs under the same heap-state mutex. No
+  observer can see a header without its class-pool membership.
+- Checked slot resolution validates arena membership, exact slot-start
+  geometry, dense class-table membership, class geometry, and authoritative
+  run-pool membership before returning canonical metadata. A header ID from
+  another heap has no meaning outside its owner state.
+- `AllocationClass<T>` provenance is checked before the heap mutex and before
+  any run state is changed. A foreign handle therefore cannot allocate or
+  publish a run even when its numeric dense ID happens to equal a local ID.
 
 ### `Send` and `Sync` for `Gc<T>`
 

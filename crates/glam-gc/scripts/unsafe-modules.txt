@@ -1,6 +1,8 @@
+crates/glam-gc/src/heap.rs:#[expect(unsafe_code, reason = "reviewed C2B allocation-class fixtures")]
 crates/glam-gc/src/lib.rs:#[expect(unsafe_code, reason = "reviewed C1A allocation boundary")]
 crates/glam-gc/src/lib.rs:#[expect(unsafe_code, reason = "reviewed C1A boundary verification")]
 crates/glam-gc/src/lib.rs:#[expect(unsafe_code, reason = "reviewed C1A pointer boundary")]
 crates/glam-gc/src/lib.rs:#[expect(unsafe_code, reason = "reviewed C1B trace boundary")]
 crates/glam-gc/src/lib.rs:#[expect(unsafe_code, reason = "reviewed C1C mutation boundary")]
 crates/glam-gc/src/lib.rs:#[expect(unsafe_code, reason = "reviewed C2A arena and run topology")]
+crates/glam-gc/src/lib.rs:#[expect(unsafe_code, reason = "reviewed C2B canonical metadata dispatch")]

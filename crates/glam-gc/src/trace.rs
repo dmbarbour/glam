@@ -21,6 +21,14 @@ use crate::Gc;
 /// destruction. Later collector phases invoke it only while mutation is
 /// excluded.
 pub unsafe trait Trace: Send + Sync + 'static {
+    /// Optional collector slot size requested by this managed representation.
+    ///
+    /// The request may reserve more bytes than [`std::mem::size_of::<Self>()`]
+    /// without changing the Rust layout or alignment of `Self`. One Rust type
+    /// has one canonical object-metadata descriptor, so a caller needing a
+    /// different allocation policy must use a distinct wrapper type.
+    const REQUESTED_SLOT_SIZE: Option<usize> = None;
+
     /// Reports the managed edges represented by this value.
     fn trace(&self, visitor: &mut Visitor<'_>);
 }

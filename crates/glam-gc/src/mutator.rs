@@ -71,7 +71,7 @@ impl<'heap> Mutator<'heap> {
         unsafe { Gc::from_raw(pointer) }
     }
 
-    pub(crate) fn debug_assert_access<T: 'static>(&self, pointer: NonNull<T>) {
+    pub(crate) fn debug_assert_access<T: Trace>(&self, pointer: NonNull<T>) {
         self.heap.debug_assert_access(pointer);
     }
 }

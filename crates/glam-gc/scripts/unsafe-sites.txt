@@ -11,6 +11,26 @@ crates/glam-gc/src/arena.rs:        let pointer = unsafe { self.base.add(offset)
 crates/glam-gc/src/arena.rs:        unsafe { dealloc(self.base.as_ptr(), chunk_layout()) };
 crates/glam-gc/src/arena.rs:        unsafe { header_pointer.write(RunHeader::initialized(class_id, geometry)) };
 crates/glam-gc/src/arena.rs:unsafe impl Send for ArenaChunk {}
+crates/glam-gc/src/class.rs:            unsafe {
+crates/glam-gc/src/class.rs:        unsafe impl Trace for PanickingCandidate {
+crates/glam-gc/src/class.rs:        unsafe { (self.trace)(pointer, visitor) };
+crates/glam-gc/src/class.rs:        unsafe { drop(pointer) };
+crates/glam-gc/src/class.rs:        unsafe { metadata_for::<DropProbe>().drop_in_place(pointer.cast()) };
+crates/glam-gc/src/class.rs:    let value = unsafe { pointer.cast::<T>().as_ref() };
+crates/glam-gc/src/class.rs:    pub(crate) unsafe fn drop_in_place(&self, pointer: NonNull<()>) {
+crates/glam-gc/src/class.rs:    pub(crate) unsafe fn trace(&self, pointer: NonNull<()>, visitor: &mut Visitor<'_>) {
+crates/glam-gc/src/class.rs:    unsafe impl Trace for DropProbe {
+crates/glam-gc/src/class.rs:    unsafe impl Trace for Holder {
+crates/glam-gc/src/class.rs:    unsafe impl Trace for Leaf {
+crates/glam-gc/src/class.rs:    unsafe { std::ptr::drop_in_place(pointer.cast::<T>().as_ptr()) };
+crates/glam-gc/src/class.rs:type ErasedDrop = unsafe fn(NonNull<()>);
+crates/glam-gc/src/class.rs:type ErasedTrace = for<'visit> unsafe fn(NonNull<()>, &mut Visitor<'visit>);
+crates/glam-gc/src/class.rs:unsafe fn drop_erased<T: Trace>(pointer: NonNull<()>) {
+crates/glam-gc/src/class.rs:unsafe fn trace_erased<T: Trace>(pointer: NonNull<()>, visitor: &mut Visitor<'_>) {
+crates/glam-gc/src/heap.rs:    unsafe impl Trace for DroppingType {
+crates/glam-gc/src/heap.rs:    unsafe impl Trace for FirstType {
+crates/glam-gc/src/heap.rs:    unsafe impl Trace for SecondType {
+crates/glam-gc/src/heap.rs:    unsafe impl Trace for UndersizedSlot {
 crates/glam-gc/src/lib.rs:                let _ = unsafe { value.get_unchecked(mutator) };
 crates/glam-gc/src/lib.rs:                let first = unsafe { *first.get_unchecked(first_mutator) };
 crates/glam-gc/src/lib.rs:                let second = unsafe { *second.get_unchecked(second_mutator) };

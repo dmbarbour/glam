@@ -1,8 +1,8 @@
 # Glam-Owned Garbage Collection Roadmap — 2026-08-19
 
-Status: in progress; collector Phases C0, C1, and C2A and integration Phase I0
-are complete, Gate G0 is established, and the mandatory post-C1 review is
-complete. Collector Phase C2B may proceed.
+Status: in progress; collector Phases C0, C1, C2A, and C2B and integration
+Phase I0 are complete, Gate G0 is established, and the mandatory post-C1
+review is complete. Collector Phase C2C may proceed.
 
 This roadmap keeps two large transitions aligned:
 

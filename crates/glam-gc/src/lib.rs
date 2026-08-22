@@ -1,9 +1,9 @@
 //! Runtime-local garbage collection support for Glam.
 //!
-//! C2A provides managed-pointer contracts, pure fixed-run geometry, and
-//! heap-owned arena/run topology. Payload allocation still uses C1A's
-//! deliberately leaking prototype until C2C; tracing and collection remain
-//! disabled.
+//! C2B provides managed-pointer contracts, canonical object metadata,
+//! heap-local allocation classes, and heap-owned typed-run topology. Payload
+//! allocation still uses C1A's deliberately leaking prototype until C2C;
+//! tracing and collection remain disabled.
 
 #![deny(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]
@@ -14,6 +14,12 @@
     reason = "C2A arenas remain collector-private until class discovery consumes them"
 )]
 mod arena;
+#[expect(unsafe_code, reason = "reviewed C2B canonical metadata dispatch")]
+#[allow(
+    dead_code,
+    reason = "C2B.1 metadata operations remain collector-private until class discovery consumes them"
+)]
+mod class;
 mod heap;
 #[expect(unsafe_code, reason = "reviewed C1C mutation boundary")]
 mod mutation;
@@ -32,6 +38,7 @@ mod trace;
 #[cfg(feature = "deterministic-test-hooks")]
 mod deterministic;
 
+pub use class::{AllocationClass, UnsupportedLayout};
 pub use heap::Heap;
 pub use mutator::Mutator;
 pub use pointer::Gc;
