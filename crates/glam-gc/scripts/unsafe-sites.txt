@@ -29,8 +29,8 @@ crates/glam-gc/src/class.rs:unsafe fn drop_erased<T: Trace>(pointer: NonNull<()>
 crates/glam-gc/src/class.rs:unsafe fn trace_erased<T: Trace>(pointer: NonNull<()>, visitor: &mut Visitor<'_>) {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for DroppingType {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for FirstType {
+crates/glam-gc/src/heap.rs:    unsafe impl Trace for OverflowingSlot {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for SecondType {
-crates/glam-gc/src/heap.rs:    unsafe impl Trace for UndersizedSlot {
 crates/glam-gc/src/lib.rs:                let _ = unsafe { value.get_unchecked(mutator) };
 crates/glam-gc/src/lib.rs:                let first = unsafe { *first.get_unchecked(first_mutator) };
 crates/glam-gc/src/lib.rs:                let second = unsafe { *second.get_unchecked(second_mutator) };

@@ -363,10 +363,15 @@ mod tests {
     }
 
     #[test]
-    fn requested_slot_size_pads_stride_without_changing_payload_alignment() {
+    fn requested_total_slot_extent_is_not_additive_and_rounds_for_alignment() {
         let geometry = RunGeometry::derive(layout(8, 8), Some(24)).unwrap();
         assert_eq!(geometry.slot_stride, 24);
         assert!(geometry.first_slot_offset.is_multiple_of(8));
+
+        let rounded = RunGeometry::derive(layout(16, 16), Some(17)).unwrap();
+        assert_eq!(rounded.slot_stride, 32);
+        assert!(rounded.first_slot_offset.is_multiple_of(16));
+
         assert_eq!(
             RunGeometry::derive(layout(16, 8), Some(15)),
             Err(GeometryError::RequestedSlotTooSmall)

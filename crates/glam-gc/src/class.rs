@@ -33,6 +33,15 @@ pub(crate) struct ObjectMetadata {
 
 impl ObjectMetadata {
     fn for_type<T: Trace>() -> Self {
+        const {
+            if let Some(requested) = T::REQUESTED_SLOT_SIZE {
+                assert!(
+                    requested >= std::mem::size_of::<T>(),
+                    "Trace::REQUESTED_SLOT_SIZE is a total slot extent and must be at least size_of::<Self>()"
+                );
+            }
+        }
+
         Self {
             type_id: TypeId::of::<T>(),
             type_name: type_name::<T>(),
@@ -168,7 +177,6 @@ impl<T: Trace> fmt::Debug for AllocationClass<T> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UnsupportedLayout {
     ZeroSized,
-    RequestedSlotTooSmall,
     ArithmeticOverflow,
     NoSlots,
 }
@@ -177,9 +185,6 @@ impl fmt::Display for UnsupportedLayout {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self {
             Self::ZeroSized => "zero-sized managed representations are unsupported",
-            Self::RequestedSlotTooSmall => {
-                "requested collector slot size is smaller than the Rust representation"
-            }
             Self::ArithmeticOverflow => "managed representation geometry overflows",
             Self::NoSlots => "managed representation does not fit in a collector run",
         };
@@ -189,11 +194,15 @@ impl fmt::Display for UnsupportedLayout {
 
 impl std::error::Error for UnsupportedLayout {}
 
-impl From<GeometryError> for UnsupportedLayout {
-    fn from(error: GeometryError) -> Self {
+impl UnsupportedLayout {
+    pub(crate) fn from_validated_geometry(error: GeometryError) -> Self {
         match error {
             GeometryError::ZeroSized => Self::ZeroSized,
-            GeometryError::RequestedSlotTooSmall => Self::RequestedSlotTooSmall,
+            GeometryError::RequestedSlotTooSmall => {
+                unreachable!(
+                    "canonical object metadata validates its slot request in const evaluation"
+                )
+            }
             GeometryError::ArithmeticOverflow => Self::ArithmeticOverflow,
             GeometryError::NoSlots => Self::NoSlots,
         }

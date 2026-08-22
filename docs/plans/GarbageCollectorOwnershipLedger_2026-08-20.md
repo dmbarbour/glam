@@ -57,11 +57,12 @@ They are diagnostics for representation planning, not a stable ABI.
 | `RuntimeNet`, `RuntimeEntry`, `RuntimeNode` | 200/8, 120/8, 96/8 | Freely mutable only under the shared-net mutex. |
 | `CopyState`, `ActivePairState` | 104/8, 48/8 | Net-internal mutable state and cross-net source edge. |
 
-The collector supports per-type requested slot sizes, so these layouts do not
-impose a heap-wide size floor. Glam's eventual compact-value policy belongs to
-the value-representation plan. Every future managed payload must fit one
-fixed-size typed-run slot; no current row is approved for a large-object or
-multi-run exception.
+The collector supports per-type requested total slot extents before alignment
+rounding, so these layouts do not impose a heap-wide size floor. A request is
+not additional padding and cannot be smaller than the Rust representation.
+Glam's eventual compact-value policy belongs to the value-representation plan.
+Every future managed payload must fit one fixed-size typed-run slot; no current
+row is approved for a large-object or multi-run exception.
 
 ## `core::Value` Variant Ledger
 

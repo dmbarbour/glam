@@ -146,9 +146,11 @@ directory access.
 
 The initial GC uses fixed aligned runs and must expose an owner-lookup
 abstraction, not its header-address formula. It also accepts canonical metadata
-whose requested slot size may exceed the Rust payload size without changing
-the payload's alignment. This plan owns both the Rust node alignment and the
-requested metadata size. It may compare the implemented fixed-run lookup with
+whose requested total pre-alignment slot extent may exceed the Rust payload
+size without changing the payload's alignment. The extent is not additional
+padding and cannot be smaller than the representation. This plan owns both the
+Rust node alignment and requested metadata extent. It may compare the
+implemented fixed-run lookup with
 encoded variable run classes only as a later representation change, after
 measuring the abstraction; the GC transition does not reserve tag bits or
 multiple run sizes for it.

@@ -43,7 +43,8 @@ impl Heap {
     /// class identity and eventual run pool belong only to this heap.
     pub fn allocation_class<T: Trace>(&self) -> Result<AllocationClass<T>, UnsupportedLayout> {
         let metadata = metadata_for::<T>();
-        let geometry = RunGeometry::derive(metadata.layout(), metadata.requested_slot_size())?;
+        let geometry = RunGeometry::derive(metadata.layout(), metadata.requested_slot_size())
+            .map_err(UnsupportedLayout::from_validated_geometry)?;
         Ok(self.inner.discover_class(metadata, geometry))
     }
 }
@@ -346,7 +347,7 @@ mod tests {
         fn trace(&self, _visitor: &mut Visitor<'_>) {}
     }
 
-    struct UndersizedSlot {
+    struct OverflowingSlot {
         _value: u64,
     }
 
@@ -363,9 +364,9 @@ mod tests {
         fn trace(&self, _visitor: &mut Visitor<'_>) {}
     }
 
-    // SAFETY: `UndersizedSlot` contains no managed edge.
-    unsafe impl Trace for UndersizedSlot {
-        const REQUESTED_SLOT_SIZE: Option<usize> = Some(1);
+    // SAFETY: `OverflowingSlot` contains no managed edge.
+    unsafe impl Trace for OverflowingSlot {
+        const REQUESTED_SLOT_SIZE: Option<usize> = Some(usize::MAX);
 
         fn trace(&self, _visitor: &mut Visitor<'_>) {}
     }
@@ -456,8 +457,8 @@ mod tests {
             Err(UnsupportedLayout::ZeroSized)
         ));
         assert!(matches!(
-            heap.allocation_class::<UndersizedSlot>(),
-            Err(UnsupportedLayout::RequestedSlotTooSmall)
+            heap.allocation_class::<OverflowingSlot>(),
+            Err(UnsupportedLayout::ArithmeticOverflow)
         ));
 
         let first_valid = heap.allocation_class::<FirstType>().unwrap();

@@ -134,10 +134,13 @@ winning descriptor is leaked intentionally. After discovery, its static
 address is the operational representation identity.
 
 Each descriptor records the exact Rust `Layout`, the representation's one
-optional requested slot size, monomorphized erased trace dispatch, and either
-no destructor or the monomorphized erased destructor. The request is an
-associated constant of the unsafe `Trace` implementation: a different policy
-therefore requires a distinct Rust wrapper type and `TypeId`.
+optional requested total slot extent, monomorphized erased trace dispatch, and
+either no destructor or the monomorphized erased destructor. The request is
+the desired complete slot size before alignment rounding, not additional
+padding; the resulting stride may be larger. Generic const evaluation rejects
+a request smaller than `size_of::<T>()` before metadata can be constructed.
+The request is an associated constant of the unsafe `Trace` implementation, so
+a different policy requires a distinct Rust wrapper type and `TypeId`.
 
 Erased trace and drop calls cast only after the caller proves that the pointer
 names a live initialized allocation whose run resolves to that exact metadata.

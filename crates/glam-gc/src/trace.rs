@@ -21,12 +21,35 @@ use crate::Gc;
 /// destruction. Later collector phases invoke it only while mutation is
 /// excluded.
 pub unsafe trait Trace: Send + Sync + 'static {
-    /// Optional collector slot size requested by this managed representation.
+    /// Optional total collector slot extent requested by this representation.
     ///
-    /// The request may reserve more bytes than [`std::mem::size_of::<Self>()`]
-    /// without changing the Rust layout or alignment of `Self`. One Rust type
-    /// has one canonical object-metadata descriptor, so a caller needing a
-    /// different allocation policy must use a distinct wrapper type.
+    /// `None` requests [`std::mem::size_of::<Self>()`]. `Some(bytes)` requests
+    /// that total number of bytes per slot before alignment rounding; it is
+    /// not an amount added to the Rust representation. The request must be at
+    /// least `size_of::<Self>()`, and metadata discovery rejects a smaller
+    /// request during const evaluation. The actual slot stride rounds the
+    /// request upward to `align_of::<Self>()`, so it may be larger.
+    ///
+    /// This policy does not change the Rust layout or alignment of `Self`. One
+    /// Rust type has one canonical object-metadata descriptor, so a caller
+    /// needing a different policy must use a distinct wrapper type.
+    ///
+    /// ```compile_fail,E0080
+    /// use glam_gc::{Heap, Trace, Visitor};
+    ///
+    /// struct InvalidRequest(u64);
+    ///
+    /// // SAFETY: `InvalidRequest` contains no managed edge. Its slot request
+    /// // is nevertheless invalid because it is smaller than the value.
+    /// unsafe impl Trace for InvalidRequest {
+    ///     const REQUESTED_SLOT_SIZE: Option<usize> = Some(1);
+    ///
+    ///     fn trace(&self, _visitor: &mut Visitor<'_>) {}
+    /// }
+    ///
+    /// let heap = Heap::new();
+    /// let _ = heap.allocation_class::<InvalidRequest>();
+    /// ```
     const REQUESTED_SLOT_SIZE: Option<usize> = None;
 
     /// Reports the managed edges represented by this value.

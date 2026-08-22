@@ -1,7 +1,7 @@
 # Glam GC Subcrate Implementation Plan — 2026-08-19
 
 Status: in progress; Phases C0, C1, C2A, and C2B are complete. The mandatory
-post-C1 review is complete, and C2C is next.
+post-C1 review is complete, and C2C.1a is next.
 
 This plan implements an exact, non-moving, runtime-local tracing collector
 without depending on Glam value semantics. The governing requirements and
@@ -26,7 +26,11 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C2B.1 | completed | canonical process-wide object metadata and erased dispatch |
 | C2B.2 | completed | heap-local allocation-class discovery and typed handles |
 | C2B.3 | completed | typed-run publication, enumeration, and metadata resolution |
-| C2C | pending | worker-local bitmap-range allocation and reuse |
+| C2C.1a | pending | indexed chunk ownership and checked owner lookup |
+| C2C.1b | pending | synchronized arena allocation and prototype access transition |
+| C2C.2 | pending | heap-specific TLS identity, epochs, and cache lifecycle |
+| C2C.3 | pending | bitmap-range leasing and worker-local hot allocation |
+| C2C.4 | pending | pressure, panic, teardown, and allocator audit |
 | C3A | pending | ordinary admission and same-heap recursion integration |
 | C3B | pending | collector election and single-heap STW quiescence |
 | C3C | pending | cross-heap dependent admission |
@@ -403,11 +407,15 @@ initialization paths fully owned.
   layouts. Comparing other fixed sizes is tuning; supporting several sizes is
   deferred.
 - Let the pure geometry input contain the Rust payload `Layout` and an optional
-  requested slot size which is at least the payload size. The requested size
-  may pad a run's slots without raising payload alignment. Round the resulting
-  stride up to `Layout::align()`. Owner lookup from an untagged pointer depends
-  only on fixed run alignment, not on payload alignment or stride. The
-  collector assigns no semantic meaning or tag budget to either.
+  requested total slot extent before alignment rounding. It is not additional
+  padding. `None` means the Rust payload size; `Some(bytes)` must be at least
+  that size, and canonical metadata discovery enforces this through generic
+  const evaluation. The pure geometry helper retains a defensive error for
+  arbitrary internal inputs. Round the requested extent up to
+  `Layout::align()` to obtain the actual stride, which may therefore be larger.
+  Owner lookup from an untagged pointer depends only on fixed run alignment,
+  not on payload alignment or stride. The collector assigns no semantic
+  meaning or tag budget to either.
 - Given an untagged managed address, recover the run header by masking with the
   fixed `RUN_SIZE`. In debug/test configurations, first validate the numeric
   address against the mutator heap's arena-chunk ranges without dereferencing a
@@ -552,16 +560,18 @@ publication each remain all-or-nothing before the next layer is added.
   `&'static ObjectMetadata` address as the operational type identity. `TypeId`
   is a cold discovery key, not a run-header field or hot-path comparison. Do
   not add relocation operations while moving collection is deferred.
-- Store both the Rust payload layout and an optional larger requested slot size
-  in `ObjectMetadata`. The request does not change Rust alignment or select a
-  run size. Because metadata remains canonical per `TypeId`, one Rust type has
-  one requested slot-size policy; callers needing another policy use a distinct
-  wrapper type. For the bootstrap collector this policy is an associated
-  constant on the unsafe managed-representation contract, so it is fixed by
-  the same implementation which proves the type's trace layout. The heap-local
-  allocation class derives its stride and slot geometry for the collector's
-  one fixed run size. An invalid or unsupported result fails class creation
-  before a class ID or run is published.
+- Store both the Rust payload layout and an optional requested total slot
+  extent in `ObjectMetadata`. The request is the whole pre-alignment slot size,
+  not bytes added to the payload; it does not change Rust alignment or select a
+  run size. Generic const evaluation rejects an extent below
+  `size_of::<T>()`. Because metadata remains canonical per `TypeId`, one Rust
+  type has one requested slot-size policy; callers needing another policy use a
+  distinct wrapper type. For the bootstrap collector this policy is an
+  associated constant on the unsafe managed-representation contract, so it is
+  fixed by the same implementation which proves the type's trace layout. The
+  heap-local allocation class rounds it to payload alignment and derives slot
+  geometry for the collector's one fixed run size. Any remaining unsupported
+  result fails class creation before a class ID or run is published.
 - Give each typed run one metadata/allocation-class identity in its header;
   ordinary slots contain payload only, with no GC header, metadata pointer,
   mark byte, or finalizer byte.
@@ -617,11 +627,12 @@ Verification:
 
 C2B.1 completed on 2026-08-21:
 
-- `ObjectMetadata` now records canonical Rust layout, an optional larger slot
-  request, monomorphized erased trace dispatch, and optional erased drop
-  dispatch. `Trace::REQUESTED_SLOT_SIZE` binds the allocation policy to the
-  same Rust representation contract; a wrapper type is required for a second
-  policy.
+- `ObjectMetadata` now records canonical Rust layout, an optional requested
+  total pre-alignment slot extent, monomorphized erased trace dispatch, and
+  optional erased drop dispatch. `Trace::REQUESTED_SLOT_SIZE` binds the
+  allocation policy to the same Rust representation contract; generic const
+  evaluation rejects an extent below the representation size, and a wrapper
+  type is required for a second policy.
 - A process-wide registry uses `TypeId` only for cold discovery. Candidate
   construction occurs outside its mutex; one winning `&'static
   ObjectMetadata` is deliberately retained, concurrent losers are dropped,
@@ -683,11 +694,113 @@ C2B.3 completed on 2026-08-21:
 
 ## Phase C2C — Worker-Local Bitmap-Range Allocation and Reuse
 
+Execute C2C as five independently verified checkpoints:
+
+- **C2C.1a — indexed chunk ownership.** Add an authoritative fixed-chunk-base
+  index beside the owning arena vector and replace linear chunk membership
+  scans with masked-base checked lookup. Publish no payload and retain the
+  prototype allocator for this independently verified topology change.
+- **C2C.1b — synchronized reference allocation and access transition.** Add
+  one synchronized payload-allocation path through the class/run machinery.
+  Once it initializes arena payloads, remove C1's leaking prototype allocator
+  and allocation-history registry, route `debug_assert_access` through checked
+  chunk/run/class metadata, and add provisional exact heap teardown.
+- **C2C.2 — heap-specific TLS identity and lifecycle.** Introduce the weak
+  heap identity, allocation-lease epoch, recursive mutator depth, bounded dense
+  class-to-cursor map, whole-cache invalidation, inert eviction, and TLS
+  destruction rules without yet making the cached cursor the ordinary payload
+  allocation path.
+- **C2C.3 — bitmap-range leasing and hot allocation.** Claim disjoint
+  allocation-word ranges through the synchronized class slow path, activate
+  cached local allocation, and prove that retained-class allocation performs no
+  `TypeId` lookup, chunk lookup, hash lookup, or shared synchronization on a
+  cache hit.
+- **C2C.4 — pressure, panic, teardown, and audit.** Complete batched pressure,
+  abandoned-range accounting, initialization/bitmap panic atomicity,
+  teardown and panic-race hardening, and the mandatory post-C2C review.
+
 C2C owns the first implementation of `ThreadHeapState`: the heap-specific TLS
 entry, recursive depth, allocation-lease epoch, and cursor map work while
 collection is still disabled. C3 later connects that existing state to global
 mutator admission and collection phases; it must not introduce a competing TLS
 representation.
+
+### C2C.1a Indexed Chunk Ownership
+
+- Keep arena chunks in their owning stable-index vector and add an authoritative
+  map from aligned chunk-base address to vector index. `RunLocation` continues
+  to use the stable vector index; the map is an ownership index, not a second
+  owner.
+- Because chunk size and alignment are both one fixed power of two, compute a
+  candidate chunk base by masking the numeric managed address. Look up that
+  base in the mutator heap's map before deriving or dereferencing a run header.
+  A missing key rejects a foreign, stale, or arbitrary address without reading
+  memory through it.
+- Reserve vector and map capacity before publishing a chunk, validate that the
+  base is absent, and publish both entries under the heap-state mutex. Failed
+  allocation, initialization, or index publication leaves neither an indexed
+  chunk nor an owning-vector entry. Fixed aligned chunks cannot partially
+  overlap: equal masked bases are the only overlap case.
+- Replace `Arena::find_run` and `checked_slot_owner` linear chunk scans with the
+  indexed lookup. Preserve numeric validation before provenance-preserving
+  pointer derivation and the subsequent exact run, slot, class, geometry, and
+  class-pool checks.
+- Keep C1's prototype allocator and access registry unchanged during this
+  checkpoint. C2C.1a changes only authoritative chunk ownership and checked
+  address lookup, keeping allocator and access-liveness changes out of its
+  unsafe audit.
+
+Verification for C2C.1a:
+
+- lookup cost is independent of the number and insertion order of live chunks,
+  with instrumentation proving one masked-base index lookup and no vector scan;
+- first and last candidate slot addresses of several chunks resolve to the
+  exact owning chunk and run topology;
+- another heap's address, an arbitrary aligned address, header/bitmap/padding
+  bytes, and slot interiors all fail before header dereference;
+- chunk publication failure leaves the owning vector and base index mutually
+  consistent, and heap teardown deallocates each indexed chunk exactly once;
+  and
+- focused tests, the exact unsafe inventory, and Miri pass before any payload
+  allocation or access transition begins.
+
+### C2C.1b Synchronized Arena Allocation and Access Transition
+
+- Add a synchronized reference allocator before the TLS optimization. It
+  obtains or creates a typed run through the existing class slow path,
+  initializes the payload before publishing its allocation bit, and provides
+  the correctness implementation against which C2C.3's local fast path is
+  tested.
+- After all `Gc<T>` allocations use arena slots, delete
+  `prototype_allocations`, `register_prototype`, and the `Box::leak` allocation
+  path. Change `debug_assert_access` to use indexed checked owner resolution and
+  compare the resolved canonical metadata address with `metadata_for::<T>()`.
+  It must not scan allocation history or compare `TypeId` directly.
+- This internal debug assertion diagnoses heap membership, exact slot shape,
+  and representation. It does not become the release liveness proof and need
+  not read a concurrently changing allocation bitmap. I2 still owns
+  release-safe public root/value provenance, while unsafe raw access continues
+  to require caller-proven liveness.
+- Add the provisional non-reentrant heap teardown required while collection is
+  disabled: enumerate allocated slots, invoke each class's erased drop exactly
+  once when required, and then release the arena chunks. C6 later replaces
+  this terminal path with collector-controlled finalization, but no C2C
+  checkpoint may regain C1's intentional payload leak.
+- Remove Miri's prototype leak exception in the same checkpoint as the final
+  `Box::leak` caller.
+
+Verification for C2C.1b:
+
+- first and last allocated slots of several chunks resolve to the exact owning
+  chunk, run, dense class, and canonical metadata;
+- the synchronized allocator never exposes an uninitialized slot or publishes
+  its allocation bit after an injected unwind between reservation and
+  publication;
+- the former prototype registry and allocation scan no longer exist, and wrong
+  heap or representation diagnostics use the indexed arena path; and
+- dropping the heap destroys allocated drop-type payloads exactly once, the
+  exact unsafe inventory passes, and Miri reports no leak without its former
+  exception before TLS cache work begins.
 
 - Require mutator authority and an `AllocationClass<T>` for every managed
   allocation.
