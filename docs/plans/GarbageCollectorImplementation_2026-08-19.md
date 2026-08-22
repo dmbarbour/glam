@@ -2,7 +2,7 @@
 
 Status: in progress; Phases C0 through C3D are complete, including the C2C.6
 verification follow-up. The mandatory post-C1 and post-C2C reviews are
-complete. C4 is next.
+complete. C3E revises collection servicing before C4 begins.
 
 This plan implements an exact, non-moving, runtime-local tracing collector
 without depending on Glam value semantics. The governing requirements and
@@ -43,6 +43,7 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C3B | completed | collector election and single-heap STW quiescence |
 | C3C | completed | cross-heap dependent admission |
 | C3D | completed | finalizer handoff, pressure, panic, and teardown races |
+| C3E | pending | entry-serviced collection and coordinator simplification |
 | C4 | pending | explicit external roots |
 | C5 | pending | exact full marking |
 | C6A | pending | no-drop sweep and run-state publication |
@@ -115,11 +116,12 @@ pub unsafe trait Trace: 'static {
 ```
 
 `request_collection` is idempotent and nonblocking. It may be called outside a
-mutator or from inside one; an active mutator only records the request and must
-reach its ordinary outer exit before collection can begin. `collect_full` is the
-synchronous maintenance boundary and rejects a call from a thread currently
-holding a mutator for that heap rather than waiting on itself. Both are Rust
-embedding operations, not Glam evaluation effects.
+mutator or from inside one; an active mutator only records the request. A
+requested collection begins when a later outer entry finds that heap idle, not
+as work performed by outer exit. `collect_full` is the synchronous maintenance
+boundary and rejects a call from a thread currently holding a mutator for any
+heap rather than entering a possible cross-heap wait. Both are Rust embedding
+operations, not Glam evaluation effects.
 
 The API must not promise `Deref`, Glam-visible finalizer declarations,
 resurrection of a completed dead allocation, moving collection, weak pointers,
@@ -1588,7 +1590,115 @@ C3B through C3D completed on 2026-08-22:
   inventory is unchanged by C3's safe coordination work. Workspace formatting,
   Clippy with warnings denied, and the complete workspace test suite pass.
 
-#### Pressure Constraints Carried into C3
+### Phase C3E — Entry-Serviced Collection Simplification
+
+C3B through C3D deliberately proved the harder queued-drain protocol. Before
+C4 adds roots to the stopped-world boundary, replace that protocol with the
+simpler policy selected after review: an asynchronous request is a coalesced
+heuristic hint, and collection begins only when an outer mutator entry finds
+the heap already idle. Outermost exit publishes quiescence and wakes explicit
+waiters, but does not itself perform collection or scan thread-local records
+for work.
+
+Execute the revision in three independently verified checkpoints:
+
+- **C3E.1 — direct idle-entry election and handoff.** An outer entry which
+  observes `Ordinary`, zero active mutators, and a latched request atomically
+  becomes the collector. It enters `Exclusive` directly, without first
+  publishing a writer-pending phase or denying admission while existing
+  mutators drain. After exclusive work and finalization complete, that same
+  thread atomically returns the coordinator to `Ordinary`, transfers its
+  collector-owned finalizer obligation into the ordinary outer-mutator
+  obligation for the entry it originally requested, and continues. The active
+  count does not pass through zero and the thread does not release the
+  coordinator and retry admission. A collector elected by `collect_full` has
+  no mutator continuation and instead returns to `Ordinary` with no obligation
+  of its own after finalization.
+- **C3E.2 — cache and request retirement.** Before that directly elected
+  entrant runs exclusive work, remove that thread's inactive,
+  heap-local TLS cache, including every class-to-allocation-word cursor. Its
+  collector-owned finalizer mutator therefore starts from a fresh cache, which
+  can then pass directly to the requested ordinary entry. This is sufficient
+  for the collector thread; C5's heap-wide lease epoch invalidates retained
+  cursors belonging to every other thread. A successful collection clears the
+  coordinator request and acknowledges the provisional typed-run pressure
+  state. Requests observed before the completion transition are deliberately
+  coalesced into the collection which just ran; a request serialized after
+  completion remains latched for a later idle entry. Until C6 can rearm from
+  actual survivor occupancy, C3 uses a documented provisional pressure reset
+  rather than immediately repeating collection because the old publication
+  threshold remains crossed.
+- **C3E.3 — retire queued-drain machinery and re-audit.** Remove
+  `ExclusivePending`, ordinary/dependent admission distinctions, TLS deferred
+  collection-service records, last-thread exit scans, and follow-up-epoch
+  chaining. Outermost exit only makes its cache inactive, decrements the active
+  count, and notifies waiters. Preserve the no-gap
+  `Exclusive`-to-`Finalizing` handoff and collector-owned finalizer mutator,
+  but treat requests made during either phase as hints coalesced into the
+  current collection rather than as an automatically committed second pass.
+
+`Heap::collect_full` remains a stronger synchronous maintenance boundary. It
+is invalid whenever the calling thread holds a mutator for *any* heap, because
+the caller may otherwise participate in a cross-heap wait cycle. An eligible
+caller records or joins the target collection and waits opportunistically for
+an idle target without blocking new entrants merely because a writer is
+queued. If another entrant or collector completes the requested collection,
+the caller joins that epoch and returns its report; it does not require an
+immediate follow-up collection. This operation may wait for active target
+mutators to leave, while `request_collection` never waits and may remain
+latched indefinitely on an unused heap. Dropping such a heap instead of
+performing a final unused collection is desirable.
+
+Collection or finalization panic does not count as successful completion: it
+restores ordinary admission without directly admitting the interrupted
+entrant, relatches the request, and leaves pressure eligible for a later
+attempt. The direct ordinary handoff occurs only after the entire successful
+collection/finalization lifecycle is complete.
+
+Deterministic verification must force:
+
+1. a request made while a mutator is active surviving outer exit, with no
+   collection until the next outer entry;
+2. several simultaneous outer entrants after one request electing exactly one
+   collector, then all entering normally after that collection;
+3. the collecting entrant continuing under one direct ordinary obligation,
+   without a retry window in which another collector can intervene;
+4. deletion of the collecting thread's inactive heap-local cursor cache before
+   exclusive work, followed by fresh finalizer allocation and direct ordinary
+   allocation from the replacement cache;
+5. a request during `Exclusive` or `Finalizing` being coalesced, while a
+   barrier-forced request after successful completion remains pending;
+6. outer exit performing no collection and no scan or service of requests for
+   other heaps;
+7. `collect_full` rejecting a caller active in the target heap or any other
+   heap before changing request or epoch state;
+8. `collect_full` joining an active collection, and separately waiting for an
+   active heap without preventing intervening mutator entries;
+9. opposite A-then-B and B-then-A nested entry completing without a dependent
+   admission category because an uncommitted request never blocks entry;
+10. exclusive-work and finalizer panic restoring admission and relatching the
+    interrupted request; and
+11. provisional pressure acknowledgement preventing an immediate redundant
+    collection on the collector's direct mutator handoff.
+
+Replace the queued-drain Loom models with the smaller direct-election model.
+It must prove that `Ordinary` plus zero active mutators changes atomically to
+`Exclusive`, that no ordinary mutator overlaps `Exclusive`, that exactly one
+entrant owns a requested collection, and that successful completion installs
+the collecting entrant as an ordinary active mutator while clearing the
+coalesced request. Keep the existing no-gap finalizer-handoff model, adjusted
+for the absence of a pending phase.
+
+Do not begin C4 until C3E is complete and the C3 coordination narrative,
+`SAFETY.md`, `VERIFY.md`, native forced schedules, Loom models, Miri, and both
+sanitizers agree on the entry-serviced state machine.
+
+#### Historical C3B–C3D Pressure Contract
+
+The following pressure and admission text records the completed implementation
+which C3E is about to replace. It is retained until C3E completes so the
+transition can be reviewed against both endpoints; it is not the target policy
+for C4 and later phases.
 
 - `Heap::request_collection` is the first explicit request API. It coalesces
   with the automatic request without changing the typed-run-publication count
@@ -1602,7 +1712,7 @@ C3B through C3D completed on 2026-08-22:
   collection without treating any of those transitions as a typed-run
   publication.
 
-#### Coordination and Admission Contract
+#### Historical C3B–C3D Coordination and Admission Contract
 
 - Implement outer `enter`/`exit` admission as an explicit state machine under
   the existing heap-state `Mutex`, with one sibling `Condvar`. Store the phase,
@@ -1821,9 +1931,9 @@ are stopped.
   run's lease bitmap during the exclusive phase: clear bits for allocation
   words with free capacity and set bits for completely full allocation words.
   Reset each class's stable run frontier, then advance one heap-wide
-  `allocation_lease_epoch`. Keep the typed-run-pressure request latched until
-  C6 sweep has completed and atomically replaced publication history with the
-  assigned-run occupancy policy.
+  `allocation_lease_epoch`. Continue C3E's provisional acknowledgement of a
+  completed collection until C6 sweep can atomically replace publication
+  history with the assigned-run occupancy policy.
   On its next outer entry, each heap-specific thread cache compares that one
   epoch and replaces its entire class-to-word-cursor map on mismatch; neither
   the collector nor the mutator validates cursors individually. Post-sweep
@@ -1900,7 +2010,7 @@ Execute C6 as four checkpoints:
   Rust destruction outside collector locks, and enforce non-resurrection.
 - **C6C — panic and activity.** Add sparse quarantine, deterministic destructor
   panic recovery, safe draining policy, finalizer activity reporting, and
-  follow-up collection-pressure publication.
+  post-collection pressure-baseline publication.
 - **C6D — terminal teardown and audit.** Resolve the last-owner drain protocol
   or explicitly restricted fallback, exercise runtime/heap drop, and perform
   the focused unsafe/finalization audit which closes Gate G1.
@@ -1912,14 +2022,16 @@ recoverable panic injected by its own tests.
 
 - The first successful sweep replaces C2C's historical publication count with
   assigned-run occupancy and the heap-wide recycled-run list described below.
-  Do not reset the historical counter earlier and then silently reuse reclaimed
-  capacity without another pressure opportunity.
+  C3E may acknowledge its synthetic collection by resetting the provisional
+  publication counter, but may not publish reclaimed capacity. C6 replaces
+  that temporary policy atomically with survivor-based occupancy.
 - An abandoned or panicking mark or sweep publishes neither a replacement
   pressure baseline nor recycled capacity. The last known-good request and
   occupancy state remains authoritative.
-- Runs activated by finalizers consume the new headroom. Publish any resulting
-  follow-up request only with the consistent post-finalization baseline; never
-  begin another collection while the heap is in `Finalizing`.
+- Runs activated by finalizers contribute to the consistent post-finalization
+  occupancy. Publish the new baseline only after finalization, clear heuristic
+  requests coalesced into the collection, and never begin another collection
+  while the heap is in `Finalizing`.
 - Verify successful and failed sweep publication, free-run reactivation,
   finalizer allocation around the trigger, and panic/quarantine recovery as
   C6 behavior rather than retroactive C2C.5b requirements.
@@ -1959,11 +2071,11 @@ recoverable panic injected by its own tests.
   requests remain independent of the target.
 - Compute the marked-survivor contribution before finalization, but publish
   the final target when the finalization batch drains. Runs activated by
-  finalizers consume the calculated headroom and may therefore latch one
-  follow-up request at completion; they do not inflate the survivor baseline.
-  A run retained by quarantine does join the baseline because it remains
-  assigned and unavailable for recycling. No collection begins during
-  `Finalizing`.
+  finalizers join current assigned occupancy before the target is published;
+  completion chooses a target above that final occupancy rather than latching
+  an immediate follow-up request. A run retained by quarantine also joins the
+  baseline because it remains assigned and unavailable for recycling. No
+  collection begins during `Finalizing`.
 - An abandoned or panicking mark or sweep publishes neither free-list
   membership nor a new pressure baseline. Finalizer-panic recovery publishes
   the consistent survivor/quarantine baseline only after every run has an
@@ -2042,12 +2154,13 @@ recoverable panic injected by its own tests.
   quiescence and shutdown cannot race their diagnostics, tasks, or host
   effects. A synchronous `collect_full` report completes only after its
   finalization set has reached terminal object states.
-- On completion, publish the post-finalization phase and any remaining
-  coalesced collection pressure before releasing the collector's mutator
-  lease. An already-committed collection may already be preventing new ordinary
-  mutator admission; it acquires exclusivity after the finalizer and other
-  active mutators exit. Otherwise the heuristic may reevaluate the pressure at
-  this boundary. Active mutators follow the normal safepoint protocol.
+- On completion, publish the post-finalization pressure baseline and clear
+  hints coalesced into the completed collection. An entry-elected collector
+  atomically carries its finalizer obligation forward as the collecting
+  entrant's ordinary mutator obligation; a `collect_full` collector returns
+  without one. A request serialized after that transition remains pending for
+  a later idle outer entry. No queued collector prevents ordinary admission
+  during finalization.
 
 Verification uses drop counters, destructors containing ordinary `Arc`,
 `Mutex`, `OnceLock`, and opaque host payloads, scoped current-mutator access,
@@ -2058,10 +2171,10 @@ is not eagerly scanned. One opaque destructor allocates and publishes a fresh
 quine and a diagnostic; the original identity is reclaimed while the published
 value survives the next collection. Another schedules work that enters the
 same heap from a worker. Uncommitted pressure raised during that finalizer
-remains coalesced. A separate deterministic test commits the next collection
-during finalization and proves that committed-collection priority blocks a
-later ordinary mutator without beginning its trace until the finalizer exits.
-A panicking opaque
+is coalesced into the completed collection, and a later outer entry proceeds
+without an immediate redundant second pass. A barrier-forced request after the
+completion transition remains pending and is serviced by a subsequent idle
+outer entry. A panicking opaque
 destructor quarantines only its slot; allocations and effects it published
 before panicking remain valid, and after the caller catches the panic another
 allocation and full collection must succeed.

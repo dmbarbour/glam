@@ -253,8 +253,8 @@ Verify that:
   tokens, recursive depths, epochs, and caches, and cannot construct a managed
   edge between them;
 - opposite A-then-B and B-then-A nesting does not deadlock when collection is
-  pending on both heaps, while entry waits safely if the target collector is
-  already exclusive;
+  requested on both heaps, because an uncommitted request does not block
+  entry, while entry waits safely if the target collector is already exclusive;
 - allocation payload and allocation-bit initialization completes before the
   managed pointer is returned, rather than at the outer-region boundary; and
 - collection requests can stop every worker at a bounded quantum boundary.
@@ -499,7 +499,8 @@ opaque family, or value-bearing runtime record.
 - Run it at every significant stable boundary: before/during/after worker
   activity, reflection quiescence, event delivery, logger supervision, module
   compilation, and settlement.
-- Add a debug mode which collects at nearly every outer mutator exit.
+- Add a debug mode which requests collection before nearly every outer mutator
+  entry.
 - Prove that collection does not alter task readiness, diagnostic counts,
   observation epochs, transaction conflicts, net revisions, or assembly
   results.
@@ -508,12 +509,11 @@ opaque family, or value-bearing runtime record.
   runtime reports quiescence, and a fresh value published by a quining
   destructor must survive independently of the reclaimed identity.
 - Request another collection from finalizer-driven work and prove it is
-  deferred until the current finalization set drains rather than deadlocking
-  or recursively collecting.
-- Force a finalizer to wait for work on another runtime worker, request a
-  collection concurrently, and distinguish both policies: uncommitted pressure
-  permits that worker to enter, while a committed next collection queues its
-  writer and deliberately blocks a later mutator until collection completes.
+  coalesced into the collection being finalized rather than deadlocking,
+  recursively collecting, or forcing an immediate second pass.
+- Force a finalizer to wait for work on another runtime worker while a
+  collection is requested concurrently, and prove the heuristic request does
+  not prevent that worker from entering during finalization.
 - Exercise runtime drop both before and after collection.
 
 Gate G3 requires the full test suite under ordinary execution plus the
@@ -530,19 +530,17 @@ unsafe/trace audit.
   These are Rust runtime-maintenance controls, not Glam evaluation effects.
 - Initially collect at controlled batch/idle boundaries.
 - Add allocation-pressure requests from successful typed-run publication which
-  are serviced at outer mutator exits. Lease-word claims and individual slot
-  allocations remain outside shared pressure accounting.
+  are serviced when a later outer mutator entry finds the heap idle. Lease-word
+  claims and individual slot allocations remain outside shared pressure
+  accounting.
 - Count queued and running finalizers as runtime operational activity. A
   readiness probe must pump consequences of finalizer diagnostics, event
   output, and newly launched tasks before returning a stable report.
 - Do not begin a requested collection while the heap is in `Finalizing`.
-  Record follow-up pressure on the current coordinator; allocations made during
-  finalization were not covered by the completed mark. Uncommitted heuristic
-  pressure remains coalesced. An explicit or heuristically committed request
-  may queue the next writer immediately: the collector-held mutator prevents
-  premature acquisition, while writer preference intentionally blocks new
-  mutators. The next trace begins only after finalizer activity drains and all
-  active mutator leases are released.
+  Requests made before successful completion are heuristic hints coalesced into
+  the active collection and are cleared with its pressure baseline; they do not
+  queue a second writer or deny fresh mutator admission. A request serialized
+  after completion remains latched for a later idle outer entry.
 - Ensure a request cannot make a worker spin, hold settlement admission, or
   publish semantic activity merely because collection ran.
 - Report metrics for debugging and profiling without making them observable to
@@ -585,7 +583,7 @@ Additional required modes:
 
 - collector disabled, to preserve a comparison baseline;
 - forced full collection at selected stable points;
-- aggressive full collection at outer mutator exits;
+- aggressive full-collection requests before outer mutator entries;
 - zero workers and several workers;
 - public roots moved among threads and dropped in forced orders;
 - every production allocation class fitting the collector's fixed-run slot

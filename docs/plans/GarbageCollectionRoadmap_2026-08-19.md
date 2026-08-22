@@ -2,8 +2,8 @@
 
 Status: in progress; collector Phases C0 through C3D, the C2C.6 verification
 follow-up, and integration Phase I0 are complete. Gate G0 is established, and
-the mandatory post-C1 and post-C2C reviews are complete. Collector Phase C4
-is next.
+the mandatory post-C1 and post-C2C reviews are complete. Collector Phase C3E
+revises collection servicing before C4 begins.
 
 This roadmap keeps two large transitions aligned:
 
@@ -137,12 +137,13 @@ permit dereference outside a region.
    cursors individually. Cursors carry no separate active/parked state: thread-
    local recursive depth governs use, and exclusive collector admission proves
    every cache is quiescent.
-   Once collection is committed, new ordinary entrants wait, while a thread
-   already active in another heap may make a dependent entry before the target
-   collector becomes exclusive. This prevents opposite cross-heap nesting
-   orders from deadlocking on pending collections. An exclusive collector never
-   enters another heap or invokes callbacks; cross-heap entry waits until that
-   exclusive phase ends.
+   An asynchronous request does not commit a queued writer or block admission.
+   An outer entry which finds the target heap idle atomically changes directly
+   from ordinary admission to exclusive collection. If the heap is active, the
+   entrant is admitted normally and the request remains latched. Consequently,
+   opposite cross-heap nesting orders require no dependent-admission exception.
+   An exclusive collector never enters another heap or invokes callbacks;
+   cross-heap entry waits only while that exclusive phase is authoritative.
 4. **No hidden stack scan.** Roots are explicit. Local unrooted pointers are
    safe because their entire lifetime lies within a mutator region.
 5. **No partially traced collection.** Production reclamation remains disabled
@@ -172,14 +173,12 @@ permit dereference outside a region.
    destructor runs while heap allocator or coordinator locks are held. The
    `Finalizing` phase reopens shared mutator admission while the collector
    retains one mutator lease; recursive same-heap entry reuses that region.
-   Uncommitted collection pressure arising before finalization completes is
-   coalesced as a possible follow-up request on the active collector
-   coordinator; it is not retroactively satisfied by the already completed
-   mark. An explicit request or heuristic commitment may commit the next
-   collection while finalization is still active. The collector-held mutator
-   delays exclusive acquisition, while the commitment intentionally makes new
-   ordinary mutators wait: stop-the-world collection has become the runtime's
-   next priority.
+   Collection pressure arising before finalization completes is coalesced into
+   the active collection as a heuristic hint. Successful completion clears the
+   request and acknowledges the pressure baseline; a request serialized after
+   that completion remains latched for a later idle outer entry. No next writer
+   is committed during finalization, and fresh ordinary mutation is not denied
+   merely because a heuristic request exists.
 8. **Stable addresses are an implementation phase, not a permanent API
    promise.** The initial full collector does not move allocations. Trace
    implementations enumerate outgoing edges through a visitor rather than
@@ -248,8 +247,10 @@ permit dereference outside a region.
   non-rootable, collection is deferred by a collector-held mutator lease,
   ordinary mutation is concurrently admitted, and queued Rust destructors run
   outside collector locks.
-- **Safepoint** — an outer mutator exit or explicit cooperative check at which
-  a requested collection may stop progress.
+- **Safepoint** — an outer mutator entry which finds its heap idle, or an
+  explicit synchronous maintenance boundary, at which a requested collection
+  may acquire exclusive authority. Outermost exit only publishes quiescence and
+  wakes waiters.
 - **Full collection** — traces the complete managed heap from explicit roots.
 - **Collector-ready graph** — the whole production root graph has passed the
   traceability inventory and forced-collection verification.
@@ -372,7 +373,7 @@ independent unsafe or scheduler boundaries, divide it before implementation
 rather than waiting for the following review.
 
 For the current collector plan, the mandatory review points are after C1C,
-C2C, C3D, C4, C5, C6D, C7, and C8. Review and partition the integration phases
+C2C, C3E, C4, C5, C6D, C7, and C8. Review and partition the integration phases
 again when Gate G1 permits that work; their present breakdown is not frozen by
 the collector implementation plan.
 
