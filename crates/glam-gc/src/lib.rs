@@ -1,9 +1,8 @@
 //! Runtime-local garbage collection support for Glam.
 //!
-//! C3A adds regional mutator admission, mutator-gated class discovery, and the
-//! prepare/admit/activate thread-cache protocol to C2C's managed-pointer and
-//! allocator foundation. Payloads remain live until terminal heap teardown;
-//! collection requests, marking, and reclamation remain disabled.
+//! C3 adds regional mutator admission and the stop-the-world coordination
+//! boundary to C2C's managed-pointer and allocator foundation. Payloads remain
+//! live until terminal heap teardown; marking and reclamation remain disabled.
 
 #![deny(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]
@@ -42,7 +41,7 @@ mod trace;
 mod deterministic;
 
 pub use class::{AllocationClass, UnsupportedLayout};
-pub use heap::Heap;
+pub use heap::{CollectionError, CollectionReport, Heap};
 pub use mutator::Mutator;
 pub use pointer::Gc;
 pub use trace::{Trace, Visitor};

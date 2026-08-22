@@ -46,12 +46,15 @@ words through atomic lease bitmaps and consults the heap mutex only when a
 class frontier is exhausted; after a claim, a worker mutates only its own
 ordinary word. C2C.6's native barrier fixtures force eight production claimers
 past the same exhausted-frontier observation and verify one synchronized
-advance or publication plus seven winner-frontier rechecks. C3A adds Loom
-models for mutator-exit visibility and pending-exclusive priority, backed by
-native forced schedules over the production coordinator and TLS activation
-path. There is still no production request, election, or collection body; C3B
-must extend the models across those transitions. Ordinary threaded stress alone
-is not proof of that later coordinator.
+advance or publication plus seven winner-frontier rechecks. C3 adds Loom models
+for mutator-exit visibility, pending-exclusive priority, reciprocal dependent
+admission, and the no-gap exclusive-to-finalizer handoff. Native forced
+schedules exercise production request epochs, election, waiter coalescing, TLS
+admission classification, deferred service, the finalizer mutator, follow-up
+commitment, and unwind restoration. The collection body remains synthetic: C4
+through C6 separately own roots, exact tracing, reclamation, and destructor
+recovery. Ordinary threaded stress remains supplementary rather than proof of
+coordinator ordering.
 
 ## Gate G0 Baseline
 

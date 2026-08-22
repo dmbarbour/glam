@@ -30,12 +30,12 @@ frontiers, and removes eager TLS pruning in favor of explicit inert release.
 C2C.6 adds forced concurrent exhausted-frontier verification and corrects the
 publication proof: initial run topology is observed through the frontier
 Release/Acquire pair or heap mutex, not through a load of the separate lease
-word. C3A adds the heap-local mutator-admission coordinator, moves allocation-
+word. C3 adds the heap-local mutator-admission coordinator, moves allocation-
 class discovery behind mutator authority, and orders TLS entry as prepare,
-admit, then activate. Its synthetic exclusive phase and Loom models verify
-drain, exclusion, and visibility without yet electing a production collector.
-There is no root registry, collection, marking, reclamation, finalization,
-callback, or production collector election.
+admit, then activate. Production request epochs now elect one collector, drain
+mutators, establish exclusive access, and perform a synthetic finalizer-mutator
+handoff. There is still no root registry, tracing, reclamation, managed-payload
+finalization, or collector callback.
 
 The crate denies unsafe code by default. `src/lib.rs` gives the reviewed
 `pointer`, `mutator`, `trace`, `mutation`, `thread_cache`, and unit-test modules named lint
@@ -146,8 +146,8 @@ implementation performs the available debug/test indexed heap and canonical
 metadata checks before `as_ref`; its result lifetime is bounded by the mutator
 borrow.
 
-Correct C2C calls satisfy the proof because collection remains disabled and
-arena payloads stay live until heap teardown. Wrong-heap and
+Correct pre-sweep calls satisfy the proof because C3's synthetic collection
+reclaims nothing and arena payloads stay live until heap teardown. Wrong-heap and
 wrong-representation tests deliberately arrange a diagnostic mismatch and
 establish that indexed validation panics before `as_ref` runs. Those checks are
 not part of the release-build proof.
@@ -184,11 +184,11 @@ C6 later owns collector-driven destruction.
   count together with the existing class/run topology. Its sibling condition
   variable supplies wakeups only; every waiter loops and rechecks its complete
   predicate under the mutex.
-- `Ordinary` admits outer mutators. `ExclusivePending` denies fresh outer
-  admission while admitted mutators drain, and `Exclusive` is published only
-  after the active count reaches zero. C3A exposes the latter phases only to
-  deterministic internal verification; C3B will connect them to requests and
-  collector election.
+- `Ordinary` admits outer mutators. An elected collection publishes
+  `ExclusivePending`, which denies ordinary admission while admitted mutators
+  drain, and publishes `Exclusive` only after the active count reaches zero.
+  One epoch identifies the elected collection; synchronous waiters either join
+  it before exclusion is fixed or record a follow-up epoch afterward.
 - Preparing a thread-local heap entry obtains or validates its weak heap-
   qualified record without changing recursive depth. An outer preparation then
   obtains one coordinator obligation before activating its cache. A panic or
@@ -198,12 +198,29 @@ C6 later owns collector-driven destruction.
   outer coordinator obligation. It remains available while exclusive work is
   pending so an already-admitted mutator can finish its bounded region. Entry
   into a different heap uses that heap's independent TLS record and admission
-  count.
+  count. If the thread already holds another heap, that outer entry is
+  dependent: it may pass `ExclusivePending` but never `Exclusive`. This narrow
+  exception prevents reciprocal cross-heap nesting from deadlocking committed
+  collectors.
 - Entry destruction first decrements recursive depth and makes the outer cache
   quiescent, then retires the coordinator obligation. Consequently, observing
   zero active mutators after acquiring the heap mutex also observes all work
-  sequenced before those outer exits. C3A's native forced schedules and Loom
+  sequenced before those outer exits. C3's native forced schedules and Loom
   model latch this visibility edge.
+- A nested different-heap exit never waits as a collector while another heap
+  remains active on the thread. It records a weak TLS-local service obligation,
+  including during unwind; the thread's last ordinary heap exit drains those
+  obligations after all its caches are quiescent.
+- The collector-to-finalizer handoff prepares an inert TLS entry, then changes
+  `Exclusive` directly to `Finalizing` while installing one active mutator
+  obligation under the same heap mutex. Ordinary finalization work and
+  recursive same-heap entry therefore run with normal mutator authority. A
+  follow-up request makes ordinary admission wait, and completion publishes
+  the next `ExclusivePending` epoch without an intervening ordinary phase.
+- An unwind guard covers exclusive and finalizer test work. It retires any
+  installed finalizer mutator first, clears collector ownership, restores
+  ordinary admission, and relatches the interrupted collection. C6 adds the
+  stronger payload/destructor recovery rules when collection gains effects.
 - An admitted mutator borrows the `Heap` handle's existing `Arc<HeapInner>`;
   admission does not clone a shared owner. Allocation-class discovery clones
   that owner only into the reusable class handle which must retain heap
@@ -338,9 +355,10 @@ C6 later owns collector-driven destruction.
 - Allocation pressure is charged exactly once under heap state after a typed
   run becomes authoritative in both arena and class pool. Word claims, local
   object allocation, cursor eviction, explicit cache release, and thread exit
-  do not touch it. A saturating count latches the provisional request after
-  `RUNS_PER_CHUNK` publications, currently 128; C3B owns acting on the request
-  and C6 owns rearming the allowance after successful sweep.
+  do not touch it. A saturating count latches the initial request after 7/8 of
+  one chunk, currently 112 typed-run publications. C3 services that coordinator
+  request but preserves the pressure latch and count; C6 owns rearming the
+  allowance after successful sweep.
 - The deterministic pre-initialization hook exists only in test builds at the
   last point before the two publication writes. An unwind there owns and drops
   the input normally while leaving both local and authoritative bit state
@@ -520,11 +538,15 @@ mutation closure runs.
   identities and geometry, zeroed bitmap ranges, exact first and last slots,
   rejection of non-slot addresses, and non-publication after invalid or
   repeated initialization.
-- C3A tests force class discovery behind synthetic exclusive admission,
+- C3 tests force class discovery behind exclusive admission,
   prepare/admit/activate state, rollback before activation, same-heap recursive
   entry during a pending exclusive transition, independent cross-heap counts,
-  committed exclusion of fresh outer entry, and mutator-exit visibility. The
-  coordinator Loom models cover visibility and pending-exclusive priority.
+  committed exclusion of fresh outer entry, mutator-exit visibility, request
+  coalescing, same-thread synchronous rejection, reciprocal dependent entry,
+  already-exclusive targets, deferred nested service, the no-gap finalizer
+  handoff, follow-up commitment, and panic restoration. Coordinator Loom models
+  cover visibility, pending-exclusive priority, reciprocal dependent admission,
+  and exclusive-to-finalizer authority transfer.
 - The ordinary crate checks, exact unsafe inventory, focused Miri run, and
   repository-wide checks are required at completed checkpoints.
 - Miri passes all implemented tests with leak checking enabled. C1's temporary

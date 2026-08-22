@@ -1,8 +1,8 @@
 # Glam GC Subcrate Implementation Plan — 2026-08-19
 
-Status: in progress; Phases C0 through C3A are complete, including the C2C.6
+Status: in progress; Phases C0 through C3D are complete, including the C2C.6
 verification follow-up. The mandatory post-C1 and post-C2C reviews are
-complete. C3B is next.
+complete. C4 is next.
 
 This plan implements an exact, non-moving, runtime-local tracing collector
 without depending on Glam value semantics. The governing requirements and
@@ -40,9 +40,9 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C3A.1 | completed | coordinator state and mutator-gated class discovery |
 | C3A.2 | completed | prepare/admit/activate TLS integration and recursion |
 | C3A.3 | completed | visibility proof, forced schedules, and Loom model |
-| C3B | pending | collector election and single-heap STW quiescence |
-| C3C | pending | cross-heap dependent admission |
-| C3D | pending | finalizer handoff, pressure, panic, and teardown races |
+| C3B | completed | collector election and single-heap STW quiescence |
+| C3C | completed | cross-heap dependent admission |
+| C3D | completed | finalizer handoff, pressure, panic, and teardown races |
 | C4 | pending | explicit external roots |
 | C5 | pending | exact full marking |
 | C6A | pending | no-drop sweep and run-state publication |
@@ -1383,9 +1383,10 @@ C2C.5 completed on 2026-08-22:
   final lease word.
 - Allocation pressure no longer participates in word leasing. One centralized
   heap-state operation publishes a run into the arena and class pool, then
-  charges one saturating typed-run event. The 128th publication latches the
-  completed C2C provisional request; C3B will lower the trigger to 7/8 of one
-  chunk when requests become serviceable. Neither a failed publication nor
+  charges one saturating typed-run event. At this checkpoint the 128th
+  publication latched the provisional request; C3B subsequently lowered the
+  trigger to 7/8 of one chunk when requests became serviceable. Neither a
+  failed publication nor
   any lease, slot, cursor, or TLS transition adds an event.
 - Each class handle and heap entry share one frontier cell. It release-publishes
   a pointer to a separately boxed, heap-owned run record, so ordinary cursor
@@ -1541,6 +1542,52 @@ C3A completed on 2026-08-22:
   Workspace formatting, Clippy with warnings denied, and the complete workspace
   test suite also pass.
 
+### C3B–C3D Completion
+
+C3B through C3D completed on 2026-08-22:
+
+- `Heap::request_collection` now records an idempotent nonblocking request,
+  while `Heap::collect_full` either joins the collection whose exclusion is
+  not yet fixed or requests the following epoch. The latter rejects a
+  same-thread active mutator before changing coordinator state. Exactly one
+  requester elects each epoch; others wait on the condition variable and
+  observe its completed report.
+- Commitment publishes `ExclusivePending`, denies ordinary outer admission,
+  drains the active count, and then publishes `Exclusive`. C3's collection
+  body is intentionally synthetic: it proves stop-the-world coordination but
+  performs no root scan, trace, sweep, lease revocation, or reclamation.
+- The automatic typed-run threshold is now 7/8 of one 128-run chunk, or 112
+  publications. Servicing the synthetic collection consumes the coordinator
+  obligation but preserves C2C's publication count and pressure latch until a
+  later successful C6 sweep has a sound rearming event.
+- Heap-qualified TLS classifies a different-heap outer entry as dependent when
+  this thread already holds another heap. Dependent entry may pass a committed
+  `ExclusivePending` collector, but not `Exclusive`. A nested exit records a
+  weak TLS-local service obligation; the thread's last ordinary heap exit
+  services those deferred requests without waiting while it still holds an
+  outer heap. This includes caught nested unwinds.
+- After synthetic exclusive work, the collector prepares an inert TLS entry,
+  then changes `Exclusive` directly to `Finalizing` while installing one
+  collector-owned mutator obligation under the heap mutex. There is no
+  authority gap. Ordinary workers may enter during finalization until a
+  follow-up request commits the next collection.
+- A request made during `Exclusive` or `Finalizing` belongs to the following
+  epoch. Completing finalization atomically completes the current report and,
+  when needed, publishes the next `ExclusivePending` epoch before releasing
+  the mutex. Finalizer and exclusive-work panics retire active obligations,
+  restore ordinary admission, and relatch the interrupted request.
+- Forced native schedules cover explicit and automatic requests, same-thread
+  rejection, waiter coalescing, reciprocal A-then-B/B-then-A dependent entry,
+  already-exclusive targets, deferred nested service, the finalizer handoff,
+  concurrent finalization entry, follow-up priority, and both exclusive and
+  finalizer unwind. Loom additionally models reciprocal pending admission and
+  the no-gap exclusive-to-finalizer transition.
+- The stable collector check passes with 100 unit tests, six Loom models, and
+  six compile-fail doctests. Full leak-checking Miri and both AddressSanitizer
+  and ThreadSanitizer pass all 100 collector unit tests. The exact unsafe
+  inventory is unchanged by C3's safe coordination work. Workspace formatting,
+  Clippy with warnings denied, and the complete workspace test suite pass.
+
 #### Pressure Constraints Carried into C3
 
 - `Heap::request_collection` is the first explicit request API. It coalesces
@@ -1628,8 +1675,10 @@ C3A completed on 2026-08-22:
 - Permit nested entry into a different heap. It activates a separate cache and
   active-mutator obligation; holding heap A's mutator neither authorizes heap B
   access nor permits a managed edge between them.
-- A collection request prevents ordinary new outer entries, then waits for
-  every active mutator of that heap to exit. There is one narrow dependent-
+- Once a collection request is committed by an elected collector, it prevents
+  ordinary new outer entries, then waits for every active mutator of that heap
+  to exit. A merely recorded nonblocking request is committed by a synchronous
+  requester or a safe outer-exit servicing boundary. There is one narrow dependent-
   admission exception: a thread already holding another heap's mutator may
   enter a target heap whose collector is requested or queued but has not yet
   acquired exclusive `Collecting` state. Under the target heap-state mutex,
