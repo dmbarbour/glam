@@ -47,11 +47,13 @@ class frontier is exhausted; after a claim, a worker mutates only its own
 ordinary word. C2C.6's native barrier fixtures force eight production claimers
 past the same exhausted-frontier observation and verify one synchronized
 advance or publication plus seven winner-frontier rechecks. C3 adds Loom models
-for mutator-exit visibility, pending-exclusive priority, reciprocal dependent
-admission, and the no-gap exclusive-to-finalizer handoff. Native forced
-schedules exercise production request epochs, election, waiter coalescing, TLS
-admission classification, deferred service, the finalizer mutator, follow-up
-commitment, and unwind restoration. The collection body remains synthetic: C4
+for mutator-exit visibility, unique idle-entry election, reciprocal nested
+admission with requests latched, and the no-gap
+exclusive-to-finalizer-to-entry handoff. Native forced schedules exercise
+production request epochs, idle-entry and synchronous election, waiter
+coalescing, direct admission transfer, collector-local cache reset, the absence
+of exit-time service, the finalizer mutator, request/pressure acknowledgement,
+and unwind restoration. The collection body remains synthetic: C4
 through C6 separately own roots, exact tracing, reclamation, and destructor
 recovery. Ordinary threaded stress remains supplementary rather than proof of
 coordinator ordering.

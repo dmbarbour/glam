@@ -10,8 +10,8 @@ use crate::{
     class::{AllocationClassEntry, MetadataIdentity, ObjectMetadata, metadata_for},
     run::{AllocationClassId, RunGeometry},
     thread_cache::{
-        AllocationCursor, AllocationLeaseEpoch, ThreadHeapEntry, take_deferred_collection_heaps,
-        thread_has_active_mutator, thread_has_any_active_mutator,
+        AllocationCursor, AllocationLeaseEpoch, ThreadHeapEntry, remove_inactive_thread_cache,
+        thread_has_any_active_mutator,
     },
 };
 
@@ -40,7 +40,7 @@ impl CollectionReport {
 /// A synchronous collection request which cannot enter the coordinator.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CollectionError {
-    /// The calling thread already holds a mutator for this heap.
+    /// The calling thread already holds a mutator for some heap.
     ActiveMutator,
 }
 
@@ -48,7 +48,7 @@ impl std::fmt::Display for CollectionError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ActiveMutator => {
-                formatter.write_str("cannot collect while this thread holds the heap's mutator")
+                formatter.write_str("cannot collect while this thread holds a mutator")
             }
         }
     }
@@ -101,7 +101,18 @@ impl Heap {
         let prepared =
             ThreadHeapEntry::prepare(&self.inner, self.inner.current_allocation_lease_epoch());
         let outer = prepared.is_outer();
-        let admission = outer.then(|| self.inner.admit_outer_mutator(prepared.admission_kind()));
+        let (prepared, admission) = if outer {
+            let (admission, collected) = self.inner.admit_outer_mutator();
+            let prepared = if collected {
+                drop(prepared);
+                ThreadHeapEntry::prepare(&self.inner, self.inner.current_allocation_lease_epoch())
+            } else {
+                prepared
+            };
+            (prepared, Some(admission))
+        } else {
+            (prepared, None)
+        };
         after_admission();
         let thread_entry =
             prepared.activate(self.inner.current_allocation_lease_epoch(), admission);
@@ -110,24 +121,14 @@ impl Heap {
         drop(mutator);
         drop(thread_entry);
 
-        // A nested cross-heap exit must not synchronously become a collector:
-        // doing so could wait on the outer heap while an opposite nesting waits
-        // on this one. The last heap region on this thread is a safe servicing
-        // boundary for coalesced requests.
-        if outer && !thread_has_any_active_mutator() {
-            for deferred in take_deferred_collection_heaps() {
-                deferred.service_requested_collections();
-            }
-            self.inner.service_requested_collections();
-        }
         result
     }
 
     /// Records an idempotent, nonblocking full-collection request.
     ///
-    /// The request is serviced at a later outer mutator exit or by
-    /// [`Heap::collect_full`]. Calling this inside a mutator never waits on the
-    /// calling region.
+    /// The request is serviced when a later outer mutator entry finds the heap
+    /// idle, or by [`Heap::collect_full`]. Calling this inside a mutator never
+    /// waits on the calling region.
     pub fn request_collection(&self) {
         self.inner.request_collection();
     }
@@ -138,7 +139,7 @@ impl Heap {
     /// same request, election, exclusion, and completion boundary which later
     /// phases use for real full collection.
     pub fn collect_full(&self) -> Result<CollectionReport, CollectionError> {
-        if thread_has_active_mutator(&self.inner) {
+        if thread_has_any_active_mutator() {
             return Err(CollectionError::ActiveMutator);
         }
         Ok(self.inner.collect_full())
@@ -227,15 +228,8 @@ struct MutatorCoordinator {
 enum AdmissionPhase {
     #[default]
     Ordinary,
-    ExclusivePending,
     Exclusive,
     Finalizing,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum AdmissionKind {
-    Ordinary,
-    Dependent,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -303,6 +297,11 @@ impl AllocationPressure {
         self.collection_requested |= self.published_runs >= INITIAL_RUN_PUBLICATION_ALLOWANCE;
         !was_requested && self.collection_requested
     }
+
+    fn acknowledge_collection(&mut self) {
+        self.published_runs = 0;
+        self.collection_requested = false;
+    }
 }
 
 impl HeapState {
@@ -331,15 +330,7 @@ impl HeapState {
 
 impl MutatorCoordinator {
     fn request_collection(&mut self) {
-        // A request which arrives before exclusion is fixed can join that
-        // collection. Once exclusion is authoritative, the completed trace
-        // would not cover subsequent work, so retain a follow-up obligation.
-        match self.phase {
-            AdmissionPhase::Ordinary | AdmissionPhase::Exclusive | AdmissionPhase::Finalizing => {
-                self.collection_requested = true;
-            }
-            AdmissionPhase::ExclusivePending => {}
-        }
+        self.collection_requested = true;
     }
 
     fn request_synchronous_collection(&mut self) -> CollectionEpoch {
@@ -348,34 +339,22 @@ impl MutatorCoordinator {
                 self.collection_requested = true;
                 CollectionEpoch::after(self.completed_collection_epoch)
             }
-            AdmissionPhase::ExclusivePending => self
+            AdmissionPhase::Exclusive | AdmissionPhase::Finalizing => self
                 .active_collection
-                .expect("pending collection must have an epoch"),
-            AdmissionPhase::Exclusive => {
-                self.collection_requested = true;
-                let active = self
-                    .active_collection
-                    .expect("exclusive collection must have an epoch");
-                CollectionEpoch::after(active.get())
-            }
-            AdmissionPhase::Finalizing => {
-                self.collection_requested = true;
-                let active = self
-                    .active_collection
-                    .expect("finalizing collection must have an epoch");
-                CollectionEpoch::after(active.get())
-            }
+                .expect("active collection phase must have an epoch"),
         }
     }
 
-    fn elect_collection(&mut self) -> Option<CollectionEpoch> {
-        if self.phase != AdmissionPhase::Ordinary || !self.collection_requested {
+    fn elect_idle_collection(&mut self) -> Option<CollectionEpoch> {
+        if self.phase != AdmissionPhase::Ordinary
+            || self.active_outer_mutators != 0
+            || !self.collection_requested
+        {
             return None;
         }
         let epoch = CollectionEpoch::after(self.completed_collection_epoch);
-        self.collection_requested = false;
         self.active_collection = Some(epoch);
-        self.phase = AdmissionPhase::ExclusivePending;
+        self.phase = AdmissionPhase::Exclusive;
         Some(epoch)
     }
 }
@@ -416,33 +395,62 @@ struct ResolvedRun {
 }
 
 impl HeapInner {
-    fn admit_outer_mutator(&self, kind: AdmissionKind) -> MutatorAdmission<'_> {
-        let mut state = self
-            .state
-            .lock()
-            .expect("heap state should not be poisoned");
-        while !admission_is_open(&state.coordinator, kind) {
-            #[cfg(test)]
-            {
-                state.coordinator.blocked_outer_mutators += 1;
-                self.admission_changed.notify_all();
-            }
-            state = self
-                .admission_changed
-                .wait(state)
+    fn admit_outer_mutator(self: &Arc<Self>) -> (MutatorAdmission<'_>, bool) {
+        let elected = {
+            let mut state = self
+                .state
+                .lock()
                 .expect("heap state should not be poisoned");
-            #[cfg(test)]
-            {
-                state.coordinator.blocked_outer_mutators -= 1;
-                self.admission_changed.notify_all();
+            loop {
+                match state.coordinator.phase {
+                    AdmissionPhase::Ordinary => {
+                        if let Some(epoch) = state.coordinator.elect_idle_collection() {
+                            self.admission_changed.notify_all();
+                            break Some(epoch);
+                        }
+                        state.coordinator.active_outer_mutators = state
+                            .coordinator
+                            .active_outer_mutators
+                            .checked_add(1)
+                            .expect("active mutator count exhausted");
+                        break None;
+                    }
+                    AdmissionPhase::Finalizing => {
+                        state.coordinator.active_outer_mutators = state
+                            .coordinator
+                            .active_outer_mutators
+                            .checked_add(1)
+                            .expect("active mutator count exhausted");
+                        break None;
+                    }
+                    AdmissionPhase::Exclusive => {
+                        #[cfg(test)]
+                        {
+                            state.coordinator.blocked_outer_mutators += 1;
+                            self.admission_changed.notify_all();
+                        }
+                        state = self
+                            .admission_changed
+                            .wait(state)
+                            .expect("heap state should not be poisoned");
+                        #[cfg(test)]
+                        {
+                            state.coordinator.blocked_outer_mutators -= 1;
+                            self.admission_changed.notify_all();
+                        }
+                    }
+                }
             }
-        }
-        state.coordinator.active_outer_mutators = state
-            .coordinator
-            .active_outer_mutators
-            .checked_add(1)
-            .expect("active mutator count exhausted");
-        MutatorAdmission { heap: self }
+        };
+
+        let Some(epoch) = elected else {
+            return (MutatorAdmission { heap: self }, false);
+        };
+        (
+            self.run_synthetic_collection(epoch, true, || {}, |_| {})
+                .expect("entry-elected collection must preserve its mutator admission"),
+            true,
+        )
     }
 
     fn request_collection(&self) {
@@ -475,7 +483,7 @@ impl HeapInner {
                     if state.coordinator.completed_collection_epoch >= target.get() {
                         return CollectionReport { epoch: target.0 };
                     }
-                    if let Some(elected) = state.coordinator.elect_collection() {
+                    if let Some(elected) = state.coordinator.elect_idle_collection() {
                         self.admission_changed.notify_all();
                         break elected;
                     }
@@ -495,40 +503,22 @@ impl HeapInner {
                     }
                 }
             };
-            let mut elected = Some(elected);
-            while let Some(epoch) = elected {
-                elected = self.run_synthetic_collection(epoch, || {}, |_| {});
-            }
+            assert!(
+                self.run_synthetic_collection(elected, false, || {}, |_| {})
+                    .is_none(),
+                "maintenance collection cannot retain a mutator admission"
+            );
         }
     }
 
-    fn service_requested_collections(self: &Arc<Self>) {
-        loop {
-            let elected = {
-                let mut state = self
-                    .state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                state.coordinator.elect_collection()
-            };
-            let Some(elected) = elected else {
-                return;
-            };
-            self.admission_changed.notify_all();
-            let mut elected = Some(elected);
-            while let Some(epoch) = elected {
-                elected = self.run_synthetic_collection(epoch, || {}, |_| {});
-            }
-        }
-    }
-
-    fn run_synthetic_collection(
-        self: &Arc<Self>,
+    fn run_synthetic_collection<'heap>(
+        self: &'heap Arc<Self>,
         epoch: CollectionEpoch,
+        continue_as_mutator: bool,
         exclusive_work: impl FnOnce(),
         finalizer_work: impl for<'mutator> FnOnce(&Mutator<'mutator>),
-    ) -> Option<CollectionEpoch> {
-        let mut state = self
+    ) -> Option<MutatorAdmission<'heap>> {
+        let state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -539,19 +529,13 @@ impl HeapInner {
         );
         assert_eq!(
             state.coordinator.phase,
-            AdmissionPhase::ExclusivePending,
-            "elected collector must begin pending"
+            AdmissionPhase::Exclusive,
+            "elected collector must begin exclusive"
         );
-        while state.coordinator.active_outer_mutators != 0 {
-            state = self
-                .admission_changed
-                .wait(state)
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-        }
-        state.coordinator.phase = AdmissionPhase::Exclusive;
-        self.admission_changed.notify_all();
+        assert_eq!(state.coordinator.active_outer_mutators, 0);
         drop(state);
 
+        remove_inactive_thread_cache(self);
         let mut attempt = CollectionAttempt::new(self, epoch);
         exclusive_work();
 
@@ -582,9 +566,15 @@ impl HeapInner {
         let mutator = Mutator::new(self, thread_entry.cache());
         finalizer_work(&mutator);
         drop(mutator);
-        drop(thread_entry);
+        let admission = thread_entry.into_outer_admission();
 
-        attempt.complete()
+        attempt.complete();
+        if continue_as_mutator {
+            Some(admission)
+        } else {
+            drop(admission);
+            None
+        }
     }
 
     fn release_outer_mutator(&self) {
@@ -608,15 +598,9 @@ impl HeapInner {
             .state
             .lock()
             .expect("heap state should not be poisoned");
-        while state.coordinator.phase != AdmissionPhase::Ordinary {
-            state = self
-                .admission_changed
-                .wait(state)
-                .expect("heap state should not be poisoned");
-        }
-        state.coordinator.phase = AdmissionPhase::ExclusivePending;
-        self.admission_changed.notify_all();
-        while state.coordinator.active_outer_mutators != 0 {
+        while state.coordinator.phase != AdmissionPhase::Ordinary
+            || state.coordinator.active_outer_mutators != 0
+        {
             state = self
                 .admission_changed
                 .wait(state)
@@ -642,20 +626,6 @@ impl HeapInner {
             .lock()
             .expect("heap state should not be poisoned");
         while state.coordinator.blocked_outer_mutators != expected {
-            state = self
-                .admission_changed
-                .wait(state)
-                .expect("heap state should not be poisoned");
-        }
-    }
-
-    #[cfg(test)]
-    fn wait_for_admission_phase(&self, expected: AdmissionPhase) {
-        let mut state = self
-            .state
-            .lock()
-            .expect("heap state should not be poisoned");
-        while state.coordinator.phase != expected {
             state = self
                 .admission_changed
                 .wait(state)
@@ -1070,17 +1040,6 @@ impl HeapInner {
     }
 }
 
-fn admission_is_open(coordinator: &MutatorCoordinator, kind: AdmissionKind) -> bool {
-    match coordinator.phase {
-        AdmissionPhase::Ordinary => true,
-        AdmissionPhase::ExclusivePending => kind == AdmissionKind::Dependent,
-        AdmissionPhase::Exclusive => false,
-        AdmissionPhase::Finalizing => {
-            !coordinator.collection_requested || kind == AdmissionKind::Dependent
-        }
-    }
-}
-
 struct CollectionAttempt<'heap> {
     heap: &'heap HeapInner,
     epoch: CollectionEpoch,
@@ -1096,7 +1055,7 @@ impl<'heap> CollectionAttempt<'heap> {
         }
     }
 
-    fn complete(&mut self) -> Option<CollectionEpoch> {
+    fn complete(&mut self) {
         let mut state = self
             .heap
             .state
@@ -1105,20 +1064,12 @@ impl<'heap> CollectionAttempt<'heap> {
         assert_eq!(state.coordinator.phase, AdmissionPhase::Finalizing);
         assert_eq!(state.coordinator.active_collection, Some(self.epoch));
         state.coordinator.completed_collection_epoch = self.epoch.get();
-        let next = if state.coordinator.collection_requested {
-            let next = CollectionEpoch::after(self.epoch.get());
-            state.coordinator.collection_requested = false;
-            state.coordinator.active_collection = Some(next);
-            state.coordinator.phase = AdmissionPhase::ExclusivePending;
-            Some(next)
-        } else {
-            state.coordinator.active_collection = None;
-            state.coordinator.phase = AdmissionPhase::Ordinary;
-            None
-        };
+        state.coordinator.collection_requested = false;
+        state.coordinator.active_collection = None;
+        state.coordinator.phase = AdmissionPhase::Ordinary;
+        state.allocation_pressure.acknowledge_collection();
         self.completed = true;
         self.heap.admission_changed.notify_all();
-        next
     }
 }
 
@@ -1414,27 +1365,26 @@ mod tests {
     }
 
     #[test]
-    fn recursive_class_discovery_reuses_admission_while_exclusive_is_pending() {
+    fn recursive_class_discovery_reuses_admission_while_collection_is_requested() {
         let heap = Heap::new();
 
-        let (class, collector) = heap.with_mutator(|_| {
-            let collector = std::thread::spawn({
-                let heap = heap.clone();
-                move || drop(heap.inner.enter_synthetic_exclusive())
-            });
-            heap.inner
-                .wait_for_admission_phase(AdmissionPhase::ExclusivePending);
-
+        let class = heap.with_mutator(|_| {
+            heap.request_collection();
             let class = heap
                 .with_mutator(|mutator| mutator.allocation_class::<SecondType>())
                 .unwrap();
             assert_eq!(heap.inner.coordinator_snapshot().active_outer_mutators, 1);
             assert_eq!(cache_snapshot(&heap.inner).unwrap().recursive_depth, 1);
-            (class, collector)
+            assert!(heap.inner.coordinator_snapshot().collection_requested);
+            class
         });
 
-        collector.join().expect("synthetic collector panicked");
         assert!(class.belongs_to(&heap.inner));
+        assert_eq!(
+            heap.inner.coordinator_snapshot().completed_collection_epoch,
+            0
+        );
+        heap.with_mutator(|_| {});
         assert_eq!(
             heap.inner.coordinator_snapshot().phase,
             AdmissionPhase::Ordinary
@@ -1520,7 +1470,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_exclusive_blocks_fresh_outer_admission_until_release() {
+    fn requested_collection_does_not_block_fresh_entry_while_heap_is_active() {
         let heap = Heap::new();
         let (active_tx, active_rx) = mpsc::channel();
         let (release_active_tx, release_active_rx) = mpsc::channel();
@@ -1534,45 +1484,36 @@ mod tests {
             }
         });
         active_rx.recv().unwrap();
-
-        let (exclusive_tx, exclusive_rx) = mpsc::channel();
-        let (release_exclusive_tx, release_exclusive_rx) = mpsc::channel();
-        let collector = std::thread::spawn({
-            let heap = heap.clone();
-            move || {
-                let exclusive = heap.inner.enter_synthetic_exclusive();
-                exclusive_tx.send(()).unwrap();
-                release_exclusive_rx.recv().unwrap();
-                drop(exclusive);
-            }
-        });
-        heap.inner
-            .wait_for_admission_phase(AdmissionPhase::ExclusivePending);
+        heap.request_collection();
 
         let (entered_tx, entered_rx) = mpsc::channel();
         let entrant = std::thread::spawn({
             let heap = heap.clone();
             move || heap.with_mutator(|_| entered_tx.send(()).unwrap())
         });
-        heap.inner.wait_for_blocked_outer_mutators(1);
+        entered_rx.recv().unwrap();
+        entrant.join().expect("blocked entrant panicked");
+
+        let requested = heap.inner.coordinator_snapshot();
+        assert!(requested.collection_requested);
+        assert_eq!(requested.completed_collection_epoch, 0);
+        assert_eq!(requested.active_outer_mutators, 1);
 
         release_active_tx.send(()).unwrap();
         active.join().expect("active mutator panicked");
-        exclusive_rx.recv().unwrap();
         assert_eq!(
-            heap.inner.coordinator_snapshot().phase,
-            AdmissionPhase::Exclusive
+            heap.inner.coordinator_snapshot().completed_collection_epoch,
+            0
         );
-        assert_eq!(heap.inner.coordinator_snapshot().blocked_outer_mutators, 1);
-        assert!(entered_rx.try_recv().is_err());
 
-        release_exclusive_tx.send(()).unwrap();
-        collector.join().expect("synthetic collector panicked");
-        entrant.join().expect("blocked entrant panicked");
-        entered_rx.recv().unwrap();
+        heap.with_mutator(|_| {});
         assert_eq!(
             heap.inner.coordinator_snapshot().phase,
             AdmissionPhase::Ordinary
+        );
+        assert_eq!(
+            heap.inner.coordinator_snapshot().completed_collection_epoch,
+            1
         );
     }
 
@@ -1594,7 +1535,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_request_is_nonblocking_and_serviced_at_outer_exit() {
+    fn explicit_request_is_nonblocking_and_serviced_before_outer_entry() {
         let heap = Heap::new();
 
         heap.request_collection();
@@ -1606,8 +1547,9 @@ mod tests {
         heap.with_mutator(|_| {
             assert_eq!(
                 heap.inner.coordinator_snapshot().completed_collection_epoch,
-                0
+                1
             );
+            assert_eq!(heap.inner.coordinator_snapshot().active_outer_mutators, 1);
         });
 
         let completed = heap.inner.coordinator_snapshot();
@@ -1617,7 +1559,7 @@ mod tests {
     }
 
     #[test]
-    fn recursive_request_is_serviced_only_after_the_outer_exit() {
+    fn recursive_request_survives_outer_exit_until_the_next_entry() {
         let heap = Heap::new();
 
         heap.with_mutator(|_| {
@@ -1628,14 +1570,137 @@ mod tests {
             assert_eq!(pending.active_outer_mutators, 1);
         });
 
-        let completed = heap.inner.coordinator_snapshot();
-        assert_eq!(completed.completed_collection_epoch, 1);
-        assert_eq!(completed.active_outer_mutators, 0);
+        let pending = heap.inner.coordinator_snapshot();
+        assert!(pending.collection_requested);
+        assert_eq!(pending.completed_collection_epoch, 0);
+        assert_eq!(pending.active_outer_mutators, 0);
+
+        heap.with_mutator(|_| {
+            assert_eq!(
+                heap.inner.coordinator_snapshot().completed_collection_epoch,
+                1
+            );
+        });
     }
 
     #[test]
-    fn synchronous_collection_rejects_a_same_thread_active_mutator() {
+    fn entry_elected_collection_hands_admission_directly_to_the_mutator() {
         let heap = Heap::new();
+        heap.request_collection();
+
+        heap.with_mutator_admission_hook(
+            || {
+                let coordinator = heap.inner.coordinator_snapshot();
+                assert_eq!(coordinator.phase, AdmissionPhase::Ordinary);
+                assert_eq!(coordinator.completed_collection_epoch, 1);
+                assert_eq!(coordinator.active_outer_mutators, 1);
+                assert!(!coordinator.collection_requested);
+                assert_eq!(cache_snapshot(&heap.inner).unwrap().recursive_depth, 0);
+            },
+            |_| {
+                let coordinator = heap.inner.coordinator_snapshot();
+                assert_eq!(coordinator.completed_collection_epoch, 1);
+                assert_eq!(coordinator.active_outer_mutators, 1);
+                assert_eq!(cache_snapshot(&heap.inner).unwrap().recursive_depth, 1);
+            },
+        );
+
+        assert_eq!(heap.inner.coordinator_snapshot().active_outer_mutators, 0);
+    }
+
+    #[test]
+    fn entry_elected_collection_clears_its_inactive_cursor_cache() {
+        let heap = Heap::new();
+        let class = heap
+            .with_mutator(|mutator| mutator.allocation_class::<FirstType>())
+            .unwrap();
+        heap.with_mutator(|mutator| {
+            let _ = mutator.alloc(&class, FirstType { _value: 1 });
+        });
+        assert_eq!(cache_snapshot(&heap.inner).unwrap().cursor_count, 1);
+
+        heap.request_collection();
+        heap.with_mutator_admission_hook(
+            || {
+                let cache = cache_snapshot(&heap.inner).unwrap();
+                assert_eq!(cache.recursive_depth, 0);
+                assert_eq!(cache.cursor_count, 0);
+            },
+            |mutator| {
+                let _ = mutator.alloc(&class, FirstType { _value: 2 });
+                assert_eq!(cache_snapshot(&heap.inner).unwrap().cursor_count, 1);
+            },
+        );
+    }
+
+    #[test]
+    fn concurrent_idle_entries_elect_exactly_one_requested_collection() {
+        const ENTRANTS: usize = 8;
+
+        let heap = Heap::new();
+        heap.request_collection();
+        let start = Arc::new(Barrier::new(ENTRANTS + 1));
+        let entrants = (0..ENTRANTS)
+            .map(|_| {
+                let heap = heap.clone();
+                let start = Arc::clone(&start);
+                std::thread::spawn(move || {
+                    start.wait();
+                    heap.with_mutator(|_| {})
+                })
+            })
+            .collect::<Vec<_>>();
+
+        start.wait();
+        for entrant in entrants {
+            entrant.join().expect("outer entrant panicked");
+        }
+        let completed = heap.inner.coordinator_snapshot();
+        assert_eq!(completed.completed_collection_epoch, 1);
+        assert_eq!(completed.active_outer_mutators, 0);
+        assert!(!completed.collection_requested);
+    }
+
+    #[test]
+    fn request_after_collection_completion_remains_pending() {
+        let heap = Heap::new();
+        heap.request_collection();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let entrant = std::thread::spawn({
+            let heap = heap.clone();
+            move || {
+                heap.with_mutator(|_| {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                });
+            }
+        });
+
+        entered_rx.recv().unwrap();
+        let completed = heap.inner.coordinator_snapshot();
+        assert_eq!(completed.completed_collection_epoch, 1);
+        assert!(!completed.collection_requested);
+        heap.request_collection();
+        assert!(heap.inner.coordinator_snapshot().collection_requested);
+
+        release_tx.send(()).unwrap();
+        entrant.join().unwrap();
+        let pending = heap.inner.coordinator_snapshot();
+        assert_eq!(pending.completed_collection_epoch, 1);
+        assert!(pending.collection_requested);
+
+        heap.with_mutator(|_| {});
+        assert_eq!(
+            heap.inner.coordinator_snapshot().completed_collection_epoch,
+            2
+        );
+    }
+
+    #[test]
+    fn synchronous_collection_rejects_any_same_thread_active_mutator() {
+        let heap = Heap::new();
+        let other = Heap::new();
 
         heap.with_mutator(|_| {
             assert_eq!(
@@ -1647,10 +1712,20 @@ mod tests {
             assert_eq!(coordinator.phase, AdmissionPhase::Ordinary);
             assert_eq!(coordinator.active_outer_mutators, 1);
         });
+
+        other.with_mutator(|_| {
+            assert_eq!(
+                heap.collect_full(),
+                Err(super::CollectionError::ActiveMutator)
+            );
+            let coordinator = heap.inner.coordinator_snapshot();
+            assert!(!coordinator.collection_requested);
+            assert_eq!(coordinator.completed_collection_epoch, 0);
+        });
     }
 
     #[test]
-    fn synchronous_collection_drains_active_mutators_and_blocks_a_fresh_entrant() {
+    fn synchronous_collection_waits_without_blocking_a_fresh_entrant() {
         let heap = Heap::new();
         let (active_tx, active_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
@@ -1669,26 +1744,24 @@ mod tests {
             let heap = heap.clone();
             move || heap.collect_full().unwrap()
         });
-        heap.inner
-            .wait_for_admission_phase(AdmissionPhase::ExclusivePending);
+        heap.inner.wait_for_collection_waiters(1);
 
         let (entered_tx, entered_rx) = mpsc::channel();
         let entrant = std::thread::spawn({
             let heap = heap.clone();
             move || heap.with_mutator(|_| entered_tx.send(()).unwrap())
         });
-        heap.inner.wait_for_blocked_outer_mutators(1);
-        assert!(entered_rx.try_recv().is_err());
+        entered_rx.recv().unwrap();
+        entrant.join().unwrap();
+        assert_eq!(heap.inner.coordinator_snapshot().active_outer_mutators, 1);
 
         release_tx.send(()).unwrap();
         active.join().unwrap();
         assert_eq!(collector.join().unwrap().epoch(), 1);
-        entrant.join().unwrap();
-        entered_rx.recv().unwrap();
     }
 
     #[test]
-    fn synchronous_requesters_coalesce_on_one_pending_collection() {
+    fn synchronous_requesters_coalesce_on_one_idle_collection() {
         let heap = Heap::new();
         let (active_tx, active_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
@@ -1707,13 +1780,12 @@ mod tests {
             let heap = heap.clone();
             move || heap.collect_full().unwrap()
         });
-        heap.inner
-            .wait_for_admission_phase(AdmissionPhase::ExclusivePending);
+        heap.inner.wait_for_collection_waiters(1);
         let second = std::thread::spawn({
             let heap = heap.clone();
             move || heap.collect_full().unwrap()
         });
-        heap.inner.wait_for_collection_waiters(1);
+        heap.inner.wait_for_collection_waiters(2);
 
         release_tx.send(()).unwrap();
         active.join().unwrap();
@@ -1723,6 +1795,48 @@ mod tests {
             heap.inner.coordinator_snapshot().completed_collection_epoch,
             1
         );
+    }
+
+    #[test]
+    fn synchronous_request_joins_an_already_exclusive_collection() {
+        let heap = Heap::new();
+        heap.request_collection();
+        let epoch = {
+            let mut state = heap.inner.state.lock().unwrap();
+            state.coordinator.elect_idle_collection().unwrap()
+        };
+        let (exclusive_tx, exclusive_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let collector = std::thread::spawn({
+            let heap = heap.clone();
+            move || {
+                heap.inner
+                    .run_synthetic_collection(
+                        epoch,
+                        false,
+                        || {
+                            exclusive_tx.send(()).unwrap();
+                            release_rx.recv().unwrap();
+                        },
+                        |_| {},
+                    )
+                    .is_none()
+            }
+        });
+        exclusive_rx.recv().unwrap();
+
+        let waiter = std::thread::spawn({
+            let heap = heap.clone();
+            move || heap.collect_full().unwrap()
+        });
+        heap.inner.wait_for_collection_waiters(1);
+        release_tx.send(()).unwrap();
+
+        assert!(collector.join().unwrap());
+        assert_eq!(waiter.join().unwrap().epoch(), 1);
+        let completed = heap.inner.coordinator_snapshot();
+        assert_eq!(completed.completed_collection_epoch, 1);
+        assert!(!completed.collection_requested);
     }
 
     #[test]
@@ -1752,8 +1866,7 @@ mod tests {
             let heap = heap.clone();
             move || heap.collect_full().unwrap()
         });
-        heap.inner
-            .wait_for_admission_phase(AdmissionPhase::ExclusivePending);
+        heap.inner.wait_for_collection_waiters(1);
 
         drop(heap);
         release_tx.send(()).unwrap();
@@ -1762,25 +1875,25 @@ mod tests {
     }
 
     #[test]
-    fn reciprocal_dependent_entries_pass_two_pending_collectors() {
+    fn reciprocal_nested_entries_pass_two_uncommitted_collection_requests() {
         let first = Heap::new();
         let second = Heap::new();
         let active = Arc::new(Barrier::new(3));
-        let enter_dependents = Arc::new(Barrier::new(3));
-        let dependent_entries = Arc::new(AtomicUsize::new(0));
+        let enter_nested = Arc::new(Barrier::new(3));
+        let nested_entries = Arc::new(AtomicUsize::new(0));
 
         let first_then_second = std::thread::spawn({
             let first = first.clone();
             let second = second.clone();
             let active = Arc::clone(&active);
-            let enter_dependents = Arc::clone(&enter_dependents);
-            let dependent_entries = Arc::clone(&dependent_entries);
+            let enter_nested = Arc::clone(&enter_nested);
+            let nested_entries = Arc::clone(&nested_entries);
             move || {
                 first.with_mutator(|_| {
                     active.wait();
-                    enter_dependents.wait();
+                    enter_nested.wait();
                     second.with_mutator(|_| {
-                        dependent_entries.fetch_add(1, Ordering::Relaxed);
+                        nested_entries.fetch_add(1, Ordering::Relaxed);
                     });
                 });
             }
@@ -1789,14 +1902,14 @@ mod tests {
             let first = first.clone();
             let second = second.clone();
             let active = Arc::clone(&active);
-            let enter_dependents = Arc::clone(&enter_dependents);
-            let dependent_entries = Arc::clone(&dependent_entries);
+            let enter_nested = Arc::clone(&enter_nested);
+            let nested_entries = Arc::clone(&nested_entries);
             move || {
                 second.with_mutator(|_| {
                     active.wait();
-                    enter_dependents.wait();
+                    enter_nested.wait();
                     first.with_mutator(|_| {
-                        dependent_entries.fetch_add(1, Ordering::Relaxed);
+                        nested_entries.fetch_add(1, Ordering::Relaxed);
                     });
                 });
             }
@@ -1811,23 +1924,19 @@ mod tests {
             let second = second.clone();
             move || second.collect_full().unwrap()
         });
-        first
-            .inner
-            .wait_for_admission_phase(AdmissionPhase::ExclusivePending);
-        second
-            .inner
-            .wait_for_admission_phase(AdmissionPhase::ExclusivePending);
+        first.inner.wait_for_collection_waiters(1);
+        second.inner.wait_for_collection_waiters(1);
 
-        enter_dependents.wait();
+        enter_nested.wait();
         first_then_second.join().unwrap();
         second_then_first.join().unwrap();
-        assert_eq!(dependent_entries.load(Ordering::Relaxed), 2);
+        assert_eq!(nested_entries.load(Ordering::Relaxed), 2);
         assert_eq!(first_collector.join().unwrap().epoch(), 1);
         assert_eq!(second_collector.join().unwrap().epoch(), 1);
     }
 
     #[test]
-    fn nested_heap_request_is_deferred_until_the_thread_leaves_its_outer_heap() {
+    fn nested_heap_request_waits_for_a_later_nested_heap_entry() {
         let outer = Heap::new();
         let nested = Heap::new();
 
@@ -1838,13 +1947,18 @@ mod tests {
             assert_eq!(pending.completed_collection_epoch, 0);
         });
 
+        let pending = nested.inner.coordinator_snapshot();
+        assert!(pending.collection_requested);
+        assert_eq!(pending.completed_collection_epoch, 0);
+
+        nested.with_mutator(|_| {});
         let completed = nested.inner.coordinator_snapshot();
         assert!(!completed.collection_requested);
         assert_eq!(completed.completed_collection_epoch, 1);
     }
 
     #[test]
-    fn caught_nested_unwind_preserves_deferred_collection_service() {
+    fn caught_nested_unwind_preserves_request_for_a_later_entry() {
         let outer = Heap::new();
         let nested = Heap::new();
 
@@ -1865,6 +1979,10 @@ mod tests {
             );
         });
 
+        let pending = nested.inner.coordinator_snapshot();
+        assert!(pending.collection_requested);
+        assert_eq!(pending.completed_collection_epoch, 0);
+        nested.with_mutator(|_| {});
         assert_eq!(
             nested
                 .inner
@@ -1875,7 +1993,7 @@ mod tests {
     }
 
     #[test]
-    fn dependent_entry_waits_once_the_target_collector_is_exclusive() {
+    fn cross_heap_entry_waits_while_the_target_collector_is_exclusive() {
         let held = Heap::new();
         let target = Heap::new();
         let (exclusive_tx, exclusive_rx) = mpsc::channel();
@@ -1914,7 +2032,7 @@ mod tests {
     }
 
     #[test]
-    fn automatic_pressure_request_is_serviced_once_but_remains_latched() {
+    fn automatic_pressure_is_acknowledged_by_the_next_idle_entry() {
         let heap = Heap::new();
         let class = heap
             .with_mutator(|mutator| mutator.allocation_class::<FirstType>())
@@ -1930,11 +2048,36 @@ mod tests {
             assert_eq!(state.coordinator.completed_collection_epoch, 0);
         });
 
+        {
+            let state = heap.inner.state.lock().unwrap();
+            assert!(state.allocation_pressure.collection_requested);
+            assert!(state.coordinator.collection_requested);
+            assert_eq!(state.coordinator.completed_collection_epoch, 0);
+            assert_eq!(state.allocation_pressure.published_runs, 112);
+        }
+
+        heap.with_mutator(|_| {});
         let state = heap.inner.state.lock().unwrap();
-        assert!(state.allocation_pressure.collection_requested);
+        assert!(!state.allocation_pressure.collection_requested);
         assert!(!state.coordinator.collection_requested);
         assert_eq!(state.coordinator.completed_collection_epoch, 1);
-        assert_eq!(state.allocation_pressure.published_runs, 112);
+        assert_eq!(state.allocation_pressure.published_runs, 0);
+        drop(state);
+
+        heap.with_mutator(|_| {
+            heap.inner.prepare_run(&class).unwrap();
+        });
+        let state = heap.inner.state.lock().unwrap();
+        assert_eq!(state.allocation_pressure.published_runs, 1);
+        assert!(!state.allocation_pressure.collection_requested);
+        assert!(!state.coordinator.collection_requested);
+        drop(state);
+        heap.with_mutator(|_| {});
+        assert_eq!(
+            heap.inner.coordinator_snapshot().completed_collection_epoch,
+            1,
+            "acknowledged pressure must not collect again immediately"
+        );
     }
 
     #[test]
@@ -1943,12 +2086,13 @@ mod tests {
         heap.request_collection();
         let epoch = {
             let mut state = heap.inner.state.lock().unwrap();
-            state.coordinator.elect_collection().unwrap()
+            state.coordinator.elect_idle_collection().unwrap()
         };
 
         let panic = catch_unwind(AssertUnwindSafe(|| {
             heap.inner.run_synthetic_collection(
                 epoch,
+                false,
                 || panic!("injected collection panic"),
                 |_| {},
             );
@@ -1959,7 +2103,7 @@ mod tests {
         assert_eq!(restored.phase, AdmissionPhase::Ordinary);
         assert!(restored.collection_requested);
         assert_eq!(restored.active_collection, None);
-        heap.inner.service_requested_collections();
+        heap.with_mutator(|_| {});
         assert_eq!(
             heap.inner.coordinator_snapshot().completed_collection_epoch,
             1
@@ -1972,11 +2116,12 @@ mod tests {
         heap.request_collection();
         let epoch = {
             let mut state = heap.inner.state.lock().unwrap();
-            state.coordinator.elect_collection().unwrap()
+            state.coordinator.elect_idle_collection().unwrap()
         };
 
-        let next = heap.inner.run_synthetic_collection(
+        let admission = heap.inner.run_synthetic_collection(
             epoch,
+            false,
             || {
                 let coordinator = heap.inner.coordinator_snapshot();
                 assert_eq!(coordinator.phase, AdmissionPhase::Exclusive);
@@ -1997,7 +2142,7 @@ mod tests {
             },
         );
 
-        assert_eq!(next, None);
+        assert!(admission.is_none());
         let completed = heap.inner.coordinator_snapshot();
         assert_eq!(completed.phase, AdmissionPhase::Ordinary);
         assert_eq!(completed.active_outer_mutators, 0);
@@ -2011,21 +2156,24 @@ mod tests {
         heap.request_collection();
         let epoch = {
             let mut state = heap.inner.state.lock().unwrap();
-            state.coordinator.elect_collection().unwrap()
+            state.coordinator.elect_idle_collection().unwrap()
         };
         let (finalizing_tx, finalizing_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
         let collector = std::thread::spawn({
             let heap = heap.clone();
             move || {
-                heap.inner.run_synthetic_collection(
-                    epoch,
-                    || {},
-                    |_| {
-                        finalizing_tx.send(()).unwrap();
-                        release_rx.recv().unwrap();
-                    },
-                )
+                heap.inner
+                    .run_synthetic_collection(
+                        epoch,
+                        false,
+                        || {},
+                        |_| {
+                            finalizing_tx.send(()).unwrap();
+                            release_rx.recv().unwrap();
+                        },
+                    )
+                    .is_none()
             }
         });
         finalizing_rx.recv().unwrap();
@@ -2044,7 +2192,7 @@ mod tests {
         );
 
         release_tx.send(()).unwrap();
-        assert_eq!(collector.join().unwrap(), None);
+        assert!(collector.join().unwrap());
         assert_eq!(
             heap.inner.coordinator_snapshot().phase,
             AdmissionPhase::Ordinary
@@ -2052,29 +2200,29 @@ mod tests {
     }
 
     #[test]
-    fn request_during_finalization_commits_a_followup_without_an_admission_gap() {
+    fn request_during_finalization_is_coalesced_without_blocking_admission() {
         let heap = Heap::new();
         heap.request_collection();
         let first_epoch = {
             let mut state = heap.inner.state.lock().unwrap();
-            state.coordinator.elect_collection().unwrap()
+            state.coordinator.elect_idle_collection().unwrap()
         };
         let (finalizing_tx, finalizing_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
         let collector = std::thread::spawn({
             let heap = heap.clone();
             move || {
-                let next = heap.inner.run_synthetic_collection(
-                    first_epoch,
-                    || {},
-                    |_| {
-                        finalizing_tx.send(()).unwrap();
-                        release_rx.recv().unwrap();
-                    },
-                );
-                let next = next.expect("finalization request must commit a follow-up");
-                assert_eq!(next.get(), 2);
-                heap.inner.run_synthetic_collection(next, || {}, |_| {})
+                heap.inner
+                    .run_synthetic_collection(
+                        first_epoch,
+                        false,
+                        || {},
+                        |_| {
+                            finalizing_tx.send(()).unwrap();
+                            release_rx.recv().unwrap();
+                        },
+                    )
+                    .is_none()
             }
         });
         finalizing_rx.recv().unwrap();
@@ -2085,52 +2233,53 @@ mod tests {
             let heap = heap.clone();
             move || heap.with_mutator(|_| entered_tx.send(()).unwrap())
         });
-        heap.inner.wait_for_blocked_outer_mutators(1);
-        assert!(entered_rx.try_recv().is_err());
+        entered_rx.recv().unwrap();
+        entrant.join().unwrap();
 
         release_tx.send(()).unwrap();
-        assert_eq!(collector.join().unwrap(), None);
-        entrant.join().unwrap();
-        entered_rx.recv().unwrap();
+        assert!(collector.join().unwrap());
         let completed = heap.inner.coordinator_snapshot();
-        assert_eq!(completed.completed_collection_epoch, 2);
+        assert_eq!(completed.completed_collection_epoch, 1);
         assert_eq!(completed.phase, AdmissionPhase::Ordinary);
+        assert!(!completed.collection_requested);
     }
 
     #[test]
-    fn request_after_exclusion_belongs_to_the_followup_epoch() {
+    fn request_during_exclusive_work_is_coalesced_into_that_collection() {
         let heap = Heap::new();
         heap.request_collection();
         let first_epoch = {
             let mut state = heap.inner.state.lock().unwrap();
-            state.coordinator.elect_collection().unwrap()
+            state.coordinator.elect_idle_collection().unwrap()
         };
         let (exclusive_tx, exclusive_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
         let collector = std::thread::spawn({
             let heap = heap.clone();
             move || {
-                let next = heap.inner.run_synthetic_collection(
-                    first_epoch,
-                    || {
-                        exclusive_tx.send(()).unwrap();
-                        release_rx.recv().unwrap();
-                    },
-                    |_| {},
-                );
-                let next = next.expect("exclusive request must schedule a follow-up");
-                heap.inner.run_synthetic_collection(next, || {}, |_| {})
+                heap.inner
+                    .run_synthetic_collection(
+                        first_epoch,
+                        false,
+                        || {
+                            exclusive_tx.send(()).unwrap();
+                            release_rx.recv().unwrap();
+                        },
+                        |_| {},
+                    )
+                    .is_none()
             }
         });
         exclusive_rx.recv().unwrap();
         heap.request_collection();
         release_tx.send(()).unwrap();
 
-        assert_eq!(collector.join().unwrap(), None);
+        assert!(collector.join().unwrap());
         assert_eq!(
             heap.inner.coordinator_snapshot().completed_collection_epoch,
-            2
+            1
         );
+        assert!(!heap.inner.coordinator_snapshot().collection_requested);
     }
 
     #[test]
@@ -2139,12 +2288,13 @@ mod tests {
         heap.request_collection();
         let epoch = {
             let mut state = heap.inner.state.lock().unwrap();
-            state.coordinator.elect_collection().unwrap()
+            state.coordinator.elect_idle_collection().unwrap()
         };
 
         let panic = catch_unwind(AssertUnwindSafe(|| {
             heap.inner.run_synthetic_collection(
                 epoch,
+                false,
                 || {},
                 |_| panic!("injected finalizer panic"),
             );
@@ -2158,7 +2308,7 @@ mod tests {
         assert!(restored.collection_requested);
         assert_eq!(cache_snapshot(&heap.inner).unwrap().recursive_depth, 0);
 
-        heap.inner.service_requested_collections();
+        heap.with_mutator(|_| {});
         assert_eq!(
             heap.inner.coordinator_snapshot().completed_collection_epoch,
             1

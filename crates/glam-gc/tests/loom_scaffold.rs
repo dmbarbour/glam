@@ -6,14 +6,13 @@
 //! integration exercised by native forced schedules.
 
 use glam_gc::Heap;
-use loom::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use loom::sync::atomic::{AtomicU64, Ordering};
 use loom::sync::{Arc, Condvar, Mutex};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum AdmissionPhase {
     #[default]
     Ordinary,
-    ExclusivePending,
     Exclusive,
     Finalizing,
 }
@@ -22,20 +21,16 @@ enum AdmissionPhase {
 struct CoordinatorState {
     phase: AdmissionPhase,
     active: usize,
+    requested: bool,
+    completed: u64,
 }
 
 type Coordinator = (Mutex<CoordinatorState>, Condvar);
 
 fn admit_mutator(coordinator: &Coordinator) {
-    admit_mutator_as(coordinator, false);
-}
-
-fn admit_mutator_as(coordinator: &Coordinator, dependent: bool) {
     let (state, changed) = coordinator;
     let mut state = state.lock().unwrap();
-    while state.phase != AdmissionPhase::Ordinary
-        && !(dependent && state.phase == AdmissionPhase::ExclusivePending)
-    {
+    while state.phase == AdmissionPhase::Exclusive {
         state = changed.wait(state).unwrap();
     }
     state.active += 1;
@@ -50,28 +45,41 @@ fn release_mutator(coordinator: &Coordinator) {
     }
 }
 
-fn acquire_exclusive(coordinator: &Coordinator, pending: Option<&AtomicBool>) {
+fn request_collection(coordinator: &Coordinator) {
     let (state, changed) = coordinator;
-    let mut state = state.lock().unwrap();
-    while state.phase != AdmissionPhase::Ordinary {
-        state = changed.wait(state).unwrap();
-    }
-    state.phase = AdmissionPhase::ExclusivePending;
-    if let Some(pending) = pending {
-        pending.store(true, Ordering::Release);
-    }
-    while state.active != 0 {
-        state = changed.wait(state).unwrap();
-    }
-    state.phase = AdmissionPhase::Exclusive;
+    state.lock().unwrap().requested = true;
+    changed.notify_all();
 }
 
-fn release_exclusive(coordinator: &Coordinator) {
+fn elect_idle_collection(coordinator: &Coordinator) -> bool {
     let (state, changed) = coordinator;
     let mut state = state.lock().unwrap();
-    assert_eq!(state.phase, AdmissionPhase::Exclusive);
-    assert_eq!(state.active, 0);
+    if state.phase == AdmissionPhase::Ordinary && state.active == 0 && state.requested {
+        state.phase = AdmissionPhase::Exclusive;
+        changed.notify_all();
+        true
+    } else {
+        false
+    }
+}
+
+fn complete_collection_as_entry(coordinator: &Coordinator) {
+    let (state, changed) = coordinator;
+    {
+        let mut state = state.lock().unwrap();
+        assert_eq!(state.phase, AdmissionPhase::Exclusive);
+        assert_eq!(state.active, 0);
+        state.phase = AdmissionPhase::Finalizing;
+        state.active = 1;
+        changed.notify_all();
+    }
+    loom::thread::yield_now();
+    let mut state = state.lock().unwrap();
+    assert_eq!(state.phase, AdmissionPhase::Finalizing);
+    assert_ne!(state.active, 0);
     state.phase = AdmissionPhase::Ordinary;
+    state.requested = false;
+    state.completed += 1;
     changed.notify_all();
 }
 
@@ -135,15 +143,19 @@ fn mutator_release_publishes_prior_work_to_exclusive_admission() {
         let published = Arc::new(AtomicU64::new(0));
 
         admit_mutator(&coordinator);
+        request_collection(&coordinator);
         published.store(73, Ordering::Relaxed);
 
         let observer = loom::thread::spawn({
             let coordinator = Arc::clone(&coordinator);
             let published = Arc::clone(&published);
             move || {
-                acquire_exclusive(&coordinator, None);
+                while !elect_idle_collection(&coordinator) {
+                    loom::thread::yield_now();
+                }
                 let observed = published.load(Ordering::Relaxed);
-                release_exclusive(&coordinator);
+                complete_collection_as_entry(&coordinator);
+                release_mutator(&coordinator);
                 observed
             }
         });
@@ -154,58 +166,65 @@ fn mutator_release_publishes_prior_work_to_exclusive_admission() {
 }
 
 #[test]
-fn pending_exclusive_precedes_fresh_mutator_admission() {
+fn simultaneous_idle_entries_elect_exactly_one_collector() {
     loom::model(|| {
         let coordinator = Arc::new(Coordinator::default());
-        let pending = Arc::new(AtomicBool::new(false));
-        let exclusive_completed = Arc::new(AtomicBool::new(false));
+        let collectors = Arc::new(AtomicU64::new(0));
+        request_collection(&coordinator);
 
-        admit_mutator(&coordinator);
-        let collector = loom::thread::spawn({
+        let first = loom::thread::spawn({
             let coordinator = Arc::clone(&coordinator);
-            let pending = Arc::clone(&pending);
-            let exclusive_completed = Arc::clone(&exclusive_completed);
+            let collectors = Arc::clone(&collectors);
             move || {
-                acquire_exclusive(&coordinator, Some(&pending));
-                exclusive_completed.store(true, Ordering::Relaxed);
-                release_exclusive(&coordinator);
+                if elect_idle_collection(&coordinator) {
+                    collectors.fetch_add(1, Ordering::Relaxed);
+                    complete_collection_as_entry(&coordinator);
+                } else {
+                    admit_mutator(&coordinator);
+                }
+                release_mutator(&coordinator);
             }
         });
-        let entrant = loom::thread::spawn({
+        let second = loom::thread::spawn({
             let coordinator = Arc::clone(&coordinator);
-            let pending = Arc::clone(&pending);
-            let exclusive_completed = Arc::clone(&exclusive_completed);
+            let collectors = Arc::clone(&collectors);
             move || {
-                while !pending.load(Ordering::Acquire) {
-                    loom::thread::yield_now();
+                if elect_idle_collection(&coordinator) {
+                    collectors.fetch_add(1, Ordering::Relaxed);
+                    complete_collection_as_entry(&coordinator);
+                } else {
+                    admit_mutator(&coordinator);
                 }
-                admit_mutator(&coordinator);
-                assert!(exclusive_completed.load(Ordering::Relaxed));
                 release_mutator(&coordinator);
             }
         });
 
-        release_mutator(&coordinator);
-        collector.join().unwrap();
-        entrant.join().unwrap();
+        first.join().unwrap();
+        second.join().unwrap();
+        assert_eq!(collectors.load(Ordering::Relaxed), 1);
+        let state = coordinator.0.lock().unwrap();
+        assert_eq!(state.phase, AdmissionPhase::Ordinary);
+        assert_eq!(state.active, 0);
+        assert_eq!(state.completed, 1);
+        assert!(!state.requested);
     });
 }
 
 #[test]
-fn reciprocal_dependent_admission_passes_pending_collections() {
+fn reciprocal_nested_admission_passes_uncommitted_requests() {
     loom::model(|| {
         let first = Arc::new(Coordinator::default());
         let second = Arc::new(Coordinator::default());
         admit_mutator(&first);
         admit_mutator(&second);
-        first.0.lock().unwrap().phase = AdmissionPhase::ExclusivePending;
-        second.0.lock().unwrap().phase = AdmissionPhase::ExclusivePending;
+        request_collection(&first);
+        request_collection(&second);
 
         let first_then_second = loom::thread::spawn({
             let first = Arc::clone(&first);
             let second = Arc::clone(&second);
             move || {
-                admit_mutator_as(&second, true);
+                admit_mutator(&second);
                 release_mutator(&second);
                 release_mutator(&first);
             }
@@ -214,7 +233,7 @@ fn reciprocal_dependent_admission_passes_pending_collections() {
             let first = Arc::clone(&first);
             let second = Arc::clone(&second);
             move || {
-                admit_mutator_as(&first, true);
+                admit_mutator(&first);
                 release_mutator(&first);
                 release_mutator(&second);
             }
@@ -235,10 +254,10 @@ fn exclusive_to_finalizer_handoff_never_publishes_an_authority_gap() {
             let mut state = coordinator.0.lock().unwrap();
             state.phase = AdmissionPhase::Exclusive;
         }
-        let finalizing = Arc::new(AtomicBool::new(false));
+        let stage = Arc::new(AtomicU64::new(0));
         let collector = loom::thread::spawn({
             let coordinator = Arc::clone(&coordinator);
-            let finalizing = Arc::clone(&finalizing);
+            let stage = Arc::clone(&stage);
             move || {
                 {
                     let mut state = coordinator.0.lock().unwrap();
@@ -246,23 +265,24 @@ fn exclusive_to_finalizer_handoff_never_publishes_an_authority_gap() {
                     assert_eq!(state.active, 0);
                     state.phase = AdmissionPhase::Finalizing;
                     state.active = 1;
-                    finalizing.store(true, Ordering::Release);
+                    stage.store(1, Ordering::Release);
                     coordinator.1.notify_all();
                 }
                 loom::thread::yield_now();
                 let mut state = coordinator.0.lock().unwrap();
                 assert_eq!(state.phase, AdmissionPhase::Finalizing);
                 assert_eq!(state.active, 1);
-                state.active = 0;
                 state.phase = AdmissionPhase::Ordinary;
+                state.completed = 1;
+                stage.store(2, Ordering::Release);
                 coordinator.1.notify_all();
             }
         });
         let observer = loom::thread::spawn({
             let coordinator = Arc::clone(&coordinator);
-            let finalizing = Arc::clone(&finalizing);
+            let stage = Arc::clone(&stage);
             move || {
-                while !finalizing.load(Ordering::Acquire) {
+                while stage.load(Ordering::Acquire) == 0 {
                     loom::thread::yield_now();
                 }
                 let state = coordinator.0.lock().unwrap();
@@ -270,11 +290,14 @@ fn exclusive_to_finalizer_handoff_never_publishes_an_authority_gap() {
                     assert_ne!(state.active, 0);
                 } else {
                     assert_eq!(state.phase, AdmissionPhase::Ordinary);
+                    assert_eq!(state.completed, 1);
+                    assert_ne!(state.active, 0);
                 }
             }
         });
 
         collector.join().unwrap();
         observer.join().unwrap();
+        release_mutator(&coordinator);
     });
 }

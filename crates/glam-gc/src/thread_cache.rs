@@ -8,7 +8,7 @@ use std::sync::{Arc, Weak};
 use crate::{
     Trace,
     arena::{RunAddress, RunLocation},
-    heap::{AdmissionKind, HeapInner, MutatorAdmission},
+    heap::{HeapInner, MutatorAdmission},
     run::{AllocationClassId, RunGeometry},
 };
 
@@ -167,7 +167,6 @@ fn cursor_slot(class_id: AllocationClassId) -> usize {
 struct ThreadHeapState {
     heap: Weak<HeapInner>,
     recursive_depth: usize,
-    collection_service_deferred: bool,
     captured_epoch: AllocationLeaseEpoch,
     cursors: ClassCursorCache,
 }
@@ -177,7 +176,6 @@ impl ThreadHeapState {
         Self {
             heap: Arc::downgrade(heap),
             recursive_depth: 0,
-            collection_service_deferred: false,
             captured_epoch,
             cursors: ClassCursorCache::default(),
         }
@@ -259,22 +257,17 @@ impl ThreadCacheHandle {
 pub(crate) struct PreparedThreadHeapEntry {
     state: SharedThreadHeapState,
     outer: bool,
-    admission_kind: AdmissionKind,
 }
 
 impl PreparedThreadHeapEntry {
     pub(crate) fn prepare(heap: &Arc<HeapInner>, epoch: AllocationLeaseEpoch) -> Self {
         let key = HeapCacheKey::new(heap);
-        let (state, has_other_active_heap) = THREAD_HEAPS.with_borrow_mut(|registry| {
-            let has_other_active_heap = registry.iter().any(|(candidate_key, candidate)| {
-                *candidate_key != key && candidate.borrow().recursive_depth != 0
-            });
-            let state = Rc::clone(
+        let state = THREAD_HEAPS.with_borrow_mut(|registry| {
+            Rc::clone(
                 registry
                     .entry(key)
                     .or_insert_with(|| Rc::new(RefCell::new(ThreadHeapState::new(heap, epoch)))),
-            );
-            (state, has_other_active_heap)
+            )
         });
 
         let outer = {
@@ -285,24 +278,11 @@ impl PreparedThreadHeapEntry {
             );
             state.recursive_depth == 0
         };
-        let admission_kind = if has_other_active_heap {
-            AdmissionKind::Dependent
-        } else {
-            AdmissionKind::Ordinary
-        };
-        Self {
-            state,
-            outer,
-            admission_kind,
-        }
+        Self { state, outer }
     }
 
     pub(crate) fn is_outer(&self) -> bool {
         self.outer
-    }
-
-    pub(crate) fn admission_kind(&self) -> AdmissionKind {
-        self.admission_kind
     }
 
     pub(crate) fn activate<'heap>(
@@ -333,6 +313,7 @@ impl PreparedThreadHeapEntry {
         ThreadHeapEntry {
             state: self.state,
             outer_admission: admission,
+            active: true,
         }
     }
 }
@@ -341,9 +322,10 @@ impl PreparedThreadHeapEntry {
 pub(crate) struct ThreadHeapEntry<'heap> {
     state: SharedThreadHeapState,
     outer_admission: Option<MutatorAdmission<'heap>>,
+    active: bool,
 }
 
-impl ThreadHeapEntry<'_> {
+impl<'heap> ThreadHeapEntry<'heap> {
     pub(crate) fn prepare(
         heap: &Arc<HeapInner>,
         epoch: AllocationLeaseEpoch,
@@ -355,6 +337,37 @@ impl ThreadHeapEntry<'_> {
         ThreadCacheHandle {
             state: Rc::clone(&self.state),
         }
+    }
+
+    /// Deactivates an outer TLS entry while preserving its coordinator lease.
+    ///
+    /// The collector uses this to transfer its finalizer mutator obligation
+    /// directly into the outer mutator entry which elected collection.
+    pub(crate) fn into_outer_admission(mut self) -> MutatorAdmission<'heap> {
+        let was_outer = self.deactivate();
+        assert!(
+            was_outer,
+            "only an outer mutator admission can be transferred"
+        );
+        self.outer_admission
+            .take()
+            .expect("outer mutator entry must own one coordinator obligation")
+    }
+
+    fn deactivate(&mut self) -> bool {
+        assert!(self.active, "mutator entry is already inactive");
+        let mut state = self.state.borrow_mut();
+        let prior_depth = state.recursive_depth;
+        state.recursive_depth = prior_depth
+            .checked_sub(1)
+            .expect("mutator entry depth underflow");
+        assert_eq!(
+            self.outer_admission.is_some(),
+            prior_depth == 1,
+            "coordinator obligation does not match outer mutator exit"
+        );
+        self.active = false;
+        prior_depth == 1
     }
 }
 
@@ -377,10 +390,6 @@ pub(crate) fn release_current_thread_caches() -> usize {
     })
 }
 
-pub(crate) fn thread_has_active_mutator(heap: &Arc<HeapInner>) -> bool {
-    state_for(heap).is_some_and(|state| state.borrow().recursive_depth != 0)
-}
-
 pub(crate) fn thread_has_any_active_mutator() -> bool {
     THREAD_HEAPS.with_borrow(|registry| {
         registry
@@ -389,48 +398,30 @@ pub(crate) fn thread_has_any_active_mutator() -> bool {
     })
 }
 
-pub(crate) fn take_deferred_collection_heaps() -> Vec<Arc<HeapInner>> {
-    THREAD_HEAPS.with_borrow(|registry| {
-        registry
-            .values()
-            .filter_map(|state| {
-                let mut state = state.borrow_mut();
-                if !state.collection_service_deferred {
-                    return None;
-                }
-                assert_eq!(state.recursive_depth, 0);
-                state.collection_service_deferred = false;
-                state.heap.upgrade()
-            })
-            .collect()
-    })
+pub(crate) fn remove_inactive_thread_cache(heap: &Arc<HeapInner>) {
+    let key = HeapCacheKey::new(heap);
+    THREAD_HEAPS.with_borrow_mut(|registry| {
+        let Some(state) = registry.get(&key) else {
+            return;
+        };
+        assert_eq!(
+            state.borrow().recursive_depth,
+            0,
+            "collector cannot remove an active thread cache"
+        );
+        registry.remove(&key);
+    });
 }
 
 impl Drop for ThreadHeapEntry<'_> {
     fn drop(&mut self) {
-        let was_outer = {
-            let mut state = self.state.borrow_mut();
-            let prior_depth = state.recursive_depth;
-            state.recursive_depth = prior_depth
-                .checked_sub(1)
-                .expect("mutator entry depth underflow");
-            assert_eq!(
-                self.outer_admission.is_some(),
-                prior_depth == 1,
-                "coordinator obligation does not match outer mutator exit"
-            );
-            prior_depth == 1
-        };
+        if !self.active {
+            return;
+        }
+        self.deactivate();
         // Cache quiescence above must precede retirement of the coordinator
         // obligation, because zero active mutators admits exclusive work.
         drop(self.outer_admission.take());
-        if was_outer && thread_has_any_active_mutator() {
-            // Servicing a nested heap here could wait on the outer heap. Leave
-            // a weak, TLS-local obligation for the thread's last ordinary exit
-            // instead. Recording it in Drop also covers a nested unwind which
-            // is caught by the outer mutator operation.
-            self.state.borrow_mut().collection_service_deferred = true;
-        }
     }
 }
 
@@ -442,6 +433,7 @@ pub(crate) struct CacheSnapshot {
     pub(crate) cursor_count: usize,
 }
 
+#[cfg(test)]
 fn state_for(heap: &Arc<HeapInner>) -> Option<SharedThreadHeapState> {
     let key = HeapCacheKey::new(heap);
     THREAD_HEAPS.with_borrow(|registry| registry.get(&key).map(Rc::clone))

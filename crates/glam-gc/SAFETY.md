@@ -184,11 +184,12 @@ C6 later owns collector-driven destruction.
   count together with the existing class/run topology. Its sibling condition
   variable supplies wakeups only; every waiter loops and rechecks its complete
   predicate under the mutex.
-- `Ordinary` admits outer mutators. An elected collection publishes
-  `ExclusivePending`, which denies ordinary admission while admitted mutators
-  drain, and publishes `Exclusive` only after the active count reaches zero.
-  One epoch identifies the elected collection; synchronous waiters either join
-  it before exclusion is fixed or record a follow-up epoch afterward.
+- `Ordinary` admits outer mutators. A nonblocking collection request is only a
+  coalesced hint and denies no admission. An outer entry which observes
+  `Ordinary`, zero active mutators, and a request atomically publishes
+  `Exclusive`; otherwise it enters normally and leaves the hint latched. One
+  epoch identifies the active collection, and synchronous waiters join it
+  rather than requiring a follow-up epoch.
 - Preparing a thread-local heap entry obtains or validates its weak heap-
   qualified record without changing recursive depth. An outer preparation then
   obtains one coordinator obligation before activating its cache. A panic or
@@ -196,27 +197,29 @@ C6 later owns collector-driven destruction.
   inactive, and the admission token's destructor rolls back the active count.
 - Recursive same-heap entry observes nonzero thread-local depth and reuses the
   outer coordinator obligation. It remains available while exclusive work is
-  pending so an already-admitted mutator can finish its bounded region. Entry
-  into a different heap uses that heap's independent TLS record and admission
-  count. If the thread already holds another heap, that outer entry is
-  dependent: it may pass `ExclusivePending` but never `Exclusive`. This narrow
-  exception prevents reciprocal cross-heap nesting from deadlocking committed
-  collectors.
+  requested so an already-admitted mutator can finish its bounded region.
+  Entry into a different heap uses that heap's independent TLS record and
+  admission count. No dependent category is needed: an uncommitted request
+  never blocks cross-heap entry, while an authoritative `Exclusive` phase
+  blocks every outer entrant.
 - Entry destruction first decrements recursive depth and makes the outer cache
   quiescent, then retires the coordinator obligation. Consequently, observing
   zero active mutators after acquiring the heap mutex also observes all work
   sequenced before those outer exits. C3's native forced schedules and Loom
   model latch this visibility edge.
-- A nested different-heap exit never waits as a collector while another heap
-  remains active on the thread. It records a weak TLS-local service obligation,
-  including during unwind; the thread's last ordinary heap exit drains those
-  obligations after all its caches are quiescent.
-- The collector-to-finalizer handoff prepares an inert TLS entry, then changes
-  `Exclusive` directly to `Finalizing` while installing one active mutator
-  obligation under the same heap mutex. Ordinary finalization work and
-  recursive same-heap entry therefore run with normal mutator authority. A
-  follow-up request makes ordinary admission wait, and completion publishes
-  the next `ExclusivePending` epoch without an intervening ordinary phase.
+- Outermost exit only makes its TLS cache inactive, retires its coordinator
+  obligation, and wakes waiters when the active count reaches zero. It neither
+  scans TLS records nor services collection. This makes nested cross-heap exit
+  identical to every other outer exit.
+- Before exclusive work, the collecting thread clears its complete inactive
+  cursor cache for the target heap. The collector-to-finalizer handoff then
+  changes `Exclusive` directly to `Finalizing` while installing one active
+  mutator obligation under the same heap mutex. Ordinary finalization work and
+  recursive same-heap entry therefore run with normal mutator authority. On
+  successful completion an entry-elected collector carries that obligation
+  directly into its originally requested outer entry; `collect_full` drops it.
+  Requests received before completion are coalesced and cleared, while one
+  serialized afterward remains pending for a later idle entry.
 - An unwind guard covers exclusive and finalizer test work. It retires any
   installed finalizer mutator first, clears collector ownership, restores
   ordinary admission, and relatches the interrupted collection. C6 adds the
@@ -540,13 +543,14 @@ mutation closure runs.
   repeated initialization.
 - C3 tests force class discovery behind exclusive admission,
   prepare/admit/activate state, rollback before activation, same-heap recursive
-  entry during a pending exclusive transition, independent cross-heap counts,
-  committed exclusion of fresh outer entry, mutator-exit visibility, request
-  coalescing, same-thread synchronous rejection, reciprocal dependent entry,
-  already-exclusive targets, deferred nested service, the no-gap finalizer
-  handoff, follow-up commitment, and panic restoration. Coordinator Loom models
-  cover visibility, pending-exclusive priority, reciprocal dependent admission,
-  and exclusive-to-finalizer authority transfer.
+  entry with a request latched, independent cross-heap counts, authoritative
+  exclusion of fresh outer entry, mutator-exit visibility, idle-entry election,
+  direct admission handoff, collector-cache reset, request coalescing,
+  any-mutator synchronous rejection, reciprocal nested entry, already-exclusive
+  targets, no exit-time service, the no-gap finalizer handoff, pressure
+  acknowledgement, and panic restoration. Coordinator Loom models cover
+  visibility, unique idle-entry election, reciprocal requested-heap admission,
+  and exclusive-to-finalizer-to-entry authority transfer.
 - The ordinary crate checks, exact unsafe inventory, focused Miri run, and
   repository-wide checks are required at completed checkpoints.
 - Miri passes all implemented tests with leak checking enabled. C1's temporary

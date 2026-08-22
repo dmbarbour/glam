@@ -1,8 +1,8 @@
 # Glam GC Subcrate Implementation Plan — 2026-08-19
 
-Status: in progress; Phases C0 through C3D are complete, including the C2C.6
+Status: in progress; Phases C0 through C3E are complete, including the C2C.6
 verification follow-up. The mandatory post-C1 and post-C2C reviews are
-complete. C3E revises collection servicing before C4 begins.
+complete. C4 is next.
 
 This plan implements an exact, non-moving, runtime-local tracing collector
 without depending on Glam value semantics. The governing requirements and
@@ -43,7 +43,7 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C3B | completed | collector election and single-heap STW quiescence |
 | C3C | completed | cross-heap dependent admission |
 | C3D | completed | finalizer handoff, pressure, panic, and teardown races |
-| C3E | pending | entry-serviced collection and coordinator simplification |
+| C3E | completed | entry-serviced collection and coordinator simplification |
 | C4 | pending | explicit external roots |
 | C5 | pending | exact full marking |
 | C6A | pending | no-drop sweep and run-state publication |
@@ -1689,16 +1689,46 @@ the collecting entrant as an ordinary active mutator while clearing the
 coalesced request. Keep the existing no-gap finalizer-handoff model, adjusted
 for the absence of a pending phase.
 
-Do not begin C4 until C3E is complete and the C3 coordination narrative,
-`SAFETY.md`, `VERIFY.md`, native forced schedules, Loom models, Miri, and both
-sanitizers agree on the entry-serviced state machine.
+### C3E Completion
+
+C3E completed on 2026-08-22:
+
+- The coordinator now has only `Ordinary`, `Exclusive`, and `Finalizing`.
+  `ExclusivePending`, admission kinds, TLS deferred-service records, and
+  exit-time heap scans are gone. Outermost exit only retires its obligation and
+  wakes waiters.
+- A requested outer entry elects collection only when it observes an idle heap
+  under the coordinator mutex. It moves directly to `Exclusive`; otherwise the
+  request remains a nonblocking hint and the entrant proceeds normally.
+- Before exclusive work, the collector removes its inactive heap-local TLS
+  record. Finalization creates a fresh record, and an entry-elected collector
+  deactivates that record while preserving its coordinator obligation, then
+  transfers the obligation directly into the original prepared entry. A
+  `collect_full` collector drops the obligation instead.
+- Successful completion clears requests received through finalization and
+  resets the provisional run-publication pressure counter. A request serialized
+  after completion remains latched. Collection or finalizer panic restores
+  ordinary admission and relatches the interrupted request.
+- `collect_full` now rejects a caller holding a mutator for any heap. Eligible
+  synchronous callers do not reserve a pending writer: they opportunistically
+  elect an idle heap or join the already-active collection epoch.
+- Native forced schedules cover all eleven C3E cases above. Six Loom models
+  cover allocation-word claims, visibility through mutator release, unique
+  idle-entry election, reciprocal requested-heap nesting, and the no-gap
+  finalizer-to-entry handoff. The stable collector gate passes with 105 unit
+  tests, six Loom models, and six compile-fail doctests. Full leak-checking
+  Miri, AddressSanitizer, and ThreadSanitizer pass all 105 collector tests.
+  Workspace formatting, Clippy with warnings denied, and the complete root test
+  suite also pass.
+
+The C3 coordination narrative, `SAFETY.md`, and `VERIFY.md` now agree on the
+entry-serviced state machine. C4 may begin.
 
 #### Historical C3B–C3D Pressure Contract
 
-The following pressure and admission text records the completed implementation
-which C3E is about to replace. It is retained until C3E completes so the
-transition can be reviewed against both endpoints; it is not the target policy
-for C4 and later phases.
+The following pressure and admission text records the completed C3B–C3D
+implementation which C3E replaced. It is retained as transition provenance;
+it is not the policy for C4 and later phases.
 
 - `Heap::request_collection` is the first explicit request API. It coalesces
   with the automatic request without changing the typed-run-publication count
