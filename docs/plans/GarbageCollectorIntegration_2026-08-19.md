@@ -69,15 +69,17 @@ core::Value
 
 api::Value
 └── RuntimeValueRoot
-    └── glam_gc::Root<core::Value or root cell containing core::Value>
+    ├── optional Glam-owned inline scalar representation
+    └── glam_gc::Root<core::Value>
 ```
 
-Whether the external root points directly at a managed `Value` or at a
-registered root cell containing an inline `Value` is decided during Phase I2.
-The latter avoids allocating every number and atom merely because it crosses
-the public API. Collector Phase C4 provides the direct-root API and an erased
-collector-private root-seed registry boundary, but deliberately does not expose
-the inline representation or decide this integration choice.
+Phase I2 decides whether `RuntimeValueRoot` is simply the collector's direct
+managed root or a Glam-owned wrapper which keeps eligible scalars inline and
+uses that same direct root for managed values. The collector does not accept an
+alternate inline root cell or generalized registry payload merely to optimize
+the public representation. A wrapper may retain a runtime ID for diagnostics
+or API compatibility, but live heap identity is the authoritative provenance
+for managed access.
 
 This provisional shape is not the compact tagged-word transition. That work is
 isolated in
@@ -143,7 +145,8 @@ Add tests which latch current semantics before changing representation:
 - fulfilled and unfulfilled lazy/promise behavior;
 - lazy, promise, metadata, function, collection, and net cycles;
 - value transfer between workers in one runtime;
-- runtime drop with escaped public values;
+- runtime drop with escaped public values, including their current supporting
+  resource lifetime and access behavior;
 - reflection store snapshots and task status after owner-session closure; and
 - settlement and diagnostic/event retention.
 
@@ -154,9 +157,12 @@ classified optimistically.
 
 - Add one `RuntimeHeap` to `EvaluationRuntime` ownership and the internal
   `RuntimeSharedResources` view.
-- Keep the heap inside the runtime value domain. Escaped public roots may keep
-  it alive after the `EvaluationRuntime` facade is dropped, just as escaped
-  values currently retain their supporting value resources.
+- Keep the heap inside the runtime value domain. Only explicitly authorized
+  runtime/value-domain owners retain it; escaped public roots do not. A root
+  may still be cloned or dropped after value-domain teardown, but managed
+  access through it is unavailable. I1 must identify which existing non-root
+  capabilities are authorized owners instead of accidentally preserving the
+  domain through every value-facing handle.
 - Do not create a `heap -> runtime state -> heap` ownership cycle.
 - Give the value factory a narrow allocation/rooting handle, not raw collector
   internals.
@@ -174,22 +180,31 @@ classified optimistically.
   declaration macro is Glam's central alignment-policy point; the collector
   does not provide a mutable or per-heap alignment setting.
 - Verify the earlier sibling allocation of runtime state and immutable profile
-  remains acyclic once both can retain rooted values.
+  remains internal to the runtime's ownership graph and acyclic once both can
+  retain rooted values. Collector roots are not an ownership escape hatch for
+  either sibling.
 
 At this phase no core object is reclaimed by the new heap. Existing behavior
 and tests must remain unchanged.
 
 ## Phase I2 — External Root and Public `Value` Prototype
 
-- Prototype both public-value representations against scalars and one
-  recursive test node: C4's direct managed root, and an inline traced root cell
-  implemented behind C4's collector-private root-seed registry boundary.
-- Select the representation which keeps public scalar construction cheap while
-  ensuring one public `Value` clone cannot lose liveness.
-- Specify and prototype how `RuntimeValueRoot` will obtain runtime provenance
-  from its heap/root rather than maintaining independently forgeable duplicated
-  provenance. Do not place the production `core::Value` in a collector root
-  until I4 supplies its exact trace; I2 uses collector-local fixtures or a
+- Prototype C4's direct managed root against scalars and one recursive test
+  node. Separately prototype a Glam-owned public wrapper whose managed arm uses
+  that root and whose optional inline arm contains only values which require no
+  managed trace. Do not add another collector registry-entry or root-cell
+  representation for the wrapper.
+- Select between exposing the direct root and using the Glam wrapper based on
+  public scalar construction cost and clarity. In either case, one public
+  `Value` clone must preserve its root cell while the value domain lives, but
+  must not preserve the heap after the domain's authorized owners are dropped.
+- Specify and prototype how `RuntimeValueRoot` obtains authoritative managed
+  provenance from the root's heap identity instead of an independently
+  forgeable duplicated runtime ID. An optional runtime ID may remain only for
+  diagnostics or compatibility. If the inline wrapper arm is selected, give
+  the wrapper an equally non-forgeable association with the live value domain.
+  Do not place the production `core::Value` in a collector root until I4
+  supplies its exact trace; I2 uses collector-local fixtures or a
   non-collecting compatibility envelope.
 - Ensure every safe root/public-value access validates or establishes the
   matching heap in release builds before invoking the collector's private
@@ -203,13 +218,20 @@ and tests must remain unchanged.
   behavior explicitly.
 - Prototype scoped core access under the correct mutator authority and record
   the production `as_core`/`into_core` call sites which I4 must migrate.
+- Review public extractors which currently return references borrowed from a
+  `Value` or `EvaluatedValue`. Managed borrows must be tied to a live matching
+  mutator/access scope; owned extraction results may outlive that scope. Do not
+  let a weak root manufacture a hidden heap lease merely to preserve an old
+  borrowed-return signature.
 - Preserve the public `EvaluatedValue` WHNF witness without making it a second
   root model.
 
 Verification includes prototype-facade tests moving roots between threads,
-dropping the owning heap facade before the last value, rejecting roots from
-another heap, and nesting construction/evaluation entries recursively. Existing
-public `Value` tests remain unchanged until the production switch in I4.
+dropping a facade while another authorized owner preserves access, dropping
+the last authorized owner before the last value and observing an inert root,
+rejecting roots from another heap, and nesting construction/evaluation entries
+recursively. Existing public `Value` tests remain unchanged until the
+production switch in I4.
 
 Collection remains disabled for the production graph.
 
@@ -287,8 +309,11 @@ Verify that:
   mutator authority. Eliminate ownership-taking `into_core` paths which could
   let an unrooted managed pointer escape its region; internal consumers borrow
   or clone the core shell inside an enclosing mutator scope.
-- Repeat I2's root movement, runtime-facade drop, foreign-runtime rejection,
-  equality, debug, and scalar-cost tests against the real public `Value`.
+- Repeat I2's root movement, value-domain-owner drop, foreign-runtime
+  rejection, equality, debug, borrowed-access, and scalar-cost tests against
+  the real public `Value`. If an authorized non-root owner remains after the
+  `EvaluationRuntime` facade drops, access may continue through that owner;
+  once the value domain itself is gone, escaped roots remain inert.
 
 This phase establishes traversal definitions but does not enable collection
 while recursive identity cells remain `Arc`-owned. From I4 onward, every

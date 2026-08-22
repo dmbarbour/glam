@@ -44,8 +44,8 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C3C | completed | cross-heap dependent admission |
 | C3D | completed | finalizer handoff, pressure, panic, and teardown races |
 | C3E | completed | entry-serviced collection and coordinator simplification |
-| C4A | pending | checked direct-root ownership and access |
-| C4B | pending | weak registry publication and root snapshots |
+| C4A | pending | checked direct-root construction and access |
+| C4B | pending | weak registry publication and stable root traversal |
 | C4C | pending | concurrent root lifetime and boundary audit |
 | C5A | pending | mark bitmap and checked-slot substrate |
 | C5B | pending | exact root-to-edge traversal |
@@ -131,6 +131,10 @@ pub unsafe trait Trace: 'static {
     fn trace(&self, visitor: &mut Visitor<'_>);
 }
 ```
+
+`Root<T>` keeps its root cell alive but does not own `Heap`. Access always
+requires a live matching `Mutator`; dropping the value domain makes any escaped
+root inert rather than extending the domain's lifetime.
 
 `request_collection` is idempotent and nonblocking. It may be called outside a
 mutator or from inside one; an active mutator only records the request. A
@@ -1945,15 +1949,16 @@ visitor.
 The downstream structure remains sound, with these corrections:
 
 - C4 can use the existing heap-state mutex for release-validating registration
-  and collection-time root snapshots. It does not need another root-registry
-  mutex. Root clone and drop remain lock-free apart from ordinary `Arc`
-  ownership.
-- C4 introduces a direct managed root without deciding I2's public
-  `RuntimeValueRoot` representation. The erased registry entry should expose a
-  collector-private root-seed operation rather than hard-code registry
-  traversal to one `Gc` field. C4's only public seed is a direct `Gc<T>`;
-  Phase I2 may later prototype an inline traced root cell without replacing
-  the registry or changing C4's direct-root semantics.
+  and a collection-time walk of the stable root registry. It does not need
+  another root-registry mutex or a full strong-root snapshot. Root clone and
+  drop remain lock-free apart from ordinary `Arc`/`Weak` ownership.
+- C4 fixes one deliberately narrow collector representation. `Root<T>` is one
+  `Arc<RootCell>` plus a zero-sized typed marker. The non-generic `RootCell`
+  contains a weak heap identity and exactly one erased direct `Gc`; the heap
+  registry contains thin `Weak<RootCell>` entries. The collector does not
+  generalize this into arbitrary or inline registry payloads. Phase I2 may
+  wrap a direct root to keep public scalars inline, without changing the
+  collector registry or root-cell representation.
 - C5 is mark-only. Revoking allocation-word leases, advancing the heap-wide
   lease epoch, resetting class frontiers, and publishing free allocation state
   belong to C6A immediately before reclaimed storage can become reusable.
@@ -1980,65 +1985,78 @@ The downstream structure remains sound, with these corrections:
   reporting policy may remain per heap.
 
 The later integration plan remains intentionally provisional until Gate G1.
-In particular, C4 does not preempt I2's scalar-root representation decision,
-and C6D still owns the last-owner teardown decision. No production integration
-phase is pulled into the isolated collector plan by this review.
+C4 fixes the collector's direct-root representation but does not preempt I2's
+choice between using it directly and placing it behind a Glam-owned public
+value wrapper. C6D still owns the last-value-domain-owner teardown decision.
+No production integration phase is pulled into the isolated collector plan by
+this review.
 
 ## Phase C4 — External Root Registry
 
 Execute C4 as three independently verified checkpoints:
 
-- **C4A — checked direct-root ownership and access.** Add the release-build
+- **C4A — checked direct-root construction and access.** Add the release-build
   slot lookup needed to prove that a `Gc<T>` names an allocated slot with the
   canonical metadata in the mutator's heap. Build the cloneable `Root<T>` and
-  its root cell on that proof. `Root<T>` retains the root cell and heap, while
-  `Root::get` requires the matching mutator and rejects a foreign mutator
-  before invoking the private unsafe `Gc` access gateway. Also provide a
-  scoped `Root::with` convenience which enters the retained heap and supplies
-  the mutator and borrowed value; this keeps a surviving root usable after the
-  original `Heap` facade is dropped without forcing bulk callers to enter once
-  per access. Root construction is permitted only from a live `Gc<T>` during a
-  mutator region, provisionally as `Mutator::root`. Keep the constructor
-  crate-private until C4B makes registry publication part of its return
-  invariant. C4's rootable state is simply `allocated`; C6 extends the same
-  lookup to reject completed dead and finalization-batch identities.
-- **C4B — weak registry publication and snapshots.** Register one weak erased
-  root-seed entry before returning the first root. Store the registry in
+  its root cell on that proof. Represent `Root<T>` as an `Arc<RootCell>` plus
+  `PhantomData<Gc<T>>`; represent the non-generic cell as a `Weak<HeapInner>`
+  plus one `ErasedGc`. A root is a liveness claim within a live heap, not an
+  owner of that heap. `Root::get` therefore requires a matching live mutator,
+  rejects a different heap before invoking the private unsafe `Gc` access
+  gateway, and provides no self-entering `Root::with` operation. Root
+  provenance compares the cell's weak heap identity with the mutator's heap;
+  the surviving weak control block prevents address reuse from making a stale
+  root appear to belong to a new heap. Latch the intended one-pointer
+  `Root<T>` size with a compile-time assertion while preserving the selected
+  variance and `Send`/`Sync` bounds through its zero-sized marker. Root
+  construction is permitted only from a live `Gc<T>` during a mutator region,
+  provisionally as `Mutator::root`. Keep the constructor crate-private until
+  C4B makes registry publication part of its return invariant. C4's rootable
+  state is simply `allocated`; C6 extends the same lookup to reject completed
+  dead and finalization-batch identities.
+- **C4B — weak registry publication and stable traversal.** Register one thin
+  `Weak<RootCell>` before returning the first root and store the registry in
   `HeapState`, so validation and publication share its existing mutex and no
-  second component lock is introduced. Collection upgrades and snapshots
-  strong root-cell references while holding heap state, prunes failed weak
-  entries there, then releases heap state and retains the strong snapshot for
-  the collection attempt. The direct-root seed contributes exactly one erased
-  `Gc`; the collector-private seed boundary deliberately leaves room for I2's
-  possible inline traced roots without exposing that API in C4.
-- **C4C — concurrent lifetime and boundary audit.** Integrate root snapshotting
-  into the exclusive collection path even though C4 does not trace the seeds
-  yet. Force clone, drop, snapshot, pruning, and heap-facade-drop orderings;
-  then update the safety ledger and run the complete collector verification
-  matrix. This checkpoint is a lifetime/concurrency audit, not a marking
-  implementation.
+  second component lock is introduced. Once collection has stopped every
+  mutator, root construction and registry publication cannot proceed; the
+  collector may therefore walk that stable registry directly. For each entry,
+  upgrade the weak cell only for the duration of reading and visiting its
+  erased `Gc`, prune failed upgrades in place, and release the temporary strong
+  reference before continuing. Do not build a `Vec<Arc<RootCell>>` snapshot.
+- **C4C — concurrent lifetime and boundary audit.** Integrate the stable
+  registry walk into the exclusive collection path even though C4 does not
+  trace the seeds yet. Force clone, drop, per-entry upgrade, pruning, and
+  heap-facade-drop orderings; specifically prove that releasing the collector's
+  temporary upgrade as the last strong cell reference runs only passive cell
+  destruction. Then update the safety ledger and run the complete collector
+  verification matrix. This checkpoint is a lifetime/concurrency audit, not a
+  marking implementation.
 
 Cloning a root may use ordinary atomic ownership at this external boundary;
 internal `Gc` copies remain free of that cost. Root destruction acquires no
-allocator or registry lock. The ownership graph stays acyclic: a root cell
-retains its heap, the heap registry retains only weak root-cell entries, and a
-collection snapshot temporarily retains strong cells without becoming a
-public root.
+allocator or registry lock. `RootCell` destruction is operationally passive:
+it drops only a weak heap reference and erased pointer bits, never `T`, a user
+callback, a lock-taking registry token, or a runtime-entry guard. The ownership
+graph stays acyclic: authorized value-domain owners retain the heap, roots
+retain their cells, cells refer weakly to the heap, and the heap registry
+refers weakly to cells.
 
 Concurrent clone/drop changes only the strong count of an already registered
-cell. A successfully upgraded snapshot keeps the seed live for that
-collection; a failed upgrade proves no public root remained at that instant.
-Because creation requires mutator admission, no otherwise unreachable bare
-pointer can become a new root after exclusive collection begins. A clone made
-from an existing root during the pause is covered by the snapshot's strong
-cell.
+cell. A successfully upgraded registry entry keeps the seed live through that
+one visit; a failed upgrade proves no public root remained at that instant.
+Dropping the final public root after its seed is visited may conservatively
+preserve the referent for one collection, which is safe. Because creation
+requires mutator admission, no otherwise unreachable bare pointer can become a
+new root after exclusive collection begins. Cloning an existing root during
+the pause changes no seed or registry membership.
 
 Verification forces root construction and access, representation mismatch,
 foreign-heap creation and access rejection, cloning, cross-thread sharing,
-final drop, heap-facade drop with a surviving root, and registry pruning on
-both sides of the snapshot boundary. Deterministic hooks prove publication
-precedes return, snapshot ownership survives the last public drop, and a
-failed weak upgrade cannot race a new root into existence.
+final drop, heap-facade drop with a surviving but unusable root, and registry
+pruning on both sides of the per-entry upgrade boundary. Deterministic hooks
+prove publication precedes return, a temporary upgrade safely survives the
+last public drop through its visit, releasing the last upgraded cell is
+passive, and a failed weak upgrade cannot race a new root into existence.
 
 ## Phase C5 — Exact Full Marking
 
@@ -2051,12 +2069,13 @@ Execute C5 as four independently verified checkpoints:
   color before propagating a tracing panic. Newly initialized or later reused
   slots must carry the committed color so they begin unmarked for the next
   opposite-color attempt.
-- **C5B — exact root-to-edge traversal.** Snapshot C4 roots, enumerate runs
-  from heap topology rather than TLS, and trace with an explicit mark stack
-  through canonical metadata and the existing edge visitor. Duplicate visits
-  terminate at the slot mark. This checkpoint covers cycles, diamonds, deep
-  chains, wide graphs, and shared logical collection spines without changing
-  allocation, lease, frontier, or pressure state.
+- **C5B — exact root-to-edge traversal.** Walk C4's stable weak-root registry,
+  upgrading and visiting one live cell at a time; enumerate runs from heap
+  topology rather than TLS, and trace with an explicit mark stack through
+  canonical metadata and the existing edge visitor. Duplicate visits terminate
+  at the slot mark. This checkpoint covers cycles, diamonds, deep chains, wide
+  graphs, and shared logical collection spines without changing allocation,
+  lease, frontier, or pressure state.
 - **C5C — invalid-edge and panic recovery.** Make every reported edge pass the
   all-build same-heap, exact-slot, allocated, and canonical-metadata lookup
   before dereference. Force visitor, worklist, and invalid-edge panics at
@@ -2068,7 +2087,8 @@ Execute C5 as four independently verified checkpoints:
   oracle, run million-edge non-recursive tests, and update the safety and
   verification ledgers. C5 still reclaims nothing.
 
-- Stop all mutators and snapshot/visit external roots.
+- Stop all mutators, then directly walk and prune the stable external-root
+  registry while visiting each successfully upgraded cell.
 - Enumerate runs directly from the heap, never by discovering them through
   thread caches. Mark-only C5 leaves allocation bits, lease bitmaps, stable
   class frontiers, allocation-lease epochs, and provisional C3E pressure
@@ -2182,9 +2202,10 @@ Execute C6 as the following smaller checkpoints:
   next high-water target.
 - **C6D.1 — terminal-teardown decision and forced fixtures.** Choose and record
   either the preferred owner-lease drain or the restricted non-reentrant
-  fallback before changing `HeapInner::drop`. Force last-facade, last-root,
-  mutator-capable destructor, panic, and root-attempt orderings against the
-  selected ownership graph.
+  fallback before changing `HeapInner::drop`. Force last-facade,
+  last-authorized-owner, escaped-root, mutator-capable destructor, panic, and
+  root-attempt orderings against the selected ownership graph. An escaped root
+  must neither postpone teardown nor become dereferenceable after it.
 - **C6D.2 — terminal teardown.** Implement only the selected protocol and
   prove each remaining allocation is destroyed or deliberately quarantined
   exactly once without reconstructing a dropped heap owner.
@@ -2345,13 +2366,16 @@ recoverable panic injected by its own tests.
 - Before admitting production mutator-capable drop types, settle terminal heap
   teardown as an explicit C6 checkpoint. The preferred shape begins a final
   drain while a runtime/value-domain owner lease is still strong, so ordinary
-  finalizer mutation is valid and creation of a fresh external root can cancel
-  terminal teardown. Do not try to reconstruct or resurrect an `Arc` owner
-  after its last strong reference has entered `Drop`. If the public ownership
-  representation cannot initiate such a drain, keep last-owner teardown a
-  restricted non-reentrant path and document which payload families it may
-  destroy; it may not silently invoke a mutator-capable production destructor
-  without its promised context.
+  finalizer mutation is valid. A root created during that drain may protect and
+  access its value only while an authorized value-domain owner and matching
+  mutator remain live; it does not cancel terminal teardown and becomes inert
+  when the domain ends. Terminal teardown ultimately destroys or quarantines
+  every remaining allocation regardless of escaped root-registry entries. Do
+  not try to reconstruct or resurrect an `Arc` owner after its last strong
+  reference has entered `Drop`. If the public ownership representation cannot
+  initiate such a drain, keep last-owner teardown a restricted non-reentrant
+  path and document which payload families it may destroy; it may not silently
+  invoke a mutator-capable production destructor without its promised context.
 - Expose queued and running finalizers as operational heap activity so runtime
   quiescence and shutdown cannot race their diagnostics, tasks, or host
   effects. A synchronous `collect_full` report completes only after its

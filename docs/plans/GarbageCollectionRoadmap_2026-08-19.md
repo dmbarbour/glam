@@ -91,8 +91,11 @@ EvaluationRuntime
 
 `RuntimeHeap` is internal to the runtime. A public `Value` is an external root
 in exactly that heap. An internal `Gc<T>` is not a root and is usable only while
-the current thread has entered that heap as a mutator. A root or mutator guard
-retains the heap allocation; a bare `Gc<T>` never does.
+the current thread has entered that heap as a mutator. Authorized runtime
+value-domain owners retain the heap; a mutator admission/access lease may
+retain it temporarily. An external root refers weakly to its heap and becomes unusable
+when the value domain is dropped. Neither a root nor a bare `Gc<T>` can prolong
+that domain.
 
 The primary supported Glam access shape is token-based:
 
@@ -238,9 +241,10 @@ permit dereference outside a region.
   alignment is the Rust type alignment; its stride is the requested metadata
   size, if larger than the Rust size, rounded up to that alignment.
 - **Managed pointer** — a cheap, non-rooting pointer between collected values.
-- **External root** — a shareable handle retaining a value from Rust code
-  outside a mutator-local managed graph, including public `Value` handles and
-  runtime-owned records.
+- **External root** — a shareable handle retaining a value while its value
+  domain exists, from Rust code outside a mutator-local managed graph,
+  including public `Value` handles and runtime-owned records. Its heap
+  association is weak: it does not own or revive the value domain.
 - **Mutator region** — dynamic scope in which a thread may allocate,
   dereference, and mutate managed values in one heap.
 - **Finalizing phase** — post-mark phase in which the completed dead set is
@@ -326,13 +330,14 @@ The following must remain sequential:
 
 These choices are intentionally unresolved rather than accidental drift:
 
-- C4 supplies a direct managed root plus an erased collector-private root-seed
-  registry boundary. I2 still chooses whether public `Value` uses that direct
-  root or an inline traced root cell; C4 does not expose or commit to the inline
-  representation merely to keep the registry extensible;
-- C6 selects a last-owner terminal teardown protocol which does not manufacture
-  an already-dropped heap owner and does not run mutator-capable destructors
-  without their promised context; and
+- C4 supplies one direct managed root representation: a one-word typed root
+  handle, a non-generic cell containing a weak heap identity and erased `Gc`,
+  and a thin weak registry entry. I2 still chooses whether public `Value` uses
+  that root directly or wraps it to keep eligible scalars inline; no alternate
+  collector root-cell representation is required;
+- C6 selects a last-value-domain-owner terminal teardown protocol which does
+  not let escaped roots retain or revive the heap and does not run
+  mutator-capable destructors without their promised context; and
 - I8 decides whether `SharedRuntimeNet` remains synchronized external storage
   with an exact visitor or becomes a managed outer node.
 
