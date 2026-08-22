@@ -87,12 +87,11 @@ pub(crate) struct InitializedRun {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct ClaimedAllocationRange {
+pub(crate) struct ClaimedAllocationWord {
     pub(crate) location: RunLocation,
     pub(crate) run: RunAddress,
     pub(crate) geometry: RunGeometry,
-    pub(crate) first_word: usize,
-    pub(crate) end_word: usize,
+    pub(crate) word_index: usize,
     pub(crate) free_mask: u64,
 }
 
@@ -240,17 +239,16 @@ impl Arena {
     pub(crate) fn claim_allocation_word(
         &mut self,
         location: RunLocation,
-    ) -> Option<ClaimedAllocationRange> {
+    ) -> Option<ClaimedAllocationWord> {
         let claimed = self
             .chunks
             .get_mut(location.chunk)?
             .claim_allocation_word(location.run)?;
-        Some(ClaimedAllocationRange {
+        Some(ClaimedAllocationWord {
             location,
             run: claimed.run,
             geometry: claimed.geometry,
-            first_word: claimed.first_word,
-            end_word: claimed.end_word,
+            word_index: claimed.word_index,
             free_mask: claimed.free_mask,
         })
     }
@@ -500,29 +498,24 @@ impl ArenaChunk {
             .collect()
     }
 
-    fn claim_allocation_word(&mut self, run: usize) -> Option<ChunkAllocationRange> {
+    fn claim_allocation_word(&mut self, run: usize) -> Option<ChunkAllocationWord> {
         let address = self.run_address(run)?;
         let geometry = self.header_for(address)?.geometry()?;
 
-        for first_word in 0..geometry.allocation_bitmap.word_len {
-            if self.lease_bit_is_set(address, geometry, first_word) {
+        for word_index in 0..geometry.allocation_bitmap.word_len {
+            if self.lease_bit_is_set(address, geometry, word_index) {
                 continue;
             }
-            let free_mask = self.free_mask_for_word(address, geometry, first_word);
+            let free_mask = self.free_mask_for_word(address, geometry, word_index);
             if free_mask == 0 {
                 continue;
             }
 
-            // C2C.3 deliberately claims one complete allocation word. The
-            // cursor retains a half-open range representation so later
-            // profiling may tune this without changing TLS lifecycle rules.
-            let end_word = first_word + 1;
-            self.set_lease_bit(address, geometry, first_word);
-            return Some(ChunkAllocationRange {
+            self.set_lease_bit(address, geometry, word_index);
+            return Some(ChunkAllocationWord {
                 run: address,
                 geometry,
-                first_word,
-                end_word,
+                word_index,
                 free_mask,
             });
         }
@@ -705,11 +698,10 @@ impl ArenaChunk {
 }
 
 #[derive(Clone, Copy)]
-struct ChunkAllocationRange {
+struct ChunkAllocationWord {
     run: RunAddress,
     geometry: RunGeometry,
-    first_word: usize,
-    end_word: usize,
+    word_index: usize,
     free_mask: u64,
 }
 
@@ -1059,8 +1051,7 @@ mod tests {
                     .claim_allocation_word(location)
                     .expect("each allocation word should be claimable once");
                 assert_eq!(claimed.location, location);
-                assert_eq!(claimed.first_word, expected_word);
-                assert_eq!(claimed.end_word, expected_word + 1);
+                assert_eq!(claimed.word_index, expected_word);
                 assert_eq!(
                     claimed.free_mask,
                     valid_slot_mask(geometry.slot_count, expected_word)
@@ -1084,7 +1075,7 @@ mod tests {
             .map_while(|_| arena.claim_allocation_word(location))
             .last()
             .unwrap();
-        let expected = valid_slot_mask(geometry.slot_count, last.first_word);
+        let expected = valid_slot_mask(geometry.slot_count, last.word_index);
         assert_eq!(last.free_mask, expected);
         assert_ne!(expected, u64::MAX);
         assert_eq!(last.free_mask & !expected, 0);

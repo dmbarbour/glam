@@ -186,7 +186,7 @@ C6 later owns collector-driven destruction.
 ## Typed-Run Publication and Resolution Invariants
 
 - One class entry owns a directly enumerable vector of every `RunLocation`
-  published for it. Thread-local cursors and later range leases do not own or
+  published for it. Thread-local cursors and later word leases do not own or
   retain the run and are not required for enumeration.
 - Before arena publication, the class run vector reserves its next entry.
   Arena publication first reuses an existing empty run, or allocates and fully
@@ -259,7 +259,7 @@ C6 later owns collector-driven destruction.
   and setting its lease bit. A fresh run is fully published into both arena
   and class pool before its first lease is returned.
 - The cursor carries the stable owning `RunAddress`, validated `RunGeometry`,
-  half-open word range, and local free mask. Its initial mask is the inverse of
+  one allocation-word index, and a local free mask. Its mask is the inverse of
   the authoritative allocation word intersected with the exact slot-count
   mask, so tail padding can never become a payload address.
 - While a lease is live, only its worker-local cursor reads or writes that

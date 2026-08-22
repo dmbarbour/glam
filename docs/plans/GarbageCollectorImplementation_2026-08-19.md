@@ -1,8 +1,9 @@
 # Glam GC Subcrate Implementation Plan — 2026-08-19
 
-Status: in progress; Phases C0, C1, C2A, C2B, C2C.1a, C2C.1b, C2C.2, and C2C.3 are
-complete. The mandatory post-C1 review is complete. C2C is complete, and its
-mandatory review precedes C3A.
+Status: in progress; Phases C0, C1, C2A, C2B, and the C2C correctness baseline
+through C2C.4 are complete. The mandatory post-C1 review is complete. The
+C2C.5 lease-claim and TLS-lifecycle optimization and the mandatory post-C2C
+review precede C3A.
 
 This plan implements an exact, non-moving, runtime-local tracing collector
 without depending on Glam value semantics. The governing requirements and
@@ -30,8 +31,11 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C2C.1a | completed | indexed chunk ownership and checked owner lookup |
 | C2C.1b | completed | synchronized arena allocation and prototype access transition |
 | C2C.2 | completed | heap-specific TLS identity, epochs, and cache lifecycle |
-| C2C.3 | completed | bitmap-range leasing and worker-local hot allocation |
+| C2C.3 | completed | allocation-word leasing and worker-local hot allocation |
 | C2C.4 | completed | pressure, panic, teardown, and allocator audit |
+| C2C.5a | pending | atomic hierarchical lease-word claiming |
+| C2C.5b | pending | stable class run frontier and lock-free cursor refill |
+| C2C.5c | pending | explicit thread-local cache release without eager pruning |
 | C3A | pending | ordinary admission and same-heap recursion integration |
 | C3B | pending | collector election and single-heap STW quiescence |
 | C3C | pending | cross-heap dependent admission |
@@ -434,7 +438,7 @@ initialization paths fully owned.
   provisional run size. If I0 is not yet complete, record equivalent
   representative layout measurements here and reconcile them with I0 before
   any production ownership migration.
-- Store allocation, allocation-range leases, and mark state in run-side
+- Store allocation, allocation-word leases, and mark state in run-side
   bitmaps. The lease bitmap has one bit per allocation-bitmap word and is part
   of the checked geometry. Do not reserve card metadata or generation fields
   for the initial collector.
@@ -577,15 +581,15 @@ publication each remain all-or-nothing before the next layer is added.
   ordinary slots contain payload only, with no GC header, metadata pointer,
   mark byte, or finalizer byte.
 - Keep every typed run owned and directly enumerable by its heap for its entire
-  lifetime. A thread-local allocator may hold exclusive allocation leases over
-  integral ranges of that run's allocation-bitmap words; several thread caches
-  may therefore allocate from nonoverlapping ranges in one run. Run-side lease
-  metadata records which bitmap-word ranges are unavailable to the synchronized
+  lifetime. A thread-local allocator may hold an exclusive lease over one of
+  that run's allocation-bitmap words; several thread caches may therefore
+  allocate from different words in one run. Run-side lease metadata records
+  which bitmap words are unavailable to the synchronized
   class slow path, but the run is never owned or discoverable only through
   thread-local state. A cursor needs no separate active versus parked state:
   the owning thread's recursive mutator depth says whether it is currently
   usable, while exclusive collector admission proves that no thread cache is
-  in use. A range lease never becomes reachability for the run's objects.
+  in use. A word lease never becomes reachability for the run's objects.
 - Maintain a per-heap map from canonical metadata pointer to
   `AllocationClassId` for first-use class discovery and a stable dense class
   table containing that metadata pointer and typed-run pools. Metadata function
@@ -691,11 +695,11 @@ C2B.3 completed on 2026-08-21:
 - The collector check and exact unsafe inventory pass with 43 unit tests. Miri
   covers the same run/header paths. No slot is allocated or initialized; C2C
   remains solely responsible for replacing the prototype `Box::leak` path and
-  introducing worker-local bitmap-range allocation.
+  introducing worker-local allocation-word leasing.
 
-## Phase C2C — Worker-Local Bitmap-Range Allocation and Reuse
+## Phase C2C — Worker-Local Allocation-Word Leasing and Reuse
 
-Execute C2C as five independently verified checkpoints:
+Execute C2C as eight independently verified checkpoints:
 
 - **C2C.1a — indexed chunk ownership.** Add an authoritative fixed-chunk-base
   index beside the owning arena vector and replace linear chunk membership
@@ -711,14 +715,24 @@ Execute C2C as five independently verified checkpoints:
   class-to-cursor map, whole-cache invalidation, inert eviction, and TLS
   destruction rules without yet making the cached cursor the ordinary payload
   allocation path.
-- **C2C.3 — bitmap-range leasing and hot allocation.** Claim disjoint
-  allocation-word ranges through the synchronized class slow path, activate
+- **C2C.3 — allocation-word leasing and hot allocation.** Claim disjoint
+  allocation words through the synchronized class slow path, activate
   cached local allocation, and prove that retained-class allocation performs no
   `TypeId` lookup, chunk lookup, hash lookup, or shared synchronization on a
   cache hit.
 - **C2C.4 — pressure, panic, teardown, and audit.** Complete batched pressure,
-  abandoned-range accounting, initialization/bitmap panic atomicity,
-  teardown and panic-race hardening, and the mandatory post-C2C review.
+  abandoned-word accounting, initialization/bitmap panic atomicity,
+  teardown and panic-race hardening, and the correctness-baseline audit.
+- **C2C.5a — atomic hierarchical lease claiming.** Replace repeated per-
+  allocation-word lease probes with lease-word scanning and atomic bit claims,
+  independently of class run selection.
+- **C2C.5b — stable class run frontier.** Publish a stable current-run record
+  per class so ordinary cursor refill can claim from it without the heap-state
+  mutex, retaining that mutex only for exhausted-frontier advancement and run
+  publication.
+- **C2C.5c — explicit TLS release.** Remove automatic whole-registry pruning
+  from mutator entry and provide an explicit current-thread cleanup operation,
+  then perform the mandatory post-C2C review.
 
 C2C owns the first implementation of `ThreadHeapState`: the heap-specific TLS
 entry, recursive depth, allocation-lease epoch, and cursor map work while
@@ -865,7 +879,7 @@ C2C.1b completed on 2026-08-22:
 
 - Give each thread a heap-specific cache containing one captured
   `allocation_lease_epoch` and a dense-class-ID map of current
-  bitmap-word-range cursors. The thread-local registry is keyed by collector
+  allocation-word cursors. The thread-local registry is keyed by collector
   heap identity because one host thread may enter more than one heap. The entry
   retains a weak heap identity but no strong heap owner, so it cannot retain a
   dead heap or its arenas. Keeping the weak allocation identity alive prevents
@@ -879,7 +893,7 @@ C2C.1b completed on 2026-08-22:
   records is inert: it must not dereference their runs or attempt to return
   leases which the collector may already have reassigned. The epoch remains
   stable for the whole mutator region.
-- Never return a range from TLS destruction, cache eviction, or ordinary
+- Never return a word lease from TLS destruction, cache eviction, or ordinary
   mutator exit. These paths only retain or forget inert cursor records and do
   not dereference the heap. Full collection is the sole reclamation protocol:
   it clears run-side lease metadata directly without finding or walking thread-
@@ -925,46 +939,47 @@ C2C.2 completed on 2026-08-22:
 - The cursor cache is a 64-entry direct-mapped array. Dense class ID selects a
   slot and the stored full ID distinguishes collisions, so lookup is bounded
   and hash-free; replacement merely forgets inert numeric cursor topology.
-  C2C.3 activates the prepared run/range/free-mask fields.
+  C2C.3 activates the prepared run/word/free-mask fields.
 - Deterministic tests cover recursion, cross-heap nesting, panic balancing,
   whole-cache epoch invalidation, collision eviction, weak heap release, and
   dead-record pruning. The collector check passes with 54 unit tests and six
   compile-fail doctests; the exact unsafe inventory and full leak-checking Miri
   run pass. No allocation yet reads or writes a TLS cursor.
 
-### C2C.3 Bitmap-Range Leasing and Hot Allocation
+### C2C.3 Allocation-Word Leasing and Hot Allocation
 
-- Allocate ordinary slots from the cached bitmap-word range using only its
+- Allocate ordinary slots from the cached bitmap word using only its
   worker-local cursor and free mask. Integral word ownership lets that thread
   update the authoritative allocation bits without contending with another
   allocator. Do not look up or hash `TypeId`, acquire a shared lock, or
   increment a shared byte counter on the ordinary hot path.
-- On cache miss or range exhaustion, use the class's synchronized slow path to
-  claim a nonoverlapping range from a reusable partial fixed-size run or
+- On cache miss or word exhaustion, use the class's synchronized slow path to
+  claim a nonoverlapping word from a reusable partial fixed-size run or
   reserve a new typed run from an arena chunk. A small run-side lease bitmap,
   separate from the object allocation bitmap, owns allocation-bitmap words
-  rather than individual slots. Initialize the range cursor's local free mask
-  from the inverse of those authoritative allocation words, with invalid tail
-  slots masked out; do not lease a range containing no free slot.
+  rather than individual slots. Initialize the cursor's local free mask from
+  the inverse of that authoritative allocation word, with invalid tail slots
+  masked out; do not lease a word containing no free slot.
 - Initialize the payload completely before setting its allocation bit. A
   reserved but uncommitted slot is not traceable. Panic unwinding returns the
   slot to local free state without invoking `Drop` on uninitialized bytes. Set
   the allocation bit before returning `Gc<T>`. Sharing that pointer through
   ordinary Rust synchronization makes it visible to another mutator; nothing
   about object visibility is deferred until mutator exit.
-- On outer mutator exit, leave each reusable range cursor retained in its
+- On outer mutator exit, leave each reusable word cursor retained in its
   heap-specific thread cache. Cache eviction merely forgets a cursor and leaves
-  that range leased until full collection. Releasing mutator admission makes
-  the cache quiescent; retaining or forgetting a range does not publish an
+  that word leased until full collection. Releasing mutator admission makes
+  the cache quiescent; retaining or forgetting a word does not publish an
   allocation or root its slots. Re-entry may reuse the whole cache after one
   epoch comparison without the shared class-pool slow path.
-- Charge allocation pressure in batches when ranges or runs are claimed and
+- Charge allocation pressure in batches when words or runs are claimed and
   reconcile unused slots only when full collection revokes all leases. Bound
-  the retained class-cursor map, charge forgotten ranges as unavailable
-  capacity, and request collection before accumulated abandoned ranges become
-  unbounded. The unit of temporary fragmentation is a range rather than a
-  partial run, but select the initial range size, cache bound, and pressure
-  threshold only after allocation histograms exist.
+  the retained class-cursor map, charge forgotten words as unavailable
+  capacity, and request collection before accumulated abandoned words become
+  unbounded. The unit of temporary fragmentation is one allocation word rather
+  than a partial run; keep that lease granularity fixed in the initial
+  collector and tune the cache bound and pressure threshold only after
+  allocation histograms exist.
 - Permit a mutex-backed run-turnover path initially. Changing run-pool or local
   cache policy later must not change pointer, trace, or mutator semantics. The
   heap-specific cache is owned by its thread and needs no mutex; ordinary
@@ -979,15 +994,15 @@ Verification:
 - allocation from several mutators never overlaps;
 - instrumentation proves repeated allocations in a cached class perform no
   hash lookup or shared synchronization;
-- nonoverlapping bitmap-word ranges let several mutators allocate from one run
+- nonoverlapping bitmap words let several mutators allocate from one run
   without overlapping or sharing an allocation word;
 - a cache retained after one outer entry is reused by a later entry on the same
   thread after one cache-level epoch comparison and without class-pool
   synchronization;
 - a thread cache does not retain its heap, and an epoch mismatch replaces its
   entire cursor map without dereferencing any stale run;
-- TLS destruction and cache eviction do not access the heap or return ranges;
-- cache eviction and thread exit leave their ranges leased and unavailable;
+- TLS destruction and cache eviction do not access the heap or return words;
+- cache eviction and thread exit leave their words leased and unavailable;
   C5 verifies that the first full collection clears those leases and advances
   the cache epoch without finding the departed thread;
 - every newly selected free slot is initialized before its allocation bit is
@@ -1003,9 +1018,9 @@ Verification:
 C2C.3 completed on 2026-08-22:
 
 - Each slow-path claim leases exactly one complete allocation-bitmap word,
-  giving one worker sole authority over at most 64 object slots. The
-  half-open word-range representation remains in the cursor so later profiling
-  can justify larger ranges without changing cache lifecycle semantics.
+  giving one worker sole authority over at most 64 object slots. The cursor
+  stores that single word index directly; larger leases are not latent in the
+  representation and would require a separately justified design change.
 - A mutator obtains one hash-free `ThreadCacheHandle` at region entry. A cache
   hit borrows only its thread-local state, selects a local free bit, writes the
   payload, and publishes the allocation bit. It performs no `TypeId`, chunk,
@@ -1081,14 +1096,14 @@ Verification for C2C.4:
 
 C2C.4 completed on 2026-08-22:
 
-- Heap state now counts claimed ranges and their leased free capacity only on
+- Heap state now counts claimed words and their leased free capacity only on
   the synchronized claim path. It uses saturating arithmetic and latches a
   pending collection request at one arena chunk. Sixty-four small allocations
   in a retained word add no shared accounting traffic; the sixty-fifth claims
   and charges exactly one more word.
 - The charge is intentionally conservative and monotonic. Evicted and exited-
   thread cursors remain included without weak upgrades, TLS callbacks, or a
-  second abandoned-range protocol. C5 must clear the lease bitmaps, reset this
+  second abandoned-word protocol. C5 must clear the lease bitmaps, reset this
   pressure, and advance the cache epoch as one exclusive transition.
 - A deterministic hook immediately before local payload initialization proves
   that unwind drops the input, publishes no allocation bit, leaves the heap
@@ -1103,9 +1118,160 @@ C2C.4 completed on 2026-08-22:
   finalization design. C2C's provisional terminal path remains explicitly
   limited to non-reentrant, non-panicking payload destruction, which is enough
   to keep the pre-collector implementation leak-free.
-- The final C2C verification passes 63 unit tests, one Loom smoke model, and
-  six compile-fail doctests. Formatting, Clippy with warnings denied, the exact
-  unsafe inventory, and full leak-checking Miri all pass.
+- The final C2C correctness-baseline verification passes 63 unit tests, one
+  Loom smoke model, and six compile-fail doctests. Formatting, Clippy with
+  warnings denied, the exact unsafe inventory, and full leak-checking Miri all
+  pass.
+
+### C2C.5 Lock-Free Lease Claims, Class Run Frontier, and TLS Release
+
+C2C.5 is a performance extension over the completed C2C correctness baseline.
+It must preserve one authoritative lease bit per allocation word, worker-local
+non-atomic allocation-word mutation after a successful claim, inert TLS
+eviction, and collector-only lease revocation.
+
+#### C2C.5a Atomic Hierarchical Lease-Word Claiming
+
+- Treat every published lease-bitmap word as `AtomicU64`. Initialization may
+  write the enclosing untyped run before publication, but after publication
+  every read, claim, reset, and diagnostic observation of lease words uses the
+  atomic representation. Allocation and mark bitmap words remain ordinary
+  `u64` storage under their existing exclusive ownership rules.
+- Scan the lease bitmap itself rather than iterating allocation words. One
+  lease word summarizes up to 64 allocation words, so the provisional 64 KiB
+  run requires at most roughly sixteen probes even for the densest supported
+  slots.
+- For each ordinary lease word, calculate candidate bits directly from the
+  inverse observed word. Do not construct a valid-bit mask on every retry.
+  After selecting the first zero bit, derive its absolute allocation-word
+  index. Only the final lease word can produce an index at or beyond
+  `lease_bitmap.bit_len`; because those invalid bits form a suffix, observing
+  such an index means that lease word has no valid candidate left.
+- Claim the selected bit with a compare-exchange loop. A failed CAS recomputes
+  candidates from the newly observed word; a successful CAS grants that worker
+  exclusive access to the corresponding non-atomic allocation word. Review
+  and document memory ordering together with run publication and C3's mutator
+  admission rather than relying on atomicity alone for pointer initialization
+  visibility.
+- After winning a bit, read the allocation word and construct its exact free
+  mask using the existing allocation-tail rule. If no free slot remains, keep
+  the lease bit set and continue; never return or race to clear it. Once C5
+  rebuilds leases, it should preset lease bits for completely full allocation
+  words so this fallback is exceptional rather than ordinary.
+- Keep the one-word `AllocationCursor` contract unchanged. This checkpoint
+  replaces only candidate discovery and ownership acquisition, not hot payload
+  initialization, pressure charging, TLS retention, or lease granularity.
+
+Verification for C2C.5a:
+
+- deterministic geometry tests cover one lease word, several lease words, and
+  a partial final lease word without ever claiming an out-of-range bit;
+- many synchronized workers race on one run and obtain every claimable
+  allocation-word index at most once, with no heap mutex protecting the CAS;
+- a deliberately full allocation word is claimed, recognized as unusable, and
+  left unavailable while search continues;
+- instrumentation proves the search reads lease words rather than rereading
+  one lease word for each represented allocation word;
+- all post-publication lease accesses are atomic, as checked by the exact
+  unsafe audit and a focused ThreadSanitizer or equivalent race run in addition
+  to Miri; and
+- a small Loom model exercises the compare-exchange state transition even if
+  the raw arena-pointer integration remains covered by native forced schedules.
+
+#### C2C.5b Stable Class Run Frontier and Lock-Free Refill
+
+- Give each heap-local allocation class stable shared allocation state which
+  is retained by both its typed `AllocationClass<T>` handles and authoritative
+  heap entry without creating a back-reference to the heap. Keep mutable run-
+  pool ownership under heap state, but publish the current candidate through
+  an atomic pointer to a heap-owned, stable run record containing both
+  `RunLocation` and `RunAddress`.
+- A cursor miss first loads that run record with publication ordering and calls
+  C2C.5a's atomic lease claimant directly. This path performs no heap-state
+  lock, class-vector lookup, run-vector scan, chunk lookup, or `TypeId` lookup.
+- If the current run has no claimable lease bit, enter the heap-state slow
+  path. Recheck the frontier after acquiring the mutex because another worker
+  may already have advanced it. Otherwise advance monotonically to an existing
+  run or publish one new typed run, then release-publish its stable record.
+  Never rescan already exhausted prefix runs before collection.
+- Move leased-capacity pressure to saturating atomics or an equivalent batched
+  facility which does not reacquire heap state after a successful lock-free
+  claim. Exact diagnostic snapshots are not semantic and need not combine the
+  counters transactionally.
+- Run records remain valid for the heap lifetime in the initial collector.
+  Before C6 ever repurposes or retires a run, exclusive collection must first
+  invalidate every atomic class frontier which could name it. A stale class
+  frontier may never point at storage already reassigned to another class.
+- During full collection, rebuild each run's atomic lease words so full
+  allocation words are preset unavailable, reset each class frontier to a run
+  with claimable capacity (or no run), reset pressure, and then advance the one
+  heap-wide lease epoch before releasing mutator exclusion. TLS cache records
+  remain invalidated wholesale on their next outer entry.
+
+Verification for C2C.5b:
+
+- repeated cursor refills in one class acquire only atomic lease and pressure
+  state until the current run is exhausted;
+- racing workers share one current run, claim distinct words, and cause at most
+  one frontier advance or new-run publication per exhaustion boundary;
+- instrumentation proves the class's exhausted run prefix is not rescanned;
+- run publication failure exposes neither a frontier record nor a class-pool
+  entry, while a losing publisher observes and uses the winner;
+- pressure remains exact at claim granularity under concurrent refill and
+  saturates without unwinding after lease publication;
+- epoch invalidation, weak TLS teardown, terminal heap destruction, and
+  multi-heap nesting retain their existing behavior; and
+- focused tests, forced schedules, Clippy, the exact unsafe inventory, Miri,
+  and available sanitizer checks pass before TLS cleanup changes begin.
+
+#### C2C.5c Explicit Thread-Local Cache Release
+
+- Remove the `HashMap::retain` scan from `ThreadHeapEntry::enter`. Entry into a
+  known heap performs only its direct thread-local key lookup and normal epoch
+  validation. Entry into a new heap inserts one record without examining
+  unrelated records.
+- Do not opportunistically classify or prune dead heaps. The expected runtime
+  heap lives for nearly the complete process, while the final dead heap would
+  never be discovered by a subsequent entry anyway. Eager scanning therefore
+  adds recurring work without providing a reliable reclamation boundary.
+- Retain each dead record until its host thread exits or explicitly releases
+  its cache registry. Its `Weak<HeapInner>` keeps the old Arc allocation address
+  unavailable for reuse while the numeric TLS key and inert run pointers
+  remain present, but does not retain the dead heap, arenas, or payloads.
+- Add a provisional associated operation such as
+  `Heap::release_current_thread_caches() -> usize`. It acts only on the calling
+  thread and returns the number of discarded heap records. The name may be
+  narrowed with the public API later, but cleanup must not require a live
+  handle to a heap which may already be dead.
+- Require that the calling thread hold no mutator for any heap. Validate every
+  recorded recursive depth in a first pass and treat a nonzero depth as a
+  programmer-contract panic before changing the registry. Only after complete
+  validation may a second step clear all records.
+- Clearing is inert: do not upgrade a weak heap, dereference a cached run,
+  return or clear a lease, adjust pressure, or invoke a callback. Leases from a
+  live heap become ordinary abandoned capacity and remain charged until C5
+  revokes all leases. Re-entry later creates a fresh record and cursor map.
+- Ordinary host-thread termination continues to drop its complete TLS registry
+  automatically. The explicit operation exists for long-lived worker threads
+  which outlive one or more runtime heaps, not as a required shutdown step.
+
+Verification for C2C.5c:
+
+- instrumentation proves repeated and recursive entry into a known heap never
+  iterates unrelated TLS records or reads their weak counts;
+- a dead record remains present when another heap is entered, retains no heap
+  payload or arena, and continues preventing reuse of its Arc identity;
+- explicit release removes both live-heap and dead-heap inactive records and
+  returns the exact count without heap access;
+- attempting release under one or several active mutator depths panics before
+  removing any record, after which those mutators can exit normally;
+- releasing a live heap's cache and re-entering it creates fresh TLS state,
+  claims a new word, and leaves the discarded lease included in pressure until
+  collection;
+- ordinary thread exit still drops the registry without an explicit call; and
+- focused lifecycle tests, multi-heap nesting, Clippy, the exact unsafe audit,
+  Miri, and available sanitizer checks pass before the mandatory post-C2C
+  review begins.
 
 ## Phase C3 — Regional Mutators and Stop-the-World Handshake
 
@@ -1131,26 +1297,27 @@ forced-order tests pass independently.
 
 - Implement outer `enter`/`exit` admission with a heap phase mutex/condition
   variable or equivalent state machine.
-- If admission and allocation slow paths share one `HeapState` mutex, keep
+- If admission and run-publication slow paths share one `HeapState` mutex, keep
   their fields and transitions separately documented. The mutex belongs to
   arena-chunk, typed-run-pool, class-discovery, and phase state; it is not held
-  by a mutator's local bitmap-range cursor. The collector sets its request under
-  that mutex, waits for the active count to reach zero, and then has exclusive
-  access to allocation state without retaining a mutator-region lock.
+  by a mutator's local allocation-word cursor. The collector sets its request
+  under that mutex, waits for the active count to reach zero, and then has
+  exclusive access to allocation state without retaining a mutator-region lock.
 - Extend C2C's `ThreadHeapState` with collection admission. It already contains
-  that heap's recursive mutator depth, allocation-lease epoch, and bitmap-range
-  cursor map. A thread may have several such states active concurrently;
+  that heap's recursive mutator depth, allocation-lease epoch, and allocation-
+  word cursor map. A thread may have several such states active concurrently;
   entering another runtime heap activates its independent state and admission
   count rather than replacing a singular current-mutator slot.
 - Support recursive same-heap entry through that heap's thread-local depth
   without incrementing its active-mutator count again.
 - Activate the persistent C2C thread cache at the outermost same-heap entry.
   Nested entry reuses that cache. Only outermost exit makes the cache quiescent,
-  leaving reusable cursors retained; eviction and exit never return a range.
+  leaving reusable cursors retained; eviction and exit never return a word
+  lease.
 - Do not maintain a cross-thread active/parked flag for a cursor. Recursive
   depth is local to its owning thread. The collector need not inspect another
   thread's depth: acquiring exclusive mutator admission proves that every
-  TLS cache is quiescent. It then revokes ranges by clearing heap-owned run
+  TLS cache is quiescent. It then revokes word leases by clearing heap-owned run
   lease bitmaps, without inspecting any cache.
 - Provide a heap-qualified scoped current-mutator accessor for reviewed
   destructor and runtime-integration code, for example an HRTB closure API
@@ -1223,7 +1390,7 @@ forced-order tests pass independently.
   must not strand an admitted mutator before it can exit.
 - Every successful allocation has initialized its payload and set its
   allocation bit before returning its pointer, independently of mutator exit.
-  Outermost exit retains its local bitmap-range cursors, makes the cache
+  Outermost exit retains its local allocation-word cursors, makes the cache
   quiescent by leaving its recursive region, and then decrements the active-
   mutator count. The admission release/acquire edge makes prior allocator
   metadata writes visible to the collector; it is not a Glam value-publication
@@ -1298,12 +1465,14 @@ are stopped.
 
 - Stop all mutators and snapshot/visit external roots.
 - Enumerate runs directly from the heap, never by discovering them through
-  thread caches. For the initial full collector, clear every run's allocation-
-  range lease bitmap at the start of the exclusive phase and advance one
-  heap-wide `allocation_lease_epoch`. On its next outer entry, each
+  thread caches. For the initial full collector, atomically rebuild every
+  run's lease bitmap during the exclusive phase: clear bits for allocation
+  words with free capacity and set bits for completely full allocation words.
+  Reset each class's stable run frontier and leased-capacity pressure, then
+  advance one heap-wide `allocation_lease_epoch`. On its next outer entry, each
   heap-specific thread cache compares that one epoch and replaces its entire
-  class-to-range-cursor map on mismatch; neither the collector nor the mutator
-  validates cursors individually. Post-sweep allocation claims fresh ranges
+  class-to-word-cursor map on mismatch; neither the collector nor the mutator
+  validates cursors individually. Post-sweep allocation claims fresh words
   from the rebuilt run state. Retaining selected hot leases across a collection
   is deferred profiling work.
 - Mark through each allocation class's edge visitor; do not derive outgoing

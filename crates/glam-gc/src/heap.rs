@@ -331,8 +331,7 @@ impl HeapInner {
             location: claimed.location,
             run: claimed.run,
             geometry: claimed.geometry,
-            current_word: claimed.first_word,
-            end_word: claimed.end_word,
+            word_index: claimed.word_index,
             free_mask: claimed.free_mask,
         }
     }
@@ -609,8 +608,7 @@ mod tests {
             location: RunLocation { chunk: 0, run: 0 },
             run: crate::arena::RunAddress::dangling_for_cache_test(),
             geometry: RunGeometry::derive(std::alloc::Layout::new::<u64>(), None).unwrap(),
-            current_word: 0,
-            end_word: 1,
+            word_index: 0,
             free_mask: u64::MAX,
         }
     }

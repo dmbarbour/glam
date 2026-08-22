@@ -69,7 +69,6 @@ crates/glam-gc/src/pointer.rs:    pub unsafe fn get_unchecked<'access>(&self, mu
 crates/glam-gc/src/pointer.rs:    pub(crate) unsafe fn from_raw(pointer: NonNull<T>) -> Self {
 crates/glam-gc/src/pointer.rs:unsafe impl<T: Trace> Send for Gc<T> {}
 crates/glam-gc/src/pointer.rs:unsafe impl<T: Trace> Sync for Gc<T> {}
-crates/glam-gc/src/thread_cache.rs:        let allocation = unsafe { pointer.read() };
 crates/glam-gc/src/thread_cache.rs:        let current = unsafe { allocation_word.read() };
 crates/glam-gc/src/thread_cache.rs:        let pointer = unsafe { self.run.pointer().add(offset).cast::<T>() };
 crates/glam-gc/src/thread_cache.rs:        unsafe {

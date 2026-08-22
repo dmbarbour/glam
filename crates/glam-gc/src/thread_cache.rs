@@ -29,15 +29,14 @@ impl AllocationLeaseEpoch {
     }
 }
 
-/// One worker-local cursor over an exclusively leased allocation-bitmap range.
+/// One worker-local cursor over one exclusively leased allocation-bitmap word.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct AllocationCursor {
     pub(crate) class_id: AllocationClassId,
     pub(crate) location: RunLocation,
     pub(crate) run: RunAddress,
     pub(crate) geometry: RunGeometry,
-    pub(crate) current_word: usize,
-    pub(crate) end_word: usize,
+    pub(crate) word_index: usize,
     pub(crate) free_mask: u64,
 }
 
@@ -51,17 +50,12 @@ impl AllocationCursor {
         value: T,
         before_initialize: impl FnOnce(),
     ) -> Result<NonNull<T>, T> {
-        while self.free_mask == 0 {
-            let next_word = self.current_word + 1;
-            if next_word >= self.end_word {
-                return Err(value);
-            }
-            self.current_word = next_word;
-            self.free_mask = self.free_mask_for_current_word();
+        if self.free_mask == 0 {
+            return Err(value);
         }
 
         let bit_index = self.free_mask.trailing_zeros() as usize;
-        let slot_index = self.current_word * u64::BITS as usize + bit_index;
+        let slot_index = self.word_index * u64::BITS as usize + bit_index;
         let offset = self
             .geometry
             .slot_offset(slot_index)
@@ -71,16 +65,16 @@ impl AllocationCursor {
             "cached allocation payload exceeds its slot"
         );
         // SAFETY: the synchronized slow path validated the run and geometry,
-        // then exclusively leased every represented allocation word to this
-        // thread. The bounded free bit identifies uninitialized payload storage
-        // wholly inside that stable run.
+        // then exclusively leased this allocation word to this thread. The
+        // bounded free bit identifies uninitialized payload storage wholly
+        // inside that stable run.
         let pointer = unsafe { self.run.pointer().add(offset).cast::<T>() };
         assert_eq!(
             pointer.addr().get() % std::mem::align_of::<T>(),
             0,
             "cached allocation slot has the wrong payload alignment"
         );
-        let allocation_word = self.allocation_word_pointer(self.current_word);
+        let allocation_word = self.allocation_word_pointer();
         // SAFETY: this cursor exclusively owns the initialized allocation word.
         let current = unsafe { allocation_word.read() };
         let bit = 1_u64 << bit_index;
@@ -105,16 +99,9 @@ impl AllocationCursor {
         Ok(pointer)
     }
 
-    fn free_mask_for_current_word(&self) -> u64 {
-        let pointer = self.allocation_word_pointer(self.current_word);
-        // SAFETY: the cursor exclusively owns this initialized bitmap word.
-        let allocation = unsafe { pointer.read() };
-        !allocation & valid_slot_mask(self.geometry.slot_count, self.current_word)
-    }
-
-    fn allocation_word_pointer(&self, word_index: usize) -> NonNull<u64> {
+    fn allocation_word_pointer(&self) -> NonNull<u64> {
         assert!(
-            word_index < self.geometry.allocation_bitmap.word_len,
+            self.word_index < self.geometry.allocation_bitmap.word_len,
             "cached allocation word is out of range"
         );
         // SAFETY: validated geometry places this aligned allocation word wholly
@@ -124,7 +111,7 @@ impl AllocationCursor {
                 .pointer()
                 .add(self.geometry.allocation_bitmap.offset)
                 .cast::<u64>()
-                .add(word_index)
+                .add(self.word_index)
         }
     }
 }
@@ -369,16 +356,4 @@ pub(crate) fn cursor(
 #[cfg(test)]
 pub(crate) fn registry_contains(heap_address: usize) -> bool {
     THREAD_HEAPS.with_borrow(|registry| registry.contains_key(&HeapCacheKey(heap_address)))
-}
-
-fn valid_slot_mask(slot_count: usize, word_index: usize) -> u64 {
-    let first_slot = word_index * u64::BITS as usize;
-    let remaining = slot_count.saturating_sub(first_slot);
-    if remaining >= u64::BITS as usize {
-        u64::MAX
-    } else if remaining == 0 {
-        0
-    } else {
-        (1_u64 << remaining) - 1
-    }
 }
