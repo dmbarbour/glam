@@ -1385,8 +1385,9 @@ C2C.5 completed on 2026-08-22:
 - Allocation pressure no longer participates in word leasing. One centralized
   heap-state operation publishes a run into the arena and class pool, then
   charges one saturating typed-run event. The 128th publication latches the
-  provisional request; neither a failed publication nor any lease, slot,
-  cursor, or TLS transition adds an event.
+  completed C2C provisional request; C3B will lower the trigger to 7/8 of one
+  chunk when requests become serviceable. Neither a failed publication nor
+  any lease, slot, cursor, or TLS transition adds an event.
 - Each class handle and heap entry share one frontier cell. It release-publishes
   a pointer to a separately boxed, heap-owned run record, so ordinary cursor
   refill claims directly without heap state. Exhaustion rechecks under the
@@ -1419,7 +1420,9 @@ Execute C3 as four checkpoints over the `ThreadHeapState` established by C2C:
   without any collector election.
 - **C3B — single-heap STW.** Add collection request/coalescing, writer
   commitment, collector election, active-count drain, exclusive phase entry,
-  and release back to ordinary admission for one heap.
+  release back to ordinary admission for one heap, and replace C2C.5b's
+  full-chunk provisional pressure threshold with the initial serviced-
+  collection threshold.
 - **C3C — cross-heap admission.** Add several simultaneously active
   heap-qualified TLS entries and the dependent-admission exception for queued
   writers. Force A-then-B/B-then-A schedules and the already-exclusive target
@@ -1438,6 +1441,16 @@ forced-order tests pass independently.
   coordinator's coalesced request state. Calling it from an admitted mutator
   never attempts collection recursively and never waits for that same region
   to leave.
+- Before automatic pressure can initiate a real collection, replace C2C.5b's
+  provisional `RUNS_PER_CHUNK` trigger with
+  `RUNS_PER_CHUNK * 7 / 8`. With the initial 128-run chunk this latches a
+  request on the 112th successful typed-run publication, leaving 16 runs
+  (1 MiB) of nominal allocation headroom before another 8 MiB chunk is needed.
+  Keep the calculation integral and compile-time checked for the fixed run
+  geometry. This is a trigger rather than a hard capacity limit: a mutator
+  does not service the request until its outermost exit and may overshoot the
+  headroom. Tests should latch the boundary at 111/112 publications and prove
+  later publications remain coalesced.
 - Treat every outermost mutator exit as a safepoint for servicing explicit and
   committed heuristic requests. Recursive same-heap exits merely decrement the
   thread-local depth. On outer exit, publish cache quiescence and decrement the
@@ -1687,11 +1700,11 @@ recoverable panic injected by its own tests.
 
 - Identify unreachable allocations only after marking completes.
 - After a successful sweep publishes reusable run state, reset the typed-run-
-  publication count and admit another `RUNS_PER_CHUNK` publications under
-  C2C.5b's deterministic provisional rule. Do this before handing a collector
-  mutator to finalizers so their run publications count toward the next cycle.
-  This does not require deallocating an empty arena chunk; future allocations
-  reuse reclaimed runs before another run-publication event.
+  publication count and rearm C3B's `RUNS_PER_CHUNK * 7 / 8` automatic trigger.
+  Do this before handing a collector mutator to finalizers so their run
+  publications count toward the next cycle. This does not require deallocating
+  an empty arena chunk; future allocations reuse reclaimed runs before another
+  run-publication event.
 - Do not eagerly enumerate every allocated payload. Inspect run summaries and
   bitmaps:
   - a no-drop run with no marked slots is reclaimed wholesale;
