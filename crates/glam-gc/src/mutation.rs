@@ -92,8 +92,12 @@ mod tests {
     #[test]
     fn replacement_gateway_executes_the_reported_edge_update_once() {
         let heap = Heap::new();
-        let leaf_class = heap.allocation_class::<Leaf>().unwrap();
-        let node_class = heap.allocation_class::<MutableNode>().unwrap();
+        let leaf_class = heap
+            .with_mutator(|mutator| mutator.allocation_class::<Leaf>())
+            .unwrap();
+        let node_class = heap
+            .with_mutator(|mutator| mutator.allocation_class::<MutableNode>())
+            .unwrap();
         heap.with_mutator(|mutator| {
             let old = mutator.alloc(&leaf_class, Leaf { _value: 1 });
             let new = mutator.alloc(&leaf_class, Leaf { _value: 2 });
@@ -137,7 +141,9 @@ mod tests {
     fn replacement_gateway_rejects_a_foreign_heap_before_mutation() {
         let owner_heap = Heap::new();
         let other_heap = Heap::new();
-        let owner_class = owner_heap.allocation_class::<MutableNode>().unwrap();
+        let owner_class = owner_heap
+            .with_mutator(|mutator| mutator.allocation_class::<MutableNode>())
+            .unwrap();
         let owner = owner_heap.with_mutator(|mutator| {
             mutator.alloc(
                 &owner_class,

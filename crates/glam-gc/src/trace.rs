@@ -48,7 +48,7 @@ pub unsafe trait Trace: Send + Sync + 'static {
     /// }
     ///
     /// let heap = Heap::new();
-    /// let _ = heap.allocation_class::<InvalidRequest>();
+    /// let _ = heap.with_mutator(|mutator| mutator.allocation_class::<InvalidRequest>());
     /// ```
     const REQUESTED_SLOT_SIZE: Option<usize> = None;
 
@@ -211,8 +211,12 @@ mod tests {
     #[test]
     fn manual_struct_and_recursive_enum_traces_match_expected_edges() {
         let heap = Heap::new();
-        let leaf_class = heap.allocation_class::<Leaf>().unwrap();
-        let node_class = heap.allocation_class::<Node>().unwrap();
+        let leaf_class = heap
+            .with_mutator(|mutator| mutator.allocation_class::<Leaf>())
+            .unwrap();
+        let node_class = heap
+            .with_mutator(|mutator| mutator.allocation_class::<Node>())
+            .unwrap();
         heap.with_mutator(|mutator| {
             let first_leaf = mutator.alloc(&leaf_class, Leaf { _value: 1 });
             let second_leaf = mutator.alloc(&leaf_class, Leaf { _value: 2 });
@@ -251,8 +255,12 @@ mod tests {
     #[test]
     fn visitor_panic_leaves_the_value_traceable_from_the_beginning() {
         let heap = Heap::new();
-        let leaf_class = heap.allocation_class::<Leaf>().unwrap();
-        let node_class = heap.allocation_class::<Node>().unwrap();
+        let leaf_class = heap
+            .with_mutator(|mutator| mutator.allocation_class::<Leaf>())
+            .unwrap();
+        let node_class = heap
+            .with_mutator(|mutator| mutator.allocation_class::<Node>())
+            .unwrap();
         heap.with_mutator(|mutator| {
             let leaf = mutator.alloc(&leaf_class, Leaf { _value: 1 });
             let node = mutator.alloc(&node_class, Node::Leaf(leaf));

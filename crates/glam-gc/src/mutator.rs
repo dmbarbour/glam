@@ -1,8 +1,10 @@
 use std::marker::PhantomData;
 use std::ptr::NonNull;
+use std::sync::Arc;
 
 use crate::thread_cache::ThreadCacheHandle;
-use crate::{AllocationClass, Gc, Trace, heap::HeapInner};
+use crate::{AllocationClass, Gc, Trace, UnsupportedLayout, heap::HeapInner};
+use crate::{class::metadata_for, run::RunGeometry};
 
 /// Scoped authority to access one [`crate::Heap`].
 ///
@@ -17,7 +19,7 @@ use crate::{AllocationClass, Gc, Trace, heap::HeapInner};
 /// use glam_gc::Heap;
 ///
 /// let heap = Heap::new();
-/// let class = heap.allocation_class::<u64>().unwrap();
+/// let class = heap.with_mutator(|mutator| mutator.allocation_class::<u64>()).unwrap();
 /// heap.with_mutator(|mutator| {
 ///     std::thread::scope(|scope| {
 ///         scope.spawn(move || {
@@ -27,18 +29,32 @@ use crate::{AllocationClass, Gc, Trace, heap::HeapInner};
 /// });
 /// ```
 pub struct Mutator<'heap> {
-    heap: &'heap HeapInner,
+    heap: &'heap Arc<HeapInner>,
     cache: ThreadCacheHandle,
     marker: PhantomData<&'heap HeapInner>,
 }
 
 impl<'heap> Mutator<'heap> {
-    pub(crate) fn new(heap: &'heap HeapInner, cache: ThreadCacheHandle) -> Self {
+    pub(crate) fn new(heap: &'heap Arc<HeapInner>, cache: ThreadCacheHandle) -> Self {
         Self {
             heap,
             cache,
             marker: PhantomData,
         }
+    }
+
+    /// Discovers or reuses this heap's allocation class for `T`.
+    ///
+    /// Process-wide metadata is shared by every heap, while the returned dense
+    /// class identity and eventual run pool belong only to this mutator's heap.
+    /// Discovery requires mutator admission because it may extend heap-local
+    /// class topology. The returned handle remains reusable after this mutator
+    /// region exits.
+    pub fn allocation_class<T: Trace>(&self) -> Result<AllocationClass<T>, UnsupportedLayout> {
+        let metadata = metadata_for::<T>();
+        let geometry = RunGeometry::derive(metadata.layout(), metadata.requested_slot_size())
+            .map_err(UnsupportedLayout::from_validated_geometry)?;
+        Ok(self.heap.discover_class(metadata, geometry))
     }
 
     /// Allocates one value through its reusable heap-local allocation class.
@@ -49,7 +65,7 @@ impl<'heap> Mutator<'heap> {
     /// use glam_gc::Heap;
     ///
     /// let heap = Heap::new();
-    /// let class = heap.allocation_class::<()>().unwrap();
+    /// let class = heap.with_mutator(|mutator| mutator.allocation_class::<()>()).unwrap();
     /// heap.with_mutator(|mutator| {
     ///     let _ = mutator.alloc(&class, ());
     /// });

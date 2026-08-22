@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 use crate::{
-    AllocationClass, Mutator, Trace, UnsupportedLayout,
+    AllocationClass, Mutator, Trace,
     arena::{Arena, RunLocation, RunPublicationError},
     class::{AllocationClassEntry, MetadataIdentity, ObjectMetadata, metadata_for},
     run::{AllocationClassId, RunGeometry},
@@ -43,29 +43,43 @@ impl Heap {
 
     /// Runs `operation` inside a scoped mutator region for this heap.
     ///
-    /// C2C still has no collector to exclude. The token is nevertheless
-    /// qualified by this heap and is required for every allocation and access.
+    /// The outermost entry obtains one coordinator admission obligation.
+    /// Recursive same-heap entries reuse that obligation, while entries into
+    /// different heaps remain independent.
     pub fn with_mutator<R>(&self, operation: impl for<'heap> FnOnce(&Mutator<'heap>) -> R) -> R {
+        self.with_mutator_after_admission(|| {}, operation)
+    }
+
+    fn with_mutator_after_admission<R>(
+        &self,
+        after_admission: impl FnOnce(),
+        operation: impl for<'heap> FnOnce(&Mutator<'heap>) -> R,
+    ) -> R {
+        let prepared =
+            ThreadHeapEntry::prepare(&self.inner, self.inner.current_allocation_lease_epoch());
+        let admission = prepared
+            .is_outer()
+            .then(|| self.inner.admit_outer_mutator());
+        after_admission();
         let thread_entry =
-            ThreadHeapEntry::enter(&self.inner, self.inner.current_allocation_lease_epoch());
+            prepared.activate(self.inner.current_allocation_lease_epoch(), admission);
         let mutator = Mutator::new(&self.inner, thread_entry.cache());
         operation(&mutator)
     }
 
-    /// Discovers or reuses this heap's allocation class for `T`.
-    ///
-    /// Process-wide metadata is shared by every heap, while the returned dense
-    /// class identity and eventual run pool belong only to this heap.
-    pub fn allocation_class<T: Trace>(&self) -> Result<AllocationClass<T>, UnsupportedLayout> {
-        let metadata = metadata_for::<T>();
-        let geometry = RunGeometry::derive(metadata.layout(), metadata.requested_slot_size())
-            .map_err(UnsupportedLayout::from_validated_geometry)?;
-        Ok(self.inner.discover_class(metadata, geometry))
+    #[cfg(test)]
+    fn with_mutator_admission_hook<R>(
+        &self,
+        after_admission: impl FnOnce(),
+        operation: impl for<'heap> FnOnce(&Mutator<'heap>) -> R,
+    ) -> R {
+        self.with_mutator_after_admission(after_admission, operation)
     }
 }
 
 pub(crate) struct HeapInner {
     state: Mutex<HeapState>,
+    admission_changed: Condvar,
     allocation_lease_epoch: AtomicU64,
     #[cfg(test)]
     allocation_cursor_claims: std::sync::atomic::AtomicUsize,
@@ -90,6 +104,7 @@ impl Default for HeapInner {
     fn default() -> Self {
         Self {
             state: Mutex::new(HeapState::default()),
+            admission_changed: Condvar::new(),
             allocation_lease_epoch: AtomicU64::new(AllocationLeaseEpoch::INITIAL.get()),
             #[cfg(test)]
             allocation_cursor_claims: std::sync::atomic::AtomicUsize::new(0),
@@ -115,6 +130,62 @@ struct HeapState {
     classes_by_metadata: HashMap<MetadataIdentity, AllocationClassId>,
     classes: Vec<AllocationClassEntry>,
     allocation_pressure: AllocationPressure,
+    coordinator: MutatorCoordinator,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct MutatorCoordinator {
+    phase: AdmissionPhase,
+    active_outer_mutators: usize,
+    #[cfg(test)]
+    blocked_outer_mutators: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[allow(
+    dead_code,
+    reason = "C3A defines exclusive phases which production collection consumes in C3B"
+)]
+enum AdmissionPhase {
+    #[default]
+    Ordinary,
+    ExclusivePending,
+    Exclusive,
+}
+
+/// One outer mutator's coordinator obligation.
+///
+/// The token borrows the heap already retained by `Heap::with_mutator`; it
+/// adds no per-entry shared-owner clone. Dropping it is the only ordinary path
+/// which retires the active-mutator count.
+pub(crate) struct MutatorAdmission<'heap> {
+    heap: &'heap HeapInner,
+}
+
+#[cfg(test)]
+struct SyntheticExclusiveAdmission<'heap> {
+    heap: &'heap HeapInner,
+}
+
+impl Drop for MutatorAdmission<'_> {
+    fn drop(&mut self) {
+        self.heap.release_outer_mutator();
+    }
+}
+
+#[cfg(test)]
+impl Drop for SyntheticExclusiveAdmission<'_> {
+    fn drop(&mut self) {
+        let mut state = self
+            .heap
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(state.coordinator.phase, AdmissionPhase::Exclusive);
+        assert_eq!(state.coordinator.active_outer_mutators, 0);
+        state.coordinator.phase = AdmissionPhase::Ordinary;
+        self.heap.admission_changed.notify_all();
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -188,6 +259,111 @@ struct ResolvedRun {
 }
 
 impl HeapInner {
+    fn admit_outer_mutator(&self) -> MutatorAdmission<'_> {
+        let mut state = self
+            .state
+            .lock()
+            .expect("heap state should not be poisoned");
+        while state.coordinator.phase != AdmissionPhase::Ordinary {
+            #[cfg(test)]
+            {
+                state.coordinator.blocked_outer_mutators += 1;
+                self.admission_changed.notify_all();
+            }
+            state = self
+                .admission_changed
+                .wait(state)
+                .expect("heap state should not be poisoned");
+            #[cfg(test)]
+            {
+                state.coordinator.blocked_outer_mutators -= 1;
+                self.admission_changed.notify_all();
+            }
+        }
+        state.coordinator.active_outer_mutators = state
+            .coordinator
+            .active_outer_mutators
+            .checked_add(1)
+            .expect("active mutator count exhausted");
+        MutatorAdmission { heap: self }
+    }
+
+    fn release_outer_mutator(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.coordinator.active_outer_mutators = state
+            .coordinator
+            .active_outer_mutators
+            .checked_sub(1)
+            .expect("active mutator count underflow");
+        if state.coordinator.active_outer_mutators == 0 {
+            self.admission_changed.notify_all();
+        }
+    }
+
+    #[cfg(test)]
+    fn enter_synthetic_exclusive(&self) -> SyntheticExclusiveAdmission<'_> {
+        let mut state = self
+            .state
+            .lock()
+            .expect("heap state should not be poisoned");
+        while state.coordinator.phase != AdmissionPhase::Ordinary {
+            state = self
+                .admission_changed
+                .wait(state)
+                .expect("heap state should not be poisoned");
+        }
+        state.coordinator.phase = AdmissionPhase::ExclusivePending;
+        self.admission_changed.notify_all();
+        while state.coordinator.active_outer_mutators != 0 {
+            state = self
+                .admission_changed
+                .wait(state)
+                .expect("heap state should not be poisoned");
+        }
+        state.coordinator.phase = AdmissionPhase::Exclusive;
+        self.admission_changed.notify_all();
+        SyntheticExclusiveAdmission { heap: self }
+    }
+
+    #[cfg(test)]
+    fn coordinator_snapshot(&self) -> MutatorCoordinator {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .coordinator
+    }
+
+    #[cfg(test)]
+    fn wait_for_blocked_outer_mutators(&self, expected: usize) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("heap state should not be poisoned");
+        while state.coordinator.blocked_outer_mutators != expected {
+            state = self
+                .admission_changed
+                .wait(state)
+                .expect("heap state should not be poisoned");
+        }
+    }
+
+    #[cfg(test)]
+    fn wait_for_admission_phase(&self, expected: AdmissionPhase) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("heap state should not be poisoned");
+        while state.coordinator.phase != expected {
+            state = self
+                .admission_changed
+                .wait(state)
+                .expect("heap state should not be poisoned");
+        }
+    }
+
     fn current_allocation_lease_epoch(&self) -> AllocationLeaseEpoch {
         AllocationLeaseEpoch::from_raw(self.allocation_lease_epoch.load(Ordering::Acquire))
             .expect("allocation lease epoch must remain nonzero")
@@ -205,7 +381,7 @@ impl HeapInner {
             .expect("advanced allocation lease epoch must remain nonzero")
     }
 
-    fn discover_class<T: Trace>(
+    pub(crate) fn discover_class<T: Trace>(
         self: &Arc<Self>,
         metadata: &'static ObjectMetadata,
         geometry: RunGeometry,
@@ -662,8 +838,8 @@ mod tests {
     };
 
     use super::{
-        AllocationPressure, Heap, INITIAL_RUN_PUBLICATION_ALLOWANCE, PrepareRunError, RunLocation,
-        RunPublicationError, class_index,
+        AdmissionPhase, AllocationPressure, Heap, INITIAL_RUN_PUBLICATION_ALLOWANCE,
+        PrepareRunError, RunLocation, RunPublicationError, class_index,
     };
 
     struct FirstType {
@@ -787,11 +963,16 @@ mod tests {
         const THREADS: usize = 12;
 
         let heap = Heap::new();
-        let expected = heap.allocation_class::<FirstType>().unwrap();
+        let expected = heap
+            .with_mutator(|mutator| mutator.allocation_class::<FirstType>())
+            .unwrap();
         let handles = (0..THREADS)
             .map(|_| {
                 let heap = heap.clone();
-                std::thread::spawn(move || heap.allocation_class::<FirstType>().unwrap())
+                std::thread::spawn(move || {
+                    heap.with_mutator(|mutator| mutator.allocation_class::<FirstType>())
+                        .unwrap()
+                })
             })
             .map(|thread| thread.join().expect("class-discovery worker panicked"))
             .collect::<Vec<_>>();
@@ -807,11 +988,237 @@ mod tests {
     }
 
     #[test]
+    fn class_discovery_waits_for_synthetic_exclusive_admission() {
+        let heap = Heap::new();
+        let exclusive = heap.inner.enter_synthetic_exclusive();
+        let worker = std::thread::spawn({
+            let heap = heap.clone();
+            move || {
+                heap.with_mutator(|mutator| mutator.allocation_class::<FirstType>())
+                    .unwrap()
+            }
+        });
+
+        heap.inner.wait_for_blocked_outer_mutators(1);
+        let blocked = heap.inner.coordinator_snapshot();
+        assert_eq!(blocked.phase, AdmissionPhase::Exclusive);
+        assert_eq!(blocked.active_outer_mutators, 0);
+        assert_eq!(blocked.blocked_outer_mutators, 1);
+
+        drop(exclusive);
+        let class = worker.join().expect("class-discovery worker panicked");
+        assert!(class.belongs_to(&heap.inner));
+        assert_eq!(class.id().get(), 1);
+        assert_eq!(heap.inner.state.lock().unwrap().classes.len(), 1);
+    }
+
+    #[test]
+    fn retained_class_handle_remains_usable_after_discovery_region_exits() {
+        let heap = Heap::new();
+        let class = heap
+            .with_mutator(|mutator| mutator.allocation_class::<FirstType>())
+            .unwrap();
+        assert_eq!(heap.inner.coordinator_snapshot().active_outer_mutators, 0);
+
+        let value = heap.with_mutator(|mutator| mutator.alloc(&class, FirstType { _value: 41 }));
+        let resolved = heap
+            .inner
+            .resolve_slot(value.erase().as_ptr().as_ptr() as usize)
+            .expect("retained class handle must allocate into its original heap");
+        assert_eq!(resolved.class_id, class.id());
+        assert!(std::ptr::eq(resolved.metadata, class.metadata()));
+    }
+
+    #[test]
+    fn recursive_class_discovery_reuses_admission_while_exclusive_is_pending() {
+        let heap = Heap::new();
+
+        let (class, collector) = heap.with_mutator(|_| {
+            let collector = std::thread::spawn({
+                let heap = heap.clone();
+                move || drop(heap.inner.enter_synthetic_exclusive())
+            });
+            heap.inner
+                .wait_for_admission_phase(AdmissionPhase::ExclusivePending);
+
+            let class = heap
+                .with_mutator(|mutator| mutator.allocation_class::<SecondType>())
+                .unwrap();
+            assert_eq!(heap.inner.coordinator_snapshot().active_outer_mutators, 1);
+            assert_eq!(cache_snapshot(&heap.inner).unwrap().recursive_depth, 1);
+            (class, collector)
+        });
+
+        collector.join().expect("synthetic collector panicked");
+        assert!(class.belongs_to(&heap.inner));
+        assert_eq!(
+            heap.inner.coordinator_snapshot().phase,
+            AdmissionPhase::Ordinary
+        );
+    }
+
+    #[test]
+    fn prepared_entry_is_inert_until_admission_activates_it() {
+        let heap = Heap::new();
+
+        heap.with_mutator_admission_hook(
+            || {
+                let coordinator = heap.inner.coordinator_snapshot();
+                assert_eq!(coordinator.phase, AdmissionPhase::Ordinary);
+                assert_eq!(coordinator.active_outer_mutators, 1);
+                assert_eq!(cache_snapshot(&heap.inner).unwrap().recursive_depth, 0);
+            },
+            |_| {
+                assert_eq!(heap.inner.coordinator_snapshot().active_outer_mutators, 1);
+                assert_eq!(cache_snapshot(&heap.inner).unwrap().recursive_depth, 1);
+            },
+        );
+
+        assert_eq!(heap.inner.coordinator_snapshot().active_outer_mutators, 0);
+        assert_eq!(cache_snapshot(&heap.inner).unwrap().recursive_depth, 0);
+    }
+
+    #[test]
+    fn panic_between_admission_and_activation_rolls_back_cleanly() {
+        let heap = Heap::new();
+
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            heap.with_mutator_admission_hook(
+                || panic!("injected post-admission panic"),
+                |_| unreachable!(),
+            );
+        }));
+
+        assert!(panic.is_err());
+        assert_eq!(heap.inner.coordinator_snapshot().active_outer_mutators, 0);
+        assert_eq!(cache_snapshot(&heap.inner).unwrap().recursive_depth, 0);
+        heap.with_mutator(|_| {});
+    }
+
+    #[test]
+    fn synthetic_exclusive_waits_for_mutator_release_and_observes_prior_work() {
+        let heap = Heap::new();
+        let published = Arc::new(AtomicUsize::new(0));
+        let (active_tx, active_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let worker = std::thread::spawn({
+            let heap = heap.clone();
+            let published = Arc::clone(&published);
+            move || {
+                heap.with_mutator(|_| {
+                    published.store(73, Ordering::Relaxed);
+                    active_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                });
+            }
+        });
+
+        active_rx.recv().unwrap();
+        assert_eq!(heap.inner.coordinator_snapshot().active_outer_mutators, 1);
+        let observer = std::thread::spawn({
+            let heap = heap.clone();
+            let published = Arc::clone(&published);
+            move || {
+                let exclusive = heap.inner.enter_synthetic_exclusive();
+                let observed = published.load(Ordering::Relaxed);
+                drop(exclusive);
+                observed
+            }
+        });
+
+        release_tx.send(()).unwrap();
+        worker.join().expect("mutator worker panicked");
+        assert_eq!(observer.join().expect("exclusive observer panicked"), 73);
+        assert_eq!(
+            heap.inner.coordinator_snapshot().phase,
+            AdmissionPhase::Ordinary
+        );
+    }
+
+    #[test]
+    fn pending_exclusive_blocks_fresh_outer_admission_until_release() {
+        let heap = Heap::new();
+        let (active_tx, active_rx) = mpsc::channel();
+        let (release_active_tx, release_active_rx) = mpsc::channel();
+        let active = std::thread::spawn({
+            let heap = heap.clone();
+            move || {
+                heap.with_mutator(|_| {
+                    active_tx.send(()).unwrap();
+                    release_active_rx.recv().unwrap();
+                });
+            }
+        });
+        active_rx.recv().unwrap();
+
+        let (exclusive_tx, exclusive_rx) = mpsc::channel();
+        let (release_exclusive_tx, release_exclusive_rx) = mpsc::channel();
+        let collector = std::thread::spawn({
+            let heap = heap.clone();
+            move || {
+                let exclusive = heap.inner.enter_synthetic_exclusive();
+                exclusive_tx.send(()).unwrap();
+                release_exclusive_rx.recv().unwrap();
+                drop(exclusive);
+            }
+        });
+        heap.inner
+            .wait_for_admission_phase(AdmissionPhase::ExclusivePending);
+
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let entrant = std::thread::spawn({
+            let heap = heap.clone();
+            move || heap.with_mutator(|_| entered_tx.send(()).unwrap())
+        });
+        heap.inner.wait_for_blocked_outer_mutators(1);
+
+        release_active_tx.send(()).unwrap();
+        active.join().expect("active mutator panicked");
+        exclusive_rx.recv().unwrap();
+        assert_eq!(
+            heap.inner.coordinator_snapshot().phase,
+            AdmissionPhase::Exclusive
+        );
+        assert_eq!(heap.inner.coordinator_snapshot().blocked_outer_mutators, 1);
+        assert!(entered_rx.try_recv().is_err());
+
+        release_exclusive_tx.send(()).unwrap();
+        collector.join().expect("synthetic collector panicked");
+        entrant.join().expect("blocked entrant panicked");
+        entered_rx.recv().unwrap();
+        assert_eq!(
+            heap.inner.coordinator_snapshot().phase,
+            AdmissionPhase::Ordinary
+        );
+    }
+
+    #[test]
+    fn panicking_synthetic_exclusive_restores_ordinary_admission() {
+        let heap = Heap::new();
+
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            let _exclusive = heap.inner.enter_synthetic_exclusive();
+            panic!("injected exclusive panic");
+        }));
+
+        assert!(panic.is_err());
+        assert_eq!(
+            heap.inner.coordinator_snapshot().phase,
+            AdmissionPhase::Ordinary
+        );
+        heap.with_mutator(|_| {});
+    }
+
+    #[test]
     fn heaps_share_type_metadata_but_not_class_provenance() {
         let first = Heap::new();
         let second = Heap::new();
-        let first_class = first.allocation_class::<FirstType>().unwrap();
-        let second_class = second.allocation_class::<FirstType>().unwrap();
+        let first_class = first
+            .with_mutator(|mutator| mutator.allocation_class::<FirstType>())
+            .unwrap();
+        let second_class = second
+            .with_mutator(|mutator| mutator.allocation_class::<FirstType>())
+            .unwrap();
 
         assert!(std::ptr::eq(
             first_class.metadata(),
@@ -827,15 +1234,17 @@ mod tests {
     fn unsupported_layouts_publish_no_class_or_dense_id() {
         let heap = Heap::new();
         assert!(matches!(
-            heap.allocation_class::<()>(),
+            heap.with_mutator(|mutator| mutator.allocation_class::<()>()),
             Err(UnsupportedLayout::ZeroSized)
         ));
         assert!(matches!(
-            heap.allocation_class::<OverflowingSlot>(),
+            heap.with_mutator(|mutator| mutator.allocation_class::<OverflowingSlot>()),
             Err(UnsupportedLayout::ArithmeticOverflow)
         ));
 
-        let first_valid = heap.allocation_class::<FirstType>().unwrap();
+        let first_valid = heap
+            .with_mutator(|mutator| mutator.allocation_class::<FirstType>())
+            .unwrap();
         assert_eq!(first_valid.id().get(), 1);
         assert_eq!(heap.inner.state.lock().unwrap().classes.len(), 1);
     }
@@ -849,24 +1258,32 @@ mod tests {
                 .unwrap();
 
         let panic = catch_unwind(AssertUnwindSafe(|| {
-            let _ = heap
-                .inner
-                .discover_class_with::<SecondType>(metadata, geometry, || {
-                    panic!("injected class construction panic")
-                });
+            heap.with_mutator(|_| {
+                let _ = heap
+                    .inner
+                    .discover_class_with::<SecondType>(metadata, geometry, || {
+                        panic!("injected class construction panic")
+                    });
+            });
         }));
         assert!(panic.is_err());
         assert!(heap.inner.state.lock().unwrap().classes.is_empty());
 
-        let class = heap.allocation_class::<SecondType>().unwrap();
+        let class = heap
+            .with_mutator(|mutator| mutator.allocation_class::<SecondType>())
+            .unwrap();
         assert_eq!(class.id().get(), 1);
     }
 
     #[test]
     fn typed_run_headers_resolve_to_exact_class_metadata() {
         let heap = Heap::new();
-        let first_class = heap.allocation_class::<FirstType>().unwrap();
-        let dropping_class = heap.allocation_class::<DroppingType>().unwrap();
+        let first_class = heap
+            .with_mutator(|mutator| mutator.allocation_class::<FirstType>())
+            .unwrap();
+        let dropping_class = heap
+            .with_mutator(|mutator| mutator.allocation_class::<DroppingType>())
+            .unwrap();
         let first_run = heap.inner.prepare_run(&first_class).unwrap();
         let dropping_run = heap.inner.prepare_run(&dropping_class).unwrap();
 
@@ -908,8 +1325,12 @@ mod tests {
     #[test]
     fn heap_enumerates_every_published_run_from_authoritative_state() {
         let heap = Heap::new();
-        let first_class = heap.allocation_class::<FirstType>().unwrap();
-        let second_class = heap.allocation_class::<SecondType>().unwrap();
+        let first_class = heap
+            .with_mutator(|mutator| mutator.allocation_class::<FirstType>())
+            .unwrap();
+        let second_class = heap
+            .with_mutator(|mutator| mutator.allocation_class::<SecondType>())
+            .unwrap();
         let first_run = heap.inner.prepare_run(&first_class).unwrap();
         let second_run = heap.inner.prepare_run(&first_class).unwrap();
         let third_run = heap.inner.prepare_run(&second_class).unwrap();
@@ -944,7 +1365,9 @@ mod tests {
         const THREADS: usize = 8;
 
         let heap = Heap::new();
-        let class = heap.allocation_class::<FirstType>().unwrap();
+        let class = heap
+            .with_mutator(|mutator| mutator.allocation_class::<FirstType>())
+            .unwrap();
         let runs = (0..THREADS)
             .map(|_| {
                 let heap = heap.clone();
@@ -968,7 +1391,9 @@ mod tests {
     fn foreign_class_leaves_both_heaps_run_state_unchanged() {
         let owner = Heap::new();
         let observer = Heap::new();
-        let class = owner.allocation_class::<FirstType>().unwrap();
+        let class = owner
+            .with_mutator(|mutator| mutator.allocation_class::<FirstType>())
+            .unwrap();
 
         assert_eq!(
             observer.inner.prepare_run(&class),
@@ -984,7 +1409,9 @@ mod tests {
     #[test]
     fn synchronized_allocation_crosses_exact_run_and_chunk_boundaries() {
         let heap = Heap::new();
-        let class = heap.allocation_class::<WideSlot>().unwrap();
+        let class = heap
+            .with_mutator(|mutator| mutator.allocation_class::<WideSlot>())
+            .unwrap();
         #[cfg(miri)]
         let last_index = crate::arena::RUNS_PER_CHUNK;
         #[cfg(not(miri))]
@@ -1062,7 +1489,9 @@ mod tests {
     fn synchronized_allocation_rejects_a_foreign_class_before_state_changes() {
         let owner = Heap::new();
         let observer = Heap::new();
-        let class = owner.allocation_class::<FirstType>().unwrap();
+        let class = owner
+            .with_mutator(|mutator| mutator.allocation_class::<FirstType>())
+            .unwrap();
 
         let panic = catch_unwind(AssertUnwindSafe(|| {
             observer.with_mutator(|mutator| {
@@ -1077,7 +1506,9 @@ mod tests {
     #[test]
     fn unwind_after_slot_selection_does_not_publish_an_allocation() {
         let heap = Heap::new();
-        let class = heap.allocation_class::<DropCounter>().unwrap();
+        let class = heap
+            .with_mutator(|mutator| mutator.allocation_class::<DropCounter>())
+            .unwrap();
         let drops = Arc::new(AtomicUsize::new(0));
 
         let panic = catch_unwind(AssertUnwindSafe(|| {
@@ -1110,7 +1541,9 @@ mod tests {
 
         let drops = Arc::new(AtomicUsize::new(0));
         let heap = Heap::new();
-        let class = heap.allocation_class::<DropCounter>().unwrap();
+        let class = heap
+            .with_mutator(|mutator| mutator.allocation_class::<DropCounter>())
+            .unwrap();
         heap.with_mutator(|mutator| {
             for _ in 0..ALLOCATIONS {
                 let _ = mutator.alloc(&class, DropCounter(Arc::clone(&drops)));
@@ -1126,7 +1559,9 @@ mod tests {
     #[test]
     fn cached_allocation_reuses_one_word_without_shared_slow_path() {
         let heap = Heap::new();
-        let class = heap.allocation_class::<u64>().unwrap();
+        let class = heap
+            .with_mutator(|mutator| mutator.allocation_class::<u64>())
+            .unwrap();
 
         let first = heap.with_mutator(|mutator| {
             (0..32_u64)
@@ -1176,7 +1611,9 @@ mod tests {
         const VALUES_PER_THREAD: usize = 16;
 
         let heap = Heap::new();
-        let class = heap.allocation_class::<u64>().unwrap();
+        let class = heap
+            .with_mutator(|mutator| mutator.allocation_class::<u64>())
+            .unwrap();
         let barrier = Arc::new(Barrier::new(THREADS));
         let workers = (0..THREADS)
             .map(|thread_index| {
@@ -1273,7 +1710,9 @@ mod tests {
         const THREADS: usize = 8;
 
         let heap = Heap::new();
-        let class = heap.allocation_class::<u64>().unwrap();
+        let class = heap
+            .with_mutator(|mutator| mutator.allocation_class::<u64>())
+            .unwrap();
         let runs = (0..2)
             .map(|_| heap.inner.prepare_run(&class).unwrap())
             .collect::<Vec<_>>();
@@ -1304,7 +1743,9 @@ mod tests {
         const THREADS: usize = 8;
 
         let heap = Heap::new();
-        let class = heap.allocation_class::<u64>().unwrap();
+        let class = heap
+            .with_mutator(|mutator| mutator.allocation_class::<u64>())
+            .unwrap();
         let first = heap.inner.prepare_run(&class).unwrap();
         assert_eq!(class.shared().frontier(), Some(first));
         while class.claim_frontier().is_some() {}
@@ -1332,7 +1773,9 @@ mod tests {
     #[test]
     fn exhausted_frontier_advances_through_prepublished_runs() {
         let heap = Heap::new();
-        let class = heap.allocation_class::<u64>().unwrap();
+        let class = heap
+            .with_mutator(|mutator| mutator.allocation_class::<u64>())
+            .unwrap();
         let runs = (0..3)
             .map(|_| heap.inner.prepare_run(&class).unwrap())
             .collect::<Vec<_>>();
@@ -1349,7 +1792,9 @@ mod tests {
     #[test]
     fn evicted_and_thread_exit_cursors_leave_their_words_leased() {
         let heap = Heap::new();
-        let class = heap.allocation_class::<u64>().unwrap();
+        let class = heap
+            .with_mutator(|mutator| mutator.allocation_class::<u64>())
+            .unwrap();
         let first = heap.with_mutator(|mutator| mutator.alloc(&class, 1_u64));
         assert_eq!(heap.inner.allocation_cursor_claim_count(), 1);
 
@@ -1412,7 +1857,9 @@ mod tests {
     #[test]
     fn authoritative_run_publication_records_exactly_one_pressure_event() {
         let heap = Heap::new();
-        let class = heap.allocation_class::<FirstType>().unwrap();
+        let class = heap
+            .with_mutator(|mutator| mutator.allocation_class::<FirstType>())
+            .unwrap();
 
         for _ in 0..INITIAL_RUN_PUBLICATION_ALLOWANCE - 1 {
             heap.inner.prepare_run(&class).unwrap();
@@ -1442,7 +1889,9 @@ mod tests {
     #[test]
     fn failed_run_publication_exposes_no_frontier_or_pressure() {
         let heap = Heap::new();
-        let class = heap.allocation_class::<FirstType>().unwrap();
+        let class = heap
+            .with_mutator(|mutator| mutator.allocation_class::<FirstType>())
+            .unwrap();
         let index = class_index(class.id()).unwrap();
         let mut invalid = heap.inner.state.lock().unwrap().classes[index].geometry();
         invalid.slot_count = 0;
@@ -1473,7 +1922,9 @@ mod tests {
     fn cached_preinitialization_unwind_reuses_the_unpublished_slot() {
         let drops = Arc::new(AtomicUsize::new(0));
         let heap = Heap::new();
-        let class = heap.allocation_class::<DropCounter>().unwrap();
+        let class = heap
+            .with_mutator(|mutator| mutator.allocation_class::<DropCounter>())
+            .unwrap();
 
         let (first, retried) = heap.with_mutator(|mutator| {
             let first = mutator.alloc(&class, DropCounter(Arc::clone(&drops)));
@@ -1509,7 +1960,9 @@ mod tests {
     #[test]
     fn terminal_heap_teardown_waits_for_active_owner_regions() {
         let heap = Heap::new();
-        let class = heap.allocation_class::<u64>().unwrap();
+        let class = heap
+            .with_mutator(|mutator| mutator.allocation_class::<u64>())
+            .unwrap();
         let weak = Arc::downgrade(&heap.inner);
         let (ready_tx, ready_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
@@ -1540,7 +1993,9 @@ mod tests {
     #[test]
     fn synchronized_allocator_remains_a_correct_test_reference() {
         let heap = Heap::new();
-        let class = heap.allocation_class::<FirstType>().unwrap();
+        let class = heap
+            .with_mutator(|mutator| mutator.allocation_class::<FirstType>())
+            .unwrap();
         let pointer = heap
             .inner
             .allocate_synchronized(&class, FirstType { _value: 73 });
@@ -1556,35 +2011,45 @@ mod tests {
     fn mutator_entries_track_same_heap_recursion_and_separate_heaps() {
         let first = Heap::new();
         let second = Heap::new();
-        let class = first.allocation_class::<FirstType>().unwrap();
+        let class = first
+            .with_mutator(|mutator| mutator.allocation_class::<FirstType>())
+            .unwrap();
 
         first.with_mutator(|_| {
             assert_eq!(cache_snapshot(&first.inner).unwrap().recursive_depth, 1);
+            assert_eq!(first.inner.coordinator_snapshot().active_outer_mutators, 1);
             insert_cursor(&first.inner, test_cursor(class.id()));
 
             first.with_mutator(|_| {
                 let snapshot = cache_snapshot(&first.inner).unwrap();
                 assert_eq!(snapshot.recursive_depth, 2);
                 assert_eq!(snapshot.cursor_count, 1);
+                assert_eq!(first.inner.coordinator_snapshot().active_outer_mutators, 1);
             });
             assert_eq!(cache_snapshot(&first.inner).unwrap().recursive_depth, 1);
 
             second.with_mutator(|_| {
                 assert_eq!(cache_snapshot(&first.inner).unwrap().recursive_depth, 1);
                 assert_eq!(cache_snapshot(&second.inner).unwrap().recursive_depth, 1);
+                assert_eq!(first.inner.coordinator_snapshot().active_outer_mutators, 1);
+                assert_eq!(second.inner.coordinator_snapshot().active_outer_mutators, 1);
             });
+            assert_eq!(second.inner.coordinator_snapshot().active_outer_mutators, 0);
             assert_eq!(cache_snapshot(&second.inner).unwrap().recursive_depth, 0);
         });
 
         let retained = cache_snapshot(&first.inner).unwrap();
         assert_eq!(retained.recursive_depth, 0);
         assert_eq!(retained.cursor_count, 1);
+        assert_eq!(first.inner.coordinator_snapshot().active_outer_mutators, 0);
     }
 
     #[test]
     fn outer_entry_invalidates_the_whole_cache_after_epoch_change() {
         let heap = Heap::new();
-        let class = heap.allocation_class::<FirstType>().unwrap();
+        let class = heap
+            .with_mutator(|mutator| mutator.allocation_class::<FirstType>())
+            .unwrap();
         heap.with_mutator(|_| insert_cursor(&heap.inner, test_cursor(class.id())));
 
         let prior = cache_snapshot(&heap.inner).unwrap();
@@ -1661,7 +2126,9 @@ mod tests {
     fn releasing_live_cache_forgets_cursor_without_changing_run_pressure() {
         let _ = Heap::release_current_thread_caches();
         let heap = Heap::new();
-        let class = heap.allocation_class::<u64>().unwrap();
+        let class = heap
+            .with_mutator(|mutator| mutator.allocation_class::<u64>())
+            .unwrap();
         let first = heap.with_mutator(|mutator| mutator.alloc(&class, 1_u64));
         assert_eq!(heap.inner.allocation_cursor_claim_count(), 1);
         assert_eq!(heap.inner.allocation_pressure().published_runs, 1);

@@ -1,8 +1,8 @@
 # Glam GC Subcrate Implementation Plan — 2026-08-19
 
-Status: in progress; Phases C0, C1, C2A, C2B, C2C, and the C2C.6 verification
-follow-up are complete. The mandatory post-C1 and post-C2C reviews are
-complete. C3A.1 is next.
+Status: in progress; Phases C0 through C3A are complete, including the C2C.6
+verification follow-up. The mandatory post-C1 and post-C2C reviews are
+complete. C3B is next.
 
 This plan implements an exact, non-moving, runtime-local tracing collector
 without depending on Glam value semantics. The governing requirements and
@@ -37,9 +37,9 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C2C.5c | completed | stable class run frontier and lock-free cursor refill |
 | C2C.5d | completed | explicit thread-local cache release without eager pruning |
 | C2C.6 | completed | forced concurrent exhausted-frontier verification |
-| C3A.1 | pending | coordinator state and mutator-gated class discovery |
-| C3A.2 | pending | prepare/admit/activate TLS integration and recursion |
-| C3A.3 | pending | visibility proof, forced schedules, and Loom model |
+| C3A.1 | completed | coordinator state and mutator-gated class discovery |
+| C3A.2 | completed | prepare/admit/activate TLS integration and recursion |
+| C3A.3 | completed | visibility proof, forced schedules, and Loom model |
 | C3B | pending | collector election and single-heap STW quiescence |
 | C3C | pending | cross-heap dependent admission |
 | C3D | pending | finalizer handoff, pressure, panic, and teardown races |
@@ -1503,6 +1503,43 @@ by C2C:
 
 Do not begin a later checkpoint until the preceding state machine and its
 forced-order tests pass independently.
+
+### C3A Completion
+
+C3A completed on 2026-08-22:
+
+- `HeapInner` now owns a mutator coordinator under the existing heap-state
+  mutex and one sibling condition variable. `Ordinary`, `ExclusivePending`,
+  and `Exclusive` distinguish open admission, committed drain, and completed
+  exclusion. C3A exposes exclusion only through test-only synthetic admission;
+  production request, election, and collection remain C3B work.
+- Allocation-class discovery moved from `Heap` to `Mutator`. Canonical metadata
+  and run geometry remain cold preparation, while every possible heap-local
+  class-table publication now occurs within an admitted mutator region. A
+  returned `AllocationClass<T>` remains an independently reusable provenance
+  handle and retains the heap after the discovery region exits.
+- Thread-local entry is explicitly prepare, admit, then activate. Preparation
+  changes no depth, an outer admission creates one RAII coordinator obligation,
+  and activation refreshes the allocation-lease epoch before incrementing
+  depth. Panic between admission and activation retires the obligation while
+  leaving the cache inactive. Entry destruction makes the cache quiescent
+  before retiring the outer obligation.
+- Recursive same-heap entry reuses its outer admission, including while
+  exclusion is pending. Different heaps retain independent TLS records,
+  recursive depths, caches, and active counts. C3C still owns the special
+  dependent cross-heap rule once production collections can be pending.
+- Forced native tests cover discovery blocked by exclusion, retained handles,
+  inactive preparation, pre-activation panic rollback, recursive discovery
+  during drain, independent nested heaps, pending-exclusive priority, unwind
+  restoration, and mutex-mediated visibility of prior mutator work. Two new
+  coordinator Loom models cover exit-to-exclusive visibility and denial of a
+  fresh outer entrant after exclusive commitment.
+- The stable collector check passes with 82 unit tests, four Loom models, and
+  six compile-fail doctests. Full leak-checking Miri and both AddressSanitizer
+  and ThreadSanitizer pass all 82 collector unit tests. The exact unsafe
+  inventory is unchanged by the safe coordinator and admission transition.
+  Workspace formatting, Clippy with warnings denied, and the complete workspace
+  test suite also pass.
 
 #### Pressure Constraints Carried into C3
 

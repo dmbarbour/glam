@@ -1,9 +1,9 @@
 //! Runtime-local garbage collection support for Glam.
 //!
-//! C2C provides managed-pointer contracts, canonical object metadata,
-//! heap-local allocation classes, atomic allocation-word leasing, lock-free
-//! class-frontier refill, and synchronized run publication. Payloads remain
-//! live until terminal heap teardown; tracing collection remains disabled.
+//! C3A adds regional mutator admission, mutator-gated class discovery, and the
+//! prepare/admit/activate thread-cache protocol to C2C's managed-pointer and
+//! allocator foundation. Payloads remain live until terminal heap teardown;
+//! collection requests, marking, and reclamation remain disabled.
 
 #![deny(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]
@@ -116,7 +116,9 @@ mod tests {
     #[test]
     fn managed_pointer_can_cross_threads_when_its_value_can() {
         let heap = Heap::new();
-        let class = heap.allocation_class::<u64>().unwrap();
+        let class = heap
+            .with_mutator(|mutator| mutator.allocation_class::<u64>())
+            .unwrap();
         let value = heap.with_mutator(|mutator| mutator.alloc(&class, 42_u64));
         let worker_heap = heap.clone();
 
@@ -138,8 +140,12 @@ mod tests {
     fn nested_heap_entries_keep_their_authority_separate() {
         let first_heap = Heap::new();
         let second_heap = Heap::new();
-        let first_class = first_heap.allocation_class::<u64>().unwrap();
-        let second_class = second_heap.allocation_class::<u64>().unwrap();
+        let first_class = first_heap
+            .with_mutator(|mutator| mutator.allocation_class::<u64>())
+            .unwrap();
+        let second_class = second_heap
+            .with_mutator(|mutator| mutator.allocation_class::<u64>())
+            .unwrap();
 
         first_heap.with_mutator(|first_mutator| {
             let first = first_mutator.alloc(&first_class, 11_u64);
@@ -161,7 +167,9 @@ mod tests {
     fn wrong_heap_access_fails_before_dereference() {
         let owner = Heap::new();
         let other = Heap::new();
-        let class = owner.allocation_class::<u64>().unwrap();
+        let class = owner
+            .with_mutator(|mutator| mutator.allocation_class::<u64>())
+            .unwrap();
         let value = owner.with_mutator(|mutator| mutator.alloc(&class, 42_u64));
 
         let panic = std::panic::catch_unwind(|| {

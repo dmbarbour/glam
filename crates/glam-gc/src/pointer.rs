@@ -16,7 +16,7 @@ use crate::{Mutator, Trace, trace::ErasedGc};
 /// use glam_gc::Heap;
 ///
 /// let heap = Heap::new();
-/// let class = heap.allocation_class::<u64>().unwrap();
+/// let class = heap.with_mutator(|mutator| mutator.allocation_class::<u64>()).unwrap();
 /// let escaped = heap.with_mutator(|mutator| {
 ///     let value = mutator.alloc(&class, 42_u64);
 ///     // SAFETY: deliberately attempting to return this reference demonstrates
@@ -32,7 +32,7 @@ use crate::{Mutator, Trace, trace::ErasedGc};
 /// use glam_gc::Heap;
 ///
 /// let heap = Heap::new();
-/// let class = heap.allocation_class::<u64>().unwrap();
+/// let class = heap.with_mutator(|mutator| mutator.allocation_class::<u64>()).unwrap();
 /// let value = heap.with_mutator(|mutator| mutator.alloc(&class, 42_u64));
 /// let _ = *value;
 /// ```
@@ -45,7 +45,7 @@ use crate::{Mutator, Trace, trace::ErasedGc};
 /// use glam_gc::Heap;
 ///
 /// let heap = Heap::new();
-/// let class = heap.allocation_class::<u64>().unwrap();
+/// let class = heap.with_mutator(|mutator| mutator.allocation_class::<u64>()).unwrap();
 /// let value = heap.with_mutator(|mutator| mutator.alloc(&class, 42_u64));
 /// let _ = HashSet::from([value]);
 /// ```
@@ -148,7 +148,9 @@ mod tests {
     #[test]
     fn pointer_identity_is_all_gc_equality_observes() {
         let heap = Heap::new();
-        let class = heap.allocation_class::<u64>().unwrap();
+        let class = heap
+            .with_mutator(|mutator| mutator.allocation_class::<u64>())
+            .unwrap();
         let (first, alias, equal_value) = heap.with_mutator(|mutator| {
             let first = mutator.alloc(&class, 42_u64);
             (first, first, mutator.alloc(&class, 42_u64))
@@ -163,7 +165,9 @@ mod tests {
     #[test]
     fn wrong_representation_fails_before_dereference() {
         let heap = Heap::new();
-        let class = heap.allocation_class::<u64>().unwrap();
+        let class = heap
+            .with_mutator(|mutator| mutator.allocation_class::<u64>())
+            .unwrap();
         let value = heap.with_mutator(|mutator| mutator.alloc(&class, 42_u64));
         let reinterpreted = Gc::<u32> {
             pointer: value.pointer.cast(),

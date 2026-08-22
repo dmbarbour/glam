@@ -478,8 +478,12 @@ mod tests {
     #[test]
     fn erased_trace_dispatch_uses_the_canonical_representation() {
         let heap = Heap::new();
-        let leaf_class = heap.allocation_class::<Leaf>().unwrap();
-        let holder_class = heap.allocation_class::<Holder>().unwrap();
+        let leaf_class = heap
+            .with_mutator(|mutator| mutator.allocation_class::<Leaf>())
+            .unwrap();
+        let holder_class = heap
+            .with_mutator(|mutator| mutator.allocation_class::<Holder>())
+            .unwrap();
         heap.with_mutator(|mutator| {
             let edge = mutator.alloc(&leaf_class, Leaf { _value: 1 });
             let holder = mutator.alloc(&holder_class, Holder { edge });

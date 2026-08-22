@@ -30,9 +30,12 @@ frontiers, and removes eager TLS pruning in favor of explicit inert release.
 C2C.6 adds forced concurrent exhausted-frontier verification and corrects the
 publication proof: initial run topology is observed through the frontier
 Release/Acquire pair or heap mutex, not through a load of the separate lease
-word.
+word. C3A adds the heap-local mutator-admission coordinator, moves allocation-
+class discovery behind mutator authority, and orders TLS entry as prepare,
+admit, then activate. Its synthetic exclusive phase and Loom models verify
+drain, exclusion, and visibility without yet electing a production collector.
 There is no root registry, collection, marking, reclamation, finalization,
-callback, or collector coordination.
+callback, or production collector election.
 
 The crate denies unsafe code by default. `src/lib.rs` gives the reviewed
 `pointer`, `mutator`, `trace`, `mutation`, `thread_cache`, and unit-test modules named lint
@@ -175,6 +178,37 @@ once and does not deallocate the slot. Typed-run metadata resolution is the
 ordinary proof source, terminal heap teardown is the provisional caller, and
 C6 later owns collector-driven destruction.
 
+## Regional Mutator Admission Invariants
+
+- One heap-state mutex protects the admission phase and active-outer-mutator
+  count together with the existing class/run topology. Its sibling condition
+  variable supplies wakeups only; every waiter loops and rechecks its complete
+  predicate under the mutex.
+- `Ordinary` admits outer mutators. `ExclusivePending` denies fresh outer
+  admission while admitted mutators drain, and `Exclusive` is published only
+  after the active count reaches zero. C3A exposes the latter phases only to
+  deterministic internal verification; C3B will connect them to requests and
+  collector election.
+- Preparing a thread-local heap entry obtains or validates its weak heap-
+  qualified record without changing recursive depth. An outer preparation then
+  obtains one coordinator obligation before activating its cache. A panic or
+  block between preparation and activation therefore leaves the TLS record
+  inactive, and the admission token's destructor rolls back the active count.
+- Recursive same-heap entry observes nonzero thread-local depth and reuses the
+  outer coordinator obligation. It remains available while exclusive work is
+  pending so an already-admitted mutator can finish its bounded region. Entry
+  into a different heap uses that heap's independent TLS record and admission
+  count.
+- Entry destruction first decrements recursive depth and makes the outer cache
+  quiescent, then retires the coordinator obligation. Consequently, observing
+  zero active mutators after acquiring the heap mutex also observes all work
+  sequenced before those outer exits. C3A's native forced schedules and Loom
+  model latch this visibility edge.
+- An admitted mutator borrows the `Heap` handle's existing `Arc<HeapInner>`;
+  admission does not clone a shared owner. Allocation-class discovery clones
+  that owner only into the reusable class handle which must retain heap
+  provenance after the discovery region exits.
+
 ## Heap-Local Allocation-Class Invariants
 
 - Canonical metadata discovery and pure fixed-run geometry derivation finish
@@ -191,9 +225,10 @@ C6 later owns collector-driven destruction.
   dense class ID. The heap state contains class entries, not handles, so this
   strong provenance capability creates no ownership cycle. It retains no
   managed allocation and is not a root.
-- A class handle is constructible only inside this crate after metadata and
-  geometry agreement. C2C's safe allocator must compare its retained heap with
-  the mutator heap in release builds before accessing run state.
+- A class handle is constructible only through an admitted `Mutator` after
+  metadata and geometry agreement. The handle remains reusable after that
+  region exits. The safe allocator compares its retained heap with the current
+  mutator heap in release builds before accessing run state.
 
 ## Typed-Run Publication and Resolution Invariants
 
@@ -485,6 +520,11 @@ mutation closure runs.
   identities and geometry, zeroed bitmap ranges, exact first and last slots,
   rejection of non-slot addresses, and non-publication after invalid or
   repeated initialization.
+- C3A tests force class discovery behind synthetic exclusive admission,
+  prepare/admit/activate state, rollback before activation, same-heap recursive
+  entry during a pending exclusive transition, independent cross-heap counts,
+  committed exclusion of fresh outer entry, and mutator-exit visibility. The
+  coordinator Loom models cover visibility and pending-exclusive priority.
 - The ordinary crate checks, exact unsafe inventory, focused Miri run, and
   repository-wide checks are required at completed checkpoints.
 - Miri passes all implemented tests with leak checking enabled. C1's temporary

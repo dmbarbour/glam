@@ -8,7 +8,7 @@ use std::sync::{Arc, Weak};
 use crate::{
     Trace,
     arena::{RunAddress, RunLocation},
-    heap::HeapInner,
+    heap::{HeapInner, MutatorAdmission},
     run::{AllocationClassId, RunGeometry},
 };
 
@@ -250,13 +250,17 @@ impl ThreadCacheHandle {
     }
 }
 
-/// Balances one same-thread heap entry, including recursive entries.
-pub(crate) struct ThreadHeapEntry {
+/// A TLS entry found or created before coordinator admission.
+///
+/// Preparation never changes recursive depth or activates a cache, so a
+/// blocked or panicking admission leaves no active thread-local state.
+pub(crate) struct PreparedThreadHeapEntry {
     state: SharedThreadHeapState,
+    outer: bool,
 }
 
-impl ThreadHeapEntry {
-    pub(crate) fn enter(heap: &Arc<HeapInner>, epoch: AllocationLeaseEpoch) -> Self {
+impl PreparedThreadHeapEntry {
+    pub(crate) fn prepare(heap: &Arc<HeapInner>, epoch: AllocationLeaseEpoch) -> Self {
         let key = HeapCacheKey::new(heap);
         let state = THREAD_HEAPS.with_borrow_mut(|registry| {
             Rc::clone(
@@ -266,13 +270,34 @@ impl ThreadHeapEntry {
             )
         });
 
-        {
-            let mut state = state.borrow_mut();
+        let outer = {
+            let state = state.borrow();
             assert!(
                 state.heap.ptr_eq(&Arc::downgrade(heap)),
                 "thread heap-cache identity collision"
             );
-            if state.recursive_depth == 0 {
+            state.recursive_depth == 0
+        };
+        Self { state, outer }
+    }
+
+    pub(crate) fn is_outer(&self) -> bool {
+        self.outer
+    }
+
+    pub(crate) fn activate<'heap>(
+        self,
+        epoch: AllocationLeaseEpoch,
+        admission: Option<MutatorAdmission<'heap>>,
+    ) -> ThreadHeapEntry<'heap> {
+        assert_eq!(
+            self.outer,
+            admission.is_some(),
+            "outer mutator preparation and coordinator admission disagree"
+        );
+        {
+            let mut state = self.state.borrow_mut();
+            if self.outer {
                 state.begin_outer_entry(epoch);
             } else {
                 debug_assert_eq!(
@@ -285,7 +310,25 @@ impl ThreadHeapEntry {
                 .checked_add(1)
                 .expect("recursive mutator depth exhausted");
         }
-        Self { state }
+        ThreadHeapEntry {
+            state: self.state,
+            outer_admission: admission,
+        }
+    }
+}
+
+/// Balances one activated same-thread heap entry, including recursive entries.
+pub(crate) struct ThreadHeapEntry<'heap> {
+    state: SharedThreadHeapState,
+    outer_admission: Option<MutatorAdmission<'heap>>,
+}
+
+impl ThreadHeapEntry<'_> {
+    pub(crate) fn prepare(
+        heap: &Arc<HeapInner>,
+        epoch: AllocationLeaseEpoch,
+    ) -> PreparedThreadHeapEntry {
+        PreparedThreadHeapEntry::prepare(heap, epoch)
     }
 
     pub(crate) fn cache(&self) -> ThreadCacheHandle {
@@ -314,13 +357,23 @@ pub(crate) fn release_current_thread_caches() -> usize {
     })
 }
 
-impl Drop for ThreadHeapEntry {
+impl Drop for ThreadHeapEntry<'_> {
     fn drop(&mut self) {
-        let mut state = self.state.borrow_mut();
-        state.recursive_depth = state
-            .recursive_depth
-            .checked_sub(1)
-            .expect("mutator entry depth underflow");
+        {
+            let mut state = self.state.borrow_mut();
+            let prior_depth = state.recursive_depth;
+            state.recursive_depth = prior_depth
+                .checked_sub(1)
+                .expect("mutator entry depth underflow");
+            assert_eq!(
+                self.outer_admission.is_some(),
+                prior_depth == 1,
+                "coordinator obligation does not match outer mutator exit"
+            );
+        }
+        // Cache quiescence above must precede retirement of the coordinator
+        // obligation, because zero active mutators admits exclusive work.
+        drop(self.outer_admission.take());
     }
 }
 
