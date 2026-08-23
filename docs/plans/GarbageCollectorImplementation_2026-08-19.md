@@ -1,8 +1,8 @@
 # Glam GC Subcrate Implementation Plan — 2026-08-19
 
 Status: in progress; Phases C0 through C5D.2 are complete, including the C2C.6
-verification follow-up. The mandatory post-C1, post-C2C, post-C3E, and post-C4
-downstream reviews are complete. The mandatory post-C5 review is next.
+verification follow-up. The mandatory post-C1, post-C2C, post-C3E, post-C4,
+and post-C5 downstream reviews are complete. C6A.0 is next.
 
 This plan implements an exact, non-moving, runtime-local tracing collector
 without depending on Glam value semantics. The governing requirements and
@@ -60,7 +60,8 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C5C.2 | completed | invalid-edge recovery and retry |
 | C5D.1 | completed | successful mark publication and report |
 | C5D.2 | completed | reachability oracle, scale, and verification closeout |
-| Post-C5 review | pending | completed C5 audit and downstream-plan reconciliation |
+| Post-C5 review | completed | completed C5 audit and downstream-plan reconciliation |
+| C6A.0 | pending | post-mark collection-pipeline handoff |
 | C6A.1 | pending | dead-set classification without reuse |
 | C6A.2a | pending | allocation-lease revocation and epoch publication |
 | C6A.2b | pending | class frontier and run-pool retirement |
@@ -2767,32 +2768,98 @@ Completed on 2026-08-23:
   fixtures are ignored, plus 6 Loom models and 8 compile-fail/doc tests. The
   exact unsafe inventory remains unchanged. The new fixtures pass focused
   Miri and AddressSanitizer runs, and the complete suite passes
-  ThreadSanitizer. Full AddressSanitizer execution still reports one 24-byte
-  leak which reproduces unchanged from the clean pre-C5D.2 `d7977d4` worktree;
-  it is recorded as a post-C5 verification finding rather than silently
-  accepted.
+  ThreadSanitizer. At C5D.2 closeout, full AddressSanitizer execution reported
+  one 24-byte leak which reproduced unchanged from the clean pre-C5D.2
+  `d7977d4` worktree; the mandatory review below attributes it and narrows the
+  sanitizer exception instead of silently accepting it.
 
 ### Mandatory Post-C5 Review
 
-After C5D.2 supplies the completed verification evidence, separately audit the
-implemented C5 marking phase against its purpose and invariants. Reconcile
-intentional implementation drift; assess whether the tests actually establish
-exact marking, retry safety, non-recursion, and atomic result publication; and
-review C6 through C8 against the concrete bitmap, reporting, locking, and
-recovery model now implemented. Repartition downstream checkpoints or record
-new design decisions before C6 begins. Classify the pre-existing 24-byte full
-AddressSanitizer leak report and either repair it or document why the sanitizer
-entry point needs an explicit process-lifetime exception. This review is the
-major-phase review required by the roadmap and is not part of C5D.2's
-implementation work.
+Completed on 2026-08-23. The review accepts C5 as the exact, non-recursive,
+mark-only collector promised by the roadmap; no marking repair is required
+before C6.
+
+The implementation audit established the following:
+
+- Every attempt clears all assigned mark ranges before discovering a root or
+  synthetic edge. Checked discovery validates exact heap membership, class and
+  run topology, allocation state, and canonical metadata, then marks before
+  enqueueing. Consequently each managed object enters the LIFO worklist and
+  dispatches `Trace` at most once per attempt even through cycles, diamonds,
+  duplicate roots, and duplicate edges.
+- `TraceWork` deliberately carries both the erased address and the canonical
+  metadata recovered by discovery. This is useful proof-carrying attempt state,
+  not retained heap metadata: the worklist is drained synchronously under
+  exclusive authority and dropped on every failure.
+- A failed trace, lookup, worklist reservation, or injected publication point
+  publishes neither a report nor a completion epoch. Its partial bitmap is
+  scratch which the mandatory next-attempt clear invalidates. Recovery clears
+  mutex poison only after the attempt-local worklist and counters unwind, then
+  relatches collection and restores ordinary admission.
+- `MarkAttempt::finish` requires an empty worklist and reduces the attempt to
+  scalar counts. `CollectionAttempt::complete` publishes the latest report and
+  matching completed epoch together under the coordinator mutex. No bitmap,
+  object identity, per-run summary, or unbounded epoch history escapes.
+- C5 changes no allocation bit, lease, class frontier, run pool, or payload.
+  Reclamation and durable conservative retention remain C6 work; pressure is
+  only acknowledged once the full collection pipeline completes successfully.
+
+The verification evidence is proportionate and independent where it matters:
+focused fixtures force duplicate discovery, cross-word boundaries, invalid
+edges, trace and work-publication panics, retry, report overtaking, and atomic
+publication; a separate index-graph oracle checks complete reachability; the
+full-run history checks repeated bitmap clearing; and native million-node and
+million-edge fixtures establish non-recursive depth and current worklist
+growth. Miri retains bounded versions of the expensive cases, Loom covers the
+coordinator models, ThreadSanitizer passes the complete suite, and the unsafe
+inventory is unchanged.
+
+The prior full-suite 24-byte LeakSanitizer finding is not a collector or TLS
+leak. Exact single-test isolation attributes it to C4D's deliberate
+`mem::forget` fixture: forgetting the scoped allocator leaks one inert frontier
+cell while proving it cannot retain the heap. The address-sanitizer entry point
+now runs every other test with leak detection enabled and that one ownership
+fixture separately with ASan enabled but leak detection disabled. The
+exception is named and local rather than suppressing unrelated leaks.
+
+The C6-C8 reconciliation made these downstream corrections:
+
+- C6A.0 now owns a no-semantics pipeline refactor. The implemented C5 helper
+  exposes only a parameterless exclusive-work callback after consuming the
+  mark attempt; C6 instead needs private access to the authoritative bitmap and
+  scalar summary under the same collection authority. Classification must not
+  grow a second reachability representation merely to work around that seam.
+- Stop-the-world frontier retirement no longer claims to race an admitted
+  scoped allocator. Exclusive drain proves none exists; the required ordering
+  protects internal publication and future admission, while a deliberately
+  forgotten allocator is inert and uncallable.
+- C5D.2's worklist peaks are test-only evidence. C7C.1 remains responsible for
+  any production operational metrics, while the observed million-entry flat
+  frontier keeps C8B.3's paged-array tracing investigation justified without
+  preselecting its outcome.
+- The existing C6 reclamation/finalization checkpoints and the C7-C8 stress,
+  metrics, tuning, and audit partitions otherwise remain coherent.
 
 ## Phase C6 — Sweep, Mutator Finalization, Retry, and Quarantine
 
 Execute C6 as the following smaller checkpoints:
 
+- **C6A.0 — post-mark collection-pipeline handoff.** Replace the current
+  parameterless synthetic `exclusive_work` seam with one collector-private
+  post-mark operation which receives the completed scalar mark summary and
+  access to managed data while the same collection retains `Exclusive`.
+  Reacquiring the managed-data mutex is permitted because exclusive admission
+  keeps allocation, root publication, and topology stable; do not copy the
+  mark bitmap or retain a managed-data borrow across finalizer admission.
+  Preserve C5 behavior exactly: perform no classification or reclamation,
+  publish the report only after downstream exclusive/finalizer work succeeds,
+  and make a panic relatch collection without publishing an epoch or report.
+  Re-run the C5 report, retry, and forced-order fixtures before C6A.1 adds a
+  consumer.
 - **C6A.1 — dead-set classification without reuse.** From one successful C5
-  mark, classify allocated slots and runs as live, no-drop dead, or
-  drop-required dead. Publish no free slot or run yet. Prove that a panic or
+  mark, use C6A.0's private post-mark seam to classify allocated slots and runs
+  as live, no-drop dead, or drop-required dead. Publish no free slot or run
+  yet. Keep the resulting dead-set plan attempt-local and prove that a panic or
   classification failure leaves allocation, class, frontier, lease, and
   pressure state unchanged.
 - **C6A.2a — allocation-lease revocation and epoch publication.** Under
@@ -2806,10 +2873,11 @@ Execute C6 as the following smaller checkpoints:
 - **C6A.2b — class frontier and run-pool retirement.** For each wholly dead
   no-drop run, first clear or repoint the old class's atomic frontier, remove
   the stable run record from its class pool, and repair any index encoded by a
-  shifted replacement. Prove that every admitted scoped allocator and racing
-  frontier load can no longer select the retired record before it is destroyed;
-  C4D and exclusive mutator drain prove that no public selector can remain
-  afterward. Do not reset the run header or publish reuse yet.
+  shifted replacement. Exclusive mutator drain proves that no admitted scoped
+  allocator or in-flight frontier load remains; clear publication before the
+  record is moved so future admission cannot select it. A deliberately
+  forgotten allocator is inert and cannot perform another load. Do not reset
+  the run header or publish reuse yet.
 - **C6A.2c — wholly dead no-drop runs and free-run reuse.** Clear the retired
   run's allocation and side state, reinitialize its empty header, and publish
   it to one heap-wide free list. Prefer recycled runs over virgin arena
@@ -2955,9 +3023,11 @@ recoverable panic injected by its own tests.
   cannot enter the list until finalization completes successfully.
 - Treat the class's stable run record and raw atomic frontier as one retirement
   unit. Before removing or moving a boxed run record, publish a null or valid
-  replacement frontier and repair class bookkeeping so neither a retained
-  scoped allocator nor a racing frontier reader can dereference the retired
-  record. Exclusive mutator drain then proves no such reader remains.
+  replacement frontier and repair class bookkeeping. Exclusive mutator drain
+  already proves that no admitted scoped allocator or in-flight frontier read
+  remains; the publication order protects the allocator view exposed to later
+  admission. A deliberately forgotten allocator is inert and cannot execute
+  against its stale cell.
 - Allocate a new typed run from the free list before consuming a virgin run in
   an existing chunk, and consume existing chunk capacity before allocating a
   new chunk. Reinitialize the run for its new class and geometry before

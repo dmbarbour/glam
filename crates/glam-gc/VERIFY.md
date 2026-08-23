@@ -95,11 +95,16 @@ C5D.2 adds no unsafe operation or module opt-in. The exact unsafe inventory
 must therefore remain unchanged while these fixtures and their ledger entries
 are added.
 
-ThreadSanitizer passes the complete C5D.2 native suite. AddressSanitizer passes
-the focused `c5d_` fixtures, but the complete crate run retains one 24-byte
-LeakSanitizer report. The same report reproduces from the clean pre-C5D.2
-`d7977d4` worktree, so it is not introduced by these fixtures; it remains an
-explicit post-C5 verification finding rather than being treated as a pass.
+ThreadSanitizer passes the complete C5D.2 native suite. The post-C5 review
+isolated the prior 24-byte LeakSanitizer report to
+`forgotten_scoped_allocator_does_not_retain_its_heap`, the C4D fixture which
+deliberately calls `mem::forget` on one inert frontier cell to prove that an
+escaped allocator does not retain its heap. It is not TLS or managed-heap
+retention and reproduces from the clean pre-C5D.2 `d7977d4` worktree.
+`check-sanitizer.sh address` therefore runs every other test with leak
+detection enabled, then runs that exact ownership fixture with ASan enabled and
+leak detection disabled. This is an explicit process-lifetime-fixture
+exception, not a general LeakSanitizer suppression.
 
 ## Gate G0 Baseline
 

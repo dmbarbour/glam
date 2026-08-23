@@ -5037,6 +5037,10 @@ mod tests {
 
         heap.with_mutator(|mutator| {
             let allocator = mutator.allocator::<u64>().unwrap();
+            // This deliberately leaks the allocator's inert 24-byte frontier
+            // cell. The address-sanitizer harness runs this fixture separately
+            // with leak detection disabled while retaining every other ASan
+            // check; see `scripts/check-sanitizer.sh` and `VERIFY.md`.
             std::mem::forget(allocator);
         });
         drop(heap);
