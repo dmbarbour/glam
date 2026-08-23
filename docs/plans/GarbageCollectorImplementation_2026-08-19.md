@@ -1072,7 +1072,8 @@ C2C.2 completed on 2026-08-22:
   allocation or root its slots. Re-entry may reuse the whole cache after one
   epoch comparison without the shared class-pool slow path.
 - Charge allocation pressure in batches when words or runs are claimed and
-  reconcile unused slots only when full collection revokes all leases. Bound
+  reconcile unused slots only when full collection invalidates cached leases
+  and rebuilds the allocator view. Bound
   the retained class-cursor map, charge forgotten words as unavailable
   capacity, and request collection before accumulated abandoned words become
   unbounded. The unit of temporary fragmentation is one allocation word rather
@@ -1102,8 +1103,8 @@ Verification:
   entire cursor map without dereferencing any stale run;
 - TLS destruction and cache eviction do not access the heap or return words;
 - cache eviction and thread exit leave their words leased and unavailable;
-  C5 verifies that the first full collection clears those leases and advances
-  the cache epoch without finding the departed thread;
+  C6 verifies that the first reclaiming collection rebuilds those leases and
+  advances the cache epoch without finding the departed thread;
 - every newly selected free slot is initialized before its allocation bit is
   published; actual dead-slot reuse begins with C6 and is verified there;
 - panic unwinding never exposes uninitialized storage as an object; and
@@ -1153,9 +1154,9 @@ C2C.3 completed on 2026-08-22:
   counters.
 - Do not make eviction or TLS destruction call back into the heap merely to
   classify a lease as abandoned. Claimed capacity is monotonic until a full
-  collection revokes every lease, so the same conservative total already
-  includes retained, evicted, and departed-thread cursors. C5 resets the total
-  and advances the lease epoch together.
+  collection rebuilds lease availability, so the same conservative total
+  already includes retained, evicted, and departed-thread cursors. C6 resets
+  the total and advances the lease epoch with the final allocator view.
 - Until allocation histograms can tune policy, set the provisional collection-
   pressure threshold to one arena chunk. Reaching it records a pending request;
   C3B connects that request to collector election. Arithmetic saturates so a
@@ -1873,8 +1874,8 @@ it is not the policy for C4 and later phases.
 - Do not maintain a cross-thread active/parked flag for a cursor. Recursive
   depth is local to its owning thread. The collector need not inspect another
   thread's depth: acquiring exclusive mutator admission proves that every
-  TLS cache is quiescent. It then revokes word leases by clearing heap-owned run
-  lease bitmaps, without inspecting any cache.
+  TLS cache is quiescent. It later rebuilds heap-owned run lease bitmaps and
+  advances the cache epoch without inspecting any cache.
 - Provide a heap-qualified scoped current-mutator accessor for reviewed
   destructor and runtime-integration code, for example an HRTB closure API
   rather than a borrow which can escape. An unqualified "current mutator" API
@@ -2339,29 +2340,36 @@ downstream corrections are required:
   aggregate counters nor pressure or reclamation state. One currently spare
   `u32` in `RunHeader` remains available for a measured future live-slot count,
   reset alongside marks, but the baseline does not consume it.
-- **Reclamation must invalidate TLS cursors before changing topology.** C6A.2a
-  revokes allocation-word leases, withdraws ordinary class-frontier selection,
-  and advances the heap allocation-lease epoch while every mutator is stopped.
-  No run record, allocation bit, or reclaimed slot changes before that
-  transition. Every later entrant discards its retained cursor map before it
-  could observe run retirement, eager sweep, or reuse.
+- **Reclamation must invalidate TLS cursors before changed topology becomes
+  observable.** C6A.2a's completed implementation conservatively sets every
+  lease bit, withdraws ordinary class-frontier selection, and advances the
+  heap allocation-lease epoch while every mutator is stopped. That blanket
+  all-ones lease state is an incremental C6 scaffold, not the target allocator
+  transition. C6A.3b must remove the blanket-revocation pass, construct each
+  lease word directly in its final post-sweep state, republish eligible class
+  frontiers, and publish the one new epoch last. Every later entrant then
+  discards its retained cursor map before it can observe run retirement, eager
+  sweep, or reuse.
 - **Retiring a run must retire every lock-free selector first.** A class owns
   stable boxed run records and publishes a raw frontier pointer. C4D ensures
   every allocator which can read that pointer is scoped to an admitted
   mutator; no escaped public class handle remains. After C6A.2a has drained
-  mutators and invalidated TLS cursors, C6A.2b must clear or replace the
-  heap-owned frontier, remove the run from the class pool, and repair any
-  shifted frontier index before the record can be destroyed or its run can be
-  retyped. Header reset and free-list publication belong to C6A.2c.
-- **Sweep no-drop allocation words eagerly.** After C6A.2a invalidates every
-  retained cursor and lease, the collector is the sole allocation-bitmap
-  writer under `Exclusive`. Retire wholly dead no-drop runs, then intersect
+  mutators and withdrawn frontier selection, C6A.2b must remove the run from
+  the class pool and repair any shifted frontier index before the record can be
+  destroyed or its run can be retyped. C6A.3b publishes the final cursor epoch
+  only after this topology and the swept lease view are complete. Header reset
+  and free-list publication belong to C6A.2c.
+- **Sweep no-drop allocation words eagerly.** After mutator drain and frontier
+  withdrawal, the collector is the sole allocation-bitmap writer under
+  `Exclusive`. Retire wholly dead no-drop runs, then intersect
   each retained no-drop allocation word with its successful mark word. This
   enumerates compact side bitmaps rather than payloads and completes every
   no-drop reclamation obligation before ordinary admission reopens. Rebuild
   lease availability and class frontiers only afterward, excluding words and
-  whole runs reserved for drop finalization. No sweep epoch, unswept bitmap,
-  first-claim branch, or retained-mark dependency enters the allocator.
+  whole runs reserved for drop finalization. Build those final lease masks
+  directly; do not first fill the lease bitmaps with ones. No sweep epoch,
+  unswept bitmap, first-claim branch, or retained-mark dependency enters the
+  allocator.
 - **Finalization reserves partial runs by word and wholly dead runs in full.**
   Ordinary mutators may allocate while the collector is in `Finalizing`. For a
   partially live run, the collector therefore removes every allocation word
@@ -2868,8 +2876,11 @@ Execute C6 as the following smaller checkpoints:
   topology, then advance the one heap-wide allocation-lease epoch. The next
   outer cache entry performs one epoch comparison and discards all stale
   cursors. Prove no allocation bit, run record, or reusable slot changes before
-  this invalidation boundary. Lease availability and ordinary frontiers are
-  rebuilt only after C6A.3's eager sweep.
+  this invalidation boundary. This checkpoint deliberately uses a blanket
+  all-ones lease state so its intermediate implementation remains safe if a
+  later collection callback unwinds. It is scaffolding: C6A.3b must remove
+  both the blanket pass and this early epoch publication in favor of one final
+  allocator-view publication after eager sweep.
 - **C6A.2b — class frontier and run-pool retirement.** For each wholly dead
   no-drop run, first clear or repoint the old class's atomic frontier, remove
   the stable run record from its class pool, and repair any index encoded by a
@@ -2892,15 +2903,25 @@ Execute C6 as the following smaller checkpoints:
   or touch payloads, and do not clear allocation bits in any drop-bearing run.
   Prove boundary words, sparse and dense death, and repeated collections.
 - **C6A.3b — swept allocator publication.** Rebuild allocation-word lease
-  availability and class frontiers from the eagerly swept topology. Exclude
-  every word containing drop-required dead slots in a partially live run, and
-  reserve every wholly dead drop-bearing run in full; C6B owns those regions
-  until their respective finalization groups are terminal. Publish no ordinary
-  allocator selector before all no-drop words are swept. Prove that a
-  post-collection claimant observes the final allocation bitmap directly and
-  performs no sweep work. The successful mark bitmap has no remaining
-  reclamation consumer after dead drop slots and eager no-drop sweep are
-  recorded; choose its physical clearing point separately.
+  availability and class frontiers from the eagerly swept topology. Replace,
+  rather than build upon, C6A.2a's blanket all-ones revocation: write every
+  lease word directly to its final mask, remove the blanket-revocation helper
+  and its raw atomic-store unsafe site if they have no other caller, and move
+  the single allocation-lease epoch publication from C6A.2a to the end of this
+  transition. Exclude every word containing drop-required dead slots in a
+  partially live run, and reserve every wholly dead drop-bearing run in full;
+  C6B owns those regions until their respective finalization groups are
+  terminal. Publish no ordinary allocator selector before all no-drop words
+  are swept; publish eligible frontiers before the final Release epoch, then
+  reopen admission only after that epoch is authoritative. Complete fallible
+  planning and capacity reservation before destructive topology changes. An
+  invariant panic inside the thereafter-infallible mutation/publication window
+  must not reopen an incomplete allocator view. Prove that no completed
+  collection performs an all-ones lease fill, and that a post-collection
+  claimant observes the final allocation bitmap directly and performs no sweep
+  work. The successful mark bitmap has no remaining reclamation consumer after
+  dead drop slots and eager no-drop sweep are recorded; choose its physical
+  clearing point separately.
 - **C6A.4 — assigned-run pressure.** Replace provisional run-publication
   history with assigned-run occupancy, account for virgin and recycled
   activation exactly once, and publish the first survivor-based high-water
@@ -3080,13 +3101,15 @@ recoverable panic injected by its own tests.
   stale. Rebuild every live assigned run's lease bitmap, remove retired runs
   from their old class pools, rebuild the class's ready-run order, republish
   class frontiers, and advance the allocation-lease epoch as one exclusive
-  transition before making any reclaimed slot available. A run reopened after
-  its finalization group completes must enter that same slow-path ready order;
-  an older run may not become permanently unreachable merely because the raw
-  frontier had advanced to a later record. This is a post-sweep synchronization
-  edge, not initial run publication and not part of mark-only C5. Ordinary
-  allocation retains its single raw-frontier fast path; ready-order maintenance
-  belongs under heap state on cursor exhaustion and finalizer publication.
+  transition before making any reclaimed slot available. Write each final
+  lease mask once; the completed collector must not blanket-fill leases and
+  then rewrite them. A run reopened after its finalization group completes must
+  enter that same slow-path ready order; an older run may not become
+  permanently unreachable merely because the raw frontier had advanced to a
+  later record. This is a post-sweep synchronization edge, not initial run
+  publication and not part of mark-only C5. Ordinary allocation retains its
+  single raw-frontier fast path; ready-order maintenance belongs under heap
+  state on cursor exhaustion and finalizer publication.
 - Finalizer registration is implicit in homogeneous run metadata. The initial
   design has no per-slot finalizer bitmap and no global finalizer registry.
   Keep allocation bits set, detach the computed dead slots into a
@@ -3306,7 +3329,10 @@ Completed on 2026-08-23:
   capacity-efficient: old runs stay in their class pools with all lease words
   unavailable. A class used before swept-frontier rebuilding may scan those
   inert records and publish a fresh typed run; it cannot reuse an old slot.
-  C6A.2b through C6A.3 restore useful old topology and capacity.
+  C6A.2b through C6A.3 restore useful old topology and capacity. C6A.3b must
+  also delete this blanket all-ones transition from the completed collector:
+  the successful path will publish final lease masks directly and advance the
+  cache epoch only after the complete allocator view is ready.
 - A focused topology fixture snapshots the successful post-mark state and the
   following finalizer state. It proves exact run/class/allocation/mark and
   pressure preservation, null frontiers, fully revoked valid lease masks, and
@@ -3321,9 +3347,11 @@ Completed on 2026-08-23:
   once more. The report/completion epoch remains unpublished until successful
   finalization as before.
 - Revoking a lease word adds one reviewed raw atomic Release store to the
-  unsafe inventory. The collector suite now contains 153 unit tests (151
-  passing plus two explicit scale fixtures), 6 Loom models, and 8
-  compile-fail/doc tests. Both new invalidation fixtures pass focused Miri.
+  unsafe inventory. This unsafe site is provisional and C6A.3b must remove it
+  if direct final-mask publication makes it unused. The collector suite now
+  contains 153 unit tests (151 passing plus two explicit scale fixtures), 6
+  Loom models, and 8 compile-fail/doc tests. Both new invalidation fixtures
+  pass focused Miri.
 
 ### Mandatory Post-C6 Review
 
