@@ -1,10 +1,10 @@
 //! Runtime-local garbage collection support for Glam.
 //!
-//! C5C hardens C5B's checked, non-recursive graph traversal against trace,
-//! worklist-publication, and invalid-edge failures. Failed attempts retain no
-//! authoritative result and retry from a freshly cleared mark bitmap.
-//! Reclamation remains disabled, so unreachable payloads still stay live
-//! until terminal heap teardown.
+//! C5D publishes successful scalar mark summaries atomically with their
+//! collection epochs after C5C's checked, recoverable graph traversal. Failed
+//! attempts retain no authoritative result and retry from a freshly cleared
+//! mark bitmap. Reclamation remains disabled, so unreachable payloads still
+//! stay live until terminal heap teardown.
 
 #![deny(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]

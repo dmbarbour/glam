@@ -1,8 +1,8 @@
 # Glam GC Subcrate Implementation Plan — 2026-08-19
 
-Status: in progress; Phases C0 through C5C are complete, including the C2C.6
+Status: in progress; Phases C0 through C5D.1 are complete, including the C2C.6
 verification follow-up. The mandatory post-C1, post-C2C, post-C3E, and post-C4
-downstream reviews are complete. C5D.1 is next.
+downstream reviews are complete. C5D.2 is next.
 
 This plan implements an exact, non-moving, runtime-local tracing collector
 without depending on Glam value semantics. The governing requirements and
@@ -58,7 +58,7 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C5B.2 | completed | checked non-recursive graph marking |
 | C5C.1 | completed | trace and worklist panic recovery |
 | C5C.2 | completed | invalid-edge recovery and retry |
-| C5D.1 | pending | successful mark publication and report |
+| C5D.1 | completed | successful mark publication and report |
 | C5D.2 | pending | reachability oracle, scale, and audit |
 | C6A.1 | pending | dead-set classification without reuse |
 | C6A.2a | pending | allocation-lease revocation and epoch publication |
@@ -2500,12 +2500,20 @@ Execute C5 as the following independently verified checkpoints:
   pointer-only `ErasedGc` visitor deliberately treats the owning run's
   canonical metadata as authoritative, while typed root construction retains
   its separate representation-mismatch check.
-- **C5D.1 — successful mark publication and report.** Treat the completed
-  bitmap as authoritative and publish only scalar root, traced-object,
-  marked-slot, and conservative-retention statistics after the complete
-  worklist succeeds. Live-run and survivor occupancy come from C6's bitmap
-  scan. C5 still reclaims nothing and does not yet choose when successful marks
-  are cleared after C6 consumes them.
+- **C5D.1 — successful mark publication and report.** Consume a completely
+  drained `MarkAttempt` into one scalar `MarkSummary`; this is the point where
+  its heap-private bitmap stops being disposable scratch and becomes the
+  successful attempt's reachability result. Publish the latest
+  `CollectionReport` and matching completed epoch together under the
+  coordinator mutex. A failed attempt publishes neither and does not replace a
+  prior report. Retain no report history: a synchronous caller overtaken by a
+  later completion receives the latest report whose epoch satisfies its
+  target. Report root-registry entries, traced objects, distinct marked slots,
+  and conservatively retained slots; the last is zero until C6 quarantine.
+  Copy no bitmap and add no bitmap-validity flag, identity list, or per-run
+  summary. C6 consumes successful marks under the same collection authority;
+  live-run and survivor occupancy come from its bitmap scan. C5 reclaims
+  nothing.
 - **C5D.2 — reachability oracle, scale, and audit.** Compare randomized graphs
   with a simple reachability oracle, run million-edge non-recursive tests,
   include both a million-node deep chain and a flat million-edge array, verify
@@ -2694,6 +2702,33 @@ Completed on 2026-08-23:
   `TraceWork`. Typed root construction continues to verify an independently
   requested representation.
 - Focused verification now passes 141 unit tests, 6 Loom models, and 8
+  compile-fail/doc tests.
+
+#### C5D.1 completion
+
+Completed on 2026-08-23:
+
+- A drained `MarkAttempt` is now consumed into one private `MarkSummary`.
+  Finishing asserts that no trace work remains, then retains only root-entry,
+  traced-object, distinct-mark, and conservative-retention scalars. C5 reports
+  zero conservative retention; C6 quarantine will supply the first nonzero
+  source.
+- Public `CollectionReport` exposes those four counts alongside its epoch.
+  `CollectionAttempt::complete` publishes the report and completed epoch in one
+  coordinator critical section after all exclusive and finalizer work
+  succeeds. Failure keeps the previous report and epoch unchanged.
+- The coordinator retains only its latest completed report. A synchronous
+  caller waits for its target epoch and returns the latest report satisfying
+  that target, allowing a later completion to overtake it without an unbounded
+  epoch-indexed history. Entry-elected collections use the same publication
+  path even when no caller consumes their report.
+- Tests distinguish distinct root cells from clones, duplicate edges from
+  distinct marked allocations, and traced live objects from an unreachable
+  allocation. Coalesced synchronous callers receive the same nonempty report;
+  a forced acknowledgement pause exposes neither report nor completed epoch;
+  and a failed trace after epoch one leaves epoch one's report intact until a
+  clean epoch-two retry.
+- Focused verification now passes 143 unit tests, 6 Loom models, and 8
   compile-fail/doc tests.
 
 ## Phase C6 — Sweep, Mutator Finalization, Retry, and Quarantine

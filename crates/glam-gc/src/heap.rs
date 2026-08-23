@@ -23,14 +23,17 @@ const INITIAL_RUN_PUBLICATION_ALLOWANCE: usize = crate::arena::RUNS_PER_CHUNK * 
 const _: () = assert!(INITIAL_RUN_PUBLICATION_ALLOWANCE != 0);
 const _: () = assert!(INITIAL_RUN_PUBLICATION_ALLOWANCE < crate::arena::RUNS_PER_CHUNK);
 
-/// One completed stop-the-world collection handshake.
+/// Scalar results from one completed stop-the-world collection.
 ///
-/// C3 reports coordination epochs only. Later phases extend the report with
-/// marking, reclamation, and finalization statistics without changing the
-/// synchronous completion boundary.
+/// The report is published atomically with its completion epoch. It contains
+/// no bitmap, allocation identity, or other retained collection history.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CollectionReport {
     epoch: NonZeroU64,
+    root_entries: usize,
+    traced_objects: usize,
+    marked_slots: usize,
+    conservatively_retained_slots: usize,
 }
 
 impl CollectionReport {
@@ -38,6 +41,36 @@ impl CollectionReport {
     #[must_use]
     pub const fn epoch(self) -> u64 {
         self.epoch.get()
+    }
+
+    /// Returns the number of live external-root registry entries visited.
+    ///
+    /// Distinct roots to the same allocation count separately; clones of one
+    /// root share a registry entry.
+    #[must_use]
+    pub const fn root_entries(self) -> usize {
+        self.root_entries
+    }
+
+    /// Returns the number of managed objects whose `Trace` implementation ran.
+    #[must_use]
+    pub const fn traced_objects(self) -> usize {
+        self.traced_objects
+    }
+
+    /// Returns the number of distinct managed slots marked reachable.
+    #[must_use]
+    pub const fn marked_slots(self) -> usize {
+        self.marked_slots
+    }
+
+    /// Returns slots retained without dispatching their `Trace` implementation.
+    ///
+    /// This is zero during the mark-only C5 collector. C6 uses it for durable
+    /// quarantine whose payload is no longer safe to trace.
+    #[must_use]
+    pub const fn conservatively_retained_slots(self) -> usize {
+        self.conservatively_retained_slots
     }
 }
 
@@ -139,10 +172,11 @@ impl Heap {
 
     /// Completes a full stop-the-world collection handshake synchronously.
     ///
-    /// C5B clears collector mark state, seeds the stable root registry, and
-    /// traces the reachable graph non-recursively. It performs no reclamation.
-    /// The same request, election, exclusion, recovery, and completion
-    /// boundary remains available to later phases.
+    /// C5D clears collector mark state, seeds the stable root registry, traces
+    /// the reachable graph non-recursively, and returns the latest completed
+    /// scalar report which satisfies this call's requested epoch. A concurrent
+    /// later collection may therefore overtake a waiting caller; no unbounded
+    /// report history is retained. C5 performs no reclamation.
     pub fn collect_full(&self) -> Result<CollectionReport, CollectionError> {
         if thread_has_any_active_mutator() {
             return Err(CollectionError::ActiveMutator);
@@ -241,6 +275,7 @@ struct MutatorCoordinator {
     active_outer_mutators: usize,
     active_collection: Option<CollectionEpoch>,
     completed_collection_epoch: u64,
+    latest_collection_report: Option<CollectionReport>,
     #[cfg(test)]
     blocked_outer_mutators: usize,
     #[cfg(test)]
@@ -255,6 +290,7 @@ struct CoordinatorSnapshot {
     collection_requested: bool,
     active_collection: Option<CollectionEpoch>,
     completed_collection_epoch: u64,
+    latest_collection_report: Option<CollectionReport>,
     blocked_outer_mutators: usize,
 }
 
@@ -479,6 +515,14 @@ struct TraceWork {
     metadata: &'static ObjectMetadata,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct MarkSummary {
+    root_entries: usize,
+    traced_objects: usize,
+    marked_slots: usize,
+    conservatively_retained_slots: usize,
+}
+
 #[derive(Default)]
 struct MarkAttempt {
     worklist: Vec<TraceWork>,
@@ -604,6 +648,19 @@ impl MarkAttempt {
         }
         Ok(())
     }
+
+    fn finish(self) -> MarkSummary {
+        assert!(
+            self.worklist.is_empty(),
+            "successful mark attempt must drain its complete worklist"
+        );
+        MarkSummary {
+            root_entries: self.root_count,
+            traced_objects: self.traced_object_count,
+            marked_slots: self.marked_slot_count,
+            conservatively_retained_slots: 0,
+        }
+    }
 }
 
 impl HeapInner {
@@ -696,7 +753,19 @@ impl HeapInner {
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 loop {
                     if coordinator.completed_collection_epoch >= target.get() {
-                        return CollectionReport { epoch: target.0 };
+                        let report = coordinator
+                            .latest_collection_report
+                            .expect("completed collection must publish its scalar report");
+                        assert_eq!(
+                            report.epoch(),
+                            coordinator.completed_collection_epoch,
+                            "latest report and completed epoch must publish together"
+                        );
+                        assert!(
+                            report.epoch() >= target.get(),
+                            "latest report must satisfy the synchronous target epoch"
+                        );
+                        return report;
                     }
                     let requested = self.collection_requested.load(Ordering::Acquire);
                     if let Some(elected) = coordinator.elect_idle_collection(requested) {
@@ -798,6 +867,7 @@ impl HeapInner {
                 .trace_worklist(&mut data)
                 .unwrap_or_else(|error| error.raise());
         }
+        let mark_summary = mark_attempt.finish();
         exclusive_work();
 
         // Prepare the TLS record without activating it. Under the coordinator
@@ -829,7 +899,7 @@ impl HeapInner {
         drop(mutator);
         let admission = thread_entry.into_outer_admission();
 
-        attempt.complete();
+        attempt.complete(mark_summary);
         if continue_as_mutator {
             Some(admission)
         } else {
@@ -883,6 +953,7 @@ impl HeapInner {
             collection_requested: self.collection_requested.load(Ordering::Acquire),
             active_collection: coordinator.active_collection,
             completed_collection_epoch: coordinator.completed_collection_epoch,
+            latest_collection_report: coordinator.latest_collection_report,
             blocked_outer_mutators: coordinator.blocked_outer_mutators,
         }
     }
@@ -1468,7 +1539,7 @@ impl<'heap> CollectionAttempt<'heap> {
         }
     }
 
-    fn complete(&mut self) {
+    fn complete(&mut self, summary: MarkSummary) {
         {
             let mut data = self
                 .heap
@@ -1490,6 +1561,14 @@ impl<'heap> CollectionAttempt<'heap> {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             assert_eq!(coordinator.phase, AdmissionPhase::Finalizing);
             assert_eq!(coordinator.active_collection, Some(self.epoch));
+            let report = CollectionReport {
+                epoch: self.epoch.0,
+                root_entries: summary.root_entries,
+                traced_objects: summary.traced_objects,
+                marked_slots: summary.marked_slots,
+                conservatively_retained_slots: summary.conservatively_retained_slots,
+            };
+            coordinator.latest_collection_report = Some(report);
             coordinator.completed_collection_epoch = self.epoch.get();
             coordinator.active_collection = None;
             coordinator.phase = AdmissionPhase::Ordinary;
@@ -1703,6 +1782,7 @@ mod tests {
         assert_eq!(restored.phase, AdmissionPhase::Ordinary);
         assert_eq!(restored.active_collection, None);
         assert_eq!(restored.completed_collection_epoch, 0);
+        assert_eq!(restored.latest_collection_report, None);
         assert!(restored.collection_requested);
     }
 
@@ -2228,6 +2308,13 @@ mod tests {
         assert_eq!(completed.phase, AdmissionPhase::Ordinary);
         assert!(!completed.collection_requested);
         assert_eq!(completed.completed_collection_epoch, 1);
+        assert_eq!(
+            completed
+                .latest_collection_report
+                .expect("entry-elected collection must publish a report")
+                .epoch(),
+            1
+        );
     }
 
     #[test]
@@ -2309,6 +2396,9 @@ mod tests {
 
         arrived.wait();
         assert!(!heap.inner.collection_requested.load(Ordering::Acquire));
+        let unpublished = heap.inner.coordinator_snapshot();
+        assert_eq!(unpublished.completed_collection_epoch, 0);
+        assert_eq!(unpublished.latest_collection_report, None);
         heap.request_collection();
         release.wait();
         assert!(collector.join().unwrap());
@@ -2316,6 +2406,13 @@ mod tests {
 
         let completed = heap.inner.coordinator_snapshot();
         assert_eq!(completed.completed_collection_epoch, 1);
+        assert_eq!(
+            completed
+                .latest_collection_report
+                .expect("completed epoch must publish its report")
+                .epoch(),
+            1
+        );
         assert!(completed.collection_requested);
         heap.with_mutator(|_| {});
         assert_eq!(
@@ -2572,6 +2669,10 @@ mod tests {
     #[test]
     fn synchronous_requesters_coalesce_on_one_idle_collection() {
         let heap = Heap::new();
+        let root = heap.with_mutator(|mutator| {
+            let value = mutator.allocator::<u64>().unwrap().alloc(42);
+            mutator.root(value)
+        });
         let (active_tx, active_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
         let active = std::thread::spawn({
@@ -2598,12 +2699,19 @@ mod tests {
 
         release_tx.send(()).unwrap();
         active.join().unwrap();
-        assert_eq!(first.join().unwrap().epoch(), 1);
-        assert_eq!(second.join().unwrap().epoch(), 1);
+        let first = first.join().unwrap();
+        let second = second.join().unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first.epoch(), 1);
+        assert_eq!(first.root_entries(), 1);
+        assert_eq!(first.traced_objects(), 1);
+        assert_eq!(first.marked_slots(), 1);
+        assert_eq!(first.conservatively_retained_slots(), 0);
         assert_eq!(
             heap.inner.coordinator_snapshot().completed_collection_epoch,
             1
         );
+        heap.with_mutator(|mutator| assert_eq!(*root.get(mutator), 42));
     }
 
     #[test]
@@ -3544,6 +3652,103 @@ mod tests {
     }
 
     #[test]
+    fn successful_collection_report_counts_roots_traces_and_distinct_marks() {
+        let heap = Heap::new();
+        let counters = (0..3)
+            .map(|_| Arc::new(AtomicUsize::new(0)))
+            .collect::<Vec<_>>();
+        let (first_root, second_root, root_alias) = heap.with_mutator(|mutator| {
+            let allocator = mutator.allocator::<GraphNode>().unwrap();
+            let nodes = counters
+                .iter()
+                .map(|counter| allocator.alloc(graph_node(Arc::clone(counter))))
+                .collect::<Vec<_>>();
+            connect_graph_nodes(mutator, nodes[0], nodes[1]);
+            connect_graph_nodes(mutator, nodes[0], nodes[1]);
+            let first_root = mutator.root(nodes[0]);
+            let root_alias = first_root.clone();
+            (first_root, mutator.root(nodes[0]), root_alias)
+        });
+
+        let first = heap.collect_full().unwrap();
+        assert_eq!(first.epoch(), 1);
+        assert_eq!(first.root_entries(), 2);
+        assert_eq!(first.traced_objects(), 2);
+        assert_eq!(first.marked_slots(), 2);
+        assert_eq!(first.conservatively_retained_slots(), 0);
+        assert_eq!(counters[0].load(Ordering::Relaxed), 1);
+        assert_eq!(counters[1].load(Ordering::Relaxed), 1);
+        assert_eq!(counters[2].load(Ordering::Relaxed), 0);
+
+        drop(second_root);
+        let second = heap.collect_full().unwrap();
+        assert_eq!(second.epoch(), 2);
+        assert_eq!(second.root_entries(), 1);
+        assert_eq!(second.traced_objects(), 2);
+        assert_eq!(second.marked_slots(), 2);
+        assert_eq!(second.conservatively_retained_slots(), 0);
+        assert_eq!(
+            heap.inner.coordinator_snapshot().latest_collection_report,
+            Some(second)
+        );
+        heap.with_mutator(|mutator| {
+            assert!(std::ptr::eq(
+                first_root.get(mutator),
+                root_alias.get(mutator)
+            ));
+        });
+    }
+
+    #[test]
+    fn failed_mark_attempt_does_not_publish_or_replace_a_report() {
+        let heap = Heap::new();
+        let first = heap.collect_full().unwrap();
+        assert_eq!(first.epoch(), 1);
+        assert_eq!(first.root_entries(), 0);
+        assert_eq!(first.traced_objects(), 0);
+        assert_eq!(first.marked_slots(), 0);
+
+        let armed = Arc::new(AtomicBool::new(true));
+        let traces = Arc::new(AtomicUsize::new(0));
+        let root = heap.with_mutator(|mutator| {
+            let value =
+                mutator
+                    .allocator::<PanickingTraceNode>()
+                    .unwrap()
+                    .alloc(PanickingTraceNode {
+                        edges: Vec::new(),
+                        panic_after_edges: Some(0),
+                        armed: Arc::clone(&armed),
+                        traces: Arc::clone(&traces),
+                    });
+            mutator.root(value)
+        });
+
+        let panic = catch_unwind(AssertUnwindSafe(|| heap.collect_full()))
+            .expect_err("armed trace must prevent report publication");
+        assert_eq!(
+            panic_string(panic.as_ref()),
+            "injected trace panic after 0 reported edges"
+        );
+        let failed = heap.inner.coordinator_snapshot();
+        assert_eq!(failed.phase, AdmissionPhase::Ordinary);
+        assert_eq!(failed.active_collection, None);
+        assert_eq!(failed.completed_collection_epoch, 1);
+        assert_eq!(failed.latest_collection_report, Some(first));
+        assert!(failed.collection_requested);
+
+        armed.store(false, Ordering::Release);
+        let second = heap.collect_full().unwrap();
+        assert_eq!(second.epoch(), 2);
+        assert_eq!(second.root_entries(), 1);
+        assert_eq!(second.traced_objects(), 1);
+        assert_eq!(second.marked_slots(), 1);
+        assert_eq!(second.conservatively_retained_slots(), 0);
+        assert_eq!(traces.load(Ordering::Relaxed), 2);
+        heap.with_mutator(|mutator| assert!(root.get(mutator).edges.is_empty()));
+    }
+
+    #[test]
     fn root_seeding_counts_entries_but_enqueues_each_allocation_once() {
         let heap = Heap::new();
         let traces = Arc::new(AtomicUsize::new(0));
@@ -3779,6 +3984,7 @@ mod tests {
         assert_eq!(restored.phase, AdmissionPhase::Ordinary);
         assert!(restored.collection_requested);
         assert_eq!(restored.active_collection, None);
+        assert_eq!(restored.latest_collection_report, None);
         heap.with_mutator(|_| {});
         assert_eq!(
             heap.inner.coordinator_snapshot().completed_collection_epoch,
@@ -3966,6 +4172,7 @@ mod tests {
         assert_eq!(restored.phase, AdmissionPhase::Ordinary);
         assert_eq!(restored.active_outer_mutators, 0);
         assert_eq!(restored.active_collection, None);
+        assert_eq!(restored.latest_collection_report, None);
         assert!(restored.collection_requested);
         assert_eq!(cache_snapshot(&heap.inner).unwrap().recursive_depth, 0);
 

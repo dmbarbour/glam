@@ -65,6 +65,11 @@ from trace and work-publication panics, and rejects live foreign, stale,
 non-slot, and unallocated reported edges before unsafe dispatch. A failed
 attempt still publishes no reachability result and reclamation remains
 disabled.
+C5D.1 consumes a drained successful mark attempt into scalar root-entry,
+trace, distinct-mark, and conservative-retention counts. The latest report and
+completed epoch publish together under the coordinator mutex; a failed attempt
+changes neither. The bitmap remains heap-private and reclamation remains
+disabled.
 
 The crate denies unsafe code by default. `src/lib.rs` gives the reviewed
 `pointer`, `root`, `mutator`, `trace`, `mutation`, `thread_cache`, and unit-test
@@ -173,6 +178,19 @@ and every unsafe function, implementation, and block are checked into
   does not scan or clear partial marks. It relatches collection before
   restoring ordinary coordinator state, and the original panic resumes. The
   next attempt's mandatory initial clear makes every stale mark irrelevant.
+- Only `MarkAttempt::finish` converts scratch into a successful `MarkSummary`,
+  and it requires an empty worklist. The complete scalar summary remains local
+  while later exclusive/finalizer work runs. `CollectionAttempt::complete`
+  then stores the report and matching completed epoch in one coordinator
+  critical section. A waiter sees neither or both. The coordinator retains
+  only the latest report; an overtaken synchronous caller receives that later
+  report when its epoch satisfies the caller's target.
+- Successful marks require no copied bitmap, validity flag, identity list, or
+  per-run summary. They are authoritative only as the completed attempt's
+  heap-private reachability result: C6 will consume them under the same
+  collection authority, and a later attempt clears them before reuse. The C5
+  conservative-retention count is zero; C6 quarantine introduces the first
+  slots retained without trace dispatch.
 
 ## Managed Pointer and Access Invariants
 
@@ -774,6 +792,13 @@ mutation closure runs.
   address, and an unallocated exact slot. Each is rejected before target trace
   dispatch, repeats while its invalid holder remains rooted, and leaves the
   involved heaps usable after that root is released.
+- C5D.1 verifies exact root-entry, trace, and distinct-mark counts with
+  duplicate edges, distinct roots, root clones, and an unreachable object.
+  Coalesced synchronous requesters receive the same report. A forced pause
+  between data acknowledgement and coordinator completion observes neither a
+  completed epoch nor a report, while an entry-elected collection publishes
+  both. A failed trace after an earlier success preserves that exact earlier
+  report until a clean retry publishes its successor.
 - The ordinary crate checks, exact unsafe inventory, focused Miri run, and
   repository-wide checks are required at completed checkpoints.
 - Miri passes all implemented tests with leak checking enabled. C1's temporary
