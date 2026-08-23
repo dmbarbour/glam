@@ -71,11 +71,14 @@ ordering.
 The ordinary stable check compares 24 deterministic randomized managed graphs
 with an independent index-based reachability oracle. It checks the successful
 report, every allocation's mark bit, and each object's trace count. A separate
-full-run fixture drives one assigned run through zero, one, all, and zero live
-slots across four successful collections, proving that each attempt clears the
-prior bitmap before publishing new reachability. That roughly eight-thousand-
-root fixture is native-only; Miri retains the existing focused bitmap boundary,
-partial-mark recovery, and one bounded 65-node randomized-oracle case.
+full-run fixture drives one assigned run through one, all, and zero live slots
+across three successful collections, proving that each attempt clears the prior
+bitmap before publishing new reachability. The terminal zero-live collection
+also permits C6A.2b retirement; stale unrooted handles are deliberately not
+resurrected afterward. Empty-heap and clear-before-mark fixtures independently
+cover zero as an initial state. The roughly eight-thousand-root fixture is
+native-only; Miri retains the existing focused bitmap boundary, partial-mark
+recovery, and one bounded 65-node randomized-oracle case.
 
 The native million-edge fixtures are intentionally isolated from routine unit
 test latency. Run them serially, with their worklist measurement visible, via:
@@ -147,6 +150,32 @@ post-mark failure preserves the old epoch, while finalizer failure retains the
 published invalidation, relatches collection, and advances again on retry.
 No old slot or run is reclaimed or reused. Both the exact transition and
 cross-thread stale-cursor fixtures pass focused Miri.
+
+C6A.2b consumes the first whole-run retirement case without reuse. The primary
+fixture allocates alternating live and dead one-slot runs in one class, then
+adds a partially live no-drop run and a wholly dead drop-bearing run. It proves
+that only the wholly dead no-drop records leave class topology, retained order
+is stable, the original boxed record addresses move unchanged into collector
+retirement state, raw frontiers stay null, retired allocation bits remain set,
+and all live roots remain usable. An empty-run fixture proves that zero
+allocated slots imply no finalization obligation even for a class whose Rust
+type implements `Drop`. A forced finalizer panic proves detached state remains
+durable, retry does not duplicate it, and pre-C6A.2c allocation selects a fresh
+run rather than reusing retired storage. These fixtures are selected for
+focused Miri with:
+
+```sh
+cargo +nightly miri test --package glam-gc --lib --all-features \
+  wholly_dead_no_drop_runs_leave_class_topology_without_changing_arena_storage
+cargo +nightly miri test --package glam-gc --lib --all-features \
+  empty_runs_have_no_finalization_obligation_and_retire_from_any_class
+cargo +nightly miri test --package glam-gc --lib --all-features \
+  finalizer_panic_retains_one_retired_record_and_retry_does_not_duplicate_it
+```
+
+This checkpoint adds no unsafe operation. The full suite contains 156 unit
+tests (154 passing and two ignored scale fixtures), six Loom models, and eight
+compile-fail/doc tests.
 
 ## Gate G0 Baseline
 

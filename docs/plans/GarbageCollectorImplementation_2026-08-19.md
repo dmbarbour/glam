@@ -1,8 +1,8 @@
 # Glam GC Subcrate Implementation Plan — 2026-08-19
 
-Status: in progress; Phases C0 through C6A.2a are complete, including the C2C.6
+Status: in progress; Phases C0 through C6A.2b are complete, including the C2C.6
 verification follow-up. The mandatory post-C1, post-C2C, post-C3E, post-C4,
-and post-C5 downstream reviews are complete. C6A.2b is next.
+and post-C5 downstream reviews are complete. C6A.2c is next.
 
 This plan implements an exact, non-moving, runtime-local tracing collector
 without depending on Glam value semantics. The governing requirements and
@@ -64,7 +64,7 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C6A.0 | completed | post-mark collection-pipeline handoff |
 | C6A.1 | completed | dead-set classification without reuse |
 | C6A.2a | completed | allocation-lease revocation and epoch publication |
-| C6A.2b | pending | class frontier and run-pool retirement |
+| C6A.2b | completed | class frontier and run-pool retirement |
 | C6A.2c | pending | wholly dead no-drop runs and free-run reuse |
 | C6A.3a | pending | eager partial no-drop sweep |
 | C6A.3b | pending | swept allocator publication |
@@ -2756,10 +2756,14 @@ Completed on 2026-08-23:
   report, every allocation's mark bit, and every trace count with an
   independent index-based reachability oracle. The graphs include cycles,
   duplicates, self-edges, and deliberately unreachable allocations.
-- One complete `u64` typed run is driven through zero, one, all, then zero live
-  slots across four successful collections. Each report and every allocated
-  slot agree, latching that a completed bitmap describes only its own attempt
-  rather than accumulated mark history.
+- Before reclamation, one complete `u64` typed run was driven through zero,
+  one, all, then zero live slots across four successful collections. C6A.2b
+  updates the continuing regression to one, all, then zero: after the final
+  zero-live collection the run correctly leaves published topology and cannot
+  be resurrected through stale unrooted handles. Independent empty-heap and
+  clear-before-mark fixtures retain the initial-zero coverage. Each report and
+  physical mark observation agrees, latching that a completed bitmap describes
+  only its own attempt rather than accumulated mark history.
 - A dedicated serial scale script keeps expensive evidence independently
   measurable from ordinary unit tests. The native marker completes a
   one-million-node chain and a flat one-million-edge array without recursive
@@ -2888,7 +2892,9 @@ Execute C6 as the following smaller checkpoints:
   allocator or in-flight frontier load remains; clear publication before the
   record is moved so future admission cannot select it. A deliberately
   forgotten allocator is inert and cannot perform another load. Do not reset
-  the run header or publish reuse yet.
+  the run header or publish reuse yet. A published run with no allocated slots
+  has no finalization obligation and follows this path regardless of whether
+  its class metadata has a destructor.
 - **C6A.2c — wholly dead no-drop runs and free-run reuse.** Clear the retired
   run's allocation and side state, reinitialize its empty header, and publish
   it to one heap-wide free list. Prefer recycled runs over virgin arena
@@ -3286,11 +3292,14 @@ Completed on 2026-08-23:
   no-drop-dead, and drop-required-dead slot/run counts plus only the nonzero
   dead masks for affected runs. Those masks occupy one flat attempt-local
   buffer with a range per run, avoiding one allocation per affected run.
-- Drop disposition is derived once from the run's canonical `ObjectMetadata`;
-  homogeneous typed runs therefore need no per-slot finalizer tags. A run may
-  contribute to both the live-run count and one dead-run category when it is
-  partially live. Each dead-run record retains stable class/run topology,
-  metadata, live/dead counts, and exact dead bitmap words for later C6 phases.
+- Drop disposition for allocated dead slots is derived from the run's
+  canonical `ObjectMetadata`; homogeneous typed runs therefore need no
+  per-slot finalizer tags. C6A.2b extends the plan with an explicit empty-run
+  count and vacuous no-drop disposition because a run with no allocated slots
+  has no destructor obligation. A run may contribute to both the live-run
+  count and one dead-run category when it is partially live. Each planned run
+  record retains stable class/run topology, metadata, live/dead counts, and
+  exact dead bitmap words for later C6 phases.
 - The post-mark seam receives the combined scalar mark summary and dead-set
   plan while managed data remains exclusively stable. The plan is neither
   published nor retained after the collection attempt, and C6A.1 changes no
@@ -3352,6 +3361,49 @@ Completed on 2026-08-23:
   contains 153 unit tests (151 passing plus two explicit scale fixtures), 6
   Loom models, and 8 compile-fail/doc tests. Both new invalidation fixtures
   pass focused Miri.
+
+#### C6A.2b completion
+
+Completed on 2026-08-23:
+
+- After C6A.2a has revoked leases, stored null to every raw frontier, reset
+  every frontier index, and published the transitional cache epoch, C6A.2b
+  prevalidates the complete retirement set and moves each wholly dead no-drop
+  run's existing boxed claim record out of its allocation-class pool. Retained
+  records preserve their original order. Because every frontier index is
+  already `None`, no shifted live index remains to repair or republish.
+- Detached records enter one collector-owned `retired_no_drop_runs` pool with
+  their former dense class identity. Their box addresses remain stable for the
+  handoff to C6A.2c. The arena header, allocation bitmap, mark bitmap, lease
+  bitmap, payload bytes, pressure state, and chunk ownership remain unchanged;
+  no retired location is reusable yet.
+- A run containing no allocated slots has no destructor obligation and is
+  classified for this retirement path even when its allocation class's Rust
+  representation implements `Drop`. This prevents publication-only or
+  pre-initialization-panic runs from remaining assigned forever without
+  inventing a finalizer for nonexistent objects.
+- One topology fixture places live and dead one-slot runs on alternating class
+  positions, plus a partially live no-drop run and a wholly dead drop-bearing
+  run. It proves stable retained order and record identity, exact detached
+  membership, null selectors, unchanged retired allocation bits, continued
+  root access, and exclusion of partial and finalizer-bearing runs. A separate
+  empty-run fixture covers both destructor-free and destructor-bearing classes.
+- A forced finalizer panic proves retirement is durable after the C6A.2a
+  publication boundary. Recovery relatches collection without restoring the
+  class record; retry neither duplicates nor loses the retired record, and a
+  subsequent allocation uses a distinct fresh run while C6A.2c reuse remains
+  absent.
+- Three C5-era fixtures were corrected for reclaiming semantics. A handle that
+  was unrooted during a completed collection can no longer be rooted or
+  inspected through published class topology. The adjusted fixtures instead
+  create post-acknowledgement values after collection, retain roots across
+  automatic pressure collection, and end a one/all/zero bitmap history with
+  the zero-live retirement rather than attempting later resurrection.
+- This checkpoint adds no unsafe operation or inventory entry. The collector
+  suite now contains 156 unit tests (154 passing plus two explicit scale
+  fixtures), 6 Loom models, and 8 compile-fail/doc tests. The three focused
+  C6A.2b fixtures are suitable for Miri; focused Miri and the full verification
+  matrix are recorded in `VERIFY.md`.
 
 ### Mandatory Post-C6 Review
 

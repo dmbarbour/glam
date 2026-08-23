@@ -80,7 +80,10 @@ admission. C6A.1 additionally derives an attempt-local dead-set plan by reading
 the compact allocation and mark words. It still performs no reclamation or
 allocator-state mutation. C6A.2a then publishes the first allocator
 invalidation boundary: old leases and raw frontiers are withdrawn before one
-heap-wide lease-epoch advance, without reclaiming or reusing storage.
+heap-wide lease-epoch advance, without reclaiming or reusing storage. C6A.2b
+moves wholly dead no-drop and allocation-empty run records out of their class
+pools only after that withdrawal. It leaves their arena headers, side metadata,
+payload storage, and chunk ownership intact for C6A.2c.
 
 The crate denies unsafe code by default. `src/lib.rs` gives the reviewed
 `pointer`, `root`, `mutator`, `trace`, `mutation`, `thread_cache`, and unit-test
@@ -317,7 +320,8 @@ C6 later owns collector-driven destruction.
   finalizer admission. C6A.2a performs only infallible allocator revocation
   after that callback returns: it withdraws lease/frontier publication under
   managed data and then advances the atomic lease epoch before releasing the
-  guard.
+  guard. C6A.2b reserves retirement-pool capacity and prevalidates its complete
+  set before moving any boxed record under that same guard.
 - The coalesced collection request is a sibling `AtomicBool`, not duplicated in
   either locked component. An asynchronous request is exactly one Release
   store: it acquires no mutex and sends no condition-variable notification.
@@ -399,9 +403,12 @@ C6 later owns collector-driven destruction.
 
 ## Typed-Run Publication and Resolution Invariants
 
-- One class entry owns a directly enumerable vector of every `RunLocation`
-  published for it. Thread-local cursors and later word leases do not own or
-  retain the run and are not required for enumeration.
+- One class entry owns a directly enumerable vector of every assigned
+  `RunLocation` currently published for it. C6A.2b may move a withdrawn,
+  wholly dead no-drop record into the collector-owned retirement pool; it then
+  deliberately fails ordinary class-topology resolution until C6A.2c resets
+  it. Thread-local cursors and word leases own neither pool membership nor the
+  run and are not required for enumeration.
 - Before arena publication, the class run vector reserves its next entry.
   Arena publication first reuses an existing empty run, or allocates and fully
   initializes a candidate chunk's first run before the chunk enters the arena.
@@ -436,11 +443,13 @@ C6 later owns collector-driven destruction.
   slots; C2C.3 replaces this correctness baseline with disjoint worker-local
   bitmap-word leases.
 - Terminal `HeapInner::drop` has exclusive ownership. It enumerates every set
-  allocation bit, dispatches the owning class's destructor exactly once when
-  required, and then lets each arena chunk deallocate exactly once. This path
-  is provisionally non-reentrant and non-panicking. C2C.4 proves it cannot race
-  an active owner region; C6 replaces terminal enumeration with collector-
-  controlled finalization, quarantine, and destructor-panic recovery.
+  allocation bit still belonging to a drop-bearing class, dispatches that
+  class's destructor exactly once, and then lets each arena chunk deallocate
+  exactly once. C6A.2b may omit detached no-drop allocations and empty runs
+  because neither has a destructor obligation. This path is provisionally
+  non-reentrant and non-panicking. C2C.4 proves it cannot race an active owner
+  region; later C6 replaces terminal enumeration with collector-controlled
+  finalization, quarantine, and destructor-panic recovery.
 
 ## Thread-Local Allocation Cache Lifecycle
 
@@ -594,6 +603,18 @@ or payload storage. Null frontier stores follow run revocation, and the final
 heap-wide Release epoch publication orders both changes before later outer
 entries clear stale cursors. Invalid suffix lease bits remain clear and are
 still rejected by the bounded claim loop.
+
+C6A.2b first reserves collector retirement-pool capacity, then prevalidates
+every candidate against the canonical class metadata, exact geometry, stable
+boxed target, and already-null raw and indexed frontiers. With all mutators
+drained, no frontier load remains in flight and topology cannot change between
+that pass and removal. `Vec::remove` moves the `Box<RunClaimTarget>` while
+preserving both its pointee address and the relative order of every retained
+record. The detached record stays owned by managed data together with its
+former class ID; the arena allocation itself is not moved, cleared, read as a
+payload, or made reusable. An empty run follows this no-finalization path even
+when its class metadata has a drop function because no allocation bit names an
+initialized object. This transition uses no new raw operation or unsafe site.
 
 The mark range is initialized as ordinary `u64` storage and remains disjoint
 from the header, atomic allocation/lease words, alignment padding, and payload.
@@ -866,6 +887,11 @@ mutation closure runs.
   thread is discarded on its next outer entry and cannot modify its old run.
   Forced failures prove planning precedes the boundary while finalization
   follows it. No allocation bit, run record, or old reusable slot changes.
+- C6A.2b verifies ordered removal of alternating wholly dead no-drop records,
+  stable boxed-record identity in collector retirement state, preservation of
+  allocation and header state, exclusion of partially live and drop-bearing
+  allocated runs, vacuous retirement of empty runs from either metadata class,
+  and durable nonduplicating retirement across finalizer panic and retry.
 - The ordinary crate checks, exact unsafe inventory, focused Miri run, and
   repository-wide checks are required at completed checkpoints.
 - Miri passes all implemented tests with leak checking enabled. C1's temporary

@@ -299,6 +299,14 @@ impl AllocationClassEntry {
         self.runs.iter().any(|run| run.location == location)
     }
 
+    pub(crate) fn contains_target(&self, target: RunClaimTarget) -> bool {
+        self.runs.iter().any(|run| **run == target)
+    }
+
+    pub(crate) fn frontier_is_withdrawn(&self) -> bool {
+        self.frontier_index.is_none() && self.shared.frontier.load(Ordering::Acquire).is_null()
+    }
+
     pub(crate) fn reserve_run(&mut self) {
         self.runs
             .try_reserve(1)
@@ -334,6 +342,25 @@ impl AllocationClassEntry {
     pub(crate) fn withdraw_frontier(&mut self) {
         self.shared.withdraw_frontier();
         self.frontier_index = None;
+    }
+
+    /// Removes one run after collection has withdrawn every selector for this
+    /// class.
+    ///
+    /// Preserving vector order keeps the remaining run-pool order stable. The
+    /// boxed record itself moves into collector-owned retirement state, so its
+    /// address remains stable until the collector deliberately disposes of it.
+    pub(crate) fn retire_withdrawn_run(&mut self, target: RunClaimTarget) -> Box<RunClaimTarget> {
+        assert!(
+            self.frontier_is_withdrawn(),
+            "cannot retire a run while its class frontier remains published"
+        );
+        let index = self
+            .runs
+            .iter()
+            .position(|run| **run == target)
+            .expect("retired run is absent from its allocation class");
+        self.runs.remove(index)
     }
 
     fn publish_frontier(&mut self, index: usize) -> &RunClaimTarget {
