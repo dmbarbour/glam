@@ -15,7 +15,8 @@ numeric owner recovery. C2A.3 initializes integer-only run headers and
 allocation, lease, and mark side metadata, but still adds no payload
 allocation. C2B.1 adds canonical process-wide object metadata and erased
 trace/drop dispatch, but no heap-local allocation class or typed run. C2B.2
-adds heap-local dense allocation classes and typed class handles. C2B.3
+adds heap-local dense allocation classes and the original typed class handles;
+C4D later makes those handles collector-private. C2B.3
 publishes typed runs, authoritative class pools, and checked metadata
 resolution, but no payload allocation. C2C.1a adds indexed chunk ownership and
 constant-cost checked chunk lookup. C2C.1b replaces the leaking prototype with
@@ -43,7 +44,9 @@ weak registry entry before returning its public root, then adds stable
 exclusive traversal and in-place pruning without a strong-root snapshot. C4C
 wires that walk into every elected collection and forces the final-public-drop
 ordering on both sides of each temporary weak upgrade. The walk still performs
-no marking or reclamation.
+no marking or reclamation. C4D replaces the reusable public class handle with
+a mutator-scoped `Allocator<'_, T>`, moves durable class/run topology entirely
+under heap ownership, and removes allocation capabilities as heap owners.
 
 The crate denies unsafe code by default. `src/lib.rs` gives the reviewed
 `pointer`, `root`, `mutator`, `trace`, `mutation`, `thread_cache`, and unit-test
@@ -107,13 +110,16 @@ and every unsafe function, implementation, and block are checked into
   identity equality but deliberately does not implement `Hash`, because an
   address hash could not remain stable across later moving collection.
 - `Mutator<'heap>` contains a reference to exactly one `HeapInner`. Its
-  `Rc<()>` phantom makes the token neither `Send` nor `Sync`; the lifetime
-  prevents it from outliving that heap entry.
-- `Mutator::alloc` accepts only `T: Trace` and requires a reusable
-  `AllocationClass<T>` from the same heap. Its inline const assertion rejects
-  zero-sized types while compiling an invalid monomorphization, before any
-  allocation can run. A foreign class is rejected in every build before either
-  heap's run state changes.
+  thread-cache handle contains thread-local `Rc<RefCell<_>>` state, making the
+  token neither `Send` nor `Sync`; the lifetime prevents it from outliving that
+  heap entry.
+- `Mutator::allocator` returns `Allocator<'mutator, T>` with real borrows of
+  that mutator's heap and thread cache. The higher-ranked `with_mutator`
+  boundary prevents the allocator from escaping its admitted region or being
+  sent to another thread. `Allocator::alloc` accepts only `T: Trace`; its inline
+  const assertion rejects zero-sized types while compiling an invalid
+  monomorphization, before any allocation can run. A public foreign
+  allocator/heap combination is unrepresentable.
 - Before collection exists, arena payloads never move and remain live until
   their heap's terminal teardown. No access is valid without a live mutator for
   the owning heap.
@@ -139,7 +145,7 @@ explicit allocator obligation.
 
 The caller must prove that the address is non-null, aligned, initialized as
 `T`, registered to the allocating heap, and live for the collector-defined
-period. `Mutator::alloc` obtains the pointer only after its synchronized arena
+period. `Allocator::alloc` obtains the pointer only after its synchronized arena
 allocator has initialized the payload and published the exact allocation bit.
 A future fast allocator or representation decoder must discharge the same
 obligations independently.
@@ -233,9 +239,10 @@ C6 later owns collector-driven destruction.
   ordinary admission, and relatches the interrupted collection. C6 adds the
   stronger payload/destructor recovery rules when collection gains effects.
 - An admitted mutator borrows the `Heap` handle's existing `Arc<HeapInner>`;
-  admission does not clone a shared owner. Allocation-class discovery clones
-  that owner only into the reusable class handle which must retain heap
-  provenance after the discovery region exits.
+  admission does not clone a shared owner. Its scoped allocator borrows the
+  mutator's heap and cache and carries only a collector-private, non-owning
+  class identity. Neither admission nor allocation-class discovery creates a
+  new heap owner.
 
 ## Heap-Local Allocation-Class Invariants
 
@@ -249,14 +256,15 @@ C6 later owns collector-driven destruction.
   second winner check, vector and map capacity is reserved before either
   authoritative structure is changed, then the dense entry and its index are
   published under the same mutex.
-- `AllocationClass<T>` retains its `HeapInner`, exact metadata address, and
-  dense class ID. The heap state contains class entries, not handles, so this
-  strong provenance capability creates no ownership cycle. It retains no
-  managed allocation and is not a root.
-- A class handle is constructible only through an admitted `Mutator` after
-  metadata and geometry agreement. The handle remains reusable after that
-  region exits. The safe allocator compares its retained heap with the current
-  mutator heap in release builds before accessing run state.
+- Heap state owns each durable class entry, run pool, and stable frontier cell.
+  Collector-private `AllocationClass<T>` values carry a non-owning heap pointer,
+  exact metadata address, dense class ID, and a clone of that stable frontier
+  cell. They retain neither the heap nor any managed allocation.
+- A public `Allocator<'mutator, T>` is constructible only through an admitted
+  `Mutator` after metadata and geometry agreement. Its real heap/cache borrows
+  make reuse after that region impossible in safe Rust. Repeated scoped
+  discovery selects the same heap-owned class and frontier state; no
+  cross-region cache is added yet.
 
 ## Typed-Run Publication and Resolution Invariants
 
@@ -276,9 +284,11 @@ C6 later owns collector-driven destruction.
   geometry, dense class-table membership, class geometry, and authoritative
   run-pool membership before returning canonical metadata. A header ID from
   another heap has no meaning outside its owner state.
-- `AllocationClass<T>` provenance is checked before the heap mutex and before
-  any run state is changed. A foreign handle therefore cannot allocate or
+- Private `AllocationClass<T>` provenance is checked before the heap mutex and
+  before any run state is changed. A foreign internal identity therefore cannot
   publish a run even when its numeric dense ID happens to equal a local ID.
+  Ordinary `Allocator::alloc` relies on constructive provenance and retains a
+  debug assertion rather than paying a release-build domain check per object.
 
 ## Synchronized Payload Allocation and Terminal Destruction
 
@@ -388,14 +398,16 @@ reference on another thread; `T: Send` permits eventual collector-thread
 destruction. The cross-thread test moves a `Gc<u64>` and accesses it
 only after entering its owner heap on that thread.
 
-### `mutator::Mutator::alloc`
+### `mutator::Allocator::alloc`
 
 The safe allocator first attempts the worker-local cursor and then the class's
 atomic run frontier. Only frontier exhaustion enters the synchronized topology
 slow path. Every successful branch calls `Gc::from_raw` only after the exact
-payload has been initialized and its allocation bit published. The class-
-provenance check precedes allocation, and neither payload path contains a
-panicking operation between the payload write and bit publication.
+payload has been initialized and its allocation bit published. The allocator's
+heap/cache borrows and private class identity are created together by one
+mutator; a debug assertion checks that constructive invariant. Neither payload
+path contains a panicking operation between the payload write and bit
+publication.
 
 ### `thread_cache::AllocationCursor` raw run and bitmap access
 
@@ -440,8 +452,9 @@ only from a fully initialized published run and remains private to callers
 which retain the heap. Its only shared mutation is an atomic lease-word CAS;
 after a successful claim, the corresponding atomic allocation word has one
 exclusive writer but may have concurrent atomic readers. Boxed target records
-retain stable addresses until heap teardown, and an allocation-class handle
-keeps that heap alive while loading or copying the current target.
+retain stable addresses until heap teardown. Only a scoped allocator may load
+or copy the current target; its admitted mutator borrow prevents heap teardown
+until that access ends, without making the allocator another heap owner.
 
 ### Run-header and side-metadata access
 

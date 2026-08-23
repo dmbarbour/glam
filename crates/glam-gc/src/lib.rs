@@ -1,9 +1,10 @@
 //! Runtime-local garbage collection support for Glam.
 //!
-//! C4 adds checked direct roots, weak-registry publication, and an exclusive
-//! collection-time registry walk to C3's regional mutator admission and
-//! stop-the-world coordination boundary. Marking and reclamation remain
-//! disabled, so payloads stay live until terminal heap teardown.
+//! C4 adds checked direct roots, weak-registry publication, an exclusive
+//! collection-time registry walk, and mutator-scoped allocation capabilities
+//! to C3's regional mutator admission and stop-the-world coordination
+//! boundary. Marking and reclamation remain disabled, so payloads stay live
+//! until terminal heap teardown.
 
 #![deny(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]
@@ -43,9 +44,9 @@ mod trace;
 #[cfg(feature = "deterministic-test-hooks")]
 mod deterministic;
 
-pub use class::{AllocationClass, UnsupportedLayout};
+pub use class::UnsupportedLayout;
 pub use heap::{CollectionError, CollectionReport, Heap};
-pub use mutator::Mutator;
+pub use mutator::{Allocator, Mutator};
 pub use pointer::Gc;
 pub use root::Root;
 pub use trace::{Trace, Visitor};
@@ -119,10 +120,7 @@ mod tests {
     #[test]
     fn managed_pointer_can_cross_threads_when_its_value_can() {
         let heap = Heap::new();
-        let class = heap
-            .with_mutator(|mutator| mutator.allocation_class::<u64>())
-            .unwrap();
-        let value = heap.with_mutator(|mutator| mutator.alloc(&class, 42_u64));
+        let value = heap.with_mutator(|mutator| mutator.allocator::<u64>().unwrap().alloc(42_u64));
         let worker_heap = heap.clone();
 
         let observed = std::thread::spawn(move || {
@@ -143,17 +141,13 @@ mod tests {
     fn nested_heap_entries_keep_their_authority_separate() {
         let first_heap = Heap::new();
         let second_heap = Heap::new();
-        let first_class = first_heap
-            .with_mutator(|mutator| mutator.allocation_class::<u64>())
-            .unwrap();
-        let second_class = second_heap
-            .with_mutator(|mutator| mutator.allocation_class::<u64>())
-            .unwrap();
 
         first_heap.with_mutator(|first_mutator| {
-            let first = first_mutator.alloc(&first_class, 11_u64);
+            let first_allocator = first_mutator.allocator::<u64>().unwrap();
+            let first = first_allocator.alloc(11_u64);
             second_heap.with_mutator(|second_mutator| {
-                let second = second_mutator.alloc(&second_class, 22_u64);
+                let second_allocator = second_mutator.allocator::<u64>().unwrap();
+                let second = second_allocator.alloc(22_u64);
 
                 // SAFETY: each pointer is paired with the mutator for the heap
                 // which allocated it, and both arena allocations are live.
@@ -170,10 +164,7 @@ mod tests {
     fn wrong_heap_access_fails_before_dereference() {
         let owner = Heap::new();
         let other = Heap::new();
-        let class = owner
-            .with_mutator(|mutator| mutator.allocation_class::<u64>())
-            .unwrap();
-        let value = owner.with_mutator(|mutator| mutator.alloc(&class, 42_u64));
+        let value = owner.with_mutator(|mutator| mutator.allocator::<u64>().unwrap().alloc(42_u64));
 
         let panic = std::panic::catch_unwind(|| {
             other.with_mutator(|mutator| {

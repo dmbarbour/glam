@@ -113,13 +113,13 @@ impl Hash for MetadataIdentity {
     }
 }
 
-/// One reusable typed handle to a heap-local fixed-run allocation class.
+/// Collector-private typed identity for one heap-local allocation class.
 ///
-/// The handle retains its heap domain, but it is not a managed root and does
-/// not retain any allocation. C2C consumes it for payload allocation.
-#[must_use = "an allocation class is required for managed allocation"]
-pub struct AllocationClass<T: Trace> {
-    heap: Arc<HeapInner>,
+/// Heap state owns the durable class entry and run topology. A public scoped
+/// allocator borrows mutator authority and carries this non-owning identity
+/// only for that admitted region.
+pub(crate) struct AllocationClass<T: Trace> {
+    heap: NonNull<HeapInner>,
     metadata: &'static ObjectMetadata,
     id: AllocationClassId,
     shared: Arc<AllocationClassShared>,
@@ -128,13 +128,13 @@ pub struct AllocationClass<T: Trace> {
 
 impl<T: Trace> AllocationClass<T> {
     pub(crate) fn new(
-        heap: Arc<HeapInner>,
+        heap: &HeapInner,
         metadata: &'static ObjectMetadata,
         id: AllocationClassId,
         shared: Arc<AllocationClassShared>,
     ) -> Self {
         Self {
-            heap,
+            heap: NonNull::from(heap),
             metadata,
             id,
             shared,
@@ -143,7 +143,7 @@ impl<T: Trace> AllocationClass<T> {
     }
 
     pub(crate) fn belongs_to(&self, heap: &HeapInner) -> bool {
-        std::ptr::eq(Arc::as_ptr(&self.heap), heap)
+        std::ptr::eq(self.heap.as_ptr(), heap)
     }
 
     pub(crate) fn metadata(&self) -> &'static ObjectMetadata {
@@ -158,20 +158,15 @@ impl<T: Trace> AllocationClass<T> {
         &self.shared
     }
 
-    pub(crate) fn claim_frontier(&self) -> Option<ClaimedAllocationWord> {
-        self.shared.claim_frontier()
+    pub(crate) fn claim_frontier(&self, heap: &HeapInner) -> Option<ClaimedAllocationWord> {
+        debug_assert!(self.belongs_to(heap));
+        self.shared.claim_frontier(heap)
     }
-}
 
-impl<T: Trace> Clone for AllocationClass<T> {
-    fn clone(&self) -> Self {
-        Self {
-            heap: Arc::clone(&self.heap),
-            metadata: self.metadata,
-            id: self.id,
-            shared: Arc::clone(&self.shared),
-            marker: PhantomData,
-        }
+    #[cfg(test)]
+    pub(crate) fn frontier(&self, heap: &HeapInner) -> Option<RunLocation> {
+        debug_assert!(self.belongs_to(heap));
+        self.shared.frontier(heap)
     }
 }
 
@@ -245,12 +240,13 @@ impl AllocationClassShared {
         }
     }
 
-    pub(crate) fn claim_frontier(&self) -> Option<ClaimedAllocationWord> {
+    pub(crate) fn claim_frontier(&self, _heap: &HeapInner) -> Option<ClaimedAllocationWord> {
         let pointer = self.frontier.load(Ordering::Acquire);
         let target = NonNull::new(pointer)?;
-        // SAFETY: the allocation-class handle which reaches this shared state
-        // also retains the heap. The heap owns every boxed run record until all
-        // such handles are gone, and frontier publication uses `Release`.
+        // SAFETY: the caller supplies a live borrow of the heap which owns this
+        // class's boxed run records. Scoped allocator admission prevents that
+        // heap from reaching teardown during the load, and frontier
+        // publication uses `Release`.
         unsafe { target.as_ref() }.claim_allocation_word()
     }
 
@@ -260,10 +256,10 @@ impl AllocationClassShared {
     }
 
     #[cfg(test)]
-    pub(crate) fn frontier(&self) -> Option<RunLocation> {
+    pub(crate) fn frontier(&self, _heap: &HeapInner) -> Option<RunLocation> {
         let pointer = NonNull::new(self.frontier.load(Ordering::Acquire))?;
-        // SAFETY: test callers retain an allocation class and therefore its
-        // heap while inspecting this stable record.
+        // SAFETY: test callers supply a live borrow of the heap which owns the
+        // stable boxed run record.
         Some(unsafe { pointer.as_ref() }.location)
     }
 }
@@ -478,15 +474,11 @@ mod tests {
     #[test]
     fn erased_trace_dispatch_uses_the_canonical_representation() {
         let heap = Heap::new();
-        let leaf_class = heap
-            .with_mutator(|mutator| mutator.allocation_class::<Leaf>())
-            .unwrap();
-        let holder_class = heap
-            .with_mutator(|mutator| mutator.allocation_class::<Holder>())
-            .unwrap();
         heap.with_mutator(|mutator| {
-            let edge = mutator.alloc(&leaf_class, Leaf { _value: 1 });
-            let holder = mutator.alloc(&holder_class, Holder { edge });
+            let leaves = mutator.allocator::<Leaf>().unwrap();
+            let holders = mutator.allocator::<Holder>().unwrap();
+            let edge = leaves.alloc(Leaf { _value: 1 });
+            let holder = holders.alloc(Holder { edge });
             let mut observed = Vec::new();
             let mut collect = |edge| observed.push(edge);
             let mut visitor = Visitor::new(&mut collect);

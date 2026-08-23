@@ -47,7 +47,7 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C4A | completed | checked direct-root construction and access |
 | C4B | completed | weak registry publication and stable root traversal |
 | C4C | completed | concurrent root lifetime and boundary audit |
-| C4D | pending | mutator-scoped allocator capability and ownership migration |
+| C4D | completed | mutator-scoped allocator capability and ownership migration |
 | C5A.0a | pending | mechanical coordinator and managed-data lock split |
 | C5A.0b | pending | atomic request and data-side acknowledgement |
 | C5A.0c | pending | split-state forced-order audit |
@@ -2229,6 +2229,41 @@ Complete this ownership correction before C5 introduces collector traversal:
 C4D settles the class-handle portion of terminal ownership: allocation
 capabilities are not authorized heap owners and none survive a drained mutator
 set. C6D still owns the terminal-finalization protocol itself.
+
+#### C4D completion
+
+Completed on 2026-08-23:
+
+- The public reusable `AllocationClass<T>` and `Mutator::alloc` surface is
+  removed. `Mutator::allocator` now returns `Allocator<'mutator, T>` with real
+  borrows of the admitted mutator's heap and thread cache, and allocation is
+  exclusively `Allocator::alloc(T)`.
+- Durable class entries, run pools, and atomic frontier state remain heap
+  owned. The collector-private typed class identity carries only a non-owning
+  heap pointer, canonical metadata/class identity, and a stable frontier cell;
+  it is neither exported nor an additional heap owner.
+- `Heap::with_mutator`'s higher-ranked closure rejects allocator escape, and a
+  separate compile-fail fixture rejects scoped-thread transfer. `Gc<T>` and
+  explicitly registered `Root<T>` remain the escaping value forms.
+- Public foreign allocator construction is unrepresentable. Private raw-state
+  boundaries retain heap-provenance checks, while the hot allocation path uses
+  constructive provenance plus a debug assertion instead of a release-build
+  domain comparison per object.
+- Fixtures now reacquire scoped allocators while reusing the same heap-owned
+  dense class and lock-free frontier. Terminal teardown no longer waits on an
+  escaped class handle, and a forced `mem::forget` fixture proves that leaking
+  an inert scoped allocator does not retain its heap.
+- Removing heap ownership from the class identity exposed one stale unsafe
+  proof around the raw frontier pointer. Frontier reads now require a live
+  `HeapInner` borrow, so admitted mutator authority—not handle ownership—keeps
+  the heap-owned run record alive during dereference.
+- No cross-region class cache was added. Repeated metadata/class lookup remains
+  a cold operation to profile before introducing weak per-thread/per-heap
+  caching.
+
+The authoritative crate check passes formatting, Clippy with warnings denied,
+the unsafe inventory, 121 unit tests, 6 Loom models, and 8 compile-fail/doc
+tests. C5A.0a is now the next implementation checkpoint.
 
 ### Post-C4 Review of C5 through C8
 

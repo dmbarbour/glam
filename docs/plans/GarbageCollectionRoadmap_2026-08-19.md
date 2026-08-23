@@ -341,11 +341,11 @@ These choices are intentionally unresolved rather than accidental drift:
   and a thin weak registry entry. I2 still chooses whether public `Value` uses
   that root directly or wraps it to keep eligible scalars inline; no alternate
   collector root-cell representation is required;
-- C6 selects a last-value-domain-owner terminal teardown protocol which does
-  not let escaped roots retain or revive the heap and does not run
-  mutator-capable destructors without their promised context. That decision
-  also settles whether escaped `AllocationClass<T>` handles remain authorized
-  heap owners or become weak and inert; and
+- C4D has already made allocation capabilities mutator-scoped and removed
+  them as heap owners. C6 still selects a last-value-domain-owner terminal
+  teardown protocol which does not let escaped roots retain or revive the heap
+  and does not run mutator-capable destructors without their promised context;
+  and
 - I8 decides whether `SharedRuntimeNet` remains synchronized external storage
   with an exact visitor or becomes a managed outer node.
 
