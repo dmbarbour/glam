@@ -1,8 +1,8 @@
 # Glam GC Subcrate Implementation Plan — 2026-08-19
 
-Status: in progress; Phases C0 through C5B are complete, including the C2C.6
+Status: in progress; Phases C0 through C5C are complete, including the C2C.6
 verification follow-up. The mandatory post-C1, post-C2C, post-C3E, and post-C4
-downstream reviews are complete. C5C.1 is next.
+downstream reviews are complete. C5D.1 is next.
 
 This plan implements an exact, non-moving, runtime-local tracing collector
 without depending on Glam value semantics. The governing requirements and
@@ -56,8 +56,8 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C5A.3 | completed | failed mark-attempt invalidation |
 | C5B.1 | completed | stable root seeding |
 | C5B.2 | completed | checked non-recursive graph marking |
-| C5C.1 | pending | trace and worklist panic recovery |
-| C5C.2 | pending | invalid-edge recovery and retry |
+| C5C.1 | completed | trace and worklist panic recovery |
+| C5C.2 | completed | invalid-edge recovery and retry |
 | C5D.1 | pending | successful mark publication and report |
 | C5D.2 | pending | reachability oracle, scale, and audit |
 | C6A.1 | pending | dead-set classification without reuse |
@@ -2481,16 +2481,25 @@ Execute C5 as the following independently verified checkpoints:
   diamonds, deep chains, wide graphs, and shared logical collection spines
   without changing allocation, lease, frontier, or pressure state.
 - **C5C.1 — trace and worklist panic recovery.** Force visitor and worklist
-  panics at zero, one, and many traced edges. Invalidate the partial marks,
-  discard aggregate counters, recover managed data and coordinator phase,
-  preserve or coalesce the request hint according to the existing coordinator
-  contract, then prove ordinary mutation and a clean retry. Invalidation is
-  logical: it publishes no result and performs no bitmap clear.
-- **C5C.2 — invalid-edge recovery and retry.** Force foreign-heap, stale,
-  non-slot, unallocated, and canonical-metadata mismatches before unsafe
-  dereference. Each invariant violation panics, publishes no mark result, and
-  leaves the heap usable. A still-reachable invalid edge must panic again on
-  retry.
+  panics after zero, one, and many reported edges, plus injected worklist
+  publication panics after zero, one, and many completed enqueues. Make actual
+  edge-driven capacity growth use `try_reserve` before `Vec::push`, so capacity
+  exhaustion is an ordinary attempt panic rather than an implicit infallible
+  allocation assumption. Invalidate the partial marks, discard proof-carrying
+  work items and aggregate counters, recover managed data and coordinator
+  phase, preserve or coalesce the request hint according to the existing
+  coordinator contract, then prove ordinary mutation and a clean retry.
+  Invalidation is logical: it publishes no result and performs no bitmap
+  clear.
+- **C5C.2 — invalid-edge recovery and retry.** Force live foreign-heap, stale
+  foreign, non-slot, and unallocated reported edges before unsafe dereference.
+  Each invariant violation panics, publishes no mark result, and leaves both
+  heaps usable. A still-reachable invalid edge must panic again on retry.
+  Canonical metadata is recovered by checked discovery and sealed into private
+  `TraceWork`; drain has no independent claimed type to mismatch. The
+  pointer-only `ErasedGc` visitor deliberately treats the owning run's
+  canonical metadata as authoritative, while typed root construction retains
+  its separate representation-mismatch check.
 - **C5D.1 — successful mark publication and report.** Treat the completed
   bitmap as authoritative and publish only scalar root, traced-object,
   marked-slot, and conservative-retention statistics after the complete
@@ -2651,8 +2660,41 @@ Completed on 2026-08-23:
   duplicate worklist entries.
 - Focused fixtures prove root counting and post-seed trace ordering, a cycle
   combined with duplicate and diamond edges, an unrooted allocation, a
-  20,000-node chain, and 2,048 branches sharing a 64-node tail. The crate now
-  passes 136 unit tests, 6 Loom models, and 8 compile-fail/doc tests.
+  native 20,000-node chain, and 2,048 branches sharing a 64-node tail. Miri
+  exercises the identical chain path with 256 nodes, preserving pointer and
+  traversal validation while leaving the stack-depth stress to native
+  execution. The crate now passes 136 unit tests, 6 Loom models, and 8
+  compile-fail/doc tests.
+
+#### C5C completion
+
+Completed on 2026-08-23:
+
+- Edge-driven worklist publication now performs explicit `try_reserve` growth
+  before `Vec::push`. Capacity failure, trace panic, and an injected panic
+  between a new edge's mark and its work-item publication all unwind through
+  the existing collection-attempt guard. Partial marks remain unpublished
+  scratch, the worklist and counters are discarded, managed-data poison is
+  cleared, ordinary admission is restored, and the request is relatched.
+- Deterministic fixtures panic after zero, one, and many reported edges and
+  after zero, one, and many completed worklist pushes. They inspect the exact
+  partial bitmap before retry, preserve the original panic payload, and prove
+  that a clean retry clears all scratch and traces every reachable allocation.
+  The shared graph fixture was corrected to recover its own mutex poison, as
+  required by the existing rule that `Trace` remain replayable after its
+  visitor panics.
+- Adversarial trace fixtures report live foreign-heap, stale-heap, interior,
+  and exact-but-unallocated pointers. Checked discovery rejects every case
+  before target trace dispatch. The failure repeats while the invalid holder
+  remains rooted; releasing it permits collection and subsequent allocation,
+  and the live foreign heap remains independently collectable.
+- Canonical metadata mismatch is not a separate erased-edge failure mode.
+  Pointer-only `ErasedGc` makes no representation claim; checked discovery
+  recovers the owning run's canonical metadata and seals it in private
+  `TraceWork`. Typed root construction continues to verify an independently
+  requested representation.
+- Focused verification now passes 141 unit tests, 6 Loom models, and 8
+  compile-fail/doc tests.
 
 ## Phase C6 — Sweep, Mutator Finalization, Retry, and Quarantine
 
@@ -2796,7 +2838,7 @@ into marking:
 Each checkpoint must leave the heap in a usable documented phase after every
 recoverable panic injected by its own tests.
 
-#### Pressure and Reuse Constraints Carried into C6
+### Pressure and Reuse Constraints Carried into C6
 
 - The first successful sweep replaces C2C's historical publication count with
   assigned-run occupancy and the heap-wide recycled-run list described below.

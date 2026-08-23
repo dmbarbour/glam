@@ -60,6 +60,11 @@ graph tracing remains disabled through C5A. C5B reserves root work outside the
 data lock, counts live root entries independently, marks each allocation before
 enqueueing it, and traces the resulting graph through a checked non-recursive
 worklist. Reclamation remains disabled.
+C5C makes edge-driven worklist growth explicitly fallible, proves recovery
+from trace and work-publication panics, and rejects live foreign, stale,
+non-slot, and unallocated reported edges before unsafe dispatch. A failed
+attempt still publishes no reachability result and reclamation remains
+disabled.
 
 The crate denies unsafe code by default. `src/lib.rs` gives the reviewed
 `pointer`, `root`, `mutator`, `trace`, `mutation`, `thread_cache`, and unit-test
@@ -150,6 +155,19 @@ and every unsafe function, implementation, and block are checked into
   exactly once. Each reported edge repeats checked discovery and marks before
   enqueueing, which terminates cycles, diamonds, repeated edges, and duplicate
   roots without recursive Rust calls.
+- Edge-driven worklist growth calls `try_reserve` before `push`; allocation
+  failure therefore unwinds through the same attempt guard as a `Trace` panic.
+  There is an intentional failure window after a newly discovered edge is
+  marked and before its work item is published. A panic in that window leaves
+  only an unpublished scratch bit; dropping the attempt discards every queued
+  proof, and the next attempt clears the bit before rediscovery.
+- Checked discovery is the only constructor of production `TraceWork`. A
+  visitor-reported pointer must identify an exact live slot in the collecting
+  heap before its owning run's canonical metadata is retained. Foreign, stale,
+  interior, and unallocated addresses therefore panic before unsafe trace
+  dispatch. Pointer-only `ErasedGc` carries no independent claimed type;
+  canonical representation mismatch remains a typed-root construction check,
+  not a second worklist-drain check.
 - If an attempt panics, Rust drops its worklist and counters before the
   collection guard recovers and clears any managed-data mutex poison. Recovery
   does not scan or clear partial marks. It relatches collection before
@@ -743,8 +761,19 @@ mutation closure runs.
   verify clone-versus-distinct-root registry behavior and dead weak-entry
   pruning, and prove that trace dispatch begins only after root seeding. Exact
   non-recursive traversal covers duplicate edges, a cycle, a diamond, an
-  unrooted allocation, a 20,000-node chain, and 2,048 wide branches sharing a
-  64-node tail. Every reachable allocation traces once despite repeated paths.
+  unrooted allocation, a native 20,000-node chain, and 2,048 wide branches
+  sharing a 64-node tail. Miri runs the same linear-chain path with 256 nodes;
+  native execution retains the stack-depth stress while interpretation checks
+  the same allocation, provenance, discovery, and worklist operations at
+  bounded cost. Every reachable allocation traces once despite repeated paths.
+- C5C injects trace and work-publication panics after zero, one, and many
+  reported edges or completed pushes. The tests observe the exact partial mark
+  scratch, original panic payload, mutex-poison recovery, restored admission,
+  relatched request, and successful clean retry. Separate adversarial fixtures
+  report a live foreign pointer, a pointer from a dropped heap, an interior
+  address, and an unallocated exact slot. Each is rejected before target trace
+  dispatch, repeats while its invalid holder remains rooted, and leaves the
+  involved heaps usable after that root is released.
 - The ordinary crate checks, exact unsafe inventory, focused Miri run, and
   repository-wide checks are required at completed checkpoints.
 - Miri passes all implemented tests with leak checking enabled. C1's temporary

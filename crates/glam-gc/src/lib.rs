@@ -1,9 +1,10 @@
 //! Runtime-local garbage collection support for Glam.
 //!
-//! C5B adds mark-before-enqueue root discovery and checked, non-recursive graph
-//! traversal to C5A's mark-bitmap and failed-attempt boundary. Reclamation
-//! remains disabled, so unreachable payloads still stay live until terminal
-//! heap teardown.
+//! C5C hardens C5B's checked, non-recursive graph traversal against trace,
+//! worklist-publication, and invalid-edge failures. Failed attempts retain no
+//! authoritative result and retry from a freshly cleared mark bitmap.
+//! Reclamation remains disabled, so unreachable payloads still stay live
+//! until terminal heap teardown.
 
 #![deny(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]

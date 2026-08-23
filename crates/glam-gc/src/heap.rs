@@ -485,6 +485,10 @@ struct MarkAttempt {
     root_count: usize,
     marked_slot_count: usize,
     traced_object_count: usize,
+    #[cfg(test)]
+    panic_before_worklist_push: Option<usize>,
+    #[cfg(test)]
+    completed_worklist_pushes: usize,
 }
 
 impl MarkAttempt {
@@ -516,11 +520,39 @@ impl MarkAttempt {
             .marked_slot_count
             .checked_add(1)
             .expect("marked-slot count exhausted");
-        self.worklist.push(TraceWork {
+        self.push_work(TraceWork {
             value,
             metadata: slot.metadata,
         });
         Ok(true)
+    }
+
+    fn push_work(&mut self, work: TraceWork) {
+        if self.worklist.len() == self.worklist.capacity() {
+            self.worklist
+                .try_reserve(1)
+                .expect("collector object worklist capacity exhausted");
+        }
+        #[cfg(test)]
+        if self.panic_before_worklist_push == Some(self.completed_worklist_pushes) {
+            panic!(
+                "injected worklist panic after {} completed pushes",
+                self.completed_worklist_pushes
+            );
+        }
+        self.worklist.push(work);
+        #[cfg(test)]
+        {
+            self.completed_worklist_pushes = self
+                .completed_worklist_pushes
+                .checked_add(1)
+                .expect("test worklist-push count exhausted");
+        }
+    }
+
+    #[cfg(test)]
+    fn inject_worklist_panic_after(&mut self, completed_pushes: usize) {
+        self.panic_before_worklist_push = Some(completed_pushes);
     }
 
     fn seed_registered_roots(
@@ -1611,7 +1643,7 @@ fn allocation_cursor(
 mod tests {
     use std::collections::HashSet;
     use std::panic::{AssertUnwindSafe, catch_unwind};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Barrier, Mutex, mpsc};
     use std::time::Duration;
 
@@ -1660,6 +1692,26 @@ mod tests {
             .lock()
             .unwrap()
             .collector_slot_is_marked(slot)
+    }
+
+    fn assert_failed_collection_restored(heap: &Heap) {
+        assert!(
+            !heap.inner.data.is_poisoned(),
+            "failed collection must recover the managed-data mutex"
+        );
+        let restored = heap.inner.coordinator_snapshot();
+        assert_eq!(restored.phase, AdmissionPhase::Ordinary);
+        assert_eq!(restored.active_collection, None);
+        assert_eq!(restored.completed_collection_epoch, 0);
+        assert!(restored.collection_requested);
+    }
+
+    fn panic_string(panic: &(dyn std::any::Any + Send)) -> &str {
+        panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&'static str>().copied())
+            .expect("test panic must carry a string payload")
     }
 
     struct FirstType {
@@ -1734,13 +1786,11 @@ mod tests {
     unsafe impl Trace for GraphNode {
         fn trace(&self, visitor: &mut Visitor<'_>) {
             self.traces.fetch_add(1, Ordering::Relaxed);
-            for edge in self
-                .edges
-                .lock()
-                .expect("graph-node edges should not be poisoned")
-                .iter()
-                .copied()
-            {
+            let edges = self.edges.lock().unwrap_or_else(|poison| {
+                self.edges.clear_poison();
+                poison.into_inner()
+            });
+            for edge in edges.iter().copied() {
                 visitor.visit(edge);
             }
         }
@@ -1770,6 +1820,80 @@ mod tests {
                     .expect("graph-node edges should not be poisoned")
                     .push(target);
             });
+        }
+    }
+
+    struct PanickingTraceNode {
+        edges: Vec<crate::Gc<PanickingTraceNode>>,
+        panic_after_edges: Option<usize>,
+        armed: Arc<AtomicBool>,
+        traces: Arc<AtomicUsize>,
+    }
+
+    // SAFETY: `edges` contains every managed edge in this immutable test
+    // representation. The injected panic leaves the value unchanged and safe
+    // to trace again from the beginning, as required by `Trace`.
+    unsafe impl Trace for PanickingTraceNode {
+        fn trace(&self, visitor: &mut Visitor<'_>) {
+            self.traces.fetch_add(1, Ordering::Relaxed);
+            for (index, edge) in self.edges.iter().copied().enumerate() {
+                if self.armed.load(Ordering::Acquire) && self.panic_after_edges == Some(index) {
+                    panic!("injected trace panic after {index} reported edges");
+                }
+                visitor.visit(edge);
+            }
+            if self.armed.load(Ordering::Acquire)
+                && self.panic_after_edges == Some(self.edges.len())
+            {
+                panic!(
+                    "injected trace panic after {} reported edges",
+                    self.edges.len()
+                );
+            }
+        }
+    }
+
+    struct InvalidEdgeHolder {
+        edge: crate::Gc<GraphNode>,
+        traces: Arc<AtomicUsize>,
+    }
+
+    // SAFETY: the holder reports its only represented managed edge. Individual
+    // C5C fixtures deliberately violate that edge's same-heap/live-slot
+    // invariant so checked discovery can prove it rejects the pointer before
+    // unsafe trace dispatch.
+    unsafe impl Trace for InvalidEdgeHolder {
+        fn trace(&self, visitor: &mut Visitor<'_>) {
+            self.traces.fetch_add(1, Ordering::Relaxed);
+            visitor.visit(self.edge);
+        }
+    }
+
+    fn invalid_edge_holder(
+        heap: &Heap,
+        edge: crate::Gc<GraphNode>,
+        traces: Arc<AtomicUsize>,
+    ) -> crate::Root<InvalidEdgeHolder> {
+        heap.with_mutator(|mutator| {
+            let holder = mutator
+                .allocator::<InvalidEdgeHolder>()
+                .unwrap()
+                .alloc(InvalidEdgeHolder { edge, traces });
+            mutator.root(holder)
+        })
+    }
+
+    fn assert_reachable_invalid_edge_repeats(
+        heap: &Heap,
+        expected_message: &str,
+        traces: &AtomicUsize,
+    ) {
+        for expected_traces in 1..=2 {
+            let panic = catch_unwind(AssertUnwindSafe(|| heap.collect_full()))
+                .expect_err("reachable invalid collector edge must panic");
+            assert_eq!(panic_string(panic.as_ref()), expected_message);
+            assert_eq!(traces.load(Ordering::Relaxed), expected_traces);
+            assert_failed_collection_restored(heap);
         }
     }
 
@@ -3140,6 +3264,286 @@ mod tests {
     }
 
     #[test]
+    fn trace_panics_after_partial_edge_reporting_are_recoverable() {
+        const EDGE_COUNT: usize = 6;
+
+        for reported_edges in [0_usize, 1, 4] {
+            let heap = Heap::new();
+            let armed = Arc::new(AtomicBool::new(true));
+            let root_traces = Arc::new(AtomicUsize::new(0));
+            let leaf_traces = (0..EDGE_COUNT)
+                .map(|_| Arc::new(AtomicUsize::new(0)))
+                .collect::<Vec<_>>();
+            let (root, slots) = heap.with_mutator(|mutator| {
+                let allocator = mutator.allocator::<PanickingTraceNode>().unwrap();
+                let leaves = leaf_traces
+                    .iter()
+                    .map(|traces| {
+                        allocator.alloc(PanickingTraceNode {
+                            edges: Vec::new(),
+                            panic_after_edges: None,
+                            armed: Arc::clone(&armed),
+                            traces: Arc::clone(traces),
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let root_value = allocator.alloc(PanickingTraceNode {
+                    edges: leaves.clone(),
+                    panic_after_edges: Some(reported_edges),
+                    armed: Arc::clone(&armed),
+                    traces: Arc::clone(&root_traces),
+                });
+                let slots = std::iter::once(root_value)
+                    .chain(leaves)
+                    .map(|value| collector_slot(&heap, value))
+                    .collect::<Vec<_>>();
+                (mutator.root(root_value), slots)
+            });
+
+            let panic = catch_unwind(AssertUnwindSafe(|| heap.collect_full()))
+                .expect_err("armed trace must panic");
+            assert_eq!(
+                panic_string(panic.as_ref()),
+                format!("injected trace panic after {reported_edges} reported edges")
+            );
+            assert_failed_collection_restored(&heap);
+            assert_eq!(root_traces.load(Ordering::Relaxed), 1);
+            assert!(slot_is_marked(&heap, slots[0]));
+            for (index, slot) in slots[1..].iter().copied().enumerate() {
+                assert_eq!(
+                    slot_is_marked(&heap, slot),
+                    index < reported_edges,
+                    "only edges reported before the trace panic may remain marked"
+                );
+                assert_eq!(leaf_traces[index].load(Ordering::Relaxed), 0);
+            }
+
+            armed.store(false, Ordering::Release);
+            assert_eq!(heap.collect_full().unwrap().epoch(), 1);
+            assert_eq!(root_traces.load(Ordering::Relaxed), 2);
+            assert!(
+                slots
+                    .iter()
+                    .copied()
+                    .all(|slot| slot_is_marked(&heap, slot))
+            );
+            assert!(
+                leaf_traces
+                    .iter()
+                    .all(|traces| traces.load(Ordering::Relaxed) == 1)
+            );
+            heap.with_mutator(|mutator| assert_eq!(root.get(mutator).edges.len(), EDGE_COUNT));
+        }
+    }
+
+    #[test]
+    fn worklist_publication_panics_leave_retryable_mark_scratch() {
+        const EDGE_COUNT: usize = 8;
+
+        for completed_pushes in [0_usize, 1, 5] {
+            let heap = Heap::new();
+            let root_traces = Arc::new(AtomicUsize::new(0));
+            let leaf_traces = (0..EDGE_COUNT)
+                .map(|_| Arc::new(AtomicUsize::new(0)))
+                .collect::<Vec<_>>();
+            let (root, slots) = heap.with_mutator(|mutator| {
+                let allocator = mutator.allocator::<GraphNode>().unwrap();
+                let leaves = leaf_traces
+                    .iter()
+                    .map(|traces| allocator.alloc(graph_node(Arc::clone(traces))))
+                    .collect::<Vec<_>>();
+                let root_value = allocator.alloc(GraphNode {
+                    edges: Mutex::new(leaves.clone()),
+                    traces: Arc::clone(&root_traces),
+                });
+                let slots = std::iter::once(root_value)
+                    .chain(leaves)
+                    .map(|value| collector_slot(&heap, value))
+                    .collect::<Vec<_>>();
+                (mutator.root(root_value), slots)
+            });
+
+            heap.request_collection();
+            let epoch = heap.inner.elect_idle_collection_for_test();
+            let panic = catch_unwind(AssertUnwindSafe(|| {
+                heap.inner.run_synthetic_collection_with_mark_work(
+                    epoch,
+                    false,
+                    |attempt, _| attempt.inject_worklist_panic_after(completed_pushes),
+                    || {},
+                    |_| {},
+                );
+            }))
+            .expect_err("injected worklist publication must panic");
+            assert_eq!(
+                panic_string(panic.as_ref()),
+                format!("injected worklist panic after {completed_pushes} completed pushes")
+            );
+            assert_failed_collection_restored(&heap);
+            assert!(slot_is_marked(&heap, slots[0]));
+            for (index, slot) in slots[1..].iter().copied().enumerate() {
+                assert_eq!(
+                    slot_is_marked(&heap, slot),
+                    index < completed_pushes,
+                    "the edge marked immediately before the failed publication remains scratch"
+                );
+            }
+
+            assert_eq!(heap.collect_full().unwrap().epoch(), 1);
+            assert_eq!(
+                root_traces.load(Ordering::Relaxed),
+                if completed_pushes == 0 { 1 } else { 2 },
+                "a failed visitor publication retraces the root on retry"
+            );
+            assert!(
+                leaf_traces
+                    .iter()
+                    .all(|traces| traces.load(Ordering::Relaxed) == 1)
+            );
+            assert!(
+                slots
+                    .iter()
+                    .copied()
+                    .all(|slot| slot_is_marked(&heap, slot))
+            );
+            heap.with_mutator(|mutator| {
+                assert_eq!(root.get(mutator).edges.lock().unwrap().len(), EDGE_COUNT)
+            });
+        }
+    }
+
+    #[test]
+    fn live_foreign_edges_fail_repeatedly_without_tracing_the_foreign_value() {
+        let owner = Heap::new();
+        let foreign = Heap::new();
+        let foreign_traces = Arc::new(AtomicUsize::new(0));
+        let (foreign_value, foreign_root) = foreign.with_mutator(|mutator| {
+            let value = mutator
+                .allocator::<GraphNode>()
+                .unwrap()
+                .alloc(graph_node(Arc::clone(&foreign_traces)));
+            (value, mutator.root(value))
+        });
+        let holder_traces = Arc::new(AtomicUsize::new(0));
+        let holder = invalid_edge_holder(&owner, foreign_value, Arc::clone(&holder_traces));
+
+        assert_reachable_invalid_edge_repeats(
+            &owner,
+            "collector edge does not identify an exact managed slot",
+            &holder_traces,
+        );
+        assert_eq!(foreign_traces.load(Ordering::Relaxed), 0);
+        assert_eq!(foreign.collect_full().unwrap().epoch(), 1);
+        assert_eq!(foreign_traces.load(Ordering::Relaxed), 1);
+        foreign.with_mutator(|mutator| {
+            assert!(foreign_root.get(mutator).edges.lock().unwrap().is_empty())
+        });
+
+        drop(holder);
+        assert_eq!(owner.collect_full().unwrap().epoch(), 1);
+        owner.with_mutator(|mutator| {
+            let value = mutator.allocator::<u64>().unwrap().alloc(42);
+            let root = mutator.root(value);
+            assert_eq!(*root.get(mutator), 42);
+        });
+    }
+
+    #[test]
+    fn stale_and_non_slot_edges_fail_before_trace_dispatch() {
+        let stale_owner = Heap::new();
+        let _owner_reservation = allocate(&stale_owner, 1_u64);
+        let stale = {
+            let temporary = Heap::new();
+            allocate(&temporary, graph_node(Arc::new(AtomicUsize::new(0))))
+        };
+        let stale_traces = Arc::new(AtomicUsize::new(0));
+        let stale_holder = invalid_edge_holder(&stale_owner, stale, Arc::clone(&stale_traces));
+        assert_reachable_invalid_edge_repeats(
+            &stale_owner,
+            "collector edge does not identify an exact managed slot",
+            &stale_traces,
+        );
+        drop(stale_holder);
+        assert_eq!(stale_owner.collect_full().unwrap().epoch(), 1);
+
+        let non_slot_owner = Heap::new();
+        let valid = allocate(&non_slot_owner, graph_node(Arc::new(AtomicUsize::new(0))));
+        let interior = std::ptr::NonNull::new(
+            valid
+                .erase()
+                .as_ptr()
+                .as_ptr()
+                .cast::<u8>()
+                .wrapping_add(1)
+                .cast::<GraphNode>(),
+        )
+        .unwrap();
+        // SAFETY: this deliberately invalid handle is never dereferenced. The
+        // C5C fixture reports it only to prove collector discovery rejects a
+        // non-slot address before trace dispatch.
+        let interior = unsafe { crate::Gc::<GraphNode>::from_raw(interior) };
+        let non_slot_traces = Arc::new(AtomicUsize::new(0));
+        let non_slot_holder =
+            invalid_edge_holder(&non_slot_owner, interior, Arc::clone(&non_slot_traces));
+        assert_reachable_invalid_edge_repeats(
+            &non_slot_owner,
+            "collector edge does not identify an exact managed slot",
+            &non_slot_traces,
+        );
+        drop(non_slot_holder);
+        assert_eq!(non_slot_owner.collect_full().unwrap().epoch(), 1);
+
+        for heap in [&stale_owner, &non_slot_owner] {
+            heap.with_mutator(|mutator| {
+                let _ = mutator.allocator::<u64>().unwrap().alloc(1);
+            });
+        }
+    }
+
+    #[test]
+    fn unallocated_slot_edges_fail_before_trace_dispatch() {
+        let heap = Heap::new();
+        let class = internal_class::<GraphNode>(&heap);
+        let run = heap.inner.prepare_run(&class).unwrap();
+        let pointer = {
+            let data = heap.inner.data.lock().unwrap();
+            let run = data.arena.run_at(run).unwrap();
+            let geometry = RunGeometry::derive(
+                metadata_for::<GraphNode>().layout(),
+                metadata_for::<GraphNode>().requested_slot_size(),
+            )
+            .unwrap();
+            std::ptr::NonNull::new(
+                run.pointer()
+                    .as_ptr()
+                    .wrapping_add(geometry.first_slot_offset)
+                    .cast::<GraphNode>(),
+            )
+            .unwrap()
+        };
+        // SAFETY: this deliberately unallocated handle is never dereferenced.
+        // The C5C fixture reports it only to prove collector discovery checks
+        // the allocation bitmap before trace dispatch.
+        let edge = unsafe { crate::Gc::<GraphNode>::from_raw(pointer) };
+        let holder_traces = Arc::new(AtomicUsize::new(0));
+        let holder = invalid_edge_holder(&heap, edge, Arc::clone(&holder_traces));
+
+        assert_reachable_invalid_edge_repeats(
+            &heap,
+            "collector edge does not identify an allocated value",
+            &holder_traces,
+        );
+        drop(holder);
+        assert_eq!(heap.collect_full().unwrap().epoch(), 1);
+        heap.with_mutator(|mutator| {
+            let _ = mutator
+                .allocator::<GraphNode>()
+                .unwrap()
+                .alloc(graph_node(Arc::new(AtomicUsize::new(0))));
+        });
+    }
+
+    #[test]
     fn root_seeding_counts_entries_but_enqueues_each_allocation_once() {
         let heap = Heap::new();
         let traces = Arc::new(AtomicUsize::new(0));
@@ -3242,6 +3646,9 @@ mod tests {
 
     #[test]
     fn checked_nonrecursive_marking_handles_a_deep_chain() {
+        #[cfg(miri)]
+        const DEPTH: usize = 256;
+        #[cfg(not(miri))]
         const DEPTH: usize = 20_000;
 
         let heap = Heap::new();

@@ -61,12 +61,16 @@ crates/glam-gc/src/heap.rs:                assert_eq!(unsafe { value.get_uncheck
 crates/glam-gc/src/heap.rs:            unsafe { owner.run.pointer().add(offset).cast::<u64>() }
 crates/glam-gc/src/heap.rs:            unsafe { work.metadata.trace(work.value.as_ptr(), &mut visitor) };
 crates/glam-gc/src/heap.rs:        assert_eq!(unsafe { pointer.as_ref() }._value, 73);
+crates/glam-gc/src/heap.rs:        let edge = unsafe { crate::Gc::<GraphNode>::from_raw(pointer) };
+crates/glam-gc/src/heap.rs:        let interior = unsafe { crate::Gc::<GraphNode>::from_raw(interior) };
 crates/glam-gc/src/heap.rs:        unsafe {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for DropCounter {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for DroppingType {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for FirstType {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for GraphNode {
+crates/glam-gc/src/heap.rs:    unsafe impl Trace for InvalidEdgeHolder {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for OverflowingSlot {
+crates/glam-gc/src/heap.rs:    unsafe impl Trace for PanickingTraceNode {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for SecondType {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for WideSlot {
 crates/glam-gc/src/lib.rs:                let _ = unsafe { value.get_unchecked(mutator) };
