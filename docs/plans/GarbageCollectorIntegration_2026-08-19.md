@@ -171,11 +171,15 @@ classified optimistically.
 - Do not create a `heap -> runtime state -> heap` ownership cycle.
 - Give the value factory a narrow allocation/rooting handle, not raw collector
   internals.
-- Let runtime/value-factory construction discover and retain reusable
-  `AllocationClass<T>` handles for common managed representations. Rare classes
-  may use first-use discovery, but ordinary value allocation must not hash
-  or otherwise look up `TypeId` on every object. Once a class is retained,
-  allocation uses its dense ID and canonical metadata pointer directly.
+- Let runtime/value-factory construction pre-discover common heap-owned classes,
+  but do not retain public allocator capabilities across mutator regions.
+  Every actual allocation uses an `Allocator<'_, T>` borrowed from its current
+  mutator. If repeated scoped lookup becomes measurable, cache canonical
+  metadata, dense class IDs, and stable frontier cells only in the collector's
+  existing per-thread/per-runtime-heap state. Such cache entries retain weak
+  heap identity rather than owning the runtime value domain. Rare classes may
+  use first-use discovery; the allocation hot path must not hash `TypeId` per
+  object once its scoped allocator is obtained.
 - Add runtime-local tuning with collection disabled by default.
 - Centralize Glam's node-size policy when constructing canonical object
   metadata. That policy may request a slot size larger than the Rust payload;

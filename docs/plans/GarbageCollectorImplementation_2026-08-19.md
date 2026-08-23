@@ -47,24 +47,25 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C4A | completed | checked direct-root construction and access |
 | C4B | completed | weak registry publication and stable root traversal |
 | C4C | completed | concurrent root lifetime and boundary audit |
+| C4D | pending | mutator-scoped allocator capability and ownership migration |
 | C5A.0a | pending | mechanical coordinator and managed-data lock split |
-| C5A.0b | pending | pressure-revision handoff across split state |
+| C5A.0b | pending | atomic request and data-side acknowledgement |
 | C5A.0c | pending | split-state forced-order audit |
-| C5A.1 | pending | mark color and allocation publication |
-| C5A.2 | pending | checked collector lookup and run summaries |
-| C5A.3 | pending | mark-attempt rollback substrate |
+| C5A.1 | pending | clear-before-mark bitmap operations |
+| C5A.2 | pending | checked collector lookup |
+| C5A.3 | pending | failed mark-attempt invalidation |
 | C5B.1 | pending | stable root seeding |
 | C5B.2 | pending | checked non-recursive graph marking |
 | C5C.1 | pending | trace and worklist panic recovery |
 | C5C.2 | pending | invalid-edge recovery and retry |
-| C5D.1 | pending | successful mark commit and report |
+| C5D.1 | pending | successful mark publication and report |
 | C5D.2 | pending | reachability oracle, scale, and audit |
 | C6A.1 | pending | dead-set classification without reuse |
 | C6A.2a | pending | allocation-lease revocation and epoch publication |
 | C6A.2b | pending | class frontier and run-pool retirement |
 | C6A.2c | pending | wholly dead no-drop runs and free-run reuse |
-| C6A.3a | pending | lease-derived lazy-sweep publication |
-| C6A.3b | pending | partial lazy sweep and first claim |
+| C6A.3a | pending | eager partial no-drop sweep |
+| C6A.3b | pending | swept allocator publication |
 | C6A.4 | pending | assigned-run pressure |
 | C6B.1 | pending | finalization batch and non-rootability |
 | C6B.2 | pending | finalizer handoff and destruction |
@@ -82,6 +83,7 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C8A | pending | tuning and reporting boundary |
 | C8B.1 | pending | measurement harness |
 | C8B.2 | pending | geometry and workload measurements |
+| C8B.3 | pending | paged array tracing exploration |
 | C8C | pending | final collector audit |
 
 ## Intended Crate Shape
@@ -120,7 +122,7 @@ pub struct Heap { /* shared heap ownership */ }
 pub struct Mutator<'h> { /* !Send region authority */ }
 pub struct Gc<T: Trace> { /* Copy, non-rooting */ }
 pub struct Root<T: Trace> { /* Clone, Send + Sync as appropriate */ }
-pub struct AllocationClass<T: Trace> { /* heap-local dense class identity */ }
+pub struct Allocator<'m, T: Trace> { /* mutator-scoped typed allocation */ }
 
 impl Heap {
     pub fn with_mutator<R>(&self, f: impl for<'h> FnOnce(&Mutator<'h>) -> R) -> R;
@@ -129,8 +131,11 @@ impl Heap {
 }
 
 impl Mutator<'_> {
-    pub fn allocation_class<T: Trace>(&self) -> Result<AllocationClass<T>, UnsupportedLayout>;
-    pub fn alloc<T: Trace>(&self, class: &AllocationClass<T>, value: T) -> Gc<T>;
+    pub fn allocator<T: Trace>(&self) -> Result<Allocator<'_, T>, UnsupportedLayout>;
+}
+
+impl<T: Trace> Allocator<'_, T> {
+    pub fn alloc(&self, value: T) -> Gc<T>;
 }
 
 impl<T: Trace> Gc<T> {
@@ -145,6 +150,16 @@ pub unsafe trait Trace: 'static {
     fn trace(&self, visitor: &mut Visitor<'_>);
 }
 ```
+
+`Allocator<'m, T>` is a scoped capability borrowed from the admitted
+`Mutator`, not an owning description of heap topology. It cannot be returned
+from `Heap::with_mutator`, stored in a managed value, or used after that
+mutator region. The heap retains canonical metadata, dense class identities,
+run pools, and stable frontier state. The scoped allocator may retain a stable
+frontier cell for its borrow but never an `Arc<HeapInner>`. Internal
+per-thread/per-heap state may cache class IDs or frontier cells across regions
+to avoid repeated cold discovery; that cache is weak/inert with respect to heap
+ownership and is not a public capability.
 
 `Root<T>` keeps its root cell alive but does not own `Heap`. Access always
 requires a live matching `Mutator`; dropping the value domain makes any escaped
@@ -520,7 +535,7 @@ Verification:
   being rejected merely to preserve a value-layer tag budget;
 - unsupported size/alignment layouts fail geometry derivation without
   partially allocating storage; dynamically sized types have no class-entry
-  path because the planned `AllocationClass<T: Trace>` keeps its implicit
+  path because the planned `Allocator<'_, T: Trace>` keeps its implicit
   `Sized` bound;
 - pointer ownership checks distinguish heaps in debug/test builds; and
 - Miri and property tests cover mask arithmetic, alignment, and the maximum
@@ -604,9 +619,12 @@ Execute C2B as three independently verified checkpoints:
   C1's debug prototype records with canonical metadata pointers, but do not
   create heap-local classes or publish runs.
 - **C2B.2 — heap-local allocation classes.** Derive geometry before
-  publication, add the metadata-pointer-to-dense-class table, and return a
-  reusable typed `AllocationClass<T>` carrying heap provenance. Concurrent
-  first discovery must publish one class per heap and metadata identity.
+  publication and add the metadata-pointer-to-dense-class table. The original
+  checkpoint returned a reusable typed `AllocationClass<T>` carrying heap
+  provenance; C4D deliberately replaces that public ownership shape with a
+  mutator-scoped `Allocator<'_, T>` while retaining the heap-owned dense class.
+  Concurrent first discovery must publish one class per heap and metadata
+  identity.
 - **C2B.3 — typed-run integration.** Publish initialized runs into their
   class pools, enumerate them from heap-owned state, and resolve checked slot
   addresses through the run's dense class ID to canonical trace/drop/layout
@@ -653,18 +671,22 @@ publication each remain all-or-nothing before the next layer is added.
   bodies are monomorphized for `T`; the metadata address is the canonical Rust
   type identity while the dense class entry is the canonical heap-local
   allocation identity.
-- Return a reusable `AllocationClass<T>` handle after discovery. Its heap
-  provenance, metadata pointer, and dense class ID make subsequent worker
-  allocation independent of `TypeId` lookup or hashing.
+- Return a typed `Allocator<'m, T>` whose lifetime is derived from the admitted
+  `&'m Mutator`. It carries the dense class ID and access to the stable frontier
+  needed for fast allocation, but it does not own the heap and cannot escape
+  the mutator region. Repeated allocation through one scoped allocator remains
+  independent of `TypeId` lookup or hashing.
 - Discover a new or existing heap-local allocation class only through an
-  admitted `Mutator`. The returned handle does not borrow the mutator and may
-  be cached or shared afterward. This makes class-table and metadata-index
-  topology part of the state frozen when collection drains all mutators,
-  without introducing a separate topology admission counter.
-- Because `Mutator::alloc` is safe, an allocation-class handle from another
-  heap must be rejected in release builds (or made unrepresentable by the
-  final API) before it reaches raw run state. Debug assertions may add detail,
-  but may not be the safety boundary.
+  admitted `Mutator`. Heap-owned class-table and metadata-index topology is
+  therefore frozen when collection drains all mutators, without introducing a
+  separate topology admission counter. A private per-thread/per-heap cache may
+  retain dense IDs and frontier cells for later mutator regions; it retains no
+  strong heap owner and exposes no allocator capability.
+- Because `Allocator<'m, T>` is constructed from one admitted mutator and
+  performs allocation itself, a foreign-heap class handle is not representable
+  in the public API. Internal cached identities remain checked at their narrow
+  heap boundary; debug assertions may add detail but are not the only safety
+  boundary.
 - Serialize concurrent first metadata interning and per-heap class discovery so
   all contenders observe one metadata address and one class/run pool per heap.
   It is acceptable for immutable metadata candidates to be constructed
@@ -738,6 +760,10 @@ C2B.2 completed on 2026-08-21:
   invalid geometry or an injected construction panic, and `Send + Sync` typed
   handles. The collector check, exact unsafe inventory, and Miri pass with 38
   unit tests. C2B.3 is next.
+
+This completion records the ownership shape implemented at that checkpoint.
+C4D intentionally removes the reusable, `Send + Sync`, heap-owning handle and
+migrates the same heap-owned class topology behind a mutator-scoped allocator.
 
 ### C2B.3 Completion
 
@@ -913,11 +939,13 @@ Verification for C2C.1b:
 
 C2C.1b completed on 2026-08-22:
 
-- `Mutator::alloc(&AllocationClass<T>, T)` is the synchronized correctness
-  allocator. It rejects a foreign class before mutation, searches the class's
-  authoritative run pool, publishes a typed run only when needed, and holds
-  heap state through unique slot selection, payload initialization, and
-  allocation-bit publication.
+- At this historical checkpoint,
+  `Mutator::alloc(&AllocationClass<T>, T)` was the synchronized correctness
+  allocator. C4D moves that same path behind `Allocator<'_, T>::alloc(T)` and
+  makes foreign-class construction unrepresentable at the public boundary.
+  The allocator searches the class's authoritative run pool, publishes a typed
+  run only when needed, and holds heap state through unique slot selection,
+  payload initialization, and allocation-bit publication.
 - Slot selection itself publishes nothing. A deterministic hook panics after
   selection and proves the allocation bit remains clear and the input value is
   destroyed normally. Production performs no panicking operation between its
@@ -941,8 +969,8 @@ C2C.1b completed on 2026-08-22:
   the exact unsafe inventory passes. Miri passes all 49 unit tests with leak
   checking enabled and no prototype exception.
 
-- Require mutator authority and an `AllocationClass<T>` for every managed
-  allocation.
+- Require mutator authority and a mutator-scoped `Allocator<'_, T>` for every
+  managed allocation.
 
 ### C2C.2 Heap-Specific TLS Identity and Lifecycle
 
@@ -1135,8 +1163,9 @@ C2C.3 completed on 2026-08-22:
   drop the still-owned input normally, and let the same cursor reuse that
   exact slot without another synchronized claim.
 - Latch the teardown ownership boundary: an active mutator region necessarily
-  retains an owning `Heap` or `AllocationClass`, so last-owner teardown cannot
-  race it. A stale TLS cache remains weak and inert after teardown.
+  exists under an authorized heap owner, so last-owner teardown cannot race
+  it. C4D removes `AllocationClass` as an independent owner. A stale TLS class
+  or cursor cache remains weak and inert after teardown.
 - Keep C2C's terminal destructor path explicitly provisional. It supports the
   non-reentrant, non-panicking fixtures required to avoid leaks while
   collection is disabled. Destructor panic recovery, quarantine,
@@ -1182,10 +1211,11 @@ C2C.4 completed on 2026-08-22:
   mutex usable, and lets the retained cursor reuse the same slot without a new
   claim. The production path invokes no callback there and has only its two
   infallible publication writes afterward.
-- A forced owner-handoff test holds a worker inside its mutator after the
-  initiating `Heap` and class handles are dropped. The owning `Arc` remains
-  live through its final access, and terminal teardown occurs only when that
-  worker releases its last heap and class owners.
+- A forced owner-handoff test originally held a worker inside its mutator after
+  the initiating `Heap` and class handles were dropped. C4D replaces the class-
+  owner portion of that fixture: the admitted region's authorized heap owner
+  alone keeps the domain live, while its scoped allocator neither owns nor
+  outlives that region.
 - Review found no reason to duplicate C6's destructor-panic and mutator-
   finalization design. C2C's provisional terminal path remains explicitly
   limited to non-reentrant, non-panicking payload destruction, which is enough
@@ -1317,11 +1347,11 @@ Verification for C2C.5b:
 
 #### C2C.5c Stable Class Run Frontier and Lock-Free Refill
 
-- Give each heap-local allocation class stable shared allocation state which
-  is retained by both its typed `AllocationClass<T>` handles and authoritative
-  heap entry without creating a back-reference to the heap. Keep mutable run-
-  pool ownership under heap state, but publish the current candidate through
-  an atomic pointer to a heap-owned, stable run record containing both
+- Give each heap-local allocation class stable shared allocation state owned by
+  its authoritative heap entry and borrowed or temporarily retained by scoped
+  allocators, without a back-reference to the heap. Keep mutable run-pool
+  ownership under heap state, but publish the current candidate through an
+  atomic pointer to a heap-owned, stable run record containing both
   `RunLocation` and `RunAddress`.
 - A cursor miss first loads that run record with publication ordering and calls
   C2C.5a's atomic lease claimant directly. This path performs no heap-state
@@ -1425,10 +1455,10 @@ C2C.5 completed on 2026-08-22:
   trigger to 7/8 of one chunk when requests became serviceable. Neither a
   failed publication nor
   any lease, slot, cursor, or TLS transition adds an event.
-- Each class handle and heap entry share one frontier cell. It release-publishes
-  a pointer to a separately boxed, heap-owned run record, so ordinary cursor
-  refill claims directly without heap state. Exhaustion rechecks under the
-  mutex, advances monotonically through already published records, and
+- Each scoped allocator and heap class entry use one frontier cell. It release-
+  publishes a pointer to a separately boxed, heap-owned run record, so ordinary
+  cursor refill claims directly without heap state. Exhaustion rechecks under
+  the mutex, advances monotonically through already published records, and
   publishes a new run only when no later record exists.
 - Mutator entry performs only the direct TLS registry lookup for its heap. Dead
   weak records remain inert until thread exit or explicit
@@ -1511,11 +1541,12 @@ by C2C:
 - **C3A.1 — coordinator and topology boundary.** Add the ordinary/exclusive
   phase representation and active-mutator accounting to the existing
   heap-state `Mutex`, plus one sibling `Condvar`, without collector election.
-  Move allocation-class discovery from `Heap` to `Mutator`; an already
-  discovered handle remains independently reusable. Have `Mutator` borrow the
-  heap's existing shared owner rather than cloning it per admitted region.
-  Force discovery against a synthetic exclusive phase before building
-  collection on this invariant.
+  Move allocation-class discovery from `Heap` to `Mutator`. This checkpoint
+  originally left the discovered handle independently reusable; C4D later
+  narrows it to the discovering mutator's borrow without changing the topology
+  admission rule. Have `Mutator` borrow the heap's existing shared owner rather
+  than cloning it per admitted region. Force discovery against a synthetic
+  exclusive phase before building collection on this invariant.
 - **C3A.2 — ordinary admission integration.** Split entry into
   prepare/admit/activate, integrate heap-qualified TLS activation, same-heap
   recursive entry/exit, panic-safe rollback and outer quiescence publication,
@@ -1553,9 +1584,11 @@ C3A completed on 2026-08-22:
   production request, election, and collection remain C3B work.
 - Allocation-class discovery moved from `Heap` to `Mutator`. Canonical metadata
   and run geometry remain cold preparation, while every possible heap-local
-  class-table publication now occurs within an admitted mutator region. A
-  returned `AllocationClass<T>` remains an independently reusable provenance
-  handle and retains the heap after the discovery region exits.
+  class-table publication now occurs within an admitted mutator region. The
+  checkpoint returned an independently reusable, heap-retaining
+  `AllocationClass<T>`; C4D deliberately narrows that result to an allocator
+  capability borrowed from the discovering mutator while retaining class-table
+  publication under the same admission.
 - Thread-local entry is explicitly prepare, admit, then activate. Preparation
   changes no depth, an outer admission creates one RAII coordinator obligation,
   and activation refreshes the allocation-lease epoch before incrementing
@@ -1978,16 +2011,18 @@ The downstream structure remains sound, with these corrections:
   belong to C6A immediately before reclaimed storage can become reusable.
   Marking alone neither changes allocation bits nor invalidates retained
   allocation cursors.
-- One alternating mark bitmap is adequate on successful collections, but a
-  panicking mark attempt cannot merely reuse a two-valued color. C5 must either
-  restore every mark bit to the last committed color before unwinding or adopt
-  a wider attempt generation. The provisional recommendation is the former:
-  panic is exceptional, a bitmap-only rollback is bounded and non-recursive,
-  and the ordinary successful path still touches only traced objects plus run
-  summaries.
+- C5 uses a conventional clear-before-mark bitmap. Under exclusive authority,
+  clear every assigned run's contiguous mark range before tracing, then use
+  `1` for every reachable slot. A failed attempt publishes no mark result and
+  may leave arbitrary scratch bits behind; the next attempt's mandatory
+  initial clear overwrites them. This intentionally trades a cache-local
+  bitmap pass per collection for a much smaller correctness surface: there is
+  no mark color, allocation-time mark write, touched-word journal, or failure-
+  time bitmap pass. A successful result remains authoritative long enough for
+  C6's eager dead-set classification and sweep.
 - C6 must refer to C3E's direct finalizer-to-entry handoff, not the superseded
   C3D queued-drain protocol. Its previous four checkpoints were still too
-  broad, so they are divided below at free-list, lazy-sweep, finalizer,
+  broad, so they are divided below at free-list, eager-sweep, finalizer,
   quarantine, pressure, and terminal-teardown boundaries.
 - C7's `deferred_requests` metric is obsolete. Entry-elected collections,
   coalesced request observations, pending hints, synchronous joins, and
@@ -2155,11 +2190,52 @@ C4C completed on 2026-08-23 with the following boundary:
 - Existing cross-thread clone/access and escaped-root teardown tests complete
   the ownership audit. C4 adds neither trace dispatch nor reclamation.
 
+### C4D — Mutator-Scoped Allocator Capability
+
+Complete this ownership correction before C5 introduces collector traversal:
+
+- Replace the public reusable `AllocationClass<T>` with
+  `Allocator<'mutator, T>`, constructed only by borrowing an admitted
+  `&'mutator Mutator`. Give the allocator real borrowed access to the mutator's
+  heap/cache capability rather than manufacturing an unconstrained lifetime
+  with `PhantomData` alone.
+- Move typed allocation to `Allocator::alloc(T)`. Keep process-wide metadata,
+  dense `AllocationClassId`, class entries, run pools, and frontier records
+  heap-owned implementation details.
+- Remove the allocator's strong `Arc<HeapInner>`. A scoped allocator may clone
+  the stable frontier cell for the duration of its borrow, but that cell has no
+  back-reference to the heap. Forgetting such a value may leak only an inert
+  frontier cell, never the heap or an exercisable post-region capability.
+- Preserve `Heap::with_mutator`'s higher-ranked closure boundary. Safe Rust
+  must reject returning an allocator from the closure, placing one in a
+  `'static` container, or sending it to another thread. Allocated `Gc<T>` and
+  explicitly published `Root<T>` remain the intended escaping products.
+- Retain foreign-heap checks at private cached-identity and raw-state
+  boundaries, but make construction of a public foreign class/allocator pair
+  unrepresentable. Do not pay a runtime-domain check per allocation merely to
+  compensate for an escapable handle the API no longer exposes.
+- If repeated discovery across short mutator regions later measures poorly,
+  cache the canonical-metadata-to-dense-class/frontier result in the existing
+  per-thread/per-heap state. Such cache records retain only weak heap identity
+  plus internal class data, are cleared by the existing epoch/release rules as
+  appropriate, and never become user-visible capabilities. Do not add this
+  cache speculatively in C4D.
+- Migrate production call sites and fixtures which currently carry a class
+  across `with_mutator` regions. Add compile-fail tests for closure escape and
+  cross-thread transfer, plus runtime tests proving repeated scoped discovery
+  still selects one heap-owned class and retains the lock-free frontier fast
+  path.
+
+C4D settles the class-handle portion of terminal ownership: allocation
+capabilities are not authorized heap owners and none survive a drained mutator
+set. C6D still owns the terminal-finalization protocol itself.
+
 ### Post-C4 Review of C5 through C8
 
 Reviewed on 2026-08-23 against the completed C4 root registry, the current
 single `HeapState` mutex, the C3E coordinator, stable allocation-class
-frontiers, and allocation-word leasing.
+frontiers, and allocation-word leasing. C4D was added afterward to remove
+escaped class ownership before these downstream phases begin.
 
 The implemented C4 boundary is sound. Root construction validates and
 registers under mutator exclusion, roots refer weakly to the heap, and the
@@ -2173,81 +2249,103 @@ downstream corrections are required:
   `request_collection` from remaining nonblocking, while reacquiring it for
   every edge would introduce exactly the pointer-scale locking this collector
   avoids. C5A.0a-b therefore split a coordinator mutex/condition variable from
-  one managed-data mutex and audit the resulting sequencing. Never hold the
-  two component mutexes together.
-  Run-publication pressure updates managed data first, releases that lock, and
-  then requests collection; its live mutator still excludes collector
-  election. A monotonic pressure revision bridges those two steps. Collection
-  completion records the greatest revision included in its managed-data
-  baseline, and the coordinator ignores delayed requests at or below that
-  revision while preserving every later request. Thus a finalizing worker may
-  publish on either side of completion without a lost request or an
-  unnecessary repeat caused solely by delayed notification. This is an
-  implementation lock split, not a new semantic phase.
-- **Make a new allocation carry the committed mark color.** With a one-bit
-  alternating color, a never-used zero bit could otherwise already equal the
-  next attempt's color. A `Mutator` captures the heap's committed color once
-  after admission. The owner of an allocation-word lease sets the selected
-  slot's mark bit to that captured color before the Release publication of its
-  allocation bit. Only allocated slots matter; fresh runs need not initialize
-  every mark bit, and ordinary allocation need not load the heap color for
-  every object.
+  one managed-data mutex, move the coalesced request bit to a sibling atomic,
+  and audit the resulting sequencing. Never hold the two component mutexes
+  together. The coordinator mutex protects phase, active-mutator count,
+  collector election, active/completed epochs, and condition-variable wait
+  predicates; it is never held through trace, sweep, finalization, or a
+  mutator closure.
+  Run-pressure publication updates managed data and sets the atomic request
+  before releasing the data lock. Successful completion publishes its final
+  pressure baseline and clears that same atomic while holding the data lock.
+  A later pressure publication must acquire the data lock afterward and
+  therefore relatches the request; an unrelated external request linearizes
+  immediately before or after the atomic clear. No pressure revision is
+  required. This is an implementation lock split, not a new semantic phase.
+  Merely setting the request bit does not change any condition-variable wait
+  predicate, so asynchronous `request_collection` performs no `notify_all`.
+  Notifications remain reserved for changes to coordinator phase, active
+  obligations, and completed epochs.
+- **Clear marks before tracing rather than coloring allocations.** After
+  exclusive admission drains every mutator, C5 clears the contiguous mark
+  range of every assigned run before it seeds or traces the graph. Reachable
+  slots are then represented by set bits. Allocation remains entirely
+  independent of mark state: a mutator captures no collection color and the
+  allocation-word owner performs no mark-bit write before publishing an
+  allocation. This keeps the frequent allocation path simple and confines all
+  mark interpretation to exclusive collection and its later sweep consumer.
 - **Keep root seeding bounded and non-fallible under the data lock.** C5 first
   reserves a `Vec<ErasedGc>` using the registry length, then retains weak
   entries, upgrades them, and copies live seeds while exclusive authority
-  keeps root publication stopped. Trace dispatch and worklist growth occur
-  only after the registry walk. This preserves C4's no-strong-snapshot intent:
-  temporary upgrades are not retained, and copied managed pointers are safe
-  because no sweep occurs during the mark attempt.
+  keeps root publication stopped. That same vector becomes the LIFO object
+  worklist; record its initial root count separately if reporting needs it.
+  Trace dispatch and further worklist growth occur only after the registry
+  walk. This preserves C4's no-strong-snapshot intent: temporary upgrades are
+  not retained, and copied managed pointers are safe because no sweep occurs
+  during the mark attempt.
 - **Validate before the first unsafe trace dereference.** Same-heap, exact
   slot, allocated-state, and canonical-metadata checks are part of C5B.2's
   basic traversal, not a later hardening pass. C5C.1-2 separately prove
   recovery from those invariant panics and from visitor/worklist panics.
   Because marking may hold the managed-data mutex, its unwind guard must
-  recover that mutex after poison, restore every touched mark word to the
-  committed color, restore coordinator state, and then resume the original
-  panic.
-- **Keep mark summaries attempt-local.** Per-run live summaries are produced
-  in the successful attempt result and keyed by stable run location. C6 may
-  consume them only after C5 commits the color. A failed attempt publishes no
-  summary and no pressure or reclamation state.
+  recover that mutex after poison, invalidate and discard the attempt-local
+  result, restore coordinator state, and then resume the original panic.
+  Partial bitmap contents remain unpublished scratch until the next attempt
+  clears them.
+- **Do not duplicate run occupancy outside the bitmaps.** C5 keeps only scalar
+  attempt counters such as roots, newly marked slots, traced objects, and
+  conservatively retained quarantine slots. It allocates no map, vector, or
+  record per run. After a successful mark, C6 enumerates the authoritative
+  assigned runs and derives zero, partial, and full occupancy directly from
+  their compact allocation and mark words. A failed attempt publishes neither
+  aggregate counters nor pressure or reclamation state. One currently spare
+  `u32` in `RunHeader` remains available for a measured future live-slot count,
+  reset alongside marks, but the baseline does not consume it.
 - **Reclamation must invalidate TLS cursors before changing topology.** C6A.2a
-  revokes allocation-word leases, rebuilds the still-valid allocator view, and
-  advances the heap allocation-lease epoch while every mutator is stopped.
+  revokes allocation-word leases, withdraws ordinary class-frontier selection,
+  and advances the heap allocation-lease epoch while every mutator is stopped.
   No run record, allocation bit, or reclaimed slot changes before that
   transition. Every later entrant discards its retained cursor map before it
-  could observe run retirement or reuse.
+  could observe run retirement, eager sweep, or reuse.
 - **Retiring a run must retire every lock-free selector first.** A class owns
-  stable boxed run records and publishes a raw frontier pointer; an escaped
-  `AllocationClass<T>` retains the shared frontier. After C6A.2a has invalidated
-  TLS cursors, C6A.2b must clear or
-  replace that frontier, remove the run from the class pool, and repair any
+  stable boxed run records and publishes a raw frontier pointer. C4D ensures
+  every allocator which can read that pointer is scoped to an admitted
+  mutator; no escaped public class handle remains. After C6A.2a has drained
+  mutators and invalidated TLS cursors, C6A.2b must clear or replace the
+  heap-owned frontier, remove the run from the class pool, and repair any
   shifted frontier index before the record can be destroyed or its run can be
   retyped. Header reset and free-list publication belong to C6A.2c.
-- **Lazy sweep needs no second generation state.** C6A.2a resets every lease
-  bit and advances the heap allocation-lease epoch. Because one allocation
-  word is successfully claimed at most once in that epoch, its lease bit
-  already means “swept or owned since the last collection.” C6A.3 passes the
-  committed mark color to that winning claim, clears dead no-drop allocation
-  bits before computing its free mask, and then retains the lease normally.
-  No per-run sweep epoch or extra unswept bitmap is required. Quarantined slots
-  are made conservatively marked before an isolated finalizer word is
-  republished, so this derivation cannot free them.
-- **Finalization must isolate every allocation word it mutates.** Ordinary
-  mutators may allocate while the collector is in `Finalizing`. The collector
-  therefore reserves or otherwise removes every allocation word containing a
-  finalization-batch slot from ordinary lease/frontier selection before
-  reopening admission. The finalizer owns those words until all corresponding
-  slots are cleared or quarantined; afterward the affected word availability
-  is rebuilt and republished. This preserves the allocation bitmap's one-
-  writer rule and prevents a finalizer clear from losing a concurrent
-  allocator update.
+- **Sweep no-drop allocation words eagerly.** After C6A.2a invalidates every
+  retained cursor and lease, the collector is the sole allocation-bitmap
+  writer under `Exclusive`. Retire wholly dead no-drop runs, then intersect
+  each retained no-drop allocation word with its successful mark word. This
+  enumerates compact side bitmaps rather than payloads and completes every
+  no-drop reclamation obligation before ordinary admission reopens. Rebuild
+  lease availability and class frontiers only afterward, excluding words and
+  whole runs reserved for drop finalization. No sweep epoch, unswept bitmap,
+  first-claim branch, or retained-mark dependency enters the allocator.
+- **Finalization reserves partial runs by word and wholly dead runs in full.**
+  Ordinary mutators may allocate while the collector is in `Finalizing`. For a
+  partially live run, the collector therefore removes every allocation word
+  containing a finalization-batch slot from ordinary lease/frontier selection
+  before reopening admission; unrelated words in that run remain usable. A
+  wholly dead drop-bearing run is instead detached from allocator selection in
+  full while still under `Exclusive`, because no live allocation benefits from
+  retaining a partial allocator view. The finalizer owns the reserved storage
+  until its corresponding slots are cleared or quarantined. A terminal partial
+  word is rebuilt and republished immediately. A wholly dead run whose complete
+  run batch succeeds is retired and published to the free-run pool immediately,
+  without waiting for another collection; quarantine instead restores the run
+  to its original class with the damaged slots retained as allocated. This
+  preserves the allocation bitmap's one-writer rule without making every
+  drop-bearing run unavailable or preventing reclaimed runs from being reused
+  across collection cycles.
 - **Quarantine and terminal teardown must agree.** Terminal destruction must
   consult sparse quarantine so a destructor which already panicked is never
-  invoked twice. C6D.1 must also decide explicitly whether escaped
-  `AllocationClass<T>` handles remain authorized heap owners, as they do now
-  to keep their frontier pointer valid, or become weak/inert before terminal
-  teardown. This ownership choice cannot be made accidentally by integration.
+  invoked twice. C4D settles allocation capability ownership before C6:
+  mutator-scoped allocators are not heap owners and cannot survive the admitted
+  region which permits their frontier access. C6D.1 therefore decides only the
+  remaining runtime/value-domain owner drain and finalizer protocol.
 - **C7 and C8 are verification/tuning phases, not new semantics.** Split
   collection/finalizer metrics from allocator/cache metrics and audit their
   consistency separately. Stabilize the report accumulated by C5 and C6 in
@@ -2255,9 +2353,11 @@ downstream corrections are required:
   workloads. Gate G1 remains owned by C6D.3, so production integration is
   still blocked even though C4 now supplies its direct-root primitive.
 
-The remaining deliberate decisions are localized: C6B.1 chooses whether an
-empty batch skips `Finalizing`, and C6D.1 settles terminal ownership, including
-escaped class handles. Neither blocks starting C5A.0a.
+The remaining deliberate decisions are localized: C6A.3b chooses when to
+physically clear a consumed successful mark bitmap, C6B.1 chooses whether an
+empty batch skips `Finalizing`, and C6D.1 settles the remaining terminal owner
+drain. C4D has already settled allocation-capability ownership. None blocks
+starting C5A.0a after C4D completes.
 
 The review reran the crate's authoritative `scripts/check.sh`: formatting,
 Clippy with warnings denied, unsafe-inventory checks, 120 unit tests, 6 Loom
@@ -2278,44 +2378,54 @@ Execute C5 as the following independently verified checkpoints:
   collection, allocation, root, and deterministic-test call sites while
   preserving behavior. Establish the structural rule that the two component
   mutexes are never held together.
-- **C5A.0b — pressure-revision handoff across split state.** Give committed run
-  publications a monotonic pressure revision. A data-side collection baseline
-  reports the greatest revision it includes; coordinator completion records
-  that acknowledgement, discards delayed notifications at or below it, and
-  preserves notifications above it. Keep explicit collection requests
-  independent. Force publishers before and after the baseline and before and
-  after coordinator completion, including publication by another mutator
-  during `Finalizing`.
+- **C5A.0b — atomic request and data-side acknowledgement.** Move the coalesced
+  request to a heap-sibling `AtomicBool`. Asynchronous requests only set it;
+  they acquire neither mutex and send no condition-variable notification.
+  Pressure publication sets it before releasing managed data. Successful
+  completion publishes the final pressure baseline and clears the bit under
+  that same data lock; failure relatches it before restoring ordinary
+  coordinator state. Keep synchronous `collect_full` under the coordinator
+  protocol so it joins an active epoch or requests and elects the next one.
+  Add no pressure revision or duplicated coordinator request flag.
 - **C5A.0c — split-state forced-order audit.** Prove `request_collection`
   remains nonblocking while exclusive work holds managed data, and replay
   every entry, request, finalizer, root-publication, and pressure schedule
-  which crosses the split. This latches the sequencing argument from the post-
-  C4 review before mark state is added.
-- **C5A.1 — mark color and allocation publication.** Add the committed heap
-  color as a heap-wide atomic and add collector-only mark-word operations.
-  Capture the committed color once in each newly admitted outer `Mutator`;
-  recursive entry reuses it. The allocation-word owner writes the chosen
-  slot's bit to that color before publishing the allocation bit with Release.
-  Prove color-toggle histories, allocation under both colors, and absence of a
-  per-object shared color load.
-- **C5A.2 — checked collector lookup and run summaries.** Add all-build
-  collector lookup from a managed address to its owning chunk, exact run and
-  slot, allocation state, and canonical metadata. Add an attempt-local live-
-  run summary keyed by stable run location; it is not heap-authoritative until
-  the attempt commits.
-- **C5A.3 — mark-attempt rollback substrate.** Add the non-recursive attempt
-  guard and touched-mark-word journal. Record a word's restorable prior state
-  before its first attempt write, so journal allocation itself cannot leave an
-  unrecorded mutation. Prove with synthetic mark writes and injected panics
-  that the guard restores the last committed color, clears data-mutex poison
-  after recovering its protected state, and only then resumes the original
-  panic. This checkpoint does not dispatch user `Trace` implementations yet.
+  which crosses the split. Verify pressure publications on both sides of the
+  data-side acknowledgement, external requests racing its atomic clear,
+  synchronous join during a held data lock, and absence of a request-only
+  notification path. This latches the sequencing argument from the post-C4
+  review before mark state is added.
+- **C5A.1 — clear-before-mark bitmap operations.** Add collector-only
+  operations to clear every assigned run's contiguous mark range and to set or
+  test an individual slot mark. Clear the ordinary `u64` mark-word slice with
+  a contiguous bulk fill so optimized builds may lower the operation to their
+  normal memset path. Run the initial clear only after exclusive admission has
+  drained every mutator and before root seeding. Allocation does not read or
+  write mark state. Prove complete clearing across zero, one, and many assigned
+  runs, marking at bitmap-word boundaries, duplicate marking, and absence of
+  any mark operation on the mutator allocation path.
+- **C5A.2 — checked collector lookup.** Add all-build collector lookup from a
+  managed address to its owning chunk, exact run and slot, allocation state,
+  and canonical metadata. Keep no run-keyed attempt state; the slot mark is the
+  only per-allocation reachability record.
+- **C5A.3 — failed mark-attempt invalidation.** Add the non-recursive attempt
+  guard. On failure, recover the managed-data mutex if necessary, discard every
+  attempt-local aggregate counter and work item, restore ordinary coordinator
+  state, and resume the original panic. Do not scan or clear the partially
+  written mark bitmap: it is unpublished scratch, and the next attempt begins
+  with C5A.1's mandatory clear. Prove with synthetic mark writes and injected
+  panics that zero, one, and many partially marked runs publish no result,
+  leave allocation and root state unchanged, and are completely overwritten
+  by a clean retry. This checkpoint does not dispatch user `Trace`
+  implementations yet.
 - **C5B.1 — stable root seeding.** Under exclusive authority, reserve seed
   capacity outside the data lock from a previously observed stable registry
   length, then reacquire managed data, retain weak entries, and copy each
-  successfully upgraded `ErasedGc` into the seed worklist. Release every
+  successfully upgraded `ErasedGc` into the object worklist. Release every
   temporary strong root-cell reference during that walk. Perform no trace
-  dispatch or fallible growth while holding managed data.
+  dispatch or fallible growth during the registry walk itself. C5B.2 reuses
+  this vector directly and may grow it while tracing under managed data;
+  C5C's unwind path treats that allocation as fallible attempt work.
 - **C5B.2 — checked non-recursive graph marking.** Drain the explicit worklist
   through canonical metadata and the existing edge visitor. Every root and
   reported edge passes C5A.2's same-heap, exact-slot, allocated, and canonical-
@@ -2324,23 +2434,28 @@ Execute C5 as the following independently verified checkpoints:
   graphs, and shared logical collection spines without changing allocation,
   lease, frontier, or pressure state.
 - **C5C.1 — trace and worklist panic recovery.** Force visitor and worklist
-  panics at zero, one, and many traced edges. Restore marks, discard summaries,
-  recover managed data and coordinator phase, preserve or coalesce the request
-  hint according to the existing coordinator contract, then prove ordinary
-  mutation and a clean retry.
+  panics at zero, one, and many traced edges. Invalidate the partial marks,
+  discard aggregate counters, recover managed data and coordinator phase,
+  preserve or coalesce the request hint according to the existing coordinator
+  contract, then prove ordinary mutation and a clean retry. Invalidation is
+  logical: it publishes no result and performs no bitmap clear.
 - **C5C.2 — invalid-edge recovery and retry.** Force foreign-heap, stale,
   non-slot, unallocated, and canonical-metadata mismatches before unsafe
   dereference. Each invariant violation panics, publishes no mark result, and
   leaves the heap usable. A still-reachable invalid edge must panic again on
   retry.
-- **C5D.1 — successful mark commit and report.** Commit the new color and
-  attempt-local run summaries only after the complete worklist succeeds. Add
-  root, traced-object, marked-slot, and live-run statistics to the collection
-  report. C5 still reclaims nothing.
+- **C5D.1 — successful mark publication and report.** Treat the completed
+  bitmap as authoritative and publish only scalar root, traced-object,
+  marked-slot, and conservative-retention statistics after the complete
+  worklist succeeds. Live-run and survivor occupancy come from C6's bitmap
+  scan. C5 still reclaims nothing and does not yet choose when successful marks
+  are cleared after C6 consumes them.
 - **C5D.2 — reachability oracle, scale, and audit.** Compare randomized graphs
   with a simple reachability oracle, run million-edge non-recursive tests,
-  verify zero/one/all-live run summaries and toggle histories, and update the
-  safety and verification ledgers.
+  include both a million-node deep chain and a flat million-edge array, verify
+  zero/one/all-live run bitmaps and repeated clear/mark histories, and update
+  the safety and verification ledgers. Record peak object-worklist length and
+  capacity for the wide fixture without making them correctness thresholds.
 
 - Stop all mutators, reserve a root-seed worklist, then directly walk and prune
   the stable external-root registry while copying each successfully upgraded
@@ -2355,9 +2470,10 @@ Execute C5 as the following independently verified checkpoints:
   edges from fixed byte offsets. Immediate/non-edge fields are invisible to the
   collector.
 - Mark by run slot in its side bitmap; duplicate visits terminate immediately.
-  Use the one-bit alternating color established in C5A.1. Successful attempts
-  do not clear old marks; exceptional rollback restores bitmap words without
-  touching payloads.
+  Clear all assigned mark ranges before graph traversal and use a set bit for
+  reachability. A successful attempt preserves those bits for C6 dead-set
+  classification; exceptional recovery leaves partial bits unpublished until
+  the next attempt overwrites them.
 - Use an explicit mark stack or queue rather than recursive Rust calls.
 - Trace cycles, diamonds, deep chains, wide graphs, and shared logical
   collection spines.
@@ -2372,19 +2488,18 @@ Execute C5 as the following independently verified checkpoints:
   violation and panics rather than returning a recoverable graph error. Debug
   builds may attach richer class and address detail, but the release check is
   mandatory.
-- Maintain an attempt-local per-run live summary sufficient to recognize a run
-  with no marked slots without enumerating its payloads. Key it by stable run
-  location, and publish or pass it to C6 only with a successful color commit.
-  Marking may touch chunk/run metadata, but its graph traversal remains
-  proportional to reachable managed edges.
+- Keep only scalar attempt aggregates. Increment marked-slot and traced-object
+  counts when the collector first marks and scans an allocation; do not create
+  run-keyed state. C6 later enumerates run side metadata without enumerating
+  payloads. Mark traversal remains proportional to reachable managed edges.
 - Wrap the attempt in an unwind guard. If tracing or mark-work allocation
-  panics, discard the worklist and summaries, recover the poisoned managed-
-  data mutex if the panic crossed trace dispatch while it was held, restore
-  every touched mark word to the last committed color, leave every allocation
-  intact, restore a usable non-collecting phase, and let the original panic
-  continue to its caller. A retry then uses the opposite of that same committed
-  color; no partial bit from the abandoned attempt can be mistaken for current
-  reachability.
+  panics, discard the worklist and scalar aggregates, recover the poisoned
+  managed-data mutex if the panic crossed trace dispatch while it was held,
+  leave every allocation intact, restore a usable non-collecting phase, and
+  let the original panic continue to its caller. Partial marks remain
+  physically present but have no published result or consumer. A retry clears
+  the complete bitmap before tracing, so no bit from the abandoned attempt can
+  be mistaken for current reachability.
 - Apply that same unwind path to an invalid-edge panic. Marking performs no
   reclamation or destruction, so detection must precede dereference and sweep;
   after unwind both heaps remain intact and ordinary mutation may resume. A
@@ -2400,9 +2515,9 @@ the Rust stack. Deterministic hooks panic after zero, one, and many traced edges
 the caller catches the panic, ordinary mutation resumes, and a later full
 collection produces the same survivors as a collection which never failed. A
 trace which deliberately panics once must succeed on retry without heap-wide
-poisoning. Bitmap-color wrap/toggle histories, allocation during the prior
-finalization phase, and runs with zero, one, and all slots live receive focused
-tests. A safe generic fixture stores a live pointer from heap B in an object in
+poisoning. Repeated clear/mark cycles, allocation during the prior finalization
+phase, and runs with zero, one, and all slots live receive focused tests. A safe
+generic fixture stores a live pointer from heap B in an object in
 heap A; collection of A must panic through a checked lookup before dereferencing
 the edge or reclaiming anything in either heap. Catching that panic must restore
 ordinary admission, while collecting again with the edge still reachable must
@@ -2419,67 +2534,86 @@ Execute C6 as the following smaller checkpoints:
   classification failure leaves allocation, class, frontier, lease, and
   pressure state unchanged.
 - **C6A.2a — allocation-lease revocation and epoch publication.** Under
-  exclusive collection, revoke every old allocation-word lease, rebuild the
-  lease words and class frontiers for the still-unchanged allocation topology,
-  and only then advance the one heap-wide allocation-lease epoch. The next
+  exclusive collection, revoke every old allocation-word lease and withdraw
+  ordinary class-frontier selection for the still-unchanged allocation
+  topology, then advance the one heap-wide allocation-lease epoch. The next
   outer cache entry performs one epoch comparison and discards all stale
   cursors. Prove no allocation bit, run record, or reusable slot changes before
-  this invalidation boundary.
+  this invalidation boundary. Lease availability and ordinary frontiers are
+  rebuilt only after C6A.3's eager sweep.
 - **C6A.2b — class frontier and run-pool retirement.** For each wholly dead
   no-drop run, first clear or repoint the old class's atomic frontier, remove
   the stable run record from its class pool, and repair any index encoded by a
-  shifted replacement. Prove that a retained `AllocationClass<T>` and every
-  racing frontier load can no longer select the retired record before it is
-  destroyed. Do not reset the run header or publish reuse yet.
+  shifted replacement. Prove that every admitted scoped allocator and racing
+  frontier load can no longer select the retired record before it is destroyed;
+  C4D and exclusive mutator drain prove that no public selector can remain
+  afterward. Do not reset the run header or publish reuse yet.
 - **C6A.2c — wholly dead no-drop runs and free-run reuse.** Clear the retired
   run's allocation and side state, reinitialize its empty header, and publish
   it to one heap-wide free list. Prefer recycled runs over virgin arena
-  capacity, retype them before frontier publication, and verify cross-class
-  reuse without stale class authority.
-- **C6A.3a — lease-derived lazy-sweep publication.** Building on C6A.2a's
-  invalidated cursor generation, reset class frontiers to eligible current
-  records and pass the current committed mark color into the allocation-word
-  claim. Prove the lease bit itself permits at most one lazy-sweep owner per
-  word and epoch; add no second sweep generation or unswept bitmap.
-- **C6A.3b — first-claim partial lazy sweep.** The first Acquire claimant of an
-  unswept allocation word clears that word's dead no-drop slots from the
-  committed mark result before it computes the free mask and allocates. The
-  lease stays claimed, so no second claimant can repeat the sweep in that
-  epoch. Other words and payloads remain untouched. Force competing claimants
-  and prove exactly one performs the clearing while all observe the rebuilt
-  allocation state.
+  capacity. A run reused during the same exclusive transition may be retyped,
+  but its ordinary class frontier remains withheld until C6A.3b publishes the
+  completely swept allocator view. Verify cross-class reuse without stale
+  class authority.
+- **C6A.3a — eager partial no-drop sweep.** Building on C6A.2a's invalidated
+  cursor generation, visit the compact allocation and mark words of every
+  retained partially live no-drop run and publish `allocated &= marked` while
+  the collector remains their sole writer under `Exclusive`. Do not enumerate
+  or touch payloads, and do not clear allocation bits in any drop-bearing run.
+  Prove boundary words, sparse and dense death, and repeated collections.
+- **C6A.3b — swept allocator publication.** Rebuild allocation-word lease
+  availability and class frontiers from the eagerly swept topology. Exclude
+  every word containing drop-required dead slots in a partially live run, and
+  reserve every wholly dead drop-bearing run in full; C6B owns those regions
+  until their respective finalization groups are terminal. Publish no ordinary
+  allocator selector before all no-drop words are swept. Prove that a
+  post-collection claimant observes the final allocation bitmap directly and
+  performs no sweep work. The successful mark bitmap has no remaining
+  reclamation consumer after dead drop slots and eager no-drop sweep are
+  recorded; choose its physical clearing point separately.
 - **C6A.4 — assigned-run pressure.** Replace provisional run-publication
   history with assigned-run occupancy, account for virgin and recycled
   activation exactly once, and publish the first survivor-based high-water
   target. This checkpoint does not yet account for allocations made by
   finalizers; C6C.2 publishes the final post-finalization baseline.
-- **C6B.1 — finalization batch, word isolation, and non-rootability.** Detach
+- **C6B.1 — finalization batch, reservation, and non-rootability.** Detach
   drop-required dead slots into a collector-owned batch while allocation bits
-  still protect their storage. Before reopening admission, reserve or remove
-  every allocation word containing a batch slot from all ordinary lease and
-  frontier selection; the finalizer becomes that word's sole allocation-bitmap
-  writer. Extend C4 root validation so every batch identity is non-rootable.
+  still protect their storage. Before reopening admission, reserve every
+  affected word in a partially live run from ordinary lease and frontier
+  selection. Detach a wholly dead drop-bearing run from ordinary class topology
+  in full, retaining its stable run record in the collector-owned batch until
+  that run reaches a terminal disposition. The finalizer becomes the sole
+  allocation-bitmap writer for every reserved word or run. Extend C4 root
+  validation so every batch identity is non-rootable.
   If the batch is empty, either retain the already-proven C3E no-op finalizer
   handoff or take the direct no-finalizer completion path after resolving the
   decision below.
 - **C6B.2 — C3E finalizer handoff and destruction.** Use C3E's no-gap
   `Exclusive`-to-`Finalizing` handoff, install the collector's current mutator,
   reopen ordinary admission, and run erased Rust destructors exactly once
-  outside collector locks. Successful destruction clears the slot allocation
-  bit; fresh allocations and effects remain ordinary later-collection state.
+  outside collector locks. Group work by allocation word for partial runs and
+  by complete run for wholly dead runs so each reserved region can be released
+  as soon as its own finalizers are terminal. Successful destruction clears the
+  slot allocation bit; fresh allocations and effects remain ordinary
+  later-collection state.
 - **C6B.3 — non-resurrection and successful completion.** Reject roots to any
   remaining batch identity, permit quining only through fresh allocations,
-  drain the successful batch, then rebuild and republish the affected
-  allocation-word availability. Prove entry-elected versus synchronous
-  completion transfers or drops the finalizer admission exactly as C3E
-  specifies.
+  and publish completed regions incrementally under heap state. Rebuild and
+  republish a terminal partial word immediately. When every destructor in a
+  fully reserved run succeeds, retire its saved class record, reset the empty
+  run, and publish it immediately to the heap-wide free-run pool; a later
+  finalizer or ordinary client may reactivate it without waiting for another
+  collection. Prove entry-elected versus synchronous completion transfers or
+  drops the finalizer admission exactly as C3E specifies.
 - **C6C.1 — panic, draining, and sparse quarantine.** Quarantine a panicking
   slot without invoking its destructor twice, safely drain or classify every
-  remaining batch item, retain the first panic for propagation, rebuild the
-  availability of every now-terminal isolated allocation word, and restore a
-  usable ordinary heap phase. Integrate existing quarantine identities into
-  every later collection as conservatively live, non-traced slots before dead-
-  set classification.
+  remaining batch item, retain the first panic for propagation, and restore a
+  usable ordinary heap phase. Rebuild every terminal partial word. A fully
+  reserved run containing quarantine cannot be retyped: restore its stable
+  record to the original allocation class, retain quarantined bits as
+  allocated, and publish any remaining safe capacity. Integrate existing
+  quarantine identities into every later collection as conservatively live,
+  non-traced slots before dead-set classification.
 - **C6C.2 — activity, reports, and final pressure publication.** Expose queued
   and running finalizers as heap activity, extend collection reports with
   reclaimed/finalized/quarantined state, incorporate runs activated during
@@ -2487,13 +2621,14 @@ Execute C6 as the following smaller checkpoints:
   next high-water target.
 - **C6D.1 — terminal-teardown decision and forced fixtures.** Choose and record
   either the preferred owner-lease drain or the restricted non-reentrant
-  fallback before changing `HeapInner::drop`. Explicitly decide whether an
-  escaped `AllocationClass<T>` remains an authorized heap owner, as it does
-  today to keep its raw frontier valid, or becomes weak and inert before
-  terminal teardown. Force last-facade, last-authorized-owner, escaped-root,
-  escaped-class, mutator-capable destructor, panic, and root-attempt orderings
-  against the selected ownership graph. An escaped root must neither postpone
-  teardown nor become dereferenceable after it.
+  fallback before changing `HeapInner::drop`. C4D already proves that no
+  allocator capability owns the heap or survives a drained mutator set. Force
+  last-facade, last-authorized-runtime-owner, active scoped-allocator,
+  escaped-root, deliberately forgotten inert allocator, mutator-capable
+  destructor, panic, and root-attempt orderings against the selected ownership
+  graph. An escaped root must neither postpone teardown nor become
+  dereferenceable after it, and forgotten allocator storage must not retain the
+  heap.
 - **C6D.2 — terminal teardown.** Implement only the selected protocol and
   prove each remaining allocation is destroyed or deliberately quarantined
   exactly once without reconstructing a dropped heap owner.
@@ -2505,18 +2640,25 @@ Execute C6 as the following smaller checkpoints:
 Resolve these C6 decisions at the named checkpoint rather than pulling them
 into marking:
 
-1. **Empty finalization batch (C6B.1).** The current C3E pipeline always makes
+1. **Successful mark clearing (C6A.3b).** Eager sweep removes every allocator
+   dependency on the successful mark bitmap. Decide whether to clear it while
+   still `Exclusive` for a tidy post-collection invariant or leave it as stale
+   scratch until the next collection's mandatory initial clear. This is a
+   physical-state and performance policy, not reachability semantics; tests
+   must consult the completed collection report and post-sweep allocator state
+   rather than infer validity from residual bits.
+2. **Empty finalization batch (C6B.1).** The current C3E pipeline always makes
    the no-gap finalizer handoff, even when its synthetic finalizer does no
    work. The recommended production path skips `Finalizing` when the batch is
    empty and atomically completes `Exclusive` either into the collecting
    entrant's one ordinary admission or into idle `Ordinary` for
    `collect_full`. Keeping the no-op handoff is semantically valid and simpler,
    so forced schedules and a small cost comparison should precede removal.
-2. **Survivor growth ratio (C6A.4).** Select the initial internal rational only
+3. **Survivor growth ratio (C6A.4).** Select the initial internal rational only
    after assigned-run occupancy exists. One half is the provisional comparison
    point, not a contract; threshold correctness tests should accept an injected
    private ratio rather than freeze the measured default into semantics.
-3. **Last-owner teardown (C6D.1).** This remains the only blocking ownership
+4. **Last-owner teardown (C6D.1).** This remains the only blocking ownership
    decision in the isolated collector plan. Do not infer it from ordinary
    collection or implement mutator-capable terminal `Drop` before its forced
    ownership fixtures exist.
@@ -2552,12 +2694,13 @@ recoverable panic injected by its own tests.
 - Treat the class's stable run record and raw atomic frontier as one retirement
   unit. Before removing or moving a boxed run record, publish a null or valid
   replacement frontier and repair class bookkeeping so neither a retained
-  class handle nor a racing frontier reader can dereference the retired record.
+  scoped allocator nor a racing frontier reader can dereference the retired
+  record. Exclusive mutator drain then proves no such reader remains.
 - Allocate a new typed run from the free list before consuming a virgin run in
   an existing chunk, and consume existing chunk capacity before allocating a
   new chunk. Reinitialize the run for its new class and geometry before
   publishing a new stable frontier record. The run's numeric location remains
-  stable, but no old class handle, frontier, or stale TLS cursor may retain
+  stable, but no old scoped allocator, frontier, or stale TLS cursor may retain
   authority over its new contents.
 - Replace typed-run-publication history with `assigned_runs`, the number of
   runs currently attached to allocation classes, and compare it with
@@ -2579,13 +2722,13 @@ recoverable panic injected by its own tests.
   allocate and retain ordinary chunks as required rather than forcing another
   collection merely because the previous capacity was nearly full. Explicit
   requests remain independent of the target.
-- Compute the marked-survivor contribution before finalization, but publish
-  the final target when the finalization batch drains. Runs activated by
-  finalizers join current assigned occupancy before the target is published;
-  completion chooses a target above that final occupancy rather than latching
-  an immediate follow-up request. A run retained by quarantine also joins the
-  baseline because it remains assigned and unavailable for recycling. No
-  collection begins during `Finalizing`.
+- Compute assigned survivor-run occupancy during the eager bitmap scan and
+  topology update, but publish the final target when the finalization batch
+  drains. Runs activated by finalizers join current assigned occupancy before
+  the target is published; completion chooses a target above that final
+  occupancy rather than latching an immediate follow-up request. A run retained
+  by quarantine also joins the baseline because it remains assigned and
+  unavailable for recycling. No collection begins during `Finalizing`.
 - An abandoned or panicking mark or sweep publishes neither free-list
   membership nor a new pressure baseline. Finalizer-panic recovery publishes
   the consistent survivor/quarantine baseline only after every run has an
@@ -2594,30 +2737,45 @@ recoverable panic injected by its own tests.
   are free. Its capacity remains available to the occupancy calculation and
   free list. Returning or decommitting empty chunks is deferred; the bootstrap
   does not complicate stable chunk indexing for an expected rare case.
-- Do not eagerly enumerate every allocated payload. Inspect run summaries and
-  bitmaps:
+- Do not eagerly enumerate every allocated payload. Inspect allocation and
+  mark bitmaps directly:
   - a no-drop run with no marked slots is retired wholesale to the free list;
-  - a partially live no-drop run retains its dead allocation bits until the
-    first post-collection lease claimant clears that word lazily; and
+  - a partially live no-drop run clears dead allocation bits eagerly through
+    wordwise `allocated &= marked`; and
   - a drop-type run computes its dead slots from `allocated & !marked` and
     queues only those slots for immediate destruction.
 - Reclamation is the point at which C5's retained allocation leases become
   stale. Rebuild every live assigned run's lease bitmap, remove retired runs
-  from their old class pools, republish class frontiers, and advance the
-  allocation-lease epoch as one exclusive transition before making any
-  reclaimed slot available. This is a post-sweep synchronization edge, not
-  initial run publication and not part of mark-only C5.
+  from their old class pools, rebuild the class's ready-run order, republish
+  class frontiers, and advance the allocation-lease epoch as one exclusive
+  transition before making any reclaimed slot available. A run reopened after
+  its finalization group completes must enter that same slow-path ready order;
+  an older run may not become permanently unreachable merely because the raw
+  frontier had advanced to a later record. This is a post-sweep synchronization
+  edge, not initial run publication and not part of mark-only C5. Ordinary
+  allocation retains its single raw-frontier fast path; ready-order maintenance
+  belongs under heap state on cursor exhaustion and finalizer publication.
 - Finalizer registration is implicit in homogeneous run metadata. The initial
   design has no per-slot finalizer bitmap and no global finalizer registry.
   Keep allocation bits set, detach the computed dead slots into a
   collector-owned finalization batch, and make those identities non-rootable
   until destruction finishes.
-- Before entering `Finalizing`, make every allocation word represented in that
-  batch unavailable to ordinary allocation-word leasing and class-frontier
-  selection. Allocation bitmap updates remain single-writer: the finalizer
-  alone clears or quarantines batch slots in those words, and ordinary workers
-  may allocate from other words concurrently. Rebuild affected word
-  availability only after all of its batch items are terminal.
+- Before entering `Finalizing`, reserve each affected word in a partially live
+  run from ordinary allocation-word leasing and class-frontier selection.
+  Fully reserve a wholly dead drop-bearing run and detach its stable record
+  from ordinary class topology while still under `Exclusive`; retain that
+  record in the finalization batch rather than destroying it early. Allocation
+  bitmap updates remain single-writer: the finalizer alone clears or
+  quarantines the reserved slots, while ordinary workers may allocate from
+  unrelated words and runs concurrently.
+- Publish a partial word back to its class as soon as all finalizers in that
+  word are terminal. Once an entirely dead run's finalizers all succeed, retire
+  its saved record, reset the empty run, and publish it immediately to the
+  free-run pool, where a later finalizer or ordinary allocator may retype it.
+  If any slot is quarantined, restore the record to its original class instead,
+  keep quarantined slots allocated, and publish its remaining usable words.
+  Neither case waits for another collection merely to recover the run's safe
+  capacity.
 - If the finalization batch is empty, finish run-state publication and release
   exclusive admission without entering `Finalizing`.
 - Before releasing exclusive admission, atomically hand the collector thread
@@ -2648,13 +2806,13 @@ recoverable panic injected by its own tests.
 - Track the ordinary case through run allocation bits and the collector-owned
   batch rather than an object header state machine. Successful `Drop` clears
   the slot's allocation bit. A panic records the slot in sparse quarantine
-  state, changes its mark bit to the committed live color before its isolated
-  allocation word is republished, leaves it non-reusable, and never invokes
-  its destructor again. Fresh allocations and already-published effects from
-  the destructor remain valid.
+  state, leaves its allocation bit set and non-reusable, and never invokes its
+  destructor again. Fresh allocations and already-published effects from the
+  destructor remain valid. Quarantine does not depend on retaining the prior
+  successful mark bitmap.
 - Before every later dead-set classification, set each sparse quarantined slot
-  to that attempt's committed live color and include it in the containing run
-  summary without dispatching its possibly damaged payload's `Trace`
+  as live after the initial mark clear and increment the scalar conservative-
+  retention count without dispatching its possibly damaged payload's `Trace`
   implementation. This is the only conservative-retention set in the isolated
   collector.
 - Terminal teardown consults the same sparse quarantine state and skips every
@@ -2700,10 +2858,11 @@ recoverable panic injected by its own tests.
 
 Verification uses drop counters, destructors containing ordinary `Arc`,
 `Mutex`, `OnceLock`, and opaque host payloads, scoped current-mutator access,
-recursive same-heap entry, bitmap-derived destruction, lazy partial-run sweep,
+recursive same-heap entry, bitmap-derived destruction, eager partial-run sweep,
 whole-run reclamation, address reuse tests, and Miri checks for stale
-references and double destruction. Instrumentation proves a no-drop partial run
-is not eagerly scanned. One opaque destructor allocates and publishes a fresh
+references and double destruction. Instrumentation proves an eagerly swept
+no-drop partial run is reclaimed from side bitmaps without enumerating its
+payload slots. One opaque destructor allocates and publishes a fresh
 quine and a diagnostic; the original identity is reclaimed while the published
 value survives the next collection. Another schedules work that enters the
 same heap from a worker. Uncommitted pressure raised during that finalizer
@@ -2717,14 +2876,17 @@ allocation and full collection must succeed.
 
 Free-run and pressure verification additionally proves that a wholly cleared
 run is detached from its old class before reuse, recycled runs are preferred
-to virgin capacity, each activation changes assigned occupancy exactly once,
-and partial or quarantined runs never enter the free list. Forced threshold
-tests cover the empty-baseline 112-run trigger, exact rounding and saturation
-of the survivor-growth term, recycled-run crossings, and a high-survivor
-collection receiving both fixed and proportional headroom. Finalizer
-activations consume rather than redefine that headroom, while quarantine is
-included in the retained baseline. Heap destruction releases retained empty
-chunks; ordinary collection does not.
+to virgin capacity, and a successfully finalized wholly dead run becomes
+available to a later finalizer before the overall finalization queue drains.
+The same fixture repeats collection and same-type finalizer allocation to prove
+that reservation does not force one virgin run per cycle. Each activation
+changes assigned occupancy exactly once, and partial or quarantined runs never
+enter the free list. Forced threshold tests cover the empty-baseline 112-run
+trigger, exact rounding and saturation of the survivor-growth term,
+recycled-run crossings, and a high-survivor collection receiving both fixed
+and proportional headroom. Finalizer activations consume rather than redefine
+that headroom, while quarantine is included in the retained baseline. Heap
+destruction releases retained empty chunks; ordinary collection does not.
 
 Gate G1 passes after C6D plus its focused unsafe-code audit.
 
@@ -2744,12 +2906,13 @@ Execute C7 as five checkpoints:
 - **C7C.1 — collection and finalization metrics.** Add entry-elected
   collections, pending and coalesced request observations, synchronous joins,
   pause/trace/sweep/finalization durations, traced objects, reclaimed
-  runs/slots, finalization batch size, and quarantine outcomes.
+  runs/slots, peak mark-object worklist length/capacity, finalization batch
+  size, and quarantine outcomes.
 - **C7C.2 — allocation and cache metrics.** Add mutator and recursive entries,
   arena chunks, assigned typed runs, recycled and virgin activations, free
-  runs, class-cache hits/misses, lazy sweeps, fixed-run utilization, and
-  partial-run fragmentation. Track cold `TypeId`/metadata discovery separately
-  from retained-class allocation.
+  runs, class-cache hits/misses, eagerly swept allocation words and slots,
+  fixed-run utilization, and partial-run fragmentation. Track cold
+  `TypeId`/metadata discovery separately from retained-class allocation.
 - **C7C.3 — metric consistency audit.** Force success, coalesced request,
   abandoned mark, finalizer panic, recycled-run, and terminal paths and prove
   counters describe committed work without double counting. Metrics remain
@@ -2760,7 +2923,7 @@ semantics beyond the shape needed to validate shared values.
 
 ## Phase C8 — Tuning Surface and Final Collector Audit
 
-Execute C8 as four checkpoints:
+Execute C8 as five checkpoints:
 
 - **C8A — tuning and reporting boundary.** Stabilize the explicit collection
   report assembled during C5 through C7 for tests and future runtime metrics.
@@ -2778,7 +2941,25 @@ Execute C8 as four checkpoints:
   builds or private fixtures, report bitmap bytes and internal fragmentation
   by metadata-requested slot stride, and record representative measurements.
   These observations guide the value layer's later type-layout policy rather
-  than becoming public defaults by accident.
+  than becoming public defaults by accident. Measure the repeated assigned-run
+  bitmap scan before considering use of the spare `RunHeader` `u32` as a live-
+  slot count reset with the mark bitmap. Do not add that count merely to avoid
+  an already-cache-local scan; future parallel marking must also account for
+  counter contention.
+- **C8B.3 — paged array tracing exploration.** Use C5D.2 and C8B's wide-array
+  measurements to judge whether the plain LIFO `Vec<ErasedGc>` has a material
+  peak-memory or reallocation cost. If it does, prototype an additive
+  array/range operation on `Visitor` rather than turning every `Trace`
+  implementation into a resumable cursor. Keep ordinary bounded tracing
+  synchronous. Internally compare a separate stack of erased stable-range
+  continuations, processed in private fixed-size pages, with the baseline
+  object stack; do not enlarge every ordinary object-stack entry to a range
+  enum. Tie delegated range lifetime to the currently traced representation,
+  document the unsafe stability obligation, cover embedded arrays and the
+  Glam-owned contiguous containers which actually need it, and keep page size
+  private and operational. Adopt the extension only if measurement justifies
+  its API and unsafe-contract cost; otherwise retain the C5 baseline and record
+  the negative result.
 - **C8C — final collector audit.** Audit every unsafe block against
   `SAFETY.md`; run Miri, Loom, sanitizers, randomized graph tests, worker stress,
   and all repository checks; reconcile the implementation plan, roadmap,
