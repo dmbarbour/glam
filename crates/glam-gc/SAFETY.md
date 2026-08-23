@@ -142,13 +142,14 @@ and every unsafe function, implementation, and block are checked into
   its pointer. Temporary strong cells are released during the shared retain
   walk, and no trace dispatch or fallible vector growth occurs inside root
   seeding.
-- The worklist therefore contains only already-marked, unique discovered
-  allocations. Popping an item does not use its set mark as a reason to skip
-  it: the collector revalidates its exact allocated slot, recovers canonical
-  metadata, and dispatches that representation exactly once. Each reported
-  edge repeats checked discovery and marks before enqueueing, which terminates
-  cycles, diamonds, repeated edges, and duplicate roots without recursive Rust
-  calls.
+- The worklist therefore contains only already-marked, unique `TraceWork`
+  discoveries. Each item retains the erased pointer and canonical metadata
+  recovered by checked discovery. Exclusive authority keeps that association
+  stable until pop, and drain holds managed data during dispatch, so it does
+  not repeat topology lookup: it dispatches the retained representation
+  exactly once. Each reported edge repeats checked discovery and marks before
+  enqueueing, which terminates cycles, diamonds, repeated edges, and duplicate
+  roots without recursive Rust calls.
 - If an attempt panics, Rust drops its worklist and counters before the
   collection guard recovers and clears any managed-data mutex poison. Recovery
   does not scan or clear partial marks. It relatches collection before

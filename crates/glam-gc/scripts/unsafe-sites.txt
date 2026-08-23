@@ -59,7 +59,7 @@ crates/glam-gc/src/heap.rs:                    unsafe { metadata.drop_in_place(p
 crates/glam-gc/src/heap.rs:                assert_eq!(unsafe { *value.get_unchecked(mutator) }, expected as u64);
 crates/glam-gc/src/heap.rs:                assert_eq!(unsafe { value.get_unchecked(mutator) }.value, index as u64);
 crates/glam-gc/src/heap.rs:            unsafe { owner.run.pointer().add(offset).cast::<u64>() }
-crates/glam-gc/src/heap.rs:            unsafe { slot.metadata.trace(value.as_ptr(), &mut visitor) };
+crates/glam-gc/src/heap.rs:            unsafe { work.metadata.trace(work.value.as_ptr(), &mut visitor) };
 crates/glam-gc/src/heap.rs:        assert_eq!(unsafe { pointer.as_ref() }._value, 73);
 crates/glam-gc/src/heap.rs:        unsafe {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for DropCounter {

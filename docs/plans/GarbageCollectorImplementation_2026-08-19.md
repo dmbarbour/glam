@@ -2310,7 +2310,7 @@ downstream corrections are required:
   allocation. This keeps the frequent allocation path simple and confines all
   mark interpretation to exclusive collection and its later sweep consumer.
 - **Keep root seeding bounded and non-fallible under the data lock.** C5 first
-  reserves a `Vec<ErasedGc>` using the registry length, then retains weak
+  reserves a `Vec<TraceWork>` using the registry length, then retains weak
   entries and upgrades them while exclusive authority keeps root publication
   stopped. Each live registry entry increments the root count, but its exact
   slot is marked before enqueueing and only a newly marked allocation is
@@ -2473,10 +2473,13 @@ Execute C5 as the following independently verified checkpoints:
   same-heap, exact-slot, allocated, and canonical-metadata check, then marks
   before enqueueing. Duplicate roots, repeated edges, cycles, and diamonds
   therefore terminate at discovery and never add duplicate worklist entries.
-  Revalidate each popped allocation before its first unsafe payload
-  dereference. Cover cycles, diamonds, deep chains, wide graphs, and shared
-  logical collection spines without changing allocation, lease, frontier, or
-  pressure state.
+  Successful discovery stores the erased pointer together with its recovered
+  canonical metadata in a private `TraceWork`, preserving that proof until
+  drain. Exclusive authority keeps the allocation and metadata association
+  stable, and drain holds managed data during dispatch, so it calls the
+  retained metadata directly without a redundant second lookup. Cover cycles,
+  diamonds, deep chains, wide graphs, and shared logical collection spines
+  without changing allocation, lease, frontier, or pressure state.
 - **C5C.1 — trace and worklist panic recovery.** Force visitor and worklist
   panics at zero, one, and many traced edges. Invalidate the partial marks,
   discard aggregate counters, recover managed data and coordinator phase,
@@ -2639,11 +2642,13 @@ Completed on 2026-08-23:
   marks the exact allocated slot before enqueueing. Distinct root cells for one
   allocation are counted separately, but clones add no cell and the allocation
   enters the worklist only on its first mark.
-- Worklist entries are already marked discoveries. Drain revalidates each
-  allocation and obtains canonical metadata before unsafe trace dispatch, then
-  traces the popped object exactly once. Reported edges use the same checked
-  mark-before-enqueue operation, so cycles, diamonds, repeated edges, and
-  shared tails terminate without recursion or duplicate worklist entries.
+- Worklist entries are private `TraceWork` values containing an already-marked
+  pointer and the canonical metadata recovered by its checked discovery.
+  Exclusive authority preserves that proof, so drain dispatches directly and
+  traces the popped object exactly once without another topology lookup.
+  Reported edges use the same checked mark-before-enqueue operation, so cycles,
+  diamonds, repeated edges, and shared tails terminate without recursion or
+  duplicate worklist entries.
 - Focused fixtures prove root counting and post-seed trace ordering, a cycle
   combined with duplicate and diamond edges, an unrooted allocation, a
   20,000-node chain, and 2,048 branches sharing a 64-node tail. The crate now
@@ -3072,7 +3077,7 @@ Execute C8 as five checkpoints:
   an already-cache-local scan; future parallel marking must also account for
   counter contention.
 - **C8B.3 — paged array tracing exploration.** Use C5D.2 and C8B's wide-array
-  measurements to judge whether the plain LIFO `Vec<ErasedGc>` has a material
+  measurements to judge whether the plain LIFO `Vec<TraceWork>` has a material
   peak-memory or reallocation cost. If it does, prototype an additive
   array/range operation on `Visitor` rather than turning every `Trace`
   implementation into a resumable cursor. Keep ordinary bounded tracing

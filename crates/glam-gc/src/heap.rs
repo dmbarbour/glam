@@ -346,10 +346,12 @@ impl ManagedData {
         self.arena.clear_assigned_mark_bitmaps()
     }
 
+    #[cfg(test)]
     fn collector_slot(&self, value: ErasedGc) -> Result<CollectorSlot, CollectorLookupError> {
         collector_slot_in(&self.arena, &self.classes, value)
     }
 
+    #[cfg(test)]
     fn collector_slot_is_marked(&self, slot: CollectorSlot) -> bool {
         self.arena.owner_slot_is_marked(slot.owner)
     }
@@ -471,9 +473,15 @@ struct CollectorSlot {
     metadata: &'static ObjectMetadata,
 }
 
+#[derive(Clone, Copy)]
+struct TraceWork {
+    value: ErasedGc,
+    metadata: &'static ObjectMetadata,
+}
+
 #[derive(Default)]
 struct MarkAttempt {
-    worklist: Vec<ErasedGc>,
+    worklist: Vec<TraceWork>,
     root_count: usize,
     marked_slot_count: usize,
     traced_object_count: usize,
@@ -508,7 +516,10 @@ impl MarkAttempt {
             .marked_slot_count
             .checked_add(1)
             .expect("marked-slot count exhausted");
-        self.worklist.push(value);
+        self.worklist.push(TraceWork {
+            value,
+            metadata: slot.metadata,
+        });
         Ok(true)
     }
 
@@ -541,22 +552,19 @@ impl MarkAttempt {
     }
 
     fn trace_worklist(&mut self, data: &mut ManagedData) -> Result<(), CollectorLookupError> {
-        while let Some(value) = self.worklist.pop() {
-            let slot = data.collector_slot(value)?;
-            assert!(
-                data.collector_slot_is_marked(slot),
-                "collector worklist contains an undiscovered allocation"
-            );
+        while let Some(work) = self.worklist.pop() {
             let mut visit = |edge| {
                 self.discover(data, edge)
                     .unwrap_or_else(|error| error.raise());
             };
             let mut visitor = Visitor::new(&mut visit);
-            // SAFETY: the checked collector lookup above proves that `value`
-            // identifies one live initialized allocation with exactly the
-            // canonical metadata used for dispatch. Exclusive collection
-            // prevents mutation or reclamation during this synchronous trace.
-            unsafe { slot.metadata.trace(value.as_ptr(), &mut visitor) };
+            // SAFETY: `TraceWork` is constructed only after checked discovery
+            // proves that `work.value` identifies one live initialized
+            // allocation with this canonical metadata. The attempt retains
+            // exclusive collection through this synchronous trace, and drain
+            // holds managed data while dispatching, so no topology change can
+            // invalidate that proof.
+            unsafe { work.metadata.trace(work.value.as_ptr(), &mut visitor) };
             self.traced_object_count = self
                 .traced_object_count
                 .checked_add(1)
@@ -3165,7 +3173,12 @@ mod tests {
             assert_eq!(data.roots.len(), 2);
             assert_eq!(attempt.root_count, 2);
             assert_eq!(attempt.marked_slot_count, 1);
-            assert_eq!(attempt.worklist, vec![value.erase()]);
+            assert_eq!(attempt.worklist.len(), 1);
+            assert_eq!(attempt.worklist[0].value, value.erase());
+            assert!(std::ptr::eq(
+                attempt.worklist[0].metadata,
+                metadata_for::<GraphNode>()
+            ));
             assert_eq!(traces.load(Ordering::Relaxed), 0);
 
             attempt.trace_worklist(&mut data).unwrap();
