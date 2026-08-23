@@ -30,7 +30,7 @@ moves pressure to authoritative typed-run publication, adds stable atomic class
 frontiers, and removes eager TLS pruning in favor of explicit inert release.
 C2C.6 adds forced concurrent exhausted-frontier verification and corrects the
 publication proof: initial run topology is observed through the frontier
-Release/Acquire pair or heap mutex, not through a load of the separate lease
+Release/Acquire pair or managed-data mutex, not through a load of the separate lease
 word. C3 adds the heap-local mutator-admission coordinator, moves allocation-
 class discovery behind mutator authority, and orders TLS entry as prepare,
 admit, then activate. Production request epochs now elect one collector, drain
@@ -47,6 +47,9 @@ ordering on both sides of each temporary weak upgrade. The walk still performs
 no marking or reclamation. C4D replaces the reusable public class handle with
 a mutator-scoped `Allocator<'_, T>`, moves durable class/run topology entirely
 under heap ownership, and removes allocation capabilities as heap owners.
+C5A.0 splits mutator/collector coordination from managed heap data and makes
+the coalesced collection request a sibling atomic. It changes no pointer,
+allocation, root, tracing, or reclamation semantics.
 
 The crate denies unsafe code by default. `src/lib.rs` gives the reviewed
 `pointer`, `root`, `mutator`, `trace`, `mutation`, `thread_cache`, and unit-test
@@ -59,10 +62,11 @@ and every unsafe function, implementation, and block are checked into
 
 - Every arena chunk is one 8 MiB allocation with size and alignment equal to
   8 MiB. It therefore contains exactly 128 aligned 64 KiB runs.
-- `HeapInner` owns its arena behind the heap mutex. The stable owning vector and
-  an authoritative map from aligned chunk base to vector index are updated
-  together. Both collections reserve capacity before publication; dropping a
-  rejected candidate or its arena returns the allocation exactly once.
+- `HeapInner` owns its arena behind the managed-data mutex. The stable owning
+  vector and an authoritative map from aligned chunk base to vector index are
+  updated together. Both collections reserve capacity before publication;
+  dropping a rejected candidate or its arena returns the allocation exactly
+  once.
 - Owner lookup masks an integer address to a candidate 8 MiB base and queries
   the owning heap's chunk index. Only a successful index and range check derive
   a run pointer from the original chunk pointer, preserving allocation
@@ -194,10 +198,21 @@ C6 later owns collector-driven destruction.
 
 ## Regional Mutator Admission Invariants
 
-- One heap-state mutex protects the admission phase and active-outer-mutator
-  count together with the existing class/run topology. Its sibling condition
-  variable supplies wakeups only; every waiter loops and rechecks its complete
-  predicate under the mutex.
+- One coordinator mutex protects the admission phase, active-outer-mutator
+  count, active/completed collection epochs, and every condition-variable
+  predicate. Its sibling condition variable supplies wakeups only; every
+  waiter loops and rechecks its complete predicate under that mutex.
+- A separate managed-data mutex protects arena, class/run topology, allocation
+  pressure, external-root registrations, and future mark/sweep state. No
+  production path holds the coordinator and managed-data mutexes together. A
+  collector validates coordinator authority, releases that guard, and then
+  accesses managed data; `Exclusive` authority keeps the state stable where
+  that transition needs stability.
+- The coalesced collection request is a sibling `AtomicBool`, not duplicated in
+  either locked component. An asynchronous request is exactly one Release
+  store: it acquires no mutex and sends no condition-variable notification.
+  Admission and synchronous collection load it with Acquire ordering before
+  attempting election under the coordinator mutex.
 - `Ordinary` admits outer mutators. A nonblocking collection request is only a
   coalesced hint and denies no admission. An outer entry which observes
   `Ordinary`, zero active mutators, and a request atomically publishes
@@ -218,9 +233,9 @@ C6 later owns collector-driven destruction.
   blocks every outer entrant.
 - Entry destruction first decrements recursive depth and makes the outer cache
   quiescent, then retires the coordinator obligation. Consequently, observing
-  zero active mutators after acquiring the heap mutex also observes all work
-  sequenced before those outer exits. C3's native forced schedules and Loom
-  model latch this visibility edge.
+  zero active mutators after acquiring the coordinator mutex also observes all
+  work sequenced before those outer exits. C3's native forced schedules and
+  Loom model latch this visibility edge.
 - Outermost exit only makes its TLS cache inactive, retires its coordinator
   obligation, and wakes waiters when the active count reaches zero. It neither
   scans TLS records nor services collection. This makes nested cross-heap exit
@@ -228,12 +243,18 @@ C6 later owns collector-driven destruction.
 - Before exclusive work, the collecting thread clears its complete inactive
   cursor cache for the target heap. The collector-to-finalizer handoff then
   changes `Exclusive` directly to `Finalizing` while installing one active
-  mutator obligation under the same heap mutex. Ordinary finalization work and
-  recursive same-heap entry therefore run with normal mutator authority. On
+  mutator obligation under the same coordinator mutex. Ordinary finalization
+  work and recursive same-heap entry therefore run with normal mutator
+  authority. On
   successful completion an entry-elected collector carries that obligation
   directly into its originally requested outer entry; `collect_full` drops it.
-  Requests received before completion are coalesced and cleared, while one
-  serialized afterward remains pending for a later idle entry.
+  Successful completion resets pressure and clears the request while holding
+  managed data, releases that guard, and then publishes ordinary coordinator
+  state. Pressure cannot race that clear because publication uses the same
+  managed-data mutex. Atomic modification order makes an external request
+  before the clear coalesce into the active collection and one after the clear
+  remain pending. Finalizing mutators may also publish roots or pressure in the
+  interval before coordinator completion; those updates remain authoritative.
 - An unwind guard covers exclusive and finalizer test work. It retires any
   installed finalizer mutator first, clears collector ownership, restores
   ordinary admission, and relatches the interrupted collection. C6 adds the
@@ -247,12 +268,12 @@ C6 later owns collector-driven destruction.
 ## Heap-Local Allocation-Class Invariants
 
 - Canonical metadata discovery and pure fixed-run geometry derivation finish
-  before the heap-state mutex is acquired. Unsupported layouts therefore
+  before the managed-data mutex is acquired. Unsupported layouts therefore
   publish no heap-local state or dense ID.
-- One heap-state mutex guards the arena, metadata-identity index, and dense
+- One managed-data mutex guards the arena, metadata-identity index, and dense
   class table. Metadata keys compare and hash only the canonical static
   descriptor address; `TypeId` is absent from this state.
-- Immutable class candidates are constructed outside the heap lock. After the
+- Immutable class candidates are constructed outside the managed-data lock. After the
   second winner check, vector and map capacity is reserved before either
   authoritative structure is changed, then the dense entry and its index are
   published under the same mutex.
@@ -278,13 +299,13 @@ C6 later owns collector-driven destruction.
   publication failure therefore adds neither a typed run nor a class-pool
   location.
 - After a successful arena publication, recording the already reserved
-  `RunLocation` is infallible and occurs under the same heap-state mutex. No
+  `RunLocation` is infallible and occurs under the same managed-data mutex. No
   observer can see a header without its class-pool membership.
 - Checked slot resolution validates arena membership, exact slot-start
   geometry, dense class-table membership, class geometry, and authoritative
   run-pool membership before returning canonical metadata. A header ID from
   another heap has no meaning outside its owner state.
-- Private `AllocationClass<T>` provenance is checked before the heap mutex and
+- Private `AllocationClass<T>` provenance is checked before the managed-data mutex and
   before any run state is changed. A foreign internal identity therefore cannot
   publish a run even when its numeric dense ID happens to equal a local ID.
   Ordinary `Allocator::alloc` relies on constructive provenance and retains a
@@ -292,7 +313,7 @@ C6 later owns collector-driven destruction.
 
 ## Synchronized Payload Allocation and Terminal Destruction
 
-- The correctness allocator holds the heap-state mutex while selecting a free
+- The correctness allocator holds the managed-data mutex while selecting a free
   allocation bit, initializing its typed payload, and publishing that bit. The
   payload and bitmap word are disjoint validated run ranges, and no operation
   capable of unwinding occurs between their raw writes.
@@ -301,7 +322,7 @@ C6 later owns collector-driven destruction.
   input value is destroyed normally. The already published empty typed run may
   remain available for later allocation.
 - Allocation-bit reads and writes use initialized aligned `u64` side metadata
-  under heap-state exclusion. The synchronized path may scan run pools and
+  under managed-data exclusion. The synchronized path may scan run pools and
   slots; C2C.3 replaces this correctness baseline with disjoint worker-local
   bitmap-word leases.
 - Terminal `HeapInner::drop` has exclusive ownership. It enumerates every set
@@ -349,7 +370,7 @@ C6 later owns collector-driven destruction.
   Release ordering.
 - Initial run topology reaches a lock-free claimant through that frontier
   Release/Acquire pair. A claimant reached from the synchronized path instead
-  relies on the heap mutex. The separate lease-word Acquire does not publish
+  relies on the managed-data mutex. The separate lease-word Acquire does not publish
   the run record; in C2C it participates in atomic word ownership. C5 will add
   a Release reset on that same lease word to publish rebuilt post-collection
   allocation/free state to the next Acquire claimant.
@@ -376,7 +397,7 @@ C6 later owns collector-driven destruction.
   occurs only after bitmap publication, and ordinary Rust synchronization may
   immediately share it with another mutator. Collection remains disabled in
   C2C, so the payload then stays live through terminal heap teardown.
-- Allocation pressure is charged exactly once under heap state after a typed
+- Allocation pressure is charged exactly once under managed data after a typed
   run becomes authoritative in both arena and class pool. Word claims, local
   object allocation, cursor eviction, explicit cache release, and thread exit
   do not touch it. A saturating count latches the initial request after 7/8 of
@@ -529,16 +550,16 @@ metadata checks required before dereference.
 ### `root::Root<T>` construction and access
 
 `Mutator::root` resolves the candidate address through the heap's indexed
-chunk, run, class, and slot topology under heap state, compares the run's
+chunk, run, class, and slot topology under managed data, compares the run's
 canonical metadata with `metadata_for::<T>()`, and loads the atomic allocation
 bit with Acquire ordering. It publishes one `Weak<RootCell>` into the same
-locked heap state before returning the first public root. Rejected input is
+locked managed data before returning the first public root. Rejected input is
 reported only after releasing the mutex, so a caller contract violation does
 not poison an otherwise valid heap. Clones share the existing cell and neither
 clone nor drop touches the registry.
 
 The `Arc<RootCell>` and its weak registration candidate are constructed before
-the heap mutex is acquired. Holding one critical section across validation and
+the managed-data mutex is acquired. Holding one critical section across validation and
 the vector push is a one-lock implementation choice, not the semantic barrier:
 the calling `Mutator` already prevents an exclusive collection or reclamation
 from intervening. Current validation nevertheless needs the mutex to read the
@@ -560,7 +581,7 @@ reference's lifetime. C4 performs no reclamation. Dropping `RootCell` releases
 only its weak heap reference and pointer bits; it never dereferences or destroys
 the managed payload and invokes no user code.
 
-Exclusive root traversal holds the existing heap-state mutex after the
+Exclusive root traversal holds the managed-data mutex after the
 coordinator has stopped every mutator. No new root cell can therefore be
 validated or published during the walk. `Vec::retain` upgrades each weak entry
 for exactly one visit, drops that temporary strong reference before advancing,
@@ -638,9 +659,16 @@ mutation closure runs.
 - C4C tests production collection-path pruning, a final public root dropped
   after the collector's successful per-entry upgrade, release of that temporary
   strong reference before visiting the next entry, conservative retention until
-  the following walk, passive root-cell destruction under the heap mutex, and
+  the following walk, passive root-cell destruction under the managed-data mutex, and
   exclusion of replacement publication until the collector leaves exclusive
   authority.
+- C5A.0 tests that asynchronous request takes neither component lock and sends
+  no coordinator notification; pressure and explicit requests on the two sides
+  of data-side acknowledgement have the specified coalescing behavior; a
+  finalizing mutator may publish a root and new pressure in the inter-lock
+  interval; and a synchronous requester joins an active epoch while its
+  collector is blocked on managed data. Existing admission, finalization,
+  root-publication, panic, and Loom schedules pass unchanged after the split.
 - The ordinary crate checks, exact unsafe inventory, focused Miri run, and
   repository-wide checks are required at completed checkpoints.
 - Miri passes all implemented tests with leak checking enabled. C1's temporary

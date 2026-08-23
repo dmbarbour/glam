@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 
 use crate::{
@@ -159,7 +159,9 @@ impl Heap {
 }
 
 pub(crate) struct HeapInner {
-    state: Mutex<HeapState>,
+    coordinator: Mutex<MutatorCoordinator>,
+    data: Mutex<ManagedData>,
+    collection_requested: AtomicBool,
     admission_changed: Condvar,
     allocation_lease_epoch: AtomicU64,
     #[cfg(test)]
@@ -172,6 +174,10 @@ pub(crate) struct HeapInner {
     allocation_cursor_frontier_advance_attempts: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
     allocation_cursor_slow_path_hook: Mutex<Option<AllocationCursorSlowPathHook>>,
+    #[cfg(test)]
+    collection_acknowledgement_hook: Mutex<Option<CollectionAcknowledgementHook>>,
+    #[cfg(test)]
+    coordinator_notifications: std::sync::atomic::AtomicUsize,
 }
 
 #[cfg(test)]
@@ -181,10 +187,19 @@ struct AllocationCursorSlowPathHook {
     release: Arc<std::sync::Barrier>,
 }
 
+#[cfg(test)]
+#[derive(Clone)]
+struct CollectionAcknowledgementHook {
+    arrived: Arc<std::sync::Barrier>,
+    release: Arc<std::sync::Barrier>,
+}
+
 impl Default for HeapInner {
     fn default() -> Self {
         Self {
-            state: Mutex::new(HeapState::default()),
+            coordinator: Mutex::new(MutatorCoordinator::default()),
+            data: Mutex::new(ManagedData::default()),
+            collection_requested: AtomicBool::new(false),
             admission_changed: Condvar::new(),
             allocation_lease_epoch: AtomicU64::new(AllocationLeaseEpoch::INITIAL.get()),
             #[cfg(test)]
@@ -197,12 +212,16 @@ impl Default for HeapInner {
             allocation_cursor_frontier_advance_attempts: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             allocation_cursor_slow_path_hook: Mutex::new(None),
+            #[cfg(test)]
+            collection_acknowledgement_hook: Mutex::new(None),
+            #[cfg(test)]
+            coordinator_notifications: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 }
 
 #[derive(Default)]
-struct HeapState {
+struct ManagedData {
     #[allow(
         dead_code,
         reason = "C2B.3 run state becomes a live allocator path in C2C"
@@ -212,20 +231,29 @@ struct HeapState {
     classes: Vec<AllocationClassEntry>,
     allocation_pressure: AllocationPressure,
     roots: Vec<Weak<RootCell>>,
-    coordinator: MutatorCoordinator,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct MutatorCoordinator {
     phase: AdmissionPhase,
     active_outer_mutators: usize,
-    collection_requested: bool,
     active_collection: Option<CollectionEpoch>,
     completed_collection_epoch: u64,
     #[cfg(test)]
     blocked_outer_mutators: usize,
     #[cfg(test)]
     blocked_collection_waiters: usize,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CoordinatorSnapshot {
+    phase: AdmissionPhase,
+    active_outer_mutators: usize,
+    collection_requested: bool,
+    active_collection: Option<CollectionEpoch>,
+    completed_collection_epoch: u64,
+    blocked_outer_mutators: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -276,44 +304,48 @@ impl Drop for MutatorAdmission<'_> {
 #[cfg(test)]
 impl Drop for SyntheticExclusiveAdmission<'_> {
     fn drop(&mut self) {
-        let mut state = self
+        let mut coordinator = self
             .heap
-            .state
+            .coordinator
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        assert_eq!(state.coordinator.phase, AdmissionPhase::Exclusive);
-        assert_eq!(state.coordinator.active_outer_mutators, 0);
-        state.coordinator.phase = AdmissionPhase::Ordinary;
-        self.heap.admission_changed.notify_all();
+        assert_eq!(coordinator.phase, AdmissionPhase::Exclusive);
+        assert_eq!(coordinator.active_outer_mutators, 0);
+        coordinator.phase = AdmissionPhase::Ordinary;
+        self.heap.notify_coordinator_waiters();
     }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct AllocationPressure {
     published_runs: usize,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct AllocationPressureSnapshot {
+    published_runs: usize,
     collection_requested: bool,
 }
 
 impl AllocationPressure {
     fn record_run_publication(&mut self) -> bool {
-        let was_requested = self.collection_requested;
         self.published_runs = self.published_runs.saturating_add(1);
-        self.collection_requested |= self.published_runs >= INITIAL_RUN_PUBLICATION_ALLOWANCE;
-        !was_requested && self.collection_requested
+        self.published_runs >= INITIAL_RUN_PUBLICATION_ALLOWANCE
     }
 
     fn acknowledge_collection(&mut self) {
         self.published_runs = 0;
-        self.collection_requested = false;
     }
 }
 
-impl HeapState {
+impl ManagedData {
     fn publish_run(
         &mut self,
         class_index: usize,
         class_id: AllocationClassId,
         geometry: RunGeometry,
+        collection_requested: &AtomicBool,
     ) -> Result<RunLocation, RunPublicationError> {
         // Reserve the class-pool entry before publishing arena state. After a
         // successful arena publication, all remaining operations are
@@ -326,33 +358,31 @@ impl HeapState {
             .expect("published typed run must expose stable claim topology");
         self.classes[class_index].publish_run(target);
         if self.allocation_pressure.record_run_publication() {
-            self.coordinator.request_collection();
+            collection_requested.store(true, Ordering::Release);
         }
         Ok(location)
     }
 }
 
 impl MutatorCoordinator {
-    fn request_collection(&mut self) {
-        self.collection_requested = true;
-    }
-
-    fn request_synchronous_collection(&mut self) -> CollectionEpoch {
+    fn request_synchronous_collection(&self) -> (CollectionEpoch, bool) {
         match self.phase {
-            AdmissionPhase::Ordinary => {
-                self.collection_requested = true;
-                CollectionEpoch::after(self.completed_collection_epoch)
-            }
-            AdmissionPhase::Exclusive | AdmissionPhase::Finalizing => self
-                .active_collection
-                .expect("active collection phase must have an epoch"),
+            AdmissionPhase::Ordinary => (
+                CollectionEpoch::after(self.completed_collection_epoch),
+                true,
+            ),
+            AdmissionPhase::Exclusive | AdmissionPhase::Finalizing => (
+                self.active_collection
+                    .expect("active collection phase must have an epoch"),
+                false,
+            ),
         }
     }
 
-    fn elect_idle_collection(&mut self) -> Option<CollectionEpoch> {
+    fn elect_idle_collection(&mut self, collection_requested: bool) -> Option<CollectionEpoch> {
         if self.phase != AdmissionPhase::Ordinary
             || self.active_outer_mutators != 0
-            || !self.collection_requested
+            || !collection_requested
         {
             return None;
         }
@@ -402,27 +432,26 @@ struct ResolvedRun {
 impl HeapInner {
     fn admit_outer_mutator(self: &Arc<Self>) -> (MutatorAdmission<'_>, bool) {
         let elected = {
-            let mut state = self
-                .state
+            let mut coordinator = self
+                .coordinator
                 .lock()
-                .expect("heap state should not be poisoned");
+                .expect("mutator coordinator should not be poisoned");
             loop {
-                match state.coordinator.phase {
+                match coordinator.phase {
                     AdmissionPhase::Ordinary => {
-                        if let Some(epoch) = state.coordinator.elect_idle_collection() {
-                            self.admission_changed.notify_all();
+                        let requested = self.collection_requested.load(Ordering::Acquire);
+                        if let Some(epoch) = coordinator.elect_idle_collection(requested) {
+                            self.notify_coordinator_waiters();
                             break Some(epoch);
                         }
-                        state.coordinator.active_outer_mutators = state
-                            .coordinator
+                        coordinator.active_outer_mutators = coordinator
                             .active_outer_mutators
                             .checked_add(1)
                             .expect("active mutator count exhausted");
                         break None;
                     }
                     AdmissionPhase::Finalizing => {
-                        state.coordinator.active_outer_mutators = state
-                            .coordinator
+                        coordinator.active_outer_mutators = coordinator
                             .active_outer_mutators
                             .checked_add(1)
                             .expect("active mutator count exhausted");
@@ -431,17 +460,17 @@ impl HeapInner {
                     AdmissionPhase::Exclusive => {
                         #[cfg(test)]
                         {
-                            state.coordinator.blocked_outer_mutators += 1;
-                            self.admission_changed.notify_all();
+                            coordinator.blocked_outer_mutators += 1;
+                            self.notify_coordinator_waiters();
                         }
-                        state = self
+                        coordinator = self
                             .admission_changed
-                            .wait(state)
-                            .expect("heap state should not be poisoned");
+                            .wait(coordinator)
+                            .expect("mutator coordinator should not be poisoned");
                         #[cfg(test)]
                         {
-                            state.coordinator.blocked_outer_mutators -= 1;
-                            self.admission_changed.notify_all();
+                            coordinator.blocked_outer_mutators -= 1;
+                            self.notify_coordinator_waiters();
                         }
                     }
                 }
@@ -459,52 +488,57 @@ impl HeapInner {
     }
 
     fn request_collection(&self) {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.coordinator.request_collection();
+        self.collection_requested.store(true, Ordering::Release);
+    }
+
+    fn notify_coordinator_waiters(&self) {
+        #[cfg(test)]
+        self.coordinator_notifications
+            .fetch_add(1, Ordering::Relaxed);
         self.admission_changed.notify_all();
     }
 
     fn collect_full(self: &Arc<Self>) -> CollectionReport {
         let target = {
-            let mut state = self
-                .state
+            let coordinator = self
+                .coordinator
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let target = state.coordinator.request_synchronous_collection();
-            self.admission_changed.notify_all();
+            let (target, request) = coordinator.request_synchronous_collection();
+            if request {
+                self.collection_requested.store(true, Ordering::Release);
+            }
             target
         };
 
         loop {
             let elected = {
-                let mut state = self
-                    .state
+                let mut coordinator = self
+                    .coordinator
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 loop {
-                    if state.coordinator.completed_collection_epoch >= target.get() {
+                    if coordinator.completed_collection_epoch >= target.get() {
                         return CollectionReport { epoch: target.0 };
                     }
-                    if let Some(elected) = state.coordinator.elect_idle_collection() {
-                        self.admission_changed.notify_all();
+                    let requested = self.collection_requested.load(Ordering::Acquire);
+                    if let Some(elected) = coordinator.elect_idle_collection(requested) {
+                        self.notify_coordinator_waiters();
                         break elected;
                     }
                     #[cfg(test)]
                     {
-                        state.coordinator.blocked_collection_waiters += 1;
-                        self.admission_changed.notify_all();
+                        coordinator.blocked_collection_waiters += 1;
+                        self.notify_coordinator_waiters();
                     }
-                    state = self
+                    coordinator = self
                         .admission_changed
-                        .wait(state)
+                        .wait(coordinator)
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     #[cfg(test)]
                     {
-                        state.coordinator.blocked_collection_waiters -= 1;
-                        self.admission_changed.notify_all();
+                        coordinator.blocked_collection_waiters -= 1;
+                        self.notify_coordinator_waiters();
                     }
                 }
             };
@@ -523,22 +557,22 @@ impl HeapInner {
         exclusive_work: impl FnOnce(),
         finalizer_work: impl for<'mutator> FnOnce(&Mutator<'mutator>),
     ) -> Option<MutatorAdmission<'heap>> {
-        let state = self
-            .state
+        let coordinator = self
+            .coordinator
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(
-            state.coordinator.active_collection,
+            coordinator.active_collection,
             Some(epoch),
             "collector epoch is no longer authoritative"
         );
         assert_eq!(
-            state.coordinator.phase,
+            coordinator.phase,
             AdmissionPhase::Exclusive,
             "elected collector must begin exclusive"
         );
-        assert_eq!(state.coordinator.active_outer_mutators, 0);
-        drop(state);
+        assert_eq!(coordinator.active_outer_mutators, 0);
+        drop(coordinator);
 
         remove_inactive_thread_cache(self);
         let mut attempt = CollectionAttempt::new(self, epoch);
@@ -548,7 +582,7 @@ impl HeapInner {
         self.visit_registered_roots(|_| {});
         exclusive_work();
 
-        // Prepare the TLS record without activating it. Under the heap-state
+        // Prepare the TLS record without activating it. Under the coordinator
         // mutex, exclusive authority is then converted directly into one
         // collector-owned mutator obligation. No ordinary entrant can observe
         // a gap in which neither authority is present.
@@ -558,16 +592,16 @@ impl HeapInner {
             "collector thread unexpectedly holds a mutator for its target heap"
         );
         let admission = {
-            let mut state = self
-                .state
+            let mut coordinator = self
+                .coordinator
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            assert_eq!(state.coordinator.phase, AdmissionPhase::Exclusive);
-            assert_eq!(state.coordinator.active_outer_mutators, 0);
-            assert_eq!(state.coordinator.active_collection, Some(epoch));
-            state.coordinator.phase = AdmissionPhase::Finalizing;
-            state.coordinator.active_outer_mutators = 1;
-            self.admission_changed.notify_all();
+            assert_eq!(coordinator.phase, AdmissionPhase::Exclusive);
+            assert_eq!(coordinator.active_outer_mutators, 0);
+            assert_eq!(coordinator.active_collection, Some(epoch));
+            coordinator.phase = AdmissionPhase::Finalizing;
+            coordinator.active_outer_mutators = 1;
+            self.notify_coordinator_waiters();
             MutatorAdmission { heap: self }
         };
         let thread_entry =
@@ -587,72 +621,133 @@ impl HeapInner {
     }
 
     fn release_outer_mutator(&self) {
-        let mut state = self
-            .state
+        let mut coordinator = self
+            .coordinator
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.coordinator.active_outer_mutators = state
-            .coordinator
+        coordinator.active_outer_mutators = coordinator
             .active_outer_mutators
             .checked_sub(1)
             .expect("active mutator count underflow");
-        if state.coordinator.active_outer_mutators == 0 {
-            self.admission_changed.notify_all();
+        if coordinator.active_outer_mutators == 0 {
+            self.notify_coordinator_waiters();
         }
     }
 
     #[cfg(test)]
     fn enter_synthetic_exclusive(&self) -> SyntheticExclusiveAdmission<'_> {
-        let mut state = self
-            .state
+        let mut coordinator = self
+            .coordinator
             .lock()
-            .expect("heap state should not be poisoned");
-        while state.coordinator.phase != AdmissionPhase::Ordinary
-            || state.coordinator.active_outer_mutators != 0
+            .expect("mutator coordinator should not be poisoned");
+        while coordinator.phase != AdmissionPhase::Ordinary
+            || coordinator.active_outer_mutators != 0
         {
-            state = self
+            coordinator = self
                 .admission_changed
-                .wait(state)
-                .expect("heap state should not be poisoned");
+                .wait(coordinator)
+                .expect("mutator coordinator should not be poisoned");
         }
-        state.coordinator.phase = AdmissionPhase::Exclusive;
-        self.admission_changed.notify_all();
+        coordinator.phase = AdmissionPhase::Exclusive;
+        self.notify_coordinator_waiters();
         SyntheticExclusiveAdmission { heap: self }
     }
 
     #[cfg(test)]
-    fn coordinator_snapshot(&self) -> MutatorCoordinator {
-        self.state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    fn coordinator_snapshot(&self) -> CoordinatorSnapshot {
+        let coordinator = *self
             .coordinator
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        CoordinatorSnapshot {
+            phase: coordinator.phase,
+            active_outer_mutators: coordinator.active_outer_mutators,
+            collection_requested: self.collection_requested.load(Ordering::Acquire),
+            active_collection: coordinator.active_collection,
+            completed_collection_epoch: coordinator.completed_collection_epoch,
+            blocked_outer_mutators: coordinator.blocked_outer_mutators,
+        }
+    }
+
+    #[cfg(test)]
+    fn coordinator_notification_count(&self) -> usize {
+        self.coordinator_notifications.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    fn install_collection_acknowledgement_hook(
+        &self,
+        arrived: Arc<std::sync::Barrier>,
+        release: Arc<std::sync::Barrier>,
+    ) {
+        let mut hook = self
+            .collection_acknowledgement_hook
+            .lock()
+            .expect("collection acknowledgement hook should not be poisoned");
+        assert!(
+            hook.is_none(),
+            "collection acknowledgement hook already installed"
+        );
+        *hook = Some(CollectionAcknowledgementHook { arrived, release });
+    }
+
+    #[cfg(test)]
+    fn clear_collection_acknowledgement_hook(&self) {
+        self.collection_acknowledgement_hook
+            .lock()
+            .expect("collection acknowledgement hook should not be poisoned")
+            .take();
+    }
+
+    #[cfg(test)]
+    fn pause_after_collection_acknowledgement(&self) {
+        let hook = self
+            .collection_acknowledgement_hook
+            .lock()
+            .expect("collection acknowledgement hook should not be poisoned")
+            .clone();
+        if let Some(hook) = hook {
+            hook.arrived.wait();
+            hook.release.wait();
+        }
+    }
+
+    #[cfg(test)]
+    fn elect_idle_collection_for_test(&self) -> CollectionEpoch {
+        let mut coordinator = self
+            .coordinator
+            .lock()
+            .expect("mutator coordinator should not be poisoned");
+        coordinator
+            .elect_idle_collection(self.collection_requested.load(Ordering::Acquire))
+            .expect("test heap must be idle with a collection requested")
     }
 
     #[cfg(test)]
     fn wait_for_blocked_outer_mutators(&self, expected: usize) {
-        let mut state = self
-            .state
+        let mut coordinator = self
+            .coordinator
             .lock()
-            .expect("heap state should not be poisoned");
-        while state.coordinator.blocked_outer_mutators != expected {
-            state = self
+            .expect("mutator coordinator should not be poisoned");
+        while coordinator.blocked_outer_mutators != expected {
+            coordinator = self
                 .admission_changed
-                .wait(state)
-                .expect("heap state should not be poisoned");
+                .wait(coordinator)
+                .expect("mutator coordinator should not be poisoned");
         }
     }
 
     #[cfg(test)]
     fn wait_for_collection_waiters(&self, expected: usize) {
-        let mut state = self
-            .state
+        let mut coordinator = self
+            .coordinator
             .lock()
-            .expect("heap state should not be poisoned");
-        while state.coordinator.blocked_collection_waiters != expected {
-            state = self
+            .expect("mutator coordinator should not be poisoned");
+        while coordinator.blocked_collection_waiters != expected {
+            coordinator = self
                 .admission_changed
-                .wait(state)
-                .expect("heap state should not be poisoned");
+                .wait(coordinator)
+                .expect("mutator coordinator should not be poisoned");
         }
     }
 
@@ -691,10 +786,7 @@ impl HeapInner {
     ) -> AllocationClass<T> {
         let identity = MetadataIdentity::new(metadata);
         {
-            let state = self
-                .state
-                .lock()
-                .expect("heap state should not be poisoned");
+            let state = self.data.lock().expect("heap state should not be poisoned");
             if let Some(id) = state.classes_by_metadata.get(&identity).copied() {
                 let shared = Arc::clone(
                     state.classes[class_index(id).expect("known class ID must be valid")].shared(),
@@ -717,10 +809,7 @@ impl HeapInner {
             "allocation-class candidate geometry mismatch"
         );
 
-        let mut state = self
-            .state
-            .lock()
-            .expect("heap state should not be poisoned");
+        let mut state = self.data.lock().expect("heap state should not be poisoned");
         if let Some(id) = state.classes_by_metadata.get(&identity).copied() {
             let shared = Arc::clone(
                 state.classes[class_index(id).expect("known class ID must be valid")].shared(),
@@ -765,12 +854,12 @@ impl HeapInner {
             return Err(PrepareRunError::ForeignClass);
         }
 
-        let mut state = self
-            .state
+        let mut data = self
+            .data
             .lock()
-            .expect("heap state should not be poisoned");
+            .expect("managed heap data should not be poisoned");
         let index = class_index(class.id()).ok_or(PrepareRunError::InvalidClass)?;
-        let entry = state
+        let entry = data
             .classes
             .get(index)
             .ok_or(PrepareRunError::InvalidClass)?;
@@ -779,8 +868,8 @@ impl HeapInner {
         }
         let geometry = entry.geometry();
 
-        let location = state
-            .publish_run(index, class.id(), geometry)
+        let location = data
+            .publish_run(index, class.id(), geometry, &self.collection_requested)
             .map_err(PrepareRunError::Publication)?;
         Ok(location)
     }
@@ -815,13 +904,13 @@ impl HeapInner {
             .fetch_add(1, Ordering::Relaxed);
         #[cfg(test)]
         self.pause_before_allocation_cursor_slow_path();
-        let mut state = self
-            .state
+        let mut data = self
+            .data
             .lock()
-            .expect("heap state should not be poisoned");
+            .expect("managed heap data should not be poisoned");
         let index = class_index(class.id()).expect("allocation class has an invalid ID");
         let geometry = {
-            let entry = state
+            let entry = data
                 .classes
                 .get(index)
                 .expect("allocation class is absent from its heap");
@@ -849,17 +938,16 @@ impl HeapInner {
             #[cfg(test)]
             self.allocation_cursor_frontier_advance_attempts
                 .fetch_add(1, Ordering::Relaxed);
-            if let Some(target) = state.classes[index].advance_frontier() {
+            if let Some(target) = data.classes[index].advance_frontier() {
                 if let Some(claimed) = target.claim_allocation_word() {
                     return allocation_cursor(class.id(), claimed);
                 }
                 continue;
             }
 
-            state
-                .publish_run(index, class.id(), geometry)
+            data.publish_run(index, class.id(), geometry, &self.collection_requested)
                 .unwrap_or_else(|error| panic!("managed run allocation failed: {error:?}"));
-            let target = state.classes[index].activate_last_run();
+            let target = data.classes[index].activate_last_run();
             if let Some(claimed) = target.claim_allocation_word() {
                 return allocation_cursor(class.id(), claimed);
             }
@@ -926,11 +1014,17 @@ impl HeapInner {
     }
 
     #[cfg(test)]
-    fn allocation_pressure(&self) -> AllocationPressure {
-        self.state
+    fn allocation_pressure(&self) -> AllocationPressureSnapshot {
+        let published_runs = self
+            .data
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .allocation_pressure
+            .published_runs;
+        AllocationPressureSnapshot {
+            published_runs,
+            collection_requested: self.collection_requested.load(Ordering::Acquire),
+        }
     }
 
     #[cfg(test)]
@@ -945,43 +1039,44 @@ impl HeapInner {
             "allocation class does not belong to this heap"
         );
 
-        let mut state = self
-            .state
-            .lock()
-            .expect("heap state should not be poisoned");
-        let index = class_index(class.id()).expect("allocation class has an invalid ID");
-        let entry = state
-            .classes
-            .get(index)
-            .expect("allocation class is absent from its heap");
-        assert!(
-            std::ptr::eq(entry.metadata(), class.metadata()),
-            "allocation class metadata does not match its heap entry"
-        );
-        let geometry = entry.geometry();
+        {
+            let mut data = self
+                .data
+                .lock()
+                .expect("managed heap data should not be poisoned");
+            let index = class_index(class.id()).expect("allocation class has an invalid ID");
+            let entry = data
+                .classes
+                .get(index)
+                .expect("allocation class is absent from its heap");
+            assert!(
+                std::ptr::eq(entry.metadata(), class.metadata()),
+                "allocation class metadata does not match its heap entry"
+            );
+            let geometry = entry.geometry();
 
-        let selected = entry.runs().iter().find_map(|run| {
-            state
-                .arena
-                .first_free_slot(run.location)
-                .map(|slot_index| (run.location, slot_index))
-        });
-        let (location, slot_index) = if let Some(selected) = selected {
-            selected
-        } else {
-            let location = state
-                .publish_run(index, class.id(), geometry)
-                .unwrap_or_else(|error| panic!("managed run allocation failed: {error:?}"));
-            (location, 0)
-        };
+            let selected = entry.runs().iter().find_map(|run| {
+                data.arena
+                    .first_free_slot(run.location)
+                    .map(|slot_index| (run.location, slot_index))
+            });
+            let (location, slot_index) = if let Some((location, slot_index)) = selected {
+                (location, slot_index)
+            } else {
+                let location = data
+                    .publish_run(index, class.id(), geometry, &self.collection_requested)
+                    .unwrap_or_else(|error| panic!("managed run allocation failed: {error:?}"));
+                (location, 0)
+            };
 
-        // This hook exists only to latch that selecting a currently free slot
-        // publishes no state. Production initialization below contains no
-        // panicking operation between writing `T` and its allocation bit.
-        before_initialize();
-        state
-            .arena
-            .initialize_slot(location, class.id(), geometry, slot_index, value)
+            // This hook exists only to latch that selecting a currently free
+            // slot publishes no state. Production initialization below
+            // contains no panicking operation between writing `T` and its
+            // allocation bit.
+            before_initialize();
+            data.arena
+                .initialize_slot(location, class.id(), geometry, slot_index, value)
+        }
     }
 
     #[allow(
@@ -989,7 +1084,7 @@ impl HeapInner {
         reason = "C2B.3 metadata resolution becomes the access proof in C2C"
     )]
     fn resolve_slot(&self, address: usize) -> Option<ResolvedSlot> {
-        let state = self.state.lock().ok()?;
+        let state = self.data.lock().ok()?;
         resolve_slot_in_state(&state, address)
     }
 
@@ -998,10 +1093,7 @@ impl HeapInner {
         reason = "C2B.3 run enumeration becomes mark and sweep input later"
     )]
     fn resolved_runs(&self) -> Vec<ResolvedRun> {
-        let state = self
-            .state
-            .lock()
-            .expect("heap state should not be poisoned");
+        let state = self.data.lock().expect("heap state should not be poisoned");
         state
             .arena
             .initialized_runs()
@@ -1026,10 +1118,7 @@ impl HeapInner {
         {
             let expected = metadata_for::<T>();
             let address = pointer.as_ptr().cast::<()>() as usize;
-            let state = self
-                .state
-                .lock()
-                .expect("heap state should not be poisoned");
+            let state = self.data.lock().expect("heap state should not be poisoned");
             let resolved = resolve_slot_in_state(&state, address);
             drop(state);
             let metadata = resolved
@@ -1052,10 +1141,7 @@ impl HeapInner {
         let (root, registration) = Root::candidate(self, value);
         let expected = metadata_for::<T>();
         let address = value.erase().as_ptr().as_ptr() as usize;
-        let mut state = self
-            .state
-            .lock()
-            .expect("heap state should not be poisoned");
+        let mut state = self.data.lock().expect("heap state should not be poisoned");
         if let Err(error) = validate_rootable_in_state(&state, address, expected) {
             drop(state);
             error.raise();
@@ -1069,19 +1155,26 @@ impl HeapInner {
     }
 
     fn visit_registered_roots(&self, mut visit: impl FnMut(crate::trace::ErasedGc)) -> usize {
-        let mut state = self
-            .state
+        {
+            let coordinator = self
+                .coordinator
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert_eq!(
+                coordinator.phase,
+                AdmissionPhase::Exclusive,
+                "root traversal requires exclusive collection authority"
+            );
+            assert_eq!(coordinator.active_outer_mutators, 0);
+        }
+
+        let mut data = self
+            .data
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        assert_eq!(
-            state.coordinator.phase,
-            AdmissionPhase::Exclusive,
-            "root traversal requires exclusive collection authority"
-        );
-        assert_eq!(state.coordinator.active_outer_mutators, 0);
 
         let mut visited = 0;
-        state.roots.retain(|registration| {
+        data.roots.retain(|registration| {
             let Some(cell) = registration.upgrade() else {
                 return false;
             };
@@ -1116,7 +1209,7 @@ impl RootValidationError {
 }
 
 fn validate_rootable_in_state(
-    state: &HeapState,
+    state: &ManagedData,
     address: usize,
     expected: &'static ObjectMetadata,
 ) -> Result<(), RootValidationError> {
@@ -1150,20 +1243,33 @@ impl<'heap> CollectionAttempt<'heap> {
     }
 
     fn complete(&mut self) {
-        let mut state = self
-            .heap
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        assert_eq!(state.coordinator.phase, AdmissionPhase::Finalizing);
-        assert_eq!(state.coordinator.active_collection, Some(self.epoch));
-        state.coordinator.completed_collection_epoch = self.epoch.get();
-        state.coordinator.collection_requested = false;
-        state.coordinator.active_collection = None;
-        state.coordinator.phase = AdmissionPhase::Ordinary;
-        state.allocation_pressure.acknowledge_collection();
+        {
+            let mut data = self
+                .heap
+                .data
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            data.allocation_pressure.acknowledge_collection();
+            self.heap
+                .collection_requested
+                .store(false, Ordering::Release);
+        }
+        #[cfg(test)]
+        self.heap.pause_after_collection_acknowledgement();
+        {
+            let mut coordinator = self
+                .heap
+                .coordinator
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert_eq!(coordinator.phase, AdmissionPhase::Finalizing);
+            assert_eq!(coordinator.active_collection, Some(self.epoch));
+            coordinator.completed_collection_epoch = self.epoch.get();
+            coordinator.active_collection = None;
+            coordinator.phase = AdmissionPhase::Ordinary;
+            self.heap.notify_coordinator_waiters();
+        }
         self.completed = true;
-        self.heap.admission_changed.notify_all();
     }
 }
 
@@ -1172,21 +1278,23 @@ impl Drop for CollectionAttempt<'_> {
         if self.completed {
             return;
         }
-        let mut state = self
+        self.heap
+            .collection_requested
+            .store(true, Ordering::Release);
+        let mut coordinator = self
             .heap
-            .state
+            .coordinator
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.coordinator.active_collection == Some(self.epoch) {
-            state.coordinator.active_collection = None;
-            state.coordinator.collection_requested = true;
-            state.coordinator.phase = AdmissionPhase::Ordinary;
+        if coordinator.active_collection == Some(self.epoch) {
+            coordinator.active_collection = None;
+            coordinator.phase = AdmissionPhase::Ordinary;
         }
-        self.heap.admission_changed.notify_all();
+        self.heap.notify_coordinator_waiters();
     }
 }
 
-fn resolve_slot_in_state(state: &HeapState, address: usize) -> Option<ResolvedSlot> {
+fn resolve_slot_in_state(state: &ManagedData, address: usize) -> Option<ResolvedSlot> {
     let owner = state.arena.checked_slot_owner(address)?;
     let entry = state.classes.get(class_index(owner.class_id)?)?;
     if entry.geometry() != owner.geometry || !entry.contains_run(owner.location) {
@@ -1205,7 +1313,7 @@ fn resolve_slot_in_state(state: &HeapState, address: usize) -> Option<ResolvedSl
 impl Drop for HeapInner {
     fn drop(&mut self) {
         let state = self
-            .state
+            .data
             .get_mut()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         for entry in &state.classes {
@@ -1256,6 +1364,7 @@ mod tests {
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Barrier, mpsc};
+    use std::time::Duration;
 
     use crate::{
         Trace, UnsupportedLayout, Visitor,
@@ -1269,7 +1378,7 @@ mod tests {
     };
 
     use super::{
-        AdmissionPhase, AllocationClass, AllocationPressure, Heap,
+        AdmissionPhase, AllocationClass, AllocationPressure, AllocationPressureSnapshot, Heap,
         INITIAL_RUN_PUBLICATION_ALLOWANCE, PrepareRunError, RootValidationError, RunLocation,
         RunPublicationError, class_index, validate_rootable_in_state,
     };
@@ -1372,7 +1481,7 @@ mod tests {
         let address = {
             let mut arena = first
                 .inner
-                .state
+                .data
                 .lock()
                 .expect("test arena should not be poisoned");
             let chunk = arena.arena.reserve_chunk().unwrap();
@@ -1382,7 +1491,7 @@ mod tests {
         assert!(
             first
                 .inner
-                .state
+                .data
                 .lock()
                 .unwrap()
                 .arena
@@ -1392,7 +1501,7 @@ mod tests {
         assert!(
             second
                 .inner
-                .state
+                .data
                 .lock()
                 .unwrap()
                 .arena
@@ -1433,7 +1542,7 @@ mod tests {
 
         assert!(identities.iter().all(|identity| *identity == expected));
         assert!(expected.2);
-        assert_eq!(heap.inner.state.lock().unwrap().classes.len(), 1);
+        assert_eq!(heap.inner.data.lock().unwrap().classes.len(), 1);
     }
 
     #[test]
@@ -1460,7 +1569,7 @@ mod tests {
         let (class_id, belongs_to_heap) = worker.join().expect("class-discovery worker panicked");
         assert!(belongs_to_heap);
         assert_eq!(class_id.get(), 1);
-        assert_eq!(heap.inner.state.lock().unwrap().classes.len(), 1);
+        assert_eq!(heap.inner.data.lock().unwrap().classes.len(), 1);
     }
 
     #[test]
@@ -1677,6 +1786,144 @@ mod tests {
         assert_eq!(completed.phase, AdmissionPhase::Ordinary);
         assert!(!completed.collection_requested);
         assert_eq!(completed.completed_collection_epoch, 1);
+    }
+
+    #[test]
+    fn explicit_request_neither_waits_for_managed_data_nor_notifies_waiters() {
+        let heap = Heap::new();
+        let data = heap.inner.data.lock().unwrap();
+        let notifications = heap.inner.coordinator_notification_count();
+        let (returned_tx, returned_rx) = mpsc::channel();
+        let requester = std::thread::spawn({
+            let heap = heap.clone();
+            move || {
+                heap.request_collection();
+                returned_tx.send(()).unwrap();
+            }
+        });
+
+        returned_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("request_collection blocked on managed data");
+        assert!(heap.inner.collection_requested.load(Ordering::Acquire));
+        assert_eq!(
+            heap.inner.coordinator_notification_count(),
+            notifications,
+            "a request-only transition must not notify coordinator waiters"
+        );
+
+        drop(data);
+        requester.join().unwrap();
+    }
+
+    #[test]
+    fn request_and_pressure_before_data_acknowledgement_are_coalesced() {
+        let heap = Heap::new();
+        let class = internal_class::<FirstType>(&heap);
+        heap.request_collection();
+        let epoch = heap.inner.elect_idle_collection_for_test();
+
+        assert!(
+            heap.inner
+                .run_synthetic_collection(
+                    epoch,
+                    false,
+                    || {},
+                    |_| {
+                        for _ in 0..INITIAL_RUN_PUBLICATION_ALLOWANCE {
+                            heap.inner.prepare_run(&class).unwrap();
+                        }
+                        heap.request_collection();
+                        assert!(heap.inner.allocation_pressure().collection_requested);
+                    },
+                )
+                .is_none()
+        );
+
+        assert_eq!(
+            heap.inner.allocation_pressure(),
+            AllocationPressureSnapshot::default()
+        );
+        assert!(!heap.inner.coordinator_snapshot().collection_requested);
+    }
+
+    #[test]
+    fn external_request_after_data_acknowledgement_remains_pending() {
+        let heap = Heap::new();
+        heap.request_collection();
+        let epoch = heap.inner.elect_idle_collection_for_test();
+        let arrived = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        heap.inner
+            .install_collection_acknowledgement_hook(Arc::clone(&arrived), Arc::clone(&release));
+        let collector = std::thread::spawn({
+            let heap = heap.clone();
+            move || {
+                heap.inner
+                    .run_synthetic_collection(epoch, false, || {}, |_| {})
+                    .is_none()
+            }
+        });
+
+        arrived.wait();
+        assert!(!heap.inner.collection_requested.load(Ordering::Acquire));
+        heap.request_collection();
+        release.wait();
+        assert!(collector.join().unwrap());
+        heap.inner.clear_collection_acknowledgement_hook();
+
+        let completed = heap.inner.coordinator_snapshot();
+        assert_eq!(completed.completed_collection_epoch, 1);
+        assert!(completed.collection_requested);
+        heap.with_mutator(|_| {});
+        assert_eq!(
+            heap.inner.coordinator_snapshot().completed_collection_epoch,
+            2
+        );
+    }
+
+    #[test]
+    fn entry_root_and_pressure_after_data_acknowledgement_survive_completion() {
+        let heap = Heap::new();
+        let value = allocate(&heap, 42_u64);
+        let class = internal_class::<FirstType>(&heap);
+        heap.request_collection();
+        let epoch = heap.inner.elect_idle_collection_for_test();
+        let arrived = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        heap.inner
+            .install_collection_acknowledgement_hook(Arc::clone(&arrived), Arc::clone(&release));
+        let collector = std::thread::spawn({
+            let heap = heap.clone();
+            move || {
+                heap.inner
+                    .run_synthetic_collection(epoch, false, || {}, |_| {})
+                    .is_none()
+            }
+        });
+
+        arrived.wait();
+        let root = heap.with_mutator(|mutator| {
+            let root = mutator.root(value);
+            for _ in 0..INITIAL_RUN_PUBLICATION_ALLOWANCE {
+                heap.inner.prepare_run(&class).unwrap();
+            }
+            root
+        });
+        assert_eq!(heap.inner.data.lock().unwrap().roots.len(), 1);
+        assert!(heap.inner.allocation_pressure().collection_requested);
+        release.wait();
+        assert!(collector.join().unwrap());
+        heap.inner.clear_collection_acknowledgement_hook();
+
+        let completed = heap.inner.coordinator_snapshot();
+        assert_eq!(completed.completed_collection_epoch, 1);
+        assert!(completed.collection_requested);
+        heap.with_mutator(|mutator| assert_eq!(*root.get(mutator), 42));
+        assert_eq!(
+            heap.inner.coordinator_snapshot().completed_collection_epoch,
+            2
+        );
     }
 
     #[test]
@@ -1921,10 +2168,7 @@ mod tests {
     fn synchronous_request_joins_an_already_exclusive_collection() {
         let heap = Heap::new();
         heap.request_collection();
-        let epoch = {
-            let mut state = heap.inner.state.lock().unwrap();
-            state.coordinator.elect_idle_collection().unwrap()
-        };
+        let epoch = heap.inner.elect_idle_collection_for_test();
         let (exclusive_tx, exclusive_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
         let collector = std::thread::spawn({
@@ -1957,6 +2201,39 @@ mod tests {
         let completed = heap.inner.coordinator_snapshot();
         assert_eq!(completed.completed_collection_epoch, 1);
         assert!(!completed.collection_requested);
+    }
+
+    #[test]
+    fn synchronous_request_joins_while_active_collection_waits_for_managed_data() {
+        let heap = Heap::new();
+        heap.request_collection();
+        let epoch = heap.inner.elect_idle_collection_for_test();
+        let data = heap.inner.data.lock().unwrap();
+        let collector = std::thread::spawn({
+            let heap = heap.clone();
+            move || {
+                heap.inner
+                    .run_synthetic_collection(epoch, false, || {}, |_| {})
+                    .is_none()
+            }
+        });
+        let waiter = std::thread::spawn({
+            let heap = heap.clone();
+            move || heap.collect_full().unwrap()
+        });
+
+        heap.inner.wait_for_collection_waiters(1);
+        let active = heap.inner.coordinator_snapshot();
+        assert_eq!(active.active_collection, Some(epoch));
+        assert_eq!(active.phase, AdmissionPhase::Exclusive);
+        drop(data);
+
+        assert!(collector.join().unwrap());
+        assert_eq!(waiter.join().unwrap().epoch(), epoch.get());
+        assert_eq!(
+            heap.inner.coordinator_snapshot().completed_collection_epoch,
+            epoch.get()
+        );
     }
 
     #[test]
@@ -2160,36 +2437,36 @@ mod tests {
             for _ in 0..INITIAL_RUN_PUBLICATION_ALLOWANCE {
                 heap.inner.prepare_run(&class).unwrap();
             }
-            let state = heap.inner.state.lock().unwrap();
-            assert!(state.allocation_pressure.collection_requested);
-            assert!(state.coordinator.collection_requested);
-            assert_eq!(state.coordinator.completed_collection_epoch, 0);
+            assert!(heap.inner.allocation_pressure().collection_requested);
+            let coordinator = heap.inner.coordinator_snapshot();
+            assert!(coordinator.collection_requested);
+            assert_eq!(coordinator.completed_collection_epoch, 0);
         });
 
         {
-            let state = heap.inner.state.lock().unwrap();
-            assert!(state.allocation_pressure.collection_requested);
-            assert!(state.coordinator.collection_requested);
-            assert_eq!(state.coordinator.completed_collection_epoch, 0);
-            assert_eq!(state.allocation_pressure.published_runs, 112);
+            let pressure = heap.inner.allocation_pressure();
+            assert!(pressure.collection_requested);
+            assert_eq!(pressure.published_runs, 112);
+            let coordinator = heap.inner.coordinator_snapshot();
+            assert!(coordinator.collection_requested);
+            assert_eq!(coordinator.completed_collection_epoch, 0);
         }
 
         heap.with_mutator(|_| {});
-        let state = heap.inner.state.lock().unwrap();
-        assert!(!state.allocation_pressure.collection_requested);
-        assert!(!state.coordinator.collection_requested);
-        assert_eq!(state.coordinator.completed_collection_epoch, 1);
-        assert_eq!(state.allocation_pressure.published_runs, 0);
-        drop(state);
+        let pressure = heap.inner.allocation_pressure();
+        assert!(!pressure.collection_requested);
+        assert_eq!(pressure.published_runs, 0);
+        let coordinator = heap.inner.coordinator_snapshot();
+        assert!(!coordinator.collection_requested);
+        assert_eq!(coordinator.completed_collection_epoch, 1);
 
         heap.with_mutator(|_| {
             heap.inner.prepare_run(&class).unwrap();
         });
-        let state = heap.inner.state.lock().unwrap();
-        assert_eq!(state.allocation_pressure.published_runs, 1);
-        assert!(!state.allocation_pressure.collection_requested);
-        assert!(!state.coordinator.collection_requested);
-        drop(state);
+        let pressure = heap.inner.allocation_pressure();
+        assert_eq!(pressure.published_runs, 1);
+        assert!(!pressure.collection_requested);
+        assert!(!heap.inner.coordinator_snapshot().collection_requested);
         heap.with_mutator(|_| {});
         assert_eq!(
             heap.inner.coordinator_snapshot().completed_collection_epoch,
@@ -2202,10 +2479,7 @@ mod tests {
     fn panicking_elected_collection_restores_and_relatches_its_request() {
         let heap = Heap::new();
         heap.request_collection();
-        let epoch = {
-            let mut state = heap.inner.state.lock().unwrap();
-            state.coordinator.elect_idle_collection().unwrap()
-        };
+        let epoch = heap.inner.elect_idle_collection_for_test();
 
         let panic = catch_unwind(AssertUnwindSafe(|| {
             heap.inner.run_synthetic_collection(
@@ -2232,10 +2506,7 @@ mod tests {
     fn finalizer_handoff_installs_one_recursive_current_mutator_without_a_gap() {
         let heap = Heap::new();
         heap.request_collection();
-        let epoch = {
-            let mut state = heap.inner.state.lock().unwrap();
-            state.coordinator.elect_idle_collection().unwrap()
-        };
+        let epoch = heap.inner.elect_idle_collection_for_test();
 
         let admission = heap.inner.run_synthetic_collection(
             epoch,
@@ -2272,10 +2543,7 @@ mod tests {
     fn ordinary_workers_may_enter_while_the_collector_holds_its_finalizer_mutator() {
         let heap = Heap::new();
         heap.request_collection();
-        let epoch = {
-            let mut state = heap.inner.state.lock().unwrap();
-            state.coordinator.elect_idle_collection().unwrap()
-        };
+        let epoch = heap.inner.elect_idle_collection_for_test();
         let (finalizing_tx, finalizing_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
         let collector = std::thread::spawn({
@@ -2321,10 +2589,7 @@ mod tests {
     fn request_during_finalization_is_coalesced_without_blocking_admission() {
         let heap = Heap::new();
         heap.request_collection();
-        let first_epoch = {
-            let mut state = heap.inner.state.lock().unwrap();
-            state.coordinator.elect_idle_collection().unwrap()
-        };
+        let first_epoch = heap.inner.elect_idle_collection_for_test();
         let (finalizing_tx, finalizing_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
         let collector = std::thread::spawn({
@@ -2366,10 +2631,7 @@ mod tests {
     fn request_during_exclusive_work_is_coalesced_into_that_collection() {
         let heap = Heap::new();
         heap.request_collection();
-        let first_epoch = {
-            let mut state = heap.inner.state.lock().unwrap();
-            state.coordinator.elect_idle_collection().unwrap()
-        };
+        let first_epoch = heap.inner.elect_idle_collection_for_test();
         let (exclusive_tx, exclusive_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
         let collector = std::thread::spawn({
@@ -2404,10 +2666,7 @@ mod tests {
     fn panicking_finalizer_retires_its_mutator_and_relatches_collection() {
         let heap = Heap::new();
         heap.request_collection();
-        let epoch = {
-            let mut state = heap.inner.state.lock().unwrap();
-            state.coordinator.elect_idle_collection().unwrap()
-        };
+        let epoch = heap.inner.elect_idle_collection_for_test();
 
         let panic = catch_unwind(AssertUnwindSafe(|| {
             heap.inner.run_synthetic_collection(
@@ -2465,7 +2724,7 @@ mod tests {
         let first_valid_id =
             heap.with_mutator(|mutator| mutator.allocator::<FirstType>().unwrap().id());
         assert_eq!(first_valid_id.get(), 1);
-        assert_eq!(heap.inner.state.lock().unwrap().classes.len(), 1);
+        assert_eq!(heap.inner.data.lock().unwrap().classes.len(), 1);
     }
 
     #[test]
@@ -2486,7 +2745,7 @@ mod tests {
             });
         }));
         assert!(panic.is_err());
-        assert!(heap.inner.state.lock().unwrap().classes.is_empty());
+        assert!(heap.inner.data.lock().unwrap().classes.is_empty());
 
         let class_id = heap.with_mutator(|mutator| mutator.allocator::<SecondType>().unwrap().id());
         assert_eq!(class_id.get(), 1);
@@ -2501,7 +2760,7 @@ mod tests {
         let dropping_run = heap.inner.prepare_run(&dropping_class).unwrap();
 
         let (first_address, dropping_address) = {
-            let state = heap.inner.state.lock().unwrap();
+            let state = heap.inner.data.lock().unwrap();
             let first_geometry = state.classes[class_index(first_class.id()).unwrap()].geometry();
             let dropping_geometry =
                 state.classes[class_index(dropping_class.id()).unwrap()].geometry();
@@ -2540,7 +2799,7 @@ mod tests {
         let heap = Heap::new();
         let value = allocate(&heap, 42_u64);
         let unallocated = {
-            let state = heap.inner.state.lock().unwrap();
+            let state = heap.inner.data.lock().unwrap();
             let address = value.erase().as_ptr().as_ptr() as usize;
             let owner = state.arena.checked_slot_owner(address).unwrap();
             let slot_index = (0..owner.geometry.slot_count)
@@ -2561,7 +2820,7 @@ mod tests {
             unsafe { owner.run.pointer().add(offset).cast::<u64>() }
         };
 
-        let state = heap.inner.state.lock().unwrap();
+        let state = heap.inner.data.lock().unwrap();
         assert!(matches!(
             validate_rootable_in_state(
                 &state,
@@ -2579,10 +2838,10 @@ mod tests {
         let first = heap.with_mutator(|mutator| mutator.root(value));
         let first_clone = first.clone();
 
-        assert_eq!(heap.inner.state.lock().unwrap().roots.len(), 1);
+        assert_eq!(heap.inner.data.lock().unwrap().roots.len(), 1);
 
         let second = heap.with_mutator(|mutator| mutator.root(value));
-        assert_eq!(heap.inner.state.lock().unwrap().roots.len(), 2);
+        assert_eq!(heap.inner.data.lock().unwrap().roots.len(), 2);
 
         drop((first, first_clone, second));
     }
@@ -2613,11 +2872,11 @@ mod tests {
             visited,
             [values[0], values[2]].map(|value| value.erase().as_ptr().as_ptr() as usize)
         );
-        assert_eq!(heap.inner.state.lock().unwrap().roots.len(), 2);
+        assert_eq!(heap.inner.data.lock().unwrap().roots.len(), 2);
 
         drop((first, last));
         assert_eq!(heap.inner.visit_registered_roots(|_| {}), 0);
-        assert!(heap.inner.state.lock().unwrap().roots.is_empty());
+        assert!(heap.inner.data.lock().unwrap().roots.is_empty());
         drop(exclusive);
     }
 
@@ -2631,11 +2890,11 @@ mod tests {
         let live = heap.with_mutator(|mutator| mutator.root(values[0]));
         let dead = heap.with_mutator(|mutator| mutator.root(values[1]));
         drop(dead);
-        assert_eq!(heap.inner.state.lock().unwrap().roots.len(), 2);
+        assert_eq!(heap.inner.data.lock().unwrap().roots.len(), 2);
 
         assert_eq!(heap.collect_full().unwrap().epoch(), 1);
 
-        assert_eq!(heap.inner.state.lock().unwrap().roots.len(), 1);
+        assert_eq!(heap.inner.data.lock().unwrap().roots.len(), 1);
         heap.with_mutator(|mutator| assert_eq!(*live.get(mutator), 41));
     }
 
@@ -2655,7 +2914,7 @@ mod tests {
         let plain_root = heap.with_mutator(|mutator| mutator.root(plain_value));
         let dropping_address = dropping_value.erase().as_ptr().as_ptr() as usize;
         let plain_address = plain_value.erase().as_ptr().as_ptr() as usize;
-        let dropping_registration = heap.inner.state.lock().unwrap().roots[0].clone();
+        let dropping_registration = heap.inner.data.lock().unwrap().roots[0].clone();
         let exclusive = heap.inner.enter_synthetic_exclusive();
         let (upgraded_tx, upgraded_rx) = mpsc::channel();
         let (dropped_tx, dropped_rx) = mpsc::channel();
@@ -2685,7 +2944,7 @@ mod tests {
         assert_eq!(count, 2);
         assert_eq!(visited, vec![dropping_address, plain_address]);
         assert_eq!(drops.load(Ordering::Relaxed), 0);
-        assert_eq!(heap.inner.state.lock().unwrap().roots.len(), 2);
+        assert_eq!(heap.inner.data.lock().unwrap().roots.len(), 2);
 
         let mut retained = Vec::new();
         assert_eq!(
@@ -2694,7 +2953,7 @@ mod tests {
             1
         );
         assert_eq!(retained, vec![plain_address]);
-        assert_eq!(heap.inner.state.lock().unwrap().roots.len(), 1);
+        assert_eq!(heap.inner.data.lock().unwrap().roots.len(), 1);
 
         drop(exclusive);
         drop(plain_root);
@@ -2708,7 +2967,7 @@ mod tests {
         let value = allocate(&heap, 42_u64);
         let expired = heap.with_mutator(|mutator| mutator.root(value));
         drop(expired);
-        assert_eq!(heap.inner.state.lock().unwrap().roots.len(), 1);
+        assert_eq!(heap.inner.data.lock().unwrap().roots.len(), 1);
         let exclusive = heap.inner.enter_synthetic_exclusive();
         let worker = std::thread::spawn({
             let heap = heap.clone();
@@ -2717,11 +2976,11 @@ mod tests {
 
         heap.inner.wait_for_blocked_outer_mutators(1);
         assert_eq!(heap.inner.visit_registered_roots(|_| {}), 0);
-        assert!(heap.inner.state.lock().unwrap().roots.is_empty());
+        assert!(heap.inner.data.lock().unwrap().roots.is_empty());
 
         drop(exclusive);
         let root = worker.join().expect("root publisher panicked");
-        assert_eq!(heap.inner.state.lock().unwrap().roots.len(), 1);
+        assert_eq!(heap.inner.data.lock().unwrap().roots.len(), 1);
         heap.with_mutator(|mutator| assert_eq!(*root.get(mutator), 42));
     }
 
@@ -2736,7 +2995,7 @@ mod tests {
         }));
 
         assert!(panic.is_err());
-        assert!(observer.inner.state.lock().unwrap().roots.is_empty());
+        assert!(observer.inner.data.lock().unwrap().roots.is_empty());
     }
 
     #[test]
@@ -2768,7 +3027,7 @@ mod tests {
             };
             std::ptr::eq(run.metadata, expected)
                 && run.geometry
-                    == heap.inner.state.lock().unwrap().classes[class_index(run.class_id).unwrap()]
+                    == heap.inner.data.lock().unwrap().classes[class_index(run.class_id).unwrap()]
                         .geometry()
         }));
     }
@@ -2876,7 +3135,7 @@ mod tests {
             assert_eq!(resolved.class_id, class.id());
             assert_eq!(resolved.slot_index, 0);
             assert!(std::ptr::eq(resolved.metadata, class.metadata()));
-            let state = heap.inner.state.lock().unwrap();
+            let state = heap.inner.data.lock().unwrap();
             assert_eq!(
                 state.arena.checked_slot_owner(address).unwrap().location,
                 location
@@ -2924,8 +3183,8 @@ mod tests {
         assert!(panic.is_err());
         assert_eq!(drops.load(Ordering::Relaxed), 1);
 
-        let state = match heap.inner.state.lock() {
-            Ok(_) => panic!("injected unwind should poison the heap-state mutex"),
+        let state = match heap.inner.data.lock() {
+            Ok(_) => panic!("injected unwind should poison the managed-data mutex"),
             Err(poisoned) => poisoned.into_inner(),
         };
         let runs = state.classes[class_index(class.id()).unwrap()].runs();
@@ -2991,7 +3250,7 @@ mod tests {
         assert_eq!(heap.inner.allocation_cursor_claim_count(), 1);
         assert_eq!(
             heap.inner.allocation_pressure(),
-            AllocationPressure {
+            AllocationPressureSnapshot {
                 published_runs: 1,
                 collection_requested: false,
             }
@@ -3002,7 +3261,7 @@ mod tests {
         assert_eq!(heap.inner.allocation_cursor_slow_path_count(), 1);
         assert_eq!(
             heap.inner.allocation_pressure(),
-            AllocationPressure {
+            AllocationPressureSnapshot {
                 published_runs: 1,
                 collection_requested: false,
             }
@@ -3230,22 +3489,19 @@ mod tests {
     fn pressure_request_uses_saturating_typed_run_publications() {
         let mut pressure = AllocationPressure::default();
         for _ in 0..INITIAL_RUN_PUBLICATION_ALLOWANCE - 1 {
-            pressure.record_run_publication();
+            assert!(!pressure.record_run_publication());
         }
         assert_eq!(
             pressure.published_runs,
             INITIAL_RUN_PUBLICATION_ALLOWANCE - 1
         );
-        assert!(!pressure.collection_requested);
 
-        pressure.record_run_publication();
+        assert!(pressure.record_run_publication());
         assert_eq!(pressure.published_runs, INITIAL_RUN_PUBLICATION_ALLOWANCE);
-        assert!(pressure.collection_requested);
 
         pressure.published_runs = usize::MAX;
-        pressure.record_run_publication();
+        assert!(pressure.record_run_publication());
         assert_eq!(pressure.published_runs, usize::MAX);
-        assert!(pressure.collection_requested);
     }
 
     #[test]
@@ -3258,7 +3514,7 @@ mod tests {
         }
         assert_eq!(
             heap.inner.allocation_pressure(),
-            AllocationPressure {
+            AllocationPressureSnapshot {
                 published_runs: INITIAL_RUN_PUBLICATION_ALLOWANCE - 1,
                 collection_requested: false,
             }
@@ -3267,7 +3523,7 @@ mod tests {
         heap.inner.prepare_run(&class).unwrap();
         assert_eq!(
             heap.inner.allocation_pressure(),
-            AllocationPressure {
+            AllocationPressureSnapshot {
                 published_runs: INITIAL_RUN_PUBLICATION_ALLOWANCE,
                 collection_requested: true,
             }
@@ -3283,15 +3539,15 @@ mod tests {
         let heap = Heap::new();
         let class = internal_class::<FirstType>(&heap);
         let index = class_index(class.id()).unwrap();
-        let mut invalid = heap.inner.state.lock().unwrap().classes[index].geometry();
+        let mut invalid = heap.inner.data.lock().unwrap().classes[index].geometry();
         invalid.slot_count = 0;
 
         let error = heap
             .inner
-            .state
+            .data
             .lock()
             .unwrap()
-            .publish_run(index, class.id(), invalid)
+            .publish_run(index, class.id(), invalid, &heap.inner.collection_requested)
             .unwrap_err();
 
         assert!(matches!(
@@ -3304,7 +3560,7 @@ mod tests {
         assert!(heap.inner.resolved_runs().is_empty());
         assert_eq!(
             heap.inner.allocation_pressure(),
-            AllocationPressure::default()
+            AllocationPressureSnapshot::default()
         );
     }
 

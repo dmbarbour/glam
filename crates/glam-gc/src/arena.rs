@@ -112,7 +112,7 @@ impl RunClaimTarget {
         for lease_word_index in 0..self.geometry.lease_bitmap.word_len {
             let lease = lease_word_pointer(self.run, self.geometry.lease_bitmap, lease_word_index);
             // Initial run visibility comes from the class frontier's Acquire
-            // load or from the heap mutex, not from this distinct atomic.
+            // load or from the managed-data mutex, not from this distinct atomic.
             // Acquire is retained here so C5's future Release lease reset can
             // publish rebuilt allocation/free state to the winning claimant.
             // The CAS is the ownership transition for the selected word.
@@ -351,8 +351,8 @@ impl Arena {
 
         // Reserve both fallible allocations before either collection exposes
         // the candidate. From here through insertion, the operations cannot
-        // allocate, and the arena is exclusively borrowed under the heap-state
-        // mutex. Equal aligned bases are the only way fixed-size chunks can
+        // allocate, and the arena is exclusively borrowed under the
+        // managed-data mutex. Equal aligned bases are the only way fixed-size chunks can
         // overlap.
         self.chunks
             .try_reserve(1)
@@ -543,8 +543,8 @@ impl ArenaChunk {
             .expect("validated slot must have an in-run offset");
         // SAFETY: validated run geometry places this exact slot wholly inside
         // the live chunk, aligned for the class payload. The allocation bit is
-        // still clear and the arena is exclusively borrowed under heap state,
-        // so no initialized `T` aliases this storage.
+        // still clear and the arena is exclusively borrowed under managed
+        // data, so no initialized `T` aliases this storage.
         let pointer = unsafe { address.pointer().add(offset).cast::<T>() };
         assert_eq!(
             pointer.addr().get() % std::mem::align_of::<T>(),
