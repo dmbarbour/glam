@@ -4,9 +4,10 @@
 //! collection epochs after C5C's checked, recoverable graph traversal. C6A.2c
 //! reclaims wholly dead runs whose initialized payloads need no destructor,
 //! resets them to untyped arena storage, and prefers that heap-local pool for
-//! later typed-run publication. C6A.3a also clears dead allocations from
-//! retained partial no-drop runs. Managed payload finalization remains
-//! disabled until the later C6 checkpoints.
+//! later typed-run publication. C6A.3a clears dead allocations from retained
+//! partial no-drop runs, and C6A.3b publishes exact lease masks, eligible class
+//! frontiers, and one final stale-cursor epoch. Managed payload finalization
+//! remains disabled until the later C6 checkpoints.
 
 #![deny(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]

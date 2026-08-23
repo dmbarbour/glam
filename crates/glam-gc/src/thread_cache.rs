@@ -190,7 +190,7 @@ impl ThreadHeapState {
         debug_assert_eq!(self.recursive_depth, 0);
         if self.captured_epoch != current_epoch {
             // Stale records are inert. Forget them wholesale without reading a
-            // run or attempting to return leases which collection revoked.
+            // run or attempting to return leases which collection rebuilt.
             self.cursors.clear();
             self.captured_epoch = current_epoch;
         }

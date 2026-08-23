@@ -112,10 +112,10 @@ impl RunClaimTarget {
         for lease_word_index in 0..self.geometry.lease_bitmap.word_len {
             let lease = lease_word_pointer(self.run, self.geometry.lease_bitmap, lease_word_index);
             // Initial run visibility comes from the class frontier's Acquire
-            // load or from the managed-data mutex, not from this distinct atomic.
-            // Acquire is retained here so C5's future Release lease reset can
-            // publish rebuilt allocation/free state to the winning claimant.
-            // The CAS is the ownership transition for the selected word.
+            // load or from the managed-data mutex, not from this distinct
+            // atomic. Acquire observes the collector's exact post-sweep
+            // Release lease publication. The CAS is the ownership transition
+            // for the selected word.
             let mut observed = unsafe { lease.as_ref() }.load(Ordering::Acquire);
             loop {
                 let candidates = !observed;
@@ -380,10 +380,11 @@ impl Arena {
 
     /// Retains exactly the marked allocations in one partial no-drop run.
     ///
-    /// The caller must hold exclusive collection authority, must have
-    /// invalidated every old allocation cursor, and must have proved that
-    /// clearing dead allocation bits requires no destructor. Payload storage
-    /// is neither enumerated nor accessed.
+    /// The caller must hold exclusive collection authority with every cursor
+    /// owner drained, must have withdrawn ordinary frontiers, and must have
+    /// proved that clearing dead allocation bits requires no destructor. It
+    /// must publish a new cursor epoch before ordinary admission resumes.
+    /// Payload storage is neither enumerated nor accessed.
     pub(crate) fn retain_marked_allocations(
         &self,
         target: RunClaimTarget,
@@ -408,31 +409,55 @@ impl Arena {
             let retained = allocated & marked;
             // SAFETY: the same validated allocation word has no concurrent
             // writer under Exclusive. Release publishes the swept allocation
-            // state before C6A.3b later makes rebuilt leases/frontiers visible.
+            // state before C6A.3b makes rebuilt leases/frontiers visible.
             unsafe { allocation.as_ref() }.store(retained, Ordering::Release);
         }
     }
 
-    /// Makes every allocation word in `target` unavailable to ordinary
-    /// cursors without changing its allocation or mark bitmap.
+    /// Publishes the final post-sweep lease view for one retained run.
     ///
-    /// The caller must hold exclusive collection authority and must advance
-    /// the heap-wide lease epoch before ordinary mutator admission resumes.
-    pub(crate) fn revoke_allocation_word_leases(
+    /// `reserved` identifies allocation words retained for finalization. Full
+    /// words and reserved words are unavailable; every other valid word is
+    /// directly claimable. The caller must hold exclusive collection
+    /// authority and publish the heap-wide lease epoch only after rebuilding
+    /// every run and class frontier. Returns whether the run has at least one
+    /// claimable word.
+    pub(crate) fn publish_allocation_word_leases(
         &self,
         target: RunClaimTarget,
         class_id: AllocationClassId,
-    ) {
+        mut reserved: impl FnMut(usize) -> bool,
+    ) -> bool {
         let (_, run) = self.resolved_claim_target(target, class_id);
-        for word_index in 0..target.geometry.lease_bitmap.word_len {
-            let revoked = valid_slot_mask(target.geometry.lease_bitmap.bit_len, word_index);
-            let lease = lease_word_pointer(run, target.geometry.lease_bitmap, word_index);
-            // SAFETY: classification immediately validated this stable typed
-            // run, exclusive collection has drained every lease owner, and
-            // geometry places the initialized atomic lease word inside it.
-            // Release publishes revocation before the later epoch advance.
-            unsafe { lease.as_ref() }.store(revoked, Ordering::Release);
+        let mut has_available_word = false;
+
+        for lease_word_index in 0..target.geometry.lease_bitmap.word_len {
+            let valid = valid_slot_mask(target.geometry.lease_bitmap.bit_len, lease_word_index);
+            let mut unavailable = 0_u64;
+            for lease_bit_index in 0..u64::BITS as usize {
+                let bit = 1_u64 << lease_bit_index;
+                if valid & bit == 0 {
+                    break;
+                }
+                let word_index = lease_word_index * u64::BITS as usize + lease_bit_index;
+                let unavailable_word = reserved(word_index)
+                    || free_mask_for_word(run, target.geometry, word_index) == 0;
+                if unavailable_word {
+                    unavailable |= bit;
+                } else {
+                    has_available_word = true;
+                }
+            }
+
+            let lease = lease_word_pointer(run, target.geometry.lease_bitmap, lease_word_index);
+            // SAFETY: the stable typed target was prevalidated while
+            // Exclusive excludes every lease owner. This initialized atomic
+            // lease word is bounded by its geometry. Release publishes the
+            // exact swept/reserved view before the later epoch advance.
+            unsafe { lease.as_ref() }.store(unavailable, Ordering::Release);
         }
+
+        has_available_word
     }
 
     pub(crate) fn mark_owner_slot(&mut self, owner: RunOwner) -> bool {

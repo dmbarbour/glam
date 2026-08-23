@@ -215,6 +215,39 @@ mark-word read, and one raw atomic allocation-word store to the exact unsafe
 inventory. The full suite contains 157 unit tests (155 passing and two ignored
 scale fixtures), six Loom models, and eight compile-fail/doc tests.
 
+C6A.3b replaces C6A.2a's completed-path blanket revocation with exact allocator
+publication. Capacity reservation and topology/dead-word validation precede
+selector withdrawal. The allocation-free mutation window retires whole
+no-drop runs, sweeps partial no-drop words, publishes exact lease masks,
+selects the first eligible frontier per class, and advances the cache epoch
+last. Successful marks remain stale private scratch until the mandatory next
+attempt clear; no allocator path consults them.
+
+The publication fixture proves that partially occupied unreserved runs receive
+clear lease bits and retain an eligible frontier rather than an all-ones mask.
+A barrier-backed persistent worker proves its old cursor is discarded by the
+new epoch and a fresh claim safely returns to the same retained run. A direct
+claim reuses an eagerly swept slot without a lazy sweep. Drop fixtures prove
+that a partial run reserves exactly the words with finalization obligations,
+while a wholly dead drop-bearing run publishes no frontier. Focused Miri runs
+are:
+
+```sh
+cargo +nightly miri test --package glam-gc --lib --all-features \
+  successful_post_sweep_publishes_final_leases_frontiers_and_epoch
+cargo +nightly miri test --package glam-gc --lib --all-features \
+  next_outer_entry_discards_a_stale_cursor_before_claiming_the_rebuilt_view
+cargo +nightly miri test --package glam-gc --lib --all-features \
+  partial_drop_runs_reserve_only_words_with_finalization_obligations
+cargo +nightly miri test --package glam-gc --lib --all-features \
+  wholly_dead_drop_runs_publish_no_allocator_frontier
+```
+
+The provisional raw lease-word Release store remains one reviewed unsafe site,
+but now stores the exact final unavailable mask rather than a blanket valid-bit
+mask. The full suite contains 160 unit tests (158 passing and two ignored scale
+fixtures), six Loom models, and eight compile-fail/doc tests.
+
 ## Gate G0 Baseline
 
 Before changing the unsafe surface in C1, recheck the focused pre-GC semantic

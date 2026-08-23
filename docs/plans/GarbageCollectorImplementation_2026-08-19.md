@@ -1,8 +1,8 @@
 # Glam GC Subcrate Implementation Plan — 2026-08-19
 
-Status: in progress; Phases C0 through C6A.3a are complete, including the C2C.6
+Status: in progress; Phases C0 through C6A.3b are complete, including the C2C.6
 verification follow-up. The mandatory post-C1, post-C2C, post-C3E, post-C4,
-and post-C5 downstream reviews are complete. C6A.3b is next.
+and post-C5 downstream reviews are complete. C6A.4 is next.
 
 This plan implements an exact, non-moving, runtime-local tracing collector
 without depending on Glam value semantics. The governing requirements and
@@ -67,7 +67,7 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C6A.2b | completed | class frontier and run-pool retirement |
 | C6A.2c | completed | wholly dead no-drop runs and free-run reuse |
 | C6A.3a | completed | eager partial no-drop sweep |
-| C6A.3b | pending | swept allocator publication |
+| C6A.3b | completed | swept allocator publication |
 | C6A.4 | pending | assigned-run pressure |
 | C6B.1 | pending | finalization batch and non-rootability |
 | C6B.2 | pending | finalizer handoff and destruction |
@@ -2341,20 +2341,20 @@ downstream corrections are required:
   `u32` in `RunHeader` remains available for a measured future live-slot count,
   reset alongside marks, but the baseline does not consume it.
 - **Reclamation must invalidate TLS cursors before changed topology becomes
-  observable.** C6A.2a's completed implementation conservatively sets every
-  lease bit, withdraws ordinary class-frontier selection, and advances the
-  heap allocation-lease epoch while every mutator is stopped. That blanket
-  all-ones lease state is an incremental C6 scaffold, not the target allocator
-  transition. C6A.3b must remove the blanket-revocation pass, construct each
-  lease word directly in its final post-sweep state, republish eligible class
-  frontiers, and publish the one new epoch last. Every later entrant then
-  discards its retained cursor map before it can observe run retirement, eager
-  sweep, or reuse.
+  observable.** C6A.3b's completed implementation validates and reserves the
+  complete transition, withdraws ordinary class-frontier selection, performs
+  whole-run retirement and eager partial sweep, constructs each lease word
+  directly in its final post-sweep/finalization-reserved state, republishes
+  eligible class frontiers, and publishes the one new heap allocation-lease
+  epoch last while every mutator remains stopped. Every later entrant then
+  discards its retained cursor map before it can use the changed topology. The
+  prior C6A.2a blanket all-ones pass and early epoch publication no longer
+  exist on the completed path.
 - **Retiring a run must retire every lock-free selector first.** A class owns
   stable boxed run records and publishes a raw frontier pointer. C4D ensures
   every allocator which can read that pointer is scoped to an admitted
   mutator; no escaped public class handle remains. After C6A.2a has drained
-  mutators and withdrawn frontier selection, C6A.2b must remove the run from
+  mutators and withdrawn frontier selection, C6A.2b removes the run from
   the class pool and repair any shifted frontier index before the record can be
   destroyed or its run can be retyped. C6A.3b publishes the final cursor epoch
   only after this topology and the swept lease view are complete. Header reset
@@ -2399,11 +2399,11 @@ downstream corrections are required:
   workloads. Gate G1 remains owned by C6D.3, so production integration is
   still blocked even though C4 now supplies its direct-root primitive.
 
-The remaining deliberate decisions are localized: C6A.3b chooses when to
-physically clear a consumed successful mark bitmap, C6B.1 chooses whether an
+The remaining deliberate decisions are localized: C6B.1 chooses whether an
 empty batch skips `Finalizing`, and C6D.1 settles the remaining terminal owner
-drain. C4D has already settled allocation-capability ownership. None blocks
-starting C5A.0a after C4D completes.
+drain. C6A.3b leaves consumed successful marks as private stale scratch until
+the next collection's mandatory clear rather than paying for a redundant pass.
+C4D has already settled allocation-capability ownership.
 
 The review reran the crate's authoritative `scripts/check.sh`: formatting,
 Clippy with warnings denied, unsafe-inventory checks, 120 unit tests, 6 Loom
@@ -2931,8 +2931,9 @@ Execute C6 as the following smaller checkpoints:
   collection performs an all-ones lease fill, and that a post-collection
   claimant observes the final allocation bitmap directly and performs no sweep
   work. The successful mark bitmap has no remaining reclamation consumer after
-  dead drop slots and eager no-drop sweep are recorded; choose its physical
-  clearing point separately.
+  dead drop slots and eager no-drop sweep are recorded. Leave it as stale
+  private scratch until the next collection's mandatory initial clear; reports
+  and allocator state, not residual mark bits, describe the completed result.
 - **C6A.4 — assigned-run pressure.** Replace provisional run-publication
   history with assigned-run occupancy, account for virgin and recycled
   activation exactly once, and publish the first survivor-based high-water
@@ -3002,13 +3003,11 @@ Execute C6 as the following smaller checkpoints:
 Resolve these C6 decisions at the named checkpoint rather than pulling them
 into marking:
 
-1. **Successful mark clearing (C6A.3b).** Eager sweep removes every allocator
-   dependency on the successful mark bitmap. Decide whether to clear it while
-   still `Exclusive` for a tidy post-collection invariant or leave it as stale
-   scratch until the next collection's mandatory initial clear. This is a
-   physical-state and performance policy, not reachability semantics; tests
-   must consult the completed collection report and post-sweep allocator state
-   rather than infer validity from residual bits.
+1. **Successful mark clearing (resolved in C6A.3b).** Eager sweep removes every
+   allocator dependency on the successful mark bitmap. The implementation
+   leaves it as stale private scratch until the next collection's mandatory
+   initial clear, avoiding a redundant pass. Tests consult the completed report
+   and post-sweep allocator state rather than infer validity from residual bits.
 2. **Empty finalization batch (C6B.1).** The current C3E pipeline always makes
    the no-gap finalizer handoff, even when its synthetic finalizer does no
    work. The recommended production path skips `Finalizing` when the batch is
@@ -3343,9 +3342,9 @@ Completed on 2026-08-23:
   capacity-efficient: old runs stay in their class pools with all lease words
   unavailable. A class used before swept-frontier rebuilding may scan those
   inert records and publish a fresh typed run; it cannot reuse an old slot.
-  C6A.2b through C6A.3 restore useful old topology and capacity. C6A.3b must
-  also delete this blanket all-ones transition from the completed collector:
-  the successful path will publish final lease masks directly and advance the
+  C6A.2b through C6A.3 restore useful old topology and capacity. C6A.3b later
+  deleted this blanket all-ones transition from the completed collector: the
+  successful path now publishes final lease masks directly and advances the
   cache epoch only after the complete allocator view is ready.
 - A focused topology fixture snapshots the successful post-mark state and the
   following finalizer state. It proves exact run/class/allocation/mark and
@@ -3360,9 +3359,9 @@ Completed on 2026-08-23:
   epoch while relatching collection; its clean retry advances the lease epoch
   once more. The report/completion epoch remains unpublished until successful
   finalization as before.
-- Revoking a lease word adds one reviewed raw atomic Release store to the
-  unsafe inventory. This unsafe site is provisional and C6A.3b must remove it
-  if direct final-mask publication makes it unused. The collector suite now
+- Revoking a lease word added one reviewed raw atomic Release store to the
+  unsafe inventory. C6A.3b retained that site but repurposed it to publish the
+  exact final unavailable mask rather than the blanket mask. The suite then
   contains 153 unit tests (151 passing plus two explicit scale fixtures), 6
   Loom models, and 8 compile-fail/doc tests. Both new invalidation fixtures
   pass focused Miri.
@@ -3455,10 +3454,11 @@ Completed on 2026-08-23:
 Completed on 2026-08-23:
 
 - Managed data now prevalidates every retained partial no-drop target against
-  its canonical metadata, class geometry, class membership, withdrawn
-  frontier, arena address, and typed header before clearing the first
-  allocation bit. Whole-run reset remains C6A.2c, while every drop-bearing
-  allocation word remains unchanged for C6B finalization.
+  its canonical metadata, class geometry, class membership, arena address,
+  and typed header before clearing the first allocation bit. C6A.3b later
+  moved this check into the complete pre-withdrawal transition validation.
+  Whole-run reset remains C6A.2c, while every drop-bearing allocation word
+  remains unchanged for C6B finalization.
 - Arena sweep walks only the compact allocation and mark words. Under
   `Exclusive`, it Acquire-loads the atomic allocation word, reads the ordinary
   mark word, computes `retained = allocated & marked`, and Release-stores the
@@ -3483,6 +3483,45 @@ Completed on 2026-08-23:
   scale fixtures), 6 Loom models, and 8 compile-fail/doc tests. The mixed,
   boundary, and panic/retry fixtures pass focused Miri; the stable collector
   and workspace verification matrices are recorded in `VERIFY.md`.
+
+#### C6A.3b completion
+
+Completed on 2026-08-23:
+
+- Managed data now reserves both retirement pools and validates every stable
+  class/run target, canonical metadata relation, geometry, arena header, and
+  attempt-local dead-word range before withdrawing the first allocator
+  selector. The remaining mutation window allocates nothing and invokes no
+  callback: it withdraws frontiers, retires/resets whole no-drop runs, sweeps
+  partial no-drop allocation words, rebuilds final lease words, republishes
+  eligible frontiers, and advances the cache epoch last.
+- The C6A.2a blanket lease fill and early epoch publication are gone. Each
+  retained run's lease word is stored directly as the exact unavailable mask:
+  full allocation words are unavailable, ordinary words with free capacity
+  are claimable, partial drop-bearing runs reserve only words containing a
+  dead drop obligation, and wholly dead drop-bearing runs reserve every word.
+  Drop reservations are consumed in the existing class/run order, avoiding a
+  temporary map or quadratic lookup. The first retained run with a claimable
+  word becomes the class frontier; a full or wholly reserved class remains
+  withdrawn.
+- A worker-thread fixture keeps an inactive cursor across collection and proves
+  that the final Release epoch forces a fresh claim before the worker returns
+  to the same retained run. A separate fixture reuses the exact slot cleared by
+  eager no-drop sweep through the ordinary claimant, with no deferred sweep.
+  Exact publication checks reject the former all-ones behavior. Partial and
+  whole-run drop fixtures prove word-local and run-wide reservation while no
+  destructor executes before C6B.
+- Successful mark words deliberately remain stale private scratch until the
+  next collection's mandatory initial clear. This avoids a redundant compact
+  bitmap pass; collection reports and post-sweep allocation/lease state remain
+  the only completed-result authorities.
+- The reviewed raw lease-word Release store remains in the unsafe inventory,
+  but its value changed from the provisional blanket mask to the exact final
+  unavailable mask. The collector suite now contains 160 unit tests (158
+  passing plus two explicit scale fixtures), 6 Loom models, and 8
+  compile-fail/doc tests. The exact publication, stale-worker, and both drop
+  reservation fixtures pass focused Miri; complete verification is recorded in
+  `VERIFY.md`.
 
 ### Mandatory Post-C6 Review
 

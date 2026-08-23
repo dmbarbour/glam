@@ -337,11 +337,26 @@ impl AllocationClassEntry {
     /// Withdraws every previously published run from lock-free selection.
     ///
     /// The stable run records remain owned by this class. C6 collection calls
-    /// this only after all mutators have drained and all old run leases have
-    /// been revoked; later allocator rebuilding chooses a new frontier.
+    /// this after all mutators have drained; it then rebuilds exact lease masks
+    /// and chooses a new frontier before publishing the new cache epoch.
     pub(crate) fn withdraw_frontier(&mut self) {
         self.shared.withdraw_frontier();
         self.frontier_index = None;
+    }
+
+    /// Publishes the first retained run with final post-sweep capacity.
+    ///
+    /// Collection calls this only after withdrawing the old frontier and
+    /// rebuilding every retained run's lease bitmap. `None` deliberately
+    /// leaves a full or wholly reserved class without an ordinary selector.
+    pub(crate) fn publish_swept_frontier(&mut self, index: Option<usize>) {
+        assert!(
+            self.frontier_is_withdrawn(),
+            "cannot rebuild a class frontier before withdrawing its old view"
+        );
+        if let Some(index) = index {
+            self.publish_frontier(index);
+        }
     }
 
     /// Removes one run after collection has withdrawn every selector for this

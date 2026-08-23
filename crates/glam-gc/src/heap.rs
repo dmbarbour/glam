@@ -401,13 +401,100 @@ impl ManagedData {
         self.arena.owner_slot_is_marked(slot.owner)
     }
 
-    fn revoke_allocator_selection(&mut self) {
-        let arena = &self.arena;
-        for (index, class) in self.classes.iter_mut().enumerate() {
+    fn prepare_swept_allocator_transition(&mut self, dead_set: &DeadSetPlan) {
+        assert!(
+            self.retired_no_drop_runs.is_empty(),
+            "a new collection cannot inherit unfinished no-drop retirement"
+        );
+        let retired_count = dead_set
+            .dead_runs
+            .iter()
+            .filter(|run| run.disposition == DeadSlotDisposition::NoDrop && run.live_slots == 0)
+            .count();
+        self.retired_no_drop_runs
+            .try_reserve(retired_count)
+            .expect("retired no-drop run pool capacity exhausted");
+        self.free_runs
+            .try_reserve(retired_count)
+            .expect("free-run pool capacity exhausted");
+
+        // Validate all stable retained topology and every attempt-local dead
+        // record before the first selector is withdrawn. Exclusive authority
+        // keeps these facts stable through the subsequent allocation-free
+        // mutation/publication window.
+        for (index, class) in self.classes.iter().enumerate() {
             let class_id = class_id(index);
             for target in class.runs().iter().map(|run| **run) {
-                arena.revoke_allocation_word_leases(target, class_id);
+                assert_eq!(target.geometry, class.geometry());
+                self.arena.validate_run_target(target, class_id);
             }
+        }
+        let mut ordered_dead_runs = dead_set.dead_runs.iter().peekable();
+        for class in &self.classes {
+            for target in class.runs().iter().map(|run| **run) {
+                if ordered_dead_runs
+                    .peek()
+                    .is_some_and(|planned| planned.target == target)
+                {
+                    ordered_dead_runs.next();
+                }
+            }
+        }
+        assert!(
+            ordered_dead_runs.next().is_none(),
+            "dead-run plan does not preserve authoritative class/run order"
+        );
+        for run in &dead_set.dead_runs {
+            let index = class_index(run.class_id).expect("dead run has an invalid class ID");
+            let class = self
+                .classes
+                .get(index)
+                .expect("dead run allocation class is absent");
+            assert!(
+                std::ptr::eq(class.metadata(), run.metadata),
+                "dead run changed allocation metadata"
+            );
+            assert_eq!(
+                class.geometry(),
+                run.target.geometry,
+                "dead run changed allocation geometry"
+            );
+            assert!(
+                class.contains_target(run.target),
+                "dead run is absent from its allocation class"
+            );
+            self.arena.validate_run_target(run.target, run.class_id);
+            let dead_words = dead_set
+                .dead_words
+                .get(run.dead_words.clone())
+                .expect("dead run has an invalid word range");
+            assert!(dead_words.iter().all(|word| {
+                word.dead_mask != 0
+                    && word.word_index < run.target.geometry.allocation_bitmap.word_len
+            }));
+            assert_eq!(
+                run.disposition,
+                if run.dead_slots == 0 || !run.metadata.needs_drop() {
+                    DeadSlotDisposition::NoDrop
+                } else {
+                    DeadSlotDisposition::DropRequired
+                },
+                "dead run has the wrong finalization disposition"
+            );
+
+            if run.disposition == DeadSlotDisposition::NoDrop && run.live_slots == 0 {
+                assert!(
+                    self.free_runs
+                        .iter()
+                        .all(|location| *location != run.target.location),
+                    "retired no-drop run was already published for reuse"
+                );
+            }
+        }
+    }
+
+    fn withdraw_allocator_frontiers(&mut self) {
+        for class in &mut self.classes {
             class.withdraw_frontier();
         }
     }
@@ -417,50 +504,13 @@ impl ManagedData {
             run.disposition == DeadSlotDisposition::NoDrop && run.live_slots == 0
         };
         let retired_count = dead_set.dead_runs.iter().filter(is_retired).count();
-        self.retired_no_drop_runs
-            .try_reserve(retired_count)
-            .expect("retired no-drop run pool capacity exhausted");
-
-        // Validate the complete retirement set before moving the first stable
-        // record. C6A.2a has already withdrawn every frontier, and Exclusive
-        // prevents topology from changing between this pass and retirement.
         for run in dead_set.dead_runs.iter().filter(is_retired) {
-            assert_eq!(
+            debug_assert_eq!(
                 run.live_slots, 0,
                 "retired run must contain no live allocation"
             );
             let index = class_index(run.class_id).expect("retired run has an invalid class ID");
-            let class = self
-                .classes
-                .get(index)
-                .expect("retired run allocation class is absent");
-            assert!(
-                std::ptr::eq(class.metadata(), run.metadata),
-                "retired run changed allocation metadata"
-            );
-            assert_eq!(
-                class.geometry(),
-                run.target.geometry,
-                "retired run changed allocation geometry"
-            );
-            assert!(
-                class.frontier_is_withdrawn(),
-                "retired run class still publishes a frontier"
-            );
-            assert!(
-                class.contains_target(run.target),
-                "retired run is absent from its allocation class"
-            );
-            assert!(
-                self.retired_no_drop_runs
-                    .iter()
-                    .all(|retired| retired.target.location != run.target.location),
-                "retired no-drop run was already detached"
-            );
-        }
-
-        for run in dead_set.dead_runs.iter().filter(is_retired) {
-            let index = class_index(run.class_id).expect("validated class ID became invalid");
+            debug_assert!(self.classes[index].frontier_is_withdrawn());
             let target = self.classes[index].retire_withdrawn_run(run.target);
             self.retired_no_drop_runs.push(RetiredNoDropRun {
                 target,
@@ -473,24 +523,6 @@ impl ManagedData {
 
     fn recycle_retired_no_drop_runs(&mut self) -> usize {
         let recycled_count = self.retired_no_drop_runs.len();
-        self.free_runs
-            .try_reserve(recycled_count)
-            .expect("free-run pool capacity exhausted");
-
-        // Validate the complete batch before the first header loses its old
-        // type. Retirement already proved class metadata and topology; this
-        // pass makes the arena identity needed by reset explicit and prevents
-        // partial reset from an ordinary validation failure.
-        for retired in &self.retired_no_drop_runs {
-            self.arena
-                .validate_run_target(*retired.target, retired.former_class_id);
-            assert!(
-                self.free_runs
-                    .iter()
-                    .all(|location| *location != retired.target.location),
-                "retired no-drop run was already published for reuse"
-            );
-        }
 
         for retired in std::mem::take(&mut self.retired_no_drop_runs) {
             let target = *retired.target;
@@ -508,44 +540,45 @@ impl ManagedData {
                 && run.live_slots != 0
                 && run.dead_slots != 0
         };
-        // Validate the complete retained batch before clearing its first
-        // allocation bit. The prior whole-run transition changes only runs
-        // with zero live slots, so every partial target must still belong to
-        // its original class with a withdrawn frontier.
         for run in dead_set.dead_runs.iter().filter(is_swept) {
-            assert!(
-                !run.metadata.needs_drop(),
-                "partial no-drop sweep selected destructor-bearing metadata"
-            );
-            let index = class_index(run.class_id).expect("swept run has an invalid class ID");
-            let class = self
-                .classes
-                .get(index)
-                .expect("swept run allocation class is absent");
-            assert!(
-                std::ptr::eq(class.metadata(), run.metadata),
-                "swept run changed allocation metadata"
-            );
-            assert_eq!(
-                class.geometry(),
-                run.target.geometry,
-                "swept run changed allocation geometry"
-            );
-            assert!(
-                class.frontier_is_withdrawn(),
-                "swept run class still publishes a frontier"
-            );
-            assert!(
-                class.contains_target(run.target),
-                "swept run is absent from its allocation class"
-            );
-            self.arena.validate_run_target(run.target, run.class_id);
-        }
-
-        for run in dead_set.dead_runs.iter().filter(is_swept) {
+            debug_assert!(!run.metadata.needs_drop());
             self.arena
                 .retain_marked_allocations(run.target, run.class_id);
         }
+    }
+
+    fn publish_swept_allocator_view(&mut self, dead_set: &DeadSetPlan) {
+        let arena = &self.arena;
+        let mut drop_reservations = dead_set
+            .dead_runs
+            .iter()
+            .filter(|run| run.disposition == DeadSlotDisposition::DropRequired)
+            .peekable();
+        for (index, class) in self.classes.iter_mut().enumerate() {
+            debug_assert!(class.frontier_is_withdrawn());
+            let class_id = class_id(index);
+            let mut first_available = None;
+
+            for (run_index, target) in class.runs().iter().enumerate() {
+                let reservation = drop_reservations.next_if(|run| run.target == **target);
+                let reserve_entire_run = reservation.is_some_and(|run| run.live_slots == 0);
+                let reserved_words =
+                    reservation.map_or(&[][..], |run| &dead_set.dead_words[run.dead_words.clone()]);
+                let has_available =
+                    arena.publish_allocation_word_leases(**target, class_id, |word_index| {
+                        reserve_entire_run
+                            || reserved_words
+                                .iter()
+                                .any(|word| word.word_index == word_index)
+                    });
+                if has_available && first_available.is_none() {
+                    first_available = Some(run_index);
+                }
+            }
+
+            class.publish_swept_frontier(first_available);
+        }
+        debug_assert!(drop_reservations.next().is_none());
     }
 
     fn publish_run(
@@ -1269,28 +1302,31 @@ impl HeapInner {
             };
             post_mark_work(&post_mark, &mut data);
 
-            // All potentially fallible post-mark planning precedes this
-            // publication boundary. Classification validated every stable run
-            // target while Exclusive excludes mutators. Revocation and raw
-            // frontier withdrawal make old cursors inert before the Release
-            // epoch publication lets a later outer entry clear them.
+            // Complete capacity reservation and topology validation before
+            // withdrawing the first selector. Exclusive admission keeps this
+            // plan stable through the allocation-free mutation window.
             let (current_epoch, next_epoch) = self.next_allocation_lease_epoch();
-            data.revoke_allocator_selection();
-            self.publish_allocation_lease_epoch(current_epoch, next_epoch);
+            data.prepare_swept_allocator_transition(&post_mark.dead_set);
+            data.withdraw_allocator_frontiers();
 
             // C6A.2b consumes only wholly dead no-drop runs. Their stable run
             // records leave class topology after every lock-free selector is
-            // null and the stale-cache epoch is published. C6A.2c then clears
-            // their side state and headers before publishing the locations to
-            // the heap-wide free-run pool. No ordinary class frontier is
-            // republished while this collection remains exclusive.
+            // null. C6A.2c then clears their side state and headers before
+            // publishing the locations to the heap-wide free-run pool.
             data.retire_wholly_dead_no_drop_runs(&post_mark.dead_set);
             data.recycle_retired_no_drop_runs();
 
             // C6A.3a eagerly clears only dead allocations in retained partial
-            // no-drop runs. Drop-bearing words remain intact for C6B, and no
-            // allocator selector is republished before C6A.3b.
+            // no-drop runs. Drop-bearing words remain intact for C6B.
             data.sweep_partial_no_drop_runs(&post_mark.dead_set);
+
+            // C6A.3b writes every lease word directly to its final swept view,
+            // keeps finalization-bearing words reserved, and selects the first
+            // eligible retained run in each class. The one Release epoch is
+            // published last, so every later outer entry discards all cursors
+            // from the old view before using these selectors.
+            data.publish_swept_allocator_view(&post_mark.dead_set);
+            self.publish_allocation_lease_epoch(current_epoch, next_epoch);
         }
 
         // Prepare the TLS record without activating it. Under the coordinator
@@ -2360,16 +2396,6 @@ mod tests {
         let start =
             run.geometry.allocation_bitmap.byte_len() + run.geometry.lease_bitmap.byte_len();
         &run.side_metadata[start..]
-    }
-
-    fn valid_bitmap_word(bit_len: usize, word_index: usize) -> u64 {
-        let first_bit = word_index * u64::BITS as usize;
-        let remaining = bit_len.saturating_sub(first_bit);
-        match remaining {
-            0 => 0,
-            remaining if remaining >= u64::BITS as usize => u64::MAX,
-            remaining => (1_u64 << remaining) - 1,
-        }
     }
 
     fn panic_string(panic: &(dyn std::any::Any + Send)) -> &str {
@@ -5170,6 +5196,115 @@ mod tests {
     }
 
     #[test]
+    fn post_collection_claim_reuses_a_swept_slot_without_lazy_sweep() {
+        let heap = Heap::new();
+        let (live, dead) = heap.with_mutator(|mutator| {
+            let allocator = mutator.allocator::<u64>().unwrap();
+            (allocator.alloc(10), allocator.alloc(20))
+        });
+        let root = heap.with_mutator(|mutator| mutator.root(live));
+        let live_slot = collector_slot(&heap, live);
+        let dead_slot = collector_slot(&heap, dead);
+        assert_eq!(live_slot.owner.location, dead_slot.owner.location);
+
+        let report = heap.collect_full().unwrap();
+        assert_eq!(report.marked_slots(), 1);
+        assert!(
+            !heap
+                .inner
+                .resolve_slot(dead.erase().as_ptr().as_ptr() as usize)
+                .unwrap()
+                .allocated
+        );
+
+        let claims_before = heap.inner.allocation_cursor_claim_count();
+        let replacement = allocate(&heap, 30_u64);
+        let replacement_slot = collector_slot(&heap, replacement);
+        assert_eq!(replacement_slot.owner.location, dead_slot.owner.location);
+        assert_eq!(
+            replacement_slot.owner.slot_index,
+            dead_slot.owner.slot_index
+        );
+        assert_eq!(
+            heap.inner.allocation_cursor_claim_count(),
+            claims_before + 1
+        );
+        heap.with_mutator(|mutator| assert_eq!(*root.get(mutator), 10));
+    }
+
+    #[test]
+    fn partial_drop_runs_reserve_only_words_with_finalization_obligations() {
+        let heap = Heap::new();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let values = heap.with_mutator(|mutator| {
+            let allocator = mutator.allocator::<DropCounter>().unwrap();
+            (0..66)
+                .map(|_| allocator.alloc(DropCounter(Arc::clone(&drops))))
+                .collect::<Vec<_>>()
+        });
+        let roots = heap.with_mutator(|mutator| {
+            [0_usize, u64::BITS as usize]
+                .into_iter()
+                .map(|index| mutator.root(values[index]))
+                .collect::<Vec<_>>()
+        });
+        let first_slot = collector_slot(&heap, values[0]);
+        assert_eq!(
+            collector_slot(&heap, values[64]).owner.slot_index / u64::BITS as usize,
+            1
+        );
+
+        let report = heap.collect_full().unwrap();
+        assert_eq!(report.marked_slots(), 2);
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
+        {
+            let data = heap.inner.data.lock().unwrap();
+            let state = classification_state_snapshot(&heap, &data);
+            let run = state
+                .runs
+                .iter()
+                .find(|run| run.location == first_slot.owner.location)
+                .unwrap();
+            assert_eq!(lease_words(run)[0] & 0b111, 0b011);
+            assert_eq!(
+                state.classes[class_index(first_slot.owner.class_id).unwrap()].frontier,
+                Some(first_slot.owner.location)
+            );
+        }
+
+        let replacement = allocate(&heap, DropCounter(Arc::clone(&drops)));
+        let replacement_slot = collector_slot(&heap, replacement);
+        assert_eq!(replacement_slot.owner.location, first_slot.owner.location);
+        assert_eq!(replacement_slot.owner.slot_index / u64::BITS as usize, 2);
+        assert_eq!(replacement_slot.owner.slot_index, 2 * u64::BITS as usize);
+        heap.with_mutator(|mutator| {
+            for root in &roots {
+                let _ = root.get(mutator);
+            }
+        });
+    }
+
+    #[test]
+    fn wholly_dead_drop_runs_publish_no_allocator_frontier() {
+        let heap = Heap::new();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let dead = allocate(&heap, DropCounter(Arc::clone(&drops)));
+        let dead_slot = collector_slot(&heap, dead);
+        let class = internal_class::<DropCounter>(&heap);
+
+        let report = heap.collect_full().unwrap();
+        assert_eq!(report.marked_slots(), 0);
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
+        assert!(class.claim_frontier(&heap.inner).is_none());
+
+        let replacement = allocate(&heap, DropCounter(Arc::clone(&drops)));
+        assert_ne!(
+            collector_slot(&heap, replacement).owner.location,
+            dead_slot.owner.location
+        );
+    }
+
+    #[test]
     fn panic_after_dead_set_classification_publishes_no_allocator_change() {
         let heap = Heap::new();
         let live = allocate(&heap, 10_u64);
@@ -5213,7 +5348,7 @@ mod tests {
     }
 
     #[test]
-    fn successful_post_mark_revocation_changes_only_leases_frontiers_and_epoch() {
+    fn successful_post_sweep_publishes_final_leases_frontiers_and_epoch() {
         let heap = Heap::new();
         let plain = allocate(&heap, 10_u64);
         let plain_root = heap.with_mutator(|mutator| mutator.root(plain));
@@ -5254,7 +5389,7 @@ mod tests {
             assert_eq!(before.metadata, after.metadata);
             assert_eq!(before.runs, after.runs);
             assert!(before.frontier.is_some());
-            assert_eq!(after.frontier, None);
+            assert_eq!(after.frontier, before.frontier);
         }
         assert_eq!(before.runs.len(), after.runs.len());
         for (before, after) in before.runs.iter().zip(&after.runs) {
@@ -5266,11 +5401,8 @@ mod tests {
             assert_eq!(mark_bytes(before), mark_bytes(after));
             assert_eq!(
                 lease_words(after),
-                (0..after.geometry.lease_bitmap.word_len)
-                    .map(|word_index| {
-                        valid_bitmap_word(after.geometry.lease_bitmap.bit_len, word_index)
-                    })
-                    .collect::<Vec<_>>()
+                vec![0; after.geometry.lease_bitmap.word_len],
+                "partially occupied runs must publish their directly claimable words"
             );
         }
         assert_eq!(drops.load(Ordering::Relaxed), 0);
@@ -5281,7 +5413,7 @@ mod tests {
     }
 
     #[test]
-    fn next_outer_entry_discards_a_cursor_revoked_on_another_thread() {
+    fn next_outer_entry_discards_a_stale_cursor_before_claiming_the_rebuilt_view() {
         let heap = Heap::new();
         let (first_tx, first_rx) = mpsc::channel();
         let (resume_tx, resume_rx) = mpsc::channel();
@@ -5312,6 +5444,7 @@ mod tests {
         let ((root, first_location), first_cache) = first_rx.recv().unwrap();
         assert_eq!(first_cache.captured_epoch, AllocationLeaseEpoch::INITIAL);
         assert_eq!(first_cache.cursor_count, 1);
+        let claims_before_collection = heap.inner.allocation_cursor_claim_count();
         let report = heap.collect_full().unwrap();
         assert_eq!(report.marked_slots(), 1);
         let collection_epoch = heap.inner.current_allocation_lease_epoch();
@@ -5320,13 +5453,17 @@ mod tests {
         resume_tx.send(()).unwrap();
         let (second_location, second_cache) = second_rx.recv().unwrap();
         worker.join().unwrap();
-        assert_ne!(second_location, first_location);
+        assert_eq!(second_location, first_location);
         assert_eq!(second_cache.captured_epoch, collection_epoch);
         assert_eq!(second_cache.cursor_count, 1);
+        assert_eq!(
+            heap.inner.allocation_cursor_claim_count(),
+            claims_before_collection + 1,
+            "the worker must claim the rebuilt view instead of using its stale cursor"
+        );
 
         let data = heap.inner.data.lock().unwrap();
-        assert_eq!(data.arena.allocated_slot_pointers(first_location).len(), 1);
-        assert_eq!(data.arena.allocated_slot_pointers(second_location).len(), 1);
+        assert_eq!(data.arena.allocated_slot_pointers(first_location).len(), 2);
         drop(data);
         heap.with_mutator(|mutator| assert_eq!(*root.get(mutator), 10));
     }
