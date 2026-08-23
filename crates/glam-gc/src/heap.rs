@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 
 use crate::{
-    Mutator, Root, Trace,
+    Mutator, Root, Trace, Visitor,
     arena::{Arena, RunLocation, RunOwner, RunPublicationError},
     class::{
         AllocationClass, AllocationClassEntry, MetadataIdentity, ObjectMetadata, metadata_for,
@@ -139,9 +139,10 @@ impl Heap {
 
     /// Completes a full stop-the-world collection handshake synchronously.
     ///
-    /// C5A clears collector mark state but performs no graph tracing or
-    /// reclamation. It uses the same request, election, exclusion, recovery,
-    /// and completion boundary which later phases extend.
+    /// C5B clears collector mark state, seeds the stable root registry, and
+    /// traces the reachable graph non-recursively. It performs no reclamation.
+    /// The same request, election, exclusion, recovery, and completion
+    /// boundary remains available to later phases.
     pub fn collect_full(&self) -> Result<CollectionReport, CollectionError> {
         if thread_has_any_active_mutator() {
             return Err(CollectionError::ActiveMutator);
@@ -346,27 +347,11 @@ impl ManagedData {
     }
 
     fn collector_slot(&self, value: ErasedGc) -> Result<CollectorSlot, CollectorLookupError> {
-        let address = value.as_ptr().as_ptr() as usize;
-        let (owner, metadata) = resolve_slot_topology(self, address)?;
-        if !self.arena.owner_slot_is_allocated(owner) {
-            return Err(CollectorLookupError::Unallocated);
-        }
-        Ok(CollectorSlot { owner, metadata })
+        collector_slot_in(&self.arena, &self.classes, value)
     }
 
-    #[cfg(test)]
     fn collector_slot_is_marked(&self, slot: CollectorSlot) -> bool {
         self.arena.owner_slot_is_marked(slot.owner)
-    }
-
-    fn mark_collector_slot(&mut self, slot: CollectorSlot) -> bool {
-        debug_assert!(std::ptr::eq(
-            slot.metadata,
-            self.classes[class_index(slot.owner.class_id)
-                .expect("collector slot must retain a valid class ID")]
-            .metadata()
-        ));
-        self.arena.mark_owner_slot(slot.owner)
     }
 
     fn publish_run(
@@ -466,6 +451,20 @@ enum CollectorLookupError {
     Unallocated,
 }
 
+impl CollectorLookupError {
+    fn raise(self) -> ! {
+        let message = match self {
+            Self::InvalidAddress => "collector edge does not identify an exact managed slot",
+            Self::InvalidClass => "collector edge refers to an absent allocation class",
+            Self::InvalidRunTopology => {
+                "collector edge refers to a run outside its allocation class"
+            }
+            Self::Unallocated => "collector edge does not identify an allocated value",
+        };
+        panic!("{message}")
+    }
+}
+
 #[derive(Clone, Copy)]
 struct CollectorSlot {
     owner: RunOwner,
@@ -473,10 +472,6 @@ struct CollectorSlot {
 }
 
 #[derive(Default)]
-#[allow(
-    dead_code,
-    reason = "C5A establishes attempt-local state before C5B consumes it"
-)]
 struct MarkAttempt {
     worklist: Vec<ErasedGc>,
     root_count: usize,
@@ -484,18 +479,29 @@ struct MarkAttempt {
     traced_object_count: usize,
 }
 
-#[allow(
-    dead_code,
-    reason = "C5A establishes attempt-local state before C5B consumes it"
-)]
 impl MarkAttempt {
-    fn mark(
+    fn reserve_root_capacity(&mut self, root_registry_len: usize) {
+        self.worklist
+            .try_reserve(root_registry_len)
+            .expect("collector root worklist capacity exhausted");
+    }
+
+    fn discover(
         &mut self,
         data: &mut ManagedData,
         value: ErasedGc,
     ) -> Result<bool, CollectorLookupError> {
-        let slot = data.collector_slot(value)?;
-        if !data.mark_collector_slot(slot) {
+        self.discover_in(&mut data.arena, &data.classes, value)
+    }
+
+    fn discover_in(
+        &mut self,
+        arena: &mut Arena,
+        classes: &[AllocationClassEntry],
+        value: ErasedGc,
+    ) -> Result<bool, CollectorLookupError> {
+        let slot = collector_slot_in(arena, classes, value)?;
+        if !mark_collector_slot_in(arena, classes, slot) {
             return Ok(false);
         }
         self.marked_slot_count = self
@@ -504,6 +510,59 @@ impl MarkAttempt {
             .expect("marked-slot count exhausted");
         self.worklist.push(value);
         Ok(true)
+    }
+
+    fn seed_registered_roots(
+        &mut self,
+        data: &mut ManagedData,
+    ) -> Result<(), CollectorLookupError> {
+        let ManagedData {
+            arena,
+            classes,
+            roots,
+            ..
+        } = data;
+        let mut lookup_error = None;
+        retain_registered_roots(roots, |value| {
+            self.root_count = self
+                .root_count
+                .checked_add(1)
+                .expect("root count exhausted");
+            if lookup_error.is_none()
+                && let Err(error) = self.discover_in(arena, classes, value)
+            {
+                lookup_error = Some(error);
+            }
+        });
+        match lookup_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    fn trace_worklist(&mut self, data: &mut ManagedData) -> Result<(), CollectorLookupError> {
+        while let Some(value) = self.worklist.pop() {
+            let slot = data.collector_slot(value)?;
+            assert!(
+                data.collector_slot_is_marked(slot),
+                "collector worklist contains an undiscovered allocation"
+            );
+            let mut visit = |edge| {
+                self.discover(data, edge)
+                    .unwrap_or_else(|error| error.raise());
+            };
+            let mut visitor = Visitor::new(&mut visit);
+            // SAFETY: the checked collector lookup above proves that `value`
+            // identifies one live initialized allocation with exactly the
+            // canonical metadata used for dispatch. Exclusive collection
+            // prevents mutation or reclamation during this synchronous trace.
+            unsafe { slot.metadata.trace(value.as_ptr(), &mut visitor) };
+            self.traced_object_count = self
+                .traced_object_count
+                .checked_add(1)
+                .expect("traced-object count exhausted");
+        }
+        Ok(())
     }
 }
 
@@ -680,10 +739,25 @@ impl HeapInner {
             data.clear_mark_bitmaps();
             mark_work(&mut mark_attempt, &mut data);
         }
-        // C4 visits roots only to establish the production registry boundary;
-        // C5 replaces this no-op receiver with exact marking. The walk still
-        // prunes cells whose final public root was released before this pause.
-        self.visit_registered_roots(|_| {});
+        let root_registry_len = self
+            .data
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .roots
+            .len();
+        mark_attempt.reserve_root_capacity(root_registry_len);
+        {
+            let mut data = self
+                .data
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            mark_attempt
+                .seed_registered_roots(&mut data)
+                .unwrap_or_else(|error| error.raise());
+            mark_attempt
+                .trace_worklist(&mut data)
+                .unwrap_or_else(|error| error.raise());
+        }
         exclusive_work();
 
         // Prepare the TLS record without activating it. Under the coordinator
@@ -1258,7 +1332,8 @@ impl HeapInner {
         root
     }
 
-    fn visit_registered_roots(&self, mut visit: impl FnMut(crate::trace::ErasedGc)) -> usize {
+    #[cfg(test)]
+    fn visit_registered_roots(&self, visit: impl FnMut(crate::trace::ErasedGc)) -> usize {
         {
             let coordinator = self
                 .coordinator
@@ -1277,18 +1352,25 @@ impl HeapInner {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-        let mut visited = 0;
-        data.roots.retain(|registration| {
-            let Some(cell) = registration.upgrade() else {
-                return false;
-            };
-            visit(cell.value());
-            drop(cell);
-            visited += 1;
-            true
-        });
-        visited
+        retain_registered_roots(&mut data.roots, visit)
     }
+}
+
+fn retain_registered_roots(
+    roots: &mut Vec<Weak<RootCell>>,
+    mut visit: impl FnMut(ErasedGc),
+) -> usize {
+    let mut visited = 0;
+    roots.retain(|registration| {
+        let Some(cell) = registration.upgrade() else {
+            return false;
+        };
+        visit(cell.value());
+        drop(cell);
+        visited += 1;
+        true
+    });
+    visited
 }
 
 enum RootValidationError {
@@ -1421,19 +1503,52 @@ fn resolve_slot_topology(
     state: &ManagedData,
     address: usize,
 ) -> Result<(RunOwner, &'static ObjectMetadata), CollectorLookupError> {
-    let owner = state
-        .arena
+    resolve_slot_topology_in(&state.arena, &state.classes, address)
+}
+
+fn resolve_slot_topology_in(
+    arena: &Arena,
+    classes: &[AllocationClassEntry],
+    address: usize,
+) -> Result<(RunOwner, &'static ObjectMetadata), CollectorLookupError> {
+    let owner = arena
         .checked_slot_owner(address)
         .ok_or(CollectorLookupError::InvalidAddress)?;
     let index = class_index(owner.class_id).ok_or(CollectorLookupError::InvalidClass)?;
-    let entry = state
-        .classes
+    let entry = classes
         .get(index)
         .ok_or(CollectorLookupError::InvalidClass)?;
     if entry.geometry() != owner.geometry || !entry.contains_run(owner.location) {
         return Err(CollectorLookupError::InvalidRunTopology);
     }
     Ok((owner, entry.metadata()))
+}
+
+fn collector_slot_in(
+    arena: &Arena,
+    classes: &[AllocationClassEntry],
+    value: ErasedGc,
+) -> Result<CollectorSlot, CollectorLookupError> {
+    let address = value.as_ptr().as_ptr() as usize;
+    let (owner, metadata) = resolve_slot_topology_in(arena, classes, address)?;
+    if !arena.owner_slot_is_allocated(owner) {
+        return Err(CollectorLookupError::Unallocated);
+    }
+    Ok(CollectorSlot { owner, metadata })
+}
+
+fn mark_collector_slot_in(
+    arena: &mut Arena,
+    classes: &[AllocationClassEntry],
+    slot: CollectorSlot,
+) -> bool {
+    debug_assert!(std::ptr::eq(
+        slot.metadata,
+        classes[class_index(slot.owner.class_id)
+            .expect("collector slot must retain a valid class ID")]
+        .metadata()
+    ));
+    arena.mark_owner_slot(slot.owner)
 }
 
 impl Drop for HeapInner {
@@ -1489,7 +1604,7 @@ mod tests {
     use std::collections::HashSet;
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Barrier, mpsc};
+    use std::sync::{Arc, Barrier, Mutex, mpsc};
     use std::time::Duration;
 
     use crate::{
@@ -1598,6 +1713,56 @@ mod tests {
     // SAFETY: `DropCounter` contains no managed edge.
     unsafe impl Trace for DropCounter {
         fn trace(&self, _visitor: &mut Visitor<'_>) {}
+    }
+
+    struct GraphNode {
+        edges: Mutex<Vec<crate::Gc<GraphNode>>>,
+        traces: Arc<AtomicUsize>,
+    }
+
+    // SAFETY: the mutex-protected vector contains every managed edge in the
+    // node. Exclusive collection excludes mutator updates, and tracing reports
+    // the complete synchronized edge snapshot without changing it.
+    unsafe impl Trace for GraphNode {
+        fn trace(&self, visitor: &mut Visitor<'_>) {
+            self.traces.fetch_add(1, Ordering::Relaxed);
+            for edge in self
+                .edges
+                .lock()
+                .expect("graph-node edges should not be poisoned")
+                .iter()
+                .copied()
+            {
+                visitor.visit(edge);
+            }
+        }
+    }
+
+    fn graph_node(traces: Arc<AtomicUsize>) -> GraphNode {
+        GraphNode {
+            edges: Mutex::new(Vec::new()),
+            traces,
+        }
+    }
+
+    fn connect_graph_nodes(
+        mutator: &crate::Mutator<'_>,
+        owner: crate::Gc<GraphNode>,
+        target: crate::Gc<GraphNode>,
+    ) {
+        // SAFETY: both nodes were allocated in this admitted mutator's heap.
+        // The closure appends the one reported edge and leaves the node valid
+        // if vector growth panics before publication.
+        unsafe {
+            mutator.with_edge_replacement(owner, None, Some(target), || {
+                owner
+                    .get_unchecked(mutator)
+                    .edges
+                    .lock()
+                    .expect("graph-node edges should not be poisoned")
+                    .push(target);
+            });
+        }
     }
 
     fn test_cursor(class_id: AllocationClassId) -> AllocationCursor {
@@ -2598,8 +2763,8 @@ mod tests {
                     false,
                     |attempt, data| {
                         for value in boundary_values {
-                            assert!(attempt.mark(data, value.erase()).unwrap());
-                            assert!(!attempt.mark(data, value.erase()).unwrap());
+                            assert!(attempt.discover(data, value.erase()).unwrap());
+                            assert!(!attempt.discover(data, value.erase()).unwrap());
                         }
                         assert_eq!(attempt.marked_slot_count, 3);
                         assert_eq!(attempt.worklist.len(), 3);
@@ -2645,7 +2810,7 @@ mod tests {
                 .run_synthetic_collection_with_mark_work(
                     dirty_epoch,
                     false,
-                    |attempt, data| assert!(attempt.mark(data, one_value.erase()).unwrap()),
+                    |attempt, data| assert!(attempt.discover(data, one_value.erase()).unwrap()),
                     || {},
                     |_| {},
                 )
@@ -2698,7 +2863,7 @@ mod tests {
                     false,
                     |attempt, data| {
                         for value in &values {
-                            assert!(attempt.mark(data, value.erase()).unwrap());
+                            assert!(attempt.discover(data, value.erase()).unwrap());
                         }
                     },
                     || {},
@@ -2745,7 +2910,7 @@ mod tests {
                 .run_synthetic_collection_with_mark_work(
                     epoch,
                     false,
-                    |attempt, data| assert!(attempt.mark(data, marked.erase()).unwrap()),
+                    |attempt, data| assert!(attempt.discover(data, marked.erase()).unwrap()),
                     || {},
                     |_| {},
                 )
@@ -2888,7 +3053,7 @@ mod tests {
                         attempt.root_count = 17;
                         attempt.traced_object_count = 23;
                         for value in values.iter().take(partial_count) {
-                            assert!(attempt.mark(data, value.erase()).unwrap());
+                            assert!(attempt.discover(data, value.erase()).unwrap());
                         }
                         assert_eq!(attempt.marked_slot_count, partial_count);
                         assert_eq!(attempt.worklist.len(), partial_count);
@@ -2944,7 +3109,7 @@ mod tests {
                                     "retry must clear every stale partial mark before work"
                                 );
                             }
-                            assert!(attempt.mark(data, values[2].erase()).unwrap());
+                            assert!(attempt.discover(data, values[2].erase()).unwrap());
                         },
                         || {},
                         |_| {},
@@ -2952,7 +3117,10 @@ mod tests {
                     .is_none()
             );
 
-            assert!(!slot_is_marked(&heap, slots[0]));
+            assert!(
+                slot_is_marked(&heap, slots[0]),
+                "the retained public root must be discovered after the retry hook"
+            );
             assert!(!slot_is_marked(&heap, slots[1]));
             assert!(slot_is_marked(&heap, slots[2]));
             assert_eq!(
@@ -2961,6 +3129,167 @@ mod tests {
             );
             heap.with_mutator(|mutator| assert_eq!(root.get(mutator).value, 0));
         }
+    }
+
+    #[test]
+    fn root_seeding_counts_entries_but_enqueues_each_allocation_once() {
+        let heap = Heap::new();
+        let traces = Arc::new(AtomicUsize::new(0));
+        let (value, first_root, second_root, root_alias, dead_root) =
+            heap.with_mutator(|mutator| {
+                let allocator = mutator.allocator::<GraphNode>().unwrap();
+                let value = allocator.alloc(graph_node(Arc::clone(&traces)));
+                let dead = allocator.alloc(graph_node(Arc::new(AtomicUsize::new(0))));
+                let first_root = mutator.root(value);
+                let root_alias = first_root.clone();
+                (
+                    value,
+                    first_root,
+                    mutator.root(value),
+                    root_alias,
+                    mutator.root(dead),
+                )
+            });
+        drop(dead_root);
+
+        let exclusive = heap.inner.enter_synthetic_exclusive();
+        let root_registry_len = heap.inner.data.lock().unwrap().roots.len();
+        assert_eq!(root_registry_len, 3);
+        let mut attempt = super::MarkAttempt::default();
+        attempt.reserve_root_capacity(root_registry_len);
+        {
+            let mut data = heap.inner.data.lock().unwrap();
+            data.clear_mark_bitmaps();
+            attempt.seed_registered_roots(&mut data).unwrap();
+
+            assert_eq!(data.roots.len(), 2);
+            assert_eq!(attempt.root_count, 2);
+            assert_eq!(attempt.marked_slot_count, 1);
+            assert_eq!(attempt.worklist, vec![value.erase()]);
+            assert_eq!(traces.load(Ordering::Relaxed), 0);
+
+            attempt.trace_worklist(&mut data).unwrap();
+            assert!(attempt.worklist.is_empty());
+            assert_eq!(attempt.traced_object_count, 1);
+        }
+        drop(exclusive);
+
+        assert_eq!(traces.load(Ordering::Relaxed), 1);
+        assert!(slot_is_marked(&heap, collector_slot(&heap, value)));
+        heap.with_mutator(|mutator| {
+            assert!(std::ptr::eq(
+                first_root.get(mutator),
+                second_root.get(mutator)
+            ));
+            assert!(std::ptr::eq(
+                first_root.get(mutator),
+                root_alias.get(mutator)
+            ));
+        });
+    }
+
+    #[test]
+    fn checked_nonrecursive_marking_handles_cycles_diamonds_and_duplicate_edges() {
+        let heap = Heap::new();
+        let counters = (0..5)
+            .map(|_| Arc::new(AtomicUsize::new(0)))
+            .collect::<Vec<_>>();
+        let (nodes, root) = heap.with_mutator(|mutator| {
+            let allocator = mutator.allocator::<GraphNode>().unwrap();
+            let nodes = counters
+                .iter()
+                .map(|counter| allocator.alloc(graph_node(Arc::clone(counter))))
+                .collect::<Vec<_>>();
+            connect_graph_nodes(mutator, nodes[0], nodes[1]);
+            connect_graph_nodes(mutator, nodes[0], nodes[2]);
+            connect_graph_nodes(mutator, nodes[0], nodes[1]);
+            connect_graph_nodes(mutator, nodes[1], nodes[3]);
+            connect_graph_nodes(mutator, nodes[2], nodes[3]);
+            connect_graph_nodes(mutator, nodes[3], nodes[0]);
+            let root = mutator.root(nodes[0]);
+            (nodes, root)
+        });
+
+        heap.collect_full().unwrap();
+
+        assert_eq!(counters[0].load(Ordering::Relaxed), 1);
+        assert_eq!(counters[1].load(Ordering::Relaxed), 1);
+        assert_eq!(counters[2].load(Ordering::Relaxed), 1);
+        assert_eq!(counters[3].load(Ordering::Relaxed), 1);
+        assert_eq!(counters[4].load(Ordering::Relaxed), 0);
+        assert!(
+            nodes[..4]
+                .iter()
+                .copied()
+                .all(|node| slot_is_marked(&heap, collector_slot(&heap, node)))
+        );
+        assert!(!slot_is_marked(&heap, collector_slot(&heap, nodes[4])));
+        heap.with_mutator(|mutator| assert_eq!(root.get(mutator).edges.lock().unwrap().len(), 3));
+    }
+
+    #[test]
+    fn checked_nonrecursive_marking_handles_a_deep_chain() {
+        const DEPTH: usize = 20_000;
+
+        let heap = Heap::new();
+        let traces = Arc::new(AtomicUsize::new(0));
+        let (last, root) = heap.with_mutator(|mutator| {
+            let allocator = mutator.allocator::<GraphNode>().unwrap();
+            let nodes = (0..DEPTH)
+                .map(|_| allocator.alloc(graph_node(Arc::clone(&traces))))
+                .collect::<Vec<_>>();
+            for pair in nodes.windows(2) {
+                connect_graph_nodes(mutator, pair[0], pair[1]);
+            }
+            (nodes[DEPTH - 1], mutator.root(nodes[0]))
+        });
+
+        heap.collect_full().unwrap();
+
+        assert_eq!(traces.load(Ordering::Relaxed), DEPTH);
+        assert!(slot_is_marked(&heap, collector_slot(&heap, last)));
+        heap.with_mutator(|mutator| {
+            assert_eq!(root.get(mutator).traces.load(Ordering::Relaxed), DEPTH)
+        });
+    }
+
+    #[test]
+    fn checked_nonrecursive_marking_handles_wide_shared_spines() {
+        const WIDTH: usize = 2_048;
+        const TAIL_DEPTH: usize = 64;
+
+        let heap = Heap::new();
+        let traces = Arc::new(AtomicUsize::new(0));
+        let (shared_tail, root) = heap.with_mutator(|mutator| {
+            let allocator = mutator.allocator::<GraphNode>().unwrap();
+            let tail = (0..TAIL_DEPTH)
+                .map(|_| allocator.alloc(graph_node(Arc::clone(&traces))))
+                .collect::<Vec<_>>();
+            for pair in tail.windows(2) {
+                connect_graph_nodes(mutator, pair[0], pair[1]);
+            }
+
+            let branches = (0..WIDTH)
+                .map(|_| allocator.alloc(graph_node(Arc::clone(&traces))))
+                .collect::<Vec<_>>();
+            for branch in &branches {
+                connect_graph_nodes(mutator, *branch, tail[0]);
+            }
+
+            let root_node = allocator.alloc(graph_node(Arc::clone(&traces)));
+            for branch in branches {
+                connect_graph_nodes(mutator, root_node, branch);
+            }
+            (tail[TAIL_DEPTH - 1], mutator.root(root_node))
+        });
+
+        heap.collect_full().unwrap();
+
+        assert_eq!(traces.load(Ordering::Relaxed), 1 + WIDTH + TAIL_DEPTH);
+        assert!(slot_is_marked(&heap, collector_slot(&heap, shared_tail)));
+        heap.with_mutator(|mutator| {
+            assert_eq!(root.get(mutator).edges.lock().unwrap().len(), WIDTH)
+        });
     }
 
     #[test]

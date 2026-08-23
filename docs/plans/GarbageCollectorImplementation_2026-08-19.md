@@ -1,8 +1,8 @@
 # Glam GC Subcrate Implementation Plan — 2026-08-19
 
-Status: in progress; Phases C0 through C5A are complete, including the C2C.6
+Status: in progress; Phases C0 through C5B are complete, including the C2C.6
 verification follow-up. The mandatory post-C1, post-C2C, post-C3E, and post-C4
-downstream reviews are complete. C5B.1 is next.
+downstream reviews are complete. C5C.1 is next.
 
 This plan implements an exact, non-moving, runtime-local tracing collector
 without depending on Glam value semantics. The governing requirements and
@@ -54,8 +54,8 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C5A.1 | completed | clear-before-mark bitmap operations |
 | C5A.2 | completed | checked collector lookup |
 | C5A.3 | completed | failed mark-attempt invalidation |
-| C5B.1 | pending | stable root seeding |
-| C5B.2 | pending | checked non-recursive graph marking |
+| C5B.1 | completed | stable root seeding |
+| C5B.2 | completed | checked non-recursive graph marking |
 | C5C.1 | pending | trace and worklist panic recovery |
 | C5C.2 | pending | invalid-edge recovery and retry |
 | C5D.1 | pending | successful mark publication and report |
@@ -2311,13 +2311,14 @@ downstream corrections are required:
   mark interpretation to exclusive collection and its later sweep consumer.
 - **Keep root seeding bounded and non-fallible under the data lock.** C5 first
   reserves a `Vec<ErasedGc>` using the registry length, then retains weak
-  entries, upgrades them, and copies live seeds while exclusive authority
-  keeps root publication stopped. That same vector becomes the LIFO object
-  worklist; record its initial root count separately if reporting needs it.
-  Trace dispatch and further worklist growth occur only after the registry
-  walk. This preserves C4's no-strong-snapshot intent: temporary upgrades are
-  not retained, and copied managed pointers are safe because no sweep occurs
-  during the mark attempt.
+  entries and upgrades them while exclusive authority keeps root publication
+  stopped. Each live registry entry increments the root count, but its exact
+  slot is marked before enqueueing and only a newly marked allocation is
+  pushed. That same vector is the LIFO object worklist, so duplicate root cells
+  never create duplicate work. Trace dispatch and further worklist growth
+  occur only after the registry walk. This preserves C4's no-strong-snapshot
+  intent: temporary upgrades are released within the walk, and copied managed
+  pointers are safe because no sweep occurs during the mark attempt.
 - **Validate before the first unsafe trace dereference.** Same-heap, exact
   slot, allocated-state, and canonical-metadata checks are part of C5B.2's
   basic traversal, not a later hardening pass. C5C.1-2 separately prove
@@ -2455,19 +2456,27 @@ Execute C5 as the following independently verified checkpoints:
   implementations yet.
 - **C5B.1 — stable root seeding.** Under exclusive authority, reserve seed
   capacity outside the data lock from a previously observed stable registry
-  length, then reacquire managed data, retain weak entries, and copy each
-  successfully upgraded `ErasedGc` into the object worklist. Release every
-  temporary strong root-cell reference during that walk. Perform no trace
-  dispatch or fallible growth during the registry walk itself. C5B.2 reuses
-  this vector directly and may grow it while tracing under managed data;
-  C5C's unwind path treats that allocation as fallible attempt work.
+  length, then reacquire managed data and retain weak entries. Count every
+  successfully upgraded root-registry entry, but validate and mark its slot
+  before enqueueing its `ErasedGc`; only the unmarked-to-marked transition
+  pushes. Multiple roots for one allocation therefore contribute separately
+  to `root_count` while that allocation enters the worklist at most once.
+  Release every temporary strong root-cell reference during that walk.
+  Perform no trace dispatch or fallible growth during the registry walk
+  itself. C5B.2 reuses this vector directly and may grow it while tracing under
+  managed data; C5C's unwind path treats that allocation as fallible attempt
+  work.
 - **C5B.2 — checked non-recursive graph marking.** Drain the explicit worklist
-  through canonical metadata and the existing edge visitor. Every root and
-  reported edge passes C5A.2's same-heap, exact-slot, allocated, and canonical-
-  metadata check before the first unsafe payload dereference. Duplicate visits
-  terminate at the slot mark. Cover cycles, diamonds, deep chains, wide
-  graphs, and shared logical collection spines without changing allocation,
-  lease, frontier, or pressure state.
+  through canonical metadata and the existing edge visitor. A popped item is
+  already marked as discovered and is traced exactly once; do not interpret
+  its set bit as a reason to skip tracing. Every reported edge passes C5A.2's
+  same-heap, exact-slot, allocated, and canonical-metadata check, then marks
+  before enqueueing. Duplicate roots, repeated edges, cycles, and diamonds
+  therefore terminate at discovery and never add duplicate worklist entries.
+  Revalidate each popped allocation before its first unsafe payload
+  dereference. Cover cycles, diamonds, deep chains, wide graphs, and shared
+  logical collection spines without changing allocation, lease, frontier, or
+  pressure state.
 - **C5C.1 — trace and worklist panic recovery.** Force visitor and worklist
   panics at zero, one, and many traced edges. Invalidate the partial marks,
   discard aggregate counters, recover managed data and coordinator phase,
@@ -2616,6 +2625,29 @@ Completed on 2026-08-23:
   absent-class, and unpublished-run addresses; and panics after zero, one, and
   three distinct-run marks followed by a clean retry. Focused verification now
   passes 132 unit tests, 6 Loom models, and 8 compile-fail/doc tests.
+
+#### C5B completion
+
+Completed on 2026-08-23:
+
+- Exclusive collection now observes the stable root-registry length, releases
+  managed data, and reserves that much additional worklist capacity before the
+  registry walk. The shared retain implementation prunes failed weak upgrades,
+  releases each temporary strong cell during the walk, and performs no trace
+  dispatch or fallible worklist growth there.
+- Every live registry entry increments `root_count`, while checked discovery
+  marks the exact allocated slot before enqueueing. Distinct root cells for one
+  allocation are counted separately, but clones add no cell and the allocation
+  enters the worklist only on its first mark.
+- Worklist entries are already marked discoveries. Drain revalidates each
+  allocation and obtains canonical metadata before unsafe trace dispatch, then
+  traces the popped object exactly once. Reported edges use the same checked
+  mark-before-enqueue operation, so cycles, diamonds, repeated edges, and
+  shared tails terminate without recursion or duplicate worklist entries.
+- Focused fixtures prove root counting and post-seed trace ordering, a cycle
+  combined with duplicate and diamond edges, an unrooted allocation, a
+  20,000-node chain, and 2,048 branches sharing a 64-node tail. The crate now
+  passes 136 unit tests, 6 Loom models, and 8 compile-fail/doc tests.
 
 ## Phase C6 — Sweep, Mutator Finalization, Retry, and Quarantine
 

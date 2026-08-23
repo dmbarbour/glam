@@ -1,9 +1,9 @@
 //! Runtime-local garbage collection support for Glam.
 //!
-//! C5A adds collector-only mark-bitmap primitives, all-build checked slot
-//! lookup, and failed-attempt recovery to C4's direct roots and exclusive
-//! registry walk. Full graph marking and reclamation remain disabled, so
-//! payloads stay live until terminal heap teardown.
+//! C5B adds mark-before-enqueue root discovery and checked, non-recursive graph
+//! traversal to C5A's mark-bitmap and failed-attempt boundary. Reclamation
+//! remains disabled, so unreachable payloads still stay live until terminal
+//! heap teardown.
 
 #![deny(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]

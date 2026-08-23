@@ -56,7 +56,10 @@ allocation state, and canonical metadata from every collector address before
 marking. C5A.3 scopes worklists and scalar counters to one attempt, recovers a
 poisoned managed-data mutex after an attempt panic, leaves partial marks as
 unpublished scratch, and relies on the mandatory next-attempt clear. Full
-graph tracing and reclamation remain disabled.
+graph tracing remains disabled through C5A. C5B reserves root work outside the
+data lock, counts live root entries independently, marks each allocation before
+enqueueing it, and traces the resulting graph through a checked non-recursive
+worklist. Reclamation remains disabled.
 
 The crate denies unsafe code by default. `src/lib.rs` gives the reviewed
 `pointer`, `root`, `mutator`, `trace`, `mutation`, `thread_cache`, and unit-test
@@ -132,6 +135,20 @@ and every unsafe function, implementation, and block are checked into
   managed-data guard. Its slot mark is the sole per-allocation reachability
   record; the attempt owns only a pointer worklist and scalar counters, not a
   run-keyed map or summary.
+- Root seeding observes the stable registry length under exclusive authority,
+  reserves that much additional worklist capacity outside managed data, then
+  retains weak entries under the data lock. Every successful upgrade
+  increments `root_count`, but only the unmarked-to-marked transition enqueues
+  its pointer. Temporary strong cells are released during the shared retain
+  walk, and no trace dispatch or fallible vector growth occurs inside root
+  seeding.
+- The worklist therefore contains only already-marked, unique discovered
+  allocations. Popping an item does not use its set mark as a reason to skip
+  it: the collector revalidates its exact allocated slot, recovers canonical
+  metadata, and dispatches that representation exactly once. Each reported
+  edge repeats checked discovery and marks before enqueueing, which terminates
+  cycles, diamonds, repeated edges, and duplicate roots without recursive Rust
+  calls.
 - If an attempt panics, Rust drops its worklist and counters before the
   collection guard recovers and clears any managed-data mutex poison. Recovery
   does not scan or clear partial marks. It relatches collection before
@@ -581,9 +598,9 @@ opaque-value escape hatch.
 `Visitor::visit` converts `Gc<T>` to a private pointer-only `ErasedGc` and
 synchronously invokes its collector-owned receiver. Erasure preserves the
 managed address but neither constructs a reference nor adds or guesses heap or
-type metadata. Later typed-run lookup must recover and validate those facts.
-The receiver may panic; no visitor or traversal state is stored in the traced
-object.
+type metadata. C5B's typed-run lookup recovers and validates those facts before
+the edge can be marked or dereferenced. The receiver may panic; no visitor or
+traversal state is stored in the traced object.
 
 `ErasedGc` is `Send + Sync` because it grants no pointer access and is created
 only from `Gc<T>` where `T: Trace` already requires `Send + Sync`. Sending or
@@ -721,6 +738,12 @@ mutation closure runs.
   allocation/root state and the original panic payload survive, verifies mutex
   poison recovery and ordinary coordinator restoration, and then proves a
   clean retry starts with empty scratch state and cleared bitmaps.
+- C5B tests separate root-entry count from unique discovered allocations,
+  verify clone-versus-distinct-root registry behavior and dead weak-entry
+  pruning, and prove that trace dispatch begins only after root seeding. Exact
+  non-recursive traversal covers duplicate edges, a cycle, a diamond, an
+  unrooted allocation, a 20,000-node chain, and 2,048 wide branches sharing a
+  64-node tail. Every reachable allocation traces once despite repeated paths.
 - The ordinary crate checks, exact unsafe inventory, focused Miri run, and
   repository-wide checks are required at completed checkpoints.
 - Miri passes all implemented tests with leak checking enabled. C1's temporary
