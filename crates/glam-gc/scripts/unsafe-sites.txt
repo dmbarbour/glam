@@ -16,15 +16,20 @@ crates/glam-gc/src/arena.rs:        let lease = unsafe { lease.as_ref() }.load(O
 crates/glam-gc/src/arena.rs:        let pointer = unsafe { address.pointer().add(offset).cast::<T>() };
 crates/glam-gc/src/arena.rs:        let pointer = unsafe { self.base.add(offset) };
 crates/glam-gc/src/arena.rs:        let pointer = unsafe { self.base.add(offset) };
+crates/glam-gc/src/arena.rs:        let prior = unsafe { pointer.read() };
 crates/glam-gc/src/arena.rs:        let start = unsafe { address.pointer().add(bitmap.offset) };
 crates/glam-gc/src/arena.rs:        let word = unsafe { pointer.as_ref() }.load(Ordering::Acquire);
+crates/glam-gc/src/arena.rs:        let word = unsafe { pointer.read() };
+crates/glam-gc/src/arena.rs:        let words = unsafe {
 crates/glam-gc/src/arena.rs:        unsafe { allocation_word.as_ref() }.store(published_word, Ordering::Release);
 crates/glam-gc/src/arena.rs:        unsafe { dealloc(self.base.as_ptr(), chunk_layout()) };
 crates/glam-gc/src/arena.rs:        unsafe { first_allocation.as_ref() }.store(u64::MAX, Ordering::Release);
 crates/glam-gc/src/arena.rs:        unsafe { header_pointer.write(RunHeader::initialized(class_id, geometry)) };
+crates/glam-gc/src/arena.rs:        unsafe { pointer.write(prior | bit) };
 crates/glam-gc/src/arena.rs:        unsafe { pointer.write(value) };
 crates/glam-gc/src/arena.rs:        unsafe { std::ptr::write_bytes(start.as_ptr(), value, bitmap.byte_len()) };
 crates/glam-gc/src/arena.rs:    let allocation = unsafe { allocation.as_ref() }.load(Ordering::Acquire);
+crates/glam-gc/src/arena.rs:    unsafe {
 crates/glam-gc/src/arena.rs:    unsafe {
 crates/glam-gc/src/arena.rs:    unsafe {
 crates/glam-gc/src/arena.rs:unsafe impl Send for ArenaChunk {}

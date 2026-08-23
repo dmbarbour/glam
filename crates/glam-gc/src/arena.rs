@@ -287,15 +287,33 @@ impl Arena {
     }
 
     pub(crate) fn owner_slot_is_allocated(&self, owner: RunOwner) -> bool {
+        let (chunk, run) = self.resolved_owner_run(owner);
+        chunk.slot_is_allocated(run, owner.geometry, owner.slot_index)
+    }
+
+    pub(crate) fn clear_assigned_mark_bitmaps(&mut self) -> usize {
+        let mut cleared = 0;
+        for chunk in &mut self.chunks {
+            cleared += chunk.clear_assigned_mark_bitmaps();
+        }
+        cleared
+    }
+
+    pub(crate) fn owner_slot_is_marked(&self, owner: RunOwner) -> bool {
+        let (chunk, run) = self.resolved_owner_run(owner);
+        chunk.slot_is_marked(run, owner.geometry, owner.slot_index)
+    }
+
+    pub(crate) fn mark_owner_slot(&mut self, owner: RunOwner) -> bool {
         let chunk = self
             .chunks
-            .get(owner.location.chunk)
-            .unwrap_or_else(|| panic!("resolved allocation owner lost its arena chunk"));
+            .get_mut(owner.location.chunk)
+            .unwrap_or_else(|| panic!("resolved mark owner lost its arena chunk"));
         let run = chunk
             .run_address(owner.location.run)
-            .expect("resolved allocation owner lost its run");
-        assert_eq!(run, owner.run, "resolved allocation owner changed runs");
-        chunk.slot_is_allocated(run, owner.geometry, owner.slot_index)
+            .expect("resolved mark owner lost its run");
+        assert_eq!(run, owner.run, "resolved mark owner changed runs");
+        chunk.mark_slot(run, owner.geometry, owner.slot_index)
     }
 
     pub(crate) fn first_free_slot(&self, location: RunLocation) -> Option<usize> {
@@ -341,6 +359,18 @@ impl Arena {
             run,
             geometry,
         })
+    }
+
+    fn resolved_owner_run(&self, owner: RunOwner) -> (&ArenaChunk, RunAddress) {
+        let chunk = self
+            .chunks
+            .get(owner.location.chunk)
+            .unwrap_or_else(|| panic!("resolved allocation owner lost its arena chunk"));
+        let run = chunk
+            .run_address(owner.location.run)
+            .expect("resolved allocation owner lost its run");
+        assert_eq!(run, owner.run, "resolved allocation owner changed runs");
+        (chunk, run)
     }
 
     fn publish_chunk(&mut self, candidate: ArenaChunk) -> Result<usize, ArenaError> {
@@ -501,6 +531,35 @@ impl ArenaChunk {
             .find(|&slot_index| !self.slot_is_allocated(address, geometry, slot_index))
     }
 
+    fn clear_assigned_mark_bitmaps(&mut self) -> usize {
+        let mut cleared = 0;
+        for run_index in 0..RUNS_PER_CHUNK {
+            let run = self
+                .run_address(run_index)
+                .expect("fixed run index must belong to its chunk");
+            let Some(geometry) = self.header_for(run).and_then(RunHeader::geometry) else {
+                continue;
+            };
+            self.clear_mark_bitmap(run, geometry);
+            cleared += 1;
+        }
+        cleared
+    }
+
+    fn clear_mark_bitmap(&mut self, run: RunAddress, geometry: RunGeometry) {
+        let bitmap = geometry.mark_bitmap;
+        // SAFETY: exclusive collection gives this mutable chunk sole access
+        // to the initialized ordinary mark words, and validated geometry keeps
+        // the complete contiguous range inside the run.
+        let words = unsafe {
+            std::slice::from_raw_parts_mut(
+                run.pointer().add(bitmap.offset).cast::<u64>().as_ptr(),
+                bitmap.word_len,
+            )
+        };
+        words.fill(0);
+    }
+
     fn initialize_slot<T: Trace>(
         &mut self,
         run: usize,
@@ -599,6 +658,31 @@ impl ArenaChunk {
         // payload before its allocation bit.
         let word = unsafe { pointer.as_ref() }.load(Ordering::Acquire);
         word & (1_u64 << bit_index) != 0
+    }
+
+    fn slot_is_marked(&self, run: RunAddress, geometry: RunGeometry, slot_index: usize) -> bool {
+        let (word_index, bit) = bitmap_bit(geometry.mark_bitmap, slot_index);
+        let pointer = mark_word_pointer(run, geometry, word_index);
+        // SAFETY: exclusive collection keeps every mutator out while ordinary
+        // mark words are read. Validated geometry places this initialized word
+        // wholly inside the live run.
+        let word = unsafe { pointer.read() };
+        word & bit != 0
+    }
+
+    fn mark_slot(&mut self, run: RunAddress, geometry: RunGeometry, slot_index: usize) -> bool {
+        let (word_index, bit) = bitmap_bit(geometry.mark_bitmap, slot_index);
+        let pointer = mark_word_pointer(run, geometry, word_index);
+        // SAFETY: the exclusive collector is the sole mark-word writer, and
+        // validated geometry identifies one initialized ordinary `u64`.
+        let prior = unsafe { pointer.read() };
+        if prior & bit != 0 {
+            return false;
+        }
+        // SAFETY: as above, this updates that same initialized mark word while
+        // no mutator or other collector can access it.
+        unsafe { pointer.write(prior | bit) };
+        true
     }
 
     fn allocation_word_update(
@@ -736,6 +820,27 @@ fn allocation_word_pointer(
         run.pointer()
             .add(bitmap.offset)
             .cast::<AtomicU64>()
+            .add(word_index)
+    }
+}
+
+fn bitmap_bit(bitmap: crate::run::BitmapGeometry, bit_index: usize) -> (usize, u64) {
+    assert!(bit_index < bitmap.bit_len, "bitmap bit is out of range");
+    let word_index = bit_index / u64::BITS as usize;
+    let bit = 1_u64 << (bit_index % u64::BITS as usize);
+    debug_assert!(word_index < bitmap.word_len);
+    (word_index, bit)
+}
+
+fn mark_word_pointer(run: RunAddress, geometry: RunGeometry, word_index: usize) -> NonNull<u64> {
+    let bitmap = geometry.mark_bitmap;
+    assert!(word_index < bitmap.word_len, "mark word is out of range");
+    // SAFETY: compile-time run alignment and validated bitmap geometry place
+    // this initialized ordinary word wholly inside the live run.
+    unsafe {
+        run.pointer()
+            .add(bitmap.offset)
+            .cast::<u64>()
             .add(word_index)
     }
 }

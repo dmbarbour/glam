@@ -49,7 +49,14 @@ a mutator-scoped `Allocator<'_, T>`, moves durable class/run topology entirely
 under heap ownership, and removes allocation capabilities as heap owners.
 C5A.0 splits mutator/collector coordination from managed heap data and makes
 the coalesced collection request a sibling atomic. It changes no pointer,
-allocation, root, tracing, or reclamation semantics.
+allocation, root, tracing, or reclamation semantics. C5A.1 clears every
+assigned run's contiguous ordinary mark-word range under exclusive authority
+and adds checked per-slot test/set operations. C5A.2 recovers exact owner,
+allocation state, and canonical metadata from every collector address before
+marking. C5A.3 scopes worklists and scalar counters to one attempt, recovers a
+poisoned managed-data mutex after an attempt panic, leaves partial marks as
+unpublished scratch, and relies on the mandatory next-attempt clear. Full
+graph tracing and reclamation remain disabled.
 
 The crate denies unsafe code by default. `src/lib.rs` gives the reviewed
 `pointer`, `root`, `mutator`, `trace`, `mutation`, `thread_cache`, and unit-test
@@ -106,6 +113,31 @@ and every unsafe function, implementation, and block are checked into
   metadata, alignment padding, slot interiors, run ends, free runs, and other
   heaps all fail without producing an owner.
 
+## Mark Attempt Invariants
+
+- Mark words are ordinary `u64` values used only while the coordinator holds
+  exclusive collection authority. Mutator allocation reads and writes only
+  atomic allocation/lease state and payload slots; it never observes or
+  changes a mark word.
+- Every collection attempt clears each assigned run's complete contiguous mark
+  range after all mutators drain and before root visitation or synthetic mark
+  work. The mutable `u64` slice exists only for that exclusive bulk fill.
+- Collector lookup starts from the erased integer address, finds its owning
+  live chunk and exact slot-start through the indexed arena, validates header
+  class and geometry against the dense class entry and run pool, loads the
+  allocation bit with Acquire, and recovers the class's canonical static
+  metadata. Foreign, interior, unallocated, absent-class, and unpublished-run
+  addresses produce no `CollectorSlot`.
+- A checked `CollectorSlot` is attempt-local and remains under the same
+  managed-data guard. Its slot mark is the sole per-allocation reachability
+  record; the attempt owns only a pointer worklist and scalar counters, not a
+  run-keyed map or summary.
+- If an attempt panics, Rust drops its worklist and counters before the
+  collection guard recovers and clears any managed-data mutex poison. Recovery
+  does not scan or clear partial marks. It relatches collection before
+  restoring ordinary coordinator state, and the original panic resumes. The
+  next attempt's mandatory initial clear makes every stale mark irrelevant.
+
 ## Managed Pointer and Access Invariants
 
 - `Gc<T>` is transparent over exactly one `NonNull<T>`. An unconditional const
@@ -124,7 +156,7 @@ and every unsafe function, implementation, and block are checked into
   const assertion rejects zero-sized types while compiling an invalid
   monomorphization, before any allocation can run. A public foreign
   allocator/heap combination is unrepresentable.
-- Before collection exists, arena payloads never move and remain live until
+- Before reclamation exists, arena payloads never move and remain live until
   their heap's terminal teardown. No access is valid without a live mutator for
   the owning heap.
 - In debug/test builds, access masks the address into the owning heap's indexed
@@ -459,6 +491,17 @@ leased worker owns allocation-word writes, while root validation and later
 collector work may read them. Read-only recovery does not create a payload
 reference.
 
+The mark range is initialized as ordinary `u64` storage and remains disjoint
+from the header, atomic allocation/lease words, alignment padding, and payload.
+After exclusive admission drains mutators, the collector reconstructs one
+bounded mutable slice over the contiguous words and uses `fill(0)` for the
+mandatory initial clear. Checked slot index and bitmap geometry then derive one
+word pointer for test/set. The collector is the sole reader and writer until it
+leaves exclusive work, so these operations require neither atomics nor
+fine-grained locks. Every raw read, write, and slice construction stays within
+the live run selected from the owning arena rather than deriving from an
+unvalidated address.
+
 ### `Send for arena::ArenaChunk`
 
 An arena chunk owns raw untyped bytes and exposes no Rust reference. Moving the
@@ -669,6 +712,15 @@ mutation closure runs.
   interval; and a synchronous requester joins an active epoch while its
   collector is blocked on managed data. Existing admission, finalization,
   root-publication, panic, and Loom schedules pass unchanged after the split.
+- C5A.1–3 tests bulk clear across zero, one, and three assigned runs; first and
+  duplicate marks on both sides of a bitmap-word boundary; unchanged mark
+  state across mutator allocation; exact owner and canonical-metadata recovery;
+  rejection of foreign, interior, unallocated, absent-class, and unpublished-
+  run addresses; and injected panics after zero, one, and three distinct-run
+  marks. The panic fixture observes physical scratch marks before retry, proves
+  allocation/root state and the original panic payload survive, verifies mutex
+  poison recovery and ordinary coordinator restoration, and then proves a
+  clean retry starts with empty scratch state and cleared bitmaps.
 - The ordinary crate checks, exact unsafe inventory, focused Miri run, and
   repository-wide checks are required at completed checkpoints.
 - Miri passes all implemented tests with leak checking enabled. C1's temporary

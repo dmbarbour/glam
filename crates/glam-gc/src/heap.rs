@@ -6,7 +6,7 @@ use std::sync::{Arc, Condvar, Mutex, Weak};
 
 use crate::{
     Mutator, Root, Trace,
-    arena::{Arena, RunLocation, RunPublicationError},
+    arena::{Arena, RunLocation, RunOwner, RunPublicationError},
     class::{
         AllocationClass, AllocationClassEntry, MetadataIdentity, ObjectMetadata, metadata_for,
     },
@@ -16,6 +16,7 @@ use crate::{
         AllocationCursor, AllocationLeaseEpoch, ThreadHeapEntry, remove_inactive_thread_cache,
         thread_has_any_active_mutator,
     },
+    trace::ErasedGc,
 };
 
 const INITIAL_RUN_PUBLICATION_ALLOWANCE: usize = crate::arena::RUNS_PER_CHUNK * 7 / 8;
@@ -61,9 +62,9 @@ impl std::error::Error for CollectionError {}
 
 /// One shareable, runtime-local managed-value domain.
 ///
-/// C2C's heap owns canonical allocation classes, typed-run topology, and every
-/// arena payload. Collection remains disabled, so payloads remain allocated
-/// until provisional terminal heap teardown.
+/// The heap owns canonical allocation classes, typed-run topology, mark state,
+/// and every arena payload. Reclamation remains disabled, so payloads remain
+/// allocated until provisional terminal heap teardown.
 #[derive(Clone, Default)]
 pub struct Heap {
     inner: Arc<HeapInner>,
@@ -138,9 +139,9 @@ impl Heap {
 
     /// Completes a full stop-the-world collection handshake synchronously.
     ///
-    /// C3 performs no tracing or reclamation. It nevertheless establishes the
-    /// same request, election, exclusion, and completion boundary which later
-    /// phases use for real full collection.
+    /// C5A clears collector mark state but performs no graph tracing or
+    /// reclamation. It uses the same request, election, exclusion, recovery,
+    /// and completion boundary which later phases extend.
     pub fn collect_full(&self) -> Result<CollectionReport, CollectionError> {
         if thread_has_any_active_mutator() {
             return Err(CollectionError::ActiveMutator);
@@ -340,6 +341,34 @@ impl AllocationPressure {
 }
 
 impl ManagedData {
+    fn clear_mark_bitmaps(&mut self) -> usize {
+        self.arena.clear_assigned_mark_bitmaps()
+    }
+
+    fn collector_slot(&self, value: ErasedGc) -> Result<CollectorSlot, CollectorLookupError> {
+        let address = value.as_ptr().as_ptr() as usize;
+        let (owner, metadata) = resolve_slot_topology(self, address)?;
+        if !self.arena.owner_slot_is_allocated(owner) {
+            return Err(CollectorLookupError::Unallocated);
+        }
+        Ok(CollectorSlot { owner, metadata })
+    }
+
+    #[cfg(test)]
+    fn collector_slot_is_marked(&self, slot: CollectorSlot) -> bool {
+        self.arena.owner_slot_is_marked(slot.owner)
+    }
+
+    fn mark_collector_slot(&mut self, slot: CollectorSlot) -> bool {
+        debug_assert!(std::ptr::eq(
+            slot.metadata,
+            self.classes[class_index(slot.owner.class_id)
+                .expect("collector slot must retain a valid class ID")]
+            .metadata()
+        ));
+        self.arena.mark_owner_slot(slot.owner)
+    }
+
     fn publish_run(
         &mut self,
         class_index: usize,
@@ -427,6 +456,55 @@ struct ResolvedRun {
     metadata: &'static ObjectMetadata,
     class_id: AllocationClassId,
     geometry: RunGeometry,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CollectorLookupError {
+    InvalidAddress,
+    InvalidClass,
+    InvalidRunTopology,
+    Unallocated,
+}
+
+#[derive(Clone, Copy)]
+struct CollectorSlot {
+    owner: RunOwner,
+    metadata: &'static ObjectMetadata,
+}
+
+#[derive(Default)]
+#[allow(
+    dead_code,
+    reason = "C5A establishes attempt-local state before C5B consumes it"
+)]
+struct MarkAttempt {
+    worklist: Vec<ErasedGc>,
+    root_count: usize,
+    marked_slot_count: usize,
+    traced_object_count: usize,
+}
+
+#[allow(
+    dead_code,
+    reason = "C5A establishes attempt-local state before C5B consumes it"
+)]
+impl MarkAttempt {
+    fn mark(
+        &mut self,
+        data: &mut ManagedData,
+        value: ErasedGc,
+    ) -> Result<bool, CollectorLookupError> {
+        let slot = data.collector_slot(value)?;
+        if !data.mark_collector_slot(slot) {
+            return Ok(false);
+        }
+        self.marked_slot_count = self
+            .marked_slot_count
+            .checked_add(1)
+            .expect("marked-slot count exhausted");
+        self.worklist.push(value);
+        Ok(true)
+    }
 }
 
 impl HeapInner {
@@ -557,6 +635,23 @@ impl HeapInner {
         exclusive_work: impl FnOnce(),
         finalizer_work: impl for<'mutator> FnOnce(&Mutator<'mutator>),
     ) -> Option<MutatorAdmission<'heap>> {
+        self.run_synthetic_collection_with_mark_work(
+            epoch,
+            continue_as_mutator,
+            |_, _| {},
+            exclusive_work,
+            finalizer_work,
+        )
+    }
+
+    fn run_synthetic_collection_with_mark_work<'heap>(
+        self: &'heap Arc<Self>,
+        epoch: CollectionEpoch,
+        continue_as_mutator: bool,
+        mark_work: impl FnOnce(&mut MarkAttempt, &mut ManagedData),
+        exclusive_work: impl FnOnce(),
+        finalizer_work: impl for<'mutator> FnOnce(&Mutator<'mutator>),
+    ) -> Option<MutatorAdmission<'heap>> {
         let coordinator = self
             .coordinator
             .lock()
@@ -576,6 +671,15 @@ impl HeapInner {
 
         remove_inactive_thread_cache(self);
         let mut attempt = CollectionAttempt::new(self, epoch);
+        let mut mark_attempt = MarkAttempt::default();
+        {
+            let mut data = self
+                .data
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            data.clear_mark_bitmaps();
+            mark_work(&mut mark_attempt, &mut data);
+        }
         // C4 visits roots only to establish the production registry boundary;
         // C5 replaces this no-op receiver with exact marking. The walk still
         // prunes cells whose final public root was released before this pause.
@@ -1278,6 +1382,13 @@ impl Drop for CollectionAttempt<'_> {
         if self.completed {
             return;
         }
+        let data = self
+            .heap
+            .data
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.heap.data.clear_poison();
+        drop(data);
         self.heap
             .collection_requested
             .store(true, Ordering::Release);
@@ -1295,19 +1406,34 @@ impl Drop for CollectionAttempt<'_> {
 }
 
 fn resolve_slot_in_state(state: &ManagedData, address: usize) -> Option<ResolvedSlot> {
-    let owner = state.arena.checked_slot_owner(address)?;
-    let entry = state.classes.get(class_index(owner.class_id)?)?;
-    if entry.geometry() != owner.geometry || !entry.contains_run(owner.location) {
-        return None;
-    }
+    let (owner, metadata) = resolve_slot_topology(state, address).ok()?;
     let allocated = state.arena.owner_slot_is_allocated(owner);
     Some(ResolvedSlot {
-        metadata: entry.metadata(),
+        metadata,
         class_id: owner.class_id,
         geometry: owner.geometry,
         slot_index: owner.slot_index,
         allocated,
     })
+}
+
+fn resolve_slot_topology(
+    state: &ManagedData,
+    address: usize,
+) -> Result<(RunOwner, &'static ObjectMetadata), CollectorLookupError> {
+    let owner = state
+        .arena
+        .checked_slot_owner(address)
+        .ok_or(CollectorLookupError::InvalidAddress)?;
+    let index = class_index(owner.class_id).ok_or(CollectorLookupError::InvalidClass)?;
+    let entry = state
+        .classes
+        .get(index)
+        .ok_or(CollectorLookupError::InvalidClass)?;
+    if entry.geometry() != owner.geometry || !entry.contains_run(owner.location) {
+        return Err(CollectorLookupError::InvalidRunTopology);
+    }
+    Ok((owner, entry.metadata()))
 }
 
 impl Drop for HeapInner {
@@ -1375,12 +1501,14 @@ mod tests {
             AllocationCursor, AllocationLeaseEpoch, cache_snapshot, cursor, insert_cursor,
             registry_contains,
         },
+        trace::ErasedGc,
     };
 
     use super::{
-        AdmissionPhase, AllocationClass, AllocationPressure, AllocationPressureSnapshot, Heap,
-        INITIAL_RUN_PUBLICATION_ALLOWANCE, PrepareRunError, RootValidationError, RunLocation,
-        RunPublicationError, class_index, validate_rootable_in_state,
+        AdmissionPhase, AllocationClass, AllocationPressure, AllocationPressureSnapshot,
+        CollectorLookupError, CollectorSlot, Heap, INITIAL_RUN_PUBLICATION_ALLOWANCE,
+        PrepareRunError, RootValidationError, RunLocation, RunPublicationError, class_index,
+        validate_rootable_in_state,
     };
 
     fn internal_class<T: Trace>(heap: &Heap) -> AllocationClass<T> {
@@ -1392,6 +1520,23 @@ mod tests {
 
     fn allocate<T: Trace>(heap: &Heap, value: T) -> crate::Gc<T> {
         heap.with_mutator(|mutator| mutator.allocator::<T>().unwrap().alloc(value))
+    }
+
+    fn collector_slot<T: Trace>(heap: &Heap, value: crate::Gc<T>) -> CollectorSlot {
+        heap.inner
+            .data
+            .lock()
+            .unwrap()
+            .collector_slot(value.erase())
+            .unwrap()
+    }
+
+    fn slot_is_marked(heap: &Heap, slot: CollectorSlot) -> bool {
+        heap.inner
+            .data
+            .lock()
+            .unwrap()
+            .collector_slot_is_marked(slot)
     }
 
     struct FirstType {
@@ -2426,6 +2571,396 @@ mod tests {
         collector.join().unwrap();
         entrant.join().unwrap();
         entered_rx.recv().unwrap();
+    }
+
+    #[test]
+    fn collector_marks_cross_word_boundaries_and_duplicate_marks_are_inert() {
+        let heap = Heap::new();
+        let values = heap.with_mutator(|mutator| {
+            let allocator = mutator.allocator::<u32>().unwrap();
+            (0..65_u32)
+                .map(|value| allocator.alloc(value))
+                .collect::<Vec<_>>()
+        });
+        let boundary_values = [values[0], values[63], values[64]];
+        let boundary_slots = boundary_values.map(|value| collector_slot(&heap, value));
+        assert_eq!(
+            boundary_slots.map(|slot| slot.owner.slot_index),
+            [0, 63, 64]
+        );
+
+        heap.request_collection();
+        let epoch = heap.inner.elect_idle_collection_for_test();
+        assert!(
+            heap.inner
+                .run_synthetic_collection_with_mark_work(
+                    epoch,
+                    false,
+                    |attempt, data| {
+                        for value in boundary_values {
+                            assert!(attempt.mark(data, value.erase()).unwrap());
+                            assert!(!attempt.mark(data, value.erase()).unwrap());
+                        }
+                        assert_eq!(attempt.marked_slot_count, 3);
+                        assert_eq!(attempt.worklist.len(), 3);
+                    },
+                    || {},
+                    |_| {},
+                )
+                .is_none()
+        );
+
+        assert!(
+            boundary_slots
+                .into_iter()
+                .all(|slot| slot_is_marked(&heap, slot))
+        );
+    }
+
+    #[test]
+    fn collection_clears_zero_one_and_many_assigned_mark_ranges() {
+        let empty = Heap::new();
+        empty.request_collection();
+        let epoch = empty.inner.elect_idle_collection_for_test();
+        assert!(
+            empty
+                .inner
+                .run_synthetic_collection_with_mark_work(
+                    epoch,
+                    false,
+                    |_, data| assert_eq!(data.clear_mark_bitmaps(), 0),
+                    || {},
+                    |_| {},
+                )
+                .is_none()
+        );
+
+        let one = Heap::new();
+        let one_value = allocate(&one, 1_u64);
+        let one_slot = collector_slot(&one, one_value);
+        one.request_collection();
+        let dirty_epoch = one.inner.elect_idle_collection_for_test();
+        assert!(
+            one.inner
+                .run_synthetic_collection_with_mark_work(
+                    dirty_epoch,
+                    false,
+                    |attempt, data| assert!(attempt.mark(data, one_value.erase()).unwrap()),
+                    || {},
+                    |_| {},
+                )
+                .is_none()
+        );
+        assert!(slot_is_marked(&one, one_slot));
+        one.request_collection();
+        let clear_epoch = one.inner.elect_idle_collection_for_test();
+        assert!(
+            one.inner
+                .run_synthetic_collection_with_mark_work(
+                    clear_epoch,
+                    false,
+                    |_, data| assert_eq!(data.clear_mark_bitmaps(), 1),
+                    || {},
+                    |_| {},
+                )
+                .is_none()
+        );
+        assert!(!slot_is_marked(&one, one_slot));
+
+        let heap = Heap::new();
+        let values = heap.with_mutator(|mutator| {
+            let allocator = mutator.allocator::<WideSlot>().unwrap();
+            (0..3_u64)
+                .map(|value| allocator.alloc(WideSlot { value }))
+                .collect::<Vec<_>>()
+        });
+        let slots = values
+            .iter()
+            .copied()
+            .map(|value| collector_slot(&heap, value))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            slots
+                .iter()
+                .map(|slot| slot.owner.location)
+                .collect::<HashSet<_>>()
+                .len(),
+            3,
+            "wide fixtures must occupy distinct assigned runs"
+        );
+
+        heap.request_collection();
+        let first = heap.inner.elect_idle_collection_for_test();
+        assert!(
+            heap.inner
+                .run_synthetic_collection_with_mark_work(
+                    first,
+                    false,
+                    |attempt, data| {
+                        for value in &values {
+                            assert!(attempt.mark(data, value.erase()).unwrap());
+                        }
+                    },
+                    || {},
+                    |_| {},
+                )
+                .is_none()
+        );
+        assert!(
+            slots
+                .iter()
+                .copied()
+                .all(|slot| slot_is_marked(&heap, slot))
+        );
+
+        heap.request_collection();
+        let second = heap.inner.elect_idle_collection_for_test();
+        assert!(
+            heap.inner
+                .run_synthetic_collection_with_mark_work(
+                    second,
+                    false,
+                    |_, data| assert_eq!(data.clear_mark_bitmaps(), 3),
+                    || {},
+                    |_| {},
+                )
+                .is_none()
+        );
+        assert!(
+            slots
+                .iter()
+                .copied()
+                .all(|slot| !slot_is_marked(&heap, slot))
+        );
+    }
+
+    #[test]
+    fn mutator_allocation_neither_reads_nor_writes_mark_state() {
+        let heap = Heap::new();
+        let marked = allocate(&heap, 1_u64);
+        heap.request_collection();
+        let epoch = heap.inner.elect_idle_collection_for_test();
+        assert!(
+            heap.inner
+                .run_synthetic_collection_with_mark_work(
+                    epoch,
+                    false,
+                    |attempt, data| assert!(attempt.mark(data, marked.erase()).unwrap()),
+                    || {},
+                    |_| {},
+                )
+                .is_none()
+        );
+        let marked_slot = collector_slot(&heap, marked);
+        assert!(slot_is_marked(&heap, marked_slot));
+
+        let unmarked = allocate(&heap, 2_u64);
+        let unmarked_slot = collector_slot(&heap, unmarked);
+        assert!(slot_is_marked(&heap, marked_slot));
+        assert!(!slot_is_marked(&heap, unmarked_slot));
+    }
+
+    #[test]
+    fn collector_lookup_recovers_exact_owner_and_canonical_metadata() {
+        let heap = Heap::new();
+        let value = allocate(&heap, 42_u64);
+        let slot = collector_slot(&heap, value);
+
+        assert!(std::ptr::eq(slot.metadata, metadata_for::<u64>()));
+        assert_eq!(slot.owner.class_id, internal_class::<u64>(&heap).id());
+        assert_eq!(slot.owner.slot_index, 0);
+        assert_eq!(
+            value.erase().as_ptr().as_ptr() as usize,
+            slot.owner.run.address()
+                + slot
+                    .owner
+                    .geometry
+                    .slot_offset(slot.owner.slot_index)
+                    .unwrap()
+        );
+    }
+
+    #[test]
+    fn collector_lookup_rejects_foreign_interior_unallocated_and_unknown_class_slots() {
+        let heap = Heap::new();
+        let foreign = Heap::new();
+        let value = allocate(&heap, 42_u64);
+        let foreign_value = allocate(&foreign, 73_u64);
+        let interior =
+            std::ptr::NonNull::new(((value.erase().as_ptr().as_ptr() as usize) + 1) as *mut ())
+                .unwrap();
+
+        let class = internal_class::<FirstType>(&heap);
+        let empty_run = heap.inner.prepare_run(&class).unwrap();
+        let empty_address = {
+            let data = heap.inner.data.lock().unwrap();
+            let geometry = RunGeometry::derive(
+                metadata_for::<FirstType>().layout(),
+                metadata_for::<FirstType>().requested_slot_size(),
+            )
+            .unwrap();
+            data.arena.run_at(empty_run).unwrap().address() + geometry.first_slot_offset
+        };
+        let empty = ErasedGc::new(std::ptr::NonNull::new(empty_address as *mut ()).unwrap());
+
+        let (unknown_class, unpublished_run) = {
+            let mut data = heap.inner.data.lock().unwrap();
+            let chunk = data.arena.reserve_chunk().unwrap();
+            let geometry = RunGeometry::derive(std::alloc::Layout::new::<u64>(), None).unwrap();
+            let id = AllocationClassId::new(99).unwrap();
+            data.arena.initialize_run(chunk, 0, id, geometry).unwrap();
+            data.arena
+                .initialize_run(chunk, 1, class.id(), geometry)
+                .unwrap();
+            let unknown_run = data.arena.run_address(chunk, 0).unwrap();
+            let unpublished_run = data.arena.run_address(chunk, 1).unwrap();
+            (
+                ErasedGc::new(
+                    std::ptr::NonNull::new(
+                        (unknown_run.address() + geometry.first_slot_offset) as *mut (),
+                    )
+                    .unwrap(),
+                ),
+                ErasedGc::new(
+                    std::ptr::NonNull::new(
+                        (unpublished_run.address() + geometry.first_slot_offset) as *mut (),
+                    )
+                    .unwrap(),
+                ),
+            )
+        };
+
+        let data = heap.inner.data.lock().unwrap();
+        assert!(matches!(
+            data.collector_slot(foreign_value.erase()),
+            Err(CollectorLookupError::InvalidAddress)
+        ));
+        assert!(matches!(
+            data.collector_slot(ErasedGc::new(interior)),
+            Err(CollectorLookupError::InvalidAddress)
+        ));
+        assert!(matches!(
+            data.collector_slot(empty),
+            Err(CollectorLookupError::Unallocated)
+        ));
+        assert!(matches!(
+            data.collector_slot(unknown_class),
+            Err(CollectorLookupError::InvalidClass)
+        ));
+        assert!(matches!(
+            data.collector_slot(unpublished_run),
+            Err(CollectorLookupError::InvalidRunTopology)
+        ));
+    }
+
+    #[test]
+    fn failed_mark_attempts_leave_scratch_until_a_clean_retry_overwrites_it() {
+        for partial_count in [0_usize, 1, 3] {
+            let heap = Heap::new();
+            let values = heap.with_mutator(|mutator| {
+                let allocator = mutator.allocator::<WideSlot>().unwrap();
+                (0..3_u64)
+                    .map(|value| allocator.alloc(WideSlot { value }))
+                    .collect::<Vec<_>>()
+            });
+            let root = heap.with_mutator(|mutator| mutator.root(values[0]));
+            let slots = values
+                .iter()
+                .copied()
+                .map(|value| collector_slot(&heap, value))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                slots
+                    .iter()
+                    .map(|slot| slot.owner.location)
+                    .collect::<HashSet<_>>()
+                    .len(),
+                3
+            );
+
+            heap.request_collection();
+            let failed_epoch = heap.inner.elect_idle_collection_for_test();
+            let panic = catch_unwind(AssertUnwindSafe(|| {
+                heap.inner.run_synthetic_collection_with_mark_work(
+                    failed_epoch,
+                    false,
+                    |attempt, data| {
+                        attempt.root_count = 17;
+                        attempt.traced_object_count = 23;
+                        for value in values.iter().take(partial_count) {
+                            assert!(attempt.mark(data, value.erase()).unwrap());
+                        }
+                        assert_eq!(attempt.marked_slot_count, partial_count);
+                        assert_eq!(attempt.worklist.len(), partial_count);
+                        panic!("injected mark-attempt panic after {partial_count} marks");
+                    },
+                    || {},
+                    |_| {},
+                );
+            }));
+            let panic = panic.expect_err("synthetic mark attempt must panic");
+            let message = panic
+                .downcast_ref::<String>()
+                .expect("injected mark panic must retain its String payload");
+            assert_eq!(
+                message,
+                &format!("injected mark-attempt panic after {partial_count} marks")
+            );
+            assert!(!heap.inner.data.is_poisoned());
+
+            {
+                let data = heap.inner.data.lock().unwrap();
+                assert_eq!(data.roots.len(), 1);
+                for (index, slot) in slots.iter().copied().enumerate() {
+                    assert_eq!(
+                        data.collector_slot_is_marked(slot),
+                        index < partial_count,
+                        "failed attempt must leave its physical marks as unpublished scratch"
+                    );
+                    assert!(data.collector_slot(values[index].erase()).is_ok());
+                }
+            }
+            let restored = heap.inner.coordinator_snapshot();
+            assert_eq!(restored.phase, AdmissionPhase::Ordinary);
+            assert_eq!(restored.active_collection, None);
+            assert_eq!(restored.completed_collection_epoch, 0);
+            assert!(restored.collection_requested);
+
+            let retry_epoch = heap.inner.elect_idle_collection_for_test();
+            assert_eq!(retry_epoch, failed_epoch);
+            assert!(
+                heap.inner
+                    .run_synthetic_collection_with_mark_work(
+                        retry_epoch,
+                        false,
+                        |attempt, data| {
+                            assert_eq!(attempt.root_count, 0);
+                            assert_eq!(attempt.marked_slot_count, 0);
+                            assert_eq!(attempt.traced_object_count, 0);
+                            assert!(attempt.worklist.is_empty());
+                            for slot in &slots {
+                                assert!(
+                                    !data.collector_slot_is_marked(*slot),
+                                    "retry must clear every stale partial mark before work"
+                                );
+                            }
+                            assert!(attempt.mark(data, values[2].erase()).unwrap());
+                        },
+                        || {},
+                        |_| {},
+                    )
+                    .is_none()
+            );
+
+            assert!(!slot_is_marked(&heap, slots[0]));
+            assert!(!slot_is_marked(&heap, slots[1]));
+            assert!(slot_is_marked(&heap, slots[2]));
+            assert_eq!(
+                heap.inner.coordinator_snapshot().completed_collection_epoch,
+                1
+            );
+            heap.with_mutator(|mutator| assert_eq!(root.get(mutator).value, 0));
+        }
     }
 
     #[test]

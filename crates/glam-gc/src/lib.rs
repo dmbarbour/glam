@@ -1,10 +1,9 @@
 //! Runtime-local garbage collection support for Glam.
 //!
-//! C4 adds checked direct roots, weak-registry publication, an exclusive
-//! collection-time registry walk, and mutator-scoped allocation capabilities
-//! to C3's regional mutator admission and stop-the-world coordination
-//! boundary. Marking and reclamation remain disabled, so payloads stay live
-//! until terminal heap teardown.
+//! C5A adds collector-only mark-bitmap primitives, all-build checked slot
+//! lookup, and failed-attempt recovery to C4's direct roots and exclusive
+//! registry walk. Full graph marking and reclamation remain disabled, so
+//! payloads stay live until terminal heap teardown.
 
 #![deny(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]

@@ -1,8 +1,8 @@
 # Glam GC Subcrate Implementation Plan — 2026-08-19
 
-Status: in progress; Phases C0 through C5A.0 are complete, including the C2C.6
+Status: in progress; Phases C0 through C5A are complete, including the C2C.6
 verification follow-up. The mandatory post-C1, post-C2C, post-C3E, and post-C4
-downstream reviews are complete. C5A.1 is next.
+downstream reviews are complete. C5B.1 is next.
 
 This plan implements an exact, non-moving, runtime-local tracing collector
 without depending on Glam value semantics. The governing requirements and
@@ -51,9 +51,9 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C5A.0a | completed | mechanical coordinator and managed-data lock split |
 | C5A.0b | completed | atomic request and data-side acknowledgement |
 | C5A.0c | completed | split-state forced-order audit |
-| C5A.1 | pending | clear-before-mark bitmap operations |
-| C5A.2 | pending | checked collector lookup |
-| C5A.3 | pending | failed mark-attempt invalidation |
+| C5A.1 | completed | clear-before-mark bitmap operations |
+| C5A.2 | completed | checked collector lookup |
+| C5A.3 | completed | failed mark-attempt invalidation |
 | C5B.1 | pending | stable root seeding |
 | C5B.2 | pending | checked non-recursive graph marking |
 | C5C.1 | pending | trace and worklist panic recovery |
@@ -2430,36 +2430,6 @@ Execute C5 as the following independently verified checkpoints:
   synchronous join during a held data lock, and absence of a request-only
   notification path. This latches the sequencing argument from the post-C4
   review before mark state is added.
-
-#### C5A.0 completion
-
-Completed on 2026-08-23:
-
-- `HeapInner` now owns separate coordinator and managed-data mutexes. Admission
-  phase, active-mutator counts, collection epochs, and condition-variable
-  predicates live only under the coordinator mutex; arena, classes, pressure,
-  roots, and future mark/sweep state live only under the managed-data mutex.
-  Production paths release either component guard before acquiring the other.
-- The coalesced collection hint is a sibling `AtomicBool`.
-  `request_collection` performs one Release store, takes no mutex, and sends no
-  notification. Idle admission and synchronous collection inspect the bit with
-  Acquire ordering while coordinating election through the coordinator mutex.
-- Typed-run pressure stores the request bit while holding managed data.
-  Successful collection resets the pressure baseline and clears the bit under
-  that same lock, releases managed data, and only then publishes coordinator
-  completion. A request before the clear is coalesced; an external request or
-  pressure publication after the clear remains pending. Unwind relatches the
-  bit before restoring ordinary coordinator state.
-- Deterministic tests hold managed data while issuing an asynchronous request,
-  pause completion immediately after data-side acknowledgement, and force
-  request, mutator entry, root publication, run-pressure publication, and
-  synchronous-join schedules on both sides of that boundary. A test-only
-  notification counter also proves that request-only transitions do not use
-  the condition variable.
-- The focused crate verification passes 126 unit tests, 6 Loom models, and 8
-  compile-fail/doc tests. Repository-wide formatting, Clippy with warnings
-  denied, tests, diff validation, and the exact unsafe inventory also pass.
-
 - **C5A.1 — clear-before-mark bitmap operations.** Add collector-only
   operations to clear every assigned run's contiguous mark range and to set or
   test an individual slot mark. Clear the ordinary `u64` mark-word slice with
@@ -2588,6 +2558,64 @@ the edge or reclaiming anything in either heap. Catching that panic must restore
 ordinary admission, while collecting again with the edge still reachable must
 panic again. Lease-word Release/Acquire reset verification moves to C6A, where
 the collector first publishes reclaimed allocation state.
+
+### C5 completions
+
+#### C5A.0 completion
+
+Completed on 2026-08-23:
+
+- `HeapInner` now owns separate coordinator and managed-data mutexes. Admission
+  phase, active-mutator counts, collection epochs, and condition-variable
+  predicates live only under the coordinator mutex; arena, classes, pressure,
+  roots, and future mark/sweep state live only under the managed-data mutex.
+  Production paths release either component guard before acquiring the other.
+- The coalesced collection hint is a sibling `AtomicBool`.
+  `request_collection` performs one Release store, takes no mutex, and sends no
+  notification. Idle admission and synchronous collection inspect the bit with
+  Acquire ordering while coordinating election through the coordinator mutex.
+- Typed-run pressure stores the request bit while holding managed data.
+  Successful collection resets the pressure baseline and clears the bit under
+  that same lock, releases managed data, and only then publishes coordinator
+  completion. A request before the clear is coalesced; an external request or
+  pressure publication after the clear remains pending. Unwind relatches the
+  bit before restoring ordinary coordinator state.
+- Deterministic tests hold managed data while issuing an asynchronous request,
+  pause completion immediately after data-side acknowledgement, and force
+  request, mutator entry, root publication, run-pressure publication, and
+  synchronous-join schedules on both sides of that boundary. A test-only
+  notification counter also proves that request-only transitions do not use
+  the condition variable.
+- The focused crate verification passes 126 unit tests, 6 Loom models, and 8
+  compile-fail/doc tests. Repository-wide formatting, Clippy with warnings
+  denied, tests, diff validation, and the exact unsafe inventory also pass.
+
+#### C5A.1–3 completion
+
+Completed on 2026-08-23:
+
+- The collector clears every assigned run's contiguous ordinary-`u64` mark
+  range after exclusive admission and before any attempt work. Collector-only
+  checked operations test and set exact slot marks; duplicate marks are inert,
+  and mutator allocation neither reads nor writes mark state.
+- Collector lookup now validates the indexed chunk, exact run and slot, class
+  identity and geometry, class run-pool membership, allocation bit, and
+  canonical metadata before returning an attempt-local slot description. No
+  run-keyed attempt map was introduced; the mark bit remains the only
+  per-allocation reachability record.
+- Attempt scratch consists only of a stack-scoped worklist and scalar counters.
+  The existing collection-attempt RAII guard owns recovery of the managed-data
+  mutex and coordinator state. An injected panic discards the scratch,
+  recovers mutex poison, relatches the collection request, restores ordinary
+  admission, and resumes the original panic without scanning or clearing
+  partial marks. The mandatory clear at the beginning of the next attempt
+  invalidates those unpublished marks.
+- Tests cover zero, one, and three assigned mark ranges; both sides of a bitmap
+  word boundary; duplicate marks; allocation independence; exact owner and
+  canonical-metadata recovery; rejection of foreign, interior, unallocated,
+  absent-class, and unpublished-run addresses; and panics after zero, one, and
+  three distinct-run marks followed by a clean retry. Focused verification now
+  passes 132 unit tests, 6 Loom models, and 8 compile-fail/doc tests.
 
 ## Phase C6 — Sweep, Mutator Finalization, Retry, and Quarantine
 
