@@ -1,8 +1,8 @@
 # Glam GC Subcrate Implementation Plan — 2026-08-19
 
-Status: in progress; Phases C0 through C5D.2 are complete, including the C2C.6
+Status: in progress; Phases C0 through C6A.0 are complete, including the C2C.6
 verification follow-up. The mandatory post-C1, post-C2C, post-C3E, post-C4,
-and post-C5 downstream reviews are complete. C6A.0 is next.
+and post-C5 downstream reviews are complete. C6A.1 is next.
 
 This plan implements an exact, non-moving, runtime-local tracing collector
 without depending on Glam value semantics. The governing requirements and
@@ -61,7 +61,7 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C5D.1 | completed | successful mark publication and report |
 | C5D.2 | completed | reachability oracle, scale, and verification closeout |
 | Post-C5 review | completed | completed C5 audit and downstream-plan reconciliation |
-| C6A.0 | pending | post-mark collection-pipeline handoff |
+| C6A.0 | completed | post-mark collection-pipeline handoff |
 | C6A.1 | pending | dead-set classification without reuse |
 | C6A.2a | pending | allocation-lease revocation and epoch publication |
 | C6A.2b | pending | class frontier and run-pool retirement |
@@ -3223,6 +3223,34 @@ destruction releases retained empty chunks; ordinary collection does not.
 Gate G1 passes after C6D plus its focused unsafe-code audit.
 
 ### Phase C6 Completions
+
+#### C6A.0 completion
+
+Completed on 2026-08-23:
+
+- The collection pipeline now invokes one data-side `post_mark_work` operation
+  after `MarkAttempt::finish`. It receives the completed `MarkSummary` and a
+  temporary mutable borrow of `ManagedData` while the same collection remains
+  `Exclusive`. The mark bitmap stays in its owning runs; no copied live set,
+  validity flag, or retained managed-data reference was introduced.
+- The callback executes under only the managed-data mutex. Coordinator
+  authority is validated before that lock is acquired, and the callback is
+  explicitly forbidden from acquiring the sibling coordinator mutex. Its
+  guard and borrow end before the existing no-gap finalizer handoff.
+- A focused rooted-value fixture observes exact root, trace, mark, and
+  conservative-retention scalars alongside the authoritative mark bit. Its
+  following finalizer callback reacquires managed data with `try_lock`, latching
+  that neither the guard nor borrow crosses admission.
+- The prior exclusive-work panic fixture now panics at the post-mark seam and
+  still publishes no report or completion epoch, restores ordinary admission,
+  and relatches collection. Existing request coalescing, failed-mark retry,
+  acknowledgement, finalizer handoff, and scalar-report tests exercise the
+  refactored path unchanged.
+- C6A.0 adds no unsafe site, allocation-state mutation, classification, sweep,
+  lease invalidation, finalization state, or report field. The focused suite
+  now contains 148 unit tests, of which the two scale fixtures remain ignored,
+  plus 6 Loom models and 8 compile-fail/doc tests. The new handoff fixture also
+  passes a focused Miri run, and all workspace checks pass.
 
 ### Mandatory Post-C6 Review
 

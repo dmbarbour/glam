@@ -72,7 +72,11 @@ changes neither. The bitmap remains heap-private and reclamation remains
 disabled. C5D.2 closes the mark-only phase with an independent randomized
 reachability oracle, repeated complete-run bitmap histories, and native
 million-edge depth and width fixtures. It adds no unsafe operation, unsafe
-module opt-in, or reclamation behavior.
+module opt-in, or reclamation behavior. C6A.0 replaces the parameterless
+exclusive-work hook with a data-side post-mark operation. It receives the
+completed scalar summary and a temporary managed-data borrow under the same
+exclusive collection authority, then releases that borrow before finalizer
+admission. It still performs no classification or reclamation.
 
 The crate denies unsafe code by default. `src/lib.rs` gives the reviewed
 `pointer`, `root`, `mutator`, `trace`, `mutation`, `thread_cache`, and unit-test
@@ -302,7 +306,10 @@ C6 later owns collector-driven destruction.
   production path holds the coordinator and managed-data mutexes together. A
   collector validates coordinator authority, releases that guard, and then
   accesses managed data; `Exclusive` authority keeps the state stable where
-  that transition needs stability.
+  that transition needs stability. C6A.0 post-mark work runs under this data
+  mutex and is therefore data-side only: it may inspect the already completed
+  mark summary and authoritative bitmap, but must not acquire the sibling
+  coordinator mutex. Its borrow ends before finalizer admission.
 - The coalesced collection request is a sibling `AtomicBool`, not duplicated in
   either locked component. An asynchronous request is exactly one Release
   store: it acquires no mutex and sends no condition-variable notification.
@@ -808,6 +815,13 @@ mutation closure runs.
   completed epoch nor a report, while an entry-elected collection publishes
   both. A failed trace after an earlier success preserves that exact earlier
   report until a clean retry publishes its successor.
+- C6A.0 verifies that post-mark work receives exact root, trace, distinct-mark,
+  and conservative-retention scalars together with the authoritative marked
+  slot while collection remains exclusive. The following finalizer callback
+  can immediately acquire managed data, proving that the post-mark guard and
+  borrow did not cross admission. Existing post-mark panic, request
+  coalescing, failed-mark retry, report, and forced-order fixtures pass through
+  the same refactored pipeline.
 - The ordinary crate checks, exact unsafe inventory, focused Miri run, and
   repository-wide checks are required at completed checkpoints.
 - Miri passes all implemented tests with leak checking enabled. C1's temporary

@@ -739,7 +739,7 @@ impl HeapInner {
             return (MutatorAdmission { heap: self }, false);
         };
         (
-            self.run_synthetic_collection(epoch, true, || {}, |_| {})
+            self.run_synthetic_collection(epoch, true, |_, _| {}, |_| {})
                 .expect("entry-elected collection must preserve its mutator admission"),
             true,
         )
@@ -813,7 +813,7 @@ impl HeapInner {
                 }
             };
             assert!(
-                self.run_synthetic_collection(elected, false, || {}, |_| {})
+                self.run_synthetic_collection(elected, false, |_, _| {}, |_| {})
                     .is_none(),
                 "maintenance collection cannot retain a mutator admission"
             );
@@ -824,14 +824,14 @@ impl HeapInner {
         self: &'heap Arc<Self>,
         epoch: CollectionEpoch,
         continue_as_mutator: bool,
-        exclusive_work: impl FnOnce(),
+        post_mark_work: impl FnOnce(MarkSummary, &mut ManagedData),
         finalizer_work: impl for<'mutator> FnOnce(&Mutator<'mutator>),
     ) -> Option<MutatorAdmission<'heap>> {
         self.run_synthetic_collection_with_mark_work(
             epoch,
             continue_as_mutator,
             |_, _| {},
-            exclusive_work,
+            post_mark_work,
             finalizer_work,
         )
     }
@@ -841,7 +841,7 @@ impl HeapInner {
         epoch: CollectionEpoch,
         continue_as_mutator: bool,
         mark_work: impl FnOnce(&mut MarkAttempt, &mut ManagedData),
-        exclusive_work: impl FnOnce(),
+        post_mark_work: impl FnOnce(MarkSummary, &mut ManagedData),
         finalizer_work: impl for<'mutator> FnOnce(&Mutator<'mutator>),
     ) -> Option<MutatorAdmission<'heap>> {
         let coordinator = self
@@ -892,7 +892,17 @@ impl HeapInner {
                 .unwrap_or_else(|error| error.raise());
         }
         let mark_summary = mark_attempt.finish();
-        exclusive_work();
+        {
+            // Post-mark work is deliberately data-side. Exclusive authority
+            // was validated above and keeps this topology stable; the callback
+            // must not acquire the sibling coordinator mutex while this guard
+            // is held. Its managed-data borrow ends before finalizer admission.
+            let mut data = self
+                .data
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            post_mark_work(mark_summary, &mut data);
+        }
 
         // Prepare the TLS record without activating it. Under the coordinator
         // mutex, exclusive authority is then converted directly into one
@@ -1768,7 +1778,7 @@ mod tests {
 
     use super::{
         AdmissionPhase, AllocationClass, AllocationPressure, AllocationPressureSnapshot,
-        CollectorLookupError, CollectorSlot, Heap, INITIAL_RUN_PUBLICATION_ALLOWANCE,
+        CollectorLookupError, CollectorSlot, Heap, INITIAL_RUN_PUBLICATION_ALLOWANCE, MarkSummary,
         PrepareRunError, RootValidationError, RunLocation, RunPublicationError, class_index,
         validate_rootable_in_state,
     };
@@ -2484,7 +2494,7 @@ mod tests {
                 .run_synthetic_collection(
                     epoch,
                     false,
-                    || {},
+                    |_, _| {},
                     |_| {
                         for _ in 0..INITIAL_RUN_PUBLICATION_ALLOWANCE {
                             heap.inner.prepare_run(&class).unwrap();
@@ -2516,7 +2526,7 @@ mod tests {
             let heap = heap.clone();
             move || {
                 heap.inner
-                    .run_synthetic_collection(epoch, false, || {}, |_| {})
+                    .run_synthetic_collection(epoch, false, |_, _| {}, |_| {})
                     .is_none()
             }
         });
@@ -2563,7 +2573,7 @@ mod tests {
             let heap = heap.clone();
             move || {
                 heap.inner
-                    .run_synthetic_collection(epoch, false, || {}, |_| {})
+                    .run_synthetic_collection(epoch, false, |_, _| {}, |_| {})
                     .is_none()
             }
         });
@@ -2855,7 +2865,7 @@ mod tests {
                     .run_synthetic_collection(
                         epoch,
                         false,
-                        || {
+                        |_, _| {
                             exclusive_tx.send(()).unwrap();
                             release_rx.recv().unwrap();
                         },
@@ -2890,7 +2900,7 @@ mod tests {
             let heap = heap.clone();
             move || {
                 heap.inner
-                    .run_synthetic_collection(epoch, false, || {}, |_| {})
+                    .run_synthetic_collection(epoch, false, |_, _| {}, |_| {})
                     .is_none()
             }
         });
@@ -3136,7 +3146,7 @@ mod tests {
                         assert_eq!(attempt.marked_slot_count, 3);
                         assert_eq!(attempt.worklist.len(), 3);
                     },
-                    || {},
+                    |_, _| {},
                     |_| {},
                 )
                 .is_none()
@@ -3161,7 +3171,7 @@ mod tests {
                     epoch,
                     false,
                     |_, data| assert_eq!(data.clear_mark_bitmaps(), 0),
-                    || {},
+                    |_, _| {},
                     |_| {},
                 )
                 .is_none()
@@ -3178,7 +3188,7 @@ mod tests {
                     dirty_epoch,
                     false,
                     |attempt, data| assert!(attempt.discover(data, one_value.erase()).unwrap()),
-                    || {},
+                    |_, _| {},
                     |_| {},
                 )
                 .is_none()
@@ -3192,7 +3202,7 @@ mod tests {
                     clear_epoch,
                     false,
                     |_, data| assert_eq!(data.clear_mark_bitmaps(), 1),
-                    || {},
+                    |_, _| {},
                     |_| {},
                 )
                 .is_none()
@@ -3233,7 +3243,7 @@ mod tests {
                             assert!(attempt.discover(data, value.erase()).unwrap());
                         }
                     },
-                    || {},
+                    |_, _| {},
                     |_| {},
                 )
                 .is_none()
@@ -3253,7 +3263,7 @@ mod tests {
                     second,
                     false,
                     |_, data| assert_eq!(data.clear_mark_bitmaps(), 3),
-                    || {},
+                    |_, _| {},
                     |_| {},
                 )
                 .is_none()
@@ -3278,7 +3288,7 @@ mod tests {
                     epoch,
                     false,
                     |attempt, data| assert!(attempt.discover(data, marked.erase()).unwrap()),
-                    || {},
+                    |_, _| {},
                     |_| {},
                 )
                 .is_none()
@@ -3426,7 +3436,7 @@ mod tests {
                         assert_eq!(attempt.worklist.len(), partial_count);
                         panic!("injected mark-attempt panic after {partial_count} marks");
                     },
-                    || {},
+                    |_, _| {},
                     |_| {},
                 );
             }));
@@ -3478,7 +3488,7 @@ mod tests {
                             }
                             assert!(attempt.discover(data, values[2].erase()).unwrap());
                         },
-                        || {},
+                        |_, _| {},
                         |_| {},
                     )
                     .is_none()
@@ -3605,7 +3615,7 @@ mod tests {
                     epoch,
                     false,
                     |attempt, _| attempt.inject_worklist_panic_after(completed_pushes),
-                    || {},
+                    |_, _| {},
                     |_| {},
                 );
             }))
@@ -4290,6 +4300,51 @@ mod tests {
     }
 
     #[test]
+    fn post_mark_handoff_exposes_summary_and_releases_data_before_finalizing() {
+        let heap = Heap::new();
+        let value = allocate(&heap, 42_u64);
+        let slot = collector_slot(&heap, value);
+        let root = heap.with_mutator(|mutator| mutator.root(value));
+        let post_mark_seen = AtomicBool::new(false);
+
+        heap.request_collection();
+        let epoch = heap.inner.elect_idle_collection_for_test();
+        assert!(
+            heap.inner
+                .run_synthetic_collection(
+                    epoch,
+                    false,
+                    |summary, data| {
+                        assert_eq!(summary.root_entries, 1);
+                        assert_eq!(summary.traced_objects, 1);
+                        assert_eq!(summary.marked_slots, 1);
+                        assert_eq!(summary.conservatively_retained_slots, 0);
+                        assert!(data.collector_slot_is_marked(slot));
+                        post_mark_seen.store(true, Ordering::Release);
+                    },
+                    |_| {
+                        assert!(post_mark_seen.load(Ordering::Acquire));
+                        assert!(
+                            heap.inner.data.try_lock().is_ok(),
+                            "post-mark managed-data access must end before finalization"
+                        );
+                    },
+                )
+                .is_none()
+        );
+
+        let report = heap
+            .inner
+            .coordinator_snapshot()
+            .latest_collection_report
+            .expect("successful post-mark work must publish its report");
+        assert_eq!(report.root_entries(), 1);
+        assert_eq!(report.traced_objects(), 1);
+        assert_eq!(report.marked_slots(), 1);
+        heap.with_mutator(|mutator| assert_eq!(*root.get(mutator), 42));
+    }
+
+    #[test]
     fn panicking_elected_collection_restores_and_relatches_its_request() {
         let heap = Heap::new();
         heap.request_collection();
@@ -4299,7 +4354,7 @@ mod tests {
             heap.inner.run_synthetic_collection(
                 epoch,
                 false,
-                || panic!("injected collection panic"),
+                |_, _| panic!("injected collection panic"),
                 |_| {},
             );
         }));
@@ -4326,11 +4381,7 @@ mod tests {
         let admission = heap.inner.run_synthetic_collection(
             epoch,
             false,
-            || {
-                let coordinator = heap.inner.coordinator_snapshot();
-                assert_eq!(coordinator.phase, AdmissionPhase::Exclusive);
-                assert_eq!(coordinator.active_outer_mutators, 0);
-            },
+            |summary, _| assert_eq!(summary, MarkSummary::default()),
             |finalizer_mutator| {
                 let coordinator = heap.inner.coordinator_snapshot();
                 assert_eq!(coordinator.phase, AdmissionPhase::Finalizing);
@@ -4368,7 +4419,7 @@ mod tests {
                     .run_synthetic_collection(
                         epoch,
                         false,
-                        || {},
+                        |_, _| {},
                         |_| {
                             finalizing_tx.send(()).unwrap();
                             release_rx.recv().unwrap();
@@ -4414,7 +4465,7 @@ mod tests {
                     .run_synthetic_collection(
                         first_epoch,
                         false,
-                        || {},
+                        |_, _| {},
                         |_| {
                             finalizing_tx.send(()).unwrap();
                             release_rx.recv().unwrap();
@@ -4443,7 +4494,7 @@ mod tests {
     }
 
     #[test]
-    fn request_during_exclusive_work_is_coalesced_into_that_collection() {
+    fn request_during_post_mark_work_is_coalesced_into_that_collection() {
         let heap = Heap::new();
         heap.request_collection();
         let first_epoch = heap.inner.elect_idle_collection_for_test();
@@ -4456,7 +4507,7 @@ mod tests {
                     .run_synthetic_collection(
                         first_epoch,
                         false,
-                        || {
+                        |_, _| {
                             exclusive_tx.send(()).unwrap();
                             release_rx.recv().unwrap();
                         },
@@ -4487,7 +4538,7 @@ mod tests {
             heap.inner.run_synthetic_collection(
                 epoch,
                 false,
-                || {},
+                |_, _| {},
                 |_| panic!("injected finalizer panic"),
             );
         }));

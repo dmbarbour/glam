@@ -53,8 +53,9 @@ exclusive-to-finalizer-to-entry handoff. Native forced schedules exercise
 production request epochs, idle-entry and synchronous election, waiter
 coalescing, direct admission transfer, collector-local cache reset, the absence
 of exit-time service, the finalizer mutator, request/pressure acknowledgement,
-and unwind restoration. The collection body remains synthetic: C4 through C6
-separately own roots, exact tracing, reclamation, and destructor recovery. C4A
+and unwind restoration. The coordination body began as a synthetic harness;
+C4 and C5 now supply production roots and exact tracing, while C6 owns
+reclamation and destructor recovery. C4A
 adds release-checked direct roots and makes allocation-bit publication atomic
 so root validation can inspect a word while its leased writer advances other
 slots. C4B publishes each cell into a weak heap registry before returning its
@@ -105,6 +106,20 @@ retention and reproduces from the clean pre-C5D.2 `d7977d4` worktree.
 detection enabled, then runs that exact ownership fixture with ASan enabled and
 leak detection disabled. This is an explicit process-lifetime-fixture
 exception, not a general LeakSanitizer suppression.
+
+## C6 Collection-Pipeline Verification
+
+C6A.0 is a no-semantics handoff refactor. One focused fixture roots a managed
+`u64` and proves the post-mark callback receives root-entry, traced-object,
+distinct-mark, and conservative-retention counts together with direct access
+to its authoritative mark bit. The callback is data-side only. The following
+finalizer callback successfully `try_lock`s managed data, proving that neither
+the mutex guard nor its borrow crosses finalizer admission. Existing injected
+post-mark panic, request-during-post-mark, failed-mark retry, successful report,
+and acknowledgement schedules run unchanged. No bitmap is copied and no
+classification, sweep, lease invalidation, or report field is introduced. The
+new handoff fixture passes a focused Miri run in addition to the ordinary
+crate and workspace suites.
 
 ## Gate G0 Baseline
 
