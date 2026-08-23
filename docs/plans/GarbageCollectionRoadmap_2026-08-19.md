@@ -2,8 +2,8 @@
 
 Status: in progress; collector Phases C0 through C4C, the C2C.6 verification
 follow-up, and integration Phase I0 are complete. Gate G0 is established, and
-the mandatory post-C1, post-C2C, and post-C3E downstream reviews are complete.
-Collector Phase C5A is next.
+the mandatory post-C1, post-C2C, post-C3E, and post-C4 downstream reviews are
+complete. Collector Phase C5A.0a is next.
 
 This roadmap keeps two large transitions aligned:
 
@@ -174,7 +174,13 @@ permit dereference outside a region.
    diagnostics, host callbacks, and scheduler callbacks occur only in phases
    whose lock and re-entry rules are explicit. No arbitrary callback or Rust
    destructor runs while heap allocator or coordinator locks are held. The
-   `Finalizing` phase reopens shared mutator admission while the collector
+   collector's unsafe `Trace` dispatch is deliberately narrower than such a
+   callback: it may run while the stopped-world collector holds managed heap
+   data, may only report managed edges through its visitor, and must not enter
+   a heap, allocate, destroy values, or invoke host/runtime work. Its panic path
+   restores mark state and recovers any poisoned managed-data mutex before
+   unwinding reaches the caller. The `Finalizing` phase reopens shared mutator
+   admission while the collector
    retains one mutator lease; recursive same-heap entry reuses that region.
    Collection pressure arising before finalization completes is coalesced into
    the active collection as a heuristic hint. Successful completion clears the
@@ -337,7 +343,9 @@ These choices are intentionally unresolved rather than accidental drift:
   collector root-cell representation is required;
 - C6 selects a last-value-domain-owner terminal teardown protocol which does
   not let escaped roots retain or revive the heap and does not run
-  mutator-capable destructors without their promised context; and
+  mutator-capable destructors without their promised context. That decision
+  also settles whether escaped `AllocationClass<T>` handles remain authorized
+  heap owners or become weak and inert; and
 - I8 decides whether `SharedRuntimeNet` remains synchronized external storage
   with an exact visitor or becomes a managed outer node.
 

@@ -31,6 +31,11 @@ interaction nets. Cross-plan invariants and enablement gates live in
 
 ## Current Boundary
 
+The collector now supplies C4's checked direct root and weak registry, but it
+does not yet mark, reclaim, finalize, or pass Gate G1. Integration may use that
+completed boundary only in isolated prototypes; no production ownership
+migration begins before G1.
+
 `RuntimeValueRoot` currently stores `{EvaluationRuntimeId, core::Value}`. It
 protects provenance but does not register a collector root. Recursive core
 ownership includes at least:
