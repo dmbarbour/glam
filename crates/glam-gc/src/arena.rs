@@ -304,6 +304,52 @@ impl Arena {
         chunk.slot_is_marked(run, owner.geometry, owner.slot_index)
     }
 
+    /// Visits the authoritative allocation and mark words for one published run.
+    ///
+    /// The caller must hold exclusive collection authority while observing the
+    /// ordinary mark bitmap. Invalid suffix bits are masked from both words,
+    /// so every reported bit maps to one payload slot in `target`.
+    pub(crate) fn visit_allocation_mark_words(
+        &self,
+        target: RunClaimTarget,
+        class_id: AllocationClassId,
+        mut visit: impl FnMut(usize, u64, u64),
+    ) {
+        let chunk = self
+            .chunks
+            .get(target.location.chunk)
+            .expect("published run must retain its arena chunk");
+        let run = chunk
+            .run_address(target.location.run)
+            .expect("published run must retain its arena location");
+        assert_eq!(run, target.run, "published run changed addresses");
+        assert_eq!(
+            chunk.header_for(run).and_then(RunHeader::class_id),
+            Some(class_id),
+            "published run changed allocation classes"
+        );
+        assert_eq!(
+            chunk.header_for(run).and_then(RunHeader::geometry),
+            Some(target.geometry),
+            "published run changed geometry"
+        );
+
+        for word_index in 0..target.geometry.allocation_bitmap.word_len {
+            let valid = valid_slot_mask(target.geometry.slot_count, word_index);
+            let allocation = allocation_word_pointer(run, target.geometry, word_index);
+            // SAFETY: validated published-run geometry places this initialized
+            // atomic allocation word in the retained arena. Acquire observes
+            // every payload publication before its allocation bit.
+            let allocated = unsafe { allocation.as_ref() }.load(Ordering::Acquire) & valid;
+            let marked = mark_word_pointer(run, target.geometry, word_index);
+            // SAFETY: the caller's exclusive collection authority excludes
+            // concurrent mark writers, while validated geometry keeps this
+            // initialized ordinary word inside the run.
+            let marked = unsafe { marked.read() } & valid;
+            visit(word_index, allocated, marked);
+        }
+    }
+
     pub(crate) fn mark_owner_slot(&mut self, owner: RunOwner) -> bool {
         let chunk = self
             .chunks
@@ -341,6 +387,18 @@ impl Arena {
             .get(location.chunk)
             .expect("published run must retain its arena chunk")
             .allocated_slot_pointers(location.run)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn run_side_metadata_for_test(
+        &self,
+        location: RunLocation,
+        geometry: RunGeometry,
+    ) -> Vec<u8> {
+        self.chunks
+            .get(location.chunk)
+            .expect("published run must retain its arena chunk")
+            .side_metadata(location.run, geometry)
     }
 
     pub(crate) fn claim_allocation_word(

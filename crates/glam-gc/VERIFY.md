@@ -121,6 +121,19 @@ classification, sweep, lease invalidation, or report field is introduced. The
 new handoff fixture passes a focused Miri run in addition to the ordinary
 crate and workspace suites.
 
+C6A.1 derives one attempt-local dead-set plan from the authoritative compact
+allocation and mark words. Focused fixtures prove exact live, no-drop-dead,
+and drop-required-dead classification for mixed typed runs; exact nonzero dead
+masks across allocation-word and run boundaries; and exclusion of invalid
+suffix bits. No payload is inspected. A forced post-classification panic
+snapshots class membership, frontiers, allocation identities, allocation,
+lease, and mark side metadata, pressure, and the heap-wide lease epoch. Recovery
+matches that snapshot exactly, publishes no collection report, relatches the
+request, and completes a clean retry. Reclamation and allocator publication
+remain disabled until C6A.2 and C6A.3. All three classification fixtures pass
+the focused `cargo +nightly miri test --package glam-gc --lib --all-features
+dead_set` run.
+
 ## Gate G0 Baseline
 
 Before changing the unsafe surface in C1, recheck the focused pre-GC semantic

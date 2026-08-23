@@ -1,12 +1,13 @@
 use std::collections::HashMap;
 use std::num::NonZeroU64;
+use std::ops::Range;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 
 use crate::{
     Mutator, Root, Trace, Visitor,
-    arena::{Arena, RunLocation, RunOwner, RunPublicationError},
+    arena::{Arena, RunClaimTarget, RunLocation, RunOwner, RunPublicationError},
     class::{
         AllocationClass, AllocationClassEntry, MetadataIdentity, ObjectMetadata, metadata_for,
     },
@@ -531,6 +532,182 @@ struct MarkSummary {
     peak_object_worklist_capacity: usize,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DeadSlotDisposition {
+    NoDrop,
+    DropRequired,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DeadBitmapWord {
+    word_index: usize,
+    dead_mask: u64,
+}
+
+#[allow(
+    dead_code,
+    reason = "C6A.1 classifies attempt-local dead runs before C6A.2 consumes them"
+)]
+struct DeadRunPlan {
+    target: RunClaimTarget,
+    class_id: AllocationClassId,
+    metadata: &'static ObjectMetadata,
+    disposition: DeadSlotDisposition,
+    live_slots: usize,
+    dead_slots: usize,
+    dead_words: Range<usize>,
+}
+
+#[allow(
+    dead_code,
+    reason = "C6A.1 classifies attempt-local dead sets before C6A.2 consumes them"
+)]
+#[derive(Default)]
+struct DeadSetPlan {
+    allocated_slots: usize,
+    live_slots: usize,
+    no_drop_dead_slots: usize,
+    drop_required_dead_slots: usize,
+    live_runs: usize,
+    no_drop_dead_runs: usize,
+    drop_required_dead_runs: usize,
+    dead_runs: Vec<DeadRunPlan>,
+    dead_words: Vec<DeadBitmapWord>,
+}
+
+#[allow(
+    dead_code,
+    reason = "C6A exposes post-mark state before C6A.2 consumes it in production"
+)]
+struct PostMarkPlan {
+    summary: MarkSummary,
+    dead_set: DeadSetPlan,
+}
+
+impl DeadSetPlan {
+    fn classify(data: &ManagedData) -> Self {
+        let mut plan = Self::default();
+
+        for (class_index, class) in data.classes.iter().enumerate() {
+            let class_id = AllocationClassId::new(
+                u64::try_from(class_index)
+                    .expect("allocation-class index exceeds u64")
+                    .checked_add(1)
+                    .expect("allocation-class ID exhausted"),
+            )
+            .expect("allocation-class IDs begin at one");
+            let metadata = class.metadata();
+            let disposition = if metadata.needs_drop() {
+                DeadSlotDisposition::DropRequired
+            } else {
+                DeadSlotDisposition::NoDrop
+            };
+
+            for target in class.runs().iter().map(|run| **run) {
+                assert_eq!(
+                    target.geometry,
+                    class.geometry(),
+                    "allocation-class run changed geometry"
+                );
+                let mut live_slots = 0_usize;
+                let mut dead_slots = 0_usize;
+                let dead_words_start = plan.dead_words.len();
+                data.arena.visit_allocation_mark_words(
+                    target,
+                    class_id,
+                    |word_index, allocated, marked| {
+                        assert_eq!(
+                            marked & !allocated,
+                            0,
+                            "mark bitmap refers to an unallocated slot"
+                        );
+                        let live = allocated & marked;
+                        let dead = allocated & !marked;
+                        live_slots = live_slots
+                            .checked_add(live.count_ones() as usize)
+                            .expect("live-slot count exhausted");
+                        dead_slots = dead_slots
+                            .checked_add(dead.count_ones() as usize)
+                            .expect("dead-slot count exhausted");
+                        if dead != 0 {
+                            plan.dead_words
+                                .try_reserve(1)
+                                .expect("collector dead-word plan capacity exhausted");
+                            plan.dead_words.push(DeadBitmapWord {
+                                word_index,
+                                dead_mask: dead,
+                            });
+                        }
+                    },
+                );
+
+                plan.allocated_slots = plan
+                    .allocated_slots
+                    .checked_add(live_slots)
+                    .and_then(|slots| slots.checked_add(dead_slots))
+                    .expect("allocated-slot count exhausted");
+                plan.live_slots = plan
+                    .live_slots
+                    .checked_add(live_slots)
+                    .expect("live-slot count exhausted");
+                if live_slots != 0 {
+                    plan.live_runs = plan
+                        .live_runs
+                        .checked_add(1)
+                        .expect("live-run count exhausted");
+                }
+                if dead_slots == 0 {
+                    continue;
+                }
+
+                match disposition {
+                    DeadSlotDisposition::NoDrop => {
+                        plan.no_drop_dead_slots = plan
+                            .no_drop_dead_slots
+                            .checked_add(dead_slots)
+                            .expect("no-drop dead-slot count exhausted");
+                        plan.no_drop_dead_runs = plan
+                            .no_drop_dead_runs
+                            .checked_add(1)
+                            .expect("no-drop dead-run count exhausted");
+                    }
+                    DeadSlotDisposition::DropRequired => {
+                        plan.drop_required_dead_slots = plan
+                            .drop_required_dead_slots
+                            .checked_add(dead_slots)
+                            .expect("drop-required dead-slot count exhausted");
+                        plan.drop_required_dead_runs = plan
+                            .drop_required_dead_runs
+                            .checked_add(1)
+                            .expect("drop-required dead-run count exhausted");
+                    }
+                }
+                plan.dead_runs
+                    .try_reserve(1)
+                    .expect("collector dead-run plan capacity exhausted");
+                plan.dead_runs.push(DeadRunPlan {
+                    target,
+                    class_id,
+                    metadata,
+                    disposition,
+                    live_slots,
+                    dead_slots,
+                    dead_words: dead_words_start..plan.dead_words.len(),
+                });
+            }
+        }
+
+        debug_assert_eq!(
+            plan.allocated_slots,
+            plan.live_slots
+                .checked_add(plan.no_drop_dead_slots)
+                .and_then(|slots| slots.checked_add(plan.drop_required_dead_slots))
+                .expect("classified-slot count exhausted")
+        );
+        plan
+    }
+}
+
 #[derive(Default)]
 struct MarkAttempt {
     worklist: Vec<TraceWork>,
@@ -824,7 +1001,7 @@ impl HeapInner {
         self: &'heap Arc<Self>,
         epoch: CollectionEpoch,
         continue_as_mutator: bool,
-        post_mark_work: impl FnOnce(MarkSummary, &mut ManagedData),
+        post_mark_work: impl FnOnce(&PostMarkPlan, &mut ManagedData),
         finalizer_work: impl for<'mutator> FnOnce(&Mutator<'mutator>),
     ) -> Option<MutatorAdmission<'heap>> {
         self.run_synthetic_collection_with_mark_work(
@@ -841,7 +1018,7 @@ impl HeapInner {
         epoch: CollectionEpoch,
         continue_as_mutator: bool,
         mark_work: impl FnOnce(&mut MarkAttempt, &mut ManagedData),
-        post_mark_work: impl FnOnce(MarkSummary, &mut ManagedData),
+        post_mark_work: impl FnOnce(&PostMarkPlan, &mut ManagedData),
         finalizer_work: impl for<'mutator> FnOnce(&Mutator<'mutator>),
     ) -> Option<MutatorAdmission<'heap>> {
         let coordinator = self
@@ -901,7 +1078,11 @@ impl HeapInner {
                 .data
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            post_mark_work(mark_summary, &mut data);
+            let post_mark = PostMarkPlan {
+                summary: mark_summary,
+                dead_set: DeadSetPlan::classify(&data),
+            };
+            post_mark_work(&post_mark, &mut data);
         }
 
         // Prepare the TLS record without activating it. Under the coordinator
@@ -1778,9 +1959,9 @@ mod tests {
 
     use super::{
         AdmissionPhase, AllocationClass, AllocationPressure, AllocationPressureSnapshot,
-        CollectorLookupError, CollectorSlot, Heap, INITIAL_RUN_PUBLICATION_ALLOWANCE, MarkSummary,
-        PrepareRunError, RootValidationError, RunLocation, RunPublicationError, class_index,
-        validate_rootable_in_state,
+        CollectorLookupError, CollectorSlot, DeadBitmapWord, DeadSlotDisposition, Heap,
+        INITIAL_RUN_PUBLICATION_ALLOWANCE, MarkSummary, PrepareRunError, RootValidationError,
+        RunLocation, RunPublicationError, class_index, validate_rootable_in_state,
     };
 
     fn internal_class<T: Trace>(heap: &Heap) -> AllocationClass<T> {
@@ -1822,6 +2003,107 @@ mod tests {
         assert_eq!(restored.completed_collection_epoch, 0);
         assert_eq!(restored.latest_collection_report, None);
         assert!(restored.collection_requested);
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct ClassificationClassSnapshot {
+        class_id: AllocationClassId,
+        metadata: usize,
+        runs: Vec<RunLocation>,
+        frontier: Option<RunLocation>,
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct ClassificationRunSnapshot {
+        class_id: AllocationClassId,
+        location: RunLocation,
+        geometry: RunGeometry,
+        allocations: Vec<usize>,
+        side_metadata: Vec<u8>,
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct ClassificationStateSnapshot {
+        classes: Vec<ClassificationClassSnapshot>,
+        runs: Vec<ClassificationRunSnapshot>,
+        pressure: AllocationPressureSnapshot,
+        allocation_lease_epoch: AllocationLeaseEpoch,
+    }
+
+    fn classification_state_snapshot(
+        heap: &Heap,
+        data: &super::ManagedData,
+    ) -> ClassificationStateSnapshot {
+        let classes = data
+            .classes
+            .iter()
+            .enumerate()
+            .map(|(index, class)| {
+                let class_id =
+                    AllocationClassId::new(u64::try_from(index).unwrap().checked_add(1).unwrap())
+                        .unwrap();
+                ClassificationClassSnapshot {
+                    class_id,
+                    metadata: class.metadata() as *const _ as usize,
+                    runs: class.runs().iter().map(|run| run.location).collect(),
+                    frontier: class.shared().frontier(&heap.inner),
+                }
+            })
+            .collect();
+        let runs = data
+            .classes
+            .iter()
+            .enumerate()
+            .flat_map(|(index, class)| {
+                let class_id =
+                    AllocationClassId::new(u64::try_from(index).unwrap().checked_add(1).unwrap())
+                        .unwrap();
+                class
+                    .runs()
+                    .iter()
+                    .map(move |run| ClassificationRunSnapshot {
+                        class_id,
+                        location: run.location,
+                        geometry: run.geometry,
+                        allocations: data
+                            .arena
+                            .allocated_slot_pointers(run.location)
+                            .into_iter()
+                            .map(|pointer| pointer.as_ptr() as usize)
+                            .collect(),
+                        side_metadata: data
+                            .arena
+                            .run_side_metadata_for_test(run.location, run.geometry),
+                    })
+            })
+            .collect();
+        ClassificationStateSnapshot {
+            classes,
+            runs,
+            pressure: AllocationPressureSnapshot {
+                published_runs: data.allocation_pressure.published_runs,
+                collection_requested: heap.inner.collection_requested.load(Ordering::Acquire),
+            },
+            allocation_lease_epoch: heap.inner.current_allocation_lease_epoch(),
+        }
+    }
+
+    fn dead_bitmap_words(slots: &[CollectorSlot]) -> Vec<DeadBitmapWord> {
+        let mut words: Vec<DeadBitmapWord> = Vec::new();
+        for slot in slots {
+            let word_index = slot.owner.slot_index / u64::BITS as usize;
+            let bit = 1_u64 << (slot.owner.slot_index % u64::BITS as usize);
+            if let Some(word) = words.iter_mut().find(|word| word.word_index == word_index) {
+                word.dead_mask |= bit;
+            } else {
+                words.push(DeadBitmapWord {
+                    word_index,
+                    dead_mask: bit,
+                });
+            }
+        }
+        words.sort_by_key(|word| word.word_index);
+        words
     }
 
     fn panic_string(panic: &(dyn std::any::Any + Send)) -> &str {
@@ -1876,6 +2158,18 @@ mod tests {
     // values.
     unsafe impl Trace for WideSlot {
         const REQUESTED_SLOT_SIZE: Option<usize> = Some(32 * 1024);
+
+        fn trace(&self, _visitor: &mut Visitor<'_>) {}
+    }
+
+    struct BitmapBoundarySlot {
+        _value: u64,
+    }
+
+    // SAFETY: `BitmapBoundarySlot` contains no managed edge. Its requested
+    // stride gives classification fixtures multiple allocation words per run.
+    unsafe impl Trace for BitmapBoundarySlot {
+        const REQUESTED_SLOT_SIZE: Option<usize> = Some(512);
 
         fn trace(&self, _visitor: &mut Visitor<'_>) {}
     }
@@ -4314,11 +4608,11 @@ mod tests {
                 .run_synthetic_collection(
                     epoch,
                     false,
-                    |summary, data| {
-                        assert_eq!(summary.root_entries, 1);
-                        assert_eq!(summary.traced_objects, 1);
-                        assert_eq!(summary.marked_slots, 1);
-                        assert_eq!(summary.conservatively_retained_slots, 0);
+                    |post_mark, data| {
+                        assert_eq!(post_mark.summary.root_entries, 1);
+                        assert_eq!(post_mark.summary.traced_objects, 1);
+                        assert_eq!(post_mark.summary.marked_slots, 1);
+                        assert_eq!(post_mark.summary.conservatively_retained_slots, 0);
                         assert!(data.collector_slot_is_marked(slot));
                         post_mark_seen.store(true, Ordering::Release);
                     },
@@ -4342,6 +4636,236 @@ mod tests {
         assert_eq!(report.traced_objects(), 1);
         assert_eq!(report.marked_slots(), 1);
         heap.with_mutator(|mutator| assert_eq!(*root.get(mutator), 42));
+    }
+
+    #[test]
+    fn post_mark_dead_set_classifies_exact_live_and_dead_slot_masks() {
+        let heap = Heap::new();
+        let plain_live = allocate(&heap, 10_u64);
+        let plain_dead_a = allocate(&heap, 20_u64);
+        let plain_dead_b = allocate(&heap, 30_u64);
+        let plain_root = heap.with_mutator(|mutator| mutator.root(plain_live));
+        let plain_live_slot = collector_slot(&heap, plain_live);
+        let plain_dead_slots = [
+            collector_slot(&heap, plain_dead_a),
+            collector_slot(&heap, plain_dead_b),
+        ];
+
+        let drops = Arc::new(AtomicUsize::new(0));
+        let dropping_live = allocate(&heap, DropCounter(Arc::clone(&drops)));
+        let dropping_dead = allocate(&heap, DropCounter(Arc::clone(&drops)));
+        let dropping_root = heap.with_mutator(|mutator| mutator.root(dropping_live));
+        let dropping_live_slot = collector_slot(&heap, dropping_live);
+        let dropping_dead_slot = collector_slot(&heap, dropping_dead);
+
+        heap.request_collection();
+        let epoch = heap.inner.elect_idle_collection_for_test();
+        assert!(
+            heap.inner
+                .run_synthetic_collection(
+                    epoch,
+                    false,
+                    |post_mark, _| {
+                        assert_eq!(post_mark.summary.root_entries, 2);
+                        assert_eq!(post_mark.summary.traced_objects, 2);
+                        assert_eq!(post_mark.summary.marked_slots, 2);
+
+                        let plan = &post_mark.dead_set;
+                        assert_eq!(plan.allocated_slots, 5);
+                        assert_eq!(plan.live_slots, 2);
+                        assert_eq!(plan.no_drop_dead_slots, 2);
+                        assert_eq!(plan.drop_required_dead_slots, 1);
+                        assert_eq!(plan.live_runs, 2);
+                        assert_eq!(plan.no_drop_dead_runs, 1);
+                        assert_eq!(plan.drop_required_dead_runs, 1);
+                        assert_eq!(plan.dead_runs.len(), 2);
+
+                        let plain = plan
+                            .dead_runs
+                            .iter()
+                            .find(|run| run.class_id == plain_live_slot.owner.class_id)
+                            .expect("plain dead run must be classified");
+                        assert_eq!(plain.disposition, DeadSlotDisposition::NoDrop);
+                        assert_eq!(plain.target.location, plain_live_slot.owner.location);
+                        assert_eq!(plain.target.geometry, plain_live_slot.owner.geometry);
+                        assert!(std::ptr::eq(plain.metadata, metadata_for::<u64>()));
+                        assert_eq!(plain.live_slots, 1);
+                        assert_eq!(plain.dead_slots, 2);
+                        assert_eq!(
+                            plan.dead_words[plain.dead_words.clone()],
+                            dead_bitmap_words(&plain_dead_slots)
+                        );
+
+                        let dropping = plan
+                            .dead_runs
+                            .iter()
+                            .find(|run| run.class_id == dropping_live_slot.owner.class_id)
+                            .expect("drop-required dead run must be classified");
+                        assert_eq!(dropping.disposition, DeadSlotDisposition::DropRequired);
+                        assert_eq!(dropping.target.location, dropping_live_slot.owner.location);
+                        assert_eq!(dropping.target.geometry, dropping_live_slot.owner.geometry);
+                        assert!(std::ptr::eq(
+                            dropping.metadata,
+                            metadata_for::<DropCounter>()
+                        ));
+                        assert_eq!(dropping.live_slots, 1);
+                        assert_eq!(dropping.dead_slots, 1);
+                        assert_eq!(
+                            plan.dead_words[dropping.dead_words.clone()],
+                            dead_bitmap_words(&[dropping_dead_slot])
+                        );
+                    },
+                    |_| {},
+                )
+                .is_none()
+        );
+
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
+        assert!(
+            heap.inner
+                .resolve_slot(plain_dead_a.erase().as_ptr().as_ptr() as usize)
+                .unwrap()
+                .allocated
+        );
+        assert!(
+            heap.inner
+                .resolve_slot(dropping_dead.erase().as_ptr().as_ptr() as usize)
+                .unwrap()
+                .allocated
+        );
+        heap.with_mutator(|mutator| {
+            assert_eq!(*plain_root.get(mutator), 10);
+            let _ = dropping_root.get(mutator);
+        });
+    }
+
+    #[test]
+    fn dead_set_masks_cross_bitmap_words_and_run_boundaries() {
+        let heap = Heap::new();
+        let metadata = metadata_for::<BitmapBoundarySlot>();
+        let geometry = RunGeometry::derive(metadata.layout(), metadata.requested_slot_size())
+            .expect("boundary fixture must have supported geometry");
+        assert!(geometry.slot_count > u64::BITS as usize);
+        let allocation_count = geometry.slot_count + 3;
+        let values = heap.with_mutator(|mutator| {
+            let allocator = mutator.allocator::<BitmapBoundarySlot>().unwrap();
+            (0..allocation_count)
+                .map(|value| {
+                    allocator.alloc(BitmapBoundarySlot {
+                        _value: value as u64,
+                    })
+                })
+                .collect::<Vec<_>>()
+        });
+        let slots = values
+            .iter()
+            .map(|value| collector_slot(&heap, *value))
+            .collect::<Vec<_>>();
+        let rooted_indices = [
+            0,
+            u64::BITS as usize - 1,
+            u64::BITS as usize,
+            geometry.slot_count - 1,
+            geometry.slot_count,
+        ];
+        let roots = heap.with_mutator(|mutator| {
+            rooted_indices
+                .iter()
+                .map(|&index| mutator.root(values[index]))
+                .collect::<Vec<_>>()
+        });
+
+        heap.request_collection();
+        let epoch = heap.inner.elect_idle_collection_for_test();
+        assert!(
+            heap.inner
+                .run_synthetic_collection(
+                    epoch,
+                    false,
+                    |post_mark, _| {
+                        let plan = &post_mark.dead_set;
+                        assert_eq!(plan.allocated_slots, allocation_count);
+                        assert_eq!(plan.live_slots, rooted_indices.len());
+                        assert_eq!(
+                            plan.no_drop_dead_slots,
+                            allocation_count - rooted_indices.len()
+                        );
+                        assert_eq!(plan.drop_required_dead_slots, 0);
+                        assert_eq!(plan.live_runs, 2);
+                        assert_eq!(plan.no_drop_dead_runs, 2);
+                        assert_eq!(plan.dead_runs.len(), 2);
+
+                        for run in &plan.dead_runs {
+                            assert_eq!(run.disposition, DeadSlotDisposition::NoDrop);
+                            let expected = slots
+                                .iter()
+                                .enumerate()
+                                .filter(|(index, slot)| {
+                                    slot.owner.location == run.target.location
+                                        && !rooted_indices.contains(index)
+                                })
+                                .map(|(_, slot)| *slot)
+                                .collect::<Vec<_>>();
+                            assert_eq!(run.dead_slots, expected.len());
+                            assert_eq!(
+                                plan.dead_words[run.dead_words.clone()],
+                                dead_bitmap_words(&expected)
+                            );
+                        }
+                    },
+                    |_| {},
+                )
+                .is_none()
+        );
+
+        heap.with_mutator(|mutator| {
+            for root in &roots {
+                let _ = root.get(mutator);
+            }
+        });
+    }
+
+    #[test]
+    fn panic_after_dead_set_classification_publishes_no_allocator_change() {
+        let heap = Heap::new();
+        let live = allocate(&heap, 10_u64);
+        let _dead = allocate(&heap, 20_u64);
+        let root = heap.with_mutator(|mutator| mutator.root(live));
+        let captured = Mutex::new(None);
+
+        heap.request_collection();
+        let epoch = heap.inner.elect_idle_collection_for_test();
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            heap.inner.run_synthetic_collection(
+                epoch,
+                false,
+                |post_mark, data| {
+                    assert_eq!(post_mark.dead_set.live_slots, 1);
+                    assert_eq!(post_mark.dead_set.no_drop_dead_slots, 1);
+                    let snapshot = classification_state_snapshot(&heap, data);
+                    *captured.lock().unwrap() = Some(snapshot);
+                    panic!("injected panic after dead-set classification");
+                },
+                |_| {},
+            );
+        }));
+        assert!(panic.is_err());
+        assert_failed_collection_restored(&heap);
+
+        let expected = captured
+            .lock()
+            .unwrap()
+            .take()
+            .expect("post-mark snapshot must precede the injected panic");
+        let data = heap.inner.data.lock().unwrap();
+        assert_eq!(classification_state_snapshot(&heap, &data), expected);
+        drop(data);
+
+        heap.with_mutator(|mutator| assert_eq!(*root.get(mutator), 10));
+        assert_eq!(
+            heap.inner.coordinator_snapshot().completed_collection_epoch,
+            1
+        );
     }
 
     #[test]
@@ -4381,7 +4905,7 @@ mod tests {
         let admission = heap.inner.run_synthetic_collection(
             epoch,
             false,
-            |summary, _| assert_eq!(summary, MarkSummary::default()),
+            |post_mark, _| assert_eq!(post_mark.summary, MarkSummary::default()),
             |finalizer_mutator| {
                 let coordinator = heap.inner.coordinator_snapshot();
                 assert_eq!(coordinator.phase, AdmissionPhase::Finalizing);

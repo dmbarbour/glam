@@ -2,6 +2,8 @@ crates/glam-gc/src/arena.rs:                let word = unsafe { pointer.as_ref()
 crates/glam-gc/src/arena.rs:                match unsafe { lease.as_ref() }.compare_exchange_weak(
 crates/glam-gc/src/arena.rs:                unsafe { address.pointer().add(offset).cast() }
 crates/glam-gc/src/arena.rs:            NonNull::new(unsafe { alloc_zeroed(layout) }).ok_or(ArenaError::AllocationFailed)?;
+crates/glam-gc/src/arena.rs:            let allocated = unsafe { allocation.as_ref() }.load(Ordering::Acquire) & valid;
+crates/glam-gc/src/arena.rs:            let marked = unsafe { marked.read() } & valid;
 crates/glam-gc/src/arena.rs:            let mut observed = unsafe { lease.as_ref() }.load(Ordering::Acquire);
 crates/glam-gc/src/arena.rs:            let range = unsafe { std::slice::from_raw_parts(start.as_ptr(), bitmap.byte_len()) };
 crates/glam-gc/src/arena.rs:            let start = unsafe { address.pointer().add(bitmap.offset) };
@@ -64,6 +66,7 @@ crates/glam-gc/src/heap.rs:        assert_eq!(unsafe { pointer.as_ref() }._value
 crates/glam-gc/src/heap.rs:        let edge = unsafe { crate::Gc::<GraphNode>::from_raw(pointer) };
 crates/glam-gc/src/heap.rs:        let interior = unsafe { crate::Gc::<GraphNode>::from_raw(interior) };
 crates/glam-gc/src/heap.rs:        unsafe {
+crates/glam-gc/src/heap.rs:    unsafe impl Trace for BitmapBoundarySlot {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for DropCounter {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for DroppingType {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for FirstType {

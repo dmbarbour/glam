@@ -76,7 +76,9 @@ module opt-in, or reclamation behavior. C6A.0 replaces the parameterless
 exclusive-work hook with a data-side post-mark operation. It receives the
 completed scalar summary and a temporary managed-data borrow under the same
 exclusive collection authority, then releases that borrow before finalizer
-admission. It still performs no classification or reclamation.
+admission. C6A.1 additionally derives an attempt-local dead-set plan by reading
+the compact allocation and mark words. It still performs no reclamation or
+allocator-state mutation.
 
 The crate denies unsafe code by default. `src/lib.rs` gives the reviewed
 `pointer`, `root`, `mutator`, `trace`, `mutation`, `thread_cache`, and unit-test
@@ -308,8 +310,9 @@ C6 later owns collector-driven destruction.
   accesses managed data; `Exclusive` authority keeps the state stable where
   that transition needs stability. C6A.0 post-mark work runs under this data
   mutex and is therefore data-side only: it may inspect the already completed
-  mark summary and authoritative bitmap, but must not acquire the sibling
-  coordinator mutex. Its borrow ends before finalizer admission.
+  mark summary, C6A.1's attempt-local dead-set plan, and authoritative bitmaps,
+  but must not acquire the sibling coordinator mutex. Its borrow ends before
+  finalizer admission.
 - The coalesced collection request is a sibling `AtomicBool`, not duplicated in
   either locked component. An asynchronous request is exactly one Release
   store: it acquires no mutex and sends no condition-variable notification.
@@ -560,6 +563,16 @@ lease words are initialized and subsequently accessed as `AtomicU64`; one
 leased worker owns allocation-word writes, while root validation and later
 collector work may read them. Read-only recovery does not create a payload
 reference.
+
+C6A.1's compact dead-set visitor resolves each class-owned stable run target
+back through its retained chunk and verifies its raw address, class ID, and
+geometry against the initialized header. It then performs one Acquire load of
+each atomic allocation word and one ordinary read of the matching mark word
+while exclusive collection excludes every mutator and mark writer. Both words
+are masked by the exact valid-slot suffix before classification. The visitor
+returns integers only; it neither constructs a payload reference nor changes
+side metadata. Its two raw reads use the same validated word-pointer helpers as
+allocation and marking and are now explicit unsafe-inventory entries.
 
 The mark range is initialized as ordinary `u64` storage and remains disjoint
 from the header, atomic allocation/lease words, alignment padding, and payload.
@@ -822,6 +835,11 @@ mutation closure runs.
   borrow did not cross admission. Existing post-mark panic, request
   coalescing, failed-mark retry, report, and forced-order fixtures pass through
   the same refactored pipeline.
+- C6A.1 verifies exact live, no-drop-dead, and drop-required-dead counts and
+  compact masks across typed, allocation-word, and run boundaries. A forced
+  post-classification panic preserves class/run membership, frontiers,
+  allocation identities, all side metadata, pressure, and lease epoch, then
+  permits a clean retry. No payload is read, dropped, or made reusable.
 - The ordinary crate checks, exact unsafe inventory, focused Miri run, and
   repository-wide checks are required at completed checkpoints.
 - Miri passes all implemented tests with leak checking enabled. C1's temporary

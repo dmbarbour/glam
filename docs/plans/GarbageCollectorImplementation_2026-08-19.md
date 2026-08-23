@@ -1,8 +1,8 @@
 # Glam GC Subcrate Implementation Plan — 2026-08-19
 
-Status: in progress; Phases C0 through C6A.0 are complete, including the C2C.6
+Status: in progress; Phases C0 through C6A.1 are complete, including the C2C.6
 verification follow-up. The mandatory post-C1, post-C2C, post-C3E, post-C4,
-and post-C5 downstream reviews are complete. C6A.1 is next.
+and post-C5 downstream reviews are complete. C6A.2a is next.
 
 This plan implements an exact, non-moving, runtime-local tracing collector
 without depending on Glam value semantics. The governing requirements and
@@ -62,7 +62,7 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C5D.2 | completed | reachability oracle, scale, and verification closeout |
 | Post-C5 review | completed | completed C5 audit and downstream-plan reconciliation |
 | C6A.0 | completed | post-mark collection-pipeline handoff |
-| C6A.1 | pending | dead-set classification without reuse |
+| C6A.1 | completed | dead-set classification without reuse |
 | C6A.2a | pending | allocation-lease revocation and epoch publication |
 | C6A.2b | pending | class frontier and run-pool retirement |
 | C6A.2c | pending | wholly dead no-drop runs and free-run reuse |
@@ -3251,6 +3251,41 @@ Completed on 2026-08-23:
   now contains 148 unit tests, of which the two scale fixtures remain ignored,
   plus 6 Loom models and 8 compile-fail/doc tests. The new handoff fixture also
   passes a focused Miri run, and all workspace checks pass.
+
+#### C6A.1 completion
+
+Completed on 2026-08-23:
+
+- Every successful mark now produces one attempt-local `DeadSetPlan` before
+  the post-mark callback. Classification walks each typed class run's compact
+  allocation and mark words directly, masks invalid suffix bits, and asserts
+  that no mark names an unallocated slot. It records aggregate live,
+  no-drop-dead, and drop-required-dead slot/run counts plus only the nonzero
+  dead masks for affected runs. Those masks occupy one flat attempt-local
+  buffer with a range per run, avoiding one allocation per affected run.
+- Drop disposition is derived once from the run's canonical `ObjectMetadata`;
+  homogeneous typed runs therefore need no per-slot finalizer tags. A run may
+  contribute to both the live-run count and one dead-run category when it is
+  partially live. Each dead-run record retains stable class/run topology,
+  metadata, live/dead counts, and exact dead bitmap words for later C6 phases.
+- The post-mark seam receives the combined scalar mark summary and dead-set
+  plan while managed data remains exclusively stable. The plan is neither
+  published nor retained after the collection attempt, and C6A.1 changes no
+  allocation bit, lease, class frontier, run pool, pressure baseline, or lease
+  epoch. C6A.2a remains the first checkpoint permitted to invalidate allocator
+  state.
+- Focused fixtures classify mixed live/dead no-drop and drop-bearing runs,
+  exact masks spanning allocation-word and run boundaries, and invalid suffix
+  exclusion. A forced panic after classification compares complete class/run
+  membership, frontiers, allocation identities, side metadata, pressure, and
+  lease epoch before and after recovery, then completes a clean retry.
+- The direct word visitor adds two reviewed raw reads: an Acquire load of the
+  atomic allocation word and an exclusive read of the ordinary mark word.
+  Their locations and proof obligations are recorded in the unsafe inventory
+  and `SAFETY.md`. No payload is read, destroyed, or made reusable. The
+  collector suite now contains 151 unit tests (149 passing plus the two
+  explicit scale fixtures), 6 Loom models, and 8 compile-fail/doc tests; all
+  three new classification fixtures also pass focused Miri.
 
 ### Mandatory Post-C6 Review
 
