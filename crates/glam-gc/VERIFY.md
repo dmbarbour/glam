@@ -134,6 +134,20 @@ remain disabled until C6A.2 and C6A.3. All three classification fixtures pass
 the focused `cargo +nightly miri test --package glam-gc --lib --all-features
 dead_set` run.
 
+C6A.2a publishes the first allocator invalidation boundary. One fixture
+compares post-mark and finalizer-time snapshots and proves that class/run
+membership, allocation identities and words, mark words, and pressure are
+unchanged while every class frontier becomes null, every valid lease bit is
+set, and the heap-wide lease epoch advances exactly once. Another keeps an
+inactive cursor on a persistent worker thread across collection by a different
+thread; the worker's next outer entry captures the new epoch, discards its
+stale cursor, and allocates from a distinct fresh run without changing the old
+allocation word. Existing forced panics now latch both sides of the boundary:
+post-mark failure preserves the old epoch, while finalizer failure retains the
+published invalidation, relatches collection, and advances again on retry.
+No old slot or run is reclaimed or reused. Both the exact transition and
+cross-thread stale-cursor fixtures pass focused Miri.
+
 ## Gate G0 Baseline
 
 Before changing the unsafe surface in C1, recheck the focused pre-GC semantic

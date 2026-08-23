@@ -255,6 +255,10 @@ impl AllocationClassShared {
             .store(std::ptr::from_ref(target).cast_mut(), Ordering::Release);
     }
 
+    fn withdraw_frontier(&self) {
+        self.frontier.store(std::ptr::null_mut(), Ordering::Release);
+    }
+
     #[cfg(test)]
     pub(crate) fn frontier(&self, _heap: &HeapInner) -> Option<RunLocation> {
         let pointer = NonNull::new(self.frontier.load(Ordering::Acquire))?;
@@ -320,6 +324,16 @@ impl AllocationClassEntry {
             .checked_sub(1)
             .expect("cannot activate an absent allocation run");
         self.publish_frontier(last)
+    }
+
+    /// Withdraws every previously published run from lock-free selection.
+    ///
+    /// The stable run records remain owned by this class. C6 collection calls
+    /// this only after all mutators have drained and all old run leases have
+    /// been revoked; later allocator rebuilding chooses a new frontier.
+    pub(crate) fn withdraw_frontier(&mut self) {
+        self.shared.withdraw_frontier();
+        self.frontier_index = None;
     }
 
     fn publish_frontier(&mut self, index: usize) -> &RunClaimTarget {

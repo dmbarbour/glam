@@ -1,8 +1,8 @@
 # Glam GC Subcrate Implementation Plan — 2026-08-19
 
-Status: in progress; Phases C0 through C6A.1 are complete, including the C2C.6
+Status: in progress; Phases C0 through C6A.2a are complete, including the C2C.6
 verification follow-up. The mandatory post-C1, post-C2C, post-C3E, post-C4,
-and post-C5 downstream reviews are complete. C6A.2a is next.
+and post-C5 downstream reviews are complete. C6A.2b is next.
 
 This plan implements an exact, non-moving, runtime-local tracing collector
 without depending on Glam value semantics. The governing requirements and
@@ -63,7 +63,7 @@ to a later performance plan. Concurrent marking is also a later plan.
 | Post-C5 review | completed | completed C5 audit and downstream-plan reconciliation |
 | C6A.0 | completed | post-mark collection-pipeline handoff |
 | C6A.1 | completed | dead-set classification without reuse |
-| C6A.2a | pending | allocation-lease revocation and epoch publication |
+| C6A.2a | completed | allocation-lease revocation and epoch publication |
 | C6A.2b | pending | class frontier and run-pool retirement |
 | C6A.2c | pending | wholly dead no-drop runs and free-run reuse |
 | C6A.3a | pending | eager partial no-drop sweep |
@@ -3286,6 +3286,44 @@ Completed on 2026-08-23:
   collector suite now contains 151 unit tests (149 passing plus the two
   explicit scale fixtures), 6 Loom models, and 8 compile-fail/doc tests; all
   three new classification fixtures also pass focused Miri.
+
+#### C6A.2a completion
+
+Completed on 2026-08-23:
+
+- After classification and the private post-mark callback finish, exclusive
+  collection sets every valid allocation-word lease bit in every class-owned
+  run, publishes a null raw frontier for every class, resets each internal
+  frontier index, and only then publishes the next heap-wide allocation-lease
+  epoch. Allocation and mark words, payloads, run records, class membership,
+  pressure, and root state remain unchanged.
+- Epoch overflow is checked before revocation begins. The final epoch
+  publication is one Release compare-exchange whose expected predecessor is
+  fixed while collection is exclusive. A later outer entry's Acquire load
+  therefore observes lease/frontier revocation before it compares the epoch
+  and clears its complete stale cursor cache.
+- The temporary pre-C6A.3 allocator state is safe but intentionally not
+  capacity-efficient: old runs stay in their class pools with all lease words
+  unavailable. A class used before swept-frontier rebuilding may scan those
+  inert records and publish a fresh typed run; it cannot reuse an old slot.
+  C6A.2b through C6A.3 restore useful old topology and capacity.
+- A focused topology fixture snapshots the successful post-mark state and the
+  following finalizer state. It proves exact run/class/allocation/mark and
+  pressure preservation, null frontiers, fully revoked valid lease masks, and
+  one epoch advance. A persistent worker-thread fixture retains an inactive
+  cursor across another thread's collection and proves its next outer entry
+  captures the new epoch, discards the stale cursor, and allocates from a
+  distinct fresh run without modifying the old allocation word.
+- Failure fixtures distinguish the publication boundary. A panic in
+  post-mark planning leaves the old epoch and allocator topology intact. A
+  later finalizer panic retains the already-published revocation and advanced
+  epoch while relatching collection; its clean retry advances the lease epoch
+  once more. The report/completion epoch remains unpublished until successful
+  finalization as before.
+- Revoking a lease word adds one reviewed raw atomic Release store to the
+  unsafe inventory. The collector suite now contains 153 unit tests (151
+  passing plus two explicit scale fixtures), 6 Loom models, and 8
+  compile-fail/doc tests. Both new invalidation fixtures pass focused Miri.
 
 ### Mandatory Post-C6 Review
 

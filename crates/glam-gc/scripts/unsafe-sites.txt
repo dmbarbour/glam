@@ -9,6 +9,7 @@ crates/glam-gc/src/arena.rs:            let range = unsafe { std::slice::from_ra
 crates/glam-gc/src/arena.rs:            let start = unsafe { address.pointer().add(bitmap.offset) };
 crates/glam-gc/src/arena.rs:            let word = unsafe { pointer.as_ref() }.load(Ordering::Acquire);
 crates/glam-gc/src/arena.rs:            unsafe { header.write(RunHeader::empty()) };
+crates/glam-gc/src/arena.rs:            unsafe { lease.as_ref() }.store(revoked, Ordering::Release);
 crates/glam-gc/src/arena.rs:            unsafe { pointer.write(AtomicU64::new(word_value)) };
 crates/glam-gc/src/arena.rs:            unsafe { pointer.write(AtomicU64::new(word_value)) };
 crates/glam-gc/src/arena.rs:        Some(unsafe { run.pointer().cast::<RunHeader>().as_ref() })

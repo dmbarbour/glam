@@ -397,6 +397,17 @@ impl ManagedData {
         self.arena.owner_slot_is_marked(slot.owner)
     }
 
+    fn revoke_allocator_selection(&mut self) {
+        let arena = &self.arena;
+        for (index, class) in self.classes.iter_mut().enumerate() {
+            let class_id = class_id(index);
+            for target in class.runs().iter().map(|run| **run) {
+                arena.revoke_allocation_word_leases(target, class_id);
+            }
+            class.withdraw_frontier();
+        }
+    }
+
     fn publish_run(
         &mut self,
         class_index: usize,
@@ -589,13 +600,7 @@ impl DeadSetPlan {
         let mut plan = Self::default();
 
         for (class_index, class) in data.classes.iter().enumerate() {
-            let class_id = AllocationClassId::new(
-                u64::try_from(class_index)
-                    .expect("allocation-class index exceeds u64")
-                    .checked_add(1)
-                    .expect("allocation-class ID exhausted"),
-            )
-            .expect("allocation-class IDs begin at one");
+            let class_id = class_id(class_index);
             let metadata = class.metadata();
             let disposition = if metadata.needs_drop() {
                 DeadSlotDisposition::DropRequired
@@ -1083,6 +1088,15 @@ impl HeapInner {
                 dead_set: DeadSetPlan::classify(&data),
             };
             post_mark_work(&post_mark, &mut data);
+
+            // All potentially fallible post-mark planning precedes this
+            // publication boundary. Classification validated every stable run
+            // target while Exclusive excludes mutators. Revocation and raw
+            // frontier withdrawal make old cursors inert before the Release
+            // epoch publication lets a later outer entry clear them.
+            let (current_epoch, next_epoch) = self.next_allocation_lease_epoch();
+            data.revoke_allocator_selection();
+            self.publish_allocation_lease_epoch(current_epoch, next_epoch);
         }
 
         // Prepare the TLS record without activating it. Under the coordinator
@@ -1260,16 +1274,36 @@ impl HeapInner {
             .expect("allocation lease epoch must remain nonzero")
     }
 
+    fn next_allocation_lease_epoch(&self) -> (AllocationLeaseEpoch, AllocationLeaseEpoch) {
+        let current = self.current_allocation_lease_epoch();
+        let next = current
+            .get()
+            .checked_add(1)
+            .and_then(AllocationLeaseEpoch::from_raw)
+            .expect("allocation lease epoch exhausted");
+        (current, next)
+    }
+
+    fn publish_allocation_lease_epoch(
+        &self,
+        current: AllocationLeaseEpoch,
+        next: AllocationLeaseEpoch,
+    ) {
+        self.allocation_lease_epoch
+            .compare_exchange(
+                current.get(),
+                next.get(),
+                Ordering::Release,
+                Ordering::Acquire,
+            )
+            .expect("allocation lease epoch changed outside exclusive collection");
+    }
+
     #[cfg(test)]
     fn advance_allocation_lease_epoch(&self) -> AllocationLeaseEpoch {
-        let prior = self
-            .allocation_lease_epoch
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |prior| {
-                prior.checked_add(1).filter(|next| *next != 0)
-            })
-            .expect("allocation lease epoch exhausted");
-        AllocationLeaseEpoch::from_raw(prior + 1)
-            .expect("advanced allocation lease epoch must remain nonzero")
+        let (current, next) = self.next_allocation_lease_epoch();
+        self.publish_allocation_lease_epoch(current, next);
+        next
     }
 
     pub(crate) fn discover_class<T: Trace>(
@@ -1922,6 +1956,14 @@ fn class_index(id: AllocationClassId) -> Option<usize> {
     usize::try_from(id.get().checked_sub(1)?).ok()
 }
 
+fn class_id(index: usize) -> AllocationClassId {
+    u64::try_from(index)
+        .ok()
+        .and_then(|index| index.checked_add(1))
+        .and_then(AllocationClassId::new)
+        .expect("allocation class ID space exhausted")
+}
+
 fn allocation_cursor(
     class_id: AllocationClassId,
     claimed: crate::arena::ClaimedAllocationWord,
@@ -2104,6 +2146,35 @@ mod tests {
         }
         words.sort_by_key(|word| word.word_index);
         words
+    }
+
+    fn allocation_bytes(run: &ClassificationRunSnapshot) -> &[u8] {
+        &run.side_metadata[..run.geometry.allocation_bitmap.byte_len()]
+    }
+
+    fn lease_words(run: &ClassificationRunSnapshot) -> Vec<u64> {
+        let start = run.geometry.allocation_bitmap.byte_len();
+        let end = start + run.geometry.lease_bitmap.byte_len();
+        run.side_metadata[start..end]
+            .chunks_exact(std::mem::size_of::<u64>())
+            .map(|word| u64::from_ne_bytes(word.try_into().unwrap()))
+            .collect()
+    }
+
+    fn mark_bytes(run: &ClassificationRunSnapshot) -> &[u8] {
+        let start =
+            run.geometry.allocation_bitmap.byte_len() + run.geometry.lease_bitmap.byte_len();
+        &run.side_metadata[start..]
+    }
+
+    fn valid_bitmap_word(bit_len: usize, word_index: usize) -> u64 {
+        let first_bit = word_index * u64::BITS as usize;
+        let remaining = bit_len.saturating_sub(first_bit);
+        match remaining {
+            0 => 0,
+            remaining if remaining >= u64::BITS as usize => u64::MAX,
+            remaining => (1_u64 << remaining) - 1,
+        }
     }
 
     fn panic_string(panic: &(dyn std::any::Any + Send)) -> &str {
@@ -4869,8 +4940,130 @@ mod tests {
     }
 
     #[test]
+    fn successful_post_mark_revocation_changes_only_leases_frontiers_and_epoch() {
+        let heap = Heap::new();
+        let plain = allocate(&heap, 10_u64);
+        let plain_root = heap.with_mutator(|mutator| mutator.root(plain));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let dropping = allocate(&heap, DropCounter(Arc::clone(&drops)));
+        let dropping_root = heap.with_mutator(|mutator| mutator.root(dropping));
+        let plain_class = internal_class::<u64>(&heap);
+        heap.inner.prepare_run(&plain_class).unwrap();
+
+        let before = Mutex::new(None);
+        let after = Mutex::new(None);
+        heap.request_collection();
+        let epoch = heap.inner.elect_idle_collection_for_test();
+        assert!(
+            heap.inner
+                .run_synthetic_collection(
+                    epoch,
+                    false,
+                    |_, data| {
+                        *before.lock().unwrap() = Some(classification_state_snapshot(&heap, data));
+                    },
+                    |_| {
+                        let data = heap.inner.data.lock().unwrap();
+                        *after.lock().unwrap() = Some(classification_state_snapshot(&heap, &data));
+                    },
+                )
+                .is_none()
+        );
+
+        let before = before.lock().unwrap().take().unwrap();
+        let after = after.lock().unwrap().take().unwrap();
+        assert_eq!(before.pressure, after.pressure);
+        assert_eq!(
+            after.allocation_lease_epoch.get(),
+            before.allocation_lease_epoch.get() + 1
+        );
+        assert_eq!(before.classes.len(), after.classes.len());
+        for (before, after) in before.classes.iter().zip(&after.classes) {
+            assert_eq!(before.class_id, after.class_id);
+            assert_eq!(before.metadata, after.metadata);
+            assert_eq!(before.runs, after.runs);
+            assert!(before.frontier.is_some());
+            assert_eq!(after.frontier, None);
+        }
+        assert_eq!(before.runs.len(), after.runs.len());
+        for (before, after) in before.runs.iter().zip(&after.runs) {
+            assert_eq!(before.class_id, after.class_id);
+            assert_eq!(before.location, after.location);
+            assert_eq!(before.geometry, after.geometry);
+            assert_eq!(before.allocations, after.allocations);
+            assert_eq!(allocation_bytes(before), allocation_bytes(after));
+            assert_eq!(mark_bytes(before), mark_bytes(after));
+            assert_eq!(
+                lease_words(after),
+                (0..after.geometry.lease_bitmap.word_len)
+                    .map(|word_index| {
+                        valid_bitmap_word(after.geometry.lease_bitmap.bit_len, word_index)
+                    })
+                    .collect::<Vec<_>>()
+            );
+        }
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
+        heap.with_mutator(|mutator| {
+            assert_eq!(*plain_root.get(mutator), 10);
+            let _ = dropping_root.get(mutator);
+        });
+    }
+
+    #[test]
+    fn next_outer_entry_discards_a_cursor_revoked_on_another_thread() {
+        let heap = Heap::new();
+        let (first_tx, first_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        let (second_tx, second_rx) = mpsc::channel();
+        let worker = std::thread::spawn({
+            let heap = heap.clone();
+            move || {
+                let first = heap.with_mutator(|mutator| {
+                    let value = mutator.allocator::<u64>().unwrap().alloc(10);
+                    let root = mutator.root(value);
+                    let location = collector_slot(&heap, value).owner.location;
+                    (root, location)
+                });
+                let first_cache = cache_snapshot(&heap.inner).unwrap();
+                first_tx.send((first, first_cache)).unwrap();
+                resume_rx.recv().unwrap();
+
+                let second_location = heap.with_mutator(|mutator| {
+                    let value = mutator.allocator::<u64>().unwrap().alloc(20);
+                    collector_slot(&heap, value).owner.location
+                });
+                second_tx
+                    .send((second_location, cache_snapshot(&heap.inner).unwrap()))
+                    .unwrap();
+            }
+        });
+
+        let ((root, first_location), first_cache) = first_rx.recv().unwrap();
+        assert_eq!(first_cache.captured_epoch, AllocationLeaseEpoch::INITIAL);
+        assert_eq!(first_cache.cursor_count, 1);
+        let report = heap.collect_full().unwrap();
+        assert_eq!(report.marked_slots(), 1);
+        let collection_epoch = heap.inner.current_allocation_lease_epoch();
+        assert_ne!(collection_epoch, first_cache.captured_epoch);
+
+        resume_tx.send(()).unwrap();
+        let (second_location, second_cache) = second_rx.recv().unwrap();
+        worker.join().unwrap();
+        assert_ne!(second_location, first_location);
+        assert_eq!(second_cache.captured_epoch, collection_epoch);
+        assert_eq!(second_cache.cursor_count, 1);
+
+        let data = heap.inner.data.lock().unwrap();
+        assert_eq!(data.arena.allocated_slot_pointers(first_location).len(), 1);
+        assert_eq!(data.arena.allocated_slot_pointers(second_location).len(), 1);
+        drop(data);
+        heap.with_mutator(|mutator| assert_eq!(*root.get(mutator), 10));
+    }
+
+    #[test]
     fn panicking_elected_collection_restores_and_relatches_its_request() {
         let heap = Heap::new();
+        let initial_lease_epoch = heap.inner.current_allocation_lease_epoch();
         heap.request_collection();
         let epoch = heap.inner.elect_idle_collection_for_test();
 
@@ -4889,10 +5082,19 @@ mod tests {
         assert!(restored.collection_requested);
         assert_eq!(restored.active_collection, None);
         assert_eq!(restored.latest_collection_report, None);
+        assert_eq!(
+            heap.inner.current_allocation_lease_epoch(),
+            initial_lease_epoch,
+            "post-mark planning panic precedes allocator invalidation"
+        );
         heap.with_mutator(|_| {});
         assert_eq!(
             heap.inner.coordinator_snapshot().completed_collection_epoch,
             1
+        );
+        assert_eq!(
+            heap.inner.current_allocation_lease_epoch().get(),
+            initial_lease_epoch.get() + 1
         );
     }
 
@@ -5055,6 +5257,7 @@ mod tests {
     #[test]
     fn panicking_finalizer_retires_its_mutator_and_relatches_collection() {
         let heap = Heap::new();
+        let initial_lease_epoch = heap.inner.current_allocation_lease_epoch();
         heap.request_collection();
         let epoch = heap.inner.elect_idle_collection_for_test();
 
@@ -5075,11 +5278,20 @@ mod tests {
         assert_eq!(restored.latest_collection_report, None);
         assert!(restored.collection_requested);
         assert_eq!(cache_snapshot(&heap.inner).unwrap().recursive_depth, 0);
+        assert_eq!(
+            heap.inner.current_allocation_lease_epoch().get(),
+            initial_lease_epoch.get() + 1,
+            "published allocator invalidation is not rolled back by finalizer panic"
+        );
 
         heap.with_mutator(|_| {});
         assert_eq!(
             heap.inner.coordinator_snapshot().completed_collection_epoch,
             1
+        );
+        assert_eq!(
+            heap.inner.current_allocation_lease_epoch().get(),
+            initial_lease_epoch.get() + 2
         );
     }
 

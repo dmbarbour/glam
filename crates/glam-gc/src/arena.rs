@@ -315,24 +315,7 @@ impl Arena {
         class_id: AllocationClassId,
         mut visit: impl FnMut(usize, u64, u64),
     ) {
-        let chunk = self
-            .chunks
-            .get(target.location.chunk)
-            .expect("published run must retain its arena chunk");
-        let run = chunk
-            .run_address(target.location.run)
-            .expect("published run must retain its arena location");
-        assert_eq!(run, target.run, "published run changed addresses");
-        assert_eq!(
-            chunk.header_for(run).and_then(RunHeader::class_id),
-            Some(class_id),
-            "published run changed allocation classes"
-        );
-        assert_eq!(
-            chunk.header_for(run).and_then(RunHeader::geometry),
-            Some(target.geometry),
-            "published run changed geometry"
-        );
+        let (_, run) = self.resolved_claim_target(target, class_id);
 
         for word_index in 0..target.geometry.allocation_bitmap.word_len {
             let valid = valid_slot_mask(target.geometry.slot_count, word_index);
@@ -347,6 +330,28 @@ impl Arena {
             // initialized ordinary word inside the run.
             let marked = unsafe { marked.read() } & valid;
             visit(word_index, allocated, marked);
+        }
+    }
+
+    /// Makes every allocation word in `target` unavailable to ordinary
+    /// cursors without changing its allocation or mark bitmap.
+    ///
+    /// The caller must hold exclusive collection authority and must advance
+    /// the heap-wide lease epoch before ordinary mutator admission resumes.
+    pub(crate) fn revoke_allocation_word_leases(
+        &self,
+        target: RunClaimTarget,
+        class_id: AllocationClassId,
+    ) {
+        let (_, run) = self.resolved_claim_target(target, class_id);
+        for word_index in 0..target.geometry.lease_bitmap.word_len {
+            let revoked = valid_slot_mask(target.geometry.lease_bitmap.bit_len, word_index);
+            let lease = lease_word_pointer(run, target.geometry.lease_bitmap, word_index);
+            // SAFETY: classification immediately validated this stable typed
+            // run, exclusive collection has drained every lease owner, and
+            // geometry places the initialized atomic lease word inside it.
+            // Release publishes revocation before the later epoch advance.
+            unsafe { lease.as_ref() }.store(revoked, Ordering::Release);
         }
     }
 
@@ -428,6 +433,32 @@ impl Arena {
             .run_address(owner.location.run)
             .expect("resolved allocation owner lost its run");
         assert_eq!(run, owner.run, "resolved allocation owner changed runs");
+        (chunk, run)
+    }
+
+    fn resolved_claim_target(
+        &self,
+        target: RunClaimTarget,
+        class_id: AllocationClassId,
+    ) -> (&ArenaChunk, RunAddress) {
+        let chunk = self
+            .chunks
+            .get(target.location.chunk)
+            .expect("published run must retain its arena chunk");
+        let run = chunk
+            .run_address(target.location.run)
+            .expect("published run must retain its arena location");
+        assert_eq!(run, target.run, "published run changed addresses");
+        assert_eq!(
+            chunk.header_for(run).and_then(RunHeader::class_id),
+            Some(class_id),
+            "published run changed allocation classes"
+        );
+        assert_eq!(
+            chunk.header_for(run).and_then(RunHeader::geometry),
+            Some(target.geometry),
+            "published run changed geometry"
+        );
         (chunk, run)
     }
 

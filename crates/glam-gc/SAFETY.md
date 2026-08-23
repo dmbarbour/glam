@@ -78,7 +78,9 @@ completed scalar summary and a temporary managed-data borrow under the same
 exclusive collection authority, then releases that borrow before finalizer
 admission. C6A.1 additionally derives an attempt-local dead-set plan by reading
 the compact allocation and mark words. It still performs no reclamation or
-allocator-state mutation.
+allocator-state mutation. C6A.2a then publishes the first allocator
+invalidation boundary: old leases and raw frontiers are withdrawn before one
+heap-wide lease-epoch advance, without reclaiming or reusing storage.
 
 The crate denies unsafe code by default. `src/lib.rs` gives the reviewed
 `pointer`, `root`, `mutator`, `trace`, `mutation`, `thread_cache`, and unit-test
@@ -312,7 +314,10 @@ C6 later owns collector-driven destruction.
   mutex and is therefore data-side only: it may inspect the already completed
   mark summary, C6A.1's attempt-local dead-set plan, and authoritative bitmaps,
   but must not acquire the sibling coordinator mutex. Its borrow ends before
-  finalizer admission.
+  finalizer admission. C6A.2a performs only infallible allocator revocation
+  after that callback returns: it withdraws lease/frontier publication under
+  managed data and then advances the atomic lease epoch before releasing the
+  guard.
 - The coalesced collection request is a sibling `AtomicBool`, not duplicated in
   either locked component. An asynchronous request is exactly one Release
   store: it acquires no mutex and sends no condition-variable notification.
@@ -463,6 +468,12 @@ C6 later owns collector-driven destruction.
   succeeds. C2C leases one complete allocation word per cursor. Separate
   cursors never own the same word, and eviction, explicit cache release, or TLS
   destruction forgets the pointer without clearing its lease.
+- C6A.2a revokes all old cursors while every mutator is drained. It sets every
+  valid lease bit with Release ordering, stores null to every raw class
+  frontier, and then publishes a new heap-wide lease epoch with Release
+  ordering. A later outer entry's Acquire epoch load clears the complete local
+  cursor array before allocation. Recursive entry cannot straddle that change
+  because exclusive collection requires zero active outer mutators.
 
 ## Worker-Local Allocation-Word Invariants
 
@@ -476,9 +487,10 @@ C6 later owns collector-driven destruction.
 - Initial run topology reaches a lock-free claimant through that frontier
   Release/Acquire pair. A claimant reached from the synchronized path instead
   relies on the managed-data mutex. The separate lease-word Acquire does not publish
-  the run record; in C2C it participates in atomic word ownership. C5 will add
-  a Release reset on that same lease word to publish rebuilt post-collection
-  allocation/free state to the next Acquire claimant.
+  the run record; in C2C it participates in atomic word ownership. C6A.2a uses
+  a Release store on that word to revoke every valid claim. C6A.3 later uses
+  the same publication edge to expose rebuilt post-sweep allocation/free state
+  to the next Acquire claimant.
 - The cursor carries the stable owning `RunAddress`, validated `RunGeometry`,
   one allocation-word index, and a local free mask. Its mask is the inverse of
   the authoritative allocation word intersected with the exact slot-count
@@ -573,6 +585,15 @@ are masked by the exact valid-slot suffix before classification. The visitor
 returns integers only; it neither constructs a payload reference nor changes
 side metadata. Its two raw reads use the same validated word-pointer helpers as
 allocation and marking and are now explicit unsafe-inventory entries.
+
+C6A.2a reuses that validated class/run topology while exclusive collection has
+drained every cursor owner. For each initialized atomic lease word, it derives
+the exact valid-bit mask and performs one raw-reference Release store of that
+mask. This makes every allocation word unavailable without touching allocation
+or payload storage. Null frontier stores follow run revocation, and the final
+heap-wide Release epoch publication orders both changes before later outer
+entries clear stale cursors. Invalid suffix lease bits remain clear and are
+still rejected by the bounded claim loop.
 
 The mark range is initialized as ordinary `u64` storage and remains disjoint
 from the header, atomic allocation/lease words, alignment padding, and payload.
@@ -840,6 +861,11 @@ mutation closure runs.
   post-classification panic preserves class/run membership, frontiers,
   allocation identities, all side metadata, pressure, and lease epoch, then
   permits a clean retry. No payload is read, dropped, or made reusable.
+- C6A.2a verifies that successful invalidation changes only lease words,
+  frontiers, and the lease epoch; an inactive cursor retained on another
+  thread is discarded on its next outer entry and cannot modify its old run.
+  Forced failures prove planning precedes the boundary while finalization
+  follows it. No allocation bit, run record, or old reusable slot changes.
 - The ordinary crate checks, exact unsafe inventory, focused Miri run, and
   repository-wide checks are required at completed checkpoints.
 - Miri passes all implemented tests with leak checking enabled. C1's temporary
