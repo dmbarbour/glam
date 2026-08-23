@@ -88,7 +88,10 @@ complete detached batch, clears each run's side state, replaces its typed
 header with the canonical empty header, and publishes its location to one
 heap-wide free-run pool. Later ordinary publication retypes a free run before
 virgin arena capacity. Partial runs and initialized drop-bearing payloads
-remain unreclaimed.
+remain unreclaimed at that checkpoint. C6A.3a then eagerly clears dead
+allocation bits from retained partial no-drop runs by intersecting their
+allocation and mark words under exclusive collection. It does not inspect
+payloads or change any drop-bearing allocation bit.
 
 The crate denies unsafe code by default. `src/lib.rs` gives the reviewed
 `pointer`, `root`, `mutator`, `trace`, `mutation`, `thread_cache`, and unit-test
@@ -328,7 +331,9 @@ C6 later owns collector-driven destruction.
   guard. C6A.2b reserves retirement-pool capacity and prevalidates its complete
   set before moving any boxed record under that same guard. C6A.2c reserves
   free-pool capacity and validates every detached arena identity before
-  clearing the first run under that same exclusive guard.
+  clearing the first run under that same exclusive guard. C6A.3a similarly
+  prevalidates every retained partial no-drop target before its first atomic
+  allocation-word store.
 - The coalesced collection request is a sibling `AtomicBool`, not duplicated in
   either locked component. An asynchronous request is exactly one Release
   store: it acquires no mutex and sends no condition-variable notification.
@@ -644,6 +649,22 @@ then publishes the frontier. Old payload and side-metadata bytes which fall in
 new payload space remain unallocated until ordinary typed initialization
 overwrites the selected slot before its allocation bit is released.
 
+C6A.3a prevalidates every partial no-drop run against its canonical class
+metadata, geometry, retained boxed target, withdrawn frontier, arena address,
+and typed header before changing the first allocation word. Exclusive
+collection and C6A.2a's cursor invalidation make the collector the sole writer.
+For each compact word it performs one checked raw-reference Acquire load of the
+atomic allocation bits and one checked raw read of the ordinary mark bits,
+masks both to the exact valid-slot suffix, and computes their intersection. A
+debug-only `marked & allocated == marked` assertion records the internal
+marking invariant without adding release-build policy; publishing the
+intersection remains safe if assertions are absent. One checked raw-reference
+Release store makes the retained allocation bits authoritative before C6A.3b
+later republishes allocator selectors. No payload address is derived, no Rust
+payload reference is formed, and no destructor-bearing allocation word is
+selected. A later finalizer panic may suppress the collection report but cannot
+restore a swept allocation; retry starts from that valid reduced topology.
+
 The mark range is initialized as ordinary `u64` storage and remains disjoint
 from the header, atomic allocation/lease words, alignment padding, and payload.
 After exclusive admission drains mutators, the collector reconstructs one
@@ -926,6 +947,10 @@ mutation closure runs.
   class authority. A finalizer panic after reset leaves one durable pool entry,
   retry does not duplicate it, and later allocation consumes that exact
   location. All three focused fixtures pass Miri.
+- C6A.3a verifies exact retained allocation bits across bitmap-word and run
+  boundaries, dense and sparse death, preservation of drop-bearing dead slots,
+  all/one/zero repeated collection, and durable retry after a finalizer panic.
+  The mixed, boundary, and panic/retry fixtures pass focused Miri.
 - The ordinary crate checks, exact unsafe inventory, focused Miri run, and
   repository-wide checks are required at completed checkpoints.
 - Miri passes all implemented tests with leak checking enabled. C1's temporary

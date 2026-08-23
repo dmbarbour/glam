@@ -1,8 +1,8 @@
 # Glam GC Subcrate Implementation Plan — 2026-08-19
 
-Status: in progress; Phases C0 through C6A.2c are complete, including the C2C.6
+Status: in progress; Phases C0 through C6A.3a are complete, including the C2C.6
 verification follow-up. The mandatory post-C1, post-C2C, post-C3E, post-C4,
-and post-C5 downstream reviews are complete. C6A.3a is next.
+and post-C5 downstream reviews are complete. C6A.3b is next.
 
 This plan implements an exact, non-moving, runtime-local tracing collector
 without depending on Glam value semantics. The governing requirements and
@@ -66,7 +66,7 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C6A.2a | completed | allocation-lease revocation and epoch publication |
 | C6A.2b | completed | class frontier and run-pool retirement |
 | C6A.2c | completed | wholly dead no-drop runs and free-run reuse |
-| C6A.3a | pending | eager partial no-drop sweep |
+| C6A.3a | completed | eager partial no-drop sweep |
 | C6A.3b | pending | swept allocator publication |
 | C6A.4 | pending | assigned-run pressure |
 | C6B.1 | pending | finalization batch and non-rootability |
@@ -2758,12 +2758,14 @@ Completed on 2026-08-23:
   duplicates, self-edges, and deliberately unreachable allocations.
 - Before reclamation, one complete `u64` typed run was driven through zero,
   one, all, then zero live slots across four successful collections. C6A.2b
-  updates the continuing regression to one, all, then zero: after the final
-  zero-live collection the run correctly leaves published topology and cannot
-  be resurrected through stale unrooted handles. Independent empty-heap and
-  clear-before-mark fixtures retain the initial-zero coverage. Each report and
-  physical mark observation agrees, latching that a completed bitmap describes
-  only its own attempt rather than accumulated mark history.
+  first removed the initial-zero resurrection and C6A.3a now orders the
+  continuing regression all, one, then zero, because eager partial sweep makes
+  unrooted allocations irrecoverable after the first collection. After the
+  final zero-live collection the run correctly leaves published topology.
+  Independent empty-heap and clear-before-mark fixtures retain initial-zero
+  coverage. Each report and physical mark observation agrees, latching that a
+  completed bitmap describes only its own attempt rather than accumulated mark
+  history.
 - A dedicated serial scale script keeps expensive evidence independently
   measurable from ordinary unit tests. The native marker completes a
   one-million-node chain and a flat one-million-edge array without recursive
@@ -2907,6 +2909,9 @@ Execute C6 as the following smaller checkpoints:
   retained partially live no-drop run and publish `allocated &= marked` while
   the collector remains their sole writer under `Exclusive`. Do not enumerate
   or touch payloads, and do not clear allocation bits in any drop-bearing run.
+  The internal subset check is debug-only and states the intended relation
+  directly as `marked & allocated == marked`; the release operation remains
+  safe by publishing the intersection even when assertions are compiled out.
   Prove boundary words, sparse and dense death, and repeated collections.
 - **C6A.3b — swept allocator publication.** Rebuild allocation-word lease
   availability and class frontiers from the eagerly swept topology. Replace,
@@ -3397,8 +3402,9 @@ Completed on 2026-08-23:
   was unrooted during a completed collection can no longer be rooted or
   inspected through published class topology. The adjusted fixtures instead
   create post-acknowledgement values after collection, retain roots across
-  automatic pressure collection, and end a one/all/zero bitmap history with
-  the zero-live retirement rather than attempting later resurrection.
+  automatic pressure collection, and—after C6A.3a's further update—end an
+  all/one/zero bitmap history with zero-live retirement rather than attempting
+  later resurrection.
 - This checkpoint adds no unsafe operation or inventory entry. The collector
   suite now contains 156 unit tests (154 passing plus two explicit scale
   fixtures), 6 Loom models, and 8 compile-fail/doc tests. The three focused
@@ -3443,6 +3449,40 @@ Completed on 2026-08-23:
   compile-fail/doc tests. All three focused C6A.2c fixtures pass Miri, and the
   stable collector and workspace verification matrices are recorded in
   `VERIFY.md`.
+
+#### C6A.3a completion
+
+Completed on 2026-08-23:
+
+- Managed data now prevalidates every retained partial no-drop target against
+  its canonical metadata, class geometry, class membership, withdrawn
+  frontier, arena address, and typed header before clearing the first
+  allocation bit. Whole-run reset remains C6A.2c, while every drop-bearing
+  allocation word remains unchanged for C6B finalization.
+- Arena sweep walks only the compact allocation and mark words. Under
+  `Exclusive`, it Acquire-loads the atomic allocation word, reads the ordinary
+  mark word, computes `retained = allocated & marked`, and Release-stores the
+  result. It neither enumerates nor forms a reference to payload storage. Both
+  words are masked to valid slot bits, and the internal subset invariant uses
+  the debug-only `marked & allocated == marked` spelling.
+- The bitmap-boundary fixture now verifies exact retained allocation bits at
+  indices around 63/64 and across two runs, covering sparse live values and
+  dense death. The mixed no-drop/drop fixture proves that a partial no-drop
+  dead slot is cleared while a drop-bearing dead slot remains allocated and
+  undisposed. The complete-run regression is ordered all, one, then zero so it
+  never resurrects reclaimed unrooted pointers; it proves a partial sweep can
+  reduce an assigned run to one allocation before the later zero-live
+  collection resets the whole run.
+- A forced finalizer panic after partial sweep leaves the cleared allocation
+  durable while the report remains unpublished. Retry observes only the live
+  allocation, does not restore the dead bit or detach the partial run, and
+  completes normally. This latches the checkpoint's recoverable-panic state.
+- The sweep adds one reviewed atomic allocation-word load, ordinary mark-word
+  read, and atomic allocation-word store to the exact unsafe inventory. The
+  collector suite now contains 157 unit tests (155 passing plus two explicit
+  scale fixtures), 6 Loom models, and 8 compile-fail/doc tests. The mixed,
+  boundary, and panic/retry fixtures pass focused Miri; the stable collector
+  and workspace verification matrices are recorded in `VERIFY.md`.
 
 ### Mandatory Post-C6 Review
 

@@ -71,9 +71,10 @@ ordering.
 The ordinary stable check compares 24 deterministic randomized managed graphs
 with an independent index-based reachability oracle. It checks the successful
 report, every allocation's mark bit, and each object's trace count. A separate
-full-run fixture drives one assigned run through one, all, and zero live slots
+full-run fixture drives one assigned run through all, one, and zero live slots
 across three successful collections, proving that each attempt clears the prior
-bitmap before publishing new reachability. The terminal zero-live collection
+bitmap before publishing new reachability without resurrecting an allocation
+which an earlier eager sweep reclaimed. The terminal zero-live collection
 also permits C6A.2b retirement and C6A.2c reset; stale unrooted handles are
 deliberately not resurrected afterward. Empty-heap and clear-before-mark
 fixtures independently cover zero as an initial state. The roughly
@@ -184,6 +185,35 @@ Header reset adds one reviewed raw write to the unsafe inventory; side-state
 reset reuses the existing initialization boundary after mutator drain and
 selector retirement. The full suite contains 156 unit tests (154 passing and
 two ignored scale fixtures), six Loom models, and eight compile-fail/doc tests.
+
+C6A.3a prevalidates every retained partial no-drop target, then intersects its
+compact atomic allocation words with the ordinary mark words under exclusive
+collection. The subset assertion is debug-only and uses
+`marked & allocated == marked`; the release build still masks both inputs and
+publishes their intersection. No payload is enumerated or referenced, and
+drop-bearing allocation words remain unchanged for later finalization.
+
+The existing bitmap-boundary fixture now checks the exact post-sweep allocation
+state around indices 63/64 and across two runs, including dense death and sparse
+survival. The mixed no-drop/drop fixture checks that only the no-drop dead bit
+is cleared. The all/one/zero complete-run history proves repeated reduction,
+and a new forced finalizer panic proves the reduced allocation state remains
+valid and nonduplicating across an unpublished attempt and clean retry. Focused
+Miri runs are:
+
+```sh
+cargo +nightly miri test --package glam-gc --lib --all-features \
+  post_mark_dead_set_classifies_exact_live_and_dead_slot_masks
+cargo +nightly miri test --package glam-gc --lib --all-features \
+  dead_set_masks_cross_bitmap_words_and_run_boundaries
+cargo +nightly miri test --package glam-gc --lib --all-features \
+  finalizer_panic_after_partial_no_drop_sweep_preserves_reclaimed_state
+```
+
+The sweep adds one reviewed raw atomic allocation-word load, one ordinary
+mark-word read, and one raw atomic allocation-word store to the exact unsafe
+inventory. The full suite contains 157 unit tests (155 passing and two ignored
+scale fixtures), six Loom models, and eight compile-fail/doc tests.
 
 ## Gate G0 Baseline
 

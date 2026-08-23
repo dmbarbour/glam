@@ -3,11 +3,14 @@ crates/glam-gc/src/arena.rs:                match unsafe { lease.as_ref() }.comp
 crates/glam-gc/src/arena.rs:                unsafe { address.pointer().add(offset).cast() }
 crates/glam-gc/src/arena.rs:            NonNull::new(unsafe { alloc_zeroed(layout) }).ok_or(ArenaError::AllocationFailed)?;
 crates/glam-gc/src/arena.rs:            let allocated = unsafe { allocation.as_ref() }.load(Ordering::Acquire) & valid;
+crates/glam-gc/src/arena.rs:            let allocated = unsafe { allocation.as_ref() }.load(Ordering::Acquire) & valid;
+crates/glam-gc/src/arena.rs:            let marked = unsafe { mark.read() } & valid;
 crates/glam-gc/src/arena.rs:            let marked = unsafe { marked.read() } & valid;
 crates/glam-gc/src/arena.rs:            let mut observed = unsafe { lease.as_ref() }.load(Ordering::Acquire);
 crates/glam-gc/src/arena.rs:            let range = unsafe { std::slice::from_raw_parts(start.as_ptr(), bitmap.byte_len()) };
 crates/glam-gc/src/arena.rs:            let start = unsafe { address.pointer().add(bitmap.offset) };
 crates/glam-gc/src/arena.rs:            let word = unsafe { pointer.as_ref() }.load(Ordering::Acquire);
+crates/glam-gc/src/arena.rs:            unsafe { allocation.as_ref() }.store(retained, Ordering::Release);
 crates/glam-gc/src/arena.rs:            unsafe { header.write(RunHeader::empty()) };
 crates/glam-gc/src/arena.rs:            unsafe { lease.as_ref() }.store(revoked, Ordering::Release);
 crates/glam-gc/src/arena.rs:            unsafe { pointer.write(AtomicU64::new(word_value)) };

@@ -203,37 +203,31 @@ impl Arena {
             .initialize_run(run, class_id, geometry)
     }
 
-    /// Validates one detached run before collection clears its old type.
+    /// Validates one stable typed-run target against authoritative arena state.
     ///
-    /// The caller retains exclusive collection authority and has already
-    /// removed every ordinary allocator selector for `target`. Keeping this
-    /// validation separate lets the collector validate a complete retirement
-    /// batch before resetting its first header.
-    pub(crate) fn validate_recyclable_run(
-        &self,
-        target: RunClaimTarget,
-        class_id: AllocationClassId,
-    ) {
+    /// Keeping this validation separate lets collector transitions validate a
+    /// complete batch before resetting a header or allocation word.
+    pub(crate) fn validate_run_target(&self, target: RunClaimTarget, class_id: AllocationClassId) {
         let chunk = self
             .chunks
             .get(target.location.chunk)
-            .expect("recyclable run lost its arena chunk");
+            .expect("validated run lost its arena chunk");
         let run = chunk
             .run_address(target.location.run)
-            .expect("recyclable run lost its arena location");
-        assert_eq!(run, target.run, "recyclable run changed addresses");
+            .expect("validated run lost its arena location");
+        assert_eq!(run, target.run, "validated run changed addresses");
         let header = chunk
             .header_for(run)
-            .expect("recyclable run lost its initialized header");
+            .expect("validated run lost its initialized header");
         assert_eq!(
             header.class_id(),
             Some(class_id),
-            "recyclable run changed allocation classes"
+            "validated run changed allocation classes"
         );
         assert_eq!(
             header.geometry(),
             Some(target.geometry),
-            "recyclable run changed geometry"
+            "validated run changed geometry"
         );
     }
 
@@ -249,7 +243,7 @@ impl Arena {
         target: RunClaimTarget,
         class_id: AllocationClassId,
     ) {
-        self.validate_recyclable_run(target, class_id);
+        self.validate_run_target(target, class_id);
         self.chunks[target.location.chunk]
             .reset_recyclable_run(target.location.run, target.geometry);
     }
@@ -381,6 +375,41 @@ impl Arena {
             // initialized ordinary word inside the run.
             let marked = unsafe { marked.read() } & valid;
             visit(word_index, allocated, marked);
+        }
+    }
+
+    /// Retains exactly the marked allocations in one partial no-drop run.
+    ///
+    /// The caller must hold exclusive collection authority, must have
+    /// invalidated every old allocation cursor, and must have proved that
+    /// clearing dead allocation bits requires no destructor. Payload storage
+    /// is neither enumerated nor accessed.
+    pub(crate) fn retain_marked_allocations(
+        &self,
+        target: RunClaimTarget,
+        class_id: AllocationClassId,
+    ) {
+        let (_, run) = self.resolved_claim_target(target, class_id);
+
+        for word_index in 0..target.geometry.allocation_bitmap.word_len {
+            let valid = valid_slot_mask(target.geometry.slot_count, word_index);
+            let allocation = allocation_word_pointer(run, target.geometry, word_index);
+            // SAFETY: validated published-run geometry places this initialized
+            // atomic allocation word in the retained arena. Exclusive
+            // collection excludes its leased writer; Acquire observes the
+            // payload publications whose bits are being retained or cleared.
+            let allocated = unsafe { allocation.as_ref() }.load(Ordering::Acquire) & valid;
+            let mark = mark_word_pointer(run, target.geometry, word_index);
+            // SAFETY: exclusive collection is the sole mark-word reader and
+            // writer, and validated geometry bounds this ordinary word.
+            let marked = unsafe { mark.read() } & valid;
+            debug_assert_eq!(marked & allocated, marked);
+
+            let retained = allocated & marked;
+            // SAFETY: the same validated allocation word has no concurrent
+            // writer under Exclusive. Release publishes the swept allocation
+            // state before C6A.3b later makes rebuilt leases/frontiers visible.
+            unsafe { allocation.as_ref() }.store(retained, Ordering::Release);
         }
     }
 

@@ -180,10 +180,10 @@ impl Heap {
     /// The collector clears mark state, seeds the stable root registry, traces
     /// the reachable graph non-recursively, and returns the latest completed
     /// scalar report which satisfies this call's requested epoch. It currently
-    /// reclaims wholly dead runs with no destructor obligation; partial sweep
-    /// and managed finalization remain later C6 work. A concurrent later
-    /// collection may overtake a waiting caller, and no unbounded report
-    /// history is retained.
+    /// reclaims wholly dead runs with no destructor obligation and clears dead
+    /// allocations from retained partial no-drop runs. Managed finalization
+    /// remains later C6 work. A concurrent later collection may overtake a
+    /// waiting caller, and no unbounded report history is retained.
     pub fn collect_full(&self) -> Result<CollectionReport, CollectionError> {
         if thread_has_any_active_mutator() {
             return Err(CollectionError::ActiveMutator);
@@ -483,7 +483,7 @@ impl ManagedData {
         // partial reset from an ordinary validation failure.
         for retired in &self.retired_no_drop_runs {
             self.arena
-                .validate_recyclable_run(*retired.target, retired.former_class_id);
+                .validate_run_target(*retired.target, retired.former_class_id);
             assert!(
                 self.free_runs
                     .iter()
@@ -500,6 +500,52 @@ impl ManagedData {
         }
 
         recycled_count
+    }
+
+    fn sweep_partial_no_drop_runs(&mut self, dead_set: &DeadSetPlan) {
+        let is_swept = |run: &&DeadRunPlan| {
+            run.disposition == DeadSlotDisposition::NoDrop
+                && run.live_slots != 0
+                && run.dead_slots != 0
+        };
+        // Validate the complete retained batch before clearing its first
+        // allocation bit. The prior whole-run transition changes only runs
+        // with zero live slots, so every partial target must still belong to
+        // its original class with a withdrawn frontier.
+        for run in dead_set.dead_runs.iter().filter(is_swept) {
+            assert!(
+                !run.metadata.needs_drop(),
+                "partial no-drop sweep selected destructor-bearing metadata"
+            );
+            let index = class_index(run.class_id).expect("swept run has an invalid class ID");
+            let class = self
+                .classes
+                .get(index)
+                .expect("swept run allocation class is absent");
+            assert!(
+                std::ptr::eq(class.metadata(), run.metadata),
+                "swept run changed allocation metadata"
+            );
+            assert_eq!(
+                class.geometry(),
+                run.target.geometry,
+                "swept run changed allocation geometry"
+            );
+            assert!(
+                class.frontier_is_withdrawn(),
+                "swept run class still publishes a frontier"
+            );
+            assert!(
+                class.contains_target(run.target),
+                "swept run is absent from its allocation class"
+            );
+            self.arena.validate_run_target(run.target, run.class_id);
+        }
+
+        for run in dead_set.dead_runs.iter().filter(is_swept) {
+            self.arena
+                .retain_marked_allocations(run.target, run.class_id);
+        }
     }
 
     fn publish_run(
@@ -740,11 +786,7 @@ impl DeadSetPlan {
                     target,
                     class_id,
                     |word_index, allocated, marked| {
-                        assert_eq!(
-                            marked & !allocated,
-                            0,
-                            "mark bitmap refers to an unallocated slot"
-                        );
+                        debug_assert_eq!(marked & allocated, marked);
                         let live = allocated & marked;
                         let dead = allocated & !marked;
                         live_slots = live_slots
@@ -1244,6 +1286,11 @@ impl HeapInner {
             // republished while this collection remains exclusive.
             data.retire_wholly_dead_no_drop_runs(&post_mark.dead_set);
             data.recycle_retired_no_drop_runs();
+
+            // C6A.3a eagerly clears only dead allocations in retained partial
+            // no-drop runs. Drop-bearing words remain intact for C6B, and no
+            // allocator selector is republished before C6A.3b.
+            data.sweep_partial_no_drop_runs(&post_mark.dead_set);
         }
 
         // Prepare the TLS record without activating it. Under the coordinator
@@ -4421,7 +4468,7 @@ mod tests {
         miri,
         ignore = "native complete-run bitmap history is intentionally scale-shaped"
     )]
-    fn c5d_full_run_mark_bitmap_tracks_one_all_and_zero_histories() {
+    fn full_run_sweep_tracks_all_one_and_zero_histories() {
         let metadata = metadata_for::<u64>();
         let geometry = RunGeometry::derive(metadata.layout(), metadata.requested_slot_size())
             .expect("u64 must have supported run geometry");
@@ -4453,12 +4500,6 @@ mod tests {
             }
         };
 
-        let one_index = geometry.slot_count / 2;
-        let one_root = heap.with_mutator(|mutator| mutator.root(values[one_index]));
-        let one = heap.collect_full().unwrap();
-        assert_eq!(one.marked_slots(), 1);
-        assert_first_run_marks(&HashSet::from([one_index]));
-
         let all_roots = heap.with_mutator(|mutator| {
             values[..geometry.slot_count]
                 .iter()
@@ -4470,8 +4511,25 @@ mod tests {
         assert_eq!(all.marked_slots(), geometry.slot_count);
         assert_first_run_marks(&(0..geometry.slot_count).collect());
 
-        drop(one_root);
+        let one_index = geometry.slot_count / 2;
+        let one_root = all_roots[one_index].clone();
         drop(all_roots);
+        let one = heap.collect_full().unwrap();
+        assert_eq!(one.marked_slots(), 1);
+        assert_first_run_marks(&HashSet::from([one_index]));
+        assert_eq!(
+            heap.inner
+                .data
+                .lock()
+                .unwrap()
+                .arena
+                .allocated_slot_pointers(first_run)
+                .len(),
+            1,
+            "partial no-drop sweep must retain exactly the marked allocation"
+        );
+
+        drop(one_root);
         let empty_again = heap.collect_full().unwrap();
         assert_eq!(empty_again.marked_slots(), 0);
         assert_first_run_marks(&HashSet::new());
@@ -4935,16 +4993,19 @@ mod tests {
 
         assert_eq!(drops.load(Ordering::Relaxed), 0);
         assert!(
-            heap.inner
+            !heap
+                .inner
                 .resolve_slot(plain_dead_a.erase().as_ptr().as_ptr() as usize)
                 .unwrap()
-                .allocated
+                .allocated,
+            "partial no-drop sweep must clear a dead allocation bit"
         );
         assert!(
             heap.inner
                 .resolve_slot(dropping_dead.erase().as_ptr().as_ptr() as usize)
                 .unwrap()
-                .allocated
+                .allocated,
+            "drop-bearing allocation must remain intact before finalization"
         );
         heap.with_mutator(|mutator| {
             assert_eq!(*plain_root.get(mutator), 10);
@@ -5031,11 +5092,81 @@ mod tests {
                 .is_none()
         );
 
+        for (index, value) in values.iter().enumerate() {
+            assert_eq!(
+                heap.inner
+                    .resolve_slot(value.erase().as_ptr().as_ptr() as usize)
+                    .unwrap()
+                    .allocated,
+                rooted_indices.contains(&index),
+                "swept allocation mismatch at boundary fixture slot {index}"
+            );
+        }
+
         heap.with_mutator(|mutator| {
             for root in &roots {
                 let _ = root.get(mutator);
             }
         });
+    }
+
+    #[test]
+    fn finalizer_panic_after_partial_no_drop_sweep_preserves_reclaimed_state() {
+        let heap = Heap::new();
+        let (live, dead) = heap.with_mutator(|mutator| {
+            let allocator = mutator.allocator::<u64>().unwrap();
+            (allocator.alloc(10), allocator.alloc(20))
+        });
+        let live_root = heap.with_mutator(|mutator| mutator.root(live));
+        let live_slot = collector_slot(&heap, live);
+        let dead_slot = collector_slot(&heap, dead);
+        assert_eq!(live_slot.owner.location, dead_slot.owner.location);
+
+        heap.request_collection();
+        let epoch = heap.inner.elect_idle_collection_for_test();
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            heap.inner.run_synthetic_collection(
+                epoch,
+                false,
+                |_, _| {},
+                |_| panic!("injected finalizer panic after partial no-drop sweep"),
+            );
+        }));
+        assert!(panic.is_err());
+        assert_failed_collection_restored(&heap);
+
+        for (value, expected) in [(live, true), (dead, false)] {
+            assert_eq!(
+                heap.inner
+                    .resolve_slot(value.erase().as_ptr().as_ptr() as usize)
+                    .unwrap()
+                    .allocated,
+                expected
+            );
+        }
+        {
+            let data = heap.inner.data.lock().unwrap();
+            assert!(data.free_runs.is_empty());
+            assert_eq!(
+                data.classes[class_index(live_slot.owner.class_id).unwrap()]
+                    .runs()
+                    .len(),
+                1,
+                "partial run must remain attached to its allocation class"
+            );
+        }
+
+        let report = heap.collect_full().unwrap();
+        assert_eq!(report.marked_slots(), 1);
+        assert!(
+            !heap
+                .inner
+                .resolve_slot(dead.erase().as_ptr().as_ptr() as usize)
+                .unwrap()
+                .allocated,
+            "retry must not restore the swept allocation"
+        );
+        heap.with_mutator(|mutator| assert_eq!(*live_root.get(mutator), 10));
     }
 
     #[test]
