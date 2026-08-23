@@ -1,10 +1,11 @@
 //! Runtime-local garbage collection support for Glam.
 //!
 //! C5D publishes successful scalar mark summaries atomically with their
-//! collection epochs after C5C's checked, recoverable graph traversal. Failed
-//! attempts retain no authoritative result and retry from a freshly cleared
-//! mark bitmap. Reclamation remains disabled, so unreachable payloads still
-//! stay live until terminal heap teardown.
+//! collection epochs after C5C's checked, recoverable graph traversal. C6A.2c
+//! reclaims wholly dead runs whose initialized payloads need no destructor,
+//! resets them to untyped arena storage, and prefers that heap-local pool for
+//! later typed-run publication. Partial-run sweep and managed payload
+//! finalization remain disabled until the later C6 checkpoints.
 
 #![deny(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]

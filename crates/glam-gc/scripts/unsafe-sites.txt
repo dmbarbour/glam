@@ -27,6 +27,7 @@ crates/glam-gc/src/arena.rs:        let words = unsafe {
 crates/glam-gc/src/arena.rs:        unsafe { allocation_word.as_ref() }.store(published_word, Ordering::Release);
 crates/glam-gc/src/arena.rs:        unsafe { dealloc(self.base.as_ptr(), chunk_layout()) };
 crates/glam-gc/src/arena.rs:        unsafe { first_allocation.as_ref() }.store(u64::MAX, Ordering::Release);
+crates/glam-gc/src/arena.rs:        unsafe { header_pointer.write(RunHeader::empty()) };
 crates/glam-gc/src/arena.rs:        unsafe { header_pointer.write(RunHeader::initialized(class_id, geometry)) };
 crates/glam-gc/src/arena.rs:        unsafe { pointer.write(prior | bit) };
 crates/glam-gc/src/arena.rs:        unsafe { pointer.write(value) };

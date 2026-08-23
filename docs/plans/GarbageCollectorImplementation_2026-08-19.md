@@ -1,8 +1,8 @@
 # Glam GC Subcrate Implementation Plan — 2026-08-19
 
-Status: in progress; Phases C0 through C6A.2b are complete, including the C2C.6
+Status: in progress; Phases C0 through C6A.2c are complete, including the C2C.6
 verification follow-up. The mandatory post-C1, post-C2C, post-C3E, post-C4,
-and post-C5 downstream reviews are complete. C6A.2c is next.
+and post-C5 downstream reviews are complete. C6A.3a is next.
 
 This plan implements an exact, non-moving, runtime-local tracing collector
 without depending on Glam value semantics. The governing requirements and
@@ -65,7 +65,7 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C6A.1 | completed | dead-set classification without reuse |
 | C6A.2a | completed | allocation-lease revocation and epoch publication |
 | C6A.2b | completed | class frontier and run-pool retirement |
-| C6A.2c | pending | wholly dead no-drop runs and free-run reuse |
+| C6A.2c | completed | wholly dead no-drop runs and free-run reuse |
 | C6A.3a | pending | eager partial no-drop sweep |
 | C6A.3b | pending | swept allocator publication |
 | C6A.4 | pending | assigned-run pressure |
@@ -3404,6 +3404,45 @@ Completed on 2026-08-23:
   fixtures), 6 Loom models, and 8 compile-fail/doc tests. The three focused
   C6A.2b fixtures are suitable for Miri; focused Miri and the full verification
   matrix are recorded in `VERIFY.md`.
+
+#### C6A.2c completion
+
+Completed on 2026-08-23:
+
+- Managed data now owns one heap-wide `free_runs` pool. After C6A.2b has
+  prevalidated and detached the complete wholly dead no-drop batch, C6A.2c
+  validates every arena identity before resetting the first run. The
+  thereafter-infallible pass clears the allocation, lease, and mark side
+  words, replaces the typed header with the canonical empty header, drops the
+  old boxed class record, and publishes only the numeric location to that
+  pool. Payload bytes remain unspecified and inaccessible.
+- Reset itself publishes no class frontier. After exclusive collection and
+  finalizer handoff finish, ordinary run publication pops the free-run pool
+  before asking the arena for virgin capacity, initializes the chosen location
+  for the requesting class and geometry, then installs a new stable class
+  record through the existing publication path. A rejected initialization
+  restores the still-empty location to the pool.
+- The primary mixed-topology fixture now proves exact zeroed side state and
+  empty headers for alternating dead wide runs, preserved live class order,
+  exclusion of partial and destructor-bearing runs, preference over unused
+  virgin runs, and cross-class retyping without restoring authority to the old
+  class. The empty-run fixture proves the same reset for both no-drop and
+  drop-bearing metadata when no allocation exists.
+- A forced finalizer panic after reset leaves exactly one durable free-run
+  entry. Retry sees neither a typed run nor a second retirement obligation,
+  preserves that one entry, and a later allocation consumes the original
+  location. This makes the destructive no-drop transition retry-stable even
+  though the collection report remains unpublished until finalization
+  succeeds.
+- Header reset adds one reviewed raw write to the unsafe inventory. The side
+  metadata reset reuses the existing raw atomic/mark initialization boundary
+  only after exclusive mutator drain and class-selector retirement; its safety
+  comments and `SAFETY.md` contract now cover both virgin initialization and
+  recycled reinitialization. The collector suite remains 156 unit tests (154
+  passing plus two explicit scale fixtures), 6 Loom models, and 8
+  compile-fail/doc tests. All three focused C6A.2c fixtures pass Miri, and the
+  stable collector and workspace verification matrices are recorded in
+  `VERIFY.md`.
 
 ### Mandatory Post-C6 Review
 

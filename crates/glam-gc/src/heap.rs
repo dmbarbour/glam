@@ -177,11 +177,13 @@ impl Heap {
 
     /// Completes a full stop-the-world collection handshake synchronously.
     ///
-    /// C5D clears collector mark state, seeds the stable root registry, traces
+    /// The collector clears mark state, seeds the stable root registry, traces
     /// the reachable graph non-recursively, and returns the latest completed
-    /// scalar report which satisfies this call's requested epoch. A concurrent
-    /// later collection may therefore overtake a waiting caller; no unbounded
-    /// report history is retained. C5 performs no reclamation.
+    /// scalar report which satisfies this call's requested epoch. It currently
+    /// reclaims wholly dead runs with no destructor obligation; partial sweep
+    /// and managed finalization remain later C6 work. A concurrent later
+    /// collection may overtake a waiting caller, and no unbounded report
+    /// history is retained.
     pub fn collect_full(&self) -> Result<CollectionReport, CollectionError> {
         if thread_has_any_active_mutator() {
             return Err(CollectionError::ActiveMutator);
@@ -271,6 +273,7 @@ struct ManagedData {
     classes_by_metadata: HashMap<MetadataIdentity, AllocationClassId>,
     classes: Vec<AllocationClassEntry>,
     retired_no_drop_runs: Vec<RetiredNoDropRun>,
+    free_runs: Vec<RunLocation>,
     allocation_pressure: AllocationPressure,
     roots: Vec<Weak<RootCell>>,
 }
@@ -468,6 +471,37 @@ impl ManagedData {
         retired_count
     }
 
+    fn recycle_retired_no_drop_runs(&mut self) -> usize {
+        let recycled_count = self.retired_no_drop_runs.len();
+        self.free_runs
+            .try_reserve(recycled_count)
+            .expect("free-run pool capacity exhausted");
+
+        // Validate the complete batch before the first header loses its old
+        // type. Retirement already proved class metadata and topology; this
+        // pass makes the arena identity needed by reset explicit and prevents
+        // partial reset from an ordinary validation failure.
+        for retired in &self.retired_no_drop_runs {
+            self.arena
+                .validate_recyclable_run(*retired.target, retired.former_class_id);
+            assert!(
+                self.free_runs
+                    .iter()
+                    .all(|location| *location != retired.target.location),
+                "retired no-drop run was already published for reuse"
+            );
+        }
+
+        for retired in std::mem::take(&mut self.retired_no_drop_runs) {
+            let target = *retired.target;
+            self.arena
+                .reset_recyclable_run(target, retired.former_class_id);
+            self.free_runs.push(target.location);
+        }
+
+        recycled_count
+    }
+
     fn publish_run(
         &mut self,
         class_index: usize,
@@ -479,7 +513,22 @@ impl ManagedData {
         // successful arena publication, all remaining operations are
         // infallible and the pressure event is recorded exactly once.
         self.classes[class_index].reserve_run();
-        let location = self.arena.publish_run(class_id, geometry)?;
+        let location = if let Some(location) = self.free_runs.pop() {
+            match self
+                .arena
+                .initialize_run(location.chunk, location.run, class_id, geometry)
+            {
+                Ok(()) => location,
+                Err(error) => {
+                    // Initialization validates before mutating the empty run,
+                    // so a rejected retype remains reusable.
+                    self.free_runs.push(location);
+                    return Err(RunPublicationError::Initialization(error));
+                }
+            }
+        } else {
+            self.arena.publish_run(class_id, geometry)?
+        };
         let target = self
             .arena
             .run_claim_target(location)
@@ -1189,9 +1238,12 @@ impl HeapInner {
 
             // C6A.2b consumes only wholly dead no-drop runs. Their stable run
             // records leave class topology after every lock-free selector is
-            // null and the stale-cache epoch is published; allocation bits,
-            // run headers, and arena ownership remain untouched for C6A.2c.
+            // null and the stale-cache epoch is published. C6A.2c then clears
+            // their side state and headers before publishing the locations to
+            // the heap-wide free-run pool. No ordinary class frontier is
+            // republished while this collection remains exclusive.
             data.retire_wholly_dead_no_drop_runs(&post_mark.dead_set);
+            data.recycle_retired_no_drop_runs();
         }
 
         // Prepare the TLS record without activating it. Under the coordinator
@@ -2084,7 +2136,7 @@ mod tests {
 
     use crate::{
         Trace, UnsupportedLayout, Visitor,
-        arena::{Arena, RunClaimTarget},
+        arena::Arena,
         class::metadata_for,
         run::{AllocationClassId, RunGeometry},
         thread_cache::{
@@ -5149,7 +5201,7 @@ mod tests {
     }
 
     #[test]
-    fn wholly_dead_no_drop_runs_leave_class_topology_without_changing_arena_storage() {
+    fn wholly_dead_no_drop_runs_reset_and_reuse_across_allocation_classes() {
         let heap = Heap::new();
         let wide_class = internal_class::<WideSlot>(&heap);
         let (wide_values, wide_roots) = heap.with_mutator(|mutator| {
@@ -5188,15 +5240,6 @@ mod tests {
         let dropping_dead = allocate(&heap, DropCounter(Arc::clone(&drops)));
         let dropping_slot = collector_slot(&heap, dropping_dead);
 
-        let record_addresses = {
-            let data = heap.inner.data.lock().unwrap();
-            data.classes[class_index(wide_class.id()).unwrap()]
-                .runs()
-                .iter()
-                .map(|run| (run.location, run.as_ref() as *const RunClaimTarget as usize))
-                .collect::<Vec<_>>()
-        };
-
         let report = heap.collect_full().unwrap();
         assert_eq!(report.marked_slots(), 4);
         assert_eq!(drops.load(Ordering::Relaxed), 0);
@@ -5214,31 +5257,22 @@ mod tests {
         );
         assert!(data.classes[class_index(wide_class.id()).unwrap()].frontier_is_withdrawn());
 
-        let retired = data
-            .retired_no_drop_runs
-            .iter()
-            .filter(|run| run.former_class_id == wide_class.id())
-            .collect::<Vec<_>>();
-        assert_eq!(retired.len(), 2);
-        assert_eq!(retired[0].target.location, wide_locations[1]);
-        assert_eq!(retired[1].target.location, wide_locations[3]);
-        for run in retired {
-            let original_record = record_addresses
-                .iter()
-                .find(|(location, _)| *location == run.target.location)
-                .unwrap()
-                .1;
-            assert_eq!(
-                run.target.as_ref() as *const RunClaimTarget as usize,
-                original_record,
-                "retirement must move rather than reconstruct the stable run record"
-            );
-            assert_eq!(
+        assert!(data.retired_no_drop_runs.is_empty());
+        assert_eq!(
+            data.free_runs,
+            vec![wide_locations[1], wide_locations[3]],
+            "reset locations must enter the one heap-wide free-run pool"
+        );
+        let free_before_reuse = data.free_runs.iter().copied().collect::<HashSet<_>>();
+        for location in &data.free_runs {
+            assert!(data.arena.run_is_empty_for_test(*location));
+            assert!(data.arena.run_claim_target(*location).is_none());
+            assert!(
                 data.arena
-                    .allocated_slot_pointers(run.target.location)
-                    .len(),
-                1,
-                "C6A.2b must not clear a retired run's allocation bitmap"
+                    .run_side_metadata_for_test(*location, wide_slots[0].owner.geometry)
+                    .iter()
+                    .all(|byte| *byte == 0),
+                "reset run retained old allocation, lease, or mark state"
             );
         }
 
@@ -5264,6 +5298,30 @@ mod tests {
         drop(data);
 
         assert!(wide_class.claim_frontier(&heap.inner).is_none());
+        let replacement = allocate(&heap, BitmapBoundarySlot { _value: 99 });
+        let replacement_slot = collector_slot(&heap, replacement);
+        assert!(
+            free_before_reuse.contains(&replacement_slot.owner.location),
+            "recycled storage must be preferred over virgin arena capacity"
+        );
+        assert_ne!(replacement_slot.owner.class_id, wide_class.id());
+        {
+            let data = heap.inner.data.lock().unwrap();
+            assert_eq!(data.free_runs.len(), 1);
+            assert!(!data.free_runs.contains(&replacement_slot.owner.location));
+            assert!(
+                data.classes[class_index(wide_class.id()).unwrap()]
+                    .runs()
+                    .iter()
+                    .all(|run| run.location != replacement_slot.owner.location),
+                "old class recovered authority over a retyped run"
+            );
+            assert!(
+                data.classes[class_index(replacement_slot.owner.class_id).unwrap()]
+                    .contains_run(replacement_slot.owner.location),
+                "new class did not receive the retyped run"
+            );
+        }
         heap.with_mutator(|mutator| {
             assert_eq!(wide_roots[0].get(mutator).value, 0);
             assert_eq!(wide_roots[1].get(mutator).value, 2);
@@ -5273,12 +5331,19 @@ mod tests {
     }
 
     #[test]
-    fn empty_runs_have_no_finalization_obligation_and_retire_from_any_class() {
+    fn empty_runs_have_no_finalization_obligation_and_recycle_from_any_class() {
         let heap = Heap::new();
         let plain_class = internal_class::<FirstType>(&heap);
         let dropping_class = internal_class::<DroppingType>(&heap);
         let plain_location = heap.inner.prepare_run(&plain_class).unwrap();
         let dropping_location = heap.inner.prepare_run(&dropping_class).unwrap();
+        let (plain_geometry, dropping_geometry) = {
+            let data = heap.inner.data.lock().unwrap();
+            (
+                data.classes[class_index(plain_class.id()).unwrap()].geometry(),
+                data.classes[class_index(dropping_class.id()).unwrap()].geometry(),
+            )
+        };
 
         heap.request_collection();
         let epoch = heap.inner.elect_idle_collection_for_test();
@@ -5317,34 +5382,29 @@ mod tests {
                 .runs()
                 .is_empty()
         );
-        assert_eq!(data.retired_no_drop_runs.len(), 2);
-        assert_eq!(
-            data.retired_no_drop_runs
-                .iter()
-                .map(|run| (run.former_class_id, run.target.location))
-                .collect::<Vec<_>>(),
-            vec![
-                (plain_class.id(), plain_location),
-                (dropping_class.id(), dropping_location)
-            ]
-        );
-        for location in [plain_location, dropping_location] {
-            assert!(data.arena.allocated_slot_pointers(location).is_empty());
-            assert!(data.arena.run_claim_target(location).is_some());
+        assert!(data.retired_no_drop_runs.is_empty());
+        assert_eq!(data.free_runs, vec![plain_location, dropping_location]);
+        for (location, geometry) in [
+            (plain_location, plain_geometry),
+            (dropping_location, dropping_geometry),
+        ] {
+            assert!(data.arena.run_is_empty_for_test(location));
+            assert!(data.arena.run_claim_target(location).is_none());
+            assert!(
+                data.arena
+                    .run_side_metadata_for_test(location, geometry)
+                    .iter()
+                    .all(|byte| *byte == 0)
+            );
         }
     }
 
     #[test]
-    fn finalizer_panic_retains_one_retired_record_and_retry_does_not_duplicate_it() {
+    fn finalizer_panic_retains_one_free_run_and_retry_does_not_duplicate_it() {
         let heap = Heap::new();
         let class = internal_class::<WideSlot>(&heap);
         let dead = allocate(&heap, WideSlot { value: 10 });
         let dead_slot = collector_slot(&heap, dead);
-        let record_address = {
-            let data = heap.inner.data.lock().unwrap();
-            data.classes[class_index(class.id()).unwrap()].runs()[0].as_ref()
-                as *const RunClaimTarget as usize
-        };
         let initial_lease_epoch = heap.inner.current_allocation_lease_epoch();
 
         heap.request_collection();
@@ -5371,19 +5431,19 @@ mod tests {
                     .runs()
                     .is_empty()
             );
-            assert_eq!(data.retired_no_drop_runs.len(), 1);
-            let retired = &data.retired_no_drop_runs[0];
-            assert_eq!(retired.former_class_id, class.id());
-            assert_eq!(retired.target.location, dead_slot.owner.location);
-            assert_eq!(
-                retired.target.as_ref() as *const RunClaimTarget as usize,
-                record_address
-            );
-            assert_eq!(
+            assert!(data.retired_no_drop_runs.is_empty());
+            assert_eq!(data.free_runs, vec![dead_slot.owner.location]);
+            assert!(data.arena.run_is_empty_for_test(dead_slot.owner.location));
+            assert!(
                 data.arena
-                    .allocated_slot_pointers(dead_slot.owner.location)
-                    .len(),
-                1
+                    .run_claim_target(dead_slot.owner.location)
+                    .is_none()
+            );
+            assert!(
+                data.arena
+                    .run_side_metadata_for_test(dead_slot.owner.location, dead_slot.owner.geometry,)
+                    .iter()
+                    .all(|byte| *byte == 0)
             );
         }
 
@@ -5391,7 +5451,8 @@ mod tests {
         assert_eq!(report.marked_slots(), 0);
         {
             let data = heap.inner.data.lock().unwrap();
-            assert_eq!(data.retired_no_drop_runs.len(), 1);
+            assert!(data.retired_no_drop_runs.is_empty());
+            assert_eq!(data.free_runs, vec![dead_slot.owner.location]);
             assert!(
                 data.classes[class_index(class.id()).unwrap()]
                     .runs()
@@ -5401,7 +5462,8 @@ mod tests {
 
         let replacement = allocate(&heap, WideSlot { value: 20 });
         let replacement_slot = collector_slot(&heap, replacement);
-        assert_ne!(replacement_slot.owner.location, dead_slot.owner.location);
+        assert_eq!(replacement_slot.owner.location, dead_slot.owner.location);
+        assert!(heap.inner.data.lock().unwrap().free_runs.is_empty());
     }
 
     #[test]

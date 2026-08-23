@@ -203,6 +203,57 @@ impl Arena {
             .initialize_run(run, class_id, geometry)
     }
 
+    /// Validates one detached run before collection clears its old type.
+    ///
+    /// The caller retains exclusive collection authority and has already
+    /// removed every ordinary allocator selector for `target`. Keeping this
+    /// validation separate lets the collector validate a complete retirement
+    /// batch before resetting its first header.
+    pub(crate) fn validate_recyclable_run(
+        &self,
+        target: RunClaimTarget,
+        class_id: AllocationClassId,
+    ) {
+        let chunk = self
+            .chunks
+            .get(target.location.chunk)
+            .expect("recyclable run lost its arena chunk");
+        let run = chunk
+            .run_address(target.location.run)
+            .expect("recyclable run lost its arena location");
+        assert_eq!(run, target.run, "recyclable run changed addresses");
+        let header = chunk
+            .header_for(run)
+            .expect("recyclable run lost its initialized header");
+        assert_eq!(
+            header.class_id(),
+            Some(class_id),
+            "recyclable run changed allocation classes"
+        );
+        assert_eq!(
+            header.geometry(),
+            Some(target.geometry),
+            "recyclable run changed geometry"
+        );
+    }
+
+    /// Clears a prevalidated, wholly dead run and restores its empty header.
+    ///
+    /// The caller must hold exclusive collection authority, must have removed
+    /// every class and frontier selector for `target`, and must have proved
+    /// that no initialized payload in the run requires destruction. Payload
+    /// bytes remain unspecified and become unreachable when the header is
+    /// reset; every authoritative allocation, lease, and mark bit is cleared.
+    pub(crate) fn reset_recyclable_run(
+        &mut self,
+        target: RunClaimTarget,
+        class_id: AllocationClassId,
+    ) {
+        self.validate_recyclable_run(target, class_id);
+        self.chunks[target.location.chunk]
+            .reset_recyclable_run(target.location.run, target.geometry);
+    }
+
     pub(crate) fn publish_run(
         &mut self,
         class_id: AllocationClassId,
@@ -404,6 +455,14 @@ impl Arena {
             .get(location.chunk)
             .expect("published run must retain its arena chunk")
             .side_metadata(location.run, geometry)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn run_is_empty_for_test(&self, location: RunLocation) -> bool {
+        self.chunks
+            .get(location.chunk)
+            .and_then(|chunk| chunk.header_for_index(location.run))
+            .is_some_and(RunHeader::is_empty)
     }
 
     pub(crate) fn claim_allocation_word(
@@ -821,6 +880,24 @@ impl ArenaChunk {
         Ok(())
     }
 
+    fn reset_recyclable_run(&mut self, run: usize, geometry: RunGeometry) {
+        let address = self
+            .run_address(run)
+            .expect("prevalidated recyclable run must belong to its chunk");
+        let header_pointer = address.pointer().cast::<RunHeader>();
+
+        // Reinitializing every side word is safe only because exclusive
+        // collection has drained mutators and the old class record and raw
+        // frontier have already been retired. The words become unpublished
+        // storage again before the header loses its geometry.
+        self.fill_side_metadata(run, geometry, 0);
+        // SAFETY: prevalidation proved this is the initialized integer-only
+        // header for `geometry`; all old side state and allocator selectors
+        // are gone, so replacing it with an empty header makes the run
+        // untyped without invalidating an accessible Rust reference.
+        unsafe { header_pointer.write(RunHeader::empty()) };
+    }
+
     fn fill_side_metadata(&mut self, run: usize, geometry: RunGeometry, value: u8) {
         debug_assert!(geometry.is_structurally_valid());
         let address = self
@@ -829,17 +906,19 @@ impl ArenaChunk {
         let word_value = u64::from_ne_bytes([value; std::mem::size_of::<u64>()]);
         for word_index in 0..geometry.allocation_bitmap.word_len {
             let pointer = allocation_word_pointer(address, geometry, word_index);
-            // SAFETY: the run is exclusively borrowed and not yet published
-            // with this geometry. Each aligned raw allocation-word destination
-            // is initialized exactly once as an atomic value before
-            // publication.
+            // SAFETY: the run is exclusively borrowed and is not accessible
+            // through an allocator selector. For a virgin or newly retyped
+            // run this initializes aligned raw storage; for collector reset it
+            // overwrites an inaccessible `AtomicU64`, which has no destructor.
+            // Publication happens only after all side words and the typed
+            // header are authoritative.
             unsafe { pointer.write(AtomicU64::new(word_value)) };
         }
         for word_index in 0..geometry.lease_bitmap.word_len {
             let pointer = lease_word_pointer(address, geometry.lease_bitmap, word_index);
-            // SAFETY: the run is exclusively borrowed and not yet published
-            // with this geometry. Each aligned raw lease-word destination is
-            // initialized exactly once as an atomic value before publication.
+            // SAFETY: the same unpublished or exclusively retired run proof
+            // permits initializing or overwriting this destructor-free atomic
+            // lease word before any allocator can observe it.
             unsafe { pointer.write(AtomicU64::new(word_value)) };
         }
         let bitmap = geometry.mark_bitmap;
