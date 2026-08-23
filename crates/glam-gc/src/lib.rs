@@ -1,9 +1,9 @@
 //! Runtime-local garbage collection support for Glam.
 //!
-//! C4B adds checked direct roots and weak-registry publication to C3's regional
-//! mutator admission and stop-the-world coordination boundary. Marking and
-//! reclamation remain disabled, so payloads stay live until terminal heap
-//! teardown.
+//! C4 adds checked direct roots, weak-registry publication, and an exclusive
+//! collection-time registry walk to C3's regional mutator admission and
+//! stop-the-world coordination boundary. Marking and reclamation remain
+//! disabled, so payloads stay live until terminal heap teardown.
 
 #![deny(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]

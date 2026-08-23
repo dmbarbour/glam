@@ -540,6 +540,10 @@ impl HeapInner {
 
         remove_inactive_thread_cache(self);
         let mut attempt = CollectionAttempt::new(self, epoch);
+        // C4 visits roots only to establish the production registry boundary;
+        // C5 replaces this no-op receiver with exact marking. The walk still
+        // prunes cells whose final public root was released before this pause.
+        self.visit_registered_roots(|_| {});
         exclusive_work();
 
         // Prepare the TLS record without activating it. Under the heap-state
@@ -1062,10 +1066,6 @@ impl HeapInner {
         root
     }
 
-    #[allow(
-        dead_code,
-        reason = "C4B traversal is integrated into collection by C4C"
-    )]
     fn visit_registered_roots(&self, mut visit: impl FnMut(crate::trace::ErasedGc)) -> usize {
         let mut state = self
             .state
@@ -2618,12 +2618,102 @@ mod tests {
     }
 
     #[test]
-    fn root_publication_waits_for_exclusive_collection_authority() {
+    fn elected_collection_walks_and_prunes_the_root_registry() {
+        let heap = Heap::new();
+        let class = heap
+            .with_mutator(|mutator| mutator.allocation_class::<u64>())
+            .unwrap();
+        let values = heap
+            .with_mutator(|mutator| [mutator.alloc(&class, 41_u64), mutator.alloc(&class, 42_u64)]);
+        let live = heap.with_mutator(|mutator| mutator.root(values[0]));
+        let dead = heap.with_mutator(|mutator| mutator.root(values[1]));
+        drop(dead);
+        assert_eq!(heap.inner.state.lock().unwrap().roots.len(), 2);
+
+        assert_eq!(heap.collect_full().unwrap().epoch(), 1);
+
+        assert_eq!(heap.inner.state.lock().unwrap().roots.len(), 1);
+        heap.with_mutator(|mutator| assert_eq!(*live.get(mutator), 41));
+    }
+
+    #[test]
+    fn last_public_drop_after_upgrade_is_passive_and_conservatively_retained() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let heap = Heap::new();
+        let dropping_class = heap
+            .with_mutator(|mutator| mutator.allocation_class::<DropCounter>())
+            .unwrap();
+        let plain_class = heap
+            .with_mutator(|mutator| mutator.allocation_class::<u64>())
+            .unwrap();
+        let (dropping_value, plain_value) = heap.with_mutator(|mutator| {
+            (
+                mutator.alloc(&dropping_class, DropCounter(Arc::clone(&drops))),
+                mutator.alloc(&plain_class, 42_u64),
+            )
+        });
+        let dropping_root = heap.with_mutator(|mutator| mutator.root(dropping_value));
+        let plain_root = heap.with_mutator(|mutator| mutator.root(plain_value));
+        let dropping_address = dropping_value.erase().as_ptr().as_ptr() as usize;
+        let plain_address = plain_value.erase().as_ptr().as_ptr() as usize;
+        let dropping_registration = heap.inner.state.lock().unwrap().roots[0].clone();
+        let exclusive = heap.inner.enter_synthetic_exclusive();
+        let (upgraded_tx, upgraded_rx) = mpsc::channel();
+        let (dropped_tx, dropped_rx) = mpsc::channel();
+        let dropper = std::thread::spawn(move || {
+            upgraded_rx.recv().unwrap();
+            drop(dropping_root);
+            dropped_tx.send(()).unwrap();
+        });
+
+        let mut visited = Vec::new();
+        let count = heap.inner.visit_registered_roots(|value| {
+            let address = value.as_ptr().as_ptr() as usize;
+            visited.push(address);
+            if address == dropping_address {
+                upgraded_tx.send(()).unwrap();
+                dropped_rx.recv().unwrap();
+            } else {
+                assert_eq!(address, plain_address);
+                assert!(
+                    dropping_registration.upgrade().is_none(),
+                    "the prior temporary upgrade must be released before the next entry"
+                );
+            }
+        });
+        dropper.join().expect("root dropper panicked");
+
+        assert_eq!(count, 2);
+        assert_eq!(visited, vec![dropping_address, plain_address]);
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
+        assert_eq!(heap.inner.state.lock().unwrap().roots.len(), 2);
+
+        let mut retained = Vec::new();
+        assert_eq!(
+            heap.inner
+                .visit_registered_roots(|value| retained.push(value.as_ptr().as_ptr() as usize)),
+            1
+        );
+        assert_eq!(retained, vec![plain_address]);
+        assert_eq!(heap.inner.state.lock().unwrap().roots.len(), 1);
+
+        drop(exclusive);
+        drop(plain_root);
+        drop((dropping_class, plain_class));
+        drop(heap);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn failed_upgrade_cannot_race_root_publication_during_exclusive_collection() {
         let heap = Heap::new();
         let class = heap
             .with_mutator(|mutator| mutator.allocation_class::<u64>())
             .unwrap();
         let value = heap.with_mutator(|mutator| mutator.alloc(&class, 42_u64));
+        let expired = heap.with_mutator(|mutator| mutator.root(value));
+        drop(expired);
+        assert_eq!(heap.inner.state.lock().unwrap().roots.len(), 1);
         let exclusive = heap.inner.enter_synthetic_exclusive();
         let worker = std::thread::spawn({
             let heap = heap.clone();
@@ -2631,6 +2721,7 @@ mod tests {
         });
 
         heap.inner.wait_for_blocked_outer_mutators(1);
+        assert_eq!(heap.inner.visit_registered_roots(|_| {}), 0);
         assert!(heap.inner.state.lock().unwrap().roots.is_empty());
 
         drop(exclusive);

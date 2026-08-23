@@ -1,8 +1,8 @@
 # Glam GC Subcrate Implementation Plan — 2026-08-19
 
-Status: in progress; Phases C0 through C4B are complete, including the C2C.6
+Status: in progress; Phases C0 through C4C are complete, including the C2C.6
 verification follow-up. The mandatory post-C1, post-C2C, and post-C3E
-downstream reviews are complete. C4C is next.
+downstream reviews are complete. C5A is next.
 
 This plan implements an exact, non-moving, runtime-local tracing collector
 without depending on Glam value semantics. The governing requirements and
@@ -46,7 +46,7 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C3E | completed | entry-serviced collection and coordinator simplification |
 | C4A | completed | checked direct-root construction and access |
 | C4B | completed | weak registry publication and stable root traversal |
-| C4C | pending | concurrent root lifetime and boundary audit |
+| C4C | completed | concurrent root lifetime and boundary audit |
 | C5A | pending | mark bitmap and checked-slot substrate |
 | C5B | pending | exact root-to-edge traversal |
 | C5C | pending | invalid-edge and panic recovery |
@@ -2027,6 +2027,11 @@ Execute C4 as three independently verified checkpoints:
   upgrade the weak cell only for the duration of reading and visiting its
   erased `Gc`, prune failed upgrades in place, and release the temporary strong
   reference before continuing. Do not build a `Vec<Arc<RootCell>>` snapshot.
+  Construct the `Arc<RootCell>` and its weak candidate before taking heap
+  state. The active mutator is the semantic exclusion barrier between
+  validation and publication; using one state-lock acquisition for both is an
+  implementation economy because current topology validation already requires
+  that mutex, not an additional atomicity requirement.
 - **C4C — concurrent lifetime and boundary audit.** Integrate the stable
   registry walk into the exclusive collection path even though C4 does not
   trace the seeds yet. Force clone, drop, per-entry upgrade, pruning, and
@@ -2111,6 +2116,30 @@ C4B completed on 2026-08-22 with the following boundary:
   exclusion during a collection pause, ordered visitation, and dead-entry
   pruning. C4B does not yet invoke the traversal from a production collection;
   C4C owns that integration and the concurrent lifetime audit.
+
+#### C4C Completion
+
+C4C completed on 2026-08-23 with the following boundary:
+
+- Every elected collection now walks the weak registry during its exclusive
+  phase. C4 supplies a no-op seed receiver, so the walk prunes dead cells but
+  does not mark or reclaim payloads; C5 replaces that receiver with exact
+  marking.
+- A forced per-entry schedule pauses after a successful weak upgrade, drops
+  the final public root on another thread, and then proves traversal reaches
+  the next entry while retaining the heap-state mutex. The temporary collector
+  `Arc` keeps the first seed valid through its visit, is explicitly dropped
+  before the next entry, and runs only passive `RootCell` destruction.
+- A cell which was live at upgrade is conservatively retained in the weak
+  vector for that collection even if its final public root is dropped during
+  the visit. The following walk observes the failed upgrade and prunes it in
+  place. Its managed payload remains allocated until heap teardown.
+- Production-path tests prove an elected collection prunes expired roots.
+  Another forced schedule proves a failed upgrade cannot race replacement
+  publication: root construction stays blocked until exclusive authority ends,
+  then publishes a distinct new cell normally.
+- Existing cross-thread clone/access and escaped-root teardown tests complete
+  the ownership audit. C4 adds neither trace dispatch nor reclamation.
 
 ## Phase C5 — Exact Full Marking
 

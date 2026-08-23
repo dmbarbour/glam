@@ -40,7 +40,10 @@ multi-reader publication, adds the one-word typed `Root<T>` and weak-heap
 `RootCell`, and checks heap ownership, canonical representation, and the
 allocation bit in every root construction. C4B publishes each new cell as one
 weak registry entry before returning its public root, then adds stable
-exclusive traversal and in-place pruning without a strong-root snapshot.
+exclusive traversal and in-place pruning without a strong-root snapshot. C4C
+wires that walk into every elected collection and forces the final-public-drop
+ordering on both sides of each temporary weak upgrade. The walk still performs
+no marking or reclamation.
 
 The crate denies unsafe code by default. `src/lib.rs` gives the reviewed
 `pointer`, `root`, `mutator`, `trace`, `mutation`, `thread_cache`, and unit-test
@@ -521,6 +524,14 @@ reported only after releasing the mutex, so a caller contract violation does
 not poison an otherwise valid heap. Clones share the existing cell and neither
 clone nor drop touches the registry.
 
+The `Arc<RootCell>` and its weak registration candidate are constructed before
+the heap mutex is acquired. Holding one critical section across validation and
+the vector push is a one-lock implementation choice, not the semantic barrier:
+the calling `Mutator` already prevents an exclusive collection or reclamation
+from intervening. Current validation nevertheless needs the mutex to read the
+arena chunk index and class topology; only its final allocation-bit load is
+independently atomic.
+
 `Root<T>` contains one `Arc<RootCell>` plus a zero-sized typed marker. The
 non-generic cell contains a `Weak<HeapInner>` and one `ErasedGc`. The weak
 control block remains allocated while the root exists, so comparing its address
@@ -611,6 +622,12 @@ mutation closure runs.
 - C4B tests one registry entry per cell rather than per clone, publication only
   after successful validation and mutator admission, stable ordered visitation,
   and in-place removal of dead weak entries through the exclusive walk.
+- C4C tests production collection-path pruning, a final public root dropped
+  after the collector's successful per-entry upgrade, release of that temporary
+  strong reference before visiting the next entry, conservative retention until
+  the following walk, passive root-cell destruction under the heap mutex, and
+  exclusion of replacement publication until the collector leaves exclusive
+  authority.
 - The ordinary crate checks, exact unsafe inventory, focused Miri run, and
   repository-wide checks are required at completed checkpoints.
 - Miri passes all implemented tests with leak checking enabled. C1's temporary

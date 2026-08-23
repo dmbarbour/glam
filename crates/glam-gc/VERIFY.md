@@ -59,7 +59,9 @@ adds release-checked direct roots and makes allocation-bit publication atomic
 so root validation can inspect a word while its leased writer advances other
 slots. C4B publishes each cell into a weak heap registry before returning its
 public root and adds exclusive, stable, in-place traversal and pruning. C4C
-next integrates that walk with collection and audits lifetime races.
+integrates that walk with every elected collection and forces the last-root
+drop on both sides of a temporary weak upgrade. The C4 walk remains a no-op
+seed receiver until C5 adds marking.
 Ordinary threaded stress remains supplementary rather than proof of coordinator
 ordering.
 
