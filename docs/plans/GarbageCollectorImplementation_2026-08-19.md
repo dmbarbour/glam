@@ -1,8 +1,8 @@
 # Glam GC Subcrate Implementation Plan — 2026-08-19
 
-Status: in progress; Phases C0 through C5D.1 are complete, including the C2C.6
+Status: in progress; Phases C0 through C5D.2 are complete, including the C2C.6
 verification follow-up. The mandatory post-C1, post-C2C, post-C3E, and post-C4
-downstream reviews are complete. C5D.2 is next.
+downstream reviews are complete. The mandatory post-C5 review is next.
 
 This plan implements an exact, non-moving, runtime-local tracing collector
 without depending on Glam value semantics. The governing requirements and
@@ -59,7 +59,8 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C5C.1 | completed | trace and worklist panic recovery |
 | C5C.2 | completed | invalid-edge recovery and retry |
 | C5D.1 | completed | successful mark publication and report |
-| C5D.2 | pending | reachability oracle, scale, and audit |
+| C5D.2 | completed | reachability oracle, scale, and verification closeout |
+| Post-C5 review | pending | completed C5 audit and downstream-plan reconciliation |
 | C6A.1 | pending | dead-set classification without reuse |
 | C6A.2a | pending | allocation-lease revocation and epoch publication |
 | C6A.2b | pending | class frontier and run-pool retirement |
@@ -2514,12 +2515,19 @@ Execute C5 as the following independently verified checkpoints:
   summary. C6 consumes successful marks under the same collection authority;
   live-run and survivor occupancy come from its bitmap scan. C5 reclaims
   nothing.
-- **C5D.2 — reachability oracle, scale, and audit.** Compare randomized graphs
-  with a simple reachability oracle, run million-edge non-recursive tests,
-  include both a million-node deep chain and a flat million-edge array, verify
-  zero/one/all-live run bitmaps and repeated clear/mark histories, and update
-  the safety and verification ledgers. Record peak object-worklist length and
-  capacity for the wide fixture without making them correctness thresholds.
+- **C5D.2 — reachability oracle, scale, and verification closeout.** Compare
+  randomized graphs with a simple reachability oracle, run million-edge
+  non-recursive tests, include both a million-node deep chain and a flat
+  million-edge array, verify zero/one/all-live run bitmaps and repeated
+  clear/mark histories, and record peak object-worklist length and capacity
+  for the wide fixture without making them correctness thresholds. Update
+  `VERIFY.md` with the resulting fixtures and commands. Update `SAFETY.md` only
+  with C5 completion and the evidence supporting its existing mark invariants;
+  C5D.2 introduces no new unsafe boundary. Run the exact unsafe inventory and
+  focused verification suite to prove that inventory remains unchanged. This
+  checkpoint is an implementation-verification closeout, not the mandatory
+  post-C5 review: it does not reopen C5 architecture, re-audit every unsafe
+  block, or reconcile the downstream phase design.
 
 - Stop all mutators, reserve a root-seed worklist, then directly walk and prune
   the stable external-root registry while copying each successfully upgraded
@@ -2730,6 +2738,53 @@ Completed on 2026-08-23:
   clean epoch-two retry.
 - Focused verification now passes 143 unit tests, 6 Loom models, and 8
   compile-fail/doc tests.
+
+#### C5D.2 completion
+
+Completed on 2026-08-23:
+
+- Twenty-four deterministic randomized graph fixtures compare the collector's
+  report, every allocation's mark bit, and every trace count with an
+  independent index-based reachability oracle. The graphs include cycles,
+  duplicates, self-edges, and deliberately unreachable allocations.
+- One complete `u64` typed run is driven through zero, one, all, then zero live
+  slots across four successful collections. Each report and every allocated
+  slot agree, latching that a completed bitmap describes only its own attempt
+  rather than accumulated mark history.
+- A dedicated serial scale script keeps expensive evidence independently
+  measurable from ordinary unit tests. The native marker completes a
+  one-million-node chain and a flat one-million-edge array without recursive
+  Rust traversal. The flat fixture observed a peak object-worklist length of
+  1,000,000 and capacity of 1,048,576; neither value is a correctness or
+  performance threshold.
+- Test-only peak counters compile out of the collector's production report and
+  retain no operational history. The compact test edge representation keeps a
+  single chain edge inline, avoiding a million irrelevant host allocations;
+  it reuses the existing reviewed `GraphNode` trace contract and adds no unsafe
+  site.
+- `SAFETY.md` and `VERIFY.md` now record the C5 evidence. The ordinary focused
+  suite contains 147 unit tests, of which the two independently timed scale
+  fixtures are ignored, plus 6 Loom models and 8 compile-fail/doc tests. The
+  exact unsafe inventory remains unchanged. The new fixtures pass focused
+  Miri and AddressSanitizer runs, and the complete suite passes
+  ThreadSanitizer. Full AddressSanitizer execution still reports one 24-byte
+  leak which reproduces unchanged from the clean pre-C5D.2 `d7977d4` worktree;
+  it is recorded as a post-C5 verification finding rather than silently
+  accepted.
+
+### Mandatory Post-C5 Review
+
+After C5D.2 supplies the completed verification evidence, separately audit the
+implemented C5 marking phase against its purpose and invariants. Reconcile
+intentional implementation drift; assess whether the tests actually establish
+exact marking, retry safety, non-recursion, and atomic result publication; and
+review C6 through C8 against the concrete bitmap, reporting, locking, and
+recovery model now implemented. Repartition downstream checkpoints or record
+new design decisions before C6 begins. Classify the pre-existing 24-byte full
+AddressSanitizer leak report and either repair it or document why the sanitizer
+entry point needs an explicit process-lifetime exception. This review is the
+major-phase review required by the roadmap and is not part of C5D.2's
+implementation work.
 
 ## Phase C6 — Sweep, Mutator Finalization, Retry, and Quarantine
 
@@ -3096,6 +3151,10 @@ that headroom, while quarantine is included in the retained baseline. Heap
 destruction releases retained empty chunks; ordinary collection does not.
 
 Gate G1 passes after C6D plus its focused unsafe-code audit.
+
+### Phase C6 Completions
+
+### Mandatory Post-C6 Review
 
 ## Phase C7 — Shared-Pointer and Worker-Shaped Stress
 

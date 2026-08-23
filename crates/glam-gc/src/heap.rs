@@ -34,6 +34,10 @@ pub struct CollectionReport {
     traced_objects: usize,
     marked_slots: usize,
     conservatively_retained_slots: usize,
+    #[cfg(test)]
+    peak_object_worklist_len: usize,
+    #[cfg(test)]
+    peak_object_worklist_capacity: usize,
 }
 
 impl CollectionReport {
@@ -521,6 +525,10 @@ struct MarkSummary {
     traced_objects: usize,
     marked_slots: usize,
     conservatively_retained_slots: usize,
+    #[cfg(test)]
+    peak_object_worklist_len: usize,
+    #[cfg(test)]
+    peak_object_worklist_capacity: usize,
 }
 
 #[derive(Default)]
@@ -533,6 +541,10 @@ struct MarkAttempt {
     panic_before_worklist_push: Option<usize>,
     #[cfg(test)]
     completed_worklist_pushes: usize,
+    #[cfg(test)]
+    peak_object_worklist_len: usize,
+    #[cfg(test)]
+    peak_object_worklist_capacity: usize,
 }
 
 impl MarkAttempt {
@@ -540,6 +552,10 @@ impl MarkAttempt {
         self.worklist
             .try_reserve(root_registry_len)
             .expect("collector root worklist capacity exhausted");
+        #[cfg(test)]
+        {
+            self.peak_object_worklist_capacity = self.worklist.capacity();
+        }
     }
 
     fn discover(
@@ -587,6 +603,10 @@ impl MarkAttempt {
         self.worklist.push(work);
         #[cfg(test)]
         {
+            self.peak_object_worklist_len = self.peak_object_worklist_len.max(self.worklist.len());
+            self.peak_object_worklist_capacity = self
+                .peak_object_worklist_capacity
+                .max(self.worklist.capacity());
             self.completed_worklist_pushes = self
                 .completed_worklist_pushes
                 .checked_add(1)
@@ -659,6 +679,10 @@ impl MarkAttempt {
             traced_objects: self.traced_object_count,
             marked_slots: self.marked_slot_count,
             conservatively_retained_slots: 0,
+            #[cfg(test)]
+            peak_object_worklist_len: self.peak_object_worklist_len,
+            #[cfg(test)]
+            peak_object_worklist_capacity: self.peak_object_worklist_capacity,
         }
     }
 }
@@ -1567,6 +1591,10 @@ impl<'heap> CollectionAttempt<'heap> {
                 traced_objects: summary.traced_objects,
                 marked_slots: summary.marked_slots,
                 conservatively_retained_slots: summary.conservatively_retained_slots,
+                #[cfg(test)]
+                peak_object_worklist_len: summary.peak_object_worklist_len,
+                #[cfg(test)]
+                peak_object_worklist_capacity: summary.peak_object_worklist_capacity,
             };
             coordinator.latest_collection_report = Some(report);
             coordinator.completed_collection_epoch = self.epoch.get();
@@ -1855,14 +1883,63 @@ mod tests {
         fn trace(&self, _visitor: &mut Visitor<'_>) {}
     }
 
+    enum GraphEdges {
+        Empty,
+        One(crate::Gc<GraphNode>),
+        Many(Vec<crate::Gc<GraphNode>>),
+    }
+
+    impl GraphEdges {
+        fn from_vec(mut edges: Vec<crate::Gc<GraphNode>>) -> Self {
+            match edges.len() {
+                0 => Self::Empty,
+                1 => Self::One(edges.pop().expect("single graph edge disappeared")),
+                _ => Self::Many(edges),
+            }
+        }
+
+        fn push(&mut self, target: crate::Gc<GraphNode>) {
+            match self {
+                Self::Empty => *self = Self::One(target),
+                Self::One(first) => *self = Self::Many(vec![*first, target]),
+                Self::Many(edges) => edges.push(target),
+            }
+        }
+
+        fn len(&self) -> usize {
+            match self {
+                Self::Empty => 0,
+                Self::One(_) => 1,
+                Self::Many(edges) => edges.len(),
+            }
+        }
+
+        fn is_empty(&self) -> bool {
+            matches!(self, Self::Empty)
+        }
+
+        fn visit(&self, visitor: &mut Visitor<'_>) {
+            match self {
+                Self::Empty => {}
+                Self::One(edge) => visitor.visit(*edge),
+                Self::Many(edges) => {
+                    for edge in edges.iter().copied() {
+                        visitor.visit(edge);
+                    }
+                }
+            }
+        }
+    }
+
     struct GraphNode {
-        edges: Mutex<Vec<crate::Gc<GraphNode>>>,
+        edges: Mutex<GraphEdges>,
         traces: Arc<AtomicUsize>,
     }
 
-    // SAFETY: the mutex-protected vector contains every managed edge in the
-    // node. Exclusive collection excludes mutator updates, and tracing reports
-    // the complete synchronized edge snapshot without changing it.
+    // SAFETY: the mutex-protected edge representation contains every managed
+    // edge in the node. Exclusive collection excludes mutator updates, and
+    // tracing reports the complete synchronized edge snapshot without changing
+    // it.
     unsafe impl Trace for GraphNode {
         fn trace(&self, visitor: &mut Visitor<'_>) {
             self.traces.fetch_add(1, Ordering::Relaxed);
@@ -1870,17 +1947,67 @@ mod tests {
                 self.edges.clear_poison();
                 poison.into_inner()
             });
-            for edge in edges.iter().copied() {
-                visitor.visit(edge);
-            }
+            edges.visit(visitor);
         }
     }
 
     fn graph_node(traces: Arc<AtomicUsize>) -> GraphNode {
         GraphNode {
-            edges: Mutex::new(Vec::new()),
+            edges: Mutex::new(GraphEdges::Empty),
             traces,
         }
+    }
+
+    fn graph_node_with_edges(
+        traces: Arc<AtomicUsize>,
+        edges: Vec<crate::Gc<GraphNode>>,
+    ) -> GraphNode {
+        GraphNode {
+            edges: Mutex::new(GraphEdges::from_vec(edges)),
+            traces,
+        }
+    }
+
+    fn graph_node_with_edge(traces: Arc<AtomicUsize>, edge: crate::Gc<GraphNode>) -> GraphNode {
+        GraphNode {
+            edges: Mutex::new(GraphEdges::One(edge)),
+            traces,
+        }
+    }
+
+    struct TestRng(u64);
+
+    impl TestRng {
+        fn new(seed: u64) -> Self {
+            assert_ne!(seed, 0, "test RNG seed must be nonzero");
+            Self(seed)
+        }
+
+        fn next(&mut self) -> u64 {
+            let mut value = self.0;
+            value ^= value << 13;
+            value ^= value >> 7;
+            value ^= value << 17;
+            self.0 = value;
+            value
+        }
+
+        fn index(&mut self, upper_bound: usize) -> usize {
+            assert_ne!(upper_bound, 0);
+            (self.next() % upper_bound as u64) as usize
+        }
+    }
+
+    fn reference_reachability(adjacency: &[Vec<usize>], roots: &[usize]) -> Vec<bool> {
+        let mut reachable = vec![false; adjacency.len()];
+        let mut worklist = roots.to_vec();
+        while let Some(node) = worklist.pop() {
+            if std::mem::replace(&mut reachable[node], true) {
+                continue;
+            }
+            worklist.extend(adjacency[node].iter().copied());
+        }
+        reachable
     }
 
     fn connect_graph_nodes(
@@ -3460,10 +3587,10 @@ mod tests {
                     .iter()
                     .map(|traces| allocator.alloc(graph_node(Arc::clone(traces))))
                     .collect::<Vec<_>>();
-                let root_value = allocator.alloc(GraphNode {
-                    edges: Mutex::new(leaves.clone()),
-                    traces: Arc::clone(&root_traces),
-                });
+                let root_value = allocator.alloc(graph_node_with_edges(
+                    Arc::clone(&root_traces),
+                    leaves.clone(),
+                ));
                 let slots = std::iter::once(root_value)
                     .chain(leaves)
                     .map(|value| collector_slot(&heap, value))
@@ -3700,6 +3827,140 @@ mod tests {
     }
 
     #[test]
+    fn c5d_random_graph_marks_match_an_independent_reachability_oracle() {
+        #[cfg(miri)]
+        const CASES: u64 = 1;
+        #[cfg(not(miri))]
+        const CASES: u64 = 24;
+        #[cfg(miri)]
+        const NODE_COUNT: usize = 65;
+        #[cfg(not(miri))]
+        const NODE_COUNT: usize = 257;
+        const CONNECTED_NODE_COUNT: usize = NODE_COUNT - 8;
+        const ROOT_INDICES: [usize; 3] =
+            [0, CONNECTED_NODE_COUNT / 3, 2 * CONNECTED_NODE_COUNT / 3];
+
+        for case in 1..=CASES {
+            let mut rng = TestRng::new(case.wrapping_mul(0x9e37_79b9_7f4a_7c15));
+            let mut adjacency = vec![Vec::new(); NODE_COUNT];
+            for edges in &mut adjacency[..CONNECTED_NODE_COUNT] {
+                let edge_count = rng.index(7);
+                edges.extend((0..edge_count).map(|_| rng.index(CONNECTED_NODE_COUNT)));
+            }
+            adjacency[0].extend([0, 1, 1]);
+            adjacency[1].push(0);
+            let expected = reference_reachability(&adjacency, &ROOT_INDICES);
+            let expected_count = expected.iter().filter(|reachable| **reachable).count();
+
+            let heap = Heap::new();
+            let counters = (0..NODE_COUNT)
+                .map(|_| Arc::new(AtomicUsize::new(0)))
+                .collect::<Vec<_>>();
+            let (nodes, roots) = heap.with_mutator(|mutator| {
+                let allocator = mutator.allocator::<GraphNode>().unwrap();
+                let nodes = counters
+                    .iter()
+                    .map(|counter| allocator.alloc(graph_node(Arc::clone(counter))))
+                    .collect::<Vec<_>>();
+                for (owner, edges) in adjacency.iter().enumerate() {
+                    for target in edges {
+                        connect_graph_nodes(mutator, nodes[owner], nodes[*target]);
+                    }
+                }
+                let roots = ROOT_INDICES
+                    .iter()
+                    .map(|index| mutator.root(nodes[*index]))
+                    .collect::<Vec<_>>();
+                (nodes, roots)
+            });
+
+            let report = heap.collect_full().unwrap();
+            assert_eq!(report.root_entries(), roots.len(), "case {case}");
+            assert_eq!(report.marked_slots(), expected_count, "case {case}");
+            assert_eq!(report.traced_objects(), expected_count, "case {case}");
+            for (index, node) in nodes.iter().copied().enumerate() {
+                assert_eq!(
+                    slot_is_marked(&heap, collector_slot(&heap, node)),
+                    expected[index],
+                    "case {case}, node {index}"
+                );
+                assert_eq!(
+                    counters[index].load(Ordering::Relaxed),
+                    usize::from(expected[index]),
+                    "case {case}, node {index}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native complete-run bitmap history is intentionally scale-shaped"
+    )]
+    fn c5d_full_run_mark_bitmap_tracks_zero_one_all_and_zero_histories() {
+        let metadata = metadata_for::<u64>();
+        let geometry = RunGeometry::derive(metadata.layout(), metadata.requested_slot_size())
+            .expect("u64 must have supported run geometry");
+        let heap = Heap::new();
+        let values = heap.with_mutator(|mutator| {
+            let allocator = mutator.allocator::<u64>().unwrap();
+            (0..=geometry.slot_count)
+                .map(|value| allocator.alloc(value as u64))
+                .collect::<Vec<_>>()
+        });
+        let slots = values
+            .iter()
+            .copied()
+            .map(|value| collector_slot(&heap, value))
+            .collect::<Vec<_>>();
+        let first_run = slots[0].owner.location;
+        assert!(
+            slots[..geometry.slot_count]
+                .iter()
+                .all(|slot| slot.owner.location == first_run)
+        );
+        assert_ne!(slots[geometry.slot_count].owner.location, first_run);
+
+        let assert_first_run_marks = |expected: &HashSet<usize>| {
+            for (index, slot) in slots[..geometry.slot_count].iter().copied().enumerate() {
+                assert_eq!(
+                    slot_is_marked(&heap, slot),
+                    expected.contains(&index),
+                    "unexpected mark state at slot {index}"
+                );
+            }
+        };
+
+        let empty = heap.collect_full().unwrap();
+        assert_eq!(empty.marked_slots(), 0);
+        assert_first_run_marks(&HashSet::new());
+
+        let one_index = geometry.slot_count / 2;
+        let one_root = heap.with_mutator(|mutator| mutator.root(values[one_index]));
+        let one = heap.collect_full().unwrap();
+        assert_eq!(one.marked_slots(), 1);
+        assert_first_run_marks(&HashSet::from([one_index]));
+
+        drop(one_root);
+        let all_roots = heap.with_mutator(|mutator| {
+            values[..geometry.slot_count]
+                .iter()
+                .copied()
+                .map(|value| mutator.root(value))
+                .collect::<Vec<_>>()
+        });
+        let all = heap.collect_full().unwrap();
+        assert_eq!(all.marked_slots(), geometry.slot_count);
+        assert_first_run_marks(&(0..geometry.slot_count).collect());
+
+        drop(all_roots);
+        let empty_again = heap.collect_full().unwrap();
+        assert_eq!(empty_again.marked_slots(), 0);
+        assert_first_run_marks(&HashSet::new());
+    }
+
+    #[test]
     fn failed_mark_attempt_does_not_publish_or_replace_a_report() {
         let heap = Heap::new();
         let first = heap.collect_full().unwrap();
@@ -3914,6 +4175,70 @@ mod tests {
         assert!(slot_is_marked(&heap, collector_slot(&heap, shared_tail)));
         heap.with_mutator(|mutator| {
             assert_eq!(root.get(mutator).edges.lock().unwrap().len(), WIDTH)
+        });
+    }
+
+    #[test]
+    #[ignore = "C5D.2 scale fixture; run crates/glam-gc/scripts/check-scale.sh"]
+    fn c5d_scale_million_node_deep_chain_is_nonrecursive() {
+        #[cfg(miri)]
+        const NODE_COUNT: usize = 256;
+        #[cfg(not(miri))]
+        const NODE_COUNT: usize = 1_000_000;
+
+        let heap = Heap::new();
+        let traces = Arc::new(AtomicUsize::new(0));
+        let (tail, root) = heap.with_mutator(|mutator| {
+            let allocator = mutator.allocator::<GraphNode>().unwrap();
+            let tail = allocator.alloc(graph_node(Arc::clone(&traces)));
+            let mut head = tail;
+            for _ in 1..NODE_COUNT {
+                head = allocator.alloc(graph_node_with_edge(Arc::clone(&traces), head));
+            }
+            (tail, mutator.root(head))
+        });
+
+        let report = heap.collect_full().unwrap();
+        assert_eq!(report.root_entries(), 1);
+        assert_eq!(report.traced_objects(), NODE_COUNT);
+        assert_eq!(report.marked_slots(), NODE_COUNT);
+        assert_eq!(traces.load(Ordering::Relaxed), NODE_COUNT);
+        assert!(slot_is_marked(&heap, collector_slot(&heap, tail)));
+        heap.with_mutator(|mutator| assert_eq!(root.get(mutator).edges.lock().unwrap().len(), 1));
+    }
+
+    #[test]
+    #[ignore = "C5D.2 scale fixture; run crates/glam-gc/scripts/check-scale.sh"]
+    fn c5d_scale_flat_million_edge_array_records_worklist_peak() {
+        #[cfg(miri)]
+        const EDGE_COUNT: usize = 256;
+        #[cfg(not(miri))]
+        const EDGE_COUNT: usize = 1_000_000;
+
+        let heap = Heap::new();
+        let traces = Arc::new(AtomicUsize::new(0));
+        let (last, root) = heap.with_mutator(|mutator| {
+            let allocator = mutator.allocator::<GraphNode>().unwrap();
+            let edges = (0..EDGE_COUNT)
+                .map(|_| allocator.alloc(graph_node(Arc::clone(&traces))))
+                .collect::<Vec<_>>();
+            let last = edges[EDGE_COUNT - 1];
+            let root = allocator.alloc(graph_node_with_edges(Arc::clone(&traces), edges));
+            (last, mutator.root(root))
+        });
+
+        let report = heap.collect_full().unwrap();
+        assert_eq!(report.root_entries(), 1);
+        assert_eq!(report.traced_objects(), EDGE_COUNT + 1);
+        assert_eq!(report.marked_slots(), EDGE_COUNT + 1);
+        assert_eq!(traces.load(Ordering::Relaxed), EDGE_COUNT + 1);
+        assert!(slot_is_marked(&heap, collector_slot(&heap, last)));
+        eprintln!(
+            "C5D.2 flat {EDGE_COUNT}-edge worklist peak: len={}, capacity={}",
+            report.peak_object_worklist_len, report.peak_object_worklist_capacity
+        );
+        heap.with_mutator(|mutator| {
+            assert_eq!(root.get(mutator).edges.lock().unwrap().len(), EDGE_COUNT)
         });
     }
 

@@ -65,6 +65,42 @@ seed receiver until C5 adds marking.
 Ordinary threaded stress remains supplementary rather than proof of coordinator
 ordering.
 
+## C5 Exact-Mark Verification
+
+The ordinary stable check compares 24 deterministic randomized managed graphs
+with an independent index-based reachability oracle. It checks the successful
+report, every allocation's mark bit, and each object's trace count. A separate
+full-run fixture drives one assigned run through zero, one, all, and zero live
+slots across four successful collections, proving that each attempt clears the
+prior bitmap before publishing new reachability. That roughly eight-thousand-
+root fixture is native-only; Miri retains the existing focused bitmap boundary,
+partial-mark recovery, and one bounded 65-node randomized-oracle case.
+
+The native million-edge fixtures are intentionally isolated from routine unit
+test latency. Run them serially, with their worklist measurement visible, via:
+
+```sh
+crates/glam-gc/scripts/check-scale.sh
+```
+
+That script exercises a one-million-node chain and a flat one-million-edge
+array through the checked non-recursive production marker. On 2026-08-23 the
+flat fixture reported a peak object-worklist length of 1,000,000 and capacity
+of 1,048,576. These are observations of the current LIFO `Vec` worklist, not
+correctness or performance thresholds. The routine native suite retains its
+20,000-node chain, while Miri uses the same path with 256 nodes; stack-depth and
+million-edge scale remain native responsibilities.
+
+C5D.2 adds no unsafe operation or module opt-in. The exact unsafe inventory
+must therefore remain unchanged while these fixtures and their ledger entries
+are added.
+
+ThreadSanitizer passes the complete C5D.2 native suite. AddressSanitizer passes
+the focused `c5d_` fixtures, but the complete crate run retains one 24-byte
+LeakSanitizer report. The same report reproduces from the clean pre-C5D.2
+`d7977d4` worktree, so it is not introduced by these fixtures; it remains an
+explicit post-C5 verification finding rather than being treated as a pass.
+
 ## Gate G0 Baseline
 
 Before changing the unsafe surface in C1, recheck the focused pre-GC semantic

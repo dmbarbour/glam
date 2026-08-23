@@ -69,7 +69,10 @@ C5D.1 consumes a drained successful mark attempt into scalar root-entry,
 trace, distinct-mark, and conservative-retention counts. The latest report and
 completed epoch publish together under the coordinator mutex; a failed attempt
 changes neither. The bitmap remains heap-private and reclamation remains
-disabled.
+disabled. C5D.2 closes the mark-only phase with an independent randomized
+reachability oracle, repeated complete-run bitmap histories, and native
+million-edge depth and width fixtures. It adds no unsafe operation, unsafe
+module opt-in, or reclamation behavior.
 
 The crate denies unsafe code by default. `src/lib.rs` gives the reviewed
 `pointer`, `root`, `mutator`, `trace`, `mutation`, `thread_cache`, and unit-test
@@ -160,6 +163,12 @@ and every unsafe function, implementation, and block are checked into
   exactly once. Each reported edge repeats checked discovery and marks before
   enqueueing, which terminates cycles, diamonds, repeated edges, and duplicate
   roots without recursive Rust calls.
+- C5D.2 compares those authoritative bits with an independent reachability
+  computation across deterministic randomized graphs and checks zero, one,
+  all, then zero marked allocations in one complete run across successive
+  collections. Million-node depth and million-edge width fixtures establish
+  that the same checked worklist remains non-recursive at scale; their observed
+  worklist capacity is diagnostic evidence rather than a safety threshold.
 - Edge-driven worklist growth calls `try_reserve` before `push`; allocation
   failure therefore unwinds through the same attempt guard as a `Trace` panic.
   There is an intentional failure window after a newly discovered edge is
