@@ -22,6 +22,7 @@ crates/glam-gc/src/arena.rs:        let lease = unsafe { lease.as_ref() }.load(O
 crates/glam-gc/src/arena.rs:        let pointer = unsafe { address.pointer().add(offset).cast::<T>() };
 crates/glam-gc/src/arena.rs:        let pointer = unsafe { self.base.add(offset) };
 crates/glam-gc/src/arena.rs:        let pointer = unsafe { self.base.add(offset) };
+crates/glam-gc/src/arena.rs:        let previous = unsafe { lease.as_ref() }.fetch_and(!bit, Ordering::Release);
 crates/glam-gc/src/arena.rs:        let prior = unsafe { pointer.read() };
 crates/glam-gc/src/arena.rs:        let start = unsafe { address.pointer().add(bitmap.offset) };
 crates/glam-gc/src/arena.rs:        let word = unsafe { pointer.as_ref() }.load(Ordering::Acquire);
@@ -78,15 +79,17 @@ crates/glam-gc/src/heap.rs:        let interior = unsafe { crate::Gc::<GraphNode
 crates/glam-gc/src/heap.rs:        unsafe {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for AllocatingDrop {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for BitmapBoundarySlot {
+crates/glam-gc/src/heap.rs:    unsafe impl Trace for ConcurrentReleaseDrop {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for DropCounter {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for DroppingType {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for FirstType {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for GraphNode {
+crates/glam-gc/src/heap.rs:    unsafe impl Trace for IncrementalReleaseDrop {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for InvalidEdgeHolder {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for OverflowingSlot {
-crates/glam-gc/src/heap.rs:    unsafe impl Trace for PanickingDrop {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for PanickingTraceNode {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for SecondType {
+crates/glam-gc/src/heap.rs:    unsafe impl Trace for SelectivePanickingDrop {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for WideDropCounter {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for WideSlot {
 crates/glam-gc/src/lib.rs:                let _ = unsafe { value.get_unchecked(mutator) };

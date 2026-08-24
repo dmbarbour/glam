@@ -365,8 +365,7 @@ impl Arena {
         unsafe { run.pointer().add(offset).cast() }
     }
 
-    /// Retires one successfully destroyed allocation from a finalizer-owned
-    /// word.
+    /// Retires one terminally destroyed allocation from a finalizer-owned word.
     ///
     /// The caller must own the exact finalization reservation for this word,
     /// so no ordinary allocation-word writer may race this update. Root and
@@ -388,7 +387,8 @@ impl Arena {
         // SAFETY: validated geometry places this initialized atomic word in
         // the retained run. The finalization reservation makes this caller its
         // sole writer; AcqRel preserves payload publication for concurrent
-        // readers and orders retirement after successful destruction.
+        // readers and orders retirement after `Drop` either returns or reaches
+        // the collector's unwind boundary.
         unsafe { allocation.as_ref() }.fetch_and(!bit, Ordering::AcqRel) & bit != 0
     }
 

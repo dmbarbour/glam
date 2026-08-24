@@ -9,9 +9,10 @@
 //! frontiers, and one final stale-cursor epoch. C6B.1 isolates exact
 //! drop-required identities in a durable, non-rootable finalization batch.
 //! C6B.2 drains that batch outside collector locks under the installed
-//! finalizer mutator, retires successful allocations exactly once, and
-//! transfers an actually panicking destructor into sparse quarantine before
-//! propagating its panic. C6B.3 restores completed-region allocator capacity.
+//! finalizer mutator, while C6B.3 restores completed-region allocator capacity.
+//! C6C.1 terminally retires each attempted allocation after `Drop` returns or
+//! unwinds, preserves untouched pending work for a later collection, and
+//! propagates the original panic without persistent exceptional state.
 
 #![deny(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]

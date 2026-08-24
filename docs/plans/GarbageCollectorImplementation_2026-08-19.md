@@ -1,8 +1,8 @@
 # Glam GC Subcrate Implementation Plan — 2026-08-19
 
-Status: in progress; Phases C0 through C6B.3 are complete, including the C2C.6
+Status: in progress; Phases C0 through C6C.1 are complete, including the C2C.6
 verification follow-up. The mandatory post-C1, post-C2C, post-C3E, post-C4,
-and post-C5 downstream reviews are complete. C6C.1 is next.
+and post-C5 downstream reviews are complete. C6C.2 is next.
 
 This plan implements an exact, non-moving, runtime-local tracing collector
 without depending on Glam value semantics. The governing requirements and
@@ -72,7 +72,7 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C6B.1 | completed | finalization batch and non-rootability |
 | C6B.2 | completed | finalizer handoff, destruction, and temporary panic-retirement scaffolding |
 | C6B.3 | completed | managed-`Drop` contract, non-resurrection, and successful completion |
-| C6C.1 | pending | destructor panic, terminal slot retirement, and deferred retry |
+| C6C.1 | completed | destructor panic, terminal slot retirement, and deferred retry |
 | C6C.2 | pending | finalizer activity, reports, and pressure publication |
 | C6D.1 | pending | terminal-teardown decision and fixtures |
 | C6D.2 | pending | terminal teardown |
@@ -3039,9 +3039,11 @@ Execute C6 as the following smaller checkpoints:
   that attempted slot's retirement. Every not-yet-attempted identity remains
   in the finalization batch, non-rootable and untraced; its partial word stays
   reserved or its wholly dead run stays detached. Restore an ordinary
-  allocator/coordinator phase, relatch a collection request when pending work
-  remains, release the collector's finalizer mutator, and only then resume the
-  original panic. The next collection retains those pending identities
+  allocator/coordinator phase, relatch the failed collection request, release
+  the collector's finalizer mutator, and only then resume the original panic.
+  This remains true when the failed item was the last pending destructor,
+  because no successful epoch or report was published. The next collection
+  retains any pending identities
   conservatively during marking and makes a fresh bounded attempt to finalize
   them. The collector therefore never deliberately invokes a second destructor
   while already handling a destructor panic. `panic=abort` builds have no
@@ -3065,9 +3067,9 @@ Execute C6 as the following smaller checkpoints:
   and next high-water target. A recovered finalizer panic still publishes the
   durable allocator/pressure baseline before resuming the panic, but does not
   publish a successful collection epoch or report. Its untouched pending batch
-  remains queued activity and its relatched request belongs to a later
-  collection attempt; a later successful report may count those identities as
-  conservatively retained by that attempt.
+  remains queued activity and the failed attempt's relatched request belongs to
+  a later collection attempt; a later successful report may count those
+  identities as conservatively retained by that attempt.
 - **C6D.1 — terminal-teardown decision and forced fixtures.** Choose and record
   either the preferred owner-lease drain or the restricted non-reentrant
   fallback before changing `HeapInner::drop`. C4D already proves that no
@@ -3180,8 +3182,9 @@ recoverable panic injected by its own tests.
   finalizers and detached runs still retained by pending work participate in
   current assigned occupancy before final publication; completion chooses a
   target above that occupancy rather than latching an immediate pressure-only
-  follow-up request. Pending destructor work independently relatches a
-  collection request. No collection begins during `Finalizing`.
+  follow-up request. A recovered panic relatches the failed collection request
+  whether or not untouched pending work remains. No collection begins during
+  `Finalizing`.
 - An abandoned or panicking mark or sweep publishes neither free-list
   membership nor a new pressure baseline. Finalizer-panic recovery publishes
   the consistent post-attempt baseline only after every run has an unambiguous
@@ -3764,6 +3767,46 @@ Completed on 2026-08-24:
 - The collector suite now contains 172 unit tests (170 passing plus two
   explicit scale fixtures), 6 Loom models, and 8 compile-fail/doc tests.
   Focused and complete verification is recorded in `VERIFY.md`.
+
+#### C6C.1 completion
+
+Completed on 2026-08-24:
+
+- A destructor attempt now reaches one terminal storage state whether erased
+  `Drop` returns or unwinds to the collector's `catch_unwind` boundary. Under
+  managed data, the collector clears that exact allocation bit before its
+  pending bit and uses the existing completed-word or detached-run release
+  path. The failed Rust value is never traced, rooted, or dropped again, while
+  its backing slot remains ordinary reusable storage.
+- The collector stops dispatching immediately after the first destructor
+  panic. Every untouched identity remains in the durable finalization batch;
+  attached allocation words remain reserved and wholly dead runs remain
+  detached. Stack unwinding releases the finalizer mutator, the collection
+  attempt restores ordinary admission and relatches collection, and only then
+  does the original panic reach the caller.
+- A later collection conservatively marks each untouched pending identity
+  without dispatching `Trace`, counts it in the existing conservative-
+  retention scalar, and makes a fresh bounded finalization attempt. Repeated
+  panics therefore make one terminal step per collection without defining a
+  same-attempt second-panic policy.
+- The temporary `ErasedGc -> QuarantineRecord` map, its exceptional allocation
+  path, special root/debug result, conservative mark walk, detached-run
+  restoration branch, and terminal-teardown exclusions are gone. The compact
+  pending bitmaps remain the exact non-rootability authority; their initial
+  linear run-record lookup remains deliberately deferred to C8 measurement.
+- The regression was latched against the prior behavior before the fix: the
+  first panicking slot incorrectly retained its allocation bit. Final focused
+  fixtures cover a detached two-item batch, an attached shared allocation word
+  that remains reserved until retry and then reuses the failed slot, and three
+  successive panics which each retire exactly one value while preserving the
+  untouched suffix.
+- The three panic fixtures pass focused Miri. The authoritative collector
+  script passes 174 unit tests (172 passing plus two explicit scale fixtures),
+  6 Loom models, 8 compile-fail/doc tests, unsafe-inventory audit, and all-
+  target/all-feature checking. Workspace formatting, Clippy with warnings
+  denied, and the complete test suite also pass. C6C.1 adds no unsafe site; the
+  inventory update reconciles the already reviewed C6B.3 lease-release and
+  fixture sites together with the renamed panic fixture.
 
 ### Mandatory Post-C6 Review
 

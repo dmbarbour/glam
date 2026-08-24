@@ -85,7 +85,7 @@ EvaluationRuntime
     ├── typed-run pools
     ├── explicit external-root registry
     ├── active-mutator and safepoint coordinator
-    ├── mark work and sparse quarantine state
+    ├── mark work and durable pending-finalization state
     └── collection metrics and tuning
 ```
 
@@ -214,12 +214,14 @@ permit dereference outside a region.
 11. **Failed collection attempts are recoverable until reclamation commits.**
     Marking and tracing reclaim nothing: an unwind guard abandons the partial
     worklist/epoch, restores the heap phase, and permits a later collection to
-    retry from all roots. Sweep and destruction use run side metadata plus
-    sparse exceptional state so a panicking destructor is never invoked twice;
-    its original allocation is quarantined while fresh allocations and
-    already-published effects from that destructor remain valid. The
-    finalization queue and heap phase must still reach a documented consistent
-    state before unwinding.
+    retry from all roots. Sweep and destruction use run side metadata plus an
+    exact durable finalization batch. Once a destructor returns or unwinds to
+    the collector boundary, its allocation and pending identity are terminally
+    retired so it is never invoked twice. On panic, untouched identities remain
+    pending and non-rootable for a later collection, while fresh allocations
+    and already-published effects from that destructor remain valid. The
+    finalization batch and heap phase reach a documented consistent state
+    before the original panic resumes.
     Heap-wide poison or abort is reserved for detected allocator/metadata
     corruption or an unsafe contract violation whose effects cannot be
     bounded.

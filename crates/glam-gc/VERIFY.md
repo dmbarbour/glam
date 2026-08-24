@@ -290,8 +290,8 @@ complete detachment of wholly dead drop-bearing runs, preservation of former
 class order across multiple detachments, and assigned-pressure accounting
 which treats detached runs as occupied. C6B.2 migrated these fixtures to real
 destruction, and C6B.3 now removes every successfully completed batch record;
-durable cross-collection retention remains exceptional recovery scaffolding
-rather than the normal post-collection state.
+durable cross-collection retention is now the intentional C6C.1 recovery path
+after a destructor panic rather than ordinary successful post-collection state.
 
 Exact root and debug-access validation is still forced while batch identities
 are pending. `concurrent_finalizing_entrant_cannot_root_a_detached_identity`
@@ -316,28 +316,17 @@ recursive depth two and validates the fresh value after collection. Completion
 proves erased dispatch held neither managed data nor the coordinator mutex and
 that the successful dying allocation bit was retired exactly once.
 
-`managed_destructor_panic_quarantines_exactly_once_without_retracing` forces a
-real `Drop` panic. It checks attempt recovery, one exact quarantine record, a
-still-set allocation bit, an empty pending mask, root rejection, and propagation
-of the original panic. The next collection marks one conservative slot while
-running neither `Trace` nor `Drop`; terminal heap release also leaves the
-destructor count at one. C6C.1 later adds draining of work after that first
-panic and restores all remaining safe run capacity.
-
 Focused Miri runs are:
 
 ```sh
 cargo +nightly miri test --package glam-gc --lib --all-features \
   managed_destructor_runs_outside_locks_with_the_recursive_finalizer_mutator
-cargo +nightly miri test --package glam-gc --lib --all-features \
-  managed_destructor_panic_quarantines_exactly_once_without_retracing
 ```
 
 The collection-time erased `drop_in_place` call and exact allocation retirement
-are reviewed unsafe sites; sparse quarantine itself is safe Rust and allocates
-only on the exceptional path. The stable collector matrix contains 170 unit
-tests (168 passing and two ignored scale fixtures), six Loom models, and eight
-compile-fail/doc tests.
+are reviewed unsafe sites. The C6B.2 checkpoint matrix contained 170 unit tests
+(168 passing and two ignored scale fixtures), six Loom models, and eight
+compile-fail/doc tests. C6C.1 owns the superseding panic-path verification.
 
 ## C6B.3 Successful-Completion Verification
 
@@ -381,6 +370,56 @@ All four focused fixtures pass Miri. The stable collector matrix contains 172
 unit tests (170 passing and two ignored scale fixtures), six Loom models, and
 eight compile-fail/doc tests. Formatting, all-target/all-feature Clippy with
 warnings denied, and the complete workspace suite also pass.
+
+## C6C.1 Destructor-Panic Retirement Verification
+
+C6C.1 removes the temporary `ErasedGc -> QuarantineRecord` map. The focused
+two-item regression was first run against the old implementation and failed
+because the panicking identity retained its allocation bit in sparse
+quarantine. After the fix, reaching the collector's unwind boundary clears that
+exact allocation bit before its pending bit and routes completed word/run
+capacity through the same terminal path as a returning destructor. The
+original panic resumes only after the finalizer mutator and coordinator phase
+have recovered; no later destructor is dispatched in that attempt.
+
+`managed_destructor_panic_retires_one_and_defers_the_untouched_batch` places a
+panicking and a returning destructor in one wholly dead run. It proves only the
+first runs before the panic reaches the caller, the attempted allocation is
+retired, the untouched allocation remains in one detached non-rootable pending
+record, and recovery relatches collection. The next collection marks that one
+pending slot conservatively without tracing it, finalizes it, recycles the run,
+and publishes a report with one conservative retention.
+
+`managed_destructor_panic_keeps_an_attached_word_reserved_until_retry` keeps a
+third value rooted so the same panic occurs in an attached partial run. The
+failed slot clears immediately, but the shared allocation word remains reserved
+while its untouched pending bit exists. A later successful collection releases
+the batch record and the next allocation reuses the failed slot, proving that
+the storage is neither permanently damaged nor prematurely exposed.
+
+`repeated_destructor_panics_make_one_terminal_step_per_collection` gives three
+pending values panicking destructors. Three caught collection attempts retire
+exactly one successive allocation apiece, preserve the untouched suffix, and
+relatch the same uncompleted epoch. A fourth clean collection publishes epoch
+one with no remaining mark or conservative-retention count. Heap teardown does
+not retry any retired destructor.
+
+Focused Miri runs are:
+
+```sh
+cargo +nightly miri test --package glam-gc --lib --all-features \
+  managed_destructor_panic_retires_one_and_defers_the_untouched_batch
+cargo +nightly miri test --package glam-gc --lib --all-features \
+  managed_destructor_panic_keeps_an_attached_word_reserved_until_retry
+cargo +nightly miri test --package glam-gc --lib --all-features \
+  repeated_destructor_panics_make_one_terminal_step_per_collection
+```
+
+All three focused fixtures pass Miri. C6C.1 adds no unsafe site: it changes
+bookkeeping after the existing reviewed erased `drop_in_place` boundary and
+deletes exceptional safe-Rust state. The stable collector matrix contains 174
+unit tests (172 passing and two ignored scale fixtures), six Loom models, and
+eight compile-fail/doc tests.
 
 ## Gate G0 Baseline
 

@@ -391,11 +391,12 @@ impl AllocationClassEntry {
         self.retire_withdrawn_run_at(target).1
     }
 
-    /// Removes one run while retaining its former ordered class position.
+    /// Removes one run and reports its former ordered class position.
     ///
-    /// Finalization keeps that position with a detached stable record so a
-    /// later quarantine path can restore class ownership deliberately rather
-    /// than inventing an order after the fact.
+    /// Finalization compares that position with its precomputed transition
+    /// plan before transferring the stable record into detached batch
+    /// ownership. A completed detached run is recycled rather than restored to
+    /// this class.
     pub(crate) fn retire_withdrawn_run_at(
         &mut self,
         target: RunClaimTarget,

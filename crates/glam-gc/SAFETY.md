@@ -101,9 +101,12 @@ durable exact finalization batch: partial runs retain class membership with
 reserved words, wholly dead drop-bearing runs transfer their stable record to
 batch ownership, and every pending identity becomes non-rootable. C6B.2 drains
 those exact masks with a bounded cursor, invokes erased destructors outside
-collector locks under the installed finalizer mutator, retires successful
-allocations, and transfers an actually panicking destructor to sparse durable
-quarantine before propagating its panic.
+collector locks under the installed finalizer mutator, and retires returning
+destructors. C6B.3 republishes each successfully completed attached word or
+detached run. C6C.1 extends terminal retirement through the unwind boundary:
+an unwinding destructor retires its exact allocation, the collector stops
+dispatching, and untouched pending identities remain in the durable batch for
+a later collection before the original panic resumes.
 
 The crate denies unsafe code by default. `src/lib.rs` gives the reviewed
 `pointer`, `root`, `mutator`, `trace`, `mutation`, `thread_cache`, and unit-test
@@ -229,8 +232,9 @@ and every unsafe function, implementation, and block are checked into
   per-run summary. They are authoritative only as the completed attempt's
   heap-private reachability result: C6 will consume them under the same
   collection authority, and a later attempt clears them before reuse. The C5
-  conservative-retention count is zero; C6 quarantine introduces the first
-  slots retained without trace dispatch.
+  conservative-retention count is zero; C6 pending finalizers carried across a
+  recovered destructor panic introduce the first slots retained without trace
+  dispatch.
 
 ## Managed Pointer and Access Invariants
 
@@ -473,15 +477,16 @@ C6 later owns collector-driven destruction.
   class's destructor exactly once, and then lets each arena chunk deallocate
   exactly once. C6A.2c has already erased wholly dead no-drop and empty runs
   from typed arena enumeration because neither has a destructor obligation.
-  C6B excludes exact attached pending and quarantined identities from that
-  ordinary class walk, then visits each remaining exact attached or detached
-  batch identity once. Each nonzero mask still names an initialized, allocated
-  payload with the record's canonical metadata; class and batch walks are
-  disjoint by construction, and quarantine is skipped in both.
+  C6B excludes exact attached pending identities from that ordinary class walk,
+  then visits each remaining exact attached or detached batch identity once.
+  Each nonzero mask still names an initialized, allocated payload with the
+  record's canonical metadata; class and batch walks are disjoint by
+  construction. An earlier panicking identity has already cleared both its
+  allocation and pending bits, so neither walk can rediscover it.
   This path is provisionally
   non-reentrant and non-panicking. C2C.4 proves it cannot race an active owner
   region; later C6 replaces terminal enumeration with collector-controlled
-  finalization, quarantine, and destructor-panic recovery.
+  finalization and destructor-panic recovery.
 
 ## Thread-Local Allocation Cache Lifecycle
 
@@ -730,15 +735,17 @@ stored `Gc` retains the existing caller obligation to prove liveness.
 
 Terminal `HeapInner::drop` remains the fallback destruction boundary for live
 or interrupted pending allocations. The ordinary class walk skips every exact
-attached pending or quarantined identity. A second batch walk derives pointers
-only from the validated retained run location and allocation bitmap, filters
-them through the exact pending mask, and calls that record's canonical erased
-destructor. Detached runs occur only in this second walk. Exclusive final heap
-ownership, initialized set allocation bits, and disjoint class/batch
-visitation therefore prove each call sees a valid payload and runs exactly
-once. This remains the provisional non-reentrant teardown policy pending C6D.
+attached pending identity. A second batch walk derives pointers only from the
+validated retained run location and allocation bitmap, filters them through
+the exact pending mask, and calls that record's canonical erased destructor.
+Detached runs occur only in this second walk. A destructor which already
+panicked has cleared its allocation and pending bits and therefore occurs in
+neither walk. Exclusive final heap ownership, initialized set allocation bits,
+and disjoint class/batch visitation prove each call sees a valid payload and
+runs exactly once. This remains the provisional non-reentrant teardown policy
+pending C6D.
 
-### C6B.2 erased destruction and quarantine transfer
+### C6B.2 erased destruction and C6C.1 panic retirement
 
 The finalization cursor stores only run, word, and bit indices. Under the
 managed-data mutex it resolves one set pending bit through the retained run
@@ -750,24 +757,28 @@ keeps the heap in `Finalizing`. Recursive same-heap entry therefore reuses that
 mutator; unrelated admitted mutators may run concurrently; another collection
 cannot begin.
 
-After successful `Drop`, managed data is reacquired. The exact atomic
-allocation bit is cleared with the finalizer's exclusive word ownership before
-the pending mask bit is removed. Root and debug-access validation shares that
-mutex, so every observer sees either the old pending authority or the retired
-allocation. Zero-mask word and run records remain allocator-reserved until
-C6B.3 republishes their capacity.
+After either successful `Drop` or an unwind reaching the collector's
+`catch_unwind` boundary, managed data is reacquired. The attempted Rust value
+is terminally destroyed and must never be observed or dropped again. The exact
+atomic allocation bit is cleared with the finalizer's exclusive word ownership
+before its pending mask bit is removed. Root and debug-access validation shares
+that mutex, so every observer sees either the old pending authority or the
+retired allocation. If that was the last pending bit in an attached word or
+detached run, C6B.3's ordinary completion path republishes or recycles the
+region immediately.
 
-Erased destruction is wrapped only to establish an exceptional ownership
-boundary. On panic, the same critical section reserves one hash entry, inserts
-the exact stable `ErasedGc` plus canonical static metadata, and then removes
-the pending mask bit. Failure to reserve that indispensable record aborts;
-retrying or forgetting a partially destroyed Rust value would be unsound. A
-later collection re-resolves the address from arena topology, validates its
-set allocation bit, marks it conservatively without invoking `Trace`, and
-counts it as conservative retention. Rooting rejects exact quarantine before
-ordinary topology lookup, and terminal teardown skips its destructor. Durable
-quarantine contains no raw run pointer: such topology remains attempt-local,
-preserving the heap's `Send` boundary.
+On unwind, the collector dispatches no later destructor in that attempt. The
+panic payload stays outside managed heap state while untouched batch records
+remain authoritative: their allocation and pending bits stay set, attached
+words remain reserved, and detached runs remain batch-owned. The collection
+attempt guard releases the finalizer mutator, restores ordinary admission, and
+relatches collection before resuming the original panic. A later collection
+marks each untouched pending slot conservatively without invoking `Trace`,
+counts it as conservative retention, and makes a fresh bounded finalization
+attempt. The panicking identity itself has no durable tombstone: its cleared
+allocation and pending bits are sufficient to prevent retry. The recovery path
+allocates no exceptional record and deliberately has no same-attempt
+second-destructor-panic case.
 
 ### Managed `Drop`, spoiled edges, and host ownership
 
@@ -856,9 +867,11 @@ location through normal typed-run publication.
 
 Removing the current batch record shifts its successor into the same vector
 index; the bounded finalization cursor retains that run index and resets only
-its word index. A destructor panic takes the quarantine path instead and does
-not release its zero-mask word or containing detached run. C6C.1 owns recovery
-and safe-capacity restoration for that exceptional case.
+its word index. A destructor panic terminally completes that one work item
+through the same region-release path, then stops cursor dispatch. A zero-mask
+word is republished and a completed detached run is recycled immediately;
+otherwise untouched pending bits keep the word or run reserved for the next
+collection.
 
 The mark range is initialized as ordinary `u64` storage and remains disjoint
 from the header, atomic allocation/lease words, alignment padding, and payload.

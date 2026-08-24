@@ -76,7 +76,8 @@ impl CollectionReport {
     /// Returns slots retained without dispatching their `Trace` implementation.
     ///
     /// This is zero during the mark-only C5 collector. C6 uses it for durable
-    /// quarantine whose payload is no longer safe to trace.
+    /// pending finalizers retained across a recovered destructor panic without
+    /// tracing their payloads.
     #[must_use]
     pub const fn conservatively_retained_slots(self) -> usize {
         self.conservatively_retained_slots
@@ -188,8 +189,10 @@ impl Heap {
     /// reclaims wholly dead runs with no destructor obligation, clears dead
     /// allocations from retained partial no-drop runs, and invokes exact
     /// drop-required identities outside collector locks under an installed
-    /// finalizer mutator. A successful destructor retires its allocation;
-    /// a panicking destructor is quarantined before its original panic resumes.
+    /// finalizer mutator. A destructor retires its allocation after either
+    /// returning or unwinding to the collector boundary. On unwind, untouched
+    /// finalizers remain pending for a later collection before the original
+    /// panic resumes.
     /// A concurrent later collection may overtake a waiting caller, and no
     /// unbounded report history is retained.
     pub fn collect_full(&self) -> Result<CollectionReport, CollectionError> {
@@ -282,15 +285,9 @@ struct ManagedData {
     classes: Vec<AllocationClassEntry>,
     retired_no_drop_runs: Vec<RetiredNoDropRun>,
     finalization_batch: FinalizationBatch,
-    quarantined: HashMap<ErasedGc, QuarantineRecord>,
     free_runs: Vec<RunLocation>,
     allocation_pressure: AllocationPressure,
     roots: Vec<Weak<RootCell>>,
-}
-
-#[derive(Clone, Copy)]
-struct QuarantineRecord {
-    metadata: &'static ObjectMetadata,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -683,10 +680,7 @@ impl ManagedData {
                     current_index <= former_index,
                     "finalization detachment moved past its retained class position"
                 );
-                run.target = FinalizationRunTarget::Detached {
-                    target,
-                    former_index,
-                };
+                run.target = FinalizationRunTarget::Detached { target };
             } else {
                 assert!(class.contains_target(target));
             }
@@ -700,21 +694,7 @@ impl ManagedData {
     }
 
     fn complete_finalization(&mut self, work: FinalizationWork) -> bool {
-        let retain_detached_run = {
-            let run = self
-                .finalization_batch
-                .runs
-                .get(work.run_index)
-                .expect("completed finalization lost its run record");
-            run.target.is_detached()
-                && self.quarantined.keys().any(|value| {
-                    self.arena.find_run(value.as_ptr().as_ptr() as usize)
-                        == Some(run.target.target().run)
-                })
-        };
-        let completion =
-            self.finalization_batch
-                .complete_success(&self.arena, work, !retain_detached_run);
+        let completion = self.finalization_batch.complete_terminal(&self.arena, work);
 
         if let Some(released) = completion.released_attached_word {
             self.arena.release_finalized_allocation_word(
@@ -735,30 +715,6 @@ impl ManagedData {
         }
 
         completion.removed_run_record
-    }
-
-    fn quarantine_finalization(&mut self, work: FinalizationWork) {
-        if self.quarantined.try_reserve(1).is_err() {
-            // A partially destroyed Rust value cannot be retried or forgotten.
-            // If its durable exceptional record cannot be allocated, no safe
-            // recoverable heap state exists.
-            std::process::abort();
-        }
-        assert!(
-            !self.quarantined.contains_key(&work.value),
-            "finalization identity was quarantined twice"
-        );
-        let replaced = self.quarantined.insert(
-            work.value,
-            QuarantineRecord {
-                metadata: work.metadata,
-            },
-        );
-        debug_assert!(replaced.is_none());
-
-        // The insertion precedes removal from pending masks under the same
-        // heap mutex. Root validation therefore observes no resurrectable gap.
-        self.finalization_batch.complete_quarantine(work);
     }
 
     fn sweep_partial_no_drop_runs(&mut self, dead_set: &DeadSetPlan) {
@@ -1064,14 +1020,7 @@ enum FinalizationRunTarget {
     /// A partial run still selected through its ordinary allocation class.
     Attached(RunClaimTarget),
     /// A wholly dead run owned only by the finalization batch.
-    Detached {
-        target: Box<RunClaimTarget>,
-        #[allow(
-            dead_code,
-            reason = "C6C.1 restores quarantined runs in their former class order"
-        )]
-        former_index: usize,
-    },
+    Detached { target: Box<RunClaimTarget> },
 }
 
 impl FinalizationRunTarget {
@@ -1287,11 +1236,10 @@ impl FinalizationBatch {
         None
     }
 
-    fn complete_success(
+    fn complete_terminal(
         &mut self,
         arena: &Arena,
         work: FinalizationWork,
-        may_release_detached_run: bool,
     ) -> FinalizationCompletion {
         let (target, class_id, finalized_word_index, word_completed, run_completed, detached) = {
             let run = self
@@ -1315,7 +1263,7 @@ impl FinalizationBatch {
             // unallocated slot.
             assert!(
                 arena.clear_owner_allocation(work.owner),
-                "successfully destroyed allocation was already retired"
+                "terminally destroyed allocation was already retired"
             );
             word.dead_mask &= !work.bit;
             let finalized_word_index = word.word_index;
@@ -1341,7 +1289,7 @@ impl FinalizationBatch {
                 class_id,
                 word_index: finalized_word_index,
             });
-        let remove_run_record = run_completed && (!detached || may_release_detached_run);
+        let remove_run_record = run_completed;
         let completed_detached_run = if remove_run_record {
             let run = self.runs.remove(work.run_index);
             match run.target {
@@ -1362,22 +1310,6 @@ impl FinalizationBatch {
             completed_detached_run,
             removed_run_record: remove_run_record,
         }
-    }
-
-    fn complete_quarantine(&mut self, work: FinalizationWork) {
-        let run = self
-            .runs
-            .get_mut(work.run_index)
-            .expect("quarantined finalization lost its run record");
-        assert_eq!(run.target.target().location, work.owner.location);
-        assert_eq!(run.class_id, work.owner.class_id);
-        assert!(std::ptr::eq(run.metadata, work.metadata));
-        let word = run
-            .pending_words
-            .get_mut(work.word_index)
-            .expect("quarantined finalization lost its word record");
-        assert_ne!(word.dead_mask & work.bit, 0);
-        word.dead_mask &= !work.bit;
     }
 
     fn reserves_word(&self, target: RunClaimTarget, word_index: usize) -> bool {
@@ -1577,35 +1509,6 @@ struct MarkAttempt {
 }
 
 impl MarkAttempt {
-    fn retain_quarantined(&mut self, data: &mut ManagedData) {
-        let ManagedData {
-            arena, quarantined, ..
-        } = data;
-        for (value, record) in quarantined.iter() {
-            assert!(record.metadata.needs_drop());
-            let owner = arena
-                .checked_slot_owner(value.as_ptr().addr().get())
-                .expect("quarantined allocation lost its arena owner");
-            assert_eq!(arena.owner_slot_pointer(owner), value.as_ptr());
-            assert!(
-                arena.owner_slot_is_allocated(owner),
-                "quarantined allocation lost its allocation bit"
-            );
-            assert!(
-                arena.mark_owner_slot(owner),
-                "quarantined allocation was marked twice"
-            );
-            self.marked_slot_count = self
-                .marked_slot_count
-                .checked_add(1)
-                .expect("marked-slot count exhausted");
-            self.conservatively_retained_slot_count = self
-                .conservatively_retained_slot_count
-                .checked_add(1)
-                .expect("conservative-retention count exhausted");
-        }
-    }
-
     fn retain_pending_finalizers(&mut self, data: &mut ManagedData) {
         let ManagedData {
             arena,
@@ -1954,7 +1857,6 @@ impl HeapInner {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             data.clear_mark_bitmaps();
-            mark_attempt.retain_quarantined(&mut data);
             mark_attempt.retain_pending_finalizers(&mut data);
             mark_work(&mut mark_attempt, &mut data);
         }
@@ -2104,7 +2006,7 @@ impl HeapInner {
                     }
                 }
                 Err(panic) => {
-                    data.quarantine_finalization(work);
+                    data.complete_finalization(work);
                     drop(data);
                     resume_unwind(panic);
                 }
@@ -2709,7 +2611,6 @@ enum RootValidationError {
     },
     Unallocated,
     PendingFinalization,
-    Quarantined,
 }
 
 impl RootValidationError {
@@ -2723,9 +2624,6 @@ impl RootValidationError {
             Self::PendingFinalization => {
                 panic!("managed pointer is pending finalization and cannot be rooted or accessed")
             }
-            Self::Quarantined => {
-                panic!("managed pointer is quarantined and cannot be rooted or accessed")
-            }
         }
     }
 }
@@ -2735,16 +2633,6 @@ fn validate_rootable_in_state(
     value: ErasedGc,
     expected: &'static ObjectMetadata,
 ) -> Result<(), RootValidationError> {
-    if let Some(record) = state.quarantined.get(&value) {
-        if !std::ptr::eq(record.metadata, expected) {
-            return Err(RootValidationError::Representation {
-                actual: record.metadata.type_name(),
-                expected: expected.type_name(),
-            });
-        }
-        return Err(RootValidationError::Quarantined);
-    }
-
     let address = value.as_ptr().as_ptr() as usize;
     if let Some(actual) = state.finalization_batch.pending_metadata_at(address) {
         if !std::ptr::eq(actual, expected) {
@@ -2937,12 +2825,10 @@ impl Drop for HeapInner {
             }
             for run in entry.runs() {
                 for pointer in state.arena.allocated_slot_pointers(run.location) {
-                    let value = ErasedGc::new(pointer);
                     if state
                         .finalization_batch
                         .pending_metadata_at(pointer.as_ptr() as usize)
                         .is_some()
-                        || state.quarantined.contains_key(&value)
                     {
                         continue;
                     }
@@ -2960,9 +2846,6 @@ impl Drop for HeapInner {
                 .arena
                 .allocated_slot_pointers(run.target.target().location)
             {
-                if state.quarantined.contains_key(&ErasedGc::new(pointer)) {
-                    continue;
-                }
                 if !run.contains_address(pointer.as_ptr() as usize) {
                     continue;
                 }
@@ -3390,19 +3273,24 @@ mod tests {
         fn trace(&self, _visitor: &mut Visitor<'_>) {}
     }
 
-    struct PanickingDrop(Arc<AtomicUsize>);
+    struct SelectivePanickingDrop {
+        id: usize,
+        panic: bool,
+        events: Arc<Mutex<Vec<usize>>>,
+    }
 
-    impl Drop for PanickingDrop {
+    impl Drop for SelectivePanickingDrop {
         fn drop(&mut self) {
-            self.0.fetch_add(1, Ordering::Relaxed);
-            panic!("injected managed destructor panic");
+            self.events.lock().unwrap().push(self.id);
+            if self.panic {
+                panic!("injected managed destructor panic");
+            }
         }
     }
 
-    // SAFETY: `PanickingDrop` contains no managed edge.
-    unsafe impl Trace for PanickingDrop {
-        const REQUESTED_SLOT_SIZE: Option<usize> = Some(32 * 1024);
-
+    // SAFETY: `SelectivePanickingDrop` contains no managed edge. The event log
+    // is host coordination state and IDs and policy are immediate values.
+    unsafe impl Trace for SelectivePanickingDrop {
         fn trace(&self, _visitor: &mut Visitor<'_>) {}
     }
 
@@ -6606,11 +6494,28 @@ mod tests {
     }
 
     #[test]
-    fn managed_destructor_panic_quarantines_exactly_once_without_retracing() {
+    fn managed_destructor_panic_retires_one_and_defers_the_untouched_batch() {
         let heap = Heap::new();
-        let drops = Arc::new(AtomicUsize::new(0));
-        let dead = allocate(&heap, PanickingDrop(Arc::clone(&drops)));
-        let dead_slot = collector_slot(&heap, dead);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let panicking = allocate(
+            &heap,
+            SelectivePanickingDrop {
+                id: 0,
+                panic: true,
+                events: Arc::clone(&events),
+            },
+        );
+        let deferred = allocate(
+            &heap,
+            SelectivePanickingDrop {
+                id: 1,
+                panic: false,
+                events: Arc::clone(&events),
+            },
+        );
+        let panicking_slot = collector_slot(&heap, panicking);
+        let deferred_slot = collector_slot(&heap, deferred);
+        assert_eq!(panicking_slot.owner.location, deferred_slot.owner.location);
 
         let panic = catch_unwind(AssertUnwindSafe(|| heap.collect_full()))
             .expect_err("managed destructor must propagate its panic");
@@ -6618,29 +6523,202 @@ mod tests {
             panic_string(panic.as_ref()),
             "injected managed destructor panic"
         );
-        assert_eq!(drops.load(Ordering::Relaxed), 1);
+        assert_eq!(*events.lock().unwrap(), vec![0]);
         assert_failed_collection_restored(&heap);
         {
             let data = heap.inner.data.lock().unwrap();
-            assert_eq!(data.quarantined.len(), 1);
-            assert!(data.quarantined.contains_key(&dead.erase()));
-            assert_eq!(data.finalization_batch.pending_slot_count(), 0);
-            assert!(data.arena.owner_slot_is_allocated(dead_slot.owner));
+            let metadata = metadata_for::<SelectivePanickingDrop>();
+            assert_eq!(data.finalization_batch.pending_slot_count(), 1);
+            assert_eq!(data.finalization_batch.detached_run_count(), 1);
+            assert!(
+                data.finalization_batch
+                    .pending_metadata_at(deferred.erase().as_ptr().as_ptr() as usize)
+                    .is_some()
+            );
+            assert!(
+                !data.arena.owner_slot_is_allocated(panicking_slot.owner),
+                "a panicking destructor must terminally retire its allocation"
+            );
+            assert!(data.arena.owner_slot_is_allocated(deferred_slot.owner));
+            assert!(matches!(
+                validate_rootable_in_state(&data, panicking.erase(), metadata),
+                Err(RootValidationError::ForeignHeap | RootValidationError::Unallocated)
+            ));
+            assert!(matches!(
+                validate_rootable_in_state(&data, deferred.erase(), metadata),
+                Err(RootValidationError::PendingFinalization)
+            ));
         }
+
         let retry = heap.collect_full().unwrap();
         assert_eq!(retry.epoch(), 1);
         assert_eq!(retry.root_entries(), 0);
         assert_eq!(retry.traced_objects(), 0);
         assert_eq!(retry.marked_slots(), 1);
         assert_eq!(retry.conservatively_retained_slots(), 1);
-        assert_eq!(drops.load(Ordering::Relaxed), 1);
+        assert_eq!(*events.lock().unwrap(), vec![0, 1]);
+        assert_eq!(
+            heap.inner
+                .data
+                .lock()
+                .unwrap()
+                .finalization_batch
+                .pending_slot_count(),
+            0
+        );
         heap.with_mutator(|mutator| {
-            let rejected = catch_unwind(AssertUnwindSafe(|| mutator.root(dead)));
-            assert!(rejected.is_err(), "quarantine must remain non-rootable");
+            assert!(catch_unwind(AssertUnwindSafe(|| mutator.root(panicking))).is_err());
+            assert!(catch_unwind(AssertUnwindSafe(|| mutator.root(deferred))).is_err());
         });
 
         drop(heap);
-        assert_eq!(drops.load(Ordering::Relaxed), 1);
+        assert_eq!(*events.lock().unwrap(), vec![0, 1]);
+    }
+
+    #[test]
+    fn managed_destructor_panic_keeps_an_attached_word_reserved_until_retry() {
+        let heap = Heap::new();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let (panicking, deferred, live_root) = heap.with_mutator(|mutator| {
+            let allocator = mutator.allocator::<SelectivePanickingDrop>().unwrap();
+            let panicking = allocator.alloc(SelectivePanickingDrop {
+                id: 0,
+                panic: true,
+                events: Arc::clone(&events),
+            });
+            let deferred = allocator.alloc(SelectivePanickingDrop {
+                id: 1,
+                panic: false,
+                events: Arc::clone(&events),
+            });
+            let live = allocator.alloc(SelectivePanickingDrop {
+                id: 2,
+                panic: false,
+                events: Arc::clone(&events),
+            });
+            (panicking, deferred, mutator.root(live))
+        });
+        let panicking_slot = collector_slot(&heap, panicking);
+        let deferred_slot = collector_slot(&heap, deferred);
+        assert_eq!(panicking_slot.owner.location, deferred_slot.owner.location);
+        assert_eq!(
+            panicking_slot.owner.slot_index / u64::BITS as usize,
+            deferred_slot.owner.slot_index / u64::BITS as usize
+        );
+
+        let panic = catch_unwind(AssertUnwindSafe(|| heap.collect_full()))
+            .expect_err("managed destructor must propagate its panic");
+        assert_eq!(
+            panic_string(panic.as_ref()),
+            "injected managed destructor panic"
+        );
+        assert_eq!(*events.lock().unwrap(), vec![0]);
+        assert_failed_collection_restored(&heap);
+        {
+            let data = heap.inner.data.lock().unwrap();
+            let target = data
+                .arena
+                .run_claim_target(panicking_slot.owner.location)
+                .expect("attached pending run must retain arena topology");
+            let word_index = panicking_slot.owner.slot_index / u64::BITS as usize;
+            assert_eq!(data.finalization_batch.pending_slot_count(), 1);
+            assert_eq!(data.finalization_batch.detached_run_count(), 0);
+            assert!(data.finalization_batch.reserves_word(target, word_index));
+            assert!(!data.arena.owner_slot_is_allocated(panicking_slot.owner));
+            assert!(data.arena.owner_slot_is_allocated(deferred_slot.owner));
+        }
+
+        let retry = heap.collect_full().unwrap();
+        assert_eq!(retry.epoch(), 1);
+        assert_eq!(retry.marked_slots(), 2);
+        assert_eq!(retry.conservatively_retained_slots(), 1);
+        assert_eq!(*events.lock().unwrap(), vec![0, 1]);
+        {
+            let data = heap.inner.data.lock().unwrap();
+            assert_eq!(data.finalization_batch.pending_slot_count(), 0);
+            assert!(data.finalization_batch.runs.is_empty());
+        }
+
+        let replacement = allocate(
+            &heap,
+            SelectivePanickingDrop {
+                id: 3,
+                panic: false,
+                events: Arc::clone(&events),
+            },
+        );
+        let replacement_slot = collector_slot(&heap, replacement);
+        assert_eq!(
+            replacement_slot.owner.location,
+            panicking_slot.owner.location
+        );
+        assert_eq!(
+            replacement_slot.owner.slot_index,
+            panicking_slot.owner.slot_index
+        );
+
+        drop(live_root);
+        drop(heap);
+        let mut completed = events.lock().unwrap().clone();
+        completed.sort_unstable();
+        assert_eq!(completed, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn repeated_destructor_panics_make_one_terminal_step_per_collection() {
+        let heap = Heap::new();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let values = heap.with_mutator(|mutator| {
+            let allocator = mutator.allocator::<SelectivePanickingDrop>().unwrap();
+            (0..3)
+                .map(|id| {
+                    allocator.alloc(SelectivePanickingDrop {
+                        id,
+                        panic: true,
+                        events: Arc::clone(&events),
+                    })
+                })
+                .collect::<Vec<_>>()
+        });
+        let slots = values
+            .iter()
+            .map(|value| collector_slot(&heap, *value))
+            .collect::<Vec<_>>();
+        assert!(
+            slots
+                .iter()
+                .all(|slot| slot.owner.location == slots[0].owner.location)
+        );
+
+        for completed in 1..=values.len() {
+            let panic = catch_unwind(AssertUnwindSafe(|| heap.collect_full()))
+                .expect_err("each pending destructor must propagate its own panic");
+            assert_eq!(
+                panic_string(panic.as_ref()),
+                "injected managed destructor panic"
+            );
+            assert_eq!(*events.lock().unwrap(), (0..completed).collect::<Vec<_>>());
+            assert_failed_collection_restored(&heap);
+            let data = heap.inner.data.lock().unwrap();
+            assert_eq!(
+                data.finalization_batch.pending_slot_count(),
+                values.len() - completed
+            );
+            for (index, slot) in slots.iter().enumerate() {
+                assert_eq!(
+                    data.arena.owner_slot_is_allocated(slot.owner),
+                    index >= completed
+                );
+            }
+        }
+
+        let completed = heap.collect_full().unwrap();
+        assert_eq!(completed.epoch(), 1);
+        assert_eq!(completed.marked_slots(), 0);
+        assert_eq!(completed.conservatively_retained_slots(), 0);
+        assert_eq!(*events.lock().unwrap(), vec![0, 1, 2]);
+        drop(heap);
+        assert_eq!(*events.lock().unwrap(), vec![0, 1, 2]);
     }
 
     #[test]
