@@ -99,8 +99,11 @@ frontiers, and advances the stale-cursor epoch last. C6A.4 replaces historical
 publication pressure with exact assigned-run occupancy. C6B.1 then installs a
 durable exact finalization batch: partial runs retain class membership with
 reserved words, wholly dead drop-bearing runs transfer their stable record to
-batch ownership, and every pending identity becomes non-rootable. Collection-
-time destructor dispatch remains disabled until C6B.2.
+batch ownership, and every pending identity becomes non-rootable. C6B.2 drains
+those exact masks with a bounded cursor, invokes erased destructors outside
+collector locks under the installed finalizer mutator, retires successful
+allocations, and transfers an actually panicking destructor to sparse durable
+quarantine before propagating its panic.
 
 The crate denies unsafe code by default. `src/lib.rs` gives the reviewed
 `pointer`, `root`, `mutator`, `trace`, `mutation`, `thread_cache`, and unit-test
@@ -470,10 +473,11 @@ C6 later owns collector-driven destruction.
   class's destructor exactly once, and then lets each arena chunk deallocate
   exactly once. C6A.2c has already erased wholly dead no-drop and empty runs
   from typed arena enumeration because neither has a destructor obligation.
-  C6B.1 excludes exact attached pending identities from that ordinary class
-  walk, then visits each exact attached or detached batch identity once. Its
-  mask still names an initialized, allocated payload with the record's
-  canonical metadata; class and batch walks are disjoint by construction.
+  C6B excludes exact attached pending and quarantined identities from that
+  ordinary class walk, then visits each remaining exact attached or detached
+  batch identity once. Each nonzero mask still names an initialized, allocated
+  payload with the record's canonical metadata; class and batch walks are
+  disjoint by construction, and quarantine is skipped in both.
   This path is provisionally
   non-reentrant and non-panicking. C2C.4 proves it cannot race an active owner
   region; later C6 replaces terminal enumeration with collector-controlled
@@ -724,15 +728,46 @@ referents alive merely because Rust destruction is delayed. Safe finalizer
 code may use only independently live/rooted values; an unsafe access through a
 stored `Gc` retains the existing caller obligation to prove liveness.
 
-Until C6B.2 consumes the batch during collection, terminal `HeapInner::drop`
-is its destruction boundary. The ordinary class walk skips every exact
-attached pending identity. A second batch walk derives pointers only from the
-validated retained run location and allocation bitmap, filters them through
-the exact pending mask, and calls that record's canonical erased destructor.
-Detached runs occur only in this second walk. Exclusive final heap ownership,
-initialized set allocation bits, and disjoint class/batch visitation therefore
-prove the new `drop_in_place` call sees a valid payload and runs exactly once.
-This remains the provisional non-reentrant teardown policy pending C6D.
+Terminal `HeapInner::drop` remains the fallback destruction boundary for live
+or interrupted pending allocations. The ordinary class walk skips every exact
+attached pending or quarantined identity. A second batch walk derives pointers
+only from the validated retained run location and allocation bitmap, filters
+them through the exact pending mask, and calls that record's canonical erased
+destructor. Detached runs occur only in this second walk. Exclusive final heap
+ownership, initialized set allocation bits, and disjoint class/batch
+visitation therefore prove each call sees a valid payload and runs exactly
+once. This remains the provisional non-reentrant teardown policy pending C6D.
+
+### C6B.2 erased destruction and quarantine transfer
+
+The finalization cursor stores only run, word, and bit indices. Under the
+managed-data mutex it resolves one set pending bit through the retained run
+record, validates the allocation bit and canonical metadata, and derives the
+exact payload address. The cursor and copied work descriptor borrow no payload
+reference. The mutex is released before `ObjectMetadata::drop_in_place`
+dispatches Rust `Drop`, while the collector's C3E mutator remains installed and
+keeps the heap in `Finalizing`. Recursive same-heap entry therefore reuses that
+mutator; unrelated admitted mutators may run concurrently; another collection
+cannot begin.
+
+After successful `Drop`, managed data is reacquired. The exact atomic
+allocation bit is cleared with the finalizer's exclusive word ownership before
+the pending mask bit is removed. Root and debug-access validation shares that
+mutex, so every observer sees either the old pending authority or the retired
+allocation. Zero-mask word and run records remain allocator-reserved until
+C6B.3 republishes their capacity.
+
+Erased destruction is wrapped only to establish an exceptional ownership
+boundary. On panic, the same critical section reserves one hash entry, inserts
+the exact stable `ErasedGc` plus canonical static metadata, and then removes
+the pending mask bit. Failure to reserve that indispensable record aborts;
+retrying or forgetting a partially destroyed Rust value would be unsound. A
+later collection re-resolves the address from arena topology, validates its
+set allocation bit, marks it conservatively without invoking `Trace`, and
+counts it as conservative retention. Rooting rejects exact quarantine before
+ordinary topology lookup, and terminal teardown skips its destructor. Durable
+quarantine contains no raw run pointer: such topology remains attempt-local,
+preserving the heap's `Send` boundary.
 
 The mark range is initialized as ordinary `u64` storage and remains disjoint
 from the header, atomic allocation/lease words, alignment padding, and payload.

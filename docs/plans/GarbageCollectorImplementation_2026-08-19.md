@@ -1,8 +1,8 @@
 # Glam GC Subcrate Implementation Plan — 2026-08-19
 
-Status: in progress; Phases C0 through C6B.1 are complete, including the C2C.6
+Status: in progress; Phases C0 through C6B.2 are complete, including the C2C.6
 verification follow-up. The mandatory post-C1, post-C2C, post-C3E, post-C4,
-and post-C5 downstream reviews are complete. C6B.2 is next.
+and post-C5 downstream reviews are complete. C6B.3 is next.
 
 This plan implements an exact, non-moving, runtime-local tracing collector
 without depending on Glam value semantics. The governing requirements and
@@ -70,7 +70,7 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C6A.3b | completed | swept allocator publication |
 | C6A.4 | completed | assigned-run pressure |
 | C6B.1 | completed | finalization batch and non-rootability |
-| C6B.2 | pending | finalizer handoff and destruction |
+| C6B.2 | completed | finalizer handoff, destruction, and panic-safe quarantine foundation |
 | C6B.3 | pending | non-resurrection and successful completion |
 | C6C.1 | pending | destructor panic, draining, and quarantine |
 | C6C.2 | pending | finalizer activity, reports, and pressure publication |
@@ -2971,11 +2971,16 @@ Execute C6 as the following smaller checkpoints:
 - **C6B.2 — C3E finalizer handoff and destruction.** Use C3E's no-gap
   `Exclusive`-to-`Finalizing` handoff, install the collector's current mutator,
   reopen ordinary admission, and run erased Rust destructors exactly once
-  outside collector locks. Group work by allocation word for partial runs and
-  by complete run for wholly dead runs so each reserved region can be released
-  as soon as its own finalizers are terminal. Successful destruction clears the
-  slot allocation bit; fresh allocations and effects remain ordinary
-  later-collection state.
+  outside collector locks. Traverse the durable batch with a bounded
+  run/word/bit cursor instead of allocating a second per-slot work vector.
+  Successful destruction clears the slot allocation bit before removing its
+  exact pending identity under the managed-data mutex; fresh allocations and
+  effects remain ordinary later-collection state. Retain terminal zero-mask
+  word and run records through this checkpoint; C6B.3 releases each completed
+  region back to allocator topology. Install the minimal exact-address sparse
+  quarantine transfer needed to propagate a destructor panic without making
+  that partially destroyed allocation retryable; C6C.1 adds remaining-batch
+  draining and complete run restoration.
 - **C6B.3 — non-resurrection and successful completion.** Reject roots to any
   remaining batch identity, permit quining only through fresh allocations,
   and publish completed regions incrementally under heap state. Rebuild and
@@ -3632,6 +3637,38 @@ Completed on 2026-08-24:
   ordered whole-run detachment, and concurrent root rejection pass focused
   Miri. The stable collector and workspace verification matrices are recorded
   in `VERIFY.md`.
+
+#### C6B.2 completion
+
+Completed on 2026-08-24:
+
+- The collector drains the batch with a compact run/word/bit cursor. It derives
+  one exact initialized payload under the managed-data mutex, releases every
+  collector lock, then dispatches that record's canonical erased Rust
+  destructor while the C3E finalizer mutator is installed.
+- A successful destructor reacquires managed data, clears the exact atomic
+  allocation bit first, and only then removes the pending mask bit. Concurrent
+  root/debug validation therefore observes either a pending identity or an
+  unallocated slot, never a resurrectable gap. Zero-mask records deliberately
+  continue reserving their regions until C6B.3 republishes capacity.
+- Destructor code may recursively enter the same heap, allocate, and publish a
+  root through the installed mutator. A focused fixture exercises class
+  discovery and allocation from `Drop`, proving that neither the data mutex nor
+  the coordinator mutex crosses erased destructor dispatch.
+- An actual destructor panic reserves and inserts one exact
+  `ErasedGc -> QuarantineRecord` entry before removing pending authority, then
+  resumes the original panic. Later collection marks that allocation
+  conservatively without tracing its damaged payload, root construction
+  rejects it, and terminal teardown never invokes its destructor again. Only
+  static canonical metadata is durable; raw run pointers remain attempt-local
+  and are re-resolved from the arena under collector authority.
+- This checkpoint supplies only the minimum panic-safe quarantine foundation.
+  C6C.1 still drains or classifies work after the first panic and restores safe
+  capacity for partial and detached runs containing quarantine.
+- The collector suite now contains 170 unit tests (168 passing plus two
+  explicit scale fixtures), 6 Loom models, and 8 compile-fail/doc tests. The
+  recursive allocation and exact quarantine fixtures join the migrated C6B.1
+  coverage in `VERIFY.md`.
 
 ### Mandatory Post-C6 Review
 

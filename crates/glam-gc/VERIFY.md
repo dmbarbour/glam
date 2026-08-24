@@ -288,8 +288,8 @@ C6B.1 materializes exact drop-required identities before selector withdrawal.
 Native fixtures prove word-local reservation in an attached partial run,
 complete detachment of wholly dead drop-bearing runs, preservation of former
 class order across multiple detachments, and assigned-pressure accounting
-which treats detached runs as occupied. No destructor runs during collection
-at this checkpoint.
+which treats detached runs as occupied. At the C6B.1 checkpoint, no destructor
+yet ran during collection; C6B.2 migrates those same fixtures below.
 
 A second collection retains pending identities without tracing them and does
 not duplicate batch records. A staged fixture drops another root between
@@ -320,6 +320,45 @@ unit tests (166 passing and two ignored scale fixtures), six Loom models, and
 eight compile-fail/doc tests. The exact unsafe inventory, workspace formatting,
 all-target/all-feature Clippy with warnings denied, and the complete workspace
 test suite also pass.
+
+## C6B.2 Erased-Destruction Verification
+
+C6B.2 migrates every C6B.1 fixture from durable pending state to completed
+destruction. Drop counters now advance during the collection which discovers
+the dead allocation; successful payloads have their exact allocation bits
+cleared and contribute no conservative retention to a later collection.
+Pre-collection slot snapshots preserve bitmap verification without attempting
+to resolve stale post-destruction `Gc` identities.
+
+`managed_destructor_runs_outside_locks_with_the_recursive_finalizer_mutator`
+uses a real managed Rust `Drop` implementation to reenter the same heap,
+discover an allocation class, allocate `u64`, and publish a root. It observes
+recursive depth two and validates the fresh value after collection. Completion
+proves erased dispatch held neither managed data nor the coordinator mutex and
+that the successful dying allocation bit was retired exactly once.
+
+`managed_destructor_panic_quarantines_exactly_once_without_retracing` forces a
+real `Drop` panic. It checks attempt recovery, one exact quarantine record, a
+still-set allocation bit, an empty pending mask, root rejection, and propagation
+of the original panic. The next collection marks one conservative slot while
+running neither `Trace` nor `Drop`; terminal heap release also leaves the
+destructor count at one. C6C.1 later adds draining of work after that first
+panic and restores all remaining safe run capacity.
+
+Focused Miri runs are:
+
+```sh
+cargo +nightly miri test --package glam-gc --lib --all-features \
+  managed_destructor_runs_outside_locks_with_the_recursive_finalizer_mutator
+cargo +nightly miri test --package glam-gc --lib --all-features \
+  managed_destructor_panic_quarantines_exactly_once_without_retracing
+```
+
+The collection-time erased `drop_in_place` call and exact allocation retirement
+are reviewed unsafe sites; sparse quarantine itself is safe Rust and allocates
+only on the exceptional path. The stable collector matrix contains 170 unit
+tests (168 passing and two ignored scale fixtures), six Loom models, and eight
+compile-fail/doc tests.
 
 ## Gate G0 Baseline
 

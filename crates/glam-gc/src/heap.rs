@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::ops::Range;
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
@@ -104,8 +105,9 @@ impl std::error::Error for CollectionError {}
 /// One shareable, runtime-local managed-value domain.
 ///
 /// The heap owns canonical allocation classes, typed-run topology, mark state,
-/// and every arena payload. Reclamation remains disabled, so payloads remain
-/// allocated until provisional terminal heap teardown.
+/// and every arena payload. Full collection eagerly reclaims dead no-drop
+/// allocations and runs, and invokes drop-bearing payload destructors under a
+/// collector-owned finalizer mutator.
 #[derive(Clone, Default)]
 pub struct Heap {
     inner: Arc<HeapInner>,
@@ -184,11 +186,12 @@ impl Heap {
     /// the reachable graph non-recursively, and returns the latest completed
     /// scalar report which satisfies this call's requested epoch. It currently
     /// reclaims wholly dead runs with no destructor obligation, clears dead
-    /// allocations from retained partial no-drop runs, and isolates exact
-    /// drop-required identities in a non-rootable finalization batch. Erased
-    /// destruction during collection remains later C6 work. A concurrent
-    /// later collection may overtake a waiting caller, and no unbounded report
-    /// history is retained.
+    /// allocations from retained partial no-drop runs, and invokes exact
+    /// drop-required identities outside collector locks under an installed
+    /// finalizer mutator. A successful destructor retires its allocation;
+    /// a panicking destructor is quarantined before its original panic resumes.
+    /// A concurrent later collection may overtake a waiting caller, and no
+    /// unbounded report history is retained.
     pub fn collect_full(&self) -> Result<CollectionReport, CollectionError> {
         if thread_has_any_active_mutator() {
             return Err(CollectionError::ActiveMutator);
@@ -279,9 +282,15 @@ struct ManagedData {
     classes: Vec<AllocationClassEntry>,
     retired_no_drop_runs: Vec<RetiredNoDropRun>,
     finalization_batch: FinalizationBatch,
+    quarantined: HashMap<ErasedGc, QuarantineRecord>,
     free_runs: Vec<RunLocation>,
     allocation_pressure: AllocationPressure,
     roots: Vec<Weak<RootCell>>,
+}
+
+#[derive(Clone, Copy)]
+struct QuarantineRecord {
+    metadata: &'static ObjectMetadata,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -677,6 +686,38 @@ impl ManagedData {
         }
     }
 
+    fn next_finalization_work(&self, cursor: &mut FinalizationCursor) -> Option<FinalizationWork> {
+        self.finalization_batch.next_work(&self.arena, cursor)
+    }
+
+    fn complete_finalization(&mut self, work: FinalizationWork) {
+        self.finalization_batch.complete_success(&self.arena, work);
+    }
+
+    fn quarantine_finalization(&mut self, work: FinalizationWork) {
+        if self.quarantined.try_reserve(1).is_err() {
+            // A partially destroyed Rust value cannot be retried or forgotten.
+            // If its durable exceptional record cannot be allocated, no safe
+            // recoverable heap state exists.
+            std::process::abort();
+        }
+        assert!(
+            !self.quarantined.contains_key(&work.value),
+            "finalization identity was quarantined twice"
+        );
+        let replaced = self.quarantined.insert(
+            work.value,
+            QuarantineRecord {
+                metadata: work.metadata,
+            },
+        );
+        debug_assert!(replaced.is_none());
+
+        // The insertion precedes removal from pending masks under the same
+        // heap mutex. Root validation therefore observes no resurrectable gap.
+        self.finalization_batch.complete_quarantine(work);
+    }
+
     fn sweep_partial_no_drop_runs(&mut self, dead_set: &DeadSetPlan) {
         let is_swept = |run: &&DeadRunPlan| {
             run.disposition == DeadSlotDisposition::NoDrop
@@ -934,6 +975,22 @@ struct FinalizationBatch {
     runs: Vec<FinalizationRun>,
 }
 
+#[derive(Default)]
+struct FinalizationCursor {
+    run_index: usize,
+    word_index: usize,
+}
+
+#[derive(Clone, Copy)]
+struct FinalizationWork {
+    run_index: usize,
+    word_index: usize,
+    bit: u64,
+    owner: RunOwner,
+    value: ErasedGc,
+    metadata: &'static ObjectMetadata,
+}
+
 struct FinalizationRun {
     target: FinalizationRunTarget,
     class_id: AllocationClassId,
@@ -1097,7 +1154,10 @@ impl FinalizationBatch {
 
     #[cfg_attr(
         not(test),
-        allow(dead_code, reason = "C6B.2 consumes the finalization batch")
+        allow(
+            dead_code,
+            reason = "exact pending counts remain test-only until C6C reporting"
+        )
     )]
     fn pending_slot_count(&self) -> usize {
         self.runs.iter().fold(0_usize, |total, run| {
@@ -1119,6 +1179,92 @@ impl FinalizationBatch {
             .iter()
             .find(|run| run.contains_address(address))
             .map(|run| run.metadata)
+    }
+
+    fn next_work(
+        &self,
+        arena: &Arena,
+        cursor: &mut FinalizationCursor,
+    ) -> Option<FinalizationWork> {
+        while let Some(run) = self.runs.get(cursor.run_index) {
+            while let Some(word) = run.pending_words.get(cursor.word_index) {
+                if word.dead_mask == 0 {
+                    cursor.word_index += 1;
+                    continue;
+                }
+
+                let bit_index = word.dead_mask.trailing_zeros() as usize;
+                let bit = 1_u64 << bit_index;
+                let slot_index = word
+                    .word_index
+                    .checked_mul(u64::BITS as usize)
+                    .and_then(|start| start.checked_add(bit_index))
+                    .expect("finalization slot index exhausted");
+                let target = run.target.target();
+                assert!(slot_index < target.geometry.slot_count);
+                let owner = RunOwner {
+                    location: target.location,
+                    run: target.run,
+                    class_id: run.class_id,
+                    geometry: target.geometry,
+                    slot_index,
+                };
+                assert!(arena.owner_slot_is_allocated(owner));
+                let pointer = arena.owner_slot_pointer(owner);
+                return Some(FinalizationWork {
+                    run_index: cursor.run_index,
+                    word_index: cursor.word_index,
+                    bit,
+                    owner,
+                    value: ErasedGc::new(pointer),
+                    metadata: run.metadata,
+                });
+            }
+            cursor.run_index += 1;
+            cursor.word_index = 0;
+        }
+        None
+    }
+
+    fn complete_success(&mut self, arena: &Arena, work: FinalizationWork) {
+        let run = self
+            .runs
+            .get_mut(work.run_index)
+            .expect("completed finalization lost its run record");
+        assert_eq!(run.target.target().location, work.owner.location);
+        assert_eq!(run.class_id, work.owner.class_id);
+        assert!(std::ptr::eq(run.metadata, work.metadata));
+        let word = run
+            .pending_words
+            .get_mut(work.word_index)
+            .expect("completed finalization lost its word record");
+        assert_ne!(word.dead_mask & work.bit, 0);
+        assert_eq!(arena.owner_slot_pointer(work.owner), work.value.as_ptr());
+
+        // Keep the exact batch identity authoritative until after the
+        // allocation bit is cleared. Root validation shares this heap mutex,
+        // so it observes either pending finalization or an unallocated slot.
+        assert!(
+            arena.clear_owner_allocation(work.owner),
+            "successfully destroyed allocation was already retired"
+        );
+        word.dead_mask &= !work.bit;
+    }
+
+    fn complete_quarantine(&mut self, work: FinalizationWork) {
+        let run = self
+            .runs
+            .get_mut(work.run_index)
+            .expect("quarantined finalization lost its run record");
+        assert_eq!(run.target.target().location, work.owner.location);
+        assert_eq!(run.class_id, work.owner.class_id);
+        assert!(std::ptr::eq(run.metadata, work.metadata));
+        let word = run
+            .pending_words
+            .get_mut(work.word_index)
+            .expect("quarantined finalization lost its word record");
+        assert_ne!(word.dead_mask & work.bit, 0);
+        word.dead_mask &= !work.bit;
     }
 
     fn reserves_word(&self, target: RunClaimTarget, word_index: usize) -> bool {
@@ -1318,6 +1464,35 @@ struct MarkAttempt {
 }
 
 impl MarkAttempt {
+    fn retain_quarantined(&mut self, data: &mut ManagedData) {
+        let ManagedData {
+            arena, quarantined, ..
+        } = data;
+        for (value, record) in quarantined.iter() {
+            assert!(record.metadata.needs_drop());
+            let owner = arena
+                .checked_slot_owner(value.as_ptr().addr().get())
+                .expect("quarantined allocation lost its arena owner");
+            assert_eq!(arena.owner_slot_pointer(owner), value.as_ptr());
+            assert!(
+                arena.owner_slot_is_allocated(owner),
+                "quarantined allocation lost its allocation bit"
+            );
+            assert!(
+                arena.mark_owner_slot(owner),
+                "quarantined allocation was marked twice"
+            );
+            self.marked_slot_count = self
+                .marked_slot_count
+                .checked_add(1)
+                .expect("marked-slot count exhausted");
+            self.conservatively_retained_slot_count = self
+                .conservatively_retained_slot_count
+                .checked_add(1)
+                .expect("conservative-retention count exhausted");
+        }
+    }
+
     fn retain_pending_finalizers(&mut self, data: &mut ManagedData) {
         let ManagedData {
             arena,
@@ -1666,6 +1841,7 @@ impl HeapInner {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             data.clear_mark_bitmaps();
+            mark_attempt.retain_quarantined(&mut data);
             mark_attempt.retain_pending_finalizers(&mut data);
             mark_work(&mut mark_attempt, &mut data);
         }
@@ -1758,7 +1934,11 @@ impl HeapInner {
         let thread_entry =
             prepared.activate(self.current_allocation_lease_epoch(), Some(admission));
         let mutator = Mutator::new(self, thread_entry.cache());
+        // Test-only/synthetic work observes the established Finalizing
+        // boundary before production destruction begins. A panic here has not
+        // invoked any payload destructor and remains safely retryable.
         finalizer_work(&mutator);
+        self.run_finalization_batch(&mutator);
         drop(mutator);
         let admission = thread_entry.into_outer_admission();
 
@@ -1768,6 +1948,46 @@ impl HeapInner {
         } else {
             drop(admission);
             None
+        }
+    }
+
+    fn run_finalization_batch(&self, mutator: &Mutator<'_>) {
+        debug_assert!(std::ptr::eq(self, Arc::as_ptr(mutator.heap())));
+        let mut cursor = FinalizationCursor::default();
+
+        loop {
+            let work = {
+                let data = self
+                    .data
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                data.next_finalization_work(&mut cursor)
+            };
+            let Some(work) = work else {
+                break;
+            };
+
+            // SAFETY: the batch record was built from an initialized allocated
+            // slot with this canonical metadata. Its exact word remains
+            // finalizer-owned, root/debug access rejects the pending identity,
+            // and the installed finalizer mutator prevents another collection.
+            // No collector lock is held while user/Rust destruction runs.
+            let result = catch_unwind(AssertUnwindSafe(|| unsafe {
+                work.metadata.drop_in_place(work.value.as_ptr())
+            }));
+
+            let mut data = self
+                .data
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match result {
+                Ok(()) => data.complete_finalization(work),
+                Err(panic) => {
+                    data.quarantine_finalization(work);
+                    drop(data);
+                    resume_unwind(panic);
+                }
+            }
         }
     }
 
@@ -2289,9 +2509,9 @@ impl HeapInner {
         #[cfg(debug_assertions)]
         {
             let expected = metadata_for::<T>();
-            let address = pointer.as_ptr().cast::<()>() as usize;
+            let value = ErasedGc::new(pointer.cast());
             let state = self.data.lock().expect("heap state should not be poisoned");
-            let validation = validate_rootable_in_state(&state, address, expected);
+            let validation = validate_rootable_in_state(&state, value, expected);
             drop(state);
             if let Err(error) = validation {
                 error.raise();
@@ -2305,9 +2525,9 @@ impl HeapInner {
     pub(crate) fn register_root<T: Trace>(self: &Arc<Self>, value: crate::Gc<T>) -> Root<T> {
         let (root, registration) = Root::candidate(self, value);
         let expected = metadata_for::<T>();
-        let address = value.erase().as_ptr().as_ptr() as usize;
+        let value = value.erase();
         let mut state = self.data.lock().expect("heap state should not be poisoned");
-        if let Err(error) = validate_rootable_in_state(&state, address, expected) {
+        if let Err(error) = validate_rootable_in_state(&state, value, expected) {
             drop(state);
             error.raise();
         }
@@ -2368,6 +2588,7 @@ enum RootValidationError {
     },
     Unallocated,
     PendingFinalization,
+    Quarantined,
 }
 
 impl RootValidationError {
@@ -2381,15 +2602,29 @@ impl RootValidationError {
             Self::PendingFinalization => {
                 panic!("managed pointer is pending finalization and cannot be rooted or accessed")
             }
+            Self::Quarantined => {
+                panic!("managed pointer is quarantined and cannot be rooted or accessed")
+            }
         }
     }
 }
 
 fn validate_rootable_in_state(
     state: &ManagedData,
-    address: usize,
+    value: ErasedGc,
     expected: &'static ObjectMetadata,
 ) -> Result<(), RootValidationError> {
+    if let Some(record) = state.quarantined.get(&value) {
+        if !std::ptr::eq(record.metadata, expected) {
+            return Err(RootValidationError::Representation {
+                actual: record.metadata.type_name(),
+                expected: expected.type_name(),
+            });
+        }
+        return Err(RootValidationError::Quarantined);
+    }
+
+    let address = value.as_ptr().as_ptr() as usize;
     if let Some(actual) = state.finalization_batch.pending_metadata_at(address) {
         if !std::ptr::eq(actual, expected) {
             return Err(RootValidationError::Representation {
@@ -2581,10 +2816,12 @@ impl Drop for HeapInner {
             }
             for run in entry.runs() {
                 for pointer in state.arena.allocated_slot_pointers(run.location) {
+                    let value = ErasedGc::new(pointer);
                     if state
                         .finalization_batch
                         .pending_metadata_at(pointer.as_ptr() as usize)
                         .is_some()
+                        || state.quarantined.contains_key(&value)
                     {
                         continue;
                     }
@@ -2602,6 +2839,9 @@ impl Drop for HeapInner {
                 .arena
                 .allocated_slot_pointers(run.target.target().location)
             {
+                if state.quarantined.contains_key(&ErasedGc::new(pointer)) {
+                    continue;
+                }
                 if !run.contains_address(pointer.as_ptr() as usize) {
                     continue;
                 }
@@ -2930,6 +3170,50 @@ mod tests {
     // SAFETY: `WideDropCounter` contains no managed edge. Its large total slot
     // request gives finalization fixtures one allocation per run.
     unsafe impl Trace for WideDropCounter {
+        const REQUESTED_SLOT_SIZE: Option<usize> = Some(32 * 1024);
+
+        fn trace(&self, _visitor: &mut Visitor<'_>) {}
+    }
+
+    struct AllocatingDrop {
+        heap: Heap,
+        drops: Arc<AtomicUsize>,
+        published: Arc<Mutex<Option<crate::Root<u64>>>>,
+    }
+
+    impl Drop for AllocatingDrop {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::Relaxed);
+            self.heap.with_mutator(|mutator| {
+                assert_eq!(
+                    self.heap.inner.coordinator_snapshot().phase,
+                    AdmissionPhase::Finalizing
+                );
+                assert_eq!(cache_snapshot(&self.heap.inner).unwrap().recursive_depth, 2);
+                let value = mutator.allocator::<u64>().unwrap().alloc(73);
+                let root = mutator.root(value);
+                assert!(self.published.lock().unwrap().replace(root).is_none());
+            });
+        }
+    }
+
+    // SAFETY: the heap handle and publication channel are ordinary Rust
+    // resources, not managed edges. `AllocatingDrop` contains no `Gc<_>`.
+    unsafe impl Trace for AllocatingDrop {
+        fn trace(&self, _visitor: &mut Visitor<'_>) {}
+    }
+
+    struct PanickingDrop(Arc<AtomicUsize>);
+
+    impl Drop for PanickingDrop {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            panic!("injected managed destructor panic");
+        }
+    }
+
+    // SAFETY: `PanickingDrop` contains no managed edge.
+    unsafe impl Trace for PanickingDrop {
         const REQUESTED_SLOT_SIZE: Option<usize> = Some(32 * 1024);
 
         fn trace(&self, _visitor: &mut Visitor<'_>) {}
@@ -4868,11 +5152,8 @@ mod tests {
         assert_eq!(second.epoch(), 2);
         assert_eq!(second.root_entries(), 1);
         assert_eq!(second.traced_objects(), 2);
-        // C6B.1 keeps the first collection's unreachable drop-bearing node in
-        // the durable batch. Until C6B.2 drains it, a later collection retains
-        // that identity without dispatching its trace implementation.
-        assert_eq!(second.marked_slots(), 3);
-        assert_eq!(second.conservatively_retained_slots(), 1);
+        assert_eq!(second.marked_slots(), 2);
+        assert_eq!(second.conservatively_retained_slots(), 0);
         assert_eq!(
             heap.inner.coordinator_snapshot().latest_collection_report,
             Some(second)
@@ -4932,14 +5213,19 @@ mod tests {
                     .collect::<Vec<_>>();
                 (nodes, roots)
             });
+            let slots = nodes
+                .iter()
+                .copied()
+                .map(|node| collector_slot(&heap, node))
+                .collect::<Vec<_>>();
 
             let report = heap.collect_full().unwrap();
             assert_eq!(report.root_entries(), roots.len(), "case {case}");
             assert_eq!(report.marked_slots(), expected_count, "case {case}");
             assert_eq!(report.traced_objects(), expected_count, "case {case}");
-            for (index, node) in nodes.iter().copied().enumerate() {
+            for index in 0..nodes.len() {
                 assert_eq!(
-                    slot_is_marked(&heap, collector_slot(&heap, node)),
+                    slot_is_marked(&heap, slots[index]),
                     expected[index],
                     "case {case}, node {index}"
                 );
@@ -5156,6 +5442,11 @@ mod tests {
             let root = mutator.root(nodes[0]);
             (nodes, root)
         });
+        let slots = nodes
+            .iter()
+            .copied()
+            .map(|node| collector_slot(&heap, node))
+            .collect::<Vec<_>>();
 
         heap.collect_full().unwrap();
 
@@ -5167,10 +5458,10 @@ mod tests {
         assert!(
             nodes[..4]
                 .iter()
-                .copied()
-                .all(|node| slot_is_marked(&heap, collector_slot(&heap, node)))
+                .enumerate()
+                .all(|(index, _)| slot_is_marked(&heap, slots[index]))
         );
-        assert!(!slot_is_marked(&heap, collector_slot(&heap, nodes[4])));
+        assert!(!slot_is_marked(&heap, slots[4]));
         heap.with_mutator(|mutator| assert_eq!(root.get(mutator).edges.lock().unwrap().len(), 3));
     }
 
@@ -5483,7 +5774,7 @@ mod tests {
                 .is_none()
         );
 
-        assert_eq!(drops.load(Ordering::Relaxed), 0);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
         assert!(
             !heap
                 .inner
@@ -5493,11 +5784,12 @@ mod tests {
             "partial no-drop sweep must clear a dead allocation bit"
         );
         assert!(
-            heap.inner
+            !heap
+                .inner
                 .resolve_slot(dropping_dead.erase().as_ptr().as_ptr() as usize)
                 .unwrap()
                 .allocated,
-            "drop-bearing allocation must remain intact before finalization"
+            "successful finalization must retire the drop-bearing allocation"
         );
         heap.with_mutator(|mutator| {
             assert_eq!(*plain_root.get(mutator), 10);
@@ -5722,7 +6014,7 @@ mod tests {
 
         let report = heap.collect_full().unwrap();
         assert_eq!(report.marked_slots(), 2);
-        assert_eq!(drops.load(Ordering::Relaxed), 0);
+        assert_eq!(drops.load(Ordering::Relaxed), 64);
         {
             let data = heap.inner.data.lock().unwrap();
             let state = classification_state_snapshot(&heap, &data);
@@ -5744,11 +6036,11 @@ mod tests {
                 vec![
                     DeadBitmapWord {
                         word_index: 0,
-                        dead_mask: !1,
+                        dead_mask: 0,
                     },
                     DeadBitmapWord {
                         word_index: 1,
-                        dead_mask: 0b10,
+                        dead_mask: 0,
                     },
                 ]
             );
@@ -5780,7 +6072,7 @@ mod tests {
 
         let report = heap.collect_full().unwrap();
         assert_eq!(report.marked_slots(), 0);
-        assert_eq!(drops.load(Ordering::Relaxed), 0);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
         assert!(class.claim_frontier(&heap.inner).is_none());
 
         let replacement = allocate(&heap, WideDropCounter(Arc::clone(&drops)));
@@ -5812,11 +6104,11 @@ mod tests {
         let first = heap.collect_full().unwrap();
         assert_eq!(first.marked_slots(), 1);
         assert_eq!(first.conservatively_retained_slots(), 0);
-        assert_eq!(drops.load(Ordering::Relaxed), 0);
+        assert_eq!(drops.load(Ordering::Relaxed), 2);
         {
             let data = heap.inner.data.lock().unwrap();
             assert_eq!(data.finalization_batch.runs.len(), 2);
-            assert_eq!(data.finalization_batch.pending_slot_count(), 2);
+            assert_eq!(data.finalization_batch.pending_slot_count(), 0);
             assert_eq!(data.finalization_batch.detached_run_count(), 1);
             assert!(
                 data.classes[class_index(live_slot.owner.class_id).unwrap()]
@@ -5860,14 +6152,14 @@ mod tests {
         });
 
         let second = heap.collect_full().unwrap();
-        assert_eq!(second.marked_slots(), 3);
-        assert_eq!(second.conservatively_retained_slots(), 2);
+        assert_eq!(second.marked_slots(), 1);
+        assert_eq!(second.conservatively_retained_slots(), 0);
         assert_eq!(second.traced_objects(), 1);
-        assert_eq!(drops.load(Ordering::Relaxed), 0);
+        assert_eq!(drops.load(Ordering::Relaxed), 2);
         {
             let data = heap.inner.data.lock().unwrap();
             assert_eq!(data.finalization_batch.runs.len(), 2);
-            assert_eq!(data.finalization_batch.pending_slot_count(), 2);
+            assert_eq!(data.finalization_batch.pending_slot_count(), 0);
             assert_eq!(data.finalization_batch.detached_run_count(), 1);
             assert_eq!(data.roots.len(), 1);
         }
@@ -5906,23 +6198,19 @@ mod tests {
         {
             let data = heap.inner.data.lock().unwrap();
             assert_eq!(data.finalization_batch.runs.len(), 1);
-            assert_eq!(data.finalization_batch.pending_slot_count(), 1);
+            assert_eq!(data.finalization_batch.pending_slot_count(), 0);
         }
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
 
         drop(later_root);
         let second = heap.collect_full().unwrap();
-        assert_eq!(second.marked_slots(), 2);
-        assert_eq!(second.conservatively_retained_slots(), 1);
-        assert_eq!(drops.load(Ordering::Relaxed), 0);
+        assert_eq!(second.marked_slots(), 1);
+        assert_eq!(second.conservatively_retained_slots(), 0);
+        assert_eq!(drops.load(Ordering::Relaxed), 2);
         {
             let data = heap.inner.data.lock().unwrap();
             assert_eq!(data.finalization_batch.runs.len(), 1);
-            assert_eq!(data.finalization_batch.pending_slot_count(), 2);
-            let pending = &data.finalization_batch.runs[0];
-            for value in [values[1], values[2]] {
-                assert!(pending.contains_address(value.erase().as_ptr().as_ptr() as usize));
-            }
-            assert!(!pending.contains_address(values[0].erase().as_ptr().as_ptr() as usize));
+            assert_eq!(data.finalization_batch.pending_slot_count(), 0);
         }
 
         heap.with_mutator(|mutator| {
@@ -5987,7 +6275,85 @@ mod tests {
 
         release.wait();
         assert!(collector.join().unwrap());
-        assert_eq!(drops.load(Ordering::Relaxed), 0);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+        drop(heap);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn managed_destructor_runs_outside_locks_with_the_recursive_finalizer_mutator() {
+        let heap = Heap::new();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let published = Arc::new(Mutex::new(None));
+        let dead = allocate(
+            &heap,
+            AllocatingDrop {
+                heap: heap.clone(),
+                drops: Arc::clone(&drops),
+                published: Arc::clone(&published),
+            },
+        );
+        let dead_slot = collector_slot(&heap, dead);
+
+        let report = heap.collect_full().unwrap();
+
+        assert_eq!(report.marked_slots(), 0);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+        assert!(
+            !heap
+                .inner
+                .data
+                .lock()
+                .unwrap()
+                .arena
+                .owner_slot_is_allocated(dead_slot.owner),
+            "the allocation bit must retire only after successful Drop"
+        );
+        let root = published
+            .lock()
+            .unwrap()
+            .take()
+            .expect("managed Drop must publish its fresh allocation");
+        heap.with_mutator(|mutator| assert_eq!(*root.get(mutator), 73));
+        drop(root);
+        drop(heap);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn managed_destructor_panic_quarantines_exactly_once_without_retracing() {
+        let heap = Heap::new();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let dead = allocate(&heap, PanickingDrop(Arc::clone(&drops)));
+        let dead_slot = collector_slot(&heap, dead);
+
+        let panic = catch_unwind(AssertUnwindSafe(|| heap.collect_full()))
+            .expect_err("managed destructor must propagate its panic");
+        assert_eq!(
+            panic_string(panic.as_ref()),
+            "injected managed destructor panic"
+        );
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+        assert_failed_collection_restored(&heap);
+        {
+            let data = heap.inner.data.lock().unwrap();
+            assert_eq!(data.quarantined.len(), 1);
+            assert!(data.quarantined.contains_key(&dead.erase()));
+            assert_eq!(data.finalization_batch.pending_slot_count(), 0);
+            assert!(data.arena.owner_slot_is_allocated(dead_slot.owner));
+        }
+        let retry = heap.collect_full().unwrap();
+        assert_eq!(retry.epoch(), 1);
+        assert_eq!(retry.root_entries(), 0);
+        assert_eq!(retry.traced_objects(), 0);
+        assert_eq!(retry.marked_slots(), 1);
+        assert_eq!(retry.conservatively_retained_slots(), 1);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+        heap.with_mutator(|mutator| {
+            let rejected = catch_unwind(AssertUnwindSafe(|| mutator.root(dead)));
+            assert!(rejected.is_err(), "quarantine must remain non-rootable");
+        });
+
         drop(heap);
         assert_eq!(drops.load(Ordering::Relaxed), 1);
     }
@@ -6264,7 +6630,7 @@ mod tests {
 
         let report = heap.collect_full().unwrap();
         assert_eq!(report.marked_slots(), 4);
-        assert_eq!(drops.load(Ordering::Relaxed), 0);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
 
         let data = heap.inner.data.lock().unwrap();
         let retained = data.classes[class_index(wide_class.id()).unwrap()]
@@ -6988,7 +7354,7 @@ mod tests {
         assert!(matches!(
             validate_rootable_in_state(
                 &state,
-                unallocated.as_ptr() as usize,
+                ErasedGc::new(unallocated.cast()),
                 metadata_for::<u64>()
             ),
             Err(RootValidationError::Unallocated)

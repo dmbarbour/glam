@@ -7,8 +7,11 @@
 //! later typed-run publication. C6A.3a clears dead allocations from retained
 //! partial no-drop runs, and C6A.3b publishes exact lease masks, eligible class
 //! frontiers, and one final stale-cursor epoch. C6B.1 isolates exact
-//! drop-required identities in a durable, non-rootable finalization batch;
-//! erased destruction during collection remains disabled until C6B.2.
+//! drop-required identities in a durable, non-rootable finalization batch.
+//! C6B.2 drains that batch outside collector locks under the installed
+//! finalizer mutator, retires successful allocations exactly once, and
+//! transfers an actually panicking destructor into sparse quarantine before
+//! propagating its panic. C6B.3 restores completed-region allocator capacity.
 
 #![deny(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]

@@ -343,6 +343,55 @@ impl Arena {
         chunk.slot_is_allocated(run, owner.geometry, owner.slot_index)
     }
 
+    pub(crate) fn owner_slot_pointer(&self, owner: RunOwner) -> NonNull<()> {
+        let (chunk, run) = self.resolved_owner_run(owner);
+        assert_eq!(
+            chunk.header_for(run).and_then(RunHeader::class_id),
+            Some(owner.class_id),
+            "resolved allocation owner changed classes"
+        );
+        assert_eq!(
+            chunk.header_for(run).and_then(RunHeader::geometry),
+            Some(owner.geometry),
+            "resolved allocation owner changed geometry"
+        );
+        let offset = owner
+            .geometry
+            .slot_offset(owner.slot_index)
+            .expect("resolved allocation owner lost its slot");
+        // SAFETY: the retained run and its initialized header were validated
+        // above, and bounded slot geometry places this pointer at the exact
+        // payload start inside the live arena allocation.
+        unsafe { run.pointer().add(offset).cast() }
+    }
+
+    /// Retires one successfully destroyed allocation from a finalizer-owned
+    /// word.
+    ///
+    /// The caller must own the exact finalization reservation for this word,
+    /// so no ordinary allocation-word writer may race this update. Root and
+    /// debug access may still read the atomic word concurrently.
+    pub(crate) fn clear_owner_allocation(&self, owner: RunOwner) -> bool {
+        let (chunk, run) = self.resolved_owner_run(owner);
+        assert_eq!(
+            chunk.header_for(run).and_then(RunHeader::class_id),
+            Some(owner.class_id),
+            "finalized allocation changed classes"
+        );
+        assert_eq!(
+            chunk.header_for(run).and_then(RunHeader::geometry),
+            Some(owner.geometry),
+            "finalized allocation changed geometry"
+        );
+        let (word_index, bit) = bitmap_bit(owner.geometry.allocation_bitmap, owner.slot_index);
+        let allocation = allocation_word_pointer(run, owner.geometry, word_index);
+        // SAFETY: validated geometry places this initialized atomic word in
+        // the retained run. The finalization reservation makes this caller its
+        // sole writer; AcqRel preserves payload publication for concurrent
+        // readers and orders retirement after successful destruction.
+        unsafe { allocation.as_ref() }.fetch_and(!bit, Ordering::AcqRel) & bit != 0
+    }
+
     pub(crate) fn clear_assigned_mark_bitmaps(&mut self) -> usize {
         let mut cleared = 0;
         for chunk in &mut self.chunks {

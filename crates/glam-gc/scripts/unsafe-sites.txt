@@ -27,6 +27,7 @@ crates/glam-gc/src/arena.rs:        let start = unsafe { address.pointer().add(b
 crates/glam-gc/src/arena.rs:        let word = unsafe { pointer.as_ref() }.load(Ordering::Acquire);
 crates/glam-gc/src/arena.rs:        let word = unsafe { pointer.read() };
 crates/glam-gc/src/arena.rs:        let words = unsafe {
+crates/glam-gc/src/arena.rs:        unsafe { allocation.as_ref() }.fetch_and(!bit, Ordering::AcqRel) & bit != 0
 crates/glam-gc/src/arena.rs:        unsafe { allocation_word.as_ref() }.store(published_word, Ordering::Release);
 crates/glam-gc/src/arena.rs:        unsafe { dealloc(self.base.as_ptr(), chunk_layout()) };
 crates/glam-gc/src/arena.rs:        unsafe { first_allocation.as_ref() }.store(u64::MAX, Ordering::Release);
@@ -34,6 +35,7 @@ crates/glam-gc/src/arena.rs:        unsafe { header_pointer.write(RunHeader::emp
 crates/glam-gc/src/arena.rs:        unsafe { header_pointer.write(RunHeader::initialized(class_id, geometry)) };
 crates/glam-gc/src/arena.rs:        unsafe { pointer.write(prior | bit) };
 crates/glam-gc/src/arena.rs:        unsafe { pointer.write(value) };
+crates/glam-gc/src/arena.rs:        unsafe { run.pointer().add(offset).cast() }
 crates/glam-gc/src/arena.rs:        unsafe { std::ptr::write_bytes(start.as_ptr(), value, bitmap.byte_len()) };
 crates/glam-gc/src/arena.rs:    let allocation = unsafe { allocation.as_ref() }.load(Ordering::Acquire);
 crates/glam-gc/src/arena.rs:    unsafe {
@@ -67,12 +69,14 @@ crates/glam-gc/src/heap.rs:                    unsafe { metadata.drop_in_place(p
 crates/glam-gc/src/heap.rs:                assert_eq!(unsafe { *value.get_unchecked(mutator) }, expected as u64);
 crates/glam-gc/src/heap.rs:                assert_eq!(unsafe { value.get_unchecked(mutator) }.value, index as u64);
 crates/glam-gc/src/heap.rs:                unsafe { run.metadata.drop_in_place(pointer) };
+crates/glam-gc/src/heap.rs:            let result = catch_unwind(AssertUnwindSafe(|| unsafe {
 crates/glam-gc/src/heap.rs:            unsafe { owner.run.pointer().add(offset).cast::<u64>() }
 crates/glam-gc/src/heap.rs:            unsafe { work.metadata.trace(work.value.as_ptr(), &mut visitor) };
 crates/glam-gc/src/heap.rs:        assert_eq!(unsafe { pointer.as_ref() }._value, 73);
 crates/glam-gc/src/heap.rs:        let edge = unsafe { crate::Gc::<GraphNode>::from_raw(pointer) };
 crates/glam-gc/src/heap.rs:        let interior = unsafe { crate::Gc::<GraphNode>::from_raw(interior) };
 crates/glam-gc/src/heap.rs:        unsafe {
+crates/glam-gc/src/heap.rs:    unsafe impl Trace for AllocatingDrop {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for BitmapBoundarySlot {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for DropCounter {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for DroppingType {
@@ -80,6 +84,7 @@ crates/glam-gc/src/heap.rs:    unsafe impl Trace for FirstType {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for GraphNode {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for InvalidEdgeHolder {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for OverflowingSlot {
+crates/glam-gc/src/heap.rs:    unsafe impl Trace for PanickingDrop {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for PanickingTraceNode {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for SecondType {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for WideDropCounter {
