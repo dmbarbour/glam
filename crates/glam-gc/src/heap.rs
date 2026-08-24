@@ -3148,6 +3148,34 @@ impl Drop for HeapInner {
             .data
             .get_mut()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        // Detached finalization runs no longer occur in allocation-class
+        // topology. They were wholly dead when detached, cannot be allocated
+        // from afterward, and terminally retired prefix slots have already
+        // cleared their allocation bits. Every remaining allocated slot is
+        // therefore one untouched pending destructor obligation.
+        for run in state
+            .finalization_batch
+            .runs
+            .values()
+            .filter(|run| run.target.is_detached())
+        {
+            for pointer in state
+                .arena
+                .allocated_slot_pointers(run.target.target().location)
+            {
+                // SAFETY: the detached run's remaining allocation bits name
+                // initialized payloads with this record's canonical metadata.
+                // Detached runs are absent from the following class walk, so
+                // terminal teardown invokes each such destructor exactly once.
+                unsafe { run.metadata.drop_in_place(pointer) };
+            }
+        }
+
+        // Attached pending finalizers remain ordinary allocated class members.
+        // Terminal teardown has no retry state to preserve, so the class walk
+        // can destroy them together with every other remaining allocation and
+        // does not need a per-object finalization-index query.
         for entry in &state.classes {
             let metadata = entry.metadata();
             if !metadata.needs_drop() {
@@ -3155,40 +3183,14 @@ impl Drop for HeapInner {
             }
             for run in entry.runs() {
                 for pointer in state.arena.allocated_slot_pointers(run.location) {
-                    if state
-                        .finalization_batch
-                        .pending_metadata_at(&state.arena, pointer.as_ptr() as usize)
-                        .is_some()
-                    {
-                        continue;
-                    }
                     // SAFETY: the allocation bitmap is published only after a
                     // value with this run's canonical metadata is initialized.
-                    // Final heap ownership is exclusive, and this provisional
-                    // teardown visits each allocated slot exactly once before
-                    // arena storage is released.
+                    // Final heap ownership is exclusive, and detached runs are
+                    // absent from class topology, so this walk visits each
+                    // attached allocated slot exactly once before arena storage
+                    // is released.
                     unsafe { metadata.drop_in_place(pointer) };
                 }
-            }
-        }
-        for run in state.finalization_batch.runs.values() {
-            for pointer in state
-                .arena
-                .allocated_slot_pointers(run.target.target().location)
-            {
-                let owner = state
-                    .arena
-                    .checked_slot_owner(pointer.as_ptr() as usize)
-                    .expect("pending finalization pointer lost its run owner");
-                if !run.contains_owner(owner) {
-                    continue;
-                }
-                // SAFETY: a pending finalization mask names an initialized,
-                // still-allocated payload with this canonical metadata. The
-                // class walk above excludes attached pending identities, and
-                // detached runs are absent from class topology, so terminal
-                // teardown invokes this destructor exactly once.
-                unsafe { run.metadata.drop_in_place(pointer) };
             }
         }
     }
@@ -8871,6 +8873,67 @@ mod tests {
 
         drop(heap);
         assert_eq!(*events.lock().unwrap(), vec![0, 1]);
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn terminal_class_walk_includes_attached_pending_finalizers_once() {
+        let heap = Heap::new();
+        let weak = Arc::downgrade(&heap.inner);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let (panicking, deferred, live, live_root) = heap.with_mutator(|mutator| {
+            let allocator = mutator.allocator::<SelectivePanickingDrop>().unwrap();
+            let panicking = allocator.alloc(SelectivePanickingDrop {
+                id: 0,
+                panic: true,
+                events: Arc::clone(&events),
+            });
+            let deferred = allocator.alloc(SelectivePanickingDrop {
+                id: 1,
+                panic: false,
+                events: Arc::clone(&events),
+            });
+            let live = allocator.alloc(SelectivePanickingDrop {
+                id: 2,
+                panic: false,
+                events: Arc::clone(&events),
+            });
+            (panicking, deferred, live, mutator.root(live))
+        });
+        let location = collector_slot(&heap, panicking).owner.location;
+        assert_eq!(collector_slot(&heap, deferred).owner.location, location);
+        assert_eq!(collector_slot(&heap, live).owner.location, location);
+
+        let panic = catch_unwind(AssertUnwindSafe(|| heap.collect_full()))
+            .expect_err("managed destructor must propagate its panic");
+        assert_eq!(
+            panic_string(panic.as_ref()),
+            "injected managed destructor panic"
+        );
+        assert_eq!(*events.lock().unwrap(), vec![0]);
+        assert_eq!(
+            heap.activity(),
+            HeapActivity {
+                queued_finalizers: 1,
+                running_finalizers: 0,
+            }
+        );
+        assert_eq!(
+            heap.inner
+                .data
+                .lock()
+                .unwrap()
+                .finalization_batch
+                .detached_run_count(),
+            0
+        );
+
+        drop(live_root);
+        drop(heap);
+
+        let mut observed = events.lock().unwrap().clone();
+        observed.sort_unstable();
+        assert_eq!(observed, vec![0, 1, 2]);
         assert!(weak.upgrade().is_none());
     }
 

@@ -474,16 +474,17 @@ C6 later owns collector-driven destruction.
   slots; C2C.3 replaces this correctness baseline with disjoint worker-local
   bitmap-word leases.
 - Terminal `HeapInner::drop` has exclusive ownership. It enumerates every set
-  allocation bit still belonging to a drop-bearing class, dispatches that
-  class's destructor exactly once, and then lets each arena chunk deallocate
-  exactly once. C6A.2c has already erased wholly dead no-drop and empty runs
-  from typed arena enumeration because neither has a destructor obligation.
-  C6B excludes exact attached pending identities from that ordinary class walk,
-  then visits each remaining exact attached or detached batch identity once.
-  Each nonzero mask still names an initialized, allocated payload with the
-  record's canonical metadata; class and batch walks are disjoint by
-  construction. An earlier panicking identity has already cleared both its
-  allocation and pending bits, so neither walk can rediscover it.
+  allocation bit in detached finalization runs first, then every set allocation
+  bit still belonging to a drop-bearing class, and finally lets each arena
+  chunk deallocate exactly once. A detached run was wholly dead when removed
+  from class topology, cannot receive another allocation, and contains only
+  untouched pending identities after terminal prefixes clear their allocation
+  bits. Attached pending identities remain ordinary class members and require
+  no separate terminal-batch lookup. C6A.2c has already erased wholly dead no-
+  drop and empty runs from typed arena enumeration because neither has a
+  destructor obligation. Detached and class walks are disjoint by topology;
+  an earlier panicking identity has already cleared its allocation bit, so
+  neither walk can rediscover it.
   This path is deliberately non-reentrant and has no matching-heap mutator.
   C2C.4 proves it cannot race an active owner region, and C4D proves that
   scoped allocation capabilities do not retain the heap. C6D verifies the
@@ -736,17 +737,16 @@ referents alive merely because Rust destruction is delayed. Safe finalizer
 code may use only independently live/rooted values; an unsafe access through a
 stored `Gc` retains the existing caller obligation to prove liveness.
 
-Terminal `HeapInner::drop` is the destruction boundary for live
-or interrupted pending allocations. The ordinary class walk skips every exact
-attached pending identity. A second batch walk derives pointers only from the
-validated retained run location and allocation bitmap, filters them through
-the exact pending mask, and calls that record's canonical erased destructor.
-Detached runs occur only in this second walk. A destructor which already
-panicked has cleared its allocation and pending bits and therefore occurs in
-neither walk. Exclusive final heap ownership, initialized set allocation bits,
-and disjoint class/batch visitation prove each call sees a valid payload and
-runs exactly once on a non-panicking drain. It intentionally does not install
-a mutator or provide runtime services.
+Terminal `HeapInner::drop` is the destruction boundary for live or interrupted
+pending allocations. It first visits only detached finalization records and
+dispatches every remaining allocated slot with the record's canonical
+metadata. It then visits all class-attached allocated slots, including attached
+pending identities, with their class metadata. A destructor which already
+panicked has cleared its allocation bit and therefore occurs in neither walk.
+Exclusive final heap ownership, initialized set allocation bits, and disjoint
+detached/class topology prove each call sees a valid payload and runs exactly
+once on a non-panicking drain. The terminal path neither reads the pending mask
+per object nor installs a mutator or runtime service.
 
 ### C6B.2 erased destruction and C6C.1 panic retirement
 
@@ -834,14 +834,16 @@ must use ordinary collection or explicit owner-live shutdown and retain a
 passive terminal path. An escaped root is ignored for terminal liveness and
 becomes inert as the final heap owner disappears.
 
-The ordinary class walk and exact pending-batch walk are disjoint, so a value
-retired by an earlier panicking finalizer is not attempted again and an
-untouched pending identity remains terminally discoverable. A valid terminal
-destructor is non-panicking. If it violates that contract, Rust propagates the
-first panic and stops the raw terminal loop; the attempted identity cannot be
-retried because the heap domain is being destroyed, and untouched payloads may
-leak their Rust resources as the arena releases its raw storage. No recovery
-path invokes a second destructor while unwinding.
+The detached-run walk and ordinary class walk are disjoint. Attached pending
+identities need no special terminal treatment because they remain class
+members; detached identities remain discoverable only through their retained
+run records. Thus a value retired by an earlier panicking finalizer is not
+attempted again and every untouched allocation remains terminally discoverable.
+A valid terminal destructor is non-panicking. If it violates that contract,
+Rust propagates the first panic and stops the raw terminal loop; the attempted
+identity cannot be retried because the heap domain is being destroyed, and
+untouched payloads may leak their Rust resources as the arena releases its raw
+storage. No recovery path invokes a second destructor while unwinding.
 
 ### Managed `Drop`, spoiled edges, and host ownership
 

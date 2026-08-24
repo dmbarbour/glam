@@ -560,6 +560,44 @@ tests (179 passing and two ignored scale fixtures), six Loom models, and eight
 compile-fail/doc tests. C6D.1 adds no production unsafe site; its two edge-free
 fixture `Trace` declarations are recorded in the exact inventory.
 
+## C6D.2 Detached-First Terminal Traversal Verification
+
+C6D.2 removes the per-object pending-finalizer lookup from terminal class
+traversal. Detached finalization records are walked first and are absent from
+class topology; the subsequent class walk handles every attached allocation,
+including attached pending finalizers. Already attempted panic identities have
+clear allocation bits and occur in neither source.
+
+`terminal_class_walk_includes_attached_pending_finalizers_once` forces an
+ordinary finalizer panic in a run kept attached by a live root. After dropping
+that root, terminal traversal does not retry the failed identity and invokes
+the deferred and formerly live values exactly once each. The existing
+`terminal_teardown_finishes_the_batch_retained_after_finalizer_panic` supplies
+the detached counterpart, while the ordinary 130-object terminal fixture and
+the order-independent first-panic fixture cover complete and interrupted
+traversal.
+
+Focused Miri runs are:
+
+```sh
+cargo +nightly miri test --package glam-gc --lib --all-features \
+  heap::tests::terminal_class_walk_includes_attached_pending_finalizers_once \
+  -- --exact
+cargo +nightly miri test --package glam-gc --lib --all-features \
+  heap::tests::terminal_teardown_finishes_the_batch_retained_after_finalizer_panic \
+  -- --exact
+cargo +nightly miri test --package glam-gc --lib --all-features \
+  heap::tests::terminal_heap_teardown_drops_each_allocated_payload_exactly_once \
+  -- --exact
+cargo +nightly miri test --package glam-gc --lib --all-features \
+  heap::tests::terminal_teardown_propagates_the_first_panic_without_continuing \
+  -- --exact
+```
+
+All four fixtures pass Miri. The stable collector matrix contains 182 unit
+tests (180 passing and two ignored scale fixtures), six Loom models, and eight
+compile-fail/doc tests. C6D.2 adds no unsafe site.
+
 ## Gate G0 Baseline
 
 Before changing the unsafe surface in C1, recheck the focused pre-GC semantic

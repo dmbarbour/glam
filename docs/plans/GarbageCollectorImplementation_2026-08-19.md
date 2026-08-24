@@ -1,8 +1,8 @@
 # Glam GC Subcrate Implementation Plan — 2026-08-19
 
-Status: in progress; Phases C0 through C6D.1 are complete, including the C2C.6
+Status: in progress; Phases C0 through C6D.2 are complete, including the C2C.6
 verification follow-up. The mandatory post-C1, post-C2C, post-C3E, post-C4,
-and post-C5 downstream reviews are complete. C6D.2 is next.
+and post-C5 downstream reviews are complete. C6D.3 is next.
 
 This plan implements an exact, non-moving, runtime-local tracing collector
 without depending on Glam value semantics. The governing requirements and
@@ -76,7 +76,7 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C6C.1b | completed | indexed finalization state and ephemeral run dispatch snapshots |
 | C6C.2 | completed | finalizer activity, reports, and pressure publication |
 | C6D.1 | completed | restricted terminal-teardown decision and fixtures |
-| C6D.2 | pending | terminal teardown |
+| C6D.2 | completed | detached-first terminal teardown |
 | C6D.3 | pending | Gate G1 audit |
 | C7A | pending | shared-root and immutable-reader stress |
 | C7B | pending | allocation and coordinator stress |
@@ -3769,10 +3769,11 @@ Completed on 2026-08-24:
   in the same attached run merge into its existing exact record. This durable
   checkpoint ownership prevents duplicated or lost destructor obligations;
   C6B.2 normally consumes the batch during the collection that creates it.
-- Terminal teardown excludes attached pending identities from the ordinary
-  class walk, then destroys exact attached and detached batch identities once.
-  This is still the provisional non-reentrant terminal path; C6D selects and
-  implements the production mutator-capable teardown protocol.
+- At this checkpoint terminal teardown excluded attached pending identities
+  from the ordinary class walk, then destroyed attached and detached batch
+  identities separately. C6D.2 later simplifies the selected non-reentrant
+  path: it walks detached records first, then all class-attached allocations,
+  including attached pending finalizers, without a per-object batch lookup.
 - Empty batches deliberately retain C3E's no-op `Finalizing` handoff. The
   simpler uniform lifecycle remains bootstrap policy until C8 measurement
   justifies a fast path.
@@ -3997,6 +3998,30 @@ Completed on 2026-08-24:
   181 unit tests (179 passing plus two explicit scale fixtures), 6 Loom models,
   and 8 compile-fail/doc tests. C6D.1 adds no production unsafe site; its two
   edge-free fixture `Trace` declarations are recorded in the exact inventory.
+
+#### C6D.2 completion
+
+Completed on 2026-08-24:
+
+- Terminal traversal now follows the authoritative topology directly. It first
+  walks only detached finalization records, whose runs are absent from every
+  allocation class and whose remaining allocation bits are exactly untouched
+  pending destructor obligations. It then walks every allocated slot in each
+  drop-bearing class, including attached pending finalizers.
+- This removes the prior `pending_metadata_at` hash lookup from every class-
+  attached terminal object. Detached and class traversal cannot overlap by
+  construction; terminally retired panic prefixes have already cleared their
+  allocation bits and cannot reappear in either walk.
+- A new attached-panic fixture keeps one run live through ordinary collection,
+  verifies its untouched finalizer remains attached, then drops the root and
+  proves terminal class traversal does not retry the failed identity and
+  attempts the deferred and formerly live identities exactly once each.
+  Existing detached-batch, ordinary multi-run, and first-panic fixtures cover
+  the other terminal branches without assigning destructor order.
+- Four focused terminal fixtures pass Miri. The stable collector matrix
+  contains 182 unit tests (180 passing plus two explicit scale fixtures), 6
+  Loom models, and 8 compile-fail/doc tests. The change adds no unsafe site and
+  removes terminal checked-owner and pending-index work.
 
 ### Mandatory Post-C6 Review
 
