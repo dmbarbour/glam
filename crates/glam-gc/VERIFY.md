@@ -523,8 +523,12 @@ across threads and an admitted mutator region, while
 non-owning capability families.
 
 `ordinary_finalization_has_a_mutator_but_terminal_teardown_does_not` directly
-latches the semantic boundary: collection-time Rust `Drop` observes the C3E
-finalizer mutator, whereas last-owner destruction observes no active mutator.
+latches optional capability availability: collection-time Rust `Drop` observes
+the C3E finalizer mutator, whereas last-owner destruction observes no active
+mutator. The public destructor contract does not expose those as modes; the
+fixture proves why every managed representation must remain safe without the
+capability.
+
 `terminal_teardown_finishes_the_batch_retained_after_finalizer_panic` proves
 the terminal class and pending-batch walks remain disjoint, complete an
 untouched pending identity once, and never retry the earlier panicking

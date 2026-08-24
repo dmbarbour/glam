@@ -3005,15 +3005,18 @@ Execute C6 as the following smaller checkpoints:
   collection, and removes the sparse exceptional state.
 - **C6B.3 — managed-`Drop` contract, non-resurrection, and successful
   completion.** Extend the public unsafe `Trace` contract and `SAFETY.md` with
-  the spoiled-edge rule: once `Drop` begins, bare `Gc` fields in the dying
-  allocation are inert handles, not liveness proofs, and may not be
-  dereferenced, rooted, or republished. Permit finalizer output only from
-  immediate/host data, independently established roots, and fresh
-  allocations. Distinguish a traceable managed edge from an edge-free host
-  coordination companion and from a genuine external root owner; promises,
-  lazies, and fixpoints may not hide their internal edges in companions or
-  roots. Keep graph quining, destruction ordering, and resurrection
-  unsupported.
+  one capability-oriented managed-destruction rule. Every representation must
+  be safely droppable without obtaining a matching-heap mutator. Once `Drop`
+  begins, bare `Gc` fields in the dying allocation are inert handles, not
+  liveness proofs, and may not be inspected, dereferenced, rooted, preserved,
+  or republished. A destructor which independently obtains a mutator may use
+  independently established roots and allocate fresh values, but the
+  capability does not revive a spoiled edge and destruction must remain
+  correct when it is unavailable. Distinguish a traceable managed edge from
+  an edge-free host coordination companion and from a genuine external root
+  owner; promises, lazies, and fixpoints may not hide their internal edges in
+  companions or roots. Keep graph quining, destruction ordering, and
+  resurrection unsupported.
 
   Reject roots to any remaining batch identity. The provisional C6B.3
   implementation published completed regions incrementally; C6C.1b supersedes
@@ -3143,13 +3146,14 @@ Execute C6 as the following smaller checkpoints:
   non-reentrant terminal destruction. `HeapInner::drop` is resource teardown,
   not a final evaluation stage: it has no matching-heap mutator, performs no
   GC allocation, rooting, evaluation, diagnostics, or runtime reentry, and
-  never reconstructs a dropped owner. C4D already proves that no allocator
-  capability owns the heap or survives a drained mutator set. Force last-
-  facade, active owner-region, escaped-root, deliberately forgotten inert
-  allocator, ordinary-finalizer versus terminal-destructor context, a batch
-  retained after an earlier finalizer panic, and terminal first-panic
-  orderings. An escaped root must neither postpone teardown nor become
-  dereferenceable afterward.
+  never reconstructs a dropped owner. This is implementation evidence for the
+  public contract's no-mutator baseline, not an observable destruction mode
+  which `Drop` must identify. C4D already proves that no allocator capability
+  owns the heap or survives a drained mutator set. Force last-facade, active
+  owner-region, escaped-root, deliberately forgotten inert allocator,
+  optional mutator availability, a batch retained after an earlier finalizer
+  panic, and terminal first-panic orderings. An escaped root must neither
+  postpone teardown nor become dereferenceable afterward.
 - **C6D.2 — terminal teardown.** Reconcile `HeapInner::drop` with the selected
   contract and prove that a non-panicking terminal drain attempts every
   remaining drop-bearing allocation exactly once while excluding every
@@ -3375,23 +3379,22 @@ recoverable panic injected by its own tests.
   and TLS caches retain only weak heap identity. Do not reconstruct or
   resurrect an `Arc` owner after its last strong reference has entered `Drop`.
 - Treat terminal destruction as passive Rust resource cleanup, not a final
-  evaluation stage. A terminal destructor may release ordinary host-owned
-  fields, but may not require managed allocation, rooting, evaluation,
-  diagnostics, runtime reentry, or access to a current matching-heap mutator.
-  A payload family needing those facilities must perform that work during
-  ordinary collection or an explicit runtime shutdown while an authorized
-  owner remains live, or provide a passive terminal fallback.
+  evaluation stage. This implementation context supplies no managed
+  allocation, rooting, evaluation, diagnostics, runtime reentry, or current
+  matching-heap mutator. It proves the general public requirement that managed
+  destruction remain safe without those optional capabilities; a destructor
+  does not identify a terminal mode or select a separate contract.
 - Escaped roots do not postpone terminal destruction and become inert when
   their weak heap identity expires. Terminal teardown ignores root-registry
   liveness and visits all remaining drop-bearing allocation identities, while
   preserving the ordinary-class versus pending-finalization-batch partition
   so an earlier terminally retired identity is never redispatched.
-- Valid terminal destructors are non-panicking. If one nevertheless panics,
-  propagate that first panic and stop dispatching terminal destructors. Never
-  retry the attempted identity or risk a second destructor panic during
-  unwinding; untouched raw payloads may leak their Rust-owned resources while
-  arena storage is released. This is a safety fallback for a violated payload
-  contract, not recoverable evaluation semantics.
+- If a terminal destructor panics, propagate that first panic and stop
+  dispatching terminal destructors. Never retry the attempted identity or risk
+  a second destructor panic during unwinding; untouched raw payloads may leak
+  their Rust-owned resources while arena storage is released. This is
+  operational panic behavior, not recoverable evaluation semantics or another
+  liveness capability.
 - Expose queued and running finalizers as operational heap activity so runtime
   quiescence and shutdown cannot race their diagnostics, tasks, or host
   effects. A synchronous `collect_full` report completes only after its
@@ -3976,20 +3979,21 @@ Completed on 2026-08-24:
 - Terminal heap destruction is now explicitly a restricted passive resource-
   cleanup boundary, not a final evaluation stage. It does not reconstruct an
   owner, install a matching-heap mutator, allocate or root managed values,
-  evaluate work, publish diagnostics, or reenter the runtime. Payloads needing
-  those services must use ordinary finalization or owner-live shutdown and
-  retain a passive terminal path.
+  evaluate work, publish diagnostics, or reenter the runtime. This context
+  proves the public managed-`Drop` baseline: every representation remains safe
+  without those capabilities, while optional mutator availability in another
+  context does not revive spoiled edges or create a distinct destructor mode.
 - The ownership proof uses the existing representation: every mutator borrows
   authority derived from a live `Heap`; scoped allocators cannot escape it;
   roots and thread-local caches hold only weak heap identity. Consequently the
   last `HeapInner` owner cannot coexist with a mutator for that heap. No owner-
   lease shell is introduced.
-- A valid terminal destructor is passive and non-panicking. A violating first
-  panic propagates and stops managed destructor dispatch; it cannot be retried
-  after the heap domain disappears, and untouched raw payloads may leak their
-  Rust-owned resources while arena storage is released. The test fixture uses
-  static counters so Miri can distinguish this selected policy from an
-  accidental collector leak.
+- A first terminal destructor panic propagates and stops managed destructor
+  dispatch; it cannot be retried after the heap domain disappears, and
+  untouched raw payloads may leak their Rust-owned resources while arena
+  storage is released. This records operational panic behavior rather than a
+  separate liveness contract. The test fixture uses static counters so Miri
+  can distinguish this selected policy from an accidental collector leak.
 - New forced fixtures prove only the last `Heap` facade starts teardown,
   ordinary finalization sees a mutator while terminal destruction does not, a
   batch retained after ordinary finalizer panic is terminally completed

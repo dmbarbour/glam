@@ -733,9 +733,10 @@ merge into its sorted masks; a disjointness assertion rejects duplicate
 destructor obligations.
 
 Not tracing a pending payload is intentional. Its managed edges do not keep
-referents alive merely because Rust destruction is delayed. Safe finalizer
-code may use only independently live/rooted values; an unsafe access through a
-stored `Gc` retains the existing caller obligation to prove liveness.
+referents alive merely because Rust destruction is delayed. A stored `Gc` is
+spoiled when destruction begins and cannot be inspected even if some external
+owner independently keeps its referent alive. Finalizer code must instead
+reach an independently live value through that external source.
 
 Terminal `HeapInner::drop` is the destruction boundary for live or interrupted
 pending allocations. It first visits only detached finalization records and
@@ -820,48 +821,64 @@ while pressure created by finalizer allocation or recycling is never lost.
 
 ### C6D.1 selected terminal-destruction contract
 
-Terminal destruction is intentionally narrower than ordinary finalization.
+The public managed-`Drop` contract is capability-based, not phase-based. Every
+managed representation must be safely droppable without obtaining a matching-
+heap mutator. If a destructor can independently obtain one, it may use that
+capability, but only independently live managed values and fresh allocations
+are valid inputs. It neither needs nor receives a way to identify a collector
+phase.
+
+The implementation supplies that optional capability during ordinary
+finalization and deliberately does not supply it during terminal destruction.
 The last strong `HeapInner` owner cannot coexist with a mutator for that heap:
 a mutator borrows authority derived from a live `Heap`, a scoped allocator
 cannot escape that borrow, and roots and thread-local caches hold only weak
 heap identity. `HeapInner::drop` therefore does not reconstruct an `Arc`,
 install a finalizer mutator, or reopen admission.
 
-Terminal destructors may passively release ordinary Rust resources, but may
-not require managed allocation, rooting, evaluation, diagnostics, runtime
-reentry, or another matching-heap capability. Payloads needing those services
-must use ordinary collection or explicit owner-live shutdown and retain a
-passive terminal path. An escaped root is ignored for terminal liveness and
-becomes inert as the final heap owner disappears.
+Consequently no managed destructor may *require* managed allocation, rooting,
+evaluation, diagnostics, runtime reentry, or another matching-heap capability
+in order to remain safe. Those services may be used only when independently
+available. An escaped root is ignored for terminal liveness and becomes inert
+as the final heap owner disappears.
 
 The detached-run walk and ordinary class walk are disjoint. Attached pending
 identities need no special terminal treatment because they remain class
 members; detached identities remain discoverable only through their retained
 run records. Thus a value retired by an earlier panicking finalizer is not
 attempted again and every untouched allocation remains terminally discoverable.
-A valid terminal destructor is non-panicking. If it violates that contract,
-Rust propagates the first panic and stops the raw terminal loop; the attempted
-identity cannot be retried because the heap domain is being destroyed, and
-untouched payloads may leak their Rust resources as the arena releases its raw
-storage. No recovery path invokes a second destructor while unwinding.
+If a terminal destructor panics, Rust propagates the first panic and stops the
+raw terminal loop. The attempted identity cannot be retried because the heap
+domain is being destroyed, and untouched payloads may leak their Rust
+resources as the arena releases its raw storage. This is operational panic
+behavior, not another liveness authority or a phase-sensitive requirement on
+the destructor. No recovery path invokes a second destructor while unwinding.
 
 ### Managed `Drop`, spoiled edges, and host ownership
 
 The unsafe `Trace` contract also governs Rust `Drop` for a managed
-representation. When `Drop::drop` starts, the allocation's Rust fields remain
-initialized, but a bare `Gc<T>` stored in those fields is no longer evidence
-that its target is live. Finalization does not impose a graph order: another
-target may already have been destroyed, and no ordering makes a cycle safe.
-Such a handle is therefore *spoiled*. Destruction may discard or move its bits
-as inert Rust data, but may not dereference it, root it merely on the strength
-of the handle, or publish it into a newly reachable managed object.
+representation. Its baseline is independent of collector phase: destruction
+must remain safe without access to a matching-heap mutator. When `Drop::drop`
+starts, the allocation's Rust fields remain initialized, but a bare `Gc<T>`
+stored in those fields is no longer evidence that its target is live.
+Finalization does not impose a graph order: another target may already have
+been destroyed, and no ordering makes a cycle safe. Such a handle is therefore
+*spoiled*. Destruction may discard its bits as inert Rust data, but may not
+inspect or dereference it, root it merely on the strength of the handle,
+preserve it beyond destruction, or publish it into a newly reachable managed
+object.
 
-Safe finalizer inputs are deliberately narrower:
+Managed values available to a destructor are deliberately narrower:
 
 - immediate and host-owned data with no managed edge;
 - a value whose liveness was established independently by an existing
   matching-heap `Root<T>`; and
-- a fresh managed allocation made through the installed finalizer mutator.
+- when a matching-heap mutator can independently be obtained, a fresh managed
+  allocation made through that capability.
+
+Mutator availability broadens the operations a destructor may perform; it
+never turns a spoiled edge back into liveness evidence. A destructor must not
+require acquisition to succeed.
 
 The collector does not promise graph quining, resurrection, or a useful
 destruction order. Constructing a fresh equivalent from the safe inputs above

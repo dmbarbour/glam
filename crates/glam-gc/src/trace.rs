@@ -24,23 +24,31 @@ use crate::Gc;
 /// # Managed `Drop`
 ///
 /// Implementing `Trace` also commits the representation's Rust destructor to
-/// the managed-drop contract. Once `Drop::drop` begins for an unreachable
-/// allocation, a bare `Gc<_>` stored in that allocation is not a liveness
-/// proof. Treat every such edge as spoiled: it may be discarded as inert
-/// pointer data, but it must not be dereferenced, rooted, or installed in a
-/// newly reachable managed object merely because the dying allocation still
-/// contains its bits. Finalization order supplies no stronger guarantee; a
-/// referent may already have been destroyed, and cycles have no safe leaf
-/// order.
+/// the managed-drop contract. A managed representation must remain safely
+/// droppable when no matching-heap [`Mutator`](crate::Mutator) can be obtained;
+/// `Drop` receives no implicit authority to inspect the managed heap.
 ///
-/// A destructor may use immediate or host-owned data, access a value through
-/// an independently established `Root<_>`, and allocate fresh managed values
-/// through the installed finalizer mutator. A host-owned coordination object
-/// associated with a managed node must contain no hidden `Gc<_>`, `Root<_>`,
-/// public managed value, or equivalent heap edge. An ordinary Rust owner may
-/// instead hold a `Root<_>` when it represents genuine external ownership;
-/// doing so deliberately extends liveness and must not substitute for a
-/// traced promise, lazy, fixpoint, or other internal graph edge.
+/// Once `Drop::drop` begins for an unreachable allocation, every bare
+/// [`Gc<_>`](crate::Gc) stored in that allocation is spoiled. Its remaining
+/// pointer bits are not evidence that its referent is live: they may be
+/// discarded as inert data, but must not be dereferenced, rooted, preserved,
+/// or installed in a newly reachable managed object. Finalization order
+/// supplies no stronger guarantee. A referent may already have been
+/// destroyed, and cycles have no safe leaf order.
+///
+/// A destructor which can independently obtain a matching-heap `Mutator` may
+/// use it, but doing so does not revive those spoiled edges. It may access a
+/// managed value only through independent liveness evidence, such as an
+/// already established matching-heap [`Root<_>`](crate::Root), and it may
+/// allocate fresh managed values. Destruction must remain correct if no such
+/// mutator is available.
+///
+/// A host-owned coordination object associated with a managed node must
+/// contain no hidden `Gc<_>`, `Root<_>`, public managed value, or equivalent
+/// heap edge. An ordinary Rust owner may instead hold a `Root<_>` when it
+/// represents genuine external ownership; doing so deliberately extends
+/// liveness and must not substitute for a traced promise, lazy, fixpoint, or
+/// other internal graph edge.
 ///
 /// General resurrection and traversal of a dying managed graph are not
 /// supported. A type needing either behavior requires a separate collector

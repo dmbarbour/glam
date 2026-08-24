@@ -5,8 +5,9 @@ Baseline: `7b30876`. This is the mandatory post-C6 review of the isolated
 contract, safety ledger, and verification surface.
 
 Status: open. The C6 representation and normal success/destructor-panic paths
-are coherent, but two contract/proof issues and two verification gaps should be
-closed before the C6D.3 Gate G1 audit certifies the collector.
+are coherent. GC6-001's public contract gap is resolved; one panic-safety/proof
+issue and two verification gaps remain before the C6D.3 Gate G1 audit can
+certify the collector.
 
 ## Outcome
 
@@ -30,12 +31,13 @@ semantics.
 The review found no confirmed overlap, duplicate-destruction, or missing-slot
 defect in the intended success, caught-destructor-panic, retry, or passive
 terminal paths. It did find a distinct panic-safety hole around *collector
-invariant panics after destructive work*, plus an incomplete public `Trace`
-contract which does not tell implementers that the same destructor may also run
-without a finalizer mutator at last-owner teardown. Those are Gate G1 blockers.
-The finalized-word publication and mixed terminal-topology claims also deserve
-forced verification before certification rather than being deferred into
-general C7 stress.
+invariant panics after destructive work*. The public `Trace` contract gap found
+alongside it has since been resolved with one capability/liveness rule: every
+managed representation is safely droppable without a matching-heap mutator,
+while optional mutator availability never revives edges from the dying
+allocation. The finalized-word publication and mixed terminal-topology claims
+also deserve forced verification before certification rather than being
+deferred into general C7 stress.
 
 Current stable verification passes: `crates/glam-gc/scripts/check.sh` reports
 180 passing unit tests, two explicit ignored scale fixtures, six Loom models,
@@ -91,7 +93,7 @@ request. These choices match the recorded C6 semantics.
 **Priority:** high  
 **Confidence:** high  
 **Classification:** unsafe public-contract gap  
-**Gate G1:** blocker
+**Gate G1:** resolved on 2026-08-24
 
 The public [`Trace` safety contract](../../crates/glam-gc/src/trace.rs#L24)
 says a destructor may allocate through the installed finalizer mutator. That is
@@ -106,19 +108,19 @@ to discover an additional safety obligation. As written, a destructor which
 correctly follows the public paragraph by requiring the finalizer mutator may
 still violate the terminal contract.
 
-Update the public trait documentation to name both contexts:
+Resolved by replacing the phase-oriented description with one public
+capability/liveness contract. Every managed representation must remain safely
+droppable when no matching-heap mutator can be obtained. A destructor which
+independently obtains one may use independently live roots and allocate fresh
+values, but cannot inspect or preserve bare `Gc` fields from the dying
+allocation; those edges are spoiled regardless of capability availability.
 
-- ordinary collection supplies the installed recursive finalizer mutator and
-  permits the already documented fresh-work behavior; and
-- terminal heap destruction supplies no matching-heap capability, so every
-  managed type must also have a passive, non-panicking terminal path.
-
-The documentation should explain how a type which conditionally uses ordinary
-finalizer services recognizes their absence, without implying that terminal
-teardown is another observable evaluation phase. Add a documentation-facing
-fixture or doctest for the two contexts; the existing internal
-`ordinary_finalization_has_a_mutator_but_terminal_teardown_does_not` test is
-good behavioral evidence but does not complete the public contract.
+The implementation's ordinary-finalization and terminal-teardown contexts now
+remain private proof evidence for optional capability availability rather than
+modes which a destructor must detect. The existing
+`ordinary_finalization_has_a_mutator_but_terminal_teardown_does_not` fixture
+latches both sides of that implementation claim, while the public `Trace`
+documentation and safety ledger state the single caller obligation.
 
 ### GC6-002 — Attempt recovery does not distinguish a retryable panic from an irreversible commit panic
 
@@ -336,14 +338,14 @@ appropriate.
 | Finalizer activity, pressure, and reports | paused running batch, successful/panicking allocation, report/epoch tests | adequate |
 | Finalized-word concurrent release | sequential/native reservation evidence only | GC6-003 |
 | Terminal detached and attached traversal | separate terminal fixtures and first-panic fixture | GC6-004 mixed case missing |
-| Public managed-`Drop` contract | internal behavioral test plus private safety prose | GC6-001/005 |
+| Public managed-`Drop` contract | capability/liveness Rustdoc, safety ledger, and optional-mutator fixture | GC6-001 resolved; broader GC6-005 drift remains |
 | Unsafe inventory | exact checked-in inventory and passing audit | defer final certification to C6D.3 |
 
 ## Resolution Ledger
 
 | Finding | Required disposition | Owner |
 | --- | --- | --- |
-| GC6-001 | Complete the public dual-context managed-`Drop` contract and its documentation-facing evidence. | before C6D.3 |
+| GC6-001 | Resolved with one capability/liveness contract and optional-mutator implementation evidence. | completed 2026-08-24 |
 | GC6-002 | Introduce an explicit irreversible/poison boundary and forced post-dispatch/post-mutation panic schedules. | before C6D.3 |
 | GC6-003 | Add Loom and production forced-order coverage for finalized-word publication versus claims. | C6D.3 prerequisite |
 | GC6-004 | Add one mixed attached/detached terminal-topology fixture. | C6D.3 prerequisite |
@@ -353,9 +355,9 @@ appropriate.
 
 ## Review Status
 
-The post-C6 review has been performed but remains open while the Gate G1
-blockers above are unresolved. C6D.3 must audit the corrected design rather
+The post-C6 review has been performed but remains open while the remaining Gate
+G1 blockers above are unresolved. C6D.3 must audit the corrected design rather
 than absorb these semantic decisions into a verification checklist. After
-GC6-001 through GC6-005 are resolved, update this ledger with exact tests and
+GC6-002 through GC6-005 are resolved, update this ledger with exact tests and
 commits, mark the post-C6 checkpoint complete, and begin the focused Gate G1
 audit.
