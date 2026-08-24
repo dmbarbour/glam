@@ -70,9 +70,9 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C6A.3b | completed | swept allocator publication |
 | C6A.4 | completed | assigned-run pressure |
 | C6B.1 | completed | finalization batch and non-rootability |
-| C6B.2 | completed | finalizer handoff, destruction, and panic-safe quarantine foundation |
+| C6B.2 | completed | finalizer handoff, destruction, and temporary panic-retirement scaffolding |
 | C6B.3 | completed | managed-`Drop` contract, non-resurrection, and successful completion |
-| C6C.1 | pending | destructor panic, draining, and quarantine |
+| C6C.1 | pending | destructor panic, terminal slot retirement, and deferred retry |
 | C6C.2 | pending | finalizer activity, reports, and pressure publication |
 | C6D.1 | pending | terminal-teardown decision and fixtures |
 | C6D.2 | pending | terminal teardown |
@@ -1171,9 +1171,10 @@ C2C.3 completed on 2026-08-22:
   or cursor cache remains weak and inert after teardown.
 - Keep C2C's terminal destructor path explicitly provisional. It supports the
   non-reentrant, non-panicking fixtures required to avoid leaks while
-  collection is disabled. Destructor panic recovery, quarantine,
-  mutator-capable finalization, and the final last-owner protocol remain the
-  already specified C6B–C6D work; C2C must not invent a competing policy.
+  collection is disabled. Destructor panic recovery, terminal slot
+  retirement, mutator-capable finalization, and the final last-owner protocol
+  remain the already specified C6B–C6D work; C2C must not invent a competing
+  policy.
 - Close C2C with a focused review of the raw allocation path, lease/data-race
   proof, bitmap publication order, weak-cache lifecycle, pressure accounting,
   terminal ownership, exact unsafe inventory, and Miri behavior.
@@ -2025,8 +2026,8 @@ The downstream structure remains sound, with these corrections:
   C6's eager dead-set classification and sweep.
 - C6 must refer to C3E's direct finalizer-to-entry handoff, not the superseded
   C3D queued-drain protocol. Its previous four checkpoints were still too
-  broad, so they are divided below at free-list, eager-sweep, finalizer,
-  quarantine, pressure, and terminal-teardown boundaries.
+  broad, so they are divided below at free-list, eager-sweep, finalizer, panic
+  recovery, pressure, and terminal-teardown boundaries.
 - C7's `deferred_requests` metric is obsolete. Entry-elected collections,
   coalesced request observations, pending hints, synchronous joins, and
   collection latency describe the implemented coordinator.
@@ -2333,11 +2334,14 @@ downstream corrections are required:
   clears them.
 - **Do not duplicate run occupancy outside the bitmaps.** C5 keeps only scalar
   attempt counters such as roots, newly marked slots, traced objects, and
-  conservatively retained quarantine slots. It allocates no map, vector, or
-  record per run. After a successful mark, C6 enumerates the authoritative
-  assigned runs and derives zero, partial, and full occupancy directly from
-  their compact allocation and mark words. A failed attempt publishes neither
-  aggregate counters nor pressure or reclamation state. One currently spare
+  conservatively retained slots. The conservative-retention count remains zero
+  until C6 leaves not-yet-attempted finalizers pending across a recovered
+  destructor panic; a later mark counts those exact pending identities while
+  retaining them without tracing. C5 allocates no map, vector, or record per
+  run. After a successful mark, C6 enumerates the authoritative assigned runs
+  and derives zero, partial, and full occupancy directly from their compact
+  allocation and mark words. A failed attempt publishes neither aggregate
+  counters nor pressure or reclamation state. One currently spare
   `u32` in `RunHeader` remains available for a measured future live-slot count,
   reset alongside marks, but the baseline does not consume it.
 - **Reclamation must invalidate TLS cursors before changed topology becomes
@@ -2378,17 +2382,25 @@ downstream corrections are required:
   wholly dead drop-bearing run is instead detached from allocator selection in
   full while still under `Exclusive`, because no live allocation benefits from
   retaining a partial allocator view. The finalizer owns the reserved storage
-  until its corresponding slots are cleared or quarantined. A terminal partial
+  until its corresponding slots are terminally retired. A terminal partial
   word is rebuilt and republished immediately. A wholly dead run whose complete
-  run batch succeeds is retired and published to the free-run pool immediately,
-  without waiting for another collection; quarantine instead restores the run
-  to its original class with the damaged slots retained as allocated. This
-  preserves the allocation bitmap's one-writer rule without making every
+  run batch drains is retired and published to the free-run pool immediately,
+  without waiting for another collection. A destructor panic terminally
+  retires the attempted value and its storage through the same completion
+  path, then stops that finalization attempt. Any not-yet-attempted slots remain
+  exact pending identities with their words or detached runs reserved for the
+  next collection. This preserves the allocation bitmap's one-writer rule
+  without making every
   drop-bearing run unavailable or preventing reclaimed runs from being reused
   across collection cycles.
-- **Quarantine and terminal teardown must agree.** Terminal destruction must
-  consult sparse quarantine so a destructor which already panicked is never
-  invoked twice. C4D settles allocation capability ownership before C6:
+- **Panic recovery and terminal teardown must agree.** A destructor attempt is
+  terminal whether it returns or unwinds to the collector's `catch_unwind`
+  boundary. Its allocation bit and pending identity are then cleared, so
+  terminal destruction cannot discover or invoke it twice. The collector does
+  not invoke another destructor after catching that panic: it restores an
+  ordinary heap phase, preserves every untouched pending identity, relatches
+  collection, and resumes the original panic. C4D settles
+  allocation capability ownership before C6:
   mutator-scoped allocators are not heap owners and cannot survive the admitted
   region which permits their frontier access. C6D.1 therefore decides only the
   remaining runtime/value-domain owner drain and finalizer protocol.
@@ -2519,11 +2531,12 @@ Execute C5 as the following independently verified checkpoints:
   prior report. Retain no report history: a synchronous caller overtaken by a
   later completion receives the latest report whose epoch satisfies its
   target. Report root-registry entries, traced objects, distinct marked slots,
-  and conservatively retained slots; the last is zero until C6 quarantine.
-  Copy no bitmap and add no bitmap-validity flag, identity list, or per-run
-  summary. C6 consumes successful marks under the same collection authority;
-  live-run and survivor occupancy come from its bitmap scan. C5 reclaims
-  nothing.
+  and the conservatively retained slot count. The last remains zero through C5
+  and first becomes nonzero when a later collection retains exact pending
+  finalizers left by a recovered destructor panic without tracing them. Copy no
+  bitmap and add no bitmap-validity flag, identity list, or per-run summary. C6
+  consumes successful marks under the same collection authority; live-run and
+  survivor occupancy come from its bitmap scan. C5 reclaims nothing.
 - **C5D.2 — reachability oracle, scale, and verification closeout.** Compare
   randomized graphs with a simple reachability oracle, run million-edge
   non-recursive tests, include both a million-node deep chain and a flat
@@ -2728,8 +2741,9 @@ Completed on 2026-08-23:
 - A drained `MarkAttempt` is now consumed into one private `MarkSummary`.
   Finishing asserts that no trace work remains, then retains only root-entry,
   traced-object, distinct-mark, and conservative-retention scalars. C5 reports
-  zero conservative retention; C6 quarantine will supply the first nonzero
-  source.
+  zero conservative retention; C6 supplies the first nonzero source when a
+  later collection retains unfinished finalizers from a recovered panic
+  without tracing them.
 - Public `CollectionReport` exposes those four counts alongside its epoch.
   `CollectionAttempt::complete` publishes the report and completed epoch in one
   coordinator critical section after all exclusive and finalizer work
@@ -2815,8 +2829,8 @@ The implementation audit established the following:
   matching completed epoch together under the coordinator mutex. No bitmap,
   object identity, per-run summary, or unbounded epoch history escapes.
 - C5 changes no allocation bit, lease, class frontier, run pool, or payload.
-  Reclamation and durable conservative retention remain C6 work; pressure is
-  only acknowledged once the full collection pipeline completes successfully.
+  Reclamation remains C6 work; pressure is only acknowledged once the full
+  collection pipeline completes successfully.
 
 The verification evidence is proportionate and independent where it matters:
 focused fixtures force duplicate discovery, cross-word boundaries, invalid
@@ -2854,7 +2868,7 @@ The C6-C8 reconciliation made these downstream corrections:
 - The existing C6 reclamation/finalization checkpoints and the C7-C8 stress,
   metrics, tuning, and audit partitions otherwise remain coherent.
 
-## Phase C6 — Sweep, Mutator Finalization, Retry, and Quarantine
+## Phase C6 — Sweep, Mutator Finalization, Retry, and Panic Recovery
 
 Execute C6 as the following smaller checkpoints:
 
@@ -2961,10 +2975,12 @@ Execute C6 as the following smaller checkpoints:
   across another collection or terminal heap teardown: attached pending slots
   are conservatively marked without tracing and remain word-reserved; detached
   runs remain batch-owned and are not rediscovered through class topology.
-  This cross-collection behavior is checkpoint safety scaffolding—C6B.2 and
-  C6B.3 normally drain the batch in the collection which created it—but it
-  prevents an interruption between checkpoints from duplicating or losing a
-  destructor obligation.
+  The ordinary successful path drains the batch in the collection which
+  created it. C6C.1 makes the cross-collection path intentional panic recovery:
+  after one destructor unwinds, every not-yet-attempted identity remains in the
+  durable batch and the next collection retains it without tracing before
+  resuming destruction. This prevents a recovered interruption from
+  duplicating, losing, or observing a destructor obligation.
   Retain the already-proven C3E no-op `Finalizing` handoff when the batch is
   empty. It is the simpler bootstrap lifecycle; C8 measurement may justify a
   direct no-finalizer completion fast path later.
@@ -2977,10 +2993,11 @@ Execute C6 as the following smaller checkpoints:
   exact pending identity under the managed-data mutex; fresh allocations and
   effects remain ordinary later-collection state. Retain terminal zero-mask
   word and run records through this checkpoint; C6B.3 releases each completed
-  region back to allocator topology. Install the minimal exact-address sparse
-  quarantine transfer needed to propagate a destructor panic without making
-  that partially destroyed allocation retryable; C6C.1 adds remaining-batch
-  draining and complete run restoration.
+  region back to allocator topology. The implemented exact-address quarantine
+  is temporary checkpoint scaffolding which prevents retry after an immediate
+  panic. C6C.1 replaces it with terminal retirement of the attempted slot,
+  preserves the untouched remainder in the existing durable batch for a later
+  collection, and removes the sparse exceptional state.
 - **C6B.3 — managed-`Drop` contract, non-resurrection, and successful
   completion.** Extend the public unsafe `Trace` contract and `SAFETY.md` with
   the spoiled-edge rule: once `Drop` begins, bare `Gc` fields in the dying
@@ -2995,54 +3012,77 @@ Execute C6 as the following smaller checkpoints:
 
   Reject roots to any remaining batch identity and publish completed regions
   incrementally under heap state. Rebuild and republish a terminal partial
-  word immediately. When every destructor in a fully reserved run succeeds,
-  retire its saved class record, reset the empty run, and publish it
-  immediately to the heap-wide free-run pool; a later finalizer or ordinary
-  client may reactivate it without waiting for another collection. Prove
+  word immediately. On the successful path, when every destructor in a fully
+  reserved run succeeds, retire its saved class record, reset the empty run,
+  and publish it immediately to the heap-wide free-run pool; a later finalizer
+  or ordinary client may reactivate it without waiting for another collection.
+  C6C.1 generalizes the same terminal-storage path to an unwinding destructor
+  while preserving any untouched remainder. Prove
   entry-elected versus synchronous completion transfers or drops the finalizer
   admission exactly as C3E specifies. Retain the current compact pending
   bitmaps as the non-rootability authority. The initial linear scan over
   affected run records is acceptable; C8 measures it before introducing a
   temporary run-location index.
-- **C6C.1 — panic, draining, and sparse quarantine.** Quarantine a panicking
-  slot without invoking its destructor twice, safely drain or classify every
-  remaining batch item, retain the first panic for propagation, and restore a
-  usable ordinary heap phase. Represent durable quarantine as a heap-private
-  `HashMap<ErasedGc, QuarantineRecord>` keyed by the exact stable address; each
-  record retains canonical metadata for representation diagnostics and
-  topology assertions. Keep the map initially allocation-free. Do not reserve
-  for the whole finalization batch on the successful path: only after an actual
-  destructor panic, `try_reserve(1)` and insert that one record while the
-  identity remains pending. Failure to record quarantine poisons or aborts the
-  heap rather than forgetting a partially destroyed allocation.
-  Rebuild every terminal partial word. A fully reserved run containing
-  quarantine cannot be retyped: restore its stable record to the original
-  allocation class, retain quarantined bits as allocated, and publish any
-  remaining safe capacity. Transfer pending-to-quarantined state under one
-  managed-data critical section so root validation always sees one exact
-  non-rootable authority. Integrate existing quarantine identities into every
-  later collection immediately after mark clearing as conservatively live,
-  non-traced slots before root tracing and dead-set classification. A
-  quarantined slot and, for a future moving collector, its containing run are
-  permanently pinned until raw heap storage is released.
+- **C6C.1 — panic, terminal retirement, and deferred retry.** Treat a destructor
+  attempt as terminal whether `drop_in_place` returns or unwinds to the
+  collector's `catch_unwind` boundary. The failed Rust value is dead and may
+  never be observed or dropped again, but its backing slot is ordinary
+  uninitialized storage rather than a permanently damaged allocation. Under
+  the managed-data mutex, complete the panicking work item through the same
+  allocation-bit, pending-mask, word-release, and detached-run recycling path
+  used after a successful destructor. The containing word remains reserved
+  until unwinding has reached the catch boundary, so reuse cannot overlap the
+  destructor itself.
+
+  Stop dispatching destructors immediately after the first caught panic. Keep
+  the original panic payload outside managed heap state while completing only
+  that attempted slot's retirement. Every not-yet-attempted identity remains
+  in the finalization batch, non-rootable and untraced; its partial word stays
+  reserved or its wholly dead run stays detached. Restore an ordinary
+  allocator/coordinator phase, relatch a collection request when pending work
+  remains, release the collector's finalizer mutator, and only then resume the
+  original panic. The next collection retains those pending identities
+  conservatively during marking and makes a fresh bounded attempt to finalize
+  them. The collector therefore never deliberately invokes a second destructor
+  while already handling a destructor panic. `panic=abort` builds have no
+  recovery path and abort at the original panic as usual.
+
+  Remove the temporary `QuarantineRecord` map and all quarantine-specific
+  marking, root/debug validation, run restoration, terminal-teardown, and
+  reporting branches. Retain `MarkSummary` and `CollectionReport` conservative
+  retention: unfinished pending finalizers are its exact C6 source. Prove that
+  the panicking identity is retired exactly once and is never retained, traced,
+  rooted, or dropped again; storage from its partial word is republished only
+  when no untouched pending bit still reserves that word; and a wholly dead
+  detached run is reset and may be retyped only when its remaining batch later
+  drains. Force at least two pending destructors so the first panic is observed
+  before any later destructor runs, the remainder survives as non-rootable
+  pending work, and subsequent collections make bounded forward progress.
 - **C6C.2 — activity, reports, and final pressure publication.** Expose queued
-  and running finalizers as heap activity, extend collection reports with
-  reclaimed/finalized/quarantined state, incorporate runs activated during
-  finalization, and atomically publish the post-finalization occupancy and
-  next high-water target.
+  and running finalizers as heap activity, extend successful collection
+  reports with reclaimed and finalized state, incorporate runs activated
+  during finalization, and atomically publish the post-finalization occupancy
+  and next high-water target. A recovered finalizer panic still publishes the
+  durable allocator/pressure baseline before resuming the panic, but does not
+  publish a successful collection epoch or report. Its untouched pending batch
+  remains queued activity and its relatched request belongs to a later
+  collection attempt; a later successful report may count those identities as
+  conservatively retained by that attempt.
 - **C6D.1 — terminal-teardown decision and forced fixtures.** Choose and record
   either the preferred owner-lease drain or the restricted non-reentrant
   fallback before changing `HeapInner::drop`. C4D already proves that no
   allocator capability owns the heap or survives a drained mutator set. Force
   last-facade, last-authorized-runtime-owner, active scoped-allocator,
   escaped-root, deliberately forgotten inert allocator, mutator-capable
-  destructor, panic, and root-attempt orderings against the selected ownership
+  destructor, a batch retained after an earlier finalizer panic, terminal
+  destructor panic, and root-attempt orderings against the selected ownership
   graph. An escaped root must neither postpone teardown nor become
   dereferenceable after it, and forgotten allocator storage must not retain the
   heap.
 - **C6D.2 — terminal teardown.** Implement only the selected protocol and
-  prove each remaining allocation is destroyed or deliberately quarantined
-  exactly once without reconstructing a dropped heap owner.
+  prove each still-allocated drop-bearing value receives exactly one terminal
+  destructor attempt and no previously retired identity is retried, without
+  reconstructing a dropped heap owner.
 - **C6D.3 — Gate G1 audit.** Reconcile the unsafe inventory, root and
   finalization proofs, Miri, Loom, sanitizers, deterministic panic schedules,
   and terminal heap release. This focused audit closes Gate G1; C7 and C8 add
@@ -3079,7 +3119,8 @@ recoverable panic injected by its own tests.
   assigned-run occupancy and the heap-wide recycled-run list described below.
   C6A.4 publishes the first survivor-based target after the eager sweep and
   before finalization. C6C.2 moves that publication to final completion so
-  finalizer activations and quarantine participate in the same baseline.
+  finalizer activations and finalizer-driven reclamation participate in the
+  same baseline.
 - An abandoned or panicking mark or sweep publishes neither a replacement
   pressure baseline nor recycled capacity. The last known-good request and
   occupancy state remains authoritative.
@@ -3089,16 +3130,17 @@ recoverable panic injected by its own tests.
   pressure; C6C.2 replaces that temporary boundary with final publication.
   Never begin another collection while the heap is in `Finalizing`.
 - Verify successful and failed sweep publication, free-run reactivation,
-  finalizer allocation around the trigger, and panic/quarantine recovery as
+  finalizer allocation around the trigger, and finalizer-panic recovery as
   C6 behavior rather than retroactive C2C.5b requirements.
 
 - Identify unreachable allocations only after marking completes.
 - Maintain a heap-wide free-run list under heap state. A run enters it only
   after it has no live allocation, every required destructor has completed,
-  no quarantined slot remains, its old class frontier and run-pool membership
-  are retired, and its header and side bitmaps are safe to reinitialize. A
+  its old class frontier and run-pool membership are retired, and its header
+  and side bitmaps are safe to reinitialize. A
   no-drop run may reach that state during exclusive sweep; a drop-type run
-  cannot enter the list until finalization completes successfully.
+  cannot enter the list until every destructor attempt in that run has reached
+  its return or unwind boundary.
 - Treat the class's stable run record and raw atomic frontier as one retirement
   unit. Before removing or moving a boxed run record, publish a null or valid
   replacement frontier and repair class bookkeeping. Exclusive mutator drain
@@ -3133,16 +3175,18 @@ recoverable panic injected by its own tests.
   requests remain independent of the target.
 - Compute assigned survivor-run occupancy during the eager bitmap scan and
   topology update. C6A.4 publishes that post-sweep target provisionally;
-  C6C.2 publishes the final target when the finalization batch drains. Runs
-  activated by finalizers join current assigned occupancy before final
-  publication; completion chooses a target above that occupancy rather than
-  latching an immediate follow-up request. A run retained by quarantine also
-  joins the baseline because it remains assigned and unavailable for
-  recycling. No collection begins during `Finalizing`.
+  C6C.2 publishes the final target when the finalization attempt either drains
+  the batch or stops at one recovered destructor panic. Runs activated by
+  finalizers and detached runs still retained by pending work participate in
+  current assigned occupancy before final publication; completion chooses a
+  target above that occupancy rather than latching an immediate pressure-only
+  follow-up request. Pending destructor work independently relatches a
+  collection request. No collection begins during `Finalizing`.
 - An abandoned or panicking mark or sweep publishes neither free-list
   membership nor a new pressure baseline. Finalizer-panic recovery publishes
-  the consistent survivor/quarantine baseline only after every run has an
-  unambiguous assigned, free, or quarantined state.
+  the consistent post-attempt baseline only after every run has an unambiguous
+  assigned, free, or pending-batch-owned state and before resuming the retained
+  panic.
 - Retain every arena chunk until heap destruction, even when all of its runs
   are free. Its capacity remains available to the occupancy calculation and
   free list. Returning or decommitting empty chunks is deferred; the bootstrap
@@ -3177,17 +3221,26 @@ recoverable panic injected by its own tests.
   Fully reserve a wholly dead drop-bearing run and detach its stable record
   from ordinary class topology while still under `Exclusive`; retain that
   record in the finalization batch rather than destroying it early. Allocation
-  bitmap updates remain single-writer: the finalizer alone clears or
-  quarantines the reserved slots, while ordinary workers may allocate from
-  unrelated words and runs concurrently.
+  bitmap updates remain single-writer: the finalizer alone clears the reserved
+  slots after each destructor reaches its return or unwind boundary, while
+  ordinary workers may allocate from unrelated words and runs concurrently.
+- Allocation-word atomics do not make these reservations redundant. The
+  bootstrap allocator grants one lease owner authority over a word and its
+  allocation protocol is not a general multi-writer `fetch_or`/`fetch_and`
+  protocol. Keep partial words unavailable and detached runs out of class
+  selection while any exact pending bit remains. C8 may measure a finer-grained
+  atomic protocol, but C6 does not mix that optimization into panic recovery.
 - Publish a partial word back to its class as soon as all finalizers in that
-  word are terminal. Once an entirely dead run's finalizers all succeed, retire
-  its saved record, reset the empty run, and publish it immediately to the
-  free-run pool, where a later finalizer or ordinary allocator may retype it.
-  If any slot is quarantined, restore the record to its original class instead,
-  keep quarantined slots allocated, and publish its remaining usable words.
-  Neither case waits for another collection merely to recover the run's safe
-  capacity.
+  word are terminal. Once an entirely dead run's finalizers are all terminal,
+  retire its saved record, reset the empty run, and publish it immediately to
+  the free-run pool, where a later finalizer or ordinary allocator may retype
+  it.
+  A destructor which unwinds is equally terminal for its own storage: retain
+  its panic payload for propagation, clear that slot, and use the same
+  word/run publication path when the containing region has no other pending
+  bits. Stop the attempt at that point; untouched pending bits continue to
+  reserve their word or detached run until a later collection. No completed
+  region waits for another collection merely to recover safe capacity.
 - If the finalization batch is empty, retain C3E's uniform no-op `Finalizing`
   handoff for the bootstrap. C8 may introduce a direct completion fast path
   only after measurement and forced lifecycle verification.
@@ -3196,8 +3249,10 @@ recoverable panic injected by its own tests.
   coordinator locks and reopen shared mutator admission. Invoke each erased
   Rust destructor exactly once under that held mutator. Recursive runtime
   operations reuse it, while worker threads may enter independent mutator
-  regions concurrently. No collection may begin until the finalization set is
-  drained and the collector releases its finalizer mutator.
+  regions concurrently. No collection may begin while the coordinator remains
+  in `Finalizing`. Successful drain or recovered-panic cleanup releases the
+  finalizer mutator and restores ordinary admission; the latter leaves the
+  untouched batch durable and relatches a request for a later attempt.
 - Install that mutator in the scoped current-mutator slot before invoking
   `Drop`. This is how ordinary Rust `Drop`, whose signature cannot accept a
   context argument, may allocate through reviewed GC/runtime APIs without
@@ -3216,40 +3271,21 @@ recoverable panic injected by its own tests.
   Rust payload while `Drop` owns it, but cannot obtain a `Gc` or root for the
   dying allocation. The same rule prevents rescuing another slot in the
   collector-owned finalization batch through a stale internal pointer.
-- Track the ordinary case through run allocation bits and the collector-owned
-  batch rather than an object header state machine. Successful `Drop` clears
-  the slot's allocation bit. A panic inserts the exact erased address and
-  canonical metadata into a heap-private quarantine hash map, leaves the slot's
-  allocation bit set and non-reusable, and never invokes its destructor again.
-  Build no quarantine capacity speculatively: an actual panic reserves one
-  entry before insertion, and inability to make that durable record is a
-  poison-or-abort condition. Fresh allocations and already-published effects
-  from the destructor remain valid. Quarantine does not depend on retaining
-  the prior successful mark bitmap.
-- Before every later root traversal and dead-set classification, iterate the
-  quarantine map immediately after the initial mark clear. Resolve and validate
-  each restored class slot against its recorded canonical metadata, set its
-  mark bit directly, and increment the scalar marked and conservative-
-  retention counts without dispatching its possibly damaged payload's `Trace`
-  implementation or adding trace work. Root validation and terminal teardown
-  use expected-constant-time exact map membership rather than repeatedly
-  scanning a vector. This is the only conservative-retention set in the
-  isolated collector.
-- Treat quarantine as a permanent pin. A future moving collector leaves the
-  complete containing run non-moving rather than attempting to relocate a
-  partially destroyed Rust representation; healthy colocated allocations may
-  remain pinned as an acceptable exceptional cost. Terminal teardown skips the
-  quarantined destructor and releases only the run's raw backing storage.
-- Terminal teardown consults the same sparse quarantine state and skips every
-  destructor identity already recorded there. Quarantine is durable collector
-  state, not merely a report field, until the underlying heap storage is
-  released.
-- Specify and test how a destructor panic drains or preserves the remaining
-  finalization queue. Before resuming the panic, the implementation must leave
-  no allocation ambiguously owned and must restore an ordinary heap phase; a
-  queued collection may run only after this recovery. The bootstrap should
-  prefer quarantining the failed allocation and safely draining the remaining
-  queue, while retaining the first panic for propagation.
+- Track both ordinary and panicking completion through run allocation bits and
+  the collector-owned batch rather than an object header state machine. After
+  either return or unwind reaches the collector boundary, clear the slot's
+  allocation bit before its exact pending bit, then republish or recycle
+  completed storage. The dead bytes are never traced or observed again and
+  require no persistent tombstone; ordinary address reuse remains governed by
+  the same stale-`Gc` liveness contract as every other reclaimed allocation.
+  Fresh allocations and already-published effects from the destructor remain
+  valid.
+- On a destructor panic, retire the attempted allocation but dispatch no later
+  finalizer in that attempt. Before resuming the panic, leave no allocation
+  ambiguously owned, preserve every untouched queue identity in the durable
+  pending batch, restore an ordinary heap phase, and relatch collection. A
+  queued collection may run only after this recovery and makes a new attempt;
+  there is therefore no collector-defined same-attempt second-panic policy.
 - Treat a panic or assertion showing that shared allocator metadata may be
   partially mutated as an internal collector defect. Poison or abort only when
   an attempt guard cannot prove a consistent phase, run, bitmap, class-pool,
@@ -3262,8 +3298,8 @@ recoverable panic injected by its own tests.
   finalizer mutation is valid. A root created during that drain may protect and
   access its value only while an authorized value-domain owner and matching
   mutator remain live; it does not cancel terminal teardown and becomes inert
-  when the domain ends. Terminal teardown ultimately destroys or quarantines
-  every remaining allocation regardless of escaped root-registry entries. Do
+  when the domain ends. Terminal teardown ultimately destroys every remaining
+  allocation regardless of escaped root-registry entries. Do
   not try to reconstruct or resurrect an `Arc` owner after its last strong
   reference has entered `Drop`. If the public ownership representation cannot
   initiate such a drain, keep last-owner teardown a restricted non-reentrant
@@ -3272,7 +3308,9 @@ recoverable panic injected by its own tests.
 - Expose queued and running finalizers as operational heap activity so runtime
   quiescence and shutdown cannot race their diagnostics, tasks, or host
   effects. A synchronous `collect_full` report completes only after its
-  finalization set has reached terminal object states.
+  finalization set has reached terminal object states. If one destructor
+  panics, that call resumes the panic instead; untouched queued finalizers
+  remain activity for a subsequent collection.
 - On completion, publish the post-finalization pressure baseline and clear
   hints coalesced into the completed collection. An entry-elected collector
   atomically carries its finalizer obligation forward as the collecting
@@ -3294,10 +3332,16 @@ same heap from a worker. Uncommitted pressure raised during that finalizer
 is coalesced into the completed collection, and a later outer entry proceeds
 without an immediate redundant second pass. A barrier-forced request after the
 completion transition remains pending and is serviced by a subsequent idle
-outer entry. A panicking opaque
-destructor quarantines only its slot; allocations and effects it published
-before panicking remain valid, and after the caller catches the panic another
-allocation and full collection must succeed.
+outer entry. A panicking opaque destructor terminally retires and releases its
+slot when its word has no other pending identity; allocations and effects it
+published before panicking remain valid. At least one later destructor is
+forced into the same batch and must not run before the original panic reaches
+its caller. The untouched identity remains non-rootable, is conservatively
+retained without tracing on the next attempt, and is finalized by a later full
+collection. Repeated forced panics prove bounded progress of one terminal
+attempt per collection rather than same-attempt draining. A focused
+address-reuse fixture proves the failed identity is not retained or dropped
+again; another allocation and full collection succeed after recovery.
 
 Free-run and pressure verification additionally proves that a wholly cleared
 run is detached from its old class before reuse, recycled runs are preferred
@@ -3305,12 +3349,13 @@ to virgin capacity, and a successfully finalized wholly dead run becomes
 available to a later finalizer before the overall finalization queue drains.
 The same fixture repeats collection and same-type finalizer allocation to prove
 that reservation does not force one virgin run per cycle. Each activation
-changes assigned occupancy exactly once, and partial or quarantined runs never
-enter the free list. Forced threshold tests cover the empty-baseline 112-run
+changes assigned occupancy exactly once, and partial runs enter the free list
+only after all of their allocations are retired. Forced threshold tests cover
+the empty-baseline 112-run
 trigger, exact rounding and saturation of the survivor-growth term,
 recycled-run crossings, and a high-survivor collection receiving both fixed
 and proportional headroom. Finalizer activations consume rather than redefine
-that headroom, while quarantine is included in the retained baseline. Heap
+that headroom. Heap
 destruction releases retained empty chunks; ordinary collection does not.
 
 Gate G1 passes after C6D plus its focused unsafe-code audit.
@@ -3330,8 +3375,10 @@ Completed on 2026-08-23:
   authority is validated before that lock is acquired, and the callback is
   explicitly forbidden from acquiring the sibling coordinator mutex. Its
   guard and borrow end before the existing no-gap finalizer handoff.
-- A focused rooted-value fixture observes exact root, trace, mark, and
-  conservative-retention scalars alongside the authoritative mark bit. Its
+- A focused rooted-value fixture observes exact root, trace, mark, and the
+  provisional always-zero conservative-retention scalar alongside the
+  authoritative mark bit. C6 gives that field meaning when a later attempt
+  retains unfinished pending finalizers without tracing them. Its
   following finalizer callback reacquires managed data with `try_lock`, latching
   that neither the guard nor borrow crosses admission.
 - The prior exclusive-work panic fixture now panics at the post-mark seam and
@@ -3612,7 +3659,7 @@ Completed on 2026-08-23:
   checkpoint the baseline intentionally precedes finalization: allocations
   before completion acknowledgement are coalesced, while a publication after
   the data-side clear survives. C6C.2 will publish the final occupancy after
-  finalizer allocations and quarantine are known.
+  finalizer allocations and completed reclamation are known.
 - The collector suite now contains 164 unit tests (162 passing plus two
   explicit scale fixtures), 6 Loom models, and 8 compile-fail/doc tests. The
   survivor, recycled-threshold, and finalizer-panic pressure fixtures pass
@@ -3669,20 +3716,21 @@ Completed on 2026-08-24:
   root through the installed mutator. A focused fixture exercises class
   discovery and allocation from `Drop`, proving that neither the data mutex nor
   the coordinator mutex crosses erased destructor dispatch.
-- An actual destructor panic reserves and inserts one exact
+- An actual destructor panic currently inserts one exact
   `ErasedGc -> QuarantineRecord` entry before removing pending authority, then
-  resumes the original panic. Later collection marks that allocation
-  conservatively without tracing its damaged payload, root construction
-  rejects it, and terminal teardown never invokes its destructor again. Only
-  static canonical metadata is durable; raw run pointers remain attempt-local
-  and are re-resolved from the arena under collector authority.
-- This checkpoint supplies only the minimum panic-safe quarantine foundation.
-  C6C.1 still drains or classifies work after the first panic and restores safe
-  capacity for partial and detached runs containing quarantine.
+  resumes the original panic. This was deliberately conservative checkpoint
+  scaffolding: the subsequent C6C review established that Rust destruction
+  terminally retires the value even when it unwinds, while the backing storage
+  remains reusable. C6C.1 removes the sparse record and routes the panicking
+  slot through ordinary completion instead.
+- This checkpoint therefore supplies only a temporary panic-safe bridge.
+  C6C.1 terminally retires the attempted slot, leaves untouched work pending
+  for a later collection, releases every completed region, and deletes the
+  quarantine-specific paths.
 - The collector suite now contains 170 unit tests (168 passing plus two
   explicit scale fixtures), 6 Loom models, and 8 compile-fail/doc tests. The
-  recursive allocation and exact quarantine fixtures join the migrated C6B.1
-  coverage in `VERIFY.md`.
+  recursive allocation and temporary exact-panic fixture join the migrated
+  C6B.1 coverage in `VERIFY.md`.
 
 #### C6B.3 completion
 
@@ -3706,8 +3754,9 @@ Completed on 2026-08-24:
   reserved before selector withdrawal.
 - Removing the current batch record keeps the cursor at that run index and
   resets its word index, so the shifted successor is visited without a full
-  rescan. Panic/quarantine deliberately retains its region for C6C.1 rather
-  than using the successful release path.
+  rescan. The temporary panic path retains its region at this checkpoint;
+  C6C.1 sends the attempted slot through the same release path after unwinding
+  reaches the collector boundary while preserving untouched pending bits.
 - Forced fixtures prove post-collection partial-word reuse, same-collection
   reuse by a later destructor, visibility to an independently admitted mutator
   while the collector is still `Finalizing`, whole-run reuse without a stale
@@ -3735,7 +3784,7 @@ Execute C7 as five checkpoints:
   collections, pending and coalesced request observations, synchronous joins,
   pause/trace/sweep/finalization durations, traced objects, reclaimed
   runs/slots, peak mark-object worklist length/capacity, finalization batch
-  size, and quarantine outcomes.
+  size, and destructor-panic outcomes.
 - **C7C.2 — allocation and cache metrics.** Add mutator and recursive entries,
   arena chunks, assigned typed runs, recycled and virgin activations, free
   runs, class-cache hits/misses, eagerly swept allocation words and slots,
