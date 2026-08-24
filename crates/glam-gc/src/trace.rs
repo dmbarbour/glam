@@ -20,6 +20,31 @@ use crate::Gc;
 /// This contract does not permit allocation, reclamation, callbacks, or
 /// destruction. Later collector phases invoke it only while mutation is
 /// excluded.
+///
+/// # Managed `Drop`
+///
+/// Implementing `Trace` also commits the representation's Rust destructor to
+/// the managed-drop contract. Once `Drop::drop` begins for an unreachable
+/// allocation, a bare `Gc<_>` stored in that allocation is not a liveness
+/// proof. Treat every such edge as spoiled: it may be discarded as inert
+/// pointer data, but it must not be dereferenced, rooted, or installed in a
+/// newly reachable managed object merely because the dying allocation still
+/// contains its bits. Finalization order supplies no stronger guarantee; a
+/// referent may already have been destroyed, and cycles have no safe leaf
+/// order.
+///
+/// A destructor may use immediate or host-owned data, access a value through
+/// an independently established `Root<_>`, and allocate fresh managed values
+/// through the installed finalizer mutator. A host-owned coordination object
+/// associated with a managed node must contain no hidden `Gc<_>`, `Root<_>`,
+/// public managed value, or equivalent heap edge. An ordinary Rust owner may
+/// instead hold a `Root<_>` when it represents genuine external ownership;
+/// doing so deliberately extends liveness and must not substitute for a
+/// traced promise, lazy, fixpoint, or other internal graph edge.
+///
+/// General resurrection and traversal of a dying managed graph are not
+/// supported. A type needing either behavior requires a separate collector
+/// protocol rather than an ordinary Rust `Drop` implementation.
 pub unsafe trait Trace: Send + Sync + 'static {
     /// Optional total collector slot extent requested by this representation.
     ///

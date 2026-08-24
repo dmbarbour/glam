@@ -769,6 +769,58 @@ ordinary topology lookup, and terminal teardown skips its destructor. Durable
 quarantine contains no raw run pointer: such topology remains attempt-local,
 preserving the heap's `Send` boundary.
 
+### Managed `Drop`, spoiled edges, and host ownership
+
+The unsafe `Trace` contract also governs Rust `Drop` for a managed
+representation. When `Drop::drop` starts, the allocation's Rust fields remain
+initialized, but a bare `Gc<T>` stored in those fields is no longer evidence
+that its target is live. Finalization does not impose a graph order: another
+target may already have been destroyed, and no ordering makes a cycle safe.
+Such a handle is therefore *spoiled*. Destruction may discard or move its bits
+as inert Rust data, but may not dereference it, root it merely on the strength
+of the handle, or publish it into a newly reachable managed object.
+
+Safe finalizer inputs are deliberately narrower:
+
+- immediate and host-owned data with no managed edge;
+- a value whose liveness was established independently by an existing
+  matching-heap `Root<T>`; and
+- a fresh managed allocation made through the installed finalizer mutator.
+
+The collector does not promise graph quining, resurrection, or a useful
+destruction order. Constructing a fresh equivalent from the safe inputs above
+creates a new allocation identity and is not resurrection.
+
+Three ownership categories must remain distinct in Glam integration:
+
+1. A managed node stores ordinary managed edges and reports them through
+   `Trace`. Promise assignments, lazy results and sources, and fixpoint edges
+   belong here.
+2. A host-owned companion object (sometimes called a sidecar) may carry locks,
+   notifications, waiter/task identifiers, and other coordination data, but
+   contains no `Gc`, `Root`, public managed value, or equivalent hidden edge.
+   It cannot keep a managed graph alive.
+3. An external Rust owner may hold a registered `Root` when its semantics
+   intentionally retain a value independently of the managed graph. Such a
+   root is conservative by design. It must not be used to move an internal
+   promise/lazy/fixpoint backedge outside tracing, because that would prevent
+   the collector from discovering the cycle.
+
+Opaque payloads are audited against the same categories. A leaf opaque
+payload has no managed edge. A genuinely external opaque owner may retain an
+exact same-heap root, accepting conservative lifetime extension. An opaque
+payload embedded merely as part of an internal managed cycle may not use a
+root as a tracing substitute. Collector-aware weak references may later
+provide non-owning host associations, but are not part of this collector.
+
+The durable finalization batch is the current exact non-rootability authority.
+Root and debug access presently find a pending identity by scanning affected
+run records and testing that run's compact pending bitmap. This is expected to
+be small and brief in the bootstrap. If measurement shows otherwise, add a
+temporary `RunLocation`-to-batch-record index while retaining the pending
+bitmap as the authority; do not overload successful mark bits with
+finalization state or duplicate every pending allocation in a hash table.
+
 The mark range is initialized as ordinary `u64` storage and remains disjoint
 from the header, atomic allocation/lease words, alignment padding, and payload.
 After exclusive admission drains mutators, the collector reconstructs one

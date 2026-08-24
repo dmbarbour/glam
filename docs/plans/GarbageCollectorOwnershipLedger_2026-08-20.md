@@ -14,8 +14,13 @@ blocking defects rather than conservative roots.
 
 - **M** — intended managed graph node or a representation which must expose an
   exact trace adapter.
-- **R** — ordinary Rust sidecar which owns registered `RuntimeValueRoot` or
-  public `Value` roots. It is not itself traced.
+- **R** — ordinary Rust external owner which intentionally owns registered
+  `RuntimeValueRoot` or public `Value` roots. It is not itself traced, and its
+  semantic lifetime deliberately extends the rooted managed values.
+- **C** — host-owned companion state associated with a managed node. It may
+  contain locks, notifications, IDs, and other coordination data, but no
+  `Gc`, `Root`, public `Value`, or equivalent hidden managed edge. It is not an
+  external root owner and cannot keep the managed node or its graph alive.
 - **T** — bounded compiler, parser, evaluator, transaction, or callback-local
   owner. Its lifetime must be enclosed by a mutator region before managed
   pointers replace its values.
@@ -28,6 +33,15 @@ or **free** under the named exclusive guard. “Mutation gateway” names the
 integration phase which routes a replaceable managed edge through the initial
 collector's structural no-op gateway. This records the relevant write sites
 without installing generational or concurrent-collector machinery.
+
+Do not use an **R** record to avoid tracing an internal edge. In particular, a
+promise assignment, lazy source/result, or fixpoint backedge held through a
+registered root would hide the cycle this collector is intended to reclaim.
+Such edges belong in **M** nodes. A public resolver, diagnostic subscriber, or
+embedding-client handle may be **R** only when it is a genuine owner outside
+the managed graph. The term *sidecar* is avoided below because it previously
+blurred this distinction between an edge-free **C** companion and an **R**
+external root owner.
 
 `TypeId::of::<T>()` is the provisional type identity for every typed row. A
 canonical `ObjectMetadata` pointer, dense heap-local class ID, requested slot
@@ -88,7 +102,7 @@ row is approved for a large-object or multi-run exception.
 | --- | --- | --- | --- |
 | `EvaluationFailure` (`core.rs`) | Emission `Value` or cycle IDs; `Arc<[Value]>` contexts. | Immutable, thread-safe, retained in task/report ledgers. | Visit emission and contexts; ordinary Rust drop initially; I6. |
 | `LazyCell` / `LazySource` (`core.rs`) | Sources include fixpoint, deferred closure, reflection computation, access arguments, application, builtin call, net construction/computation, and function call. Terminal `LazyResult` contains evaluated value or failure. | `source` is replaceable only under its mutex; `result` is one-write and published before source removal. Lock order is result check, source mutex, result recheck; destruction occurs after unlock. | Exact source/result visitor. Initial construction needs no gateway; result publication uses one. Deferred/opaque captures block I5 until I4B. Managed drop required because source/result own Rust resources. |
-| `PromiseCell` (`core.rs`) | One successful `RuntimeValueRoot`; failure; weak/coordinator producer state and subscriptions. | Assignment and producer are one-write. Coordinator mutation admission encloses task-owned publication; resolver publication uses its local path. Notifications occur after guarded publication. | Visit successful assignment through its root representation; assignment gateway; managed drop/finalization policy for unresolved producer ownership; I5. |
+| `PromiseCell` (`core.rs`) | One successful `RuntimeValueRoot`; failure; weak/coordinator producer state and subscriptions. | Assignment and producer are one-write. Coordinator mutation admission encloses task-owned publication; resolver publication uses its local path. Notifications occur after guarded publication. | Move the assignment into a traced managed edge rather than preserving its current registered-root representation. Any separated producer/subscription companion is **C** and edge-free. Assignment gateway and managed drop/finalization policy for unresolved producer ownership; I5. |
 | `MetadataCarrier` (`core.rs`) | One `Value`. | Immutable after construction. | Visit one edge; no post-construction gateway; I6. |
 | `BuiltinCall`, `Access`, `FunctionCall`, `LazyApplication` (`core.rs`) | Supplied function, arguments, and/or path leaf data. | Immutable `Arc` payloads; thread-safe. | Exact ordered visitors; I6. |
 | `FixpointComputation` (`core.rs`) | Function or object-instance `Value`. | Immutable. | Visit one value; I6. |
@@ -138,9 +152,9 @@ inventory.
 
 | Area | Types | Classification, lifetime, and migration |
 | --- | --- | --- |
-| Runtime/public facade | `RuntimeValueRoot`, `api::Value`, `EvaluatedValue`, `Values`, `RuntimeValueFactory`, `RuntimeSharedResources`, `PromiseResolver`, `EffectTokenDomain`, `EffectTokenState` | R. Public/runtime-long-lived and cross-thread. Root registration/provenance in I2; all root surfaces audited in I9. Resolver ownership/finalization is handled with promises in I5; generic effect-token domain payloads remain registered-root sidecars. |
+| Runtime/public facade | `RuntimeValueRoot`, `api::Value`, `EvaluatedValue`, `Values`, `RuntimeValueFactory`, `RuntimeSharedResources`, `PromiseResolver`, `EffectTokenDomain`, `EffectTokenState` | R. Public/runtime-long-lived and cross-thread. Root registration/provenance in I2; all root surfaces audited in I9. Resolver ownership/finalization is handled with promises in I5; generic effect-token domain payloads remain explicit external root owners. Any promise coordination split from its managed cell is separately **C** and contains no value root. |
 | Assembly facade | `AssemblerReflectionHost`, `CompilationExecution`, `ReasoningSession`, `CompileSetup`, `BuiltModule`, `ReasoningVolume`, `Assembler`, `DiagnosticAttachment`, `AssemblerBuilder`, `ModuleBuilder` | R for stored public roots/diagnostics; T for build setup raw core values. Convert setup/compiler fields to scoped managed access in I3/I9. |
-| Diagnostics | `Diagnostic`, `DiagnosticEvent`, `DiagnosticBusState`, `DiagnosticBusInner`, `DiagnosticBus`, `DiagnosticIngressInner`, `DiagnosticIngress`, `DiagnosticSubscription`, `DiagnosticSubscriptionInner`, `Error`, `ReasoningFailure` | R. Buses/callbacks are external sidecars; events retain public roots until delivery/retirement. Weak back-references remain non-owning. I9. |
+| Diagnostics | `Diagnostic`, `DiagnosticEvent`, `DiagnosticBusState`, `DiagnosticBusInner`, `DiagnosticBus`, `DiagnosticIngressInner`, `DiagnosticIngress`, `DiagnosticSubscription`, `DiagnosticSubscriptionInner`, `Error`, `ReasoningFailure` | R. Buses/callbacks are external root owners; events retain public roots until delivery/retirement. Weak back-references remain non-owning. I9. |
 | Runtime events | `RuntimeInputRecord`, `RuntimeOutputIntent`, `RuntimeDeliveryRecord`, `RuntimeEventSnapshot`, `RuntimeEventJournal`, `RuntimePreparedInput`, `RuntimeDeliveryTicket`, `RuntimeDiagnosticRoute` | R. Persistent input snapshots and identified deliveries retain roots across threads and settlement. I9. |
 | Readiness/reporting | `QuiescenceSnapshot`, `QuiescenceReport`, `DeadlockSnapshot`, `RuntimeDeadlockWork`, `EvaluationSessionReport`, `EvaluationUnfinishedTask` | R. Host-visible snapshots may outlive sessions/runtime facade. Failures and store snapshots remain exact roots; I9. |
 | Reflection store/protocol | `State`, `Set`, `Rewrite`, `StoreSnapshot`, `StoreJournal`, `ReflectionStore`, `Scoped`, `HostSnapshot`, `TaskCommit`, `Transaction`, `ReflectionJournal`, `QueryRead` | R. Store roots are persistent public roots; journals are transaction-local snapshots/edits; store mutation uses runtime mutation admission then store/event mutex, with wakes/destruction after unlock. I9. |
@@ -161,16 +175,16 @@ inventory.
 | --- | --- | --- |
 | `DeferredComputation` | Yes, raw `core::Value` today. | D. Replace/contain in I4B/I10; never conservatively trace a closure environment. |
 | `ModuleLoader`, `BinaryFileLoader`, `CompileDiagnosticEmitter` | Yes; supplied by compiler setup and may capture core/public values. | Compilation-scoped T, but any suspension/caching requires exact same-runtime roots. Audit concrete constructors in I4B. |
-| `TaskStatusPublisher` and reflection launch/host closures | Indirectly; status, query, factory, or host state can retain roots. | Keep as Rust sidecars whose captured values are public/runtime roots. I9/I10. |
+| `TaskStatusPublisher` and reflection launch/host closures | Indirectly; status, query, factory, or host state can retain roots. | Keep externally owned captures as registered roots. A host companion associated only with a managed task is instead **C** and may capture no value. I9/I10. |
 | Runtime input converter and output decoder/callback | Yes, arbitrary host state and public values. | External adapter. Authoritative runtime buffers contain `RuntimeValueRoot`; callbacks run after locks and receive retained public roots. I9. |
-| Diagnostic subscribers | Yes, arbitrary host state/public roots. | External sidecar; subscriptions use weak bus back-references and callbacks run outside locks. I9/I10. |
+| Diagnostic subscribers | Yes, arbitrary host state/public roots. | External root owner; subscriptions use weak bus back-references and callbacks run outside locks. I9/I10. |
 | Notification/probe `FnOnce` closures | Normally IDs/wakers only; tests may capture fixtures. | Must not become a graph-retention mechanism. Audit constructors in I10. |
 
 ## Opaque Payload Families
 
 | Payload | Managed edge status | Decision |
 | --- | --- | --- |
-| `EffectToken<T>` (`api/value.rs`) | Token contains ID and weak domain only; no core/managed edge. Generic domain payload remains outside the opaque token and may own public roots. | Approved leaf token. Domain remains an R sidecar. |
+| `EffectToken<T>` (`api/value.rs`) | Token contains ID and weak domain only; no core/managed edge. Generic domain payload remains outside the opaque token and may own public roots. | Approved leaf token. A value-bearing domain is an **R** external owner; an edge-free notification/identity domain may be **C**. |
 | `ConstructionPort` (`eval/builtins/net/construction.rs`) | Brand and port ID only. | Approved leaf token. |
 | `TaskHandleCell` (`reflection/requests.rs`) | Runtime ID, task handle, query handle; no raw core value. Handles reach coordinator/store obligations, not a managed pointer. | Approved external capability; re-audit in I9. |
 | `CompilationOrigin` (`diagnostic.rs`) | **Contains raw `core::Value`.** | **D:** replace with exact same-runtime public root or non-value provenance before I4B/G2. |
@@ -201,9 +215,11 @@ closure environment for hidden pointers.
    mutex and is the high-volume I8 mutation-gateway surface. Cursor/reduction
    helpers may not bypass it.
 6. Reflection store, event state, coordinator ledgers, caches, and diagnostic
-   buses are Rust sidecars. Their entries are registered roots, not interior
-   managed pointers; updating them changes root membership rather than invoking
-   an object-field mutation gateway.
+   buses are external Rust owners where their entries are registered roots,
+   not interior managed pointers; updating them changes root membership rather
+   than invoking an object-field mutation gateway. Any companion state split
+   from an individual managed node is classified separately as **C** and has no
+   such entry.
 7. No trace visitor may call user code, allocate, lock unrelated components,
    or force a lazy/promise/net value. Visitors enumerate representation edges
    only.

@@ -339,9 +339,11 @@ managed pointer:
   payload which can retain an internal `core::Value`;
 - replace Glam-owned closure captures with explicit traceable computation state
   where practical;
-- otherwise attach an explicit bundle of same-runtime public roots, accepting
-  that a backedge through such a bundle is conservative retention rather than
-  exact cycle collection;
+- otherwise attach an explicit bundle of same-runtime public roots only when
+  it represents genuine ownership outside the managed graph. A backedge from
+  an internally owned closure or opaque payload through such a bundle is a
+  retention defect, not an acceptable tracing substitute, because it hides
+  the very lazy/promise/fixpoint cycles collection is intended to remove;
 - narrow opaque construction so an arbitrary payload may contain no managed
   edge, while audited families may contain same-runtime public roots but never
   a bare `Gc`, unrooted recursive `core::Value`, or foreign-runtime root; and
@@ -359,8 +361,11 @@ I4B passes.
 Migrate the principal cyclic identities first:
 
 - replace `Arc<LazyCell>` and `Arc<PromiseCell>` with managed identity cells;
-- retain scheduler/completion sidecars as ordinary `Arc` only where they carry
-  no recursive managed value ownership;
+- retain scheduler/completion host companions as ordinary `Arc` only where
+  they carry locks, notifications, task/waiter identities, or other
+  coordination data and no `Gc`, `Root`, public `Value`, or equivalent managed
+  ownership. Store promise assignments, lazy sources/results, and all other
+  logical managed edges in traceable managed cells;
 - trace lazy sources, terminal evaluated values, permanent failures, promise
   assignments, and producer-owned data;
 - clear/release lazy sources after terminal publication as today;
@@ -458,9 +463,9 @@ a traced managed edge, including:
   deliveries; and
 - assembler/module construction state.
 
-Do not root values merely because a weak notification sidecar names their task
-or wait ID. Root ownership must follow semantic retention, not scheduler
-reachability by accident.
+Do not root values merely because an edge-free notification companion names
+their task or wait ID. Root ownership must follow semantic retention, not
+scheduler reachability by accident.
 
 Verification drops each owning session/runtime facade in controlled orders and
 checks both terminal observability and eventual reclamation.
@@ -487,15 +492,19 @@ checks both terminal observability and eventual reclamation.
 For `OpaqueValue`:
 
 - ordinary arbitrary host payloads are tracing barriers;
-- payloads may hold public/runtime-rooted `Value`s from the same runtime, which
-  are safe but can conservatively retain a cycle;
+- payloads owned by a genuine external Rust authority may hold
+  public/runtime-rooted `Value`s from the same runtime, deliberately extending
+  their lifetime. An opaque payload reached only as part of the managed graph
+  may not use such a root to represent an internal edge: that would hide and
+  permanently retain a cycle;
 - payloads must never hold bare `Gc<T>`, an unrooted recursive `core::Value`,
   a foreign-runtime root, or any equivalent managed pointer which could escape
   its mutator region;
 - preserve that rule structurally: keep opaque construction private, do not
   re-export collector pointers, and require an audited sealed/unsafe marker or
-  an external sidecar for each allowed payload family rather than retaining
-  the current unconstrained `Any + Send + Sync` constructor;
+  a classified external root owner or edge-free host companion for each
+  allowed payload family rather than retaining the current unconstrained
+  `Any + Send + Sync` constructor;
 - generic embedding payloads should remain in host-owned side tables whose
   opaque Glam token contains only identity/provenance. Same-runtime Glam values
   in the host payload use public roots; cross-runtime associations remain host
@@ -510,14 +519,15 @@ For `OpaqueValue`:
 - place every collector-owned opaque payload in a typed run whose metadata has
   one erased `Drop` operation. All such destructors run with the finalizer
   mutator installed; the collector does not distinguish passive from
-  mutator-capable Rust destruction. An explicitly external sidecar remains
+  mutator-capable Rust destruction. An explicitly external Rust owner remains
   outside this guarantee and must document that fact;
 - replace or narrow the current
   `OpaqueValue::downcast<T>() -> Option<Arc<T>>` boundary for
   mutator-finalized payloads. Cloning the `Arc` can move the last `Drop` outside
   collector finalization. Prefer a collector-owned payload with a scoped
   downcast/borrow valid only in a mutator region, or an explicitly classified
-  sidecar whose destruction does not require the finalization guarantee;
+  host companion whose destruction does not require the finalization
+  guarantee and which contains no managed edge;
 - ensure a finalizable opaque payload cannot obtain a managed pointer or root
   to its containing allocation. Public roots to other values remain valid and
   keep those values alive independently. Constructing a fresh equivalent
@@ -590,7 +600,7 @@ is stable.
 
 - Remove `Arc` wrappers whose only remaining role was recursive value
   lifetime. Retain intentional `Arc`s for public roots, immutable leaf buffers,
-  host identities, and scheduler notification sidecars.
+  host identities, and edge-free scheduler notification companions.
 - Remove duplicated runtime provenance fields when heap identity is
   authoritative and the boundary check remains equally cheap.
 - Remove temporary collection-disable gates and migration-only adapters.

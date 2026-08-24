@@ -2981,15 +2981,29 @@ Execute C6 as the following smaller checkpoints:
   quarantine transfer needed to propagate a destructor panic without making
   that partially destroyed allocation retryable; C6C.1 adds remaining-batch
   draining and complete run restoration.
-- **C6B.3 — non-resurrection and successful completion.** Reject roots to any
-  remaining batch identity, permit quining only through fresh allocations,
-  and publish completed regions incrementally under heap state. Rebuild and
-  republish a terminal partial word immediately. When every destructor in a
-  fully reserved run succeeds, retire its saved class record, reset the empty
-  run, and publish it immediately to the heap-wide free-run pool; a later
-  finalizer or ordinary client may reactivate it without waiting for another
-  collection. Prove entry-elected versus synchronous completion transfers or
-  drops the finalizer admission exactly as C3E specifies.
+- **C6B.3 — managed-`Drop` contract, non-resurrection, and successful
+  completion.** Extend the public unsafe `Trace` contract and `SAFETY.md` with
+  the spoiled-edge rule: once `Drop` begins, bare `Gc` fields in the dying
+  allocation are inert handles, not liveness proofs, and may not be
+  dereferenced, rooted, or republished. Permit finalizer output only from
+  immediate/host data, independently established roots, and fresh
+  allocations. Distinguish a traceable managed edge from an edge-free host
+  coordination companion and from a genuine external root owner; promises,
+  lazies, and fixpoints may not hide their internal edges in companions or
+  roots. Keep graph quining, destruction ordering, and resurrection
+  unsupported.
+
+  Reject roots to any remaining batch identity and publish completed regions
+  incrementally under heap state. Rebuild and republish a terminal partial
+  word immediately. When every destructor in a fully reserved run succeeds,
+  retire its saved class record, reset the empty run, and publish it
+  immediately to the heap-wide free-run pool; a later finalizer or ordinary
+  client may reactivate it without waiting for another collection. Prove
+  entry-elected versus synchronous completion transfers or drops the finalizer
+  admission exactly as C3E specifies. Retain the current compact pending
+  bitmaps as the non-rootability authority. The initial linear scan over
+  affected run records is acceptable; C8 measures it before introducing a
+  temporary run-location index.
 - **C6C.1 — panic, draining, and sparse quarantine.** Quarantine a panicking
   slot without invoking its destructor twice, safely drain or classify every
   remaining batch item, retain the first panic for propagation, and restore a
@@ -3727,7 +3741,11 @@ Execute C8 as five checkpoints:
   bitmap scan before considering use of the spare `RunHeader` `u32` as a live-
   slot count reset with the mark bitmap. Do not add that count merely to avoid
   an already-cache-local scan; future parallel marking must also account for
-  counter contention.
+  counter contention. Also measure safe-root/debug-access checks while a
+  finalization batch is active. If scanning affected run records is material,
+  add a temporary `RunLocation`-to-finalization-record index and test the exact
+  pending bit in that record. Keep pending bitmaps authoritative; do not
+  repurpose mark bits or add one hash entry per ordinary pending object.
 - **C8B.3 — paged array tracing exploration.** Use C5D.2 and C8B's wide-array
   measurements to judge whether the plain LIFO `Vec<TraceWork>` has a material
   peak-memory or reallocation cost. If it does, prototype an additive
