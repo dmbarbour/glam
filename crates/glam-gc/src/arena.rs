@@ -392,6 +392,46 @@ impl Arena {
         unsafe { allocation.as_ref() }.fetch_and(!bit, Ordering::AcqRel) & bit != 0
     }
 
+    /// Releases one allocation word after its last pending destructor
+    /// completes.
+    ///
+    /// The finalization batch must still own the exact word when this method
+    /// begins. Its lease bit was therefore unavailable before ordinary
+    /// admission reopened, and no allocation cursor can own the word. Clearing
+    /// that one lease bit publishes the allocation-word retirement performed
+    /// by finalization without disturbing concurrent claims for neighboring
+    /// words represented by the same atomic lease word.
+    pub(crate) fn release_finalized_allocation_word(
+        &self,
+        target: RunClaimTarget,
+        class_id: AllocationClassId,
+        word_index: usize,
+    ) {
+        let (_, run) = self.resolved_claim_target(target, class_id);
+        assert!(
+            word_index < target.geometry.allocation_bitmap.word_len,
+            "released finalization word is outside its run"
+        );
+        assert_ne!(
+            free_mask_for_word(run, target.geometry, word_index),
+            0,
+            "completed finalization word has no reusable slot"
+        );
+        let (lease_word_index, bit) = bitmap_bit(target.geometry.lease_bitmap, word_index);
+        let lease = lease_word_pointer(run, target.geometry.lease_bitmap, lease_word_index);
+        // SAFETY: validated geometry places this initialized atomic lease word
+        // in the retained run. The finalization reservation proves this bit has
+        // no allocation owner, while atomic RMW preserves concurrent claims in
+        // every neighboring bit. Release publishes the cleared allocation bit
+        // before a frontier can expose this word.
+        let previous = unsafe { lease.as_ref() }.fetch_and(!bit, Ordering::Release);
+        assert_ne!(
+            previous & bit,
+            0,
+            "completed finalization word was already allocator-visible"
+        );
+    }
+
     pub(crate) fn clear_assigned_mark_bitmaps(&mut self) -> usize {
         let mut cleared = 0;
         for chunk in &mut self.chunks {

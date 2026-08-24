@@ -288,38 +288,17 @@ C6B.1 materializes exact drop-required identities before selector withdrawal.
 Native fixtures prove word-local reservation in an attached partial run,
 complete detachment of wholly dead drop-bearing runs, preservation of former
 class order across multiple detachments, and assigned-pressure accounting
-which treats detached runs as occupied. At the C6B.1 checkpoint, no destructor
-yet ran during collection; C6B.2 migrates those same fixtures below.
+which treats detached runs as occupied. C6B.2 migrated these fixtures to real
+destruction, and C6B.3 now removes every successfully completed batch record;
+durable cross-collection retention remains exceptional recovery scaffolding
+rather than the normal post-collection state.
 
-A second collection retains pending identities without tracing them and does
-not duplicate batch records. A staged fixture drops another root between
-collections and proves the newly dead slot merges into the existing attached
-run record. Exact root and debug-access validation rejects both attached and
-detached pending identities. A barrier-forced worker enters while the
-collector holds its finalizer mutator and proves detached root rejection while
-ordinary admission is open. Terminal teardown then visits class and batch
-identities disjointly and invokes every destructor exactly once.
-
-Focused Miri runs are:
-
-```sh
-cargo +nightly miri test --package glam-gc --lib --all-features \
-  partial_drop_runs_reserve_only_words_with_finalization_obligations
-cargo +nightly miri test --package glam-gc --lib --all-features \
-  pending_finalization_owns_partial_and_detached_runs_across_collection
-cargo +nightly miri test --package glam-gc --lib --all-features \
-  later_dead_slots_merge_into_existing_partial_finalization_record
-cargo +nightly miri test --package glam-gc --lib --all-features \
-  multiple_whole_finalization_detachments_preserve_former_class_positions
-cargo +nightly miri test --package glam-gc --lib --all-features \
-  concurrent_finalizing_entrant_cannot_root_a_detached_identity
-```
-
-All five focused fixtures pass Miri. The stable collector matrix contains 168
-unit tests (166 passing and two ignored scale fixtures), six Loom models, and
-eight compile-fail/doc tests. The exact unsafe inventory, workspace formatting,
-all-target/all-feature Clippy with warnings denied, and the complete workspace
-test suite also pass.
+Exact root and debug-access validation is still forced while batch identities
+are pending. `concurrent_finalizing_entrant_cannot_root_a_detached_identity`
+holds the collector before erased destruction, admits another mutator, and
+proves detached root rejection while ordinary admission is open. The C6B.3
+fixtures below preserve reservation, detachment, and batch-order coverage while
+asserting the final successful release state.
 
 ## C6B.2 Erased-Destruction Verification
 
@@ -359,6 +338,49 @@ are reviewed unsafe sites; sparse quarantine itself is safe Rust and allocates
 only on the exceptional path. The stable collector matrix contains 170 unit
 tests (168 passing and two ignored scale fixtures), six Loom models, and eight
 compile-fail/doc tests.
+
+## C6B.3 Successful-Completion Verification
+
+C6B.3 makes successful finalization capacity available without waiting for
+another collection. `partial_drop_runs_release_completed_words_for_reuse`
+proves every completed attached word has a directly claimable lease and that
+the terminal batch record is gone. A replacement reuses the first swept slot
+rather than skipping to a never-reserved later word.
+
+`completed_finalization_word_is_reusable_by_a_later_destructor` proves the
+incremental boundary inside one batch: after the first allocation word drains,
+a destructor in the next word recursively allocates the same type and reuses
+the released first slot. The barrier-forced
+`completed_finalization_word_is_visible_to_an_ordinary_mutator` holds that later
+destructor open, admits an unrelated mutator while the runtime remains
+`Finalizing`, and proves the same first-slot reuse from another thread.
+
+`successful_finalization_releases_partial_and_detached_batch_ownership` proves
+an attached run remains in its class, a completed detached run leaves the
+batch and enters the free pool, stale identities remain non-rootable, and a
+later collection inherits no successful batch obligation.
+`wholly_dead_drop_runs_recycle_without_a_stale_frontier` proves immediate
+same-location retyping through the free pool, while
+`multiple_whole_finalization_detachments_recycle_in_batch_order` proves ordered
+release of multiple stable detached records.
+
+Focused Miri runs are:
+
+```sh
+cargo +nightly miri test --package glam-gc --lib --all-features \
+  partial_drop_runs_release_completed_words_for_reuse
+cargo +nightly miri test --package glam-gc --lib --all-features \
+  completed_finalization_word_is_reusable_by_a_later_destructor
+cargo +nightly miri test --package glam-gc --lib --all-features \
+  completed_finalization_word_is_visible_to_an_ordinary_mutator
+cargo +nightly miri test --package glam-gc --lib --all-features \
+  successful_finalization_releases_partial_and_detached_batch_ownership
+```
+
+All four focused fixtures pass Miri. The stable collector matrix contains 172
+unit tests (170 passing and two ignored scale fixtures), six Loom models, and
+eight compile-fail/doc tests. Formatting, all-target/all-feature Clippy with
+warnings denied, and the complete workspace suite also pass.
 
 ## Gate G0 Baseline
 

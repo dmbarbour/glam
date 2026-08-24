@@ -821,6 +821,45 @@ temporary `RunLocation`-to-batch-record index while retaining the pending
 bitmap as the authority; do not overload successful mark bits with
 finalization state or duplicate every pending allocation in a hash table.
 
+### C6B.3 successful region release
+
+Before selector withdrawal, finalization planning reserves free-run vector
+capacity for every newly detached drop-bearing run as well as every immediate
+no-drop retirement. Successful finalization can therefore publish completed
+regions without allocating collector bookkeeping.
+
+For an attached run, clearing the last pending bit in one allocation word
+makes that exact word eligible for reuse even while other words in the run
+remain pending. Under the managed-data mutex the collector has already cleared
+the dead slot's atomic allocation bit and removed its pending bit. It then
+atomically clears only the allocation word's corresponding lease bit. The RMW
+preserves concurrent claims in neighboring bits of the same lease word. A
+Release ordering publishes allocation retirement before the class frontier is
+updated. No new heap-wide lease epoch is required: the word had no prior lease
+owner, and the collection's existing epoch already invalidated every cursor
+from before reservation.
+
+The class keeps an earlier current frontier when the released run occurs later
+in class order, moves backward when a previously passed run regains capacity,
+and publishes the released run when no frontier exists. This prevents
+incremental finalization from permanently skipping capacity on either side of
+the current frontier. A raw frontier loaded just before republishing remains a
+stable run record and may still claim its independent available word.
+
+When the final pending bit in an attached run completes, its batch record is
+removed after publishing that last word. When the final pending bit in a
+detached run completes, its stable boxed record leaves the batch, the arena
+validates and resets the now-empty run, assigned-run pressure decreases once,
+and its location enters the heap-wide free-run pool. It does not reenter the
+old class. A later finalizer or ordinary admitted mutator may reactivate that
+location through normal typed-run publication.
+
+Removing the current batch record shifts its successor into the same vector
+index; the bounded finalization cursor retains that run index and resets only
+its word index. A destructor panic takes the quarantine path instead and does
+not release its zero-mask word or containing detached run. C6C.1 owns recovery
+and safe-capacity restoration for that exceptional case.
+
 The mark range is initialized as ordinary `u64` storage and remains disjoint
 from the header, atomic allocation/lease words, alignment padding, and payload.
 After exclusive admission drains mutators, the collector reconstructs one

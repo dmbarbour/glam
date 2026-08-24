@@ -334,6 +334,28 @@ impl AllocationClassEntry {
         self.publish_frontier(last)
     }
 
+    /// Makes a retained run with newly released capacity visible again.
+    ///
+    /// Finalization may release a word in a run before, at, or after the
+    /// class's current frontier. Keep an earlier current frontier so its
+    /// remaining capacity is not skipped; move backward when necessary so a
+    /// previously passed run is reconsidered. Heap-state serialization keeps
+    /// this ordered index coherent, while the raw frontier publication may be
+    /// observed concurrently by admitted allocators.
+    pub(crate) fn publish_released_run(&mut self, target: RunClaimTarget) {
+        let index = self
+            .runs
+            .iter()
+            .position(|run| **run == target)
+            .expect("released run is absent from its allocation class");
+        if self
+            .frontier_index
+            .is_none_or(|current_index| index <= current_index)
+        {
+            self.publish_frontier(index);
+        }
+    }
+
     /// Withdraws every previously published run from lock-free selection.
     ///
     /// The stable run records remain owned by this class. C6 collection calls

@@ -1,8 +1,8 @@
 # Glam GC Subcrate Implementation Plan — 2026-08-19
 
-Status: in progress; Phases C0 through C6B.2 are complete, including the C2C.6
+Status: in progress; Phases C0 through C6B.3 are complete, including the C2C.6
 verification follow-up. The mandatory post-C1, post-C2C, post-C3E, post-C4,
-and post-C5 downstream reviews are complete. C6B.3 is next.
+and post-C5 downstream reviews are complete. C6C.1 is next.
 
 This plan implements an exact, non-moving, runtime-local tracing collector
 without depending on Glam value semantics. The governing requirements and
@@ -71,7 +71,7 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C6A.4 | completed | assigned-run pressure |
 | C6B.1 | completed | finalization batch and non-rootability |
 | C6B.2 | completed | finalizer handoff, destruction, and panic-safe quarantine foundation |
-| C6B.3 | pending | non-resurrection and successful completion |
+| C6B.3 | completed | managed-`Drop` contract, non-resurrection, and successful completion |
 | C6C.1 | pending | destructor panic, draining, and quarantine |
 | C6C.2 | pending | finalizer activity, reports, and pressure publication |
 | C6D.1 | pending | terminal-teardown decision and fixtures |
@@ -3683,6 +3683,38 @@ Completed on 2026-08-24:
   explicit scale fixtures), 6 Loom models, and 8 compile-fail/doc tests. The
   recursive allocation and exact quarantine fixtures join the migrated C6B.1
   coverage in `VERIFY.md`.
+
+#### C6B.3 completion
+
+Completed on 2026-08-24:
+
+- The public unsafe `Trace` documentation and `SAFETY.md` now make managed
+  `Drop` part of the representation contract. Bare `Gc` fields in a dying
+  allocation are spoiled handles rather than liveness proofs. Managed edges,
+  edge-free host companions, and genuine external root owners are distinct;
+  promise, lazy, and fixpoint edges may not be hidden in roots or companions.
+- Completing the last pending destructor in an attached allocation word now
+  clears exactly that word's atomic lease bit. The update preserves concurrent
+  neighboring claims, then republishes the appropriate class frontier without
+  skipping capacity before or after the current frontier. The existing
+  collection lease epoch is sufficient because the word had no prior lease
+  owner.
+- Completing an attached run removes its terminal batch record. Completing a
+  detached run removes its stable record, resets the empty arena run, records
+  one assigned-run release, and immediately publishes the location to the
+  heap-wide free-run pool. Free-run capacity for every newly detached run is
+  reserved before selector withdrawal.
+- Removing the current batch record keeps the cursor at that run index and
+  resets its word index, so the shifted successor is visited without a full
+  rescan. Panic/quarantine deliberately retains its region for C6C.1 rather
+  than using the successful release path.
+- Forced fixtures prove post-collection partial-word reuse, same-collection
+  reuse by a later destructor, visibility to an independently admitted mutator
+  while the collector is still `Finalizing`, whole-run reuse without a stale
+  class frontier, and ordered recycling of multiple detached runs.
+- The collector suite now contains 172 unit tests (170 passing plus two
+  explicit scale fixtures), 6 Loom models, and 8 compile-fail/doc tests.
+  Focused and complete verification is recorded in `VERIFY.md`.
 
 ### Mandatory Post-C6 Review
 
