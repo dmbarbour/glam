@@ -511,6 +511,55 @@ All four fixtures pass Miri. The stable collector matrix contains 177 unit
 tests (175 passing and two ignored scale fixtures), six Loom models, and eight
 compile-fail/doc tests. The unsafe inventory is unchanged by C6C.2.
 
+## C6D.1 Terminal-Contract Verification
+
+C6D.1 selects passive, non-reentrant terminal destruction without an owner-
+lease shell. `only_the_last_heap_facade_starts_terminal_teardown` proves that
+one surviving public owner postpones destruction. The pre-existing
+`terminal_heap_teardown_waits_for_active_owner_regions` forces the same rule
+across threads and an admitted mutator region, while
+`forgotten_scoped_allocator_does_not_retain_its_heap` and
+`escaped_root_does_not_retain_its_heap_or_payload` cover the two deliberately
+non-owning capability families.
+
+`ordinary_finalization_has_a_mutator_but_terminal_teardown_does_not` directly
+latches the semantic boundary: collection-time Rust `Drop` observes the C3E
+finalizer mutator, whereas last-owner destruction observes no active mutator.
+`terminal_teardown_finishes_the_batch_retained_after_finalizer_panic` proves
+the terminal class and pending-batch walks remain disjoint, complete an
+untouched pending identity once, and never retry the earlier panicking
+identity.
+
+`terminal_teardown_propagates_the_first_panic_without_continuing` uses an
+order-independent shared panic flag and static attempt count. Exactly one of
+three terminal destructors runs before the first panic propagates, the heap
+identity expires, and dropping an escaped root cannot redispatch anything.
+Static instrumentation is deliberate: placing `Arc` fields in the untouched
+raw payloads would create precisely the permitted terminal resource leak and
+would prevent Miri's leak detector from distinguishing policy from an
+accidental collector leak.
+
+Focused Miri runs are:
+
+```sh
+cargo +nightly miri test --package glam-gc --lib --all-features \
+  heap::tests::only_the_last_heap_facade_starts_terminal_teardown -- --exact
+cargo +nightly miri test --package glam-gc --lib --all-features \
+  heap::tests::ordinary_finalization_has_a_mutator_but_terminal_teardown_does_not \
+  -- --exact
+cargo +nightly miri test --package glam-gc --lib --all-features \
+  heap::tests::terminal_teardown_finishes_the_batch_retained_after_finalizer_panic \
+  -- --exact
+cargo +nightly miri test --package glam-gc --lib --all-features \
+  heap::tests::terminal_teardown_propagates_the_first_panic_without_continuing \
+  -- --exact
+```
+
+All four fixtures pass Miri. The stable collector matrix contains 181 unit
+tests (179 passing and two ignored scale fixtures), six Loom models, and eight
+compile-fail/doc tests. C6D.1 adds no production unsafe site; its two edge-free
+fixture `Trace` declarations are recorded in the exact inventory.
+
 ## Gate G0 Baseline
 
 Before changing the unsafe surface in C1, recheck the focused pre-GC semantic

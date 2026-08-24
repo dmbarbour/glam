@@ -484,10 +484,11 @@ C6 later owns collector-driven destruction.
   record's canonical metadata; class and batch walks are disjoint by
   construction. An earlier panicking identity has already cleared both its
   allocation and pending bits, so neither walk can rediscover it.
-  This path is provisionally
-  non-reentrant and non-panicking. C2C.4 proves it cannot race an active owner
-  region; later C6 replaces terminal enumeration with collector-controlled
-  finalization and destructor-panic recovery.
+  This path is deliberately non-reentrant and has no matching-heap mutator.
+  C2C.4 proves it cannot race an active owner region, and C4D proves that
+  scoped allocation capabilities do not retain the heap. C6D verifies the
+  terminal class/batch partition and first-panic behavior separately from
+  ordinary collector-controlled finalization.
 
 ## Thread-Local Allocation Cache Lifecycle
 
@@ -735,7 +736,7 @@ referents alive merely because Rust destruction is delayed. Safe finalizer
 code may use only independently live/rooted values; an unsafe access through a
 stored `Gc` retains the existing caller obligation to prove liveness.
 
-Terminal `HeapInner::drop` remains the fallback destruction boundary for live
+Terminal `HeapInner::drop` is the destruction boundary for live
 or interrupted pending allocations. The ordinary class walk skips every exact
 attached pending identity. A second batch walk derives pointers only from the
 validated retained run location and allocation bitmap, filters them through
@@ -744,8 +745,8 @@ Detached runs occur only in this second walk. A destructor which already
 panicked has cleared its allocation and pending bits and therefore occurs in
 neither walk. Exclusive final heap ownership, initialized set allocation bits,
 and disjoint class/batch visitation prove each call sees a valid payload and
-runs exactly once. This remains the provisional non-reentrant teardown policy
-pending C6D.
+runs exactly once on a non-panicking drain. It intentionally does not install
+a mutator or provide runtime services.
 
 ### C6B.2 erased destruction and C6C.1 panic retirement
 
@@ -816,6 +817,31 @@ next high-water target under managed data. Only success subsequently publishes
 the scalar report and matching completed-collection epoch under the
 coordinator. Therefore no report can describe provisional finalizer state,
 while pressure created by finalizer allocation or recycling is never lost.
+
+### C6D.1 selected terminal-destruction contract
+
+Terminal destruction is intentionally narrower than ordinary finalization.
+The last strong `HeapInner` owner cannot coexist with a mutator for that heap:
+a mutator borrows authority derived from a live `Heap`, a scoped allocator
+cannot escape that borrow, and roots and thread-local caches hold only weak
+heap identity. `HeapInner::drop` therefore does not reconstruct an `Arc`,
+install a finalizer mutator, or reopen admission.
+
+Terminal destructors may passively release ordinary Rust resources, but may
+not require managed allocation, rooting, evaluation, diagnostics, runtime
+reentry, or another matching-heap capability. Payloads needing those services
+must use ordinary collection or explicit owner-live shutdown and retain a
+passive terminal path. An escaped root is ignored for terminal liveness and
+becomes inert as the final heap owner disappears.
+
+The ordinary class walk and exact pending-batch walk are disjoint, so a value
+retired by an earlier panicking finalizer is not attempted again and an
+untouched pending identity remains terminally discoverable. A valid terminal
+destructor is non-panicking. If it violates that contract, Rust propagates the
+first panic and stops the raw terminal loop; the attempted identity cannot be
+retried because the heap domain is being destroyed, and untouched payloads may
+leak their Rust resources as the arena releases its raw storage. No recovery
+path invokes a second destructor while unwinding.
 
 ### Managed `Drop`, spoiled edges, and host ownership
 

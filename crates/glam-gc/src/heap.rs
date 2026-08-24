@@ -3240,7 +3240,7 @@ mod tests {
         run::{AllocationClassId, RunGeometry},
         thread_cache::{
             AllocationCursor, AllocationLeaseEpoch, cache_snapshot, cursor, insert_cursor,
-            registry_contains,
+            registry_contains, thread_has_any_active_mutator,
         },
         trace::ErasedGc,
     };
@@ -3494,6 +3494,48 @@ mod tests {
 
     // SAFETY: `DropCounter` contains no managed edge.
     unsafe impl Trace for DropCounter {
+        fn trace(&self, _visitor: &mut Visitor<'_>) {}
+    }
+
+    struct MutatorContextDrop {
+        observed_active_mutator: Arc<Mutex<Vec<bool>>>,
+    }
+
+    impl Drop for MutatorContextDrop {
+        fn drop(&mut self) {
+            self.observed_active_mutator
+                .lock()
+                .unwrap()
+                .push(thread_has_any_active_mutator());
+        }
+    }
+
+    // SAFETY: this fixture contains only host observation state and has no
+    // managed edge. It observes whether its Rust destructor runs inside an
+    // already-established mutator region but cannot create one.
+    unsafe impl Trace for MutatorContextDrop {
+        fn trace(&self, _visitor: &mut Visitor<'_>) {}
+    }
+
+    static TERMINAL_DESTRUCTOR_PANIC_ONCE: AtomicBool = AtomicBool::new(false);
+    static TERMINAL_DESTRUCTOR_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
+
+    struct TerminalPanickingDrop {
+        _not_zero_sized: u8,
+    }
+
+    impl Drop for TerminalPanickingDrop {
+        fn drop(&mut self) {
+            TERMINAL_DESTRUCTOR_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
+            if TERMINAL_DESTRUCTOR_PANIC_ONCE.swap(false, Ordering::Relaxed) {
+                panic!("injected terminal destructor panic");
+            }
+        }
+    }
+
+    // SAFETY: this fixture contains only immediate values and host
+    // coordination state. It has no managed edge.
+    unsafe impl Trace for TerminalPanickingDrop {
         fn trace(&self, _visitor: &mut Visitor<'_>) {}
     }
 
@@ -8744,6 +8786,122 @@ mod tests {
 
         drop(heap);
         assert_eq!(drops.load(Ordering::Relaxed), ALLOCATIONS);
+    }
+
+    #[test]
+    fn only_the_last_heap_facade_starts_terminal_teardown() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let heap = Heap::new();
+        let other_facade = heap.clone();
+        let weak = Arc::downgrade(&heap.inner);
+        let _ = allocate(&heap, DropCounter(Arc::clone(&drops)));
+
+        drop(heap);
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
+        assert!(weak.upgrade().is_some());
+
+        drop(other_facade);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn ordinary_finalization_has_a_mutator_but_terminal_teardown_does_not() {
+        let ordinary_observations = Arc::new(Mutex::new(Vec::new()));
+        let ordinary = Heap::new();
+        let _ = allocate(
+            &ordinary,
+            MutatorContextDrop {
+                observed_active_mutator: Arc::clone(&ordinary_observations),
+            },
+        );
+
+        ordinary.collect_full().unwrap();
+        assert_eq!(*ordinary_observations.lock().unwrap(), vec![true]);
+
+        let terminal_observations = Arc::new(Mutex::new(Vec::new()));
+        let terminal = Heap::new();
+        let _ = allocate(
+            &terminal,
+            MutatorContextDrop {
+                observed_active_mutator: Arc::clone(&terminal_observations),
+            },
+        );
+
+        drop(terminal);
+        assert_eq!(*terminal_observations.lock().unwrap(), vec![false]);
+    }
+
+    #[test]
+    fn terminal_teardown_finishes_the_batch_retained_after_finalizer_panic() {
+        let heap = Heap::new();
+        let weak = Arc::downgrade(&heap.inner);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let _panicking = allocate(
+            &heap,
+            SelectivePanickingDrop {
+                id: 0,
+                panic: true,
+                events: Arc::clone(&events),
+            },
+        );
+        let _deferred = allocate(
+            &heap,
+            SelectivePanickingDrop {
+                id: 1,
+                panic: false,
+                events: Arc::clone(&events),
+            },
+        );
+
+        let panic = catch_unwind(AssertUnwindSafe(|| heap.collect_full()))
+            .expect_err("managed destructor must propagate its panic");
+        assert_eq!(
+            panic_string(panic.as_ref()),
+            "injected managed destructor panic"
+        );
+        assert_eq!(*events.lock().unwrap(), vec![0]);
+        assert_eq!(
+            heap.activity(),
+            HeapActivity {
+                queued_finalizers: 1,
+                running_finalizers: 0,
+            }
+        );
+
+        drop(heap);
+        assert_eq!(*events.lock().unwrap(), vec![0, 1]);
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn terminal_teardown_propagates_the_first_panic_without_continuing() {
+        TERMINAL_DESTRUCTOR_ATTEMPTS.store(0, Ordering::Relaxed);
+        TERMINAL_DESTRUCTOR_PANIC_ONCE.store(true, Ordering::Relaxed);
+        let heap = Heap::new();
+        let weak = Arc::downgrade(&heap.inner);
+        let root = heap.with_mutator(|mutator| {
+            let allocator = mutator.allocator::<TerminalPanickingDrop>().unwrap();
+            let first = allocator.alloc(TerminalPanickingDrop { _not_zero_sized: 0 });
+            for _ in 1..3 {
+                let _ = allocator.alloc(TerminalPanickingDrop { _not_zero_sized: 0 });
+            }
+            mutator.root(first)
+        });
+
+        let panic = catch_unwind(AssertUnwindSafe(|| drop(heap)))
+            .expect_err("terminal destructor must propagate its panic");
+
+        assert_eq!(
+            panic_string(panic.as_ref()),
+            "injected terminal destructor panic"
+        );
+        assert_eq!(TERMINAL_DESTRUCTOR_ATTEMPTS.load(Ordering::Relaxed), 1);
+        assert!(!TERMINAL_DESTRUCTOR_PANIC_ONCE.load(Ordering::Relaxed));
+        assert!(weak.upgrade().is_none());
+        drop(root.clone());
+        drop(root);
+        assert_eq!(TERMINAL_DESTRUCTOR_ATTEMPTS.load(Ordering::Relaxed), 1);
     }
 
     #[test]

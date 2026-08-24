@@ -86,10 +86,12 @@ crates/glam-gc/src/heap.rs:    unsafe impl Trace for FirstType {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for GraphNode {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for IncrementalReleaseDrop {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for InvalidEdgeHolder {
+crates/glam-gc/src/heap.rs:    unsafe impl Trace for MutatorContextDrop {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for OverflowingSlot {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for PanickingTraceNode {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for SecondType {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for SelectivePanickingDrop {
+crates/glam-gc/src/heap.rs:    unsafe impl Trace for TerminalPanickingDrop {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for WideDropCounter {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for WideSlot {
 crates/glam-gc/src/lib.rs:                let _ = unsafe { value.get_unchecked(mutator) };

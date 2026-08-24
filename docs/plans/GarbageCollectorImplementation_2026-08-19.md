@@ -1,8 +1,8 @@
 # Glam GC Subcrate Implementation Plan — 2026-08-19
 
-Status: in progress; Phases C0 through C6C.2 are complete, including the C2C.6
+Status: in progress; Phases C0 through C6D.1 are complete, including the C2C.6
 verification follow-up. The mandatory post-C1, post-C2C, post-C3E, post-C4,
-and post-C5 downstream reviews are complete. C6D.1 is next.
+and post-C5 downstream reviews are complete. C6D.2 is next.
 
 This plan implements an exact, non-moving, runtime-local tracing collector
 without depending on Glam value semantics. The governing requirements and
@@ -75,7 +75,7 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C6C.1a | completed | destructor panic, terminal slot retirement, and deferred retry |
 | C6C.1b | completed | indexed finalization state and ephemeral run dispatch snapshots |
 | C6C.2 | completed | finalizer activity, reports, and pressure publication |
-| C6D.1 | pending | terminal-teardown decision and fixtures |
+| C6D.1 | completed | restricted terminal-teardown decision and fixtures |
 | C6D.2 | pending | terminal teardown |
 | C6D.3 | pending | Gate G1 audit |
 | C7A | pending | shared-root and immutable-reader stress |
@@ -3137,21 +3137,23 @@ Execute C6 as the following smaller checkpoints:
   pending batch remains queued activity and the relatched request belongs to a
   later collection attempt; a later successful report may count those
   identities as conservatively retained by that attempt.
-- **C6D.1 — terminal-teardown decision and forced fixtures.** Choose and record
-  either the preferred owner-lease drain or the restricted non-reentrant
-  fallback before changing `HeapInner::drop`. C4D already proves that no
-  allocator capability owns the heap or survives a drained mutator set. Force
-  last-facade, last-authorized-runtime-owner, active scoped-allocator,
-  escaped-root, deliberately forgotten inert allocator, mutator-capable
-  destructor, a batch retained after an earlier finalizer panic, terminal
-  destructor panic, and root-attempt orderings against the selected ownership
-  graph. An escaped root must neither postpone teardown nor become
-  dereferenceable after it, and forgotten allocator storage must not retain the
-  heap.
-- **C6D.2 — terminal teardown.** Implement only the selected protocol and
-  prove each still-allocated drop-bearing value receives exactly one terminal
-  destructor attempt and no previously retired identity is retried, without
-  reconstructing a dropped heap owner.
+- **C6D.1 — terminal-teardown decision and forced fixtures.** Adopt restricted
+  non-reentrant terminal destruction. `HeapInner::drop` is resource teardown,
+  not a final evaluation stage: it has no matching-heap mutator, performs no
+  GC allocation, rooting, evaluation, diagnostics, or runtime reentry, and
+  never reconstructs a dropped owner. C4D already proves that no allocator
+  capability owns the heap or survives a drained mutator set. Force last-
+  facade, active owner-region, escaped-root, deliberately forgotten inert
+  allocator, ordinary-finalizer versus terminal-destructor context, a batch
+  retained after an earlier finalizer panic, and terminal first-panic
+  orderings. An escaped root must neither postpone teardown nor become
+  dereferenceable afterward.
+- **C6D.2 — terminal teardown.** Reconcile `HeapInner::drop` with the selected
+  contract and prove that a non-panicking terminal drain attempts every
+  remaining drop-bearing allocation exactly once while excluding every
+  previously retired identity. A terminal destructor panic propagates the
+  first panic, is never retried, and stops dispatch; untouched payloads may
+  leak their Rust resources while arena storage is released.
 - **C6D.3 — Gate G1 audit.** Reconcile the unsafe inventory, root and
   finalization proofs, Miri, Loom, sanitizers, deterministic panic schedules,
   and terminal heap release. This focused audit closes Gate G1; C7 and C8 add
@@ -3174,10 +3176,11 @@ into marking:
    one half. It remains a tuning choice rather than public semantics; pure
    threshold tests inject the numerator and denominator so rounding and
    saturation are not coupled to that default.
-4. **Last-owner teardown (C6D.1).** This remains the only blocking ownership
-   decision in the isolated collector plan. Do not infer it from ordinary
-   collection or implement mutator-capable terminal `Drop` before its forced
-   ownership fixtures exist.
+4. **Last-owner teardown (resolved in C6D.1).** Terminal `HeapInner::drop` is a
+   restricted, non-reentrant resource teardown with no matching-heap mutator.
+   It does not synthesize an owner lease or evaluation stage. Valid terminal
+   destructors are passive and non-panicking; a violating first panic is
+   propagated without retry or later destructor dispatch.
 
 Each checkpoint must leave the heap in a usable documented phase after every
 recoverable panic injected by its own tests.
@@ -3362,19 +3365,30 @@ recoverable panic injected by its own tests.
   and free-slot boundary.
 - Reuse reclaimed storage only after destruction and metadata retirement are
   complete.
-- Before admitting production mutator-capable drop types, settle terminal heap
-  teardown as an explicit C6 checkpoint. The preferred shape begins a final
-  drain while a runtime/value-domain owner lease is still strong, so ordinary
-  finalizer mutation is valid. A root created during that drain may protect and
-  access its value only while an authorized value-domain owner and matching
-  mutator remain live; it does not cancel terminal teardown and becomes inert
-  when the domain ends. Terminal teardown ultimately destroys every remaining
-  allocation regardless of escaped root-registry entries. Do
-  not try to reconstruct or resurrect an `Arc` owner after its last strong
-  reference has entered `Drop`. If the public ownership representation cannot
-  initiate such a drain, keep last-owner teardown a restricted non-reentrant
-  path and document which payload families it may destroy; it may not silently
-  invoke a mutator-capable production destructor without its promised context.
+- C6D.1 selects restricted terminal heap destruction rather than an owner-
+  lease drain. The last strong `HeapInner` owner cannot coexist with a
+  matching-heap mutator: ordinary mutators borrow authority derived from a
+  live `Heap`, allocation capabilities are scoped and non-owning, and roots
+  and TLS caches retain only weak heap identity. Do not reconstruct or
+  resurrect an `Arc` owner after its last strong reference has entered `Drop`.
+- Treat terminal destruction as passive Rust resource cleanup, not a final
+  evaluation stage. A terminal destructor may release ordinary host-owned
+  fields, but may not require managed allocation, rooting, evaluation,
+  diagnostics, runtime reentry, or access to a current matching-heap mutator.
+  A payload family needing those facilities must perform that work during
+  ordinary collection or an explicit runtime shutdown while an authorized
+  owner remains live, or provide a passive terminal fallback.
+- Escaped roots do not postpone terminal destruction and become inert when
+  their weak heap identity expires. Terminal teardown ignores root-registry
+  liveness and visits all remaining drop-bearing allocation identities, while
+  preserving the ordinary-class versus pending-finalization-batch partition
+  so an earlier terminally retired identity is never redispatched.
+- Valid terminal destructors are non-panicking. If one nevertheless panics,
+  propagate that first panic and stop dispatching terminal destructors. Never
+  retry the attempted identity or risk a second destructor panic during
+  unwinding; untouched raw payloads may leak their Rust-owned resources while
+  arena storage is released. This is a safety fallback for a violated payload
+  contract, not recoverable evaluation semantics.
 - Expose queued and running finalizers as operational heap activity so runtime
   quiescence and shutdown cannot race their diagnostics, tasks, or host
   effects. A synchronous `collect_full` report completes only after its
@@ -3950,6 +3964,39 @@ Completed on 2026-08-24:
   scale fixtures), 6 Loom models, and 8 compile-fail/doc tests. The unsafe
   inventory, workspace formatting, all-target/all-feature Clippy with warnings
   denied, and the complete workspace test suite pass.
+
+#### C6D.1 completion
+
+Completed on 2026-08-24:
+
+- Terminal heap destruction is now explicitly a restricted passive resource-
+  cleanup boundary, not a final evaluation stage. It does not reconstruct an
+  owner, install a matching-heap mutator, allocate or root managed values,
+  evaluate work, publish diagnostics, or reenter the runtime. Payloads needing
+  those services must use ordinary finalization or owner-live shutdown and
+  retain a passive terminal path.
+- The ownership proof uses the existing representation: every mutator borrows
+  authority derived from a live `Heap`; scoped allocators cannot escape it;
+  roots and thread-local caches hold only weak heap identity. Consequently the
+  last `HeapInner` owner cannot coexist with a mutator for that heap. No owner-
+  lease shell is introduced.
+- A valid terminal destructor is passive and non-panicking. A violating first
+  panic propagates and stops managed destructor dispatch; it cannot be retried
+  after the heap domain disappears, and untouched raw payloads may leak their
+  Rust-owned resources while arena storage is released. The test fixture uses
+  static counters so Miri can distinguish this selected policy from an
+  accidental collector leak.
+- New forced fixtures prove only the last `Heap` facade starts teardown,
+  ordinary finalization sees a mutator while terminal destruction does not, a
+  batch retained after ordinary finalizer panic is terminally completed
+  without retrying the failed identity, and first terminal panic stops later
+  destructor dispatch independent of allocation order. Existing active-owner-
+  region, escaped-root, and deliberately forgotten scoped-allocator fixtures
+  complete the ownership matrix.
+- All four new fixtures pass focused Miri. The stable collector matrix contains
+  181 unit tests (179 passing plus two explicit scale fixtures), 6 Loom models,
+  and 8 compile-fail/doc tests. C6D.1 adds no production unsafe site; its two
+  edge-free fixture `Trace` declarations are recorded in the exact inventory.
 
 ### Mandatory Post-C6 Review
 
