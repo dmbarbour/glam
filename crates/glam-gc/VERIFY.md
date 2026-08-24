@@ -465,6 +465,52 @@ compile-fail/doc tests. The unsafe inventory, workspace formatting,
 all-target/all-feature Clippy with warnings denied, and the complete workspace
 test suite also pass.
 
+## C6C.2 Activity, Report, and Pressure Verification
+
+C6C.2 exposes finalizer activity without weakening the run-at-a-time commit
+boundary. `pending_run_keeps_words_reserved_from_an_ordinary_mutator_until_commit`
+holds a selected run behind a deterministic barrier and observes every claimed
+obligation as running until its single commit. The recovered-panic fixtures
+then prove that running returns to zero and only an untouched suffix remains
+queued; successful retry drains both counts.
+
+Successful reports partition reclamation into all retired slots, the
+drop-bearing finalized subset, and runs reset into the free pool.
+`wholly_dead_no_drop_runs_reset_and_reuse_across_allocation_classes` combines
+partial no-drop sweep, whole-run no-drop retirement, and a real destructor to
+verify those counts against the exact allocator topology. Panic fixtures also
+prove that a failed attempt publishes neither a report nor a completed epoch,
+and that its already terminal identity is not attributed to the later retry.
+
+`finalizer_run_activation_sets_the_completed_pressure_baseline` forces a
+finalizer to activate a new typed run after sweep and proves successful
+completion publishes the two-run survivor baseline. The corresponding
+`panicking_finalizer_publishes_pressure_without_a_completion_report` fixture
+panics after the allocation and proves the same post-attempt pressure becomes
+durable while the collection request is relatched and the completion epoch and
+report remain unchanged.
+
+Focused Miri runs are:
+
+```sh
+cargo +nightly miri test --package glam-gc --lib --all-features \
+  heap::tests::pending_run_keeps_words_reserved_from_an_ordinary_mutator_until_commit \
+  -- --exact
+cargo +nightly miri test --package glam-gc --lib --all-features \
+  heap::tests::finalizer_run_activation_sets_the_completed_pressure_baseline \
+  -- --exact
+cargo +nightly miri test --package glam-gc --lib --all-features \
+  heap::tests::panicking_finalizer_publishes_pressure_without_a_completion_report \
+  -- --exact
+cargo +nightly miri test --package glam-gc --lib --all-features \
+  heap::tests::managed_destructor_panic_retires_one_and_defers_the_untouched_batch \
+  -- --exact
+```
+
+All four fixtures pass Miri. The stable collector matrix contains 177 unit
+tests (175 passing and two ignored scale fixtures), six Loom models, and eight
+compile-fail/doc tests. The unsafe inventory is unchanged by C6C.2.
+
 ## Gate G0 Baseline
 
 Before changing the unsafe surface in C1, recheck the focused pre-GC semantic

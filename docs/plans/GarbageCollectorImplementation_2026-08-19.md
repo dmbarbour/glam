@@ -1,8 +1,8 @@
 # Glam GC Subcrate Implementation Plan — 2026-08-19
 
-Status: in progress; Phases C0 through C6C.1b are complete, including the C2C.6
+Status: in progress; Phases C0 through C6C.2 are complete, including the C2C.6
 verification follow-up. The mandatory post-C1, post-C2C, post-C3E, post-C4,
-and post-C5 downstream reviews are complete. C6C.2 is next.
+and post-C5 downstream reviews are complete. C6D.1 is next.
 
 This plan implements an exact, non-moving, runtime-local tracing collector
 without depending on Glam value semantics. The governing requirements and
@@ -74,7 +74,7 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C6B.3 | completed | managed-`Drop` contract, non-resurrection, and successful completion |
 | C6C.1a | completed | destructor panic, terminal slot retirement, and deferred retry |
 | C6C.1b | completed | indexed finalization state and ephemeral run dispatch snapshots |
-| C6C.2 | pending | finalizer activity, reports, and pressure publication |
+| C6C.2 | completed | finalizer activity, reports, and pressure publication |
 | C6D.1 | pending | terminal-teardown decision and fixtures |
 | C6D.2 | pending | terminal teardown |
 | C6D.3 | pending | Gate G1 audit |
@@ -3128,11 +3128,14 @@ Execute C6 as the following smaller checkpoints:
   and running finalizers as heap activity, extend successful collection
   reports with reclaimed and finalized state, incorporate runs activated
   during finalization, and atomically publish the post-finalization occupancy
-  and next high-water target. A recovered finalizer panic still publishes the
-  durable allocator/pressure baseline before resuming the panic, but does not
-  publish a successful collection epoch or report. Its untouched pending batch
-  remains queued activity and the failed attempt's relatched request belongs to
-  a later collection attempt; a later successful report may count those
+  and next high-water target. The swept allocator view and its allocation-lease
+  epoch are already published before `Finalizing` begins and remain durable
+  after a recovered finalizer panic. Such a panic additionally publishes the
+  consistent post-attempt pressure baseline before resuming, but it neither
+  advances `completed_collection_epoch` nor publishes a successful
+  `CollectionReport`; its active attempt epoch is abandoned. Its untouched
+  pending batch remains queued activity and the relatched request belongs to a
+  later collection attempt; a later successful report may count those
   identities as conservatively retained by that attempt.
 - **C6D.1 — terminal-teardown decision and forced fixtures.** Choose and record
   either the preferred owner-lease drain or the restricted non-reentrant
@@ -3915,6 +3918,38 @@ Completed on 2026-08-24:
   all-target/all-feature Clippy with warnings denied, and the complete workspace
   test suite pass. The implementation adds no new unsafe site; the inventory
   only tracks the existing erased-drop site at its new indentation.
+
+#### C6C.2 completion
+
+Completed on 2026-08-24:
+
+- `Heap::activity` exposes exact queued and running finalizer obligations. A
+  selected run's complete bounded work batch remains running until its one
+  managed-data commit, including any successfully destroyed but not yet
+  published prefix. The durable batch caches its total pending-slot count, so
+  ordinary activity inspection does not scan its run or word maps.
+- Successful `CollectionReport`s now distinguish all reclaimed slots, the
+  destructor-bearing finalized subset, and emptied runs returned to the
+  heap-wide free pool. A destructor panic produces no report: its terminally
+  retired identity is not retroactively counted, while untouched obligations
+  are counted if a later successful attempt finalizes them.
+- The swept allocator view and allocation-lease epoch remain the durable
+  pre-finalization publication boundary. Assigned-run pressure and its next
+  high-water target now publish only after the finalization attempt has
+  committed or recovered from panic, so runs activated by a finalizer and runs
+  recycled by finalization both participate. Success clears a coalesced
+  request; panic preserves the consistent post-attempt baseline and relatches
+  collection without advancing the completed epoch or publishing a report.
+- Forced barriers observe a selected run entirely as running, then idle after
+  its commit. Panic fixtures observe only the untouched suffix as queued.
+  Mixed no-drop/drop reclamation verifies the report partition, and allocating
+  finalizers verify both successful and panicking post-attempt pressure
+  publication.
+- Four focused activity, pressure, and panic fixtures pass Miri. The stable
+  collector matrix contains 177 unit tests (175 passing plus two explicit
+  scale fixtures), 6 Loom models, and 8 compile-fail/doc tests. The unsafe
+  inventory, workspace formatting, all-target/all-feature Clippy with warnings
+  denied, and the complete workspace test suite pass.
 
 ### Mandatory Post-C6 Review
 

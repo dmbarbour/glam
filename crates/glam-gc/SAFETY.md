@@ -568,13 +568,14 @@ C6 later owns collector-driven destruction.
   allocation, cursor eviction, explicit cache release, and thread exit do not
   touch it. The initial target is 7/8 of one chunk, currently 112 assigned
   runs. A successful sweep checks the maintained count against authoritative
-  class topology, bounds it by committed arena capacity, and arms the next
-  saturating target at `S + 112 + ceil(S / 2)`. Mark or pre-publication sweep
-  failure preserves the prior baseline. At the C6A.4 checkpoint the target is
-  intentionally published before finalizers run; a finalizer panic may retain
-  that durable swept baseline, and completion coalesces earlier finalizer-time
-  pressure. C6C.2 moves final publication to the complete post-finalization
-  occupancy.
+  class topology and bounds it by committed arena capacity, but does not yet
+  publish the next pressure baseline. After finalization succeeds—or after its
+  unwind path has terminally retired the completed prefix—the collector
+  publishes the resulting assigned-run count and saturating target
+  `S + 112 + ceil(S / 2)` together under managed data. Mark or
+  pre-publication sweep failure preserves the prior baseline. Successful
+  completion clears the coalesced request; finalizer panic preserves the
+  post-attempt baseline and relatched request before resuming the panic.
 - The deterministic pre-initialization hook exists only in test builds at the
   last point before the two publication writes. An unwind there owns and drops
   the input normally while leaving both local and authoritative bit state
@@ -786,6 +787,35 @@ and makes a fresh bounded finalization attempt. The panicking identity itself
 has no durable tombstone: its cleared allocation and pending bits are sufficient
 to prevent retry. The recovery path allocates no exceptional record and
 deliberately has no same-attempt second-destructor-panic case.
+
+### C6C.2 activity, report, and pressure publication
+
+The durable finalization batch maintains one checked total pending-slot count.
+Selecting a run claims its complete bounded local work batch as `running` and
+leaves all other pending identities `queued`. Successfully destroyed prefix
+items remain running until the run's one managed-data commit publishes their
+retirement. A recovered panic commits the completed prefix plus the panicking
+identity, clears running activity, and leaves only the untouched suffix queued.
+This accounting changes no reachability or allocation authority; the indexed
+run and word maps remain the source of pending-finalizer identity.
+
+A successful collection report is assembled only after finalization commits.
+It counts every no-drop or destructor-bearing slot retired by that successful
+attempt, the destructor-bearing subset, and each emptied run reset into the
+free pool. A panicking destructor retires terminally but produces no successful
+report, so that identity is never assigned later to an epoch it did not
+complete under. Untouched pending identities remain conservative mark inputs
+and are reported normally if a later attempt successfully finalizes them.
+
+Three publication boundaries remain intentionally distinct. Eager sweep first
+publishes the reduced allocator topology and advances the allocation-lease
+epoch; those changes survive later finalizer panic. Finalization then runs with
+ordinary allocation admitted through the collector-owned mutator. Its success
+or recovered panic publishes the exact post-attempt assigned-run pressure and
+next high-water target under managed data. Only success subsequently publishes
+the scalar report and matching completed-collection epoch under the
+coordinator. Therefore no report can describe provisional finalizer state,
+while pressure created by finalizer allocation or recycling is never lost.
 
 ### Managed `Drop`, spoiled edges, and host ownership
 

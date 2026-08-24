@@ -39,6 +39,9 @@ pub struct CollectionReport {
     traced_objects: usize,
     marked_slots: usize,
     conservatively_retained_slots: usize,
+    reclaimed_slots: usize,
+    finalized_slots: usize,
+    reclaimed_runs: usize,
     #[cfg(test)]
     peak_object_worklist_len: usize,
     #[cfg(test)]
@@ -81,6 +84,65 @@ impl CollectionReport {
     #[must_use]
     pub const fn conservatively_retained_slots(self) -> usize {
         self.conservatively_retained_slots
+    }
+
+    /// Returns the number of managed allocations retired by this collection.
+    ///
+    /// This includes eagerly swept no-drop allocations and terminal destructor
+    /// attempts. [`CollectionReport::finalized_slots`] is the destructor-bearing
+    /// subset.
+    #[must_use]
+    pub const fn reclaimed_slots(self) -> usize {
+        self.reclaimed_slots
+    }
+
+    /// Returns the number of destructor-bearing allocations terminally retired.
+    ///
+    /// A destructor which unwinds does not produce a successful collection
+    /// report. Its terminal retirement is therefore not reported by a later
+    /// collection, while untouched obligations finalized by that later attempt
+    /// are counted normally.
+    #[must_use]
+    pub const fn finalized_slots(self) -> usize {
+        self.finalized_slots
+    }
+
+    /// Returns the number of emptied runs reset into the heap-wide free pool.
+    #[must_use]
+    pub const fn reclaimed_runs(self) -> usize {
+        self.reclaimed_runs
+    }
+}
+
+/// Operational finalizer activity currently retained by a heap.
+///
+/// A run-local finalization attempt claims all of its obligations together.
+/// They remain `running` until that run commits, including any successfully
+/// destroyed prefix whose allocation bits have not yet been published. A
+/// recovered panic returns only the untouched suffix to `queued` activity.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct HeapActivity {
+    queued_finalizers: usize,
+    running_finalizers: usize,
+}
+
+impl HeapActivity {
+    /// Returns finalizer obligations not claimed by the current run attempt.
+    #[must_use]
+    pub const fn queued_finalizers(self) -> usize {
+        self.queued_finalizers
+    }
+
+    /// Returns finalizer obligations claimed by the current run attempt.
+    #[must_use]
+    pub const fn running_finalizers(self) -> usize {
+        self.running_finalizers
+    }
+
+    /// Returns whether no queued or running finalizer obligation remains.
+    #[must_use]
+    pub const fn is_idle(self) -> bool {
+        self.queued_finalizers == 0 && self.running_finalizers == 0
     }
 }
 
@@ -179,6 +241,16 @@ impl Heap {
     /// waits on the calling region.
     pub fn request_collection(&self) {
         self.inner.request_collection();
+    }
+
+    /// Returns a coherent snapshot of this heap's finalizer activity.
+    ///
+    /// This is operational host information rather than managed-program
+    /// semantics. Later runtime integration combines it with worker, task,
+    /// diagnostic, and event activity when deciding quiescence.
+    #[must_use]
+    pub fn activity(&self) -> HeapActivity {
+        self.inner.activity()
     }
 
     /// Completes a full stop-the-world collection handshake synchronously.
@@ -285,6 +357,7 @@ struct ManagedData {
     classes: Vec<AllocationClassEntry>,
     retired_no_drop_runs: Vec<RetiredNoDropRun>,
     finalization_batch: FinalizationBatch,
+    running_finalizers: usize,
     free_runs: Vec<RunLocation>,
     allocation_pressure: AllocationPressure,
     roots: Vec<Weak<RootCell>>,
@@ -651,6 +724,7 @@ impl ManagedData {
                 .remove(&location)
                 .expect("finalization install order lost its planned run");
             let mut run = planned.run;
+            let added_slots = run.pending_slot_count;
             let target = run.target.target();
             assert_eq!(target.location, location);
             if let Some(existing) = self.finalization_batch.runs.get_mut(&location) {
@@ -659,6 +733,11 @@ impl ManagedData {
                 debug_assert_eq!(existing.class_id, run.class_id);
                 debug_assert!(std::ptr::eq(existing.metadata, run.metadata));
                 existing.merge_pending_words(&run.pending_words, run.pending_slot_count);
+                self.finalization_batch.pending_slot_count = self
+                    .finalization_batch
+                    .pending_slot_count
+                    .checked_add(added_slots)
+                    .expect("finalization batch slot count exhausted");
                 continue;
             }
 
@@ -684,6 +763,11 @@ impl ManagedData {
                 self.finalization_batch.runs.insert(location, run).is_none(),
                 "finalization install duplicated a durable run"
             );
+            self.finalization_batch.pending_slot_count = self
+                .finalization_batch
+                .pending_slot_count
+                .checked_add(added_slots)
+                .expect("finalization batch slot count exhausted");
         }
         assert!(batch.runs.is_empty());
     }
@@ -692,15 +776,28 @@ impl ManagedData {
         self.finalization_batch.dispatch_snapshot()
     }
 
-    fn prepare_finalization_run(&self, location: RunLocation) -> RunFinalizationAttempt {
-        self.finalization_batch
-            .prepare_run_attempt(&self.arena, location)
+    fn prepare_finalization_run(&mut self, location: RunLocation) -> RunFinalizationAttempt {
+        assert_eq!(
+            self.running_finalizers, 0,
+            "cannot claim a second finalization run while one is active"
+        );
+        let attempt = self
+            .finalization_batch
+            .prepare_run_attempt(&self.arena, location);
+        self.running_finalizers = attempt.work.len();
+        attempt
     }
 
-    fn complete_finalization_run(&mut self, attempt: RunFinalizationAttempt) {
+    fn complete_finalization_run(&mut self, attempt: RunFinalizationAttempt) -> bool {
+        assert_eq!(
+            self.running_finalizers,
+            attempt.work.len(),
+            "active finalization count diverged from its run attempt"
+        );
         let completion = self
             .finalization_batch
             .complete_run_attempt(&self.arena, attempt);
+        self.running_finalizers = 0;
 
         if !completion.detached {
             let index = class_index(completion.class_id)
@@ -723,6 +820,21 @@ impl ManagedData {
             self.arena.reset_recyclable_run(target, completed.class_id);
             self.allocation_pressure.record_run_release();
             self.free_runs.push(target.location);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn activity(&self) -> HeapActivity {
+        let queued_finalizers = self
+            .finalization_batch
+            .pending_slot_count()
+            .checked_sub(self.running_finalizers)
+            .expect("running finalizers exceed durable pending obligations");
+        HeapActivity {
+            queued_finalizers,
+            running_finalizers: self.running_finalizers,
         }
     }
 
@@ -935,6 +1047,26 @@ struct MarkSummary {
     peak_object_worklist_capacity: usize,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct SweepSummary {
+    reclaimed_slots: usize,
+    reclaimed_runs: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct FinalizationSummary {
+    finalized_slots: usize,
+    reclaimed_runs: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct CollectionSummary {
+    mark: MarkSummary,
+    reclaimed_slots: usize,
+    finalized_slots: usize,
+    reclaimed_runs: usize,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DeadSlotDisposition {
     NoDrop,
@@ -981,6 +1113,7 @@ struct RetiredNoDropRun {
 #[derive(Default)]
 struct FinalizationBatch {
     runs: HashMap<RunLocation, FinalizationRun>,
+    pending_slot_count: usize,
 }
 
 struct FinalizationBatchPlan {
@@ -1206,19 +1339,8 @@ impl FinalizationBatchPlan {
 }
 
 impl FinalizationBatch {
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "exact pending counts remain test-only until C6C reporting"
-        )
-    )]
     fn pending_slot_count(&self) -> usize {
-        self.runs.values().fold(0_usize, |total, run| {
-            total
-                .checked_add(run.pending_slot_count())
-                .expect("finalization batch slot count exhausted")
-        })
+        self.pending_slot_count
     }
 
     fn detached_run_count(&self) -> usize {
@@ -1380,6 +1502,11 @@ impl FinalizationBatch {
             .expect("completed finalization lost its run record")
             .target
             .is_detached();
+        let completed_slots = attempt
+            .work
+            .len()
+            .checked_sub(remaining_slots)
+            .expect("finalization attempt gained pending slots");
         {
             let run = self
                 .runs
@@ -1402,6 +1529,10 @@ impl FinalizationBatch {
             run.pending_slot_count = remaining_slots;
             assert_eq!(run.pending_words.is_empty(), remaining_slots == 0);
         }
+        self.pending_slot_count = self
+            .pending_slot_count
+            .checked_sub(completed_slots)
+            .expect("completed finalization exceeded pending batch count");
 
         let completed_detached_run = if remaining_slots == 0 {
             let run = self
@@ -1881,6 +2012,13 @@ impl HeapInner {
         self.collection_requested.store(true, Ordering::Release);
     }
 
+    fn activity(&self) -> HeapActivity {
+        self.data
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .activity()
+    }
+
     fn notify_coordinator_waiters(&self) {
         #[cfg(test)]
         self.coordinator_notifications
@@ -2025,7 +2163,7 @@ impl HeapInner {
                 .unwrap_or_else(|error| error.raise());
         }
         let mark_summary = mark_attempt.finish();
-        {
+        let sweep_summary = {
             // Post-mark work is deliberately data-side. Exclusive authority
             // was validated above and keeps this topology stable; the callback
             // must not acquire the sibling coordinator mutex while this guard
@@ -2051,7 +2189,7 @@ impl HeapInner {
             // records leave class topology after every lock-free selector is
             // null. C6A.2c then clears their side state and headers before
             // publishing the locations to the heap-wide free-run pool.
-            data.retire_wholly_dead_no_drop_runs(&post_mark.dead_set);
+            let reclaimed_runs = data.retire_wholly_dead_no_drop_runs(&post_mark.dead_set);
             data.install_finalization_batch(finalization_batch);
             data.recycle_retired_no_drop_runs();
 
@@ -2065,9 +2203,13 @@ impl HeapInner {
             // published last, so every later outer entry discards all cursors
             // from the old view before using these selectors.
             data.publish_swept_allocator_view();
-            data.publish_survivor_pressure_baseline();
             self.publish_allocation_lease_epoch(current_epoch, next_epoch);
-        }
+            SweepSummary {
+                reclaimed_slots: post_mark.dead_set.no_drop_dead_slots,
+                reclaimed_runs,
+            }
+        };
+        attempt.allocator_view_published = true;
 
         // Prepare the TLS record without activating it. Under the coordinator
         // mutex, exclusive authority is then converted directly into one
@@ -2098,11 +2240,22 @@ impl HeapInner {
         // boundary before production destruction begins. A panic here has not
         // invoked any payload destructor and remains safely retryable.
         finalizer_work(&mutator);
-        self.run_finalization_batch(&mutator);
+        let finalization_summary = self.run_finalization_batch(&mutator);
         drop(mutator);
         let admission = thread_entry.into_outer_admission();
 
-        attempt.complete(mark_summary);
+        attempt.complete(CollectionSummary {
+            mark: mark_summary,
+            reclaimed_slots: sweep_summary
+                .reclaimed_slots
+                .checked_add(finalization_summary.finalized_slots)
+                .expect("collection reclaimed-slot count exhausted"),
+            finalized_slots: finalization_summary.finalized_slots,
+            reclaimed_runs: sweep_summary
+                .reclaimed_runs
+                .checked_add(finalization_summary.reclaimed_runs)
+                .expect("collection reclaimed-run count exhausted"),
+        });
         if continue_as_mutator {
             Some(admission)
         } else {
@@ -2111,8 +2264,9 @@ impl HeapInner {
         }
     }
 
-    fn run_finalization_batch(&self, mutator: &Mutator<'_>) {
+    fn run_finalization_batch(&self, mutator: &Mutator<'_>) -> FinalizationSummary {
         debug_assert!(std::ptr::eq(self, Arc::as_ptr(mutator.heap())));
+        let mut summary = FinalizationSummary::default();
         let mut locations = self
             .data
             .lock()
@@ -2144,14 +2298,27 @@ impl HeapInner {
                 }
             }
 
-            self.data
+            let completed_slots = attempt.next_work_index;
+            let reclaimed_run = self
+                .data
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .complete_finalization_run(attempt);
+            summary.finalized_slots = summary
+                .finalized_slots
+                .checked_add(completed_slots)
+                .expect("finalized-slot count exhausted");
+            if reclaimed_run {
+                summary.reclaimed_runs = summary
+                    .reclaimed_runs
+                    .checked_add(1)
+                    .expect("finalized-run count exhausted");
+            }
             if let Some(payload) = panic {
                 resume_unwind(payload);
             }
         }
+        summary
     }
 
     fn release_outer_mutator(&self) {
@@ -2804,6 +2971,7 @@ fn validate_rootable_in_state(
 struct CollectionAttempt<'heap> {
     heap: &'heap HeapInner,
     epoch: CollectionEpoch,
+    allocator_view_published: bool,
     completed: bool,
 }
 
@@ -2812,22 +2980,27 @@ impl<'heap> CollectionAttempt<'heap> {
         Self {
             heap,
             epoch,
+            allocator_view_published: false,
             completed: false,
         }
     }
 
-    fn complete(&mut self, summary: MarkSummary) {
+    fn complete(&mut self, summary: CollectionSummary) {
         {
-            // Serialize acknowledgement with run assignment. C6A.4 publishes
-            // its first survivor target before finalizers run, so pressure
+            // Publish the post-finalization assigned-run baseline and
+            // serialize request acknowledgement with run assignment. Pressure
             // raised by finalizer allocations before this lock is coalesced;
-            // a later publication survives the clear. C6C.2 moves the final
-            // occupancy baseline to post-finalization completion.
-            let _data = self
+            // a later publication survives the clear.
+            let mut data = self
                 .heap
                 .data
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert!(
+                data.activity().is_idle(),
+                "successful collection retained finalizer activity"
+            );
+            data.publish_survivor_pressure_baseline();
             self.heap
                 .collection_requested
                 .store(false, Ordering::Release);
@@ -2844,14 +3017,17 @@ impl<'heap> CollectionAttempt<'heap> {
             assert_eq!(coordinator.active_collection, Some(self.epoch));
             let report = CollectionReport {
                 epoch: self.epoch.0,
-                root_entries: summary.root_entries,
-                traced_objects: summary.traced_objects,
-                marked_slots: summary.marked_slots,
-                conservatively_retained_slots: summary.conservatively_retained_slots,
+                root_entries: summary.mark.root_entries,
+                traced_objects: summary.mark.traced_objects,
+                marked_slots: summary.mark.marked_slots,
+                conservatively_retained_slots: summary.mark.conservatively_retained_slots,
+                reclaimed_slots: summary.reclaimed_slots,
+                finalized_slots: summary.finalized_slots,
+                reclaimed_runs: summary.reclaimed_runs,
                 #[cfg(test)]
-                peak_object_worklist_len: summary.peak_object_worklist_len,
+                peak_object_worklist_len: summary.mark.peak_object_worklist_len,
                 #[cfg(test)]
-                peak_object_worklist_capacity: summary.peak_object_worklist_capacity,
+                peak_object_worklist_capacity: summary.mark.peak_object_worklist_capacity,
             };
             coordinator.latest_collection_report = Some(report);
             coordinator.completed_collection_epoch = self.epoch.get();
@@ -2874,7 +3050,18 @@ impl Drop for CollectionAttempt<'_> {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.heap.data.clear_poison();
-        drop(data);
+        if self.allocator_view_published {
+            // Swept topology and the allocation-lease epoch are already
+            // durable. Publish the matching post-attempt pressure baseline
+            // before the original panic resumes, but leave the completion
+            // epoch and report untouched.
+            let mut data = data;
+            assert_eq!(data.running_finalizers, 0);
+            data.publish_survivor_pressure_baseline();
+            drop(data);
+        } else {
+            drop(data);
+        }
         self.heap
             .collection_requested
             .store(true, Ordering::Release);
@@ -3061,7 +3248,7 @@ mod tests {
     use super::{
         AdmissionPhase, AllocationClass, AllocationPressure, AllocationPressureSnapshot,
         CollectorLookupError, CollectorSlot, DeadBitmapWord, DeadSlotDisposition,
-        FIXED_SURVIVOR_RUN_HEADROOM, Heap, HeapInner, MarkSummary, PrepareRunError,
+        FIXED_SURVIVOR_RUN_HEADROOM, Heap, HeapActivity, HeapInner, MarkSummary, PrepareRunError,
         RootValidationError, RunLocation, RunPublicationError, SURVIVOR_GROWTH_DENOMINATOR,
         SURVIVOR_GROWTH_NUMERATOR, class_index, resolve_slot_in_state,
         survivor_run_high_water_mark, validate_rootable_in_state,
@@ -3330,21 +3517,29 @@ mod tests {
         heap: Heap,
         drops: Arc<AtomicUsize>,
         published: Arc<Mutex<Option<crate::Root<u64>>>>,
+        allocate_on_drop: bool,
+        panic_after_drop: bool,
     }
 
     impl Drop for AllocatingDrop {
         fn drop(&mut self) {
             self.drops.fetch_add(1, Ordering::Relaxed);
-            self.heap.with_mutator(|mutator| {
-                assert_eq!(
-                    self.heap.inner.coordinator_snapshot().phase,
-                    AdmissionPhase::Finalizing
-                );
-                assert_eq!(cache_snapshot(&self.heap.inner).unwrap().recursive_depth, 2);
-                let value = mutator.allocator::<u64>().unwrap().alloc(73);
-                let root = mutator.root(value);
-                assert!(self.published.lock().unwrap().replace(root).is_none());
-            });
+            if self.allocate_on_drop {
+                self.heap.with_mutator(|mutator| {
+                    assert_eq!(
+                        self.heap.inner.coordinator_snapshot().phase,
+                        AdmissionPhase::Finalizing
+                    );
+                    assert_eq!(cache_snapshot(&self.heap.inner).unwrap().recursive_depth, 2);
+                    let value = mutator.allocator::<u64>().unwrap().alloc(73);
+                    let root = mutator.root(value);
+                    assert!(self.published.lock().unwrap().replace(root).is_none());
+                });
+            }
+            assert!(
+                !self.panic_after_drop,
+                "injected allocating finalizer panic"
+            );
         }
     }
 
@@ -4058,7 +4253,11 @@ mod tests {
             heap.inner.allocation_pressure(),
             AllocationPressureSnapshot {
                 assigned_runs: FIXED_SURVIVOR_RUN_HEADROOM,
-                high_water_mark: FIXED_SURVIVOR_RUN_HEADROOM,
+                high_water_mark: survivor_run_high_water_mark(
+                    FIXED_SURVIVOR_RUN_HEADROOM,
+                    SURVIVOR_GROWTH_NUMERATOR,
+                    SURVIVOR_GROWTH_DENOMINATOR,
+                ),
                 collection_requested: false,
             }
         );
@@ -6236,6 +6435,9 @@ mod tests {
 
         let report = heap.collect_full().unwrap();
         assert_eq!(report.marked_slots(), 2);
+        assert_eq!(report.reclaimed_slots(), 64);
+        assert_eq!(report.finalized_slots(), 64);
+        assert_eq!(report.reclaimed_runs(), 0);
         assert_eq!(drops.load(Ordering::Relaxed), 64);
         {
             let data = heap.inner.data.lock().unwrap();
@@ -6357,6 +6559,13 @@ mod tests {
             heap.inner.coordinator_snapshot().phase,
             AdmissionPhase::Finalizing
         );
+        assert_eq!(
+            heap.activity(),
+            HeapActivity {
+                queued_finalizers: 0,
+                running_finalizers: 2 * u64::BITS as usize,
+            }
+        );
 
         let (replacement_root, replacement_owner) = heap.with_mutator(|mutator| {
             assert!(
@@ -6392,6 +6601,9 @@ mod tests {
         continue_finalization.wait();
         let report = collector.join().expect("collector worker panicked");
         assert_eq!(report.marked_slots(), 1);
+        assert_eq!(report.finalized_slots(), 2 * u64::BITS as usize);
+        assert_eq!(report.reclaimed_slots(), 2 * u64::BITS as usize);
+        assert_eq!(heap.activity(), HeapActivity::default());
         assert_eq!(drops.load(Ordering::Relaxed), 2 * u64::BITS as usize);
         assert!(
             heap.inner
@@ -6451,6 +6663,9 @@ mod tests {
         let first = heap.collect_full().unwrap();
         assert_eq!(first.marked_slots(), 1);
         assert_eq!(first.conservatively_retained_slots(), 0);
+        assert_eq!(first.reclaimed_slots(), 2);
+        assert_eq!(first.finalized_slots(), 2);
+        assert_eq!(first.reclaimed_runs(), 1);
         assert_eq!(drops.load(Ordering::Relaxed), 2);
         {
             let data = heap.inner.data.lock().unwrap();
@@ -6626,6 +6841,8 @@ mod tests {
                 heap: heap.clone(),
                 drops: Arc::clone(&drops),
                 published: Arc::clone(&published),
+                allocate_on_drop: true,
+                panic_after_drop: false,
             },
         );
         let dead_slot = collector_slot(&heap, dead);
@@ -6633,6 +6850,9 @@ mod tests {
         let report = heap.collect_full().unwrap();
 
         assert_eq!(report.marked_slots(), 0);
+        assert_eq!(report.reclaimed_slots(), 1);
+        assert_eq!(report.finalized_slots(), 1);
+        assert_eq!(report.reclaimed_runs(), 1);
         assert_eq!(drops.load(Ordering::Relaxed), 1);
         assert!(
             !heap
@@ -6653,6 +6873,141 @@ mod tests {
         drop(root);
         drop(heap);
         assert_eq!(drops.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn finalizer_run_activation_sets_the_completed_pressure_baseline() {
+        let heap = Heap::new();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let published = Arc::new(Mutex::new(None));
+        let (live, dead, live_root) = heap.with_mutator(|mutator| {
+            let allocator = mutator.allocator::<AllocatingDrop>().unwrap();
+            let live = allocator.alloc(AllocatingDrop {
+                heap: heap.clone(),
+                drops: Arc::clone(&drops),
+                published: Arc::clone(&published),
+                allocate_on_drop: false,
+                panic_after_drop: false,
+            });
+            let dead = allocator.alloc(AllocatingDrop {
+                heap: heap.clone(),
+                drops: Arc::clone(&drops),
+                published: Arc::clone(&published),
+                allocate_on_drop: true,
+                panic_after_drop: false,
+            });
+            (live, dead, mutator.root(live))
+        });
+        assert_eq!(
+            collector_slot(&heap, live).owner.location,
+            collector_slot(&heap, dead).owner.location
+        );
+        {
+            let mut data = heap.inner.data.lock().unwrap();
+            assert_eq!(data.allocation_pressure.assigned_runs, 1);
+            data.allocation_pressure.high_water_mark = 2;
+        }
+
+        let report = heap.collect_full().unwrap();
+
+        assert_eq!(report.reclaimed_slots(), 1);
+        assert_eq!(report.finalized_slots(), 1);
+        assert_eq!(report.reclaimed_runs(), 0);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+        assert_eq!(heap.activity(), HeapActivity::default());
+        assert_eq!(
+            heap.inner.allocation_pressure(),
+            AllocationPressureSnapshot {
+                assigned_runs: 2,
+                high_water_mark: survivor_run_high_water_mark(
+                    2,
+                    SURVIVOR_GROWTH_NUMERATOR,
+                    SURVIVOR_GROWTH_DENOMINATOR,
+                ),
+                collection_requested: false,
+            }
+        );
+        let published_root = published
+            .lock()
+            .unwrap()
+            .take()
+            .expect("finalizer did not publish its fresh allocation");
+        heap.with_mutator(|mutator| assert_eq!(*published_root.get(mutator), 73));
+
+        drop(published_root);
+        drop(live_root);
+        heap.collect_full().unwrap();
+        assert_eq!(drops.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn panicking_finalizer_publishes_pressure_without_a_completion_report() {
+        let heap = Heap::new();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let published = Arc::new(Mutex::new(None));
+        let (live, dead, live_root) = heap.with_mutator(|mutator| {
+            let allocator = mutator.allocator::<AllocatingDrop>().unwrap();
+            let live = allocator.alloc(AllocatingDrop {
+                heap: heap.clone(),
+                drops: Arc::clone(&drops),
+                published: Arc::clone(&published),
+                allocate_on_drop: false,
+                panic_after_drop: false,
+            });
+            let dead = allocator.alloc(AllocatingDrop {
+                heap: heap.clone(),
+                drops: Arc::clone(&drops),
+                published: Arc::clone(&published),
+                allocate_on_drop: true,
+                panic_after_drop: true,
+            });
+            (live, dead, mutator.root(live))
+        });
+        assert_eq!(
+            collector_slot(&heap, live).owner.location,
+            collector_slot(&heap, dead).owner.location
+        );
+        {
+            let mut data = heap.inner.data.lock().unwrap();
+            assert_eq!(data.allocation_pressure.assigned_runs, 1);
+            data.allocation_pressure.high_water_mark = 2;
+        }
+
+        let panic = catch_unwind(AssertUnwindSafe(|| heap.collect_full()))
+            .expect_err("allocating finalizer must propagate its panic");
+        assert_eq!(
+            panic_string(panic.as_ref()),
+            "injected allocating finalizer panic"
+        );
+        assert_failed_collection_restored(&heap);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+        assert_eq!(heap.activity(), HeapActivity::default());
+        assert_eq!(
+            heap.inner.allocation_pressure(),
+            AllocationPressureSnapshot {
+                assigned_runs: 2,
+                high_water_mark: survivor_run_high_water_mark(
+                    2,
+                    SURVIVOR_GROWTH_NUMERATOR,
+                    SURVIVOR_GROWTH_DENOMINATOR,
+                ),
+                collection_requested: true,
+            }
+        );
+        let published_root = published
+            .lock()
+            .unwrap()
+            .take()
+            .expect("panicking finalizer lost its published allocation");
+        heap.with_mutator(|mutator| assert_eq!(*published_root.get(mutator), 73));
+
+        drop(published_root);
+        drop(live_root);
+        let cleanup = heap.collect_full().unwrap();
+        assert_eq!(cleanup.reclaimed_slots(), 2);
+        assert_eq!(cleanup.finalized_slots(), 1);
+        assert_eq!(cleanup.reclaimed_runs(), 2);
+        assert_eq!(drops.load(Ordering::Relaxed), 2);
     }
 
     #[test]
@@ -6687,6 +7042,13 @@ mod tests {
         );
         assert_eq!(*events.lock().unwrap(), vec![0]);
         assert_failed_collection_restored(&heap);
+        assert_eq!(
+            heap.activity(),
+            HeapActivity {
+                queued_finalizers: 1,
+                running_finalizers: 0,
+            }
+        );
         {
             let data = heap.inner.data.lock().unwrap();
             let metadata = metadata_for::<SelectivePanickingDrop>();
@@ -6718,6 +7080,10 @@ mod tests {
         assert_eq!(retry.traced_objects(), 0);
         assert_eq!(retry.marked_slots(), 1);
         assert_eq!(retry.conservatively_retained_slots(), 1);
+        assert_eq!(retry.finalized_slots(), 1);
+        assert_eq!(retry.reclaimed_slots(), 1);
+        assert_eq!(retry.reclaimed_runs(), 1);
+        assert_eq!(heap.activity(), HeapActivity::default());
         assert_eq!(*events.lock().unwrap(), vec![0, 1]);
         assert_eq!(
             heap.inner
@@ -7116,14 +7482,22 @@ mod tests {
             after.pressure,
             AllocationPressureSnapshot {
                 assigned_runs: 2,
+                high_water_mark: FIXED_SURVIVOR_RUN_HEADROOM,
+                // The completed request is acknowledged after the finalizer
+                // callback returns.
+                collection_requested: true,
+            }
+        );
+        assert_eq!(
+            heap.inner.allocation_pressure(),
+            AllocationPressureSnapshot {
+                assigned_runs: 2,
                 high_water_mark: survivor_run_high_water_mark(
                     2,
                     SURVIVOR_GROWTH_NUMERATOR,
                     SURVIVOR_GROWTH_DENOMINATOR,
                 ),
-                // The completed request is acknowledged after the finalizer
-                // callback returns.
-                collection_requested: true,
+                collection_requested: false,
             }
         );
         assert_eq!(
@@ -7257,6 +7631,9 @@ mod tests {
 
         let report = heap.collect_full().unwrap();
         assert_eq!(report.marked_slots(), 4);
+        assert_eq!(report.reclaimed_slots(), 4);
+        assert_eq!(report.finalized_slots(), 1);
+        assert_eq!(report.reclaimed_runs(), 3);
         assert_eq!(drops.load(Ordering::Relaxed), 1);
 
         let data = heap.inner.data.lock().unwrap();
