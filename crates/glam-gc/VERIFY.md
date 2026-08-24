@@ -248,6 +248,40 @@ but now stores the exact final unavailable mask rather than a blanket valid-bit
 mask. The full suite contains 160 unit tests (158 passing and two ignored scale
 fixtures), six Loom models, and eight compile-fail/doc tests.
 
+C6A.4 replaces historical typed-run publication pressure with exact assigned-
+run occupancy. Virgin and recycled activation increment once after class
+publication; whole-run reset decrements once before free-list publication.
+Every successful sweep recomputes occupancy from class topology, checks it
+against arena capacity, and publishes the saturating target
+`S + 112 + ceil(S / 2)`. The pure arithmetic fixture injects alternate ratios
+to cover exact ceiling behavior and overflow independently of the provisional
+one-half tuning choice.
+
+The integrated survivor fixture retains three one-slot runs, reclaims a fourth,
+and observes the corresponding fixed plus proportional target. A recycled-run
+fixture lowers the private target to force the recycled activation itself
+across the boundary and verifies one occupancy increment and one request. A
+finalizer-panic fixture proves that the already published swept baseline is
+durable while the failed attempt relatches collection. Existing forced
+acknowledgement schedules distinguish pressure before and after the data-side
+clear; at this checkpoint, finalizer allocations before that clear are
+deliberately coalesced until C6C.2 publishes the final post-finalization
+baseline. Focused Miri runs are:
+
+```sh
+cargo +nightly miri test --package glam-gc --lib --all-features \
+  completed_sweep_publishes_survivor_assigned_run_baseline
+cargo +nightly miri test --package glam-gc --lib --all-features \
+  recycled_run_activation_crosses_pressure_target_once
+cargo +nightly miri test --package glam-gc --lib --all-features \
+  finalizer_panic_retains_the_completed_sweep_pressure_baseline
+```
+
+All three focused fixtures pass Miri. The stable collector matrix contains 164
+unit tests (162 passing and two ignored scale fixtures), six Loom models, and
+eight compile-fail/doc tests. Workspace formatting, all-target/all-feature
+Clippy with warnings denied, and the complete workspace test suite also pass.
+
 ## Gate G0 Baseline
 
 Before changing the unsafe surface in C1, recheck the focused pre-GC semantic

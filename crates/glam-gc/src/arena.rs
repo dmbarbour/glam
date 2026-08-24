@@ -173,6 +173,13 @@ unsafe impl Send for RunClaimTarget {}
 unsafe impl Sync for RunClaimTarget {}
 
 impl Arena {
+    pub(crate) fn run_capacity(&self) -> usize {
+        self.chunks
+            .len()
+            .checked_mul(RUNS_PER_CHUNK)
+            .expect("arena run capacity exhausted")
+    }
+
     pub(crate) fn reserve_chunk(&mut self) -> Result<usize, ArenaError> {
         let candidate = ArenaChunk::allocate()?;
         self.publish_chunk(candidate)

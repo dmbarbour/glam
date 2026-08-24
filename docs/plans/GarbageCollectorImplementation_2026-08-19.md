@@ -1,8 +1,8 @@
 # Glam GC Subcrate Implementation Plan — 2026-08-19
 
-Status: in progress; Phases C0 through C6A.3b are complete, including the C2C.6
+Status: in progress; Phases C0 through C6A.4 are complete, including the C2C.6
 verification follow-up. The mandatory post-C1, post-C2C, post-C3E, post-C4,
-and post-C5 downstream reviews are complete. C6A.4 is next.
+and post-C5 downstream reviews are complete. C6B.1 is next.
 
 This plan implements an exact, non-moving, runtime-local tracing collector
 without depending on Glam value semantics. The governing requirements and
@@ -68,7 +68,7 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C6A.2c | completed | wholly dead no-drop runs and free-run reuse |
 | C6A.3a | completed | eager partial no-drop sweep |
 | C6A.3b | completed | swept allocator publication |
-| C6A.4 | pending | assigned-run pressure |
+| C6A.4 | completed | assigned-run pressure |
 | C6B.1 | pending | finalization batch and non-rootability |
 | C6B.2 | pending | finalizer handoff and destruction |
 | C6B.3 | pending | non-resurrection and successful completion |
@@ -3015,10 +3015,10 @@ into marking:
    entrant's one ordinary admission or into idle `Ordinary` for
    `collect_full`. Keeping the no-op handoff is semantically valid and simpler,
    so forced schedules and a small cost comparison should precede removal.
-3. **Survivor growth ratio (C6A.4).** Select the initial internal rational only
-   after assigned-run occupancy exists. One half is the provisional comparison
-   point, not a contract; threshold correctness tests should accept an injected
-   private ratio rather than freeze the measured default into semantics.
+3. **Survivor growth ratio (resolved in C6A.4).** The initial private ratio is
+   one half. It remains a tuning choice rather than public semantics; pure
+   threshold tests inject the numerator and denominator so rounding and
+   saturation are not coupled to that default.
 4. **Last-owner teardown (C6D.1).** This remains the only blocking ownership
    decision in the isolated collector plan. Do not infer it from ordinary
    collection or implement mutator-capable terminal `Drop` before its forced
@@ -3031,16 +3031,17 @@ recoverable panic injected by its own tests.
 
 - The first successful sweep replaces C2C's historical publication count with
   assigned-run occupancy and the heap-wide recycled-run list described below.
-  C3E may acknowledge its synthetic collection by resetting the provisional
-  publication counter, but may not publish reclaimed capacity. C6 replaces
-  that temporary policy atomically with survivor-based occupancy.
+  C6A.4 publishes the first survivor-based target after the eager sweep and
+  before finalization. C6C.2 moves that publication to final completion so
+  finalizer activations and quarantine participate in the same baseline.
 - An abandoned or panicking mark or sweep publishes neither a replacement
   pressure baseline nor recycled capacity. The last known-good request and
   occupancy state remains authoritative.
-- Runs activated by finalizers contribute to the consistent post-finalization
-  occupancy. Publish the new baseline only after finalization, clear heuristic
-  requests coalesced into the collection, and never begin another collection
-  while the heap is in `Finalizing`.
+- Runs activated by finalizers must ultimately contribute to the consistent
+  post-finalization occupancy. At the C6A.4 checkpoint the pre-finalization
+  survivor target is durable and completion coalesces earlier finalizer-time
+  pressure; C6C.2 replaces that temporary boundary with final publication.
+  Never begin another collection while the heap is in `Finalizing`.
 - Verify successful and failed sweep publication, free-run reactivation,
   finalizer allocation around the trigger, and panic/quarantine recovery as
   C6 behavior rather than retroactive C2C.5b requirements.
@@ -3077,21 +3078,21 @@ recoverable panic injected by its own tests.
   term preserves C3B's initial 112-run trigger for an empty baseline; the
   proportional term gives high-survivor heaps increasing headroom instead of
   repeating GC after one more run. Keep the ratio as an internal rational
-  tuning constant whose initial value is selected during C6A.4 before the
-  first pressure baseline is published and measured in C8; neither the ratio
-  nor this run-level heuristic is public Glam semantics.
+  tuning constant, initially one half and measured in C8; neither the ratio nor
+  this run-level heuristic is public Glam semantics.
 - Trigger on the first run activation which reaches or crosses that absolute
   assigned-run mark. The target may exceed current committed chunk capacity;
   allocate and retain ordinary chunks as required rather than forcing another
   collection merely because the previous capacity was nearly full. Explicit
   requests remain independent of the target.
 - Compute assigned survivor-run occupancy during the eager bitmap scan and
-  topology update, but publish the final target when the finalization batch
-  drains. Runs activated by finalizers join current assigned occupancy before
-  the target is published; completion chooses a target above that final
-  occupancy rather than latching an immediate follow-up request. A run retained
-  by quarantine also joins the baseline because it remains assigned and
-  unavailable for recycling. No collection begins during `Finalizing`.
+  topology update. C6A.4 publishes that post-sweep target provisionally;
+  C6C.2 publishes the final target when the finalization batch drains. Runs
+  activated by finalizers join current assigned occupancy before final
+  publication; completion chooses a target above that occupancy rather than
+  latching an immediate follow-up request. A run retained by quarantine also
+  joins the baseline because it remains assigned and unavailable for
+  recycling. No collection begins during `Finalizing`.
 - An abandoned or panicking mark or sweep publishes neither free-list
   membership nor a new pressure baseline. Finalizer-panic recovery publishes
   the consistent survivor/quarantine baseline only after every run has an
@@ -3522,6 +3523,42 @@ Completed on 2026-08-23:
   compile-fail/doc tests. The exact publication, stale-worker, and both drop
   reservation fixtures pass focused Miri; complete verification is recorded in
   `VERIFY.md`.
+
+#### C6A.4 completion
+
+Completed on 2026-08-23:
+
+- Allocation pressure now records the exact number of runs attached to
+  allocation classes instead of historical run publications. Successful
+  virgin and recycled activation increment occupancy once after authoritative
+  class publication; whole-run reset decrements it once before free-list
+  publication. Word claims, ordinary slot allocation, cursor eviction, and TLS
+  cache release remain invisible to pressure.
+- Each successful eager sweep recomputes assigned occupancy from class
+  topology, asserts agreement with the maintained counter and committed arena
+  capacity, then publishes the saturating target
+  `S + 112 + ceil(S / 2)`. The one-half ratio is private provisional tuning.
+  Its pure arithmetic accepts injected rational components and proves exact
+  ceiling behavior plus overflow saturation without making the chosen ratio a
+  semantic contract. The absolute target may exceed current arena capacity.
+- A survivor fixture retains three one-slot runs, releases a fourth, and
+  observes both fixed and proportional headroom. A recycled-run fixture forces
+  one retyped free run across a private threshold and proves exactly one
+  occupancy event and request. Existing publication, empty-baseline 111/112,
+  cache, and concurrent-frontier fixtures now assert assigned occupancy rather
+  than historical publications.
+- Mark and pre-publication sweep failure retain the old baseline. Once the
+  swept allocator view is durable, a later finalizer panic retains that new
+  baseline alongside the durable reclamation and relatches collection. At this
+  checkpoint the baseline intentionally precedes finalization: allocations
+  before completion acknowledgement are coalesced, while a publication after
+  the data-side clear survives. C6C.2 will publish the final occupancy after
+  finalizer allocations and quarantine are known.
+- The collector suite now contains 164 unit tests (162 passing plus two
+  explicit scale fixtures), 6 Loom models, and 8 compile-fail/doc tests. The
+  survivor, recycled-threshold, and finalizer-panic pressure fixtures pass
+  focused Miri. The stable collector and workspace verification matrices are
+  recorded in `VERIFY.md`.
 
 ### Mandatory Post-C6 Review
 

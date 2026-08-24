@@ -542,13 +542,20 @@ C6 later owns collector-driven destruction.
   occurs only after bitmap publication, and ordinary Rust synchronization may
   immediately share it with another mutator. Collection remains disabled in
   C2C, so the payload then stays live through terminal heap teardown.
-- Allocation pressure is charged exactly once under managed data after a typed
-  run becomes authoritative in both arena and class pool. Word claims, local
-  object allocation, cursor eviction, explicit cache release, and thread exit
-  do not touch it. A saturating count latches the initial request after 7/8 of
-  one chunk, currently 112 typed-run publications. C3 services that coordinator
-  request but preserves the pressure latch and count; C6 owns rearming the
-  allowance after successful sweep.
+- Allocation pressure tracks assigned-run occupancy under managed data. A
+  virgin or recycled run increments the count exactly once only after it is
+  authoritative in both arena and class pool; reset publication to the
+  heap-wide free-run pool decrements it exactly once. Word claims, local object
+  allocation, cursor eviction, explicit cache release, and thread exit do not
+  touch it. The initial target is 7/8 of one chunk, currently 112 assigned
+  runs. A successful sweep checks the maintained count against authoritative
+  class topology, bounds it by committed arena capacity, and arms the next
+  saturating target at `S + 112 + ceil(S / 2)`. Mark or pre-publication sweep
+  failure preserves the prior baseline. At the C6A.4 checkpoint the target is
+  intentionally published before finalizers run; a finalizer panic may retain
+  that durable swept baseline, and completion coalesces earlier finalizer-time
+  pressure. C6C.2 moves final publication to the complete post-finalization
+  occupancy.
 - The deterministic pre-initialization hook exists only in test builds at the
   last point before the two publication writes. An unwind there owns and drops
   the input normally while leaving both local and authoritative bit state

@@ -20,9 +20,12 @@ use crate::{
     trace::ErasedGc,
 };
 
-const INITIAL_RUN_PUBLICATION_ALLOWANCE: usize = crate::arena::RUNS_PER_CHUNK * 7 / 8;
-const _: () = assert!(INITIAL_RUN_PUBLICATION_ALLOWANCE != 0);
-const _: () = assert!(INITIAL_RUN_PUBLICATION_ALLOWANCE < crate::arena::RUNS_PER_CHUNK);
+const FIXED_SURVIVOR_RUN_HEADROOM: usize = crate::arena::RUNS_PER_CHUNK * 7 / 8;
+const SURVIVOR_GROWTH_NUMERATOR: usize = 1;
+const SURVIVOR_GROWTH_DENOMINATOR: usize = 2;
+const _: () = assert!(FIXED_SURVIVOR_RUN_HEADROOM != 0);
+const _: () = assert!(FIXED_SURVIVOR_RUN_HEADROOM < crate::arena::RUNS_PER_CHUNK);
+const _: () = assert!(SURVIVOR_GROWTH_DENOMINATOR != 0);
 
 /// Scalar results from one completed stop-the-world collection.
 ///
@@ -363,27 +366,80 @@ impl Drop for SyntheticExclusiveAdmission<'_> {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct AllocationPressure {
-    published_runs: usize,
+    assigned_runs: usize,
+    high_water_mark: usize,
 }
 
 #[cfg(test)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct AllocationPressureSnapshot {
-    published_runs: usize,
+    assigned_runs: usize,
+    high_water_mark: usize,
     collection_requested: bool,
 }
 
+#[cfg(test)]
+impl Default for AllocationPressureSnapshot {
+    fn default() -> Self {
+        Self {
+            assigned_runs: 0,
+            high_water_mark: FIXED_SURVIVOR_RUN_HEADROOM,
+            collection_requested: false,
+        }
+    }
+}
+
+impl Default for AllocationPressure {
+    fn default() -> Self {
+        Self {
+            assigned_runs: 0,
+            high_water_mark: FIXED_SURVIVOR_RUN_HEADROOM,
+        }
+    }
+}
+
 impl AllocationPressure {
-    fn record_run_publication(&mut self) -> bool {
-        self.published_runs = self.published_runs.saturating_add(1);
-        self.published_runs >= INITIAL_RUN_PUBLICATION_ALLOWANCE
+    fn record_run_assignment(&mut self) -> bool {
+        self.assigned_runs = self.assigned_runs.saturating_add(1);
+        self.assigned_runs >= self.high_water_mark
     }
 
-    fn acknowledge_collection(&mut self) {
-        self.published_runs = 0;
+    fn record_run_release(&mut self) {
+        self.assigned_runs = self
+            .assigned_runs
+            .checked_sub(1)
+            .expect("released run was absent from assigned occupancy");
     }
+
+    fn publish_survivor_baseline(&mut self, assigned_runs: usize) {
+        assert_eq!(
+            self.assigned_runs, assigned_runs,
+            "pressure occupancy diverged from allocation-class topology"
+        );
+        self.high_water_mark = survivor_run_high_water_mark(
+            assigned_runs,
+            SURVIVOR_GROWTH_NUMERATOR,
+            SURVIVOR_GROWTH_DENOMINATOR,
+        );
+    }
+}
+
+fn survivor_run_high_water_mark(
+    survivors: usize,
+    growth_numerator: usize,
+    growth_denominator: usize,
+) -> usize {
+    assert_ne!(growth_denominator, 0, "survivor growth denominator is zero");
+    let growth = survivors
+        .checked_mul(growth_numerator)
+        .and_then(|product| product.checked_add(growth_denominator - 1))
+        .map_or(usize::MAX, |rounded| rounded / growth_denominator);
+    survivors
+        .checked_add(FIXED_SURVIVOR_RUN_HEADROOM)
+        .and_then(|target| target.checked_add(growth))
+        .unwrap_or(usize::MAX)
 }
 
 impl ManagedData {
@@ -528,6 +584,7 @@ impl ManagedData {
             let target = *retired.target;
             self.arena
                 .reset_recyclable_run(target, retired.former_class_id);
+            self.allocation_pressure.record_run_release();
             self.free_runs.push(target.location);
         }
 
@@ -581,6 +638,24 @@ impl ManagedData {
         debug_assert!(drop_reservations.next().is_none());
     }
 
+    fn publish_survivor_pressure_baseline(&mut self) {
+        // Class membership is the authoritative assigned-run topology. The
+        // separately maintained counter makes activation/release pressure
+        // cheap; recomputing it at the completed sweep boundary catches any
+        // accounting drift before publishing a new target.
+        let assigned_runs = self.classes.iter().fold(0_usize, |total, class| {
+            total
+                .checked_add(class.runs().len())
+                .expect("assigned-run occupancy exhausted")
+        });
+        assert!(
+            assigned_runs <= self.arena.run_capacity(),
+            "assigned-run occupancy exceeds committed arena capacity"
+        );
+        self.allocation_pressure
+            .publish_survivor_baseline(assigned_runs);
+    }
+
     fn publish_run(
         &mut self,
         class_index: usize,
@@ -613,7 +688,7 @@ impl ManagedData {
             .run_claim_target(location)
             .expect("published typed run must expose stable claim topology");
         self.classes[class_index].publish_run(target);
-        if self.allocation_pressure.record_run_publication() {
+        if self.allocation_pressure.record_run_assignment() {
             collection_requested.store(true, Ordering::Release);
         }
         Ok(location)
@@ -1326,6 +1401,7 @@ impl HeapInner {
             // published last, so every later outer entry discards all cursors
             // from the old view before using these selectors.
             data.publish_swept_allocator_view(&post_mark.dead_set);
+            data.publish_survivor_pressure_baseline();
             self.publish_allocation_lease_epoch(current_epoch, next_epoch);
         }
 
@@ -1783,14 +1859,14 @@ impl HeapInner {
 
     #[cfg(test)]
     fn allocation_pressure(&self) -> AllocationPressureSnapshot {
-        let published_runs = self
+        let pressure = self
             .data
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .allocation_pressure
-            .published_runs;
+            .allocation_pressure;
         AllocationPressureSnapshot {
-            published_runs,
+            assigned_runs: pressure.assigned_runs,
+            high_water_mark: pressure.high_water_mark,
             collection_requested: self.collection_requested.load(Ordering::Acquire),
         }
     }
@@ -2020,12 +2096,16 @@ impl<'heap> CollectionAttempt<'heap> {
 
     fn complete(&mut self, summary: MarkSummary) {
         {
-            let mut data = self
+            // Serialize acknowledgement with run assignment. C6A.4 publishes
+            // its first survivor target before finalizers run, so pressure
+            // raised by finalizer allocations before this lock is coalesced;
+            // a later publication survives the clear. C6C.2 moves the final
+            // occupancy baseline to post-finalization completion.
+            let _data = self
                 .heap
                 .data
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            data.allocation_pressure.acknowledge_collection();
             self.heap
                 .collection_requested
                 .store(false, Ordering::Release);
@@ -2231,9 +2311,10 @@ mod tests {
 
     use super::{
         AdmissionPhase, AllocationClass, AllocationPressure, AllocationPressureSnapshot,
-        CollectorLookupError, CollectorSlot, DeadBitmapWord, DeadSlotDisposition, Heap,
-        INITIAL_RUN_PUBLICATION_ALLOWANCE, MarkSummary, PrepareRunError, RootValidationError,
-        RunLocation, RunPublicationError, class_index, resolve_slot_in_state,
+        CollectorLookupError, CollectorSlot, DeadBitmapWord, DeadSlotDisposition,
+        FIXED_SURVIVOR_RUN_HEADROOM, Heap, MarkSummary, PrepareRunError, RootValidationError,
+        RunLocation, RunPublicationError, SURVIVOR_GROWTH_DENOMINATOR, SURVIVOR_GROWTH_NUMERATOR,
+        class_index, resolve_slot_in_state, survivor_run_high_water_mark,
         validate_rootable_in_state,
     };
 
@@ -2354,7 +2435,8 @@ mod tests {
             classes,
             runs,
             pressure: AllocationPressureSnapshot {
-                published_runs: data.allocation_pressure.published_runs,
+                assigned_runs: data.allocation_pressure.assigned_runs,
+                high_water_mark: data.allocation_pressure.high_water_mark,
                 collection_requested: heap.inner.collection_requested.load(Ordering::Acquire),
             },
             allocation_lease_epoch: heap.inner.current_allocation_lease_epoch(),
@@ -3082,7 +3164,7 @@ mod tests {
                     false,
                     |_, _| {},
                     |_| {
-                        for _ in 0..INITIAL_RUN_PUBLICATION_ALLOWANCE {
+                        for _ in 0..FIXED_SURVIVOR_RUN_HEADROOM {
                             heap.inner.prepare_run(&class).unwrap();
                         }
                         heap.request_collection();
@@ -3094,7 +3176,11 @@ mod tests {
 
         assert_eq!(
             heap.inner.allocation_pressure(),
-            AllocationPressureSnapshot::default()
+            AllocationPressureSnapshot {
+                assigned_runs: FIXED_SURVIVOR_RUN_HEADROOM,
+                high_water_mark: FIXED_SURVIVOR_RUN_HEADROOM,
+                collection_requested: false,
+            }
         );
         assert!(!heap.inner.coordinator_snapshot().collection_requested);
     }
@@ -3167,7 +3253,7 @@ mod tests {
         let root = heap.with_mutator(|mutator| {
             let value = mutator.allocator::<u64>().unwrap().alloc(42);
             let root = mutator.root(value);
-            for _ in 0..INITIAL_RUN_PUBLICATION_ALLOWANCE {
+            for _ in 0..FIXED_SURVIVOR_RUN_HEADROOM {
                 heap.inner.prepare_run(&class).unwrap();
             }
             root
@@ -4849,7 +4935,7 @@ mod tests {
         let class = internal_class::<FirstType>(&heap);
 
         heap.with_mutator(|_| {
-            for _ in 0..INITIAL_RUN_PUBLICATION_ALLOWANCE {
+            for _ in 0..FIXED_SURVIVOR_RUN_HEADROOM {
                 heap.inner.prepare_run(&class).unwrap();
             }
             assert!(heap.inner.allocation_pressure().collection_requested);
@@ -4861,7 +4947,8 @@ mod tests {
         {
             let pressure = heap.inner.allocation_pressure();
             assert!(pressure.collection_requested);
-            assert_eq!(pressure.published_runs, 112);
+            assert_eq!(pressure.assigned_runs, FIXED_SURVIVOR_RUN_HEADROOM);
+            assert_eq!(pressure.high_water_mark, FIXED_SURVIVOR_RUN_HEADROOM);
             let coordinator = heap.inner.coordinator_snapshot();
             assert!(coordinator.collection_requested);
             assert_eq!(coordinator.completed_collection_epoch, 0);
@@ -4870,7 +4957,8 @@ mod tests {
         heap.with_mutator(|_| {});
         let pressure = heap.inner.allocation_pressure();
         assert!(!pressure.collection_requested);
-        assert_eq!(pressure.published_runs, 0);
+        assert_eq!(pressure.assigned_runs, 0);
+        assert_eq!(pressure.high_water_mark, FIXED_SURVIVOR_RUN_HEADROOM);
         let coordinator = heap.inner.coordinator_snapshot();
         assert!(!coordinator.collection_requested);
         assert_eq!(coordinator.completed_collection_epoch, 1);
@@ -4879,7 +4967,8 @@ mod tests {
             heap.inner.prepare_run(&class).unwrap();
         });
         let pressure = heap.inner.allocation_pressure();
-        assert_eq!(pressure.published_runs, 1);
+        assert_eq!(pressure.assigned_runs, 1);
+        assert_eq!(pressure.high_water_mark, FIXED_SURVIVOR_RUN_HEADROOM);
         assert!(!pressure.collection_requested);
         assert!(!heap.inner.coordinator_snapshot().collection_requested);
         heap.with_mutator(|_| {});
@@ -5378,7 +5467,23 @@ mod tests {
 
         let before = before.lock().unwrap().take().unwrap();
         let after = after.lock().unwrap().take().unwrap();
-        assert_eq!(before.pressure, after.pressure);
+        assert_eq!(before.pressure.assigned_runs, 2);
+        assert_eq!(before.pressure.high_water_mark, FIXED_SURVIVOR_RUN_HEADROOM);
+        assert!(before.pressure.collection_requested);
+        assert_eq!(
+            after.pressure,
+            AllocationPressureSnapshot {
+                assigned_runs: 2,
+                high_water_mark: survivor_run_high_water_mark(
+                    2,
+                    SURVIVOR_GROWTH_NUMERATOR,
+                    SURVIVOR_GROWTH_DENOMINATOR,
+                ),
+                // The completed request is acknowledged after the finalizer
+                // callback returns.
+                collection_requested: true,
+            }
+        );
         assert_eq!(
             after.allocation_lease_epoch.get(),
             before.allocation_lease_epoch.get() + 1
@@ -5596,6 +5701,116 @@ mod tests {
             assert_eq!(wide_roots[2].get(mutator).value, 4);
             assert_eq!(*plain_root.get(mutator), 10);
         });
+    }
+
+    #[test]
+    fn completed_sweep_publishes_survivor_assigned_run_baseline() {
+        let heap = Heap::new();
+        let (values, roots) = heap.with_mutator(|mutator| {
+            let allocator = mutator.allocator::<WideSlot>().unwrap();
+            let values = (0..4_u64)
+                .map(|value| allocator.alloc(WideSlot { value }))
+                .collect::<Vec<_>>();
+            let roots = [0_usize, 2, 3]
+                .into_iter()
+                .map(|index| mutator.root(values[index]))
+                .collect::<Vec<_>>();
+            (values, roots)
+        });
+        let dead_location = collector_slot(&heap, values[1]).owner.location;
+
+        let report = heap.collect_full().unwrap();
+
+        assert_eq!(report.marked_slots(), 3);
+        assert_eq!(
+            heap.inner.allocation_pressure(),
+            AllocationPressureSnapshot {
+                assigned_runs: 3,
+                high_water_mark: survivor_run_high_water_mark(
+                    3,
+                    SURVIVOR_GROWTH_NUMERATOR,
+                    SURVIVOR_GROWTH_DENOMINATOR,
+                ),
+                collection_requested: false,
+            }
+        );
+        let data = heap.inner.data.lock().unwrap();
+        assert_eq!(data.free_runs, vec![dead_location]);
+        assert_eq!(data.arena.run_capacity(), crate::arena::RUNS_PER_CHUNK);
+        drop(data);
+        heap.with_mutator(|mutator| {
+            assert_eq!(roots[0].get(mutator).value, 0);
+            assert_eq!(roots[1].get(mutator).value, 2);
+            assert_eq!(roots[2].get(mutator).value, 3);
+        });
+    }
+
+    #[test]
+    fn recycled_run_activation_crosses_pressure_target_once() {
+        let heap = Heap::new();
+        let dead = allocate(&heap, WideSlot { value: 10 });
+        let recycled_location = collector_slot(&heap, dead).owner.location;
+        heap.collect_full().unwrap();
+
+        {
+            let mut data = heap.inner.data.lock().unwrap();
+            assert_eq!(data.free_runs, vec![recycled_location]);
+            assert_eq!(data.allocation_pressure.assigned_runs, 0);
+            data.allocation_pressure.high_water_mark = 1;
+        }
+        assert!(!heap.inner.allocation_pressure().collection_requested);
+
+        let replacement = allocate(&heap, BitmapBoundarySlot { _value: 20 });
+        assert_eq!(
+            collector_slot(&heap, replacement).owner.location,
+            recycled_location
+        );
+        assert_eq!(
+            heap.inner.allocation_pressure(),
+            AllocationPressureSnapshot {
+                assigned_runs: 1,
+                high_water_mark: 1,
+                collection_requested: true,
+            }
+        );
+        assert!(heap.inner.data.lock().unwrap().free_runs.is_empty());
+    }
+
+    #[test]
+    fn finalizer_panic_retains_the_completed_sweep_pressure_baseline() {
+        let heap = Heap::new();
+        let (live, dead, root) = heap.with_mutator(|mutator| {
+            let allocator = mutator.allocator::<WideSlot>().unwrap();
+            let live = allocator.alloc(WideSlot { value: 10 });
+            let dead = allocator.alloc(WideSlot { value: 20 });
+            (live, dead, mutator.root(live))
+        });
+        assert_ne!(
+            collector_slot(&heap, live).owner.location,
+            collector_slot(&heap, dead).owner.location
+        );
+        heap.request_collection();
+        let epoch = heap.inner.elect_idle_collection_for_test();
+
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            heap.inner.run_synthetic_collection(
+                epoch,
+                false,
+                |_, _| {},
+                |_| panic!("injected finalizer panic after survivor baseline"),
+            );
+        }));
+
+        assert!(panic.is_err());
+        assert_failed_collection_restored(&heap);
+        let pressure = heap.inner.allocation_pressure();
+        assert_eq!(pressure.assigned_runs, 1);
+        assert_eq!(
+            pressure.high_water_mark,
+            survivor_run_high_water_mark(1, SURVIVOR_GROWTH_NUMERATOR, SURVIVOR_GROWTH_DENOMINATOR,)
+        );
+        assert!(pressure.collection_requested);
+        heap.with_mutator(|mutator| assert_eq!(root.get(mutator).value, 10));
     }
 
     #[test]
@@ -6538,7 +6753,8 @@ mod tests {
         assert_eq!(
             heap.inner.allocation_pressure(),
             AllocationPressureSnapshot {
-                published_runs: 1,
+                assigned_runs: 1,
+                high_water_mark: FIXED_SURVIVOR_RUN_HEADROOM,
                 collection_requested: false,
             }
         );
@@ -6549,7 +6765,8 @@ mod tests {
         assert_eq!(
             heap.inner.allocation_pressure(),
             AllocationPressureSnapshot {
-                published_runs: 1,
+                assigned_runs: 1,
+                high_water_mark: FIXED_SURVIVOR_RUN_HEADROOM,
                 collection_requested: false,
             }
         );
@@ -6605,7 +6822,7 @@ mod tests {
             .collect::<HashSet<_>>();
         assert_eq!(locations.len(), THREADS * VALUES_PER_THREAD);
         assert_eq!(heap.inner.resolved_runs().len(), 1);
-        assert_eq!(heap.inner.allocation_pressure().published_runs, 1);
+        assert_eq!(heap.inner.allocation_pressure().assigned_runs, 1);
         let frontier = internal_class::<u64>(&heap).frontier(&heap.inner);
         assert_eq!(frontier, Some(RunLocation { chunk: 0, run: 0 }));
 
@@ -6676,7 +6893,7 @@ mod tests {
         assert!(claims.iter().all(|(location, _)| *location == runs[1]));
         assert_eq!(class.frontier(&heap.inner), Some(runs[1]));
         assert_eq!(heap.inner.resolved_runs().len(), 2);
-        assert_eq!(heap.inner.allocation_pressure().published_runs, 2);
+        assert_eq!(heap.inner.allocation_pressure().assigned_runs, 2);
         assert_eq!(
             heap.inner.allocation_cursor_locked_recheck_hit_count(),
             THREADS - 1
@@ -6706,7 +6923,7 @@ mod tests {
         assert!(claims.iter().all(|(location, _)| *location == successor));
         assert_eq!(class.frontier(&heap.inner), Some(successor));
         assert_eq!(heap.inner.resolved_runs().len(), 2);
-        assert_eq!(heap.inner.allocation_pressure().published_runs, 2);
+        assert_eq!(heap.inner.allocation_pressure().assigned_runs, 2);
         assert_eq!(
             heap.inner.allocation_cursor_locked_recheck_hit_count(),
             THREADS - 1
@@ -6732,7 +6949,7 @@ mod tests {
 
         assert_eq!(cursor.location, runs[1]);
         assert_eq!(class.frontier(&heap.inner), Some(runs[1]));
-        assert_eq!(heap.inner.allocation_pressure().published_runs, 3);
+        assert_eq!(heap.inner.allocation_pressure().assigned_runs, 3);
     }
 
     #[test]
@@ -6769,40 +6986,57 @@ mod tests {
             .into_iter()
             .collect::<HashSet<_>>();
         assert_eq!(slots, HashSet::from([0, 64, 128, 192]));
-        assert_eq!(heap.inner.allocation_pressure().published_runs, 1);
+        assert_eq!(heap.inner.allocation_pressure().assigned_runs, 1);
     }
 
     #[test]
-    fn pressure_request_uses_saturating_typed_run_publications() {
+    fn pressure_request_uses_saturating_assigned_run_occupancy() {
         let mut pressure = AllocationPressure::default();
-        for _ in 0..INITIAL_RUN_PUBLICATION_ALLOWANCE - 1 {
-            assert!(!pressure.record_run_publication());
+        for _ in 0..FIXED_SURVIVOR_RUN_HEADROOM - 1 {
+            assert!(!pressure.record_run_assignment());
         }
-        assert_eq!(
-            pressure.published_runs,
-            INITIAL_RUN_PUBLICATION_ALLOWANCE - 1
-        );
+        assert_eq!(pressure.assigned_runs, FIXED_SURVIVOR_RUN_HEADROOM - 1);
 
-        assert!(pressure.record_run_publication());
-        assert_eq!(pressure.published_runs, INITIAL_RUN_PUBLICATION_ALLOWANCE);
+        assert!(pressure.record_run_assignment());
+        assert_eq!(pressure.assigned_runs, FIXED_SURVIVOR_RUN_HEADROOM);
 
-        pressure.published_runs = usize::MAX;
-        assert!(pressure.record_run_publication());
-        assert_eq!(pressure.published_runs, usize::MAX);
+        pressure.assigned_runs = usize::MAX;
+        pressure.high_water_mark = usize::MAX;
+        assert!(pressure.record_run_assignment());
+        assert_eq!(pressure.assigned_runs, usize::MAX);
     }
 
     #[test]
-    fn authoritative_run_publication_records_exactly_one_pressure_event() {
+    fn survivor_pressure_target_rounds_and_saturates() {
+        assert_eq!(survivor_run_high_water_mark(0, 1, 2), 112);
+        assert_eq!(survivor_run_high_water_mark(1, 1, 2), 114);
+        assert_eq!(survivor_run_high_water_mark(2, 1, 2), 115);
+        assert_eq!(survivor_run_high_water_mark(4, 1, 2), 118);
+
+        assert_eq!(survivor_run_high_water_mark(1, 2, 3), 114);
+        assert_eq!(survivor_run_high_water_mark(2, 2, 3), 116);
+        assert_eq!(survivor_run_high_water_mark(3, 2, 3), 117);
+
+        assert_eq!(survivor_run_high_water_mark(usize::MAX, 1, 2), usize::MAX);
+        assert_eq!(
+            survivor_run_high_water_mark(usize::MAX / 2 + 1, 2, 3),
+            usize::MAX
+        );
+    }
+
+    #[test]
+    fn authoritative_run_assignment_records_exactly_one_pressure_event() {
         let heap = Heap::new();
         let class = internal_class::<FirstType>(&heap);
 
-        for _ in 0..INITIAL_RUN_PUBLICATION_ALLOWANCE - 1 {
+        for _ in 0..FIXED_SURVIVOR_RUN_HEADROOM - 1 {
             heap.inner.prepare_run(&class).unwrap();
         }
         assert_eq!(
             heap.inner.allocation_pressure(),
             AllocationPressureSnapshot {
-                published_runs: INITIAL_RUN_PUBLICATION_ALLOWANCE - 1,
+                assigned_runs: FIXED_SURVIVOR_RUN_HEADROOM - 1,
+                high_water_mark: FIXED_SURVIVOR_RUN_HEADROOM,
                 collection_requested: false,
             }
         );
@@ -6811,13 +7045,14 @@ mod tests {
         assert_eq!(
             heap.inner.allocation_pressure(),
             AllocationPressureSnapshot {
-                published_runs: INITIAL_RUN_PUBLICATION_ALLOWANCE,
+                assigned_runs: FIXED_SURVIVOR_RUN_HEADROOM,
+                high_water_mark: FIXED_SURVIVOR_RUN_HEADROOM,
                 collection_requested: true,
             }
         );
         assert_eq!(
             heap.inner.resolved_runs().len(),
-            INITIAL_RUN_PUBLICATION_ALLOWANCE
+            FIXED_SURVIVOR_RUN_HEADROOM
         );
     }
 
@@ -7047,13 +7282,13 @@ mod tests {
         let heap = Heap::new();
         let first = allocate(&heap, 1_u64);
         assert_eq!(heap.inner.allocation_cursor_claim_count(), 1);
-        assert_eq!(heap.inner.allocation_pressure().published_runs, 1);
+        assert_eq!(heap.inner.allocation_pressure().assigned_runs, 1);
 
         assert_eq!(Heap::release_current_thread_caches(), 1);
         let second = allocate(&heap, 2_u64);
 
         assert_eq!(heap.inner.allocation_cursor_claim_count(), 2);
-        assert_eq!(heap.inner.allocation_pressure().published_runs, 1);
+        assert_eq!(heap.inner.allocation_pressure().assigned_runs, 1);
         assert_eq!(
             [first, second].map(|value| {
                 heap.inner
