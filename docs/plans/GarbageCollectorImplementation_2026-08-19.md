@@ -1,8 +1,9 @@
 # Glam GC Subcrate Implementation Plan — 2026-08-19
 
-Status: in progress; Phases C0 through C6C.1 are complete, including the C2C.6
+Status: in progress; Phases C0 through C6C.1a are complete, including the C2C.6
 verification follow-up. The mandatory post-C1, post-C2C, post-C3E, post-C4,
-and post-C5 downstream reviews are complete. C6C.2 is next.
+and post-C5 downstream reviews are complete. C6C.1b is next, followed by
+C6C.2.
 
 This plan implements an exact, non-moving, runtime-local tracing collector
 without depending on Glam value semantics. The governing requirements and
@@ -72,7 +73,8 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C6B.1 | completed | finalization batch and non-rootability |
 | C6B.2 | completed | finalizer handoff, destruction, and temporary panic-retirement scaffolding |
 | C6B.3 | completed | managed-`Drop` contract, non-resurrection, and successful completion |
-| C6C.1 | completed | destructor panic, terminal slot retirement, and deferred retry |
+| C6C.1a | completed | destructor panic, terminal slot retirement, and deferred retry |
+| C6C.1b | pending | indexed finalization state and ephemeral run dispatch snapshots |
 | C6C.2 | pending | finalizer activity, reports, and pressure publication |
 | C6D.1 | pending | terminal-teardown decision and fixtures |
 | C6D.2 | pending | terminal teardown |
@@ -2976,7 +2978,7 @@ Execute C6 as the following smaller checkpoints:
   are conservatively marked without tracing and remain word-reserved; detached
   runs remain batch-owned and are not rediscovered through class topology.
   The ordinary successful path drains the batch in the collection which
-  created it. C6C.1 makes the cross-collection path intentional panic recovery:
+  created it. C6C.1a makes the cross-collection path intentional panic recovery:
   after one destructor unwinds, every not-yet-attempted identity remains in the
   durable batch and the next collection retains it without tracing before
   resuming destruction. This prevents a recovered interruption from
@@ -2991,11 +2993,13 @@ Execute C6 as the following smaller checkpoints:
   run/word/bit cursor instead of allocating a second per-slot work vector.
   Successful destruction clears the slot allocation bit before removing its
   exact pending identity under the managed-data mutex; fresh allocations and
-  effects remain ordinary later-collection state. Retain terminal zero-mask
-  word and run records through this checkpoint; C6B.3 releases each completed
-  region back to allocator topology. The implemented exact-address quarantine
+  effects remain ordinary later-collection state. C6C.1b replaces this
+  provisional persistent cursor with indexed durable state and bounded local
+  per-run attempts. Retain terminal zero-mask word and run records through this
+  checkpoint; C6B.3 releases each completed region back to allocator topology.
+  The implemented exact-address quarantine
   is temporary checkpoint scaffolding which prevents retry after an immediate
-  panic. C6C.1 replaces it with terminal retirement of the attempted slot,
+  panic. C6C.1a replaces it with terminal retirement of the attempted slot,
   preserves the untouched remainder in the existing durable batch for a later
   collection, and removes the sparse exceptional state.
 - **C6B.3 — managed-`Drop` contract, non-resurrection, and successful
@@ -3016,14 +3020,14 @@ Execute C6 as the following smaller checkpoints:
   reserved run succeeds, retire its saved class record, reset the empty run,
   and publish it immediately to the heap-wide free-run pool; a later finalizer
   or ordinary client may reactivate it without waiting for another collection.
-  C6C.1 generalizes the same terminal-storage path to an unwinding destructor
+  C6C.1a generalizes the same terminal-storage path to an unwinding destructor
   while preserving any untouched remainder. Prove
   entry-elected versus synchronous completion transfers or drops the finalizer
   admission exactly as C3E specifies. Retain the current compact pending
-  bitmaps as the non-rootability authority. The initial linear scan over
-  affected run records is acceptable; C8 measures it before introducing a
-  temporary run-location index.
-- **C6C.1 — panic, terminal retirement, and deferred retry.** Treat a destructor
+  bitmaps as the non-rootability authority. The initial linear scan and
+  ordered vectors are checkpoint-local scaffolding; C6C.1b replaces them with
+  indexed durable state before activity and reporting expose the batch.
+- **C6C.1a — panic, terminal retirement, and deferred retry.** Treat a destructor
   attempt as terminal whether `drop_in_place` returns or unwinds to the
   collector's `catch_unwind` boundary. The failed Rust value is dead and may
   never be observed or dropped again, but its backing slot is ordinary
@@ -3060,6 +3064,66 @@ Execute C6 as the following smaller checkpoints:
   drains. Force at least two pending destructors so the first panic is observed
   before any later destructor runs, the remainder survives as non-rootable
   pending work, and subsequent collections make bounded forward progress.
+- **C6C.1b — indexed durable state and ephemeral dispatch snapshots.** Replace the
+  provisional `Vec<FinalizationRun>` with a
+  `HashMap<RunLocation, FinalizationRun>` and each run's ordered pending-word
+  vector with a `HashMap<usize, u64>` keyed by allocation-word index. The maps
+  are the only durable authority for pending identities. Keep the stable run
+  target, metadata, attachment, exact pending masks, and checked pending-slot
+  count in the map values; do not add one hash entry per pending allocation.
+  Reserve every insertion needed to merge a newly classified dead set before
+  destructive allocator publication. A run which entered the durable batch
+  while attached remains attached across recovered finalizer panics. Later
+  collections merge newly dead masks into that record but do not reclassify it
+  as detached merely because no ordinary traced survivor remains.
+
+  At the start of one finalization attempt, reserve an attempt-local
+  `Vec<RunLocation>`, scan the authoritative run map once under the managed-data
+  mutex, copy each current run key into that vector, and then pop keys from its
+  end to select successive targets. This deliberately pays `HashMap`'s
+  O(capacity) iteration cost once per finalization attempt rather than once per
+  completed run. The vector is an ephemeral dispatch snapshot, not persistent
+  state or finalization authority; dropping it during unwind changes nothing.
+  Finalizing excludes another collection from inserting batch records, while
+  this attempt removes only keys it has already popped. Assert that every later
+  selected key remains present; a missing key is an internal finalization-state
+  defect rather than a recoverable scheduling event.
+
+  For each selected run, look it up in the authoritative map and construct one
+  bounded local run attempt by scanning that run's pending-word map once and
+  copying its word masks and run/word/bit identities. Track original and
+  remaining masks in this local batch. Keep the authoritative run and word
+  entries installed while invoking every erased destructor outside collector
+  locks, so root and debug validation continue to reject all pending
+  identities. Do not retain a persistent work queue or traversal vector, and
+  do not hold a map borrow or invoke `Drop` from a `retain` closure. Managed
+  destruction has no ordering guarantee.
+
+  If the complete local run attempt returns normally, reacquire managed data
+  once, verify that its authoritative masks still equal the attempt snapshot,
+  and commit the run as one terminal batch: clear its allocation bits, remove
+  its pending record, republish every completed attached word, or reset and
+  recycle its detached run. If one destructor unwinds, stop immediately and
+  treat both the successful prefix and the panicking identity as terminal.
+  Under managed data, clear precisely those allocation and pending bits,
+  republish only newly completed attached words, and leave the untouched suffix
+  in the same authoritative run record before C6C.1a's attempt guard restores
+  admission, relatches collection, and resumes the original panic. Local work
+  storage contains only copied identities and masks, so dropping it during
+  unwind cannot invoke another managed destructor.
+
+  Latch the representation change with fixtures which merge later dead slots
+  into both an existing run and an existing word after a recovered panic,
+  exercising expected-constant-time indexed discovery and proving mask union
+  without a duplicate dispatch together with exact pending counts. Force a
+  multi-run batch so one ephemeral run-key snapshot dispatches every run
+  exactly once without rescanning the run map. Cover normal attached and
+  detached run-at-a-time completion; a panic after a nonempty successful
+  prefix; continued root rejection while the local batch is running; and a
+  retry which reconstructs a fresh snapshot and dispatches only the untouched
+  suffix. Run focused Miri together with the crate verification script and
+  ordinary repository checks before C6C.2 builds operational activity and
+  reports on this representation.
 - **C6C.2 — activity, reports, and final pressure publication.** Expose queued
   and running finalizers as heap activity, extend successful collection
   reports with reclaimed and finalized state, incorporate runs activated
@@ -3724,10 +3788,10 @@ Completed on 2026-08-24:
   resumes the original panic. This was deliberately conservative checkpoint
   scaffolding: the subsequent C6C review established that Rust destruction
   terminally retires the value even when it unwinds, while the backing storage
-  remains reusable. C6C.1 removes the sparse record and routes the panicking
+  remains reusable. C6C.1a removes the sparse record and routes the panicking
   slot through ordinary completion instead.
 - This checkpoint therefore supplies only a temporary panic-safe bridge.
-  C6C.1 terminally retires the attempted slot, leaves untouched work pending
+  C6C.1a terminally retires the attempted slot, leaves untouched work pending
   for a later collection, releases every completed region, and deletes the
   quarantine-specific paths.
 - The collector suite now contains 170 unit tests (168 passing plus two
@@ -3758,7 +3822,7 @@ Completed on 2026-08-24:
 - Removing the current batch record keeps the cursor at that run index and
   resets its word index, so the shifted successor is visited without a full
   rescan. The temporary panic path retains its region at this checkpoint;
-  C6C.1 sends the attempted slot through the same release path after unwinding
+  C6C.1a sends the attempted slot through the same release path after unwinding
   reaches the collector boundary while preserving untouched pending bits.
 - Forced fixtures prove post-collection partial-word reuse, same-collection
   reuse by a later destructor, visibility to an independently admitted mutator
@@ -3768,7 +3832,7 @@ Completed on 2026-08-24:
   explicit scale fixtures), 6 Loom models, and 8 compile-fail/doc tests.
   Focused and complete verification is recorded in `VERIFY.md`.
 
-#### C6C.1 completion
+#### C6C.1a completion
 
 Completed on 2026-08-24:
 
@@ -3792,8 +3856,9 @@ Completed on 2026-08-24:
 - The temporary `ErasedGc -> QuarantineRecord` map, its exceptional allocation
   path, special root/debug result, conservative mark walk, detached-run
   restoration branch, and terminal-teardown exclusions are gone. The compact
-  pending bitmaps remain the exact non-rootability authority; their initial
-  linear run-record lookup remains deliberately deferred to C8 measurement.
+  pending bitmaps remain the exact non-rootability authority. The follow-up
+  C6C.1b checkpoint now replaces their provisional linear run lookup and
+  ordered-vector merge before C6C.2 exposes finalizer activity.
 - The regression was latched against the prior behavior before the fix: the
   first panicking slot incorrectly retained its allocation bit. Final focused
   fixtures cover a detached two-item batch, an attached shared allocation word
@@ -3804,7 +3869,7 @@ Completed on 2026-08-24:
   script passes 174 unit tests (172 passing plus two explicit scale fixtures),
   6 Loom models, 8 compile-fail/doc tests, unsafe-inventory audit, and all-
   target/all-feature checking. Workspace formatting, Clippy with warnings
-  denied, and the complete test suite also pass. C6C.1 adds no unsafe site; the
+  denied, and the complete test suite also pass. C6C.1a adds no unsafe site; the
   inventory update reconciles the already reviewed C6B.3 lease-release and
   fixture sites together with the renamed panic fixture.
 
@@ -3866,10 +3931,14 @@ Execute C8 as five checkpoints:
   slot count reset with the mark bitmap. Do not add that count merely to avoid
   an already-cache-local scan; future parallel marking must also account for
   counter contention. Also measure safe-root/debug-access checks while a
-  finalization batch is active. If scanning affected run records is material,
-  add a temporary `RunLocation`-to-finalization-record index and test the exact
-  pending bit in that record. Keep pending bitmaps authoritative; do not
-  repurpose mark bits or add one hash entry per ordinary pending object.
+  finalization batch is active, including the hash-table and sparse-word cost
+  of C6C.1b's indexed representation. Measure the one O(capacity) run-map scan
+  per finalization attempt and the one pending-word-map scan per selected run,
+  including a sparse batch retained after a forced destructor panic. Keep
+  pending masks authoritative; do not repurpose mark bits or add one hash entry
+  per ordinary pending object. Tune the internal hasher, compact exceptional
+  sparse maps, or consider an ordered/dense representation only if
+  representative workloads justify the added specialization.
 - **C8B.3 — paged array tracing exploration.** Use C5D.2 and C8B's wide-array
   measurements to judge whether the plain LIFO `Vec<TraceWork>` has a material
   peak-memory or reallocation cost. If it does, prototype an additive
