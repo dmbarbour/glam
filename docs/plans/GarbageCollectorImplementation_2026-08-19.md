@@ -2988,12 +2988,24 @@ Execute C6 as the following smaller checkpoints:
 - **C6C.1 — panic, draining, and sparse quarantine.** Quarantine a panicking
   slot without invoking its destructor twice, safely drain or classify every
   remaining batch item, retain the first panic for propagation, and restore a
-  usable ordinary heap phase. Rebuild every terminal partial word. A fully
-  reserved run containing quarantine cannot be retyped: restore its stable
-  record to the original allocation class, retain quarantined bits as
-  allocated, and publish any remaining safe capacity. Integrate existing
-  quarantine identities into every later collection as conservatively live,
-  non-traced slots before dead-set classification.
+  usable ordinary heap phase. Represent durable quarantine as a heap-private
+  `HashMap<ErasedGc, QuarantineRecord>` keyed by the exact stable address; each
+  record retains canonical metadata for representation diagnostics and
+  topology assertions. Keep the map initially allocation-free. Do not reserve
+  for the whole finalization batch on the successful path: only after an actual
+  destructor panic, `try_reserve(1)` and insert that one record while the
+  identity remains pending. Failure to record quarantine poisons or aborts the
+  heap rather than forgetting a partially destroyed allocation.
+  Rebuild every terminal partial word. A fully reserved run containing
+  quarantine cannot be retyped: restore its stable record to the original
+  allocation class, retain quarantined bits as allocated, and publish any
+  remaining safe capacity. Transfer pending-to-quarantined state under one
+  managed-data critical section so root validation always sees one exact
+  non-rootable authority. Integrate existing quarantine identities into every
+  later collection immediately after mark clearing as conservatively live,
+  non-traced slots before root tracing and dead-set classification. A
+  quarantined slot and, for a future moving collector, its containing run are
+  permanently pinned until raw heap storage is released.
 - **C6C.2 — activity, reports, and final pressure publication.** Expose queued
   and running finalizers as heap activity, extend collection reports with
   reclaimed/finalized/quarantined state, incorporate runs activated during
@@ -3157,8 +3169,9 @@ recoverable panic injected by its own tests.
   keep quarantined slots allocated, and publish its remaining usable words.
   Neither case waits for another collection merely to recover the run's safe
   capacity.
-- If the finalization batch is empty, finish run-state publication and release
-  exclusive admission without entering `Finalizing`.
+- If the finalization batch is empty, retain C3E's uniform no-op `Finalizing`
+  handoff for the bootstrap. C8 may introduce a direct completion fast path
+  only after measurement and forced lifecycle verification.
 - Before releasing exclusive admission, atomically hand the collector thread
   one ordinary mutator lease and enter `Finalizing`. Then release allocator and
   coordinator locks and reopen shared mutator admission. Invoke each erased
@@ -3186,16 +3199,28 @@ recoverable panic injected by its own tests.
   collector-owned finalization batch through a stale internal pointer.
 - Track the ordinary case through run allocation bits and the collector-owned
   batch rather than an object header state machine. Successful `Drop` clears
-  the slot's allocation bit. A panic records the slot in sparse quarantine
-  state, leaves its allocation bit set and non-reusable, and never invokes its
-  destructor again. Fresh allocations and already-published effects from the
-  destructor remain valid. Quarantine does not depend on retaining the prior
-  successful mark bitmap.
-- Before every later dead-set classification, set each sparse quarantined slot
-  as live after the initial mark clear and increment the scalar conservative-
-  retention count without dispatching its possibly damaged payload's `Trace`
-  implementation. This is the only conservative-retention set in the isolated
-  collector.
+  the slot's allocation bit. A panic inserts the exact erased address and
+  canonical metadata into a heap-private quarantine hash map, leaves the slot's
+  allocation bit set and non-reusable, and never invokes its destructor again.
+  Build no quarantine capacity speculatively: an actual panic reserves one
+  entry before insertion, and inability to make that durable record is a
+  poison-or-abort condition. Fresh allocations and already-published effects
+  from the destructor remain valid. Quarantine does not depend on retaining
+  the prior successful mark bitmap.
+- Before every later root traversal and dead-set classification, iterate the
+  quarantine map immediately after the initial mark clear. Resolve and validate
+  each restored class slot against its recorded canonical metadata, set its
+  mark bit directly, and increment the scalar marked and conservative-
+  retention counts without dispatching its possibly damaged payload's `Trace`
+  implementation or adding trace work. Root validation and terminal teardown
+  use expected-constant-time exact map membership rather than repeatedly
+  scanning a vector. This is the only conservative-retention set in the
+  isolated collector.
+- Treat quarantine as a permanent pin. A future moving collector leaves the
+  complete containing run non-moving rather than attempting to relocate a
+  partially destroyed Rust representation; healthy colocated allocations may
+  remain pinned as an acceptable exceptional cost. Terminal teardown skips the
+  quarantined destructor and releases only the run's raw backing storage.
 - Terminal teardown consults the same sparse quarantine state and skips every
   destructor identity already recorded there. Quarantine is durable collector
   state, not merely a report field, until the underlying heap storage is
