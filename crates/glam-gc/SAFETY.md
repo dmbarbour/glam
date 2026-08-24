@@ -99,14 +99,15 @@ frontiers, and advances the stale-cursor epoch last. C6A.4 replaces historical
 publication pressure with exact assigned-run occupancy. C6B.1 then installs a
 durable exact finalization batch: partial runs retain class membership with
 reserved words, wholly dead drop-bearing runs transfer their stable record to
-batch ownership, and every pending identity becomes non-rootable. C6B.2 drains
-those exact masks with a bounded cursor, invokes erased destructors outside
-collector locks under the installed finalizer mutator, and retires returning
-destructors. C6B.3 republishes each successfully completed attached word or
-detached run. C6C.1 extends terminal retirement through the unwind boundary:
-an unwinding destructor retires its exact allocation, the collector stops
+batch ownership, and every pending identity becomes non-rootable. C6B.2 invokes
+erased destructors outside collector locks under the installed finalizer
+mutator. C6C.1a extends terminal retirement through the unwind boundary: an
+unwinding destructor retires its exact allocation, the collector stops
 dispatching, and untouched pending identities remain in the durable batch for
-a later collection before the original panic resumes.
+a later collection before the original panic resumes. C6C.1b indexes the
+durable batch by run and allocation word, selects runs through an ephemeral
+attempt snapshot, and commits each selected run after its local destructor
+batch returns or unwinds.
 
 The crate denies unsafe code by default. `src/lib.rs` gives the reviewed
 `pointer`, `root`, `mutator`, `trace`, `mutation`, `thread_cache`, and unit-test
@@ -747,38 +748,44 @@ pending C6D.
 
 ### C6B.2 erased destruction and C6C.1 panic retirement
 
-The finalization cursor stores only run, word, and bit indices. Under the
-managed-data mutex it resolves one set pending bit through the retained run
-record, validates the allocation bit and canonical metadata, and derives the
-exact payload address. The cursor and copied work descriptor borrow no payload
-reference. The mutex is released before `ObjectMetadata::drop_in_place`
-dispatches Rust `Drop`, while the collector's C3E mutator remains installed and
-keeps the heap in `Finalizing`. Recursive same-heap entry therefore reuses that
-mutator; unrelated admitted mutators may run concurrently; another collection
-cannot begin.
+The durable finalization batch is indexed first by stable `RunLocation` and
+then by allocation-word index. At the start of an attempt, the collector copies
+the current run keys into one ephemeral dispatch vector. For each selected run,
+it resolves and validates the authoritative pending masks under the
+managed-data mutex, then copies a bounded run-local set of word masks and work
+identities. Neither local snapshot borrows a payload reference or carries
+finalization authority. The mutex is released before
+`ObjectMetadata::drop_in_place` dispatches Rust `Drop`, while the collector's
+C3E mutator remains installed and keeps the heap in `Finalizing`. Recursive
+same-heap entry therefore reuses that mutator; unrelated admitted mutators may
+run concurrently; another collection cannot begin.
 
-After either successful `Drop` or an unwind reaching the collector's
-`catch_unwind` boundary, managed data is reacquired. The attempted Rust value
-is terminally destroyed and must never be observed or dropped again. The exact
-atomic allocation bit is cleared with the finalizer's exclusive word ownership
-before its pending mask bit is removed. Root and debug-access validation shares
-that mutex, so every observer sees either the old pending authority or the
-retired allocation. If that was the last pending bit in an attached word or
-detached run, C6B.3's ordinary completion path republishes or recycles the
-region immediately.
+The authoritative run and word records remain installed throughout the local
+destructor batch. Root and debug-access validation therefore reject every
+pending identity, and every reserved allocation word remains unavailable to
+ordinary allocators. After the complete run succeeds, managed data is
+reacquired once, all copied masks are revalidated, and the run is committed as
+one terminal batch: allocation bits are cleared before pending masks, completed
+attached words are republished, or a completed detached run is reset and
+recycled. This deliberately postpones capacity publication until the selected
+run returns; it does not expose a completed earlier word to a later destructor
+in the same local batch.
 
-On unwind, the collector dispatches no later destructor in that attempt. The
-panic payload stays outside managed heap state while untouched batch records
-remain authoritative: their allocation and pending bits stay set, attached
-words remain reserved, and detached runs remain batch-owned. The collection
-attempt guard releases the finalizer mutator, restores ordinary admission, and
-relatches collection before resuming the original panic. A later collection
-marks each untouched pending slot conservatively without invoking `Trace`,
-counts it as conservative retention, and makes a fresh bounded finalization
-attempt. The panicking identity itself has no durable tombstone: its cleared
-allocation and pending bits are sufficient to prevent retry. The recovery path
-allocates no exceptional record and deliberately has no same-attempt
-second-destructor-panic case.
+On unwind, the collector dispatches no later destructor in that attempt. It
+reacquires managed data once and atomically commits the successful prefix plus
+the panicking identity. Allocation bits are cleared before their pending bits;
+only allocation words which became completely terminal are republished. The
+panic payload stays outside managed heap state while the untouched suffix and
+all unselected run records remain authoritative: their allocation and pending
+bits stay set, attached words remain reserved, and detached runs remain
+batch-owned. The collection attempt guard releases the finalizer mutator,
+restores ordinary admission, and relatches collection before resuming the
+original panic. A later collection marks each untouched pending slot
+conservatively without invoking `Trace`, counts it as conservative retention,
+and makes a fresh bounded finalization attempt. The panicking identity itself
+has no durable tombstone: its cleared allocation and pending bits are sufficient
+to prevent retry. The recovery path allocates no exceptional record and
+deliberately has no same-attempt second-destructor-panic case.
 
 ### Managed `Drop`, spoiled edges, and host ownership
 
@@ -825,12 +832,10 @@ root as a tracing substitute. Collector-aware weak references may later
 provide non-owning host associations, but are not part of this collector.
 
 The durable finalization batch is the current exact non-rootability authority.
-Root and debug access presently find a pending identity by scanning affected
-run records and testing that run's compact pending bitmap. This is expected to
-be small and brief in the bootstrap. If measurement shows otherwise, add a
-temporary `RunLocation`-to-batch-record index while retaining the pending
-bitmap as the authority; do not overload successful mark bits with
-finalization state or duplicate every pending allocation in a hash table.
+Root and debug access first recover the checked slot owner from the arena, then
+perform expected-constant-time lookups in the run map and that run's compact
+pending-word map. There is no hash entry per pending allocation, and successful
+mark bits remain unrelated to finalization state.
 
 ### C6B.3 successful region release
 
@@ -839,16 +844,16 @@ capacity for every newly detached drop-bearing run as well as every immediate
 no-drop retirement. Successful finalization can therefore publish completed
 regions without allocating collector bookkeeping.
 
-For an attached run, clearing the last pending bit in one allocation word
-makes that exact word eligible for reuse even while other words in the run
-remain pending. Under the managed-data mutex the collector has already cleared
-the dead slot's atomic allocation bit and removed its pending bit. It then
-atomically clears only the allocation word's corresponding lease bit. The RMW
-preserves concurrent claims in neighboring bits of the same lease word. A
-Release ordering publishes allocation retirement before the class frontier is
-updated. No new heap-wide lease epoch is required: the word had no prior lease
-owner, and the collection's existing epoch already invalidated every cursor
-from before reservation.
+For an attached run, a successful run attempt makes every allocation word whose
+pending mask became empty eligible for reuse while words with untouched pending
+slots remain reserved. Under the managed-data mutex the collector first clears
+all terminal allocation bits and updates the authoritative masks, then
+atomically clears each completed allocation word's corresponding lease bit.
+The RMW preserves concurrent claims in neighboring bits of the same lease word.
+A Release ordering publishes allocation retirement before the class frontier
+is updated. No new heap-wide lease epoch is required: each word had no prior
+lease owner, and the collection's existing epoch already invalidated every
+cursor from before reservation.
 
 The class keeps an earlier current frontier when the released run occurs later
 in class order, moves backward when a previously passed run regains capacity,
@@ -865,13 +870,12 @@ and its location enters the heap-wide free-run pool. It does not reenter the
 old class. A later finalizer or ordinary admitted mutator may reactivate that
 location through normal typed-run publication.
 
-Removing the current batch record shifts its successor into the same vector
-index; the bounded finalization cursor retains that run index and resets only
-its word index. A destructor panic terminally completes that one work item
-through the same region-release path, then stops cursor dispatch. A zero-mask
-word is republished and a completed detached run is recycled immediately;
-otherwise untouched pending bits keep the word or run reserved for the next
-collection.
+Run dispatch order is deliberately unspecified. Removing one authoritative map
+record cannot invalidate the attempt-local keys for other runs. A destructor
+panic terminally completes the successful prefix and failed identity through
+the same run-commit path, then stops dispatch. A zero-mask word is republished
+and a completed detached run is recycled during that commit; otherwise
+untouched pending bits keep the word or run reserved for the next collection.
 
 The mark range is initialized as ordinary `u64` storage and remains disjoint
 from the header, atomic allocation/lease words, alignment padding, and payload.

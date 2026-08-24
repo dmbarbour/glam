@@ -336,13 +336,14 @@ proves every completed attached word has a directly claimable lease and that
 the terminal batch record is gone. A replacement reuses the first swept slot
 rather than skipping to a never-reserved later word.
 
-`completed_finalization_word_is_reusable_by_a_later_destructor` proves the
-incremental boundary inside one batch: after the first allocation word drains,
-a destructor in the next word recursively allocates the same type and reuses
-the released first slot. The barrier-forced
-`completed_finalization_word_is_visible_to_an_ordinary_mutator` holds that later
-destructor open, admits an unrelated mutator while the runtime remains
-`Finalizing`, and proves the same first-slot reuse from another thread.
+C6C.1b deliberately moves the publication boundary from each destructor to the
+selected run attempt. `finalization_run_commit_delays_word_reuse_by_a_later_destructor`
+proves that a destructor in a later word cannot reuse an earlier completed word
+until the whole local run batch commits. The barrier-forced
+`pending_run_keeps_words_reserved_from_an_ordinary_mutator_until_commit` holds
+that later destructor open, admits an unrelated mutator while the runtime
+remains `Finalizing`, and proves both that the earlier word remains reserved and
+that its pending identity remains non-rootable until commit.
 
 `successful_finalization_releases_partial_and_detached_batch_ownership` proves
 an attached run remains in its class, a completed detached run leaves the
@@ -350,8 +351,9 @@ batch and enters the free pool, stale identities remain non-rootable, and a
 later collection inherits no successful batch obligation.
 `wholly_dead_drop_runs_recycle_without_a_stale_frontier` proves immediate
 same-location retyping through the free pool, while
-`multiple_whole_finalization_detachments_recycle_in_batch_order` proves ordered
-release of multiple stable detached records.
+`multiple_whole_finalization_detachments_recycle_without_dispatch_order` proves
+that one ephemeral run-key snapshot dispatches and recycles multiple stable
+detached records without imposing map iteration or destruction order.
 
 Focused Miri runs are:
 
@@ -359,17 +361,15 @@ Focused Miri runs are:
 cargo +nightly miri test --package glam-gc --lib --all-features \
   partial_drop_runs_release_completed_words_for_reuse
 cargo +nightly miri test --package glam-gc --lib --all-features \
-  completed_finalization_word_is_reusable_by_a_later_destructor
+  finalization_run_commit_delays_word_reuse_by_a_later_destructor
 cargo +nightly miri test --package glam-gc --lib --all-features \
-  completed_finalization_word_is_visible_to_an_ordinary_mutator
+  pending_run_keeps_words_reserved_from_an_ordinary_mutator_until_commit
 cargo +nightly miri test --package glam-gc --lib --all-features \
   successful_finalization_releases_partial_and_detached_batch_ownership
 ```
 
-All four focused fixtures pass Miri. The stable collector matrix contains 172
-unit tests (170 passing and two ignored scale fixtures), six Loom models, and
-eight compile-fail/doc tests. Formatting, all-target/all-feature Clippy with
-warnings denied, and the complete workspace suite also pass.
+The current C6C.1b verification result is recorded below rather than preserving
+the historical C6B.3 matrix as a second authoritative total.
 
 ## C6C.1 Destructor-Panic Retirement Verification
 
@@ -420,6 +420,50 @@ bookkeeping after the existing reviewed erased `drop_in_place` boundary and
 deletes exceptional safe-Rust state. The stable collector matrix contains 174
 unit tests (172 passing and two ignored scale fixtures), six Loom models, and
 eight compile-fail/doc tests.
+
+## C6C.1b Indexed Finalization Verification
+
+C6C.1b replaces linear durable run/word collections and the persistent cursor
+with authoritative nested maps plus bounded local snapshots.
+`retry_merges_new_same_run_and_same_word_finalizers_without_duplication`
+recovers from a destructor panic, adds newly dead slots to both an existing
+pending word and a new word in the same run, then proves exact mask union,
+pending counts, and one dispatch per identity. The run-commit and ordinary-
+mutator fixtures above prove that the maps remain the non-rootability and
+reservation authority while the local work batch runs.
+
+`multiple_whole_finalization_detachments_recycle_without_dispatch_order`
+forces a multi-run batch and proves that the ephemeral run-key snapshot visits
+every selected run exactly once without assigning semantics to `HashMap`
+iteration order. The existing panic-prefix fixtures prove that a normal run
+commits once, while unwind commits only its successful prefix plus failed
+identity and leaves the suffix indexed for retry.
+
+Focused Miri runs are:
+
+```sh
+cargo +nightly miri test --package glam-gc --lib --all-features \
+  heap::tests::retry_merges_new_same_run_and_same_word_finalizers_without_duplication \
+  -- --exact
+cargo +nightly miri test --package glam-gc --lib --all-features \
+  heap::tests::finalization_run_commit_delays_word_reuse_by_a_later_destructor \
+  -- --exact
+cargo +nightly miri test --package glam-gc --lib --all-features \
+  heap::tests::pending_run_keeps_words_reserved_from_an_ordinary_mutator_until_commit \
+  -- --exact
+cargo +nightly miri test --package glam-gc --lib --all-features \
+  heap::tests::multiple_whole_finalization_detachments_recycle_without_dispatch_order \
+  -- --exact
+cargo +nightly miri test --package glam-gc --lib --all-features \
+  heap::tests::managed_destructor_panic_retires_one_and_defers_the_untouched_batch \
+  -- --exact
+```
+
+All five fixtures pass Miri. The stable collector matrix contains 175 unit
+tests (173 passing and two ignored scale fixtures), six Loom models, and eight
+compile-fail/doc tests. The unsafe inventory, workspace formatting,
+all-target/all-feature Clippy with warnings denied, and the complete workspace
+test suite also pass.
 
 ## Gate G0 Baseline
 

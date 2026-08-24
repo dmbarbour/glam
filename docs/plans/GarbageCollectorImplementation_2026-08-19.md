@@ -1,9 +1,8 @@
 # Glam GC Subcrate Implementation Plan — 2026-08-19
 
-Status: in progress; Phases C0 through C6C.1a are complete, including the C2C.6
+Status: in progress; Phases C0 through C6C.1b are complete, including the C2C.6
 verification follow-up. The mandatory post-C1, post-C2C, post-C3E, post-C4,
-and post-C5 downstream reviews are complete. C6C.1b is next, followed by
-C6C.2.
+and post-C5 downstream reviews are complete. C6C.2 is next.
 
 This plan implements an exact, non-moving, runtime-local tracing collector
 without depending on Glam value semantics. The governing requirements and
@@ -74,7 +73,7 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C6B.2 | completed | finalizer handoff, destruction, and temporary panic-retirement scaffolding |
 | C6B.3 | completed | managed-`Drop` contract, non-resurrection, and successful completion |
 | C6C.1a | completed | destructor panic, terminal slot retirement, and deferred retry |
-| C6C.1b | pending | indexed finalization state and ephemeral run dispatch snapshots |
+| C6C.1b | completed | indexed finalization state and ephemeral run dispatch snapshots |
 | C6C.2 | pending | finalizer activity, reports, and pressure publication |
 | C6D.1 | pending | terminal-teardown decision and fixtures |
 | C6D.2 | pending | terminal teardown |
@@ -2384,15 +2383,15 @@ downstream corrections are required:
   wholly dead drop-bearing run is instead detached from allocator selection in
   full while still under `Exclusive`, because no live allocation benefits from
   retaining a partial allocator view. The finalizer owns the reserved storage
-  until its corresponding slots are terminally retired. A terminal partial
-  word is rebuilt and republished immediately. A wholly dead run whose complete
-  run batch drains is retired and published to the free-run pool immediately,
-  without waiting for another collection. A destructor panic terminally
-  retires the attempted value and its storage through the same completion
-  path, then stops that finalization attempt. Any not-yet-attempted slots remain
-  exact pending identities with their words or detached runs reserved for the
-  next collection. This preserves the allocation bitmap's one-writer rule
-  without making every
+  until its corresponding slots are terminally retired. C6C.1b batches
+  publication at the selected-run boundary: a normally completed local run
+  republishes all terminal partial words or recycles its detached run in one
+  commit. A destructor panic terminally retires the successful prefix plus the
+  attempted value, republishes only words which that prefix made wholly
+  terminal, and then stops that finalization attempt. Any not-yet-attempted
+  slots remain exact pending identities with their words or detached runs
+  reserved for the next collection. This preserves the allocation bitmap's
+  one-writer rule without making every
   drop-bearing run unavailable or preventing reclaimed runs from being reused
   across collection cycles.
 - **Panic recovery and terminal teardown must agree.** A destructor attempt is
@@ -3014,9 +3013,10 @@ Execute C6 as the following smaller checkpoints:
   roots. Keep graph quining, destruction ordering, and resurrection
   unsupported.
 
-  Reject roots to any remaining batch identity and publish completed regions
-  incrementally under heap state. Rebuild and republish a terminal partial
-  word immediately. On the successful path, when every destructor in a fully
+  Reject roots to any remaining batch identity. The provisional C6B.3
+  implementation published completed regions incrementally; C6C.1b supersedes
+  that timing with one managed-data commit per selected run. On the successful
+  path, when every destructor in a fully
   reserved run succeeds, retire its saved class record, reset the empty run,
   and publish it immediately to the heap-wide free-run pool; a later finalizer
   or ordinary client may reactivate it without waiting for another collection.
@@ -3773,7 +3773,9 @@ Completed on 2026-08-24:
 - The collector drains the batch with a compact run/word/bit cursor. It derives
   one exact initialized payload under the managed-data mutex, releases every
   collector lock, then dispatches that record's canonical erased Rust
-  destructor while the C3E finalizer mutator is installed.
+  destructor while the C3E finalizer mutator is installed. This records the
+  completed C6B.2 checkpoint; C6C.1b later replaces the persistent cursor with
+  indexed durable state and bounded attempt-local snapshots.
 - A successful destructor reacquires managed data, clears the exact atomic
   allocation bit first, and only then removes the pending mask bit. Concurrent
   root/debug validation therefore observes either a pending identity or an
@@ -3827,7 +3829,10 @@ Completed on 2026-08-24:
 - Forced fixtures prove post-collection partial-word reuse, same-collection
   reuse by a later destructor, visibility to an independently admitted mutator
   while the collector is still `Finalizing`, whole-run reuse without a stale
-  class frontier, and ordered recycling of multiple detached runs.
+  class frontier, and ordered recycling of multiple detached runs. C6C.1b later
+  moves publication to the selected-run commit boundary and removes destruction
+  and detached-run order from the contract; its completion record and
+  `VERIFY.md` contain the superseding fixtures.
 - The collector suite now contains 172 unit tests (170 passing plus two
   explicit scale fixtures), 6 Loom models, and 8 compile-fail/doc tests.
   Focused and complete verification is recorded in `VERIFY.md`.
@@ -3872,6 +3877,44 @@ Completed on 2026-08-24:
   denied, and the complete test suite also pass. C6C.1a adds no unsafe site; the
   inventory update reconciles the already reviewed C6B.3 lease-release and
   fixture sites together with the renamed panic fixture.
+
+#### C6C.1b completion
+
+Completed on 2026-08-24:
+
+- Durable pending-finalizer authority is now a
+  `HashMap<RunLocation, FinalizationRun>` whose run records contain compact
+  `HashMap<word_index, pending_mask>` indexes and checked pending-slot counts.
+  Root/debug validation recovers the arena slot owner first, then performs
+  expected-constant-time run and word lookup without one hash entry per slot.
+- Planning retains a separate transient install-order vector so class
+  detachment remains deterministic even though the final durable map assigns
+  no destructor order. Capacity for every new run and word entry is reserved
+  before selector withdrawal; later collections merge newly dead masks into an
+  existing attached record without duplicate obligations.
+- Each finalization attempt scans the durable run map once into an ephemeral
+  run-key vector. Selecting a run scans only its pending-word map and builds one
+  bounded local work batch. The authoritative maps remain installed while Rust
+  destructors execute outside collector locks, preserving non-rootability and
+  word reservation throughout the attempt.
+- A normally returning local run batch is committed under managed data once:
+  terminal allocation bits clear before pending masks, completed attached
+  words are republished, or a completed detached run is reset and recycled. A
+  panic commits only the successful prefix plus failed identity, leaves the
+  untouched suffix indexed, then follows C6C.1a recovery. Capacity from an
+  earlier completed word is deliberately unavailable to later destructors or
+  unrelated mutators until that selected-run commit.
+- The pre-fix fixtures expecting per-destructor word publication were updated
+  to latch the run-at-a-time boundary. New coverage forces recovered-panic
+  merges into an existing run, an existing word, and a new word; exact pending
+  counts and no duplicate dispatch; root rejection during local execution; and
+  multi-run dispatch through one ephemeral snapshot without order assumptions.
+- Five focused fixtures pass Miri. The authoritative collector matrix contains
+  175 unit tests (173 passing plus two explicit scale fixtures), 6 Loom models,
+  and 8 compile-fail/doc tests. The unsafe inventory, workspace formatting,
+  all-target/all-feature Clippy with warnings denied, and the complete workspace
+  test suite pass. The implementation adds no new unsafe site; the inventory
+  only tracks the existing erased-drop site at its new indentation.
 
 ### Mandatory Post-C6 Review
 

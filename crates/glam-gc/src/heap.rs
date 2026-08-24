@@ -466,30 +466,28 @@ impl ManagedData {
         self.arena.owner_slot_is_marked(slot.owner)
     }
 
-    fn prepare_swept_allocator_transition(&mut self, dead_set: &DeadSetPlan) -> FinalizationBatch {
+    fn prepare_swept_allocator_transition(
+        &mut self,
+        dead_set: &DeadSetPlan,
+    ) -> FinalizationBatchPlan {
         assert!(
             self.retired_no_drop_runs.is_empty(),
             "a new collection cannot inherit unfinished no-drop retirement"
         );
-        let finalization_batch = FinalizationBatch::plan(dead_set);
+        let finalization_batch = FinalizationBatchPlan::new(dead_set);
         self.finalization_batch
             .runs
             .try_reserve(finalization_batch.runs.len())
             .expect("durable finalization batch capacity exhausted");
-        for planned in &finalization_batch.runs {
-            if let Some(existing) = self
-                .finalization_batch
-                .runs
-                .iter_mut()
-                .find(|pending| pending.target.target() == planned.target.target())
-            {
+        for (&location, planned) in &finalization_batch.runs {
+            if let Some(existing) = self.finalization_batch.runs.get_mut(&location) {
                 assert!(
                     !existing.target.is_detached(),
                     "detached finalization run reappeared in class topology"
                 );
                 existing
                     .pending_words
-                    .try_reserve(planned.pending_words.len())
+                    .try_reserve(planned.run.pending_words.len())
                     .expect("durable finalization word capacity exhausted");
             }
         }
@@ -500,8 +498,8 @@ impl ManagedData {
             .count();
         let detached_finalizer_count = finalization_batch
             .runs
-            .iter()
-            .filter(|run| run.detach_from_index.is_some())
+            .values()
+            .filter(|planned| planned.detach_from_index.is_some())
             .count();
         self.retired_no_drop_runs
             .try_reserve(retired_count)
@@ -564,12 +562,8 @@ impl ManagedData {
                 &run.target,
                 "dead run changed its ordered class position"
             );
-            if let Some(pending) = self
-                .finalization_batch
-                .runs
-                .iter()
-                .find(|pending| pending.target.target() == run.target)
-            {
+            if let Some(pending) = self.finalization_batch.runs.get(&run.target.location) {
+                assert_eq!(pending.target.target(), run.target);
                 assert!(!pending.target.is_detached());
                 assert_ne!(run.live_slots, 0);
             }
@@ -647,23 +641,24 @@ impl ManagedData {
         recycled_count
     }
 
-    fn install_finalization_batch(&mut self, batch: FinalizationBatch) {
+    fn install_finalization_batch(&mut self, mut batch: FinalizationBatchPlan) {
         // Planning reserved durable batch capacity and validated every target
         // before selector withdrawal. This loop only moves stable boxes and
         // appends or merges exact masks into existing capacity.
-        for mut run in batch.runs {
-            let target = run.target.target();
-            if let Some(existing) = self
-                .finalization_batch
+        for location in batch.install_order {
+            let planned = batch
                 .runs
-                .iter_mut()
-                .find(|pending| pending.target.target() == target)
-            {
-                debug_assert!(run.detach_from_index.is_none());
+                .remove(&location)
+                .expect("finalization install order lost its planned run");
+            let mut run = planned.run;
+            let target = run.target.target();
+            assert_eq!(target.location, location);
+            if let Some(existing) = self.finalization_batch.runs.get_mut(&location) {
+                debug_assert!(planned.detach_from_index.is_none());
                 debug_assert!(!existing.target.is_detached());
                 debug_assert_eq!(existing.class_id, run.class_id);
                 debug_assert!(std::ptr::eq(existing.metadata, run.metadata));
-                existing.merge_pending_words(&run.pending_words);
+                existing.merge_pending_words(&run.pending_words, run.pending_slot_count);
                 continue;
             }
 
@@ -674,7 +669,7 @@ impl ManagedData {
                 .expect("finalization run allocation class is absent");
             assert!(class.frontier_is_withdrawn());
 
-            if let Some(former_index) = run.detach_from_index {
+            if let Some(former_index) = planned.detach_from_index {
                 let (current_index, target) = class.retire_withdrawn_run_at(target);
                 assert!(
                     current_index <= former_index,
@@ -685,26 +680,42 @@ impl ManagedData {
                 assert!(class.contains_target(target));
             }
 
-            self.finalization_batch.runs.push(run);
-        }
-    }
-
-    fn next_finalization_work(&self, cursor: &mut FinalizationCursor) -> Option<FinalizationWork> {
-        self.finalization_batch.next_work(&self.arena, cursor)
-    }
-
-    fn complete_finalization(&mut self, work: FinalizationWork) -> bool {
-        let completion = self.finalization_batch.complete_terminal(&self.arena, work);
-
-        if let Some(released) = completion.released_attached_word {
-            self.arena.release_finalized_allocation_word(
-                released.target,
-                released.class_id,
-                released.word_index,
+            assert!(
+                self.finalization_batch.runs.insert(location, run).is_none(),
+                "finalization install duplicated a durable run"
             );
-            let index = class_index(released.class_id)
+        }
+        assert!(batch.runs.is_empty());
+    }
+
+    fn finalization_dispatch_snapshot(&self) -> Vec<RunLocation> {
+        self.finalization_batch.dispatch_snapshot()
+    }
+
+    fn prepare_finalization_run(&self, location: RunLocation) -> RunFinalizationAttempt {
+        self.finalization_batch
+            .prepare_run_attempt(&self.arena, location)
+    }
+
+    fn complete_finalization_run(&mut self, attempt: RunFinalizationAttempt) {
+        let completion = self
+            .finalization_batch
+            .complete_run_attempt(&self.arena, attempt);
+
+        if !completion.detached {
+            let index = class_index(completion.class_id)
                 .expect("released finalization word has invalid class ID");
-            self.classes[index].publish_released_run(released.target);
+            for word in &completion.words {
+                if word.remaining_mask != 0 {
+                    continue;
+                }
+                self.arena.release_finalized_allocation_word(
+                    completion.target,
+                    completion.class_id,
+                    word.word_index,
+                );
+                self.classes[index].publish_released_run(completion.target);
+            }
         }
 
         if let Some(completed) = completion.completed_detached_run {
@@ -713,8 +724,6 @@ impl ManagedData {
             self.allocation_pressure.record_run_release();
             self.free_runs.push(target.location);
         }
-
-        completion.removed_run_record
     }
 
     fn sweep_partial_no_drop_runs(&mut self, dead_set: &DeadSetPlan) {
@@ -971,18 +980,22 @@ struct RetiredNoDropRun {
 /// root rejection, terminal teardown, and later collection nonduplicating.
 #[derive(Default)]
 struct FinalizationBatch {
-    runs: Vec<FinalizationRun>,
+    runs: HashMap<RunLocation, FinalizationRun>,
 }
 
-#[derive(Default)]
-struct FinalizationCursor {
-    run_index: usize,
-    word_index: usize,
+struct FinalizationBatchPlan {
+    runs: HashMap<RunLocation, PlannedFinalizationRun>,
+    install_order: Vec<RunLocation>,
+}
+
+struct PlannedFinalizationRun {
+    run: FinalizationRun,
+    detach_from_index: Option<usize>,
 }
 
 #[derive(Clone, Copy)]
 struct FinalizationWork {
-    run_index: usize,
+    word_attempt_index: usize,
     word_index: usize,
     bit: u64,
     owner: RunOwner,
@@ -991,16 +1004,28 @@ struct FinalizationWork {
 }
 
 struct FinalizationCompletion {
-    released_attached_word: Option<ReleasedFinalizationWord>,
-    completed_detached_run: Option<CompletedDetachedRun>,
-    removed_run_record: bool,
-}
-
-#[derive(Clone, Copy)]
-struct ReleasedFinalizationWord {
     target: RunClaimTarget,
     class_id: AllocationClassId,
+    detached: bool,
+    words: Vec<FinalizationWordAttempt>,
+    completed_detached_run: Option<CompletedDetachedRun>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FinalizationWordAttempt {
     word_index: usize,
+    original_mask: u64,
+    remaining_mask: u64,
+}
+
+struct RunFinalizationAttempt {
+    location: RunLocation,
+    target: RunClaimTarget,
+    class_id: AllocationClassId,
+    metadata: &'static ObjectMetadata,
+    words: Vec<FinalizationWordAttempt>,
+    work: Vec<FinalizationWork>,
+    next_work_index: usize,
 }
 
 struct CompletedDetachedRun {
@@ -1012,8 +1037,8 @@ struct FinalizationRun {
     target: FinalizationRunTarget,
     class_id: AllocationClassId,
     metadata: &'static ObjectMetadata,
-    detach_from_index: Option<usize>,
-    pending_words: Vec<DeadBitmapWord>,
+    pending_slot_count: usize,
+    pending_words: HashMap<usize, u64>,
 }
 
 enum FinalizationRunTarget {
@@ -1038,36 +1063,32 @@ impl FinalizationRunTarget {
 
 impl FinalizationRun {
     fn pending_slot_count(&self) -> usize {
-        self.pending_words.iter().fold(0_usize, |total, word| {
-            total
-                .checked_add(word.dead_mask.count_ones() as usize)
-                .expect("finalization slot count exhausted")
-        })
+        self.pending_slot_count
     }
 
-    fn contains_address(&self, address: usize) -> bool {
+    fn contains_owner(&self, owner: RunOwner) -> bool {
         let target = self.target.target();
-        let Some(offset) = address.checked_sub(target.run.address()) else {
+        if owner.location != target.location
+            || owner.run != target.run
+            || owner.class_id != self.class_id
+            || owner.geometry != target.geometry
+        {
             return false;
-        };
-        let Some(slot_index) = target.geometry.slot_index(offset) else {
-            return false;
-        };
-        let word_index = slot_index / u64::BITS as usize;
-        let bit = 1_u64 << (slot_index % u64::BITS as usize);
+        }
+        let word_index = owner.slot_index / u64::BITS as usize;
+        let bit = 1_u64 << (owner.slot_index % u64::BITS as usize);
         self.pending_words
-            .iter()
-            .any(|word| word.word_index == word_index && word.dead_mask & bit != 0)
+            .get(&word_index)
+            .is_some_and(|pending| pending & bit != 0)
     }
 
     fn visit_pending_slots(&self, mut visit: impl FnMut(RunOwner)) {
         let target = self.target.target();
-        for word in &self.pending_words {
-            let word_start = word
-                .word_index
+        for (&word_index, &pending_mask) in &self.pending_words {
+            let word_start = word_index
                 .checked_mul(u64::BITS as usize)
                 .expect("finalization word offset exhausted");
-            let mut pending = word.dead_mask;
+            let mut pending = pending_mask;
             while pending != 0 {
                 let bit_index = pending.trailing_zeros() as usize;
                 let slot_index = word_start
@@ -1086,36 +1107,38 @@ impl FinalizationRun {
         }
     }
 
-    fn merge_pending_words(&mut self, additional: &[DeadBitmapWord]) {
-        for word in additional {
-            match self
-                .pending_words
-                .binary_search_by_key(&word.word_index, |pending| pending.word_index)
-            {
-                Ok(index) => {
-                    assert_eq!(
-                        self.pending_words[index].dead_mask & word.dead_mask,
-                        0,
-                        "finalization batch duplicated an existing slot obligation"
-                    );
-                    self.pending_words[index].dead_mask |= word.dead_mask;
-                }
-                Err(index) => self.pending_words.insert(index, *word),
-            }
+    fn merge_pending_words(&mut self, additional: &HashMap<usize, u64>, additional_slots: usize) {
+        for (&word_index, &additional_mask) in additional {
+            assert_ne!(additional_mask, 0);
+            let pending = self.pending_words.entry(word_index).or_default();
+            assert_eq!(
+                *pending & additional_mask,
+                0,
+                "finalization batch duplicated an existing slot obligation"
+            );
+            *pending |= additional_mask;
         }
+        self.pending_slot_count = self
+            .pending_slot_count
+            .checked_add(additional_slots)
+            .expect("finalization slot count exhausted");
     }
 }
 
-impl FinalizationBatch {
-    fn plan(dead_set: &DeadSetPlan) -> Self {
+impl FinalizationBatchPlan {
+    fn new(dead_set: &DeadSetPlan) -> Self {
         let run_count = dead_set
             .dead_runs
             .iter()
             .filter(|run| run.disposition == DeadSlotDisposition::DropRequired)
             .count();
-        let mut runs = Vec::new();
-        runs.try_reserve_exact(run_count)
+        let mut runs = HashMap::new();
+        runs.try_reserve(run_count)
             .expect("finalization run batch capacity exhausted");
+        let mut install_order = Vec::new();
+        install_order
+            .try_reserve_exact(run_count)
+            .expect("finalization install-order capacity exhausted");
 
         for run in dead_set
             .dead_runs
@@ -1128,11 +1151,19 @@ impl FinalizationBatch {
                 .dead_words
                 .get(run.dead_words.clone())
                 .expect("finalization run has an invalid word range");
-            let mut pending_words = Vec::new();
+            let mut pending_words = HashMap::new();
             pending_words
-                .try_reserve_exact(source_words.len())
+                .try_reserve(source_words.len())
                 .expect("finalization word batch capacity exhausted");
-            pending_words.extend_from_slice(source_words);
+            for word in source_words {
+                assert_ne!(word.dead_mask, 0);
+                assert!(
+                    pending_words
+                        .insert(word.word_index, word.dead_mask)
+                        .is_none(),
+                    "finalization plan duplicated a pending word"
+                );
+            }
             let detach_from_index = (run.live_slots == 0).then(|| {
                 let retired_before = dead_set
                     .dead_runs
@@ -1148,20 +1179,33 @@ impl FinalizationBatch {
                     .checked_sub(retired_before)
                     .expect("finalization run position underflowed retired topology")
             });
-            let planned = FinalizationRun {
-                target: FinalizationRunTarget::Attached(run.target),
-                class_id: run.class_id,
-                metadata: run.metadata,
+            let location = run.target.location;
+            let planned = PlannedFinalizationRun {
                 detach_from_index,
-                pending_words,
+                run: FinalizationRun {
+                    target: FinalizationRunTarget::Attached(run.target),
+                    class_id: run.class_id,
+                    metadata: run.metadata,
+                    pending_slot_count: run.dead_slots,
+                    pending_words,
+                },
             };
-            assert_eq!(planned.pending_slot_count(), run.dead_slots);
-            runs.push(planned);
+            assert_eq!(planned.run.pending_slot_count(), run.dead_slots);
+            assert!(
+                runs.insert(location, planned).is_none(),
+                "finalization plan duplicated a run"
+            );
+            install_order.push(location);
         }
 
-        Self { runs }
+        Self {
+            runs,
+            install_order,
+        }
     }
+}
 
+impl FinalizationBatch {
     #[cfg_attr(
         not(test),
         allow(
@@ -1170,7 +1214,7 @@ impl FinalizationBatch {
         )
     )]
     fn pending_slot_count(&self) -> usize {
-        self.runs.iter().fold(0_usize, |total, run| {
+        self.runs.values().fold(0_usize, |total, run| {
             total
                 .checked_add(run.pending_slot_count())
                 .expect("finalization batch slot count exhausted")
@@ -1179,38 +1223,61 @@ impl FinalizationBatch {
 
     fn detached_run_count(&self) -> usize {
         self.runs
-            .iter()
+            .values()
             .filter(|run| run.target.is_detached())
             .count()
     }
 
-    fn pending_metadata_at(&self, address: usize) -> Option<&'static ObjectMetadata> {
-        self.runs
-            .iter()
-            .find(|run| run.contains_address(address))
-            .map(|run| run.metadata)
-    }
-
-    fn next_work(
+    fn pending_metadata_at(
         &self,
         arena: &Arena,
-        cursor: &mut FinalizationCursor,
-    ) -> Option<FinalizationWork> {
-        while let Some(run) = self.runs.get(cursor.run_index) {
-            while let Some(word) = run.pending_words.get(cursor.word_index) {
-                if word.dead_mask == 0 {
-                    cursor.word_index += 1;
-                    continue;
-                }
+        address: usize,
+    ) -> Option<&'static ObjectMetadata> {
+        let owner = arena.checked_slot_owner(address)?;
+        let run = self.runs.get(&owner.location)?;
+        run.contains_owner(owner).then_some(run.metadata)
+    }
 
-                let bit_index = word.dead_mask.trailing_zeros() as usize;
+    fn dispatch_snapshot(&self) -> Vec<RunLocation> {
+        let mut locations = Vec::new();
+        locations
+            .try_reserve_exact(self.runs.len())
+            .expect("finalization dispatch snapshot capacity exhausted");
+        locations.extend(self.runs.keys().copied());
+        locations
+    }
+
+    fn prepare_run_attempt(&self, arena: &Arena, location: RunLocation) -> RunFinalizationAttempt {
+        let run = self
+            .runs
+            .get(&location)
+            .expect("finalization dispatch snapshot lost a run");
+        let target = run.target.target();
+        assert_eq!(target.location, location);
+        let mut words = Vec::new();
+        words
+            .try_reserve_exact(run.pending_words.len())
+            .expect("run finalization word snapshot capacity exhausted");
+        let mut work = Vec::new();
+        work.try_reserve_exact(run.pending_slot_count)
+            .expect("run finalization work capacity exhausted");
+
+        for (&word_index, &pending_mask) in &run.pending_words {
+            assert_ne!(pending_mask, 0);
+            let word_attempt_index = words.len();
+            words.push(FinalizationWordAttempt {
+                word_index,
+                original_mask: pending_mask,
+                remaining_mask: pending_mask,
+            });
+            let mut pending = pending_mask;
+            while pending != 0 {
+                let bit_index = pending.trailing_zeros() as usize;
                 let bit = 1_u64 << bit_index;
-                let slot_index = word
-                    .word_index
+                let slot_index = word_index
                     .checked_mul(u64::BITS as usize)
                     .and_then(|start| start.checked_add(bit_index))
                     .expect("finalization slot index exhausted");
-                let target = run.target.target();
                 assert!(slot_index < target.geometry.slot_count);
                 let owner = RunOwner {
                     location: target.location,
@@ -1221,77 +1288,126 @@ impl FinalizationBatch {
                 };
                 assert!(arena.owner_slot_is_allocated(owner));
                 let pointer = arena.owner_slot_pointer(owner);
-                return Some(FinalizationWork {
-                    run_index: cursor.run_index,
-                    word_index: cursor.word_index,
+                work.push(FinalizationWork {
+                    word_attempt_index,
+                    word_index,
                     bit,
                     owner,
                     value: ErasedGc::new(pointer),
                     metadata: run.metadata,
                 });
+                pending &= pending - 1;
             }
-            cursor.run_index += 1;
-            cursor.word_index = 0;
         }
-        None
+
+        assert_eq!(work.len(), run.pending_slot_count);
+        RunFinalizationAttempt {
+            location,
+            target,
+            class_id: run.class_id,
+            metadata: run.metadata,
+            words,
+            work,
+            next_work_index: 0,
+        }
     }
 
-    fn complete_terminal(
+    fn complete_run_attempt(
         &mut self,
         arena: &Arena,
-        work: FinalizationWork,
+        attempt: RunFinalizationAttempt,
     ) -> FinalizationCompletion {
-        let (target, class_id, finalized_word_index, word_completed, run_completed, detached) = {
+        let location = attempt.location;
+        let target = attempt.target;
+        let class_id = attempt.class_id;
+        let metadata = attempt.metadata;
+        let remaining_slots = attempt.words.iter().fold(0_usize, |total, word| {
+            total
+                .checked_add(word.remaining_mask.count_ones() as usize)
+                .expect("remaining finalization slot count exhausted")
+        });
+
+        {
             let run = self
                 .runs
-                .get_mut(work.run_index)
+                .get(&location)
                 .expect("completed finalization lost its run record");
-            let target = run.target.target();
-            assert_eq!(target.location, work.owner.location);
-            assert_eq!(run.class_id, work.owner.class_id);
-            assert!(std::ptr::eq(run.metadata, work.metadata));
-            let word = run
-                .pending_words
-                .get_mut(work.word_index)
-                .expect("completed finalization lost its word record");
-            assert_ne!(word.dead_mask & work.bit, 0);
-            assert_eq!(arena.owner_slot_pointer(work.owner), work.value.as_ptr());
+            assert_eq!(run.target.target(), target);
+            assert_eq!(run.class_id, class_id);
+            assert!(std::ptr::eq(run.metadata, metadata));
+            assert_eq!(run.pending_words.len(), attempt.words.len());
+            assert_eq!(run.pending_slot_count, attempt.work.len());
+            for word in &attempt.words {
+                assert_eq!(
+                    run.pending_words.get(&word.word_index),
+                    Some(&word.original_mask),
+                    "finalization run changed while its local attempt executed"
+                );
+            }
+        }
 
-            // Keep the exact batch identity authoritative until after the
-            // allocation bit is cleared. Root validation shares this heap
-            // mutex, so it observes either pending finalization or an
-            // unallocated slot.
-            assert!(
-                arena.clear_owner_allocation(work.owner),
-                "terminally destroyed allocation was already retired"
-            );
-            word.dead_mask &= !work.bit;
-            let finalized_word_index = word.word_index;
-            debug_assert_eq!(
-                finalized_word_index,
-                work.owner.slot_index / u64::BITS as usize
-            );
-            let word_completed = word.dead_mask == 0;
-            let run_completed = run.pending_words.iter().all(|word| word.dead_mask == 0);
-            (
-                target,
-                run.class_id,
-                finalized_word_index,
-                word_completed,
-                run_completed,
-                run.target.is_detached(),
-            )
-        };
+        // Keep every exact pending identity authoritative until all completed
+        // allocation bits have been cleared. Root validation shares this heap
+        // mutex, so it observes either pending finalization or an unallocated
+        // slot.
+        for word in &attempt.words {
+            let mut completed = word.original_mask & !word.remaining_mask;
+            while completed != 0 {
+                let bit_index = completed.trailing_zeros() as usize;
+                let slot_index = word
+                    .word_index
+                    .checked_mul(u64::BITS as usize)
+                    .and_then(|start| start.checked_add(bit_index))
+                    .expect("completed finalization slot index exhausted");
+                let owner = RunOwner {
+                    location,
+                    run: target.run,
+                    class_id,
+                    geometry: target.geometry,
+                    slot_index,
+                };
+                assert!(
+                    arena.clear_owner_allocation(owner),
+                    "terminally destroyed allocation was already retired"
+                );
+                completed &= completed - 1;
+            }
+        }
 
-        let released_attached_word =
-            (word_completed && !detached).then_some(ReleasedFinalizationWord {
-                target,
-                class_id,
-                word_index: finalized_word_index,
-            });
-        let remove_run_record = run_completed;
-        let completed_detached_run = if remove_run_record {
-            let run = self.runs.remove(work.run_index);
+        let detached = self
+            .runs
+            .get(&location)
+            .expect("completed finalization lost its run record")
+            .target
+            .is_detached();
+        {
+            let run = self
+                .runs
+                .get_mut(&location)
+                .expect("completed finalization lost its run record");
+            for word in &attempt.words {
+                if word.remaining_mask == 0 {
+                    assert_eq!(
+                        run.pending_words.remove(&word.word_index),
+                        Some(word.original_mask)
+                    );
+                } else {
+                    assert_eq!(
+                        run.pending_words
+                            .insert(word.word_index, word.remaining_mask),
+                        Some(word.original_mask)
+                    );
+                }
+            }
+            run.pending_slot_count = remaining_slots;
+            assert_eq!(run.pending_words.is_empty(), remaining_slots == 0);
+        }
+
+        let completed_detached_run = if remaining_slots == 0 {
+            let run = self
+                .runs
+                .remove(&location)
+                .expect("completed finalization lost its empty run record");
             match run.target {
                 FinalizationRunTarget::Attached(attached) => {
                     debug_assert_eq!(attached, target);
@@ -1306,26 +1422,55 @@ impl FinalizationBatch {
         };
 
         FinalizationCompletion {
-            released_attached_word,
+            target,
+            class_id,
+            detached,
+            words: attempt.words,
             completed_detached_run,
-            removed_run_record: remove_run_record,
         }
     }
 
     fn reserves_word(&self, target: RunClaimTarget, word_index: usize) -> bool {
-        self.runs.iter().any(|run| {
+        self.runs.get(&target.location).is_some_and(|run| {
             run.target.target() == target
                 && run
                     .pending_words
-                    .iter()
-                    .any(|word| word.word_index == word_index && word.dead_mask != 0)
+                    .get(&word_index)
+                    .is_some_and(|pending| *pending != 0)
         })
     }
 
     fn visit_pending_slots(&self, mut visit: impl FnMut(RunOwner)) {
-        for run in &self.runs {
+        for run in self.runs.values() {
             run.visit_pending_slots(&mut visit);
         }
+    }
+}
+
+impl RunFinalizationAttempt {
+    fn next_work(&self) -> Option<FinalizationWork> {
+        self.work.get(self.next_work_index).copied()
+    }
+
+    fn complete_terminal(&mut self, work: FinalizationWork) {
+        assert_eq!(
+            self.work.get(self.next_work_index).map(|next| next.value),
+            Some(work.value),
+            "finalization attempt completed work out of order"
+        );
+        let word = self
+            .words
+            .get_mut(work.word_attempt_index)
+            .expect("finalization work lost its local word snapshot");
+        assert_eq!(word.word_index, work.word_index);
+        assert_eq!(work.owner.location, self.location);
+        assert_eq!(work.owner.run, self.target.run);
+        assert_eq!(work.owner.class_id, self.class_id);
+        assert_eq!(work.owner.geometry, self.target.geometry);
+        assert_eq!(work.owner.slot_index / u64::BITS as usize, work.word_index);
+        assert_ne!(word.remaining_mask & work.bit, 0);
+        word.remaining_mask &= !work.bit;
+        self.next_work_index += 1;
     }
 }
 
@@ -1968,48 +2113,43 @@ impl HeapInner {
 
     fn run_finalization_batch(&self, mutator: &Mutator<'_>) {
         debug_assert!(std::ptr::eq(self, Arc::as_ptr(mutator.heap())));
-        let mut cursor = FinalizationCursor::default();
+        let mut locations = self
+            .data
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .finalization_dispatch_snapshot();
 
-        loop {
-            let work = {
-                let data = self
-                    .data
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                data.next_finalization_work(&mut cursor)
-            };
-            let Some(work) = work else {
-                break;
-            };
-
-            // SAFETY: the batch record was built from an initialized allocated
-            // slot with this canonical metadata. Its exact word remains
-            // finalizer-owned, root/debug access rejects the pending identity,
-            // and the installed finalizer mutator prevents another collection.
-            // No collector lock is held while user/Rust destruction runs.
-            let result = catch_unwind(AssertUnwindSafe(|| unsafe {
-                work.metadata.drop_in_place(work.value.as_ptr())
-            }));
-
-            let mut data = self
+        while let Some(location) = locations.pop() {
+            let mut attempt = self
                 .data
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            match result {
-                Ok(()) => {
-                    if data.complete_finalization(work) {
-                        // Removing the completed current run shifts its
-                        // successor into this same run index. Restart at that
-                        // successor's first word without rescanning any prior
-                        // record.
-                        cursor.word_index = 0;
-                    }
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .prepare_finalization_run(location);
+            let mut panic = None;
+
+            while let Some(work) = attempt.next_work() {
+                // SAFETY: the durable map and local run snapshot were built
+                // from an initialized allocated slot with this canonical
+                // metadata. The exact word remains finalizer-owned, root/debug
+                // access rejects every pending identity, and the installed
+                // finalizer mutator prevents another collection. No collector
+                // lock is held while user/Rust destruction runs.
+                let result = catch_unwind(AssertUnwindSafe(|| unsafe {
+                    work.metadata.drop_in_place(work.value.as_ptr())
+                }));
+                attempt.complete_terminal(work);
+                if let Err(payload) = result {
+                    panic = Some(payload);
+                    break;
                 }
-                Err(panic) => {
-                    data.complete_finalization(work);
-                    drop(data);
-                    resume_unwind(panic);
-                }
+            }
+
+            self.data
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .complete_finalization_run(attempt);
+            if let Some(payload) = panic {
+                resume_unwind(payload);
             }
         }
     }
@@ -2634,7 +2774,10 @@ fn validate_rootable_in_state(
     expected: &'static ObjectMetadata,
 ) -> Result<(), RootValidationError> {
     let address = value.as_ptr().as_ptr() as usize;
-    if let Some(actual) = state.finalization_batch.pending_metadata_at(address) {
+    if let Some(actual) = state
+        .finalization_batch
+        .pending_metadata_at(&state.arena, address)
+    {
         if !std::ptr::eq(actual, expected) {
             return Err(RootValidationError::Representation {
                 actual: actual.type_name(),
@@ -2827,7 +2970,7 @@ impl Drop for HeapInner {
                 for pointer in state.arena.allocated_slot_pointers(run.location) {
                     if state
                         .finalization_batch
-                        .pending_metadata_at(pointer.as_ptr() as usize)
+                        .pending_metadata_at(&state.arena, pointer.as_ptr() as usize)
                         .is_some()
                     {
                         continue;
@@ -2841,12 +2984,16 @@ impl Drop for HeapInner {
                 }
             }
         }
-        for run in &state.finalization_batch.runs {
+        for run in state.finalization_batch.runs.values() {
             for pointer in state
                 .arena
                 .allocated_slot_pointers(run.target.target().location)
             {
-                if !run.contains_address(pointer.as_ptr() as usize) {
+                let owner = state
+                    .arena
+                    .checked_slot_owner(pointer.as_ptr() as usize)
+                    .expect("pending finalization pointer lost its run owner");
+                if !run.contains_owner(owner) {
                     continue;
                 }
                 // SAFETY: a pending finalization mask names an initialized,
@@ -6118,7 +6265,7 @@ mod tests {
     }
 
     #[test]
-    fn completed_finalization_word_is_reusable_by_a_later_destructor() {
+    fn finalization_run_commit_delays_word_reuse_by_a_later_destructor() {
         let heap = Heap::new();
         let drops = Arc::new(AtomicUsize::new(0));
         let (published_tx, published_rx) = mpsc::channel();
@@ -6151,7 +6298,8 @@ mod tests {
             .recv()
             .expect("later destructor did not publish its fresh allocation");
         assert_eq!(replacement_location, first_owner.location);
-        assert_eq!(replacement_slot_index, first_owner.slot_index);
+        assert_eq!(replacement_slot_index, 2 * u64::BITS as usize + 1);
+        assert_ne!(replacement_slot_index, first_owner.slot_index);
         assert!(
             heap.inner
                 .data
@@ -6173,7 +6321,7 @@ mod tests {
     }
 
     #[test]
-    fn completed_finalization_word_is_visible_to_an_ordinary_mutator() {
+    fn pending_run_keeps_words_reserved_from_an_ordinary_mutator_until_commit() {
         let heap = Heap::new();
         let drops = Arc::new(AtomicUsize::new(0));
         let released_before = Arc::new(Barrier::new(2));
@@ -6211,6 +6359,10 @@ mod tests {
         );
 
         let (replacement_root, replacement_owner) = heap.with_mutator(|mutator| {
+            assert!(
+                catch_unwind(AssertUnwindSafe(|| mutator.root(values[0]))).is_err(),
+                "the durable map must reject roots while its local run batch executes"
+            );
             let replacement = mutator.allocator::<ConcurrentReleaseDrop>().unwrap().alloc(
                 ConcurrentReleaseDrop {
                     drops: Arc::clone(&drops),
@@ -6225,7 +6377,17 @@ mod tests {
             )
         });
         assert_eq!(replacement_owner.location, first_owner.location);
-        assert_eq!(replacement_owner.slot_index, first_owner.slot_index);
+        assert_eq!(replacement_owner.slot_index, 2 * u64::BITS as usize + 1);
+        assert_ne!(replacement_owner.slot_index, first_owner.slot_index);
+        {
+            let data = heap.inner.data.lock().unwrap();
+            let target = data
+                .arena
+                .run_claim_target(first_owner.location)
+                .expect("attached finalization run lost its arena target");
+            assert!(data.finalization_batch.reserves_word(target, 0));
+            assert!(data.arena.owner_slot_is_allocated(first_owner));
+        }
 
         continue_finalization.wait();
         let report = collector.join().expect("collector worker panicked");
@@ -6532,7 +6694,7 @@ mod tests {
             assert_eq!(data.finalization_batch.detached_run_count(), 1);
             assert!(
                 data.finalization_batch
-                    .pending_metadata_at(deferred.erase().as_ptr().as_ptr() as usize)
+                    .pending_metadata_at(&data.arena, deferred.erase().as_ptr().as_ptr() as usize,)
                     .is_some()
             );
             assert!(
@@ -6665,6 +6827,117 @@ mod tests {
     }
 
     #[test]
+    fn retry_merges_new_same_run_and_same_word_finalizers_without_duplication() {
+        let heap = Heap::new();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let (values, mut roots) = heap.with_mutator(|mutator| {
+            let allocator = mutator.allocator::<SelectivePanickingDrop>().unwrap();
+            let values = (0..=u64::BITS as usize)
+                .map(|id| {
+                    allocator.alloc(SelectivePanickingDrop {
+                        id,
+                        panic: id == 0,
+                        events: Arc::clone(&events),
+                    })
+                })
+                .collect::<Vec<_>>();
+            let roots = values[2..]
+                .iter()
+                .map(|value| mutator.root(*value))
+                .collect::<Vec<_>>();
+            (values, roots)
+        });
+        let slots = values
+            .iter()
+            .map(|value| collector_slot(&heap, *value).owner)
+            .collect::<Vec<_>>();
+        assert!(
+            slots
+                .iter()
+                .all(|owner| owner.location == slots[0].location)
+        );
+        assert_eq!(slots[1].slot_index / u64::BITS as usize, 0);
+        assert_eq!(slots[2].slot_index / u64::BITS as usize, 0);
+        assert_eq!(slots[64].slot_index / u64::BITS as usize, 1);
+
+        let panic = catch_unwind(AssertUnwindSafe(|| heap.collect_full()))
+            .expect_err("the first destructor must interrupt finalization");
+        assert_eq!(
+            panic_string(panic.as_ref()),
+            "injected managed destructor panic"
+        );
+        assert_eq!(*events.lock().unwrap(), vec![0]);
+        assert_failed_collection_restored(&heap);
+        assert_eq!(
+            heap.inner
+                .data
+                .lock()
+                .unwrap()
+                .finalization_batch
+                .pending_slot_count(),
+            1
+        );
+
+        let same_word_root = roots.remove(0);
+        let new_word_root = roots
+            .pop()
+            .expect("the second allocation word must retain a root");
+        drop(same_word_root);
+        drop(new_word_root);
+
+        let epoch = heap.inner.elect_idle_collection_for_test();
+        assert!(
+            heap.inner
+                .run_synthetic_collection(
+                    epoch,
+                    false,
+                    |post_mark, _| {
+                        assert_eq!(post_mark.summary.conservatively_retained_slots, 1);
+                    },
+                    |_| {
+                        let data = heap.inner.data.lock().unwrap();
+                        let run = data
+                            .finalization_batch
+                            .runs
+                            .get(&slots[0].location)
+                            .expect("retry lost its attached finalization run");
+                        assert_eq!(run.pending_slot_count(), 3);
+                        assert_eq!(
+                            run.pending_words
+                                .get(&(slots[1].slot_index / u64::BITS as usize)),
+                            Some(
+                                &((1_u64 << (slots[1].slot_index % u64::BITS as usize))
+                                    | (1_u64 << (slots[2].slot_index % u64::BITS as usize)))
+                            )
+                        );
+                        assert_eq!(
+                            run.pending_words
+                                .get(&(slots[64].slot_index / u64::BITS as usize)),
+                            Some(&(1_u64 << (slots[64].slot_index % u64::BITS as usize)))
+                        );
+                    },
+                )
+                .is_none()
+        );
+
+        let mut completed = events.lock().unwrap().clone();
+        completed.sort_unstable();
+        assert_eq!(completed, vec![0, 1, 2, 64]);
+        assert!(
+            heap.inner
+                .data
+                .lock()
+                .unwrap()
+                .finalization_batch
+                .runs
+                .is_empty()
+        );
+
+        drop(roots);
+        drop(heap);
+    }
+
+    #[test]
     fn repeated_destructor_panics_make_one_terminal_step_per_collection() {
         let heap = Heap::new();
         let events = Arc::new(Mutex::new(Vec::new()));
@@ -6722,7 +6995,7 @@ mod tests {
     }
 
     #[test]
-    fn multiple_whole_finalization_detachments_recycle_in_batch_order() {
+    fn multiple_whole_finalization_detachments_recycle_without_dispatch_order() {
         let heap = Heap::new();
         let drops = Arc::new(AtomicUsize::new(0));
         let values = heap.with_mutator(|mutator| {
@@ -6739,6 +7012,7 @@ mod tests {
         let root = heap.with_mutator(|mutator| mutator.root(values[1]));
 
         heap.collect_full().unwrap();
+        assert_eq!(drops.load(Ordering::Relaxed), 2);
 
         let data = heap.inner.data.lock().unwrap();
         assert_eq!(
@@ -6750,7 +7024,10 @@ mod tests {
             vec![locations[1]]
         );
         assert!(data.finalization_batch.runs.is_empty());
-        assert_eq!(data.free_runs, vec![locations[0], locations[2]]);
+        assert_eq!(
+            data.free_runs.iter().copied().collect::<HashSet<_>>(),
+            HashSet::from([locations[0], locations[2]])
+        );
         drop(data);
 
         drop(root);
