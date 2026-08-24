@@ -2,7 +2,8 @@
 
 Status: in progress; Phases C0 through C6D.2 are complete, including the C2C.6
 verification follow-up. The mandatory post-C1, post-C2C, post-C3E, post-C4,
-and post-C5 downstream reviews are complete. C6D.3 is next.
+and post-C5 downstream reviews are complete. The mandatory post-C6 review is
+next; C6D.3 follows after its gate-blocking findings are resolved.
 
 This plan implements an exact, non-moving, runtime-local tracing collector
 without depending on Glam value semantics. The governing requirements and
@@ -77,6 +78,7 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C6C.2 | completed | finalizer activity, reports, and pressure publication |
 | C6D.1 | completed | restricted terminal-teardown decision and fixtures |
 | C6D.2 | completed | detached-first terminal teardown |
+| Post-C6 review | in progress | semantic, topology, failure, and verification reconciliation before Gate G1 |
 | C6D.3 | pending | Gate G1 audit |
 | C7A | pending | shared-root and immutable-reader stress |
 | C7B | pending | allocation and coordinator stress |
@@ -3154,7 +3156,8 @@ Execute C6 as the following smaller checkpoints:
   previously retired identity. A terminal destructor panic propagates the
   first panic, is never retried, and stops dispatch; untouched payloads may
   leak their Rust resources while arena storage is released.
-- **C6D.3 — Gate G1 audit.** Reconcile the unsafe inventory, root and
+- **C6D.3 — Gate G1 audit.** After resolving every gate-blocking finding from
+  the mandatory post-C6 review, reconcile the unsafe inventory, root and
   finalization proofs, Miri, Loom, sanitizers, deterministic panic schedules,
   and terminal heap release. This focused audit closes Gate G1; C7 and C8 add
   stress, metrics, and tuning while integration API work may begin.
@@ -4024,6 +4027,39 @@ Completed on 2026-08-24:
   removes terminal checked-owner and pending-index work.
 
 ### Mandatory Post-C6 Review
+
+Perform this semantic and design review before C6D.3. Gate G1 is the formal
+unsafe and verification certification of the reviewed design; it must not be
+used to discover which C6 design is being certified.
+
+The review is recorded in
+[`GarbageCollectorC6_2026-08-24.md`](../reviews/GarbageCollectorC6_2026-08-24.md).
+It has been performed but remains open while its Gate G1 blockers are being
+resolved.
+
+The review must:
+
+1. reconcile eager no-drop sweep, drop-required finalization, destructor-panic
+   recovery, and terminal teardown with the C6 plan and public safety contract;
+2. trace the authoritative ownership of attached and detached runs, pending
+   identities, allocation and lease bits, class frontiers, and reusable runs
+   through successful, panicking, retry, and terminal paths;
+3. audit allocator-view and collection-result publication boundaries,
+   including lease epochs, pressure, completed collection epochs, reports, and
+   finalizer activity;
+4. review every C6 unsafe boundary and raw topology mutation for reliance on
+   the selected stop-the-world, non-rootability, and spoiled-edge invariants;
+5. map the existing native, forced-order, Loom, Miri, sanitizer, and terminal
+   fixtures to those claims and identify untested schedules or failure paths;
+6. classify implementation drift as intended, acceptable deferral, cleanup,
+   or correctness/safety defect, and identify which findings block Gate G1;
+7. reconcile `SAFETY.md`, `VERIFY.md`, the roadmap, and this plan after any
+   required correction.
+
+Record the audit in a dated document under `docs/reviews/`. Resolve all
+correctness, safety, or proof gaps marked as Gate G1 blockers before changing
+this checkpoint to completed and beginning C6D.3. Performance-only work may be
+deferred to C7 or C8 when the current representation remains sound.
 
 ## Phase C7 — Shared-Pointer and Worker-Shaped Stress
 
