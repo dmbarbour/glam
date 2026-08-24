@@ -95,7 +95,12 @@ payloads or change any drop-bearing allocation bit. C6A.3b replaces the
 scaffold with the completed transition: it validates and reserves first,
 withdraws only class frontiers, performs reclamation, writes each lease word
 directly to its exact swept/finalization-reserved mask, republishes eligible
-frontiers, and advances the stale-cursor epoch last.
+frontiers, and advances the stale-cursor epoch last. C6A.4 replaces historical
+publication pressure with exact assigned-run occupancy. C6B.1 then installs a
+durable exact finalization batch: partial runs retain class membership with
+reserved words, wholly dead drop-bearing runs transfer their stable record to
+batch ownership, and every pending identity becomes non-rootable. Collection-
+time destructor dispatch remains disabled until C6B.2.
 
 The crate denies unsafe code by default. `src/lib.rs` gives the reviewed
 `pointer`, `root`, `mutator`, `trace`, `mutation`, `thread_cache`, and unit-test
@@ -465,6 +470,10 @@ C6 later owns collector-driven destruction.
   class's destructor exactly once, and then lets each arena chunk deallocate
   exactly once. C6A.2c has already erased wholly dead no-drop and empty runs
   from typed arena enumeration because neither has a destructor obligation.
+  C6B.1 excludes exact attached pending identities from that ordinary class
+  walk, then visits each exact attached or detached batch identity once. Its
+  mask still names an initialized, allocated payload with the record's
+  canonical metadata; class and batch walks are disjoint by construction.
   This path is provisionally
   non-reentrant and non-panicking. C2C.4 proves it cannot race an active owner
   region; later C6 replaces terminal enumeration with collector-controlled
@@ -689,6 +698,41 @@ The successful mark bitmap is deliberately left as stale private scratch and
 is cleared by the mandatory next collection start, avoiding a redundant
 post-sweep pass. Allocator behavior and reports never consult those residual
 marks.
+
+### C6B.1 finalization-batch ownership and terminal dispatch
+
+Finalization planning copies canonical metadata, class identity, stable run
+topology, and sorted exact dead masks while allocation bits still prove every
+pending payload initialized. It reserves all durable run and mask capacity
+before selector withdrawal. The subsequent publication window allocates
+nothing: partial runs remain class-attached with each affected word withheld
+from leasing; wholly dead drop-bearing runs move their stable boxed target into
+the batch together with their former ordered class position. Detached runs
+remain part of assigned occupancy and cannot be retyped.
+
+Root and debug-access validation consult the exact batch before ordinary class
+lookup. That ordering rejects both attached and detached pending identities
+without forming a payload reference, while preserving a representation
+mismatch when the address was decoded with the wrong `T`. A later collection
+marks each exact pending allocation conservatively and does not dispatch its
+`Trace` implementation. Newly dead slots in an already-pending attached run
+merge into its sorted masks; a disjointness assertion rejects duplicate
+destructor obligations.
+
+Not tracing a pending payload is intentional. Its managed edges do not keep
+referents alive merely because Rust destruction is delayed. Safe finalizer
+code may use only independently live/rooted values; an unsafe access through a
+stored `Gc` retains the existing caller obligation to prove liveness.
+
+Until C6B.2 consumes the batch during collection, terminal `HeapInner::drop`
+is its destruction boundary. The ordinary class walk skips every exact
+attached pending identity. A second batch walk derives pointers only from the
+validated retained run location and allocation bitmap, filters them through
+the exact pending mask, and calls that record's canonical erased destructor.
+Detached runs occur only in this second walk. Exclusive final heap ownership,
+initialized set allocation bits, and disjoint class/batch visitation therefore
+prove the new `drop_in_place` call sees a valid payload and runs exactly once.
+This remains the provisional non-reentrant teardown policy pending C6D.
 
 The mark range is initialized as ordinary `u64` storage and remains disjoint
 from the header, atomic allocation/lease words, alignment padding, and payload.

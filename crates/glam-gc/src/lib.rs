@@ -6,8 +6,9 @@
 //! resets them to untyped arena storage, and prefers that heap-local pool for
 //! later typed-run publication. C6A.3a clears dead allocations from retained
 //! partial no-drop runs, and C6A.3b publishes exact lease masks, eligible class
-//! frontiers, and one final stale-cursor epoch. Managed payload finalization
-//! remains disabled until the later C6 checkpoints.
+//! frontiers, and one final stale-cursor epoch. C6B.1 isolates exact
+//! drop-required identities in a durable, non-rootable finalization batch;
+//! erased destruction during collection remains disabled until C6B.2.
 
 #![deny(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]

@@ -1,8 +1,8 @@
 # Glam GC Subcrate Implementation Plan — 2026-08-19
 
-Status: in progress; Phases C0 through C6A.4 are complete, including the C2C.6
+Status: in progress; Phases C0 through C6B.1 are complete, including the C2C.6
 verification follow-up. The mandatory post-C1, post-C2C, post-C3E, post-C4,
-and post-C5 downstream reviews are complete. C6B.1 is next.
+and post-C5 downstream reviews are complete. C6B.2 is next.
 
 This plan implements an exact, non-moving, runtime-local tracing collector
 without depending on Glam value semantics. The governing requirements and
@@ -69,7 +69,7 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C6A.3a | completed | eager partial no-drop sweep |
 | C6A.3b | completed | swept allocator publication |
 | C6A.4 | completed | assigned-run pressure |
-| C6B.1 | pending | finalization batch and non-rootability |
+| C6B.1 | completed | finalization batch and non-rootability |
 | C6B.2 | pending | finalizer handoff and destruction |
 | C6B.3 | pending | non-resurrection and successful completion |
 | C6C.1 | pending | destructor panic, draining, and quarantine |
@@ -2939,18 +2939,35 @@ Execute C6 as the following smaller checkpoints:
   activation exactly once, and publish the first survivor-based high-water
   target. This checkpoint does not yet account for allocations made by
   finalizers; C6C.2 publishes the final post-finalization baseline.
-- **C6B.1 — finalization batch, reservation, and non-rootability.** Detach
-  drop-required dead slots into a collector-owned batch while allocation bits
-  still protect their storage. Before reopening admission, reserve every
-  affected word in a partially live run from ordinary lease and frontier
-  selection. Detach a wholly dead drop-bearing run from ordinary class topology
-  in full, retaining its stable run record in the collector-owned batch until
-  that run reaches a terminal disposition. The finalizer becomes the sole
-  allocation-bitmap writer for every reserved word or run. Extend C4 root
-  validation so every batch identity is non-rootable.
-  If the batch is empty, either retain the already-proven C3E no-op finalizer
-  handoff or take the direct no-finalizer completion path after resolving the
-  decision below.
+- **C6B.1a — finalization-batch records and validation.** Materialize each
+  drop-required dead run as a collector-owned record containing canonical
+  metadata, class identity, stable run topology, and exact pending masks grouped
+  by allocation word. Construct and validate every record while allocation
+  bits still protect initialized payloads and before withdrawing a selector.
+  Batch construction is fallible planning; the later topology transition must
+  allocate nothing.
+- **C6B.1b — reservation and whole-run detachment.** Before reopening
+  admission, reserve every affected word in a partially live run from ordinary
+  lease and frontier selection. Detach a wholly dead drop-bearing run from
+  ordinary class topology in full, retaining its stable boxed run record and
+  former class position in the collector-owned batch until that run reaches a
+  terminal disposition. Assigned occupancy includes both class-attached and
+  batch-detached runs; detachment is not reclamation and changes no pressure
+  count. The finalizer becomes the sole allocation-bitmap writer for every
+  reserved word or run.
+- **C6B.1c — non-rootability and durable pending ownership.** Extend C4 root
+  validation so every exact pending identity is non-rootable, including a slot
+  in an otherwise attached partial run. A pending batch remains authoritative
+  across another collection or terminal heap teardown: attached pending slots
+  are conservatively marked without tracing and remain word-reserved; detached
+  runs remain batch-owned and are not rediscovered through class topology.
+  This cross-collection behavior is checkpoint safety scaffolding—C6B.2 and
+  C6B.3 normally drain the batch in the collection which created it—but it
+  prevents an interruption between checkpoints from duplicating or losing a
+  destructor obligation.
+  Retain the already-proven C3E no-op `Finalizing` handoff when the batch is
+  empty. It is the simpler bootstrap lifecycle; C8 measurement may justify a
+  direct no-finalizer completion fast path later.
 - **C6B.2 — C3E finalizer handoff and destruction.** Use C3E's no-gap
   `Exclusive`-to-`Finalizing` handoff, install the collector's current mutator,
   reopen ordinary admission, and run erased Rust destructors exactly once
@@ -3008,13 +3025,11 @@ into marking:
    leaves it as stale private scratch until the next collection's mandatory
    initial clear, avoiding a redundant pass. Tests consult the completed report
    and post-sweep allocator state rather than infer validity from residual bits.
-2. **Empty finalization batch (C6B.1).** The current C3E pipeline always makes
-   the no-gap finalizer handoff, even when its synthetic finalizer does no
-   work. The recommended production path skips `Finalizing` when the batch is
-   empty and atomically completes `Exclusive` either into the collecting
-   entrant's one ordinary admission or into idle `Ordinary` for
-   `collect_full`. Keeping the no-op handoff is semantically valid and simpler,
-   so forced schedules and a small cost comparison should precede removal.
+2. **Empty finalization batch (resolved in C6B.1).** Keep the current C3E
+   no-gap finalizer handoff even when the batch is empty. This preserves one
+   lifecycle through the bootstrap implementation and keeps finalizer-mutator
+   transfer independently exercised. C8 may measure and introduce a direct
+   no-finalizer completion fast path without changing collector semantics.
 3. **Survivor growth ratio (resolved in C6A.4).** The initial private ratio is
    one half. It remains a tuning choice rather than public semantics; pure
    threshold tests inject the numerator and denominator so rounding and
@@ -3559,6 +3574,39 @@ Completed on 2026-08-23:
   survivor, recycled-threshold, and finalizer-panic pressure fixtures pass
   focused Miri. The stable collector and workspace verification matrices are
   recorded in `VERIFY.md`.
+
+#### C6B.1 completion
+
+Completed on 2026-08-24:
+
+- Every completed drop-required dead set now becomes a durable finalization
+  batch before allocator selectors are withdrawn. Each record retains the
+  canonical metadata and class identity, stable run topology, and sorted exact
+  masks of pending slots. All vector capacity is reserved and topology is
+  validated before the allocation-free publication window.
+- A partial run remains in its allocation class, but every word containing a
+  pending destructor stays unavailable to ordinary leasing. A wholly dead
+  drop-bearing run leaves class topology and transfers its stable boxed target
+  plus former ordered position to the batch. Detached runs remain assigned
+  occupancy; detachment neither releases pressure nor permits retyping.
+- Exact pending identities cannot be rooted or accessed. A later collection
+  conservatively marks them without dispatching `Trace`, and newly dead slots
+  in the same attached run merge into its existing exact record. This durable
+  checkpoint ownership prevents duplicated or lost destructor obligations;
+  C6B.2 normally consumes the batch during the collection that creates it.
+- Terminal teardown excludes attached pending identities from the ordinary
+  class walk, then destroys exact attached and detached batch identities once.
+  This is still the provisional non-reentrant terminal path; C6D selects and
+  implements the production mutator-capable teardown protocol.
+- Empty batches deliberately retain C3E's no-op `Finalizing` handoff. The
+  simpler uniform lifecycle remains bootstrap policy until C8 measurement
+  justifies a fast path.
+- The collector suite now contains 168 unit tests (166 passing plus two
+  explicit scale fixtures), 6 Loom models, and 8 compile-fail/doc tests. Exact
+  partial masks, persistent attached/detached ownership, later-slot merging,
+  ordered whole-run detachment, and concurrent root rejection pass focused
+  Miri. The stable collector and workspace verification matrices are recorded
+  in `VERIFY.md`.
 
 ### Mandatory Post-C6 Review
 

@@ -366,6 +366,18 @@ impl AllocationClassEntry {
     /// boxed record itself moves into collector-owned retirement state, so its
     /// address remains stable until the collector deliberately disposes of it.
     pub(crate) fn retire_withdrawn_run(&mut self, target: RunClaimTarget) -> Box<RunClaimTarget> {
+        self.retire_withdrawn_run_at(target).1
+    }
+
+    /// Removes one run while retaining its former ordered class position.
+    ///
+    /// Finalization keeps that position with a detached stable record so a
+    /// later quarantine path can restore class ownership deliberately rather
+    /// than inventing an order after the fact.
+    pub(crate) fn retire_withdrawn_run_at(
+        &mut self,
+        target: RunClaimTarget,
+    ) -> (usize, Box<RunClaimTarget>) {
         assert!(
             self.frontier_is_withdrawn(),
             "cannot retire a run while its class frontier remains published"
@@ -375,7 +387,7 @@ impl AllocationClassEntry {
             .iter()
             .position(|run| **run == target)
             .expect("retired run is absent from its allocation class");
-        self.runs.remove(index)
+        (index, self.runs.remove(index))
     }
 
     fn publish_frontier(&mut self, index: usize) -> &RunClaimTarget {

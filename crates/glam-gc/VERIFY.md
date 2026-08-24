@@ -282,6 +282,45 @@ unit tests (162 passing and two ignored scale fixtures), six Loom models, and
 eight compile-fail/doc tests. Workspace formatting, all-target/all-feature
 Clippy with warnings denied, and the complete workspace test suite also pass.
 
+## C6B.1 Finalization-Batch Verification
+
+C6B.1 materializes exact drop-required identities before selector withdrawal.
+Native fixtures prove word-local reservation in an attached partial run,
+complete detachment of wholly dead drop-bearing runs, preservation of former
+class order across multiple detachments, and assigned-pressure accounting
+which treats detached runs as occupied. No destructor runs during collection
+at this checkpoint.
+
+A second collection retains pending identities without tracing them and does
+not duplicate batch records. A staged fixture drops another root between
+collections and proves the newly dead slot merges into the existing attached
+run record. Exact root and debug-access validation rejects both attached and
+detached pending identities. A barrier-forced worker enters while the
+collector holds its finalizer mutator and proves detached root rejection while
+ordinary admission is open. Terminal teardown then visits class and batch
+identities disjointly and invokes every destructor exactly once.
+
+Focused Miri runs are:
+
+```sh
+cargo +nightly miri test --package glam-gc --lib --all-features \
+  partial_drop_runs_reserve_only_words_with_finalization_obligations
+cargo +nightly miri test --package glam-gc --lib --all-features \
+  pending_finalization_owns_partial_and_detached_runs_across_collection
+cargo +nightly miri test --package glam-gc --lib --all-features \
+  later_dead_slots_merge_into_existing_partial_finalization_record
+cargo +nightly miri test --package glam-gc --lib --all-features \
+  multiple_whole_finalization_detachments_preserve_former_class_positions
+cargo +nightly miri test --package glam-gc --lib --all-features \
+  concurrent_finalizing_entrant_cannot_root_a_detached_identity
+```
+
+All five focused fixtures pass Miri. The stable collector matrix contains 168
+unit tests (166 passing and two ignored scale fixtures), six Loom models, and
+eight compile-fail/doc tests. The exact unsafe inventory, workspace formatting,
+all-target/all-feature Clippy with warnings denied, and the complete workspace
+test suite also pass.
+
 ## Gate G0 Baseline
 
 Before changing the unsafe surface in C1, recheck the focused pre-GC semantic

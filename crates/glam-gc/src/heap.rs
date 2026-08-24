@@ -183,10 +183,12 @@ impl Heap {
     /// The collector clears mark state, seeds the stable root registry, traces
     /// the reachable graph non-recursively, and returns the latest completed
     /// scalar report which satisfies this call's requested epoch. It currently
-    /// reclaims wholly dead runs with no destructor obligation and clears dead
-    /// allocations from retained partial no-drop runs. Managed finalization
-    /// remains later C6 work. A concurrent later collection may overtake a
-    /// waiting caller, and no unbounded report history is retained.
+    /// reclaims wholly dead runs with no destructor obligation, clears dead
+    /// allocations from retained partial no-drop runs, and isolates exact
+    /// drop-required identities in a non-rootable finalization batch. Erased
+    /// destruction during collection remains later C6 work. A concurrent
+    /// later collection may overtake a waiting caller, and no unbounded report
+    /// history is retained.
     pub fn collect_full(&self) -> Result<CollectionReport, CollectionError> {
         if thread_has_any_active_mutator() {
             return Err(CollectionError::ActiveMutator);
@@ -276,6 +278,7 @@ struct ManagedData {
     classes_by_metadata: HashMap<MetadataIdentity, AllocationClassId>,
     classes: Vec<AllocationClassEntry>,
     retired_no_drop_runs: Vec<RetiredNoDropRun>,
+    finalization_batch: FinalizationBatch,
     free_runs: Vec<RunLocation>,
     allocation_pressure: AllocationPressure,
     roots: Vec<Weak<RootCell>>,
@@ -457,11 +460,33 @@ impl ManagedData {
         self.arena.owner_slot_is_marked(slot.owner)
     }
 
-    fn prepare_swept_allocator_transition(&mut self, dead_set: &DeadSetPlan) {
+    fn prepare_swept_allocator_transition(&mut self, dead_set: &DeadSetPlan) -> FinalizationBatch {
         assert!(
             self.retired_no_drop_runs.is_empty(),
             "a new collection cannot inherit unfinished no-drop retirement"
         );
+        let finalization_batch = FinalizationBatch::plan(dead_set);
+        self.finalization_batch
+            .runs
+            .try_reserve(finalization_batch.runs.len())
+            .expect("durable finalization batch capacity exhausted");
+        for planned in &finalization_batch.runs {
+            if let Some(existing) = self
+                .finalization_batch
+                .runs
+                .iter_mut()
+                .find(|pending| pending.target.target() == planned.target.target())
+            {
+                assert!(
+                    !existing.target.is_detached(),
+                    "detached finalization run reappeared in class topology"
+                );
+                existing
+                    .pending_words
+                    .try_reserve(planned.pending_words.len())
+                    .expect("durable finalization word capacity exhausted");
+            }
+        }
         let retired_count = dead_set
             .dead_runs
             .iter()
@@ -519,6 +544,20 @@ impl ManagedData {
                 class.contains_target(run.target),
                 "dead run is absent from its allocation class"
             );
+            assert_eq!(
+                class.runs()[run.class_run_index].as_ref(),
+                &run.target,
+                "dead run changed its ordered class position"
+            );
+            if let Some(pending) = self
+                .finalization_batch
+                .runs
+                .iter()
+                .find(|pending| pending.target.target() == run.target)
+            {
+                assert!(!pending.target.is_detached());
+                assert_ne!(run.live_slots, 0);
+            }
             self.arena.validate_run_target(run.target, run.class_id);
             let dead_words = dead_set
                 .dead_words
@@ -547,6 +586,8 @@ impl ManagedData {
                 );
             }
         }
+
+        finalization_batch
     }
 
     fn withdraw_allocator_frontiers(&mut self) {
@@ -591,6 +632,51 @@ impl ManagedData {
         recycled_count
     }
 
+    fn install_finalization_batch(&mut self, batch: FinalizationBatch) {
+        // Planning reserved durable batch capacity and validated every target
+        // before selector withdrawal. This loop only moves stable boxes and
+        // appends or merges exact masks into existing capacity.
+        for mut run in batch.runs {
+            let target = run.target.target();
+            if let Some(existing) = self
+                .finalization_batch
+                .runs
+                .iter_mut()
+                .find(|pending| pending.target.target() == target)
+            {
+                debug_assert!(run.detach_from_index.is_none());
+                debug_assert!(!existing.target.is_detached());
+                debug_assert_eq!(existing.class_id, run.class_id);
+                debug_assert!(std::ptr::eq(existing.metadata, run.metadata));
+                existing.merge_pending_words(&run.pending_words);
+                continue;
+            }
+
+            let index = class_index(run.class_id).expect("finalization run has invalid class ID");
+            let class = self
+                .classes
+                .get_mut(index)
+                .expect("finalization run allocation class is absent");
+            assert!(class.frontier_is_withdrawn());
+
+            if let Some(former_index) = run.detach_from_index {
+                let (current_index, target) = class.retire_withdrawn_run_at(target);
+                assert!(
+                    current_index <= former_index,
+                    "finalization detachment moved past its retained class position"
+                );
+                run.target = FinalizationRunTarget::Detached {
+                    target,
+                    former_index,
+                };
+            } else {
+                assert!(class.contains_target(target));
+            }
+
+            self.finalization_batch.runs.push(run);
+        }
+    }
+
     fn sweep_partial_no_drop_runs(&mut self, dead_set: &DeadSetPlan) {
         let is_swept = |run: &&DeadRunPlan| {
             run.disposition == DeadSlotDisposition::NoDrop
@@ -604,29 +690,18 @@ impl ManagedData {
         }
     }
 
-    fn publish_swept_allocator_view(&mut self, dead_set: &DeadSetPlan) {
+    fn publish_swept_allocator_view(&mut self) {
         let arena = &self.arena;
-        let mut drop_reservations = dead_set
-            .dead_runs
-            .iter()
-            .filter(|run| run.disposition == DeadSlotDisposition::DropRequired)
-            .peekable();
+        let finalization_batch = &self.finalization_batch;
         for (index, class) in self.classes.iter_mut().enumerate() {
             debug_assert!(class.frontier_is_withdrawn());
             let class_id = class_id(index);
             let mut first_available = None;
 
             for (run_index, target) in class.runs().iter().enumerate() {
-                let reservation = drop_reservations.next_if(|run| run.target == **target);
-                let reserve_entire_run = reservation.is_some_and(|run| run.live_slots == 0);
-                let reserved_words =
-                    reservation.map_or(&[][..], |run| &dead_set.dead_words[run.dead_words.clone()]);
                 let has_available =
                     arena.publish_allocation_word_leases(**target, class_id, |word_index| {
-                        reserve_entire_run
-                            || reserved_words
-                                .iter()
-                                .any(|word| word.word_index == word_index)
+                        finalization_batch.reserves_word(**target, word_index)
                     });
                 if has_available && first_available.is_none() {
                     first_available = Some(run_index);
@@ -635,19 +710,24 @@ impl ManagedData {
 
             class.publish_swept_frontier(first_available);
         }
-        debug_assert!(drop_reservations.next().is_none());
     }
 
     fn publish_survivor_pressure_baseline(&mut self) {
-        // Class membership is the authoritative assigned-run topology. The
-        // separately maintained counter makes activation/release pressure
-        // cheap; recomputing it at the completed sweep boundary catches any
-        // accounting drift before publishing a new target.
-        let assigned_runs = self.classes.iter().fold(0_usize, |total, class| {
-            total
-                .checked_add(class.runs().len())
-                .expect("assigned-run occupancy exhausted")
-        });
+        // Class membership plus collector-owned detached finalization records
+        // is the authoritative assigned-run topology. The separately
+        // maintained counter makes activation/release pressure cheap;
+        // recomputing it at the completed sweep boundary catches accounting
+        // drift before publishing a new target. Detachment is not release.
+        let assigned_runs = self
+            .classes
+            .iter()
+            .fold(0_usize, |total, class| {
+                total
+                    .checked_add(class.runs().len())
+                    .expect("assigned-run occupancy exhausted")
+            })
+            .checked_add(self.finalization_batch.detached_run_count())
+            .expect("assigned finalization-run occupancy exhausted");
         assert!(
             assigned_runs <= self.arena.run_capacity(),
             "assigned-run occupancy exceeds committed arena capacity"
@@ -824,6 +904,7 @@ struct DeadBitmapWord {
 )]
 struct DeadRunPlan {
     target: RunClaimTarget,
+    class_run_index: usize,
     class_id: AllocationClassId,
     metadata: &'static ObjectMetadata,
     disposition: DeadSlotDisposition,
@@ -839,6 +920,222 @@ struct DeadRunPlan {
 struct RetiredNoDropRun {
     target: Box<RunClaimTarget>,
     former_class_id: AllocationClassId,
+}
+
+/// Durable ownership of initialized allocations awaiting Rust destruction.
+///
+/// Partial runs remain attached to their allocation class while the batch
+/// reserves the exact words containing pending slots. Wholly dead runs move
+/// their stable boxed target here and leave ordinary class topology. C6B.2
+/// consumes these records; retaining them across a checkpoint or retry keeps
+/// root rejection, terminal teardown, and later collection nonduplicating.
+#[derive(Default)]
+struct FinalizationBatch {
+    runs: Vec<FinalizationRun>,
+}
+
+struct FinalizationRun {
+    target: FinalizationRunTarget,
+    class_id: AllocationClassId,
+    metadata: &'static ObjectMetadata,
+    detach_from_index: Option<usize>,
+    pending_words: Vec<DeadBitmapWord>,
+}
+
+enum FinalizationRunTarget {
+    /// A partial run still selected through its ordinary allocation class.
+    Attached(RunClaimTarget),
+    /// A wholly dead run owned only by the finalization batch.
+    Detached {
+        target: Box<RunClaimTarget>,
+        #[cfg_attr(
+            not(test),
+            allow(dead_code, reason = "C6B.3 restores quarantined runs in class order")
+        )]
+        former_index: usize,
+    },
+}
+
+impl FinalizationRunTarget {
+    fn target(&self) -> RunClaimTarget {
+        match self {
+            Self::Attached(target) => *target,
+            Self::Detached { target, .. } => **target,
+        }
+    }
+
+    fn is_detached(&self) -> bool {
+        matches!(self, Self::Detached { .. })
+    }
+}
+
+impl FinalizationRun {
+    fn pending_slot_count(&self) -> usize {
+        self.pending_words.iter().fold(0_usize, |total, word| {
+            total
+                .checked_add(word.dead_mask.count_ones() as usize)
+                .expect("finalization slot count exhausted")
+        })
+    }
+
+    fn contains_address(&self, address: usize) -> bool {
+        let target = self.target.target();
+        let Some(offset) = address.checked_sub(target.run.address()) else {
+            return false;
+        };
+        let Some(slot_index) = target.geometry.slot_index(offset) else {
+            return false;
+        };
+        let word_index = slot_index / u64::BITS as usize;
+        let bit = 1_u64 << (slot_index % u64::BITS as usize);
+        self.pending_words
+            .iter()
+            .any(|word| word.word_index == word_index && word.dead_mask & bit != 0)
+    }
+
+    fn visit_pending_slots(&self, mut visit: impl FnMut(RunOwner)) {
+        let target = self.target.target();
+        for word in &self.pending_words {
+            let word_start = word
+                .word_index
+                .checked_mul(u64::BITS as usize)
+                .expect("finalization word offset exhausted");
+            let mut pending = word.dead_mask;
+            while pending != 0 {
+                let bit_index = pending.trailing_zeros() as usize;
+                let slot_index = word_start
+                    .checked_add(bit_index)
+                    .expect("finalization slot index exhausted");
+                assert!(slot_index < target.geometry.slot_count);
+                visit(RunOwner {
+                    location: target.location,
+                    run: target.run,
+                    class_id: self.class_id,
+                    geometry: target.geometry,
+                    slot_index,
+                });
+                pending &= pending - 1;
+            }
+        }
+    }
+
+    fn merge_pending_words(&mut self, additional: &[DeadBitmapWord]) {
+        for word in additional {
+            match self
+                .pending_words
+                .binary_search_by_key(&word.word_index, |pending| pending.word_index)
+            {
+                Ok(index) => {
+                    assert_eq!(
+                        self.pending_words[index].dead_mask & word.dead_mask,
+                        0,
+                        "finalization batch duplicated an existing slot obligation"
+                    );
+                    self.pending_words[index].dead_mask |= word.dead_mask;
+                }
+                Err(index) => self.pending_words.insert(index, *word),
+            }
+        }
+    }
+}
+
+impl FinalizationBatch {
+    fn plan(dead_set: &DeadSetPlan) -> Self {
+        let run_count = dead_set
+            .dead_runs
+            .iter()
+            .filter(|run| run.disposition == DeadSlotDisposition::DropRequired)
+            .count();
+        let mut runs = Vec::new();
+        runs.try_reserve_exact(run_count)
+            .expect("finalization run batch capacity exhausted");
+
+        for run in dead_set
+            .dead_runs
+            .iter()
+            .filter(|run| run.disposition == DeadSlotDisposition::DropRequired)
+        {
+            assert!(run.metadata.needs_drop());
+            assert_ne!(run.dead_slots, 0);
+            let source_words = dead_set
+                .dead_words
+                .get(run.dead_words.clone())
+                .expect("finalization run has an invalid word range");
+            let mut pending_words = Vec::new();
+            pending_words
+                .try_reserve_exact(source_words.len())
+                .expect("finalization word batch capacity exhausted");
+            pending_words.extend_from_slice(source_words);
+            let detach_from_index = (run.live_slots == 0).then(|| {
+                let retired_before = dead_set
+                    .dead_runs
+                    .iter()
+                    .filter(|prior| {
+                        prior.class_id == run.class_id
+                            && prior.class_run_index < run.class_run_index
+                            && prior.disposition == DeadSlotDisposition::NoDrop
+                            && prior.live_slots == 0
+                    })
+                    .count();
+                run.class_run_index
+                    .checked_sub(retired_before)
+                    .expect("finalization run position underflowed retired topology")
+            });
+            let planned = FinalizationRun {
+                target: FinalizationRunTarget::Attached(run.target),
+                class_id: run.class_id,
+                metadata: run.metadata,
+                detach_from_index,
+                pending_words,
+            };
+            assert_eq!(planned.pending_slot_count(), run.dead_slots);
+            runs.push(planned);
+        }
+
+        Self { runs }
+    }
+
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "C6B.2 consumes the finalization batch")
+    )]
+    fn pending_slot_count(&self) -> usize {
+        self.runs.iter().fold(0_usize, |total, run| {
+            total
+                .checked_add(run.pending_slot_count())
+                .expect("finalization batch slot count exhausted")
+        })
+    }
+
+    fn detached_run_count(&self) -> usize {
+        self.runs
+            .iter()
+            .filter(|run| run.target.is_detached())
+            .count()
+    }
+
+    fn pending_metadata_at(&self, address: usize) -> Option<&'static ObjectMetadata> {
+        self.runs
+            .iter()
+            .find(|run| run.contains_address(address))
+            .map(|run| run.metadata)
+    }
+
+    fn reserves_word(&self, target: RunClaimTarget, word_index: usize) -> bool {
+        self.runs.iter().any(|run| {
+            run.target.target() == target
+                && run
+                    .pending_words
+                    .iter()
+                    .any(|word| word.word_index == word_index)
+        })
+    }
+
+    fn visit_pending_slots(&self, mut visit: impl FnMut(RunOwner)) {
+        for run in &self.runs {
+            run.visit_pending_slots(&mut visit);
+        }
+    }
 }
 
 #[allow(
@@ -881,7 +1178,7 @@ impl DeadSetPlan {
                 DeadSlotDisposition::NoDrop
             };
 
-            for target in class.runs().iter().map(|run| **run) {
+            for (class_run_index, target) in class.runs().iter().map(|run| **run).enumerate() {
                 assert_eq!(
                     target.geometry,
                     class.geometry(),
@@ -940,6 +1237,7 @@ impl DeadSetPlan {
                         .expect("collector empty-run plan capacity exhausted");
                     plan.dead_runs.push(DeadRunPlan {
                         target,
+                        class_run_index,
                         class_id,
                         metadata,
                         disposition: DeadSlotDisposition::NoDrop,
@@ -980,6 +1278,7 @@ impl DeadSetPlan {
                     .expect("collector dead-run plan capacity exhausted");
                 plan.dead_runs.push(DeadRunPlan {
                     target,
+                    class_run_index,
                     class_id,
                     metadata,
                     disposition: class_disposition,
@@ -1006,6 +1305,7 @@ struct MarkAttempt {
     worklist: Vec<TraceWork>,
     root_count: usize,
     marked_slot_count: usize,
+    conservatively_retained_slot_count: usize,
     traced_object_count: usize,
     #[cfg(test)]
     panic_before_worklist_push: Option<usize>,
@@ -1018,6 +1318,32 @@ struct MarkAttempt {
 }
 
 impl MarkAttempt {
+    fn retain_pending_finalizers(&mut self, data: &mut ManagedData) {
+        let ManagedData {
+            arena,
+            finalization_batch,
+            ..
+        } = data;
+        finalization_batch.visit_pending_slots(|owner| {
+            assert!(
+                arena.owner_slot_is_allocated(owner),
+                "pending finalizer lost its allocation bit"
+            );
+            assert!(
+                arena.mark_owner_slot(owner),
+                "pending finalizer was duplicated in its durable batch"
+            );
+            self.marked_slot_count = self
+                .marked_slot_count
+                .checked_add(1)
+                .expect("marked-slot count exhausted");
+            self.conservatively_retained_slot_count = self
+                .conservatively_retained_slot_count
+                .checked_add(1)
+                .expect("conservative-retention count exhausted");
+        });
+    }
+
     fn reserve_root_capacity(&mut self, root_registry_len: usize) {
         self.worklist
             .try_reserve(root_registry_len)
@@ -1148,7 +1474,7 @@ impl MarkAttempt {
             root_entries: self.root_count,
             traced_objects: self.traced_object_count,
             marked_slots: self.marked_slot_count,
-            conservatively_retained_slots: 0,
+            conservatively_retained_slots: self.conservatively_retained_slot_count,
             #[cfg(test)]
             peak_object_worklist_len: self.peak_object_worklist_len,
             #[cfg(test)]
@@ -1340,6 +1666,7 @@ impl HeapInner {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             data.clear_mark_bitmaps();
+            mark_attempt.retain_pending_finalizers(&mut data);
             mark_work(&mut mark_attempt, &mut data);
         }
         let root_registry_len = self
@@ -1381,7 +1708,7 @@ impl HeapInner {
             // withdrawing the first selector. Exclusive admission keeps this
             // plan stable through the allocation-free mutation window.
             let (current_epoch, next_epoch) = self.next_allocation_lease_epoch();
-            data.prepare_swept_allocator_transition(&post_mark.dead_set);
+            let finalization_batch = data.prepare_swept_allocator_transition(&post_mark.dead_set);
             data.withdraw_allocator_frontiers();
 
             // C6A.2b consumes only wholly dead no-drop runs. Their stable run
@@ -1389,6 +1716,7 @@ impl HeapInner {
             // null. C6A.2c then clears their side state and headers before
             // publishing the locations to the heap-wide free-run pool.
             data.retire_wholly_dead_no_drop_runs(&post_mark.dead_set);
+            data.install_finalization_batch(finalization_batch);
             data.recycle_retired_no_drop_runs();
 
             // C6A.3a eagerly clears only dead allocations in retained partial
@@ -1400,7 +1728,7 @@ impl HeapInner {
             // eligible retained run in each class. The one Release epoch is
             // published last, so every later outer entry discards all cursors
             // from the old view before using these selectors.
-            data.publish_swept_allocator_view(&post_mark.dead_set);
+            data.publish_swept_allocator_view();
             data.publish_survivor_pressure_baseline();
             self.publish_allocation_lease_epoch(current_epoch, next_epoch);
         }
@@ -1963,18 +2291,11 @@ impl HeapInner {
             let expected = metadata_for::<T>();
             let address = pointer.as_ptr().cast::<()>() as usize;
             let state = self.data.lock().expect("heap state should not be poisoned");
-            let resolved = resolve_slot_in_state(&state, address);
+            let validation = validate_rootable_in_state(&state, address, expected);
             drop(state);
-            let metadata = resolved
-                .map(|slot| slot.metadata)
-                .unwrap_or_else(|| panic!("managed pointer does not belong to this heap"));
-
-            assert!(
-                std::ptr::eq(metadata, expected),
-                "managed pointer has representation `{}`, not requested `{}`",
-                metadata.type_name(),
-                expected.type_name()
-            );
+            if let Err(error) = validation {
+                error.raise();
+            }
         }
 
         #[cfg(not(debug_assertions))]
@@ -2046,6 +2367,7 @@ enum RootValidationError {
         expected: &'static str,
     },
     Unallocated,
+    PendingFinalization,
 }
 
 impl RootValidationError {
@@ -2056,6 +2378,9 @@ impl RootValidationError {
                 panic!("managed pointer has representation `{actual}`, not requested `{expected}`")
             }
             Self::Unallocated => panic!("managed pointer does not identify an allocated value"),
+            Self::PendingFinalization => {
+                panic!("managed pointer is pending finalization and cannot be rooted or accessed")
+            }
         }
     }
 }
@@ -2065,6 +2390,16 @@ fn validate_rootable_in_state(
     address: usize,
     expected: &'static ObjectMetadata,
 ) -> Result<(), RootValidationError> {
+    if let Some(actual) = state.finalization_batch.pending_metadata_at(address) {
+        if !std::ptr::eq(actual, expected) {
+            return Err(RootValidationError::Representation {
+                actual: actual.type_name(),
+                expected: expected.type_name(),
+            });
+        }
+        return Err(RootValidationError::PendingFinalization);
+    }
+
     let resolved = resolve_slot_in_state(state, address).ok_or(RootValidationError::ForeignHeap)?;
 
     if !std::ptr::eq(resolved.metadata, expected) {
@@ -2246,6 +2581,13 @@ impl Drop for HeapInner {
             }
             for run in entry.runs() {
                 for pointer in state.arena.allocated_slot_pointers(run.location) {
+                    if state
+                        .finalization_batch
+                        .pending_metadata_at(pointer.as_ptr() as usize)
+                        .is_some()
+                    {
+                        continue;
+                    }
                     // SAFETY: the allocation bitmap is published only after a
                     // value with this run's canonical metadata is initialized.
                     // Final heap ownership is exclusive, and this provisional
@@ -2253,6 +2595,22 @@ impl Drop for HeapInner {
                     // arena storage is released.
                     unsafe { metadata.drop_in_place(pointer) };
                 }
+            }
+        }
+        for run in &state.finalization_batch.runs {
+            for pointer in state
+                .arena
+                .allocated_slot_pointers(run.target.target().location)
+            {
+                if !run.contains_address(pointer.as_ptr() as usize) {
+                    continue;
+                }
+                // SAFETY: a pending finalization mask names an initialized,
+                // still-allocated payload with this canonical metadata. The
+                // class walk above excludes attached pending identities, and
+                // detached runs are absent from class topology, so terminal
+                // teardown invokes this destructor exactly once.
+                unsafe { run.metadata.drop_in_place(pointer) };
             }
         }
     }
@@ -2312,10 +2670,10 @@ mod tests {
     use super::{
         AdmissionPhase, AllocationClass, AllocationPressure, AllocationPressureSnapshot,
         CollectorLookupError, CollectorSlot, DeadBitmapWord, DeadSlotDisposition,
-        FIXED_SURVIVOR_RUN_HEADROOM, Heap, MarkSummary, PrepareRunError, RootValidationError,
-        RunLocation, RunPublicationError, SURVIVOR_GROWTH_DENOMINATOR, SURVIVOR_GROWTH_NUMERATOR,
-        class_index, resolve_slot_in_state, survivor_run_high_water_mark,
-        validate_rootable_in_state,
+        FIXED_SURVIVOR_RUN_HEADROOM, FinalizationRunTarget, Heap, MarkSummary, PrepareRunError,
+        RootValidationError, RunLocation, RunPublicationError, SURVIVOR_GROWTH_DENOMINATOR,
+        SURVIVOR_GROWTH_NUMERATOR, class_index, resolve_slot_in_state,
+        survivor_run_high_water_mark, validate_rootable_in_state,
     };
 
     fn internal_class<T: Trace>(heap: &Heap) -> AllocationClass<T> {
@@ -2558,6 +2916,22 @@ mod tests {
 
     // SAFETY: `DropCounter` contains no managed edge.
     unsafe impl Trace for DropCounter {
+        fn trace(&self, _visitor: &mut Visitor<'_>) {}
+    }
+
+    struct WideDropCounter(Arc<AtomicUsize>);
+
+    impl Drop for WideDropCounter {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    // SAFETY: `WideDropCounter` contains no managed edge. Its large total slot
+    // request gives finalization fixtures one allocation per run.
+    unsafe impl Trace for WideDropCounter {
+        const REQUESTED_SLOT_SIZE: Option<usize> = Some(32 * 1024);
+
         fn trace(&self, _visitor: &mut Visitor<'_>) {}
     }
 
@@ -4494,8 +4868,11 @@ mod tests {
         assert_eq!(second.epoch(), 2);
         assert_eq!(second.root_entries(), 1);
         assert_eq!(second.traced_objects(), 2);
-        assert_eq!(second.marked_slots(), 2);
-        assert_eq!(second.conservatively_retained_slots(), 0);
+        // C6B.1 keeps the first collection's unreachable drop-bearing node in
+        // the durable batch. Until C6B.2 drains it, a later collection retains
+        // that identity without dispatching its trace implementation.
+        assert_eq!(second.marked_slots(), 3);
+        assert_eq!(second.conservatively_retained_slots(), 1);
         assert_eq!(
             heap.inner.coordinator_snapshot().latest_collection_report,
             Some(second)
@@ -5355,6 +5732,26 @@ mod tests {
                 .find(|run| run.location == first_slot.owner.location)
                 .unwrap();
             assert_eq!(lease_words(run)[0] & 0b111, 0b011);
+            let pending = data
+                .finalization_batch
+                .runs
+                .iter()
+                .find(|run| run.target.target().location == first_slot.owner.location)
+                .expect("partial drop run must own an exact finalization record");
+            assert!(matches!(pending.target, FinalizationRunTarget::Attached(_)));
+            assert_eq!(
+                pending.pending_words,
+                vec![
+                    DeadBitmapWord {
+                        word_index: 0,
+                        dead_mask: !1,
+                    },
+                    DeadBitmapWord {
+                        word_index: 1,
+                        dead_mask: 0b10,
+                    },
+                ]
+            );
             assert_eq!(
                 state.classes[class_index(first_slot.owner.class_id).unwrap()].frontier,
                 Some(first_slot.owner.location)
@@ -5377,20 +5774,272 @@ mod tests {
     fn wholly_dead_drop_runs_publish_no_allocator_frontier() {
         let heap = Heap::new();
         let drops = Arc::new(AtomicUsize::new(0));
-        let dead = allocate(&heap, DropCounter(Arc::clone(&drops)));
+        let dead = allocate(&heap, WideDropCounter(Arc::clone(&drops)));
         let dead_slot = collector_slot(&heap, dead);
-        let class = internal_class::<DropCounter>(&heap);
+        let class = internal_class::<WideDropCounter>(&heap);
 
         let report = heap.collect_full().unwrap();
         assert_eq!(report.marked_slots(), 0);
         assert_eq!(drops.load(Ordering::Relaxed), 0);
         assert!(class.claim_frontier(&heap.inner).is_none());
 
-        let replacement = allocate(&heap, DropCounter(Arc::clone(&drops)));
+        let replacement = allocate(&heap, WideDropCounter(Arc::clone(&drops)));
         assert_ne!(
             collector_slot(&heap, replacement).owner.location,
             dead_slot.owner.location
         );
+    }
+
+    #[test]
+    fn pending_finalization_owns_partial_and_detached_runs_across_collection() {
+        let heap = Heap::new();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let (live, partial_dead, whole_dead, live_root) = heap.with_mutator(|mutator| {
+            let partials = mutator.allocator::<DropCounter>().unwrap();
+            let live = partials.alloc(DropCounter(Arc::clone(&drops)));
+            let partial_dead = partials.alloc(DropCounter(Arc::clone(&drops)));
+            let whole_dead = mutator
+                .allocator::<WideDropCounter>()
+                .unwrap()
+                .alloc(WideDropCounter(Arc::clone(&drops)));
+            (live, partial_dead, whole_dead, mutator.root(live))
+        });
+        let live_slot = collector_slot(&heap, live);
+        let partial_dead_slot = collector_slot(&heap, partial_dead);
+        let whole_dead_slot = collector_slot(&heap, whole_dead);
+        assert_eq!(live_slot.owner.location, partial_dead_slot.owner.location);
+
+        let first = heap.collect_full().unwrap();
+        assert_eq!(first.marked_slots(), 1);
+        assert_eq!(first.conservatively_retained_slots(), 0);
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
+        {
+            let data = heap.inner.data.lock().unwrap();
+            assert_eq!(data.finalization_batch.runs.len(), 2);
+            assert_eq!(data.finalization_batch.pending_slot_count(), 2);
+            assert_eq!(data.finalization_batch.detached_run_count(), 1);
+            assert!(
+                data.classes[class_index(live_slot.owner.class_id).unwrap()]
+                    .contains_run(live_slot.owner.location)
+            );
+            assert!(
+                !data.classes[class_index(whole_dead_slot.owner.class_id).unwrap()]
+                    .contains_run(whole_dead_slot.owner.location)
+            );
+            let detached = data
+                .finalization_batch
+                .runs
+                .iter()
+                .find(|run| run.target.target().location == whole_dead_slot.owner.location)
+                .unwrap();
+            assert!(matches!(
+                detached.target,
+                FinalizationRunTarget::Detached {
+                    former_index: 0,
+                    ..
+                }
+            ));
+        }
+
+        heap.with_mutator(|mutator| {
+            assert!(catch_unwind(AssertUnwindSafe(|| mutator.root(partial_dead))).is_err());
+            assert!(catch_unwind(AssertUnwindSafe(|| mutator.root(whole_dead))).is_err());
+            #[cfg(debug_assertions)]
+            {
+                // SAFETY: deliberately attempts access to a completed dead-set
+                // identity to verify the debug boundary rejects it before
+                // forming a reference.
+                assert!(
+                    catch_unwind(AssertUnwindSafe(|| unsafe {
+                        partial_dead.get_unchecked(mutator)
+                    }))
+                    .is_err()
+                );
+            }
+            let _ = live_root.get(mutator);
+        });
+
+        let second = heap.collect_full().unwrap();
+        assert_eq!(second.marked_slots(), 3);
+        assert_eq!(second.conservatively_retained_slots(), 2);
+        assert_eq!(second.traced_objects(), 1);
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
+        {
+            let data = heap.inner.data.lock().unwrap();
+            assert_eq!(data.finalization_batch.runs.len(), 2);
+            assert_eq!(data.finalization_batch.pending_slot_count(), 2);
+            assert_eq!(data.finalization_batch.detached_run_count(), 1);
+            assert_eq!(data.roots.len(), 1);
+        }
+
+        drop(live_root);
+        drop(heap);
+        assert_eq!(drops.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn later_dead_slots_merge_into_existing_partial_finalization_record() {
+        let heap = Heap::new();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let (values, first_root, later_root) = heap.with_mutator(|mutator| {
+            let allocator = mutator.allocator::<DropCounter>().unwrap();
+            let values = (0..3)
+                .map(|_| allocator.alloc(DropCounter(Arc::clone(&drops))))
+                .collect::<Vec<_>>();
+            let first_root = mutator.root(values[0]);
+            let later_root = mutator.root(values[2]);
+            (values, first_root, later_root)
+        });
+        let slots = values
+            .iter()
+            .map(|value| collector_slot(&heap, *value))
+            .collect::<Vec<_>>();
+        assert!(
+            slots
+                .iter()
+                .all(|slot| slot.owner.location == slots[0].owner.location)
+        );
+
+        let first = heap.collect_full().unwrap();
+        assert_eq!(first.marked_slots(), 2);
+        assert_eq!(first.conservatively_retained_slots(), 0);
+        {
+            let data = heap.inner.data.lock().unwrap();
+            assert_eq!(data.finalization_batch.runs.len(), 1);
+            assert_eq!(data.finalization_batch.pending_slot_count(), 1);
+        }
+
+        drop(later_root);
+        let second = heap.collect_full().unwrap();
+        assert_eq!(second.marked_slots(), 2);
+        assert_eq!(second.conservatively_retained_slots(), 1);
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
+        {
+            let data = heap.inner.data.lock().unwrap();
+            assert_eq!(data.finalization_batch.runs.len(), 1);
+            assert_eq!(data.finalization_batch.pending_slot_count(), 2);
+            let pending = &data.finalization_batch.runs[0];
+            for value in [values[1], values[2]] {
+                assert!(pending.contains_address(value.erase().as_ptr().as_ptr() as usize));
+            }
+            assert!(!pending.contains_address(values[0].erase().as_ptr().as_ptr() as usize));
+        }
+
+        heap.with_mutator(|mutator| {
+            assert!(catch_unwind(AssertUnwindSafe(|| mutator.root(values[2]))).is_err());
+            let _ = first_root.get(mutator);
+        });
+        drop(first_root);
+        drop(heap);
+        assert_eq!(drops.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn concurrent_finalizing_entrant_cannot_root_a_detached_identity() {
+        let heap = Heap::new();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let dead = allocate(&heap, WideDropCounter(Arc::clone(&drops)));
+        heap.request_collection();
+        let epoch = heap.inner.elect_idle_collection_for_test();
+        let finalizing = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let collector = std::thread::spawn({
+            let heap = heap.clone();
+            let finalizing = Arc::clone(&finalizing);
+            let release = Arc::clone(&release);
+            move || {
+                heap.inner
+                    .run_synthetic_collection(
+                        epoch,
+                        false,
+                        |_, _| {},
+                        |_| {
+                            assert_eq!(
+                                heap.inner
+                                    .data
+                                    .lock()
+                                    .unwrap()
+                                    .finalization_batch
+                                    .pending_slot_count(),
+                                1
+                            );
+                            finalizing.wait();
+                            release.wait();
+                        },
+                    )
+                    .is_none()
+            }
+        });
+
+        finalizing.wait();
+        let rejected = std::thread::spawn({
+            let heap = heap.clone();
+            move || {
+                heap.with_mutator(|mutator| {
+                    catch_unwind(AssertUnwindSafe(|| mutator.root(dead))).is_err()
+                })
+            }
+        })
+        .join()
+        .expect("root-attempt worker panicked outside the checked boundary");
+        assert!(rejected);
+        assert_eq!(heap.inner.coordinator_snapshot().active_outer_mutators, 1);
+
+        release.wait();
+        assert!(collector.join().unwrap());
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
+        drop(heap);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn multiple_whole_finalization_detachments_preserve_former_class_positions() {
+        let heap = Heap::new();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let values = heap.with_mutator(|mutator| {
+            let allocator = mutator.allocator::<WideDropCounter>().unwrap();
+            (0..3)
+                .map(|_| allocator.alloc(WideDropCounter(Arc::clone(&drops))))
+                .collect::<Vec<_>>()
+        });
+        let locations = values
+            .iter()
+            .map(|value| collector_slot(&heap, *value).owner.location)
+            .collect::<Vec<_>>();
+        let class_id = collector_slot(&heap, values[1]).owner.class_id;
+        let root = heap.with_mutator(|mutator| mutator.root(values[1]));
+
+        heap.collect_full().unwrap();
+
+        let data = heap.inner.data.lock().unwrap();
+        assert_eq!(
+            data.classes[class_index(class_id).unwrap()]
+                .runs()
+                .iter()
+                .map(|run| run.location)
+                .collect::<Vec<_>>(),
+            vec![locations[1]]
+        );
+        let detached = data
+            .finalization_batch
+            .runs
+            .iter()
+            .map(|run| match &run.target {
+                FinalizationRunTarget::Detached {
+                    target,
+                    former_index,
+                } => (target.location, *former_index),
+                FinalizationRunTarget::Attached(_) => {
+                    panic!("one-slot dead run remained attached")
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(detached, vec![(locations[0], 0), (locations[2], 2)]);
+        drop(data);
+
+        drop(root);
+        drop(heap);
+        assert_eq!(drops.load(Ordering::Relaxed), 3);
     }
 
     #[test]
@@ -5657,10 +6306,23 @@ mod tests {
             "a partially live no-drop run must remain in its class"
         );
         assert!(
-            data.classes[class_index(dropping_slot.owner.class_id).unwrap()]
+            !data.classes[class_index(dropping_slot.owner.class_id).unwrap()]
                 .contains_run(dropping_slot.owner.location),
-            "a wholly dead drop-bearing run belongs to later finalization"
+            "a wholly dead drop-bearing run must leave ordinary class topology"
         );
+        let detached = data
+            .finalization_batch
+            .runs
+            .iter()
+            .find(|run| run.target.target().location == dropping_slot.owner.location)
+            .expect("drop-bearing run must enter finalization ownership");
+        assert!(matches!(
+            detached.target,
+            FinalizationRunTarget::Detached {
+                former_index: 0,
+                ..
+            }
+        ));
         for index in [1_usize, 3] {
             assert!(
                 resolve_slot_in_state(&data, wide_values[index].erase().as_ptr().as_ptr() as usize)
@@ -6002,6 +6664,16 @@ mod tests {
                 assert_eq!(coordinator.phase, AdmissionPhase::Finalizing);
                 assert_eq!(coordinator.active_outer_mutators, 1);
                 assert_eq!(cache_snapshot(&heap.inner).unwrap().recursive_depth, 1);
+                assert!(
+                    heap.inner
+                        .data
+                        .lock()
+                        .unwrap()
+                        .finalization_batch
+                        .runs
+                        .is_empty(),
+                    "the bootstrap deliberately retains the proven no-op handoff for an empty batch"
+                );
 
                 let class = finalizer_mutator.allocator::<SecondType>().unwrap();
                 heap.with_mutator(|_recursive| {
