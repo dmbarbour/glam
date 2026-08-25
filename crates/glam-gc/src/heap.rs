@@ -151,6 +151,8 @@ impl HeapActivity {
 pub enum CollectionError {
     /// The calling thread already holds a mutator for some heap.
     ActiveMutator,
+    /// A prior collection crossed an irreversible boundary and then panicked.
+    Poisoned,
 }
 
 impl std::fmt::Display for CollectionError {
@@ -159,6 +161,7 @@ impl std::fmt::Display for CollectionError {
             Self::ActiveMutator => {
                 formatter.write_str("cannot collect while this thread holds a mutator")
             }
+            Self::Poisoned => formatter.write_str("managed heap is permanently poisoned"),
         }
     }
 }
@@ -199,6 +202,11 @@ impl Heap {
     /// The outermost entry obtains one coordinator admission obligation.
     /// Recursive same-heap entries reuse that obligation, while entries into
     /// different heaps remain independent.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a prior collection crossed an irreversible mutation boundary
+    /// and then panicked, permanently poisoning this heap.
     pub fn with_mutator<R>(&self, operation: impl for<'heap> FnOnce(&Mutator<'heap>) -> R) -> R {
         self.with_mutator_after_admission(|| {}, operation)
     }
@@ -239,6 +247,10 @@ impl Heap {
     /// The request is serviced when a later outer mutator entry finds the heap
     /// idle, or by [`Heap::collect_full`]. Calling this inside a mutator never
     /// waits on the calling region.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the heap is permanently poisoned.
     pub fn request_collection(&self) {
         self.inner.request_collection();
     }
@@ -267,11 +279,20 @@ impl Heap {
     /// panic resumes.
     /// A concurrent later collection may overtake a waiting caller, and no
     /// unbounded report history is retained.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CollectionError::ActiveMutator`] when the calling thread
+    /// already holds a mutator, or [`CollectionError::Poisoned`] after an
+    /// irreversible collection panic has made further collection unsafe.
     pub fn collect_full(&self) -> Result<CollectionReport, CollectionError> {
+        if self.inner.is_poisoned() {
+            return Err(CollectionError::Poisoned);
+        }
         if thread_has_any_active_mutator() {
             return Err(CollectionError::ActiveMutator);
         }
-        Ok(self.inner.collect_full())
+        self.inner.collect_full()
     }
 
     #[cfg(test)]
@@ -287,6 +308,7 @@ impl Heap {
 pub(crate) struct HeapInner {
     coordinator: Mutex<MutatorCoordinator>,
     data: Mutex<ManagedData>,
+    poisoned: AtomicBool,
     collection_requested: AtomicBool,
     admission_changed: Condvar,
     allocation_lease_epoch: AtomicU64,
@@ -302,6 +324,8 @@ pub(crate) struct HeapInner {
     allocation_cursor_slow_path_hook: Mutex<Option<AllocationCursorSlowPathHook>>,
     #[cfg(test)]
     collection_acknowledgement_hook: Mutex<Option<CollectionAcknowledgementHook>>,
+    #[cfg(test)]
+    panic_after_topology_mutation: AtomicBool,
     #[cfg(test)]
     coordinator_notifications: std::sync::atomic::AtomicUsize,
 }
@@ -325,6 +349,7 @@ impl Default for HeapInner {
         Self {
             coordinator: Mutex::new(MutatorCoordinator::default()),
             data: Mutex::new(ManagedData::default()),
+            poisoned: AtomicBool::new(false),
             collection_requested: AtomicBool::new(false),
             admission_changed: Condvar::new(),
             allocation_lease_epoch: AtomicU64::new(AllocationLeaseEpoch::INITIAL.get()),
@@ -340,6 +365,8 @@ impl Default for HeapInner {
             allocation_cursor_slow_path_hook: Mutex::new(None),
             #[cfg(test)]
             collection_acknowledgement_hook: Mutex::new(None),
+            #[cfg(test)]
+            panic_after_topology_mutation: AtomicBool::new(false),
             #[cfg(test)]
             coordinator_notifications: std::sync::atomic::AtomicUsize::new(0),
         }
@@ -394,6 +421,7 @@ enum AdmissionPhase {
     Ordinary,
     Exclusive,
     Finalizing,
+    Poisoned,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -948,6 +976,9 @@ impl MutatorCoordinator {
                     .expect("active collection phase must have an epoch"),
                 false,
             ),
+            AdmissionPhase::Poisoned => {
+                unreachable!("poisoned heaps reject collection before requesting an epoch")
+            }
         }
     }
 
@@ -1958,6 +1989,10 @@ impl HeapInner {
                 .lock()
                 .expect("mutator coordinator should not be poisoned");
             loop {
+                if self.is_poisoned() {
+                    drop(coordinator);
+                    panic!("managed heap is permanently poisoned");
+                }
                 match coordinator.phase {
                     AdmissionPhase::Ordinary => {
                         let requested = self.collection_requested.load(Ordering::Acquire);
@@ -1994,6 +2029,10 @@ impl HeapInner {
                             self.notify_coordinator_waiters();
                         }
                     }
+                    AdmissionPhase::Poisoned => {
+                        drop(coordinator);
+                        panic!("managed heap is permanently poisoned");
+                    }
                 }
             }
         };
@@ -2009,7 +2048,33 @@ impl HeapInner {
     }
 
     fn request_collection(&self) {
+        assert!(!self.is_poisoned(), "managed heap is permanently poisoned");
         self.collection_requested.store(true, Ordering::Release);
+        if self.is_poisoned() {
+            self.collection_requested.store(false, Ordering::Release);
+            panic!("managed heap is permanently poisoned");
+        }
+    }
+
+    fn is_poisoned(&self) -> bool {
+        self.poisoned.load(Ordering::Acquire)
+    }
+
+    fn poison_collection(&self, epoch: CollectionEpoch) {
+        let mut coordinator = self
+            .coordinator
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Coordinator ownership linearizes poison against new outer mutator
+        // admission and synchronous collection. The atomic publication keeps
+        // the nonblocking request and terminal-drop paths cheap.
+        self.poisoned.store(true, Ordering::Release);
+        self.collection_requested.store(false, Ordering::Release);
+        if coordinator.active_collection == Some(epoch) {
+            coordinator.active_collection = None;
+        }
+        coordinator.phase = AdmissionPhase::Poisoned;
+        self.notify_coordinator_waiters();
     }
 
     fn activity(&self) -> HeapActivity {
@@ -2026,12 +2091,15 @@ impl HeapInner {
         self.admission_changed.notify_all();
     }
 
-    fn collect_full(self: &Arc<Self>) -> CollectionReport {
+    fn collect_full(self: &Arc<Self>) -> Result<CollectionReport, CollectionError> {
         let target = {
             let coordinator = self
                 .coordinator
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if self.is_poisoned() {
+                return Err(CollectionError::Poisoned);
+            }
             let (target, request) = coordinator.request_synchronous_collection();
             if request {
                 self.collection_requested.store(true, Ordering::Release);
@@ -2046,6 +2114,9 @@ impl HeapInner {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 loop {
+                    if self.is_poisoned() {
+                        return Err(CollectionError::Poisoned);
+                    }
                     if coordinator.completed_collection_epoch >= target.get() {
                         let report = coordinator
                             .latest_collection_report
@@ -2059,7 +2130,7 @@ impl HeapInner {
                             report.epoch() >= target.get(),
                             "latest report must satisfy the synchronous target epoch"
                         );
-                        return report;
+                        return Ok(report);
                     }
                     let requested = self.collection_requested.load(Ordering::Acquire);
                     if let Some(elected) = coordinator.elect_idle_collection(requested) {
@@ -2183,7 +2254,10 @@ impl HeapInner {
             // plan stable through the allocation-free mutation window.
             let (current_epoch, next_epoch) = self.next_allocation_lease_epoch();
             let finalization_batch = data.prepare_swept_allocator_transition(&post_mark.dead_set);
+            attempt.begin_topology_mutation();
             data.withdraw_allocator_frontiers();
+            #[cfg(test)]
+            self.maybe_panic_after_topology_mutation();
 
             // C6A.2b consumes only wholly dead no-drop runs. Their stable run
             // records leave class topology after every lock-free selector is
@@ -2209,7 +2283,7 @@ impl HeapInner {
                 reclaimed_runs,
             }
         };
-        attempt.allocator_view_published = true;
+        attempt.publish_allocator_view();
 
         // Prepare the TLS record without activating it. Under the coordinator
         // mutex, exclusive authority is then converted directly into one
@@ -2399,6 +2473,26 @@ impl HeapInner {
             .lock()
             .expect("collection acknowledgement hook should not be poisoned")
             .take();
+    }
+
+    #[cfg(test)]
+    fn inject_panic_after_topology_mutation(&self) {
+        assert!(
+            !self
+                .panic_after_topology_mutation
+                .swap(true, Ordering::AcqRel),
+            "topology-mutation panic is already armed"
+        );
+    }
+
+    #[cfg(test)]
+    fn maybe_panic_after_topology_mutation(&self) {
+        if self
+            .panic_after_topology_mutation
+            .swap(false, Ordering::AcqRel)
+        {
+            panic!("injected panic after destructive topology mutation");
+        }
     }
 
     #[cfg(test)]
@@ -2968,11 +3062,18 @@ fn validate_rootable_in_state(
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CollectionAttemptState {
+    Reversible,
+    TopologyMutation,
+    AllocatorViewPublished,
+    Completed,
+}
+
 struct CollectionAttempt<'heap> {
     heap: &'heap HeapInner,
     epoch: CollectionEpoch,
-    allocator_view_published: bool,
-    completed: bool,
+    state: CollectionAttemptState,
 }
 
 impl<'heap> CollectionAttempt<'heap> {
@@ -2980,12 +3081,22 @@ impl<'heap> CollectionAttempt<'heap> {
         Self {
             heap,
             epoch,
-            allocator_view_published: false,
-            completed: false,
+            state: CollectionAttemptState::Reversible,
         }
     }
 
+    fn begin_topology_mutation(&mut self) {
+        assert_eq!(self.state, CollectionAttemptState::Reversible);
+        self.state = CollectionAttemptState::TopologyMutation;
+    }
+
+    fn publish_allocator_view(&mut self) {
+        assert_eq!(self.state, CollectionAttemptState::TopologyMutation);
+        self.state = CollectionAttemptState::AllocatorViewPublished;
+    }
+
     fn complete(&mut self, summary: CollectionSummary) {
+        assert_eq!(self.state, CollectionAttemptState::AllocatorViewPublished);
         {
             // Publish the post-finalization assigned-run baseline and
             // serialize request acknowledgement with run assignment. Pressure
@@ -3035,14 +3146,20 @@ impl<'heap> CollectionAttempt<'heap> {
             coordinator.phase = AdmissionPhase::Ordinary;
             self.heap.notify_coordinator_waiters();
         }
-        self.completed = true;
+        self.state = CollectionAttemptState::Completed;
     }
 }
 
 impl Drop for CollectionAttempt<'_> {
     fn drop(&mut self) {
-        if self.completed {
-            return;
+        match self.state {
+            CollectionAttemptState::Completed => return,
+            CollectionAttemptState::TopologyMutation => {
+                self.heap.poison_collection(self.epoch);
+                return;
+            }
+            CollectionAttemptState::Reversible | CollectionAttemptState::AllocatorViewPublished => {
+            }
         }
         let data = self
             .heap
@@ -3050,7 +3167,7 @@ impl Drop for CollectionAttempt<'_> {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.heap.data.clear_poison();
-        if self.allocator_view_published {
+        if self.state == CollectionAttemptState::AllocatorViewPublished {
             // Swept topology and the allocation-lease epoch are already
             // durable. Publish the matching post-attempt pressure baseline
             // before the original panic resumes, but leave the completion
@@ -3144,6 +3261,13 @@ fn mark_collector_slot_in(
 
 impl Drop for HeapInner {
     fn drop(&mut self) {
+        if self.poisoned.load(Ordering::Acquire) {
+            // An irreversible collection panic may leave initialized payloads
+            // whose destructor-dispatch status is no longer authoritative.
+            // Releasing raw arena storage leaks their Rust-owned resources but
+            // cannot invoke one destructor twice.
+            return;
+        }
         let state = self
             .data
             .get_mut()
@@ -3249,7 +3373,7 @@ mod tests {
 
     use super::{
         AdmissionPhase, AllocationClass, AllocationPressure, AllocationPressureSnapshot,
-        CollectorLookupError, CollectorSlot, DeadBitmapWord, DeadSlotDisposition,
+        CollectionError, CollectorLookupError, CollectorSlot, DeadBitmapWord, DeadSlotDisposition,
         FIXED_SURVIVOR_RUN_HEADROOM, Heap, HeapActivity, HeapInner, MarkSummary, PrepareRunError,
         RootValidationError, RunLocation, RunPublicationError, SURVIVOR_GROWTH_DENOMINATOR,
         SURVIVOR_GROWTH_NUMERATOR, class_index, resolve_slot_in_state,
@@ -3538,6 +3662,24 @@ mod tests {
     // SAFETY: this fixture contains only immediate values and host
     // coordination state. It has no managed edge.
     unsafe impl Trace for TerminalPanickingDrop {
+        fn trace(&self, _visitor: &mut Visitor<'_>) {}
+    }
+
+    static POISONED_HEAP_DESTRUCTOR_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
+
+    struct PoisonedHeapDrop {
+        _not_zero_sized: u8,
+    }
+
+    impl Drop for PoisonedHeapDrop {
+        fn drop(&mut self) {
+            POISONED_HEAP_DESTRUCTOR_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    // SAFETY: this fixture contains only an immediate value and reports its
+    // destructor through static test instrumentation. It has no managed edge.
+    unsafe impl Trace for PoisonedHeapDrop {
         fn trace(&self, _visitor: &mut Visitor<'_>) {}
     }
 
@@ -7485,6 +7627,111 @@ mod tests {
         assert_eq!(
             heap.inner.coordinator_snapshot().completed_collection_epoch,
             1
+        );
+    }
+
+    #[test]
+    fn panic_after_destructive_topology_mutation_does_not_reopen_the_heap() {
+        POISONED_HEAP_DESTRUCTOR_ATTEMPTS.store(0, Ordering::Relaxed);
+        let heap = Heap::new();
+        let live = allocate(&heap, 10_u64);
+        let _dead = allocate(&heap, 20_u64);
+        let root = heap.with_mutator(|mutator| mutator.root(live));
+        let _dropping = allocate(&heap, PoisonedHeapDrop { _not_zero_sized: 0 });
+
+        heap.inner.inject_panic_after_topology_mutation();
+        let panic = catch_unwind(AssertUnwindSafe(|| heap.collect_full()))
+            .expect_err("injected topology panic must interrupt collection");
+        assert_eq!(
+            panic_string(panic.as_ref()),
+            "injected panic after destructive topology mutation"
+        );
+
+        let entry = catch_unwind(AssertUnwindSafe(|| heap.with_mutator(|_| {})));
+        assert!(
+            entry.is_err(),
+            "an irreversible collection panic must not reopen mutator admission"
+        );
+        assert_eq!(
+            panic_string(entry.unwrap_err().as_ref()),
+            "managed heap is permanently poisoned"
+        );
+        assert_eq!(heap.collect_full(), Err(CollectionError::Poisoned));
+        let request = catch_unwind(AssertUnwindSafe(|| heap.request_collection()));
+        assert_eq!(
+            panic_string(request.unwrap_err().as_ref()),
+            "managed heap is permanently poisoned"
+        );
+        assert!(heap.inner.is_poisoned());
+        assert_eq!(
+            heap.inner.coordinator_snapshot().phase,
+            AdmissionPhase::Poisoned
+        );
+
+        drop(root);
+        drop(heap);
+        assert_eq!(POISONED_HEAP_DESTRUCTOR_ATTEMPTS.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn irreversible_topology_panic_wakes_waiters_into_permanent_poison() {
+        let heap = Heap::new();
+        let _value = allocate(&heap, 10_u64);
+        heap.request_collection();
+        let epoch = heap.inner.elect_idle_collection_for_test();
+        heap.inner.inject_panic_after_topology_mutation();
+
+        let (at_boundary_tx, at_boundary_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let collector = std::thread::spawn({
+            let heap = heap.clone();
+            move || {
+                catch_unwind(AssertUnwindSafe(|| {
+                    heap.inner.run_synthetic_collection(
+                        epoch,
+                        false,
+                        |_, _| {
+                            at_boundary_tx.send(()).unwrap();
+                            release_rx.recv().unwrap();
+                        },
+                        |_| {},
+                    );
+                }))
+            }
+        });
+        at_boundary_rx.recv().unwrap();
+
+        let mutator_waiter = std::thread::spawn({
+            let heap = heap.clone();
+            move || catch_unwind(AssertUnwindSafe(|| heap.with_mutator(|_| {})))
+        });
+        let collection_waiter = std::thread::spawn({
+            let heap = heap.clone();
+            move || heap.collect_full()
+        });
+        heap.inner.wait_for_blocked_outer_mutators(1);
+        heap.inner.wait_for_collection_waiters(1);
+
+        release_tx.send(()).unwrap();
+        let collector_panic = collector
+            .join()
+            .unwrap()
+            .expect_err("collector must propagate the injected topology panic");
+        assert_eq!(
+            panic_string(collector_panic.as_ref()),
+            "injected panic after destructive topology mutation"
+        );
+        let mutator_panic = mutator_waiter
+            .join()
+            .unwrap()
+            .expect_err("blocked mutator must reject permanent poison");
+        assert_eq!(
+            panic_string(mutator_panic.as_ref()),
+            "managed heap is permanently poisoned"
+        );
+        assert_eq!(
+            collection_waiter.join().unwrap(),
+            Err(CollectionError::Poisoned)
         );
     }
 

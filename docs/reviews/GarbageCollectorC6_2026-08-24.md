@@ -177,6 +177,91 @@ retry. This also reconciles roadmap invariant 11, which reserves heap poison or
 abort for allocator corruption or unsafe-contract failure whose effects cannot
 be bounded.
 
+#### GC6-002 resolution plan
+
+Adopt permanent heap poisoning rather than process abort. Poison is an
+internal collector-safety state: it preserves the original panic, admits no
+new mutator or collection, wakes coordinator waiters so they cannot deadlock,
+and makes terminal heap teardown skip managed destructors. Poison does not
+revoke references in the middle of an already admitted Rust borrow, so such a
+scope may passively unwind or exit; operations which need authoritative heap
+state may themselves reject the poisoned heap. Remaining managed Rust
+resources may leak when the poisoned value domain is finally released, which
+is preferable to reopening uncertain topology or dispatching a destructor
+twice.
+
+Execute the repair as three independently verified checkpoints:
+
+1. **GC6-002A — topology irreversibility and heap poison (completed
+   2026-08-25).** Replace
+   `CollectionAttempt`'s two booleans with an explicit state such as
+   `Reversible`, `TopologyMutation`, `AllocatorViewPublished`,
+   `FinalizerCommitPending`, and `Completed`. Enter `TopologyMutation`
+   immediately before the first selector withdrawal, then publish
+   `AllocatorViewPublished` only after the complete swept allocator view and
+   allocation-lease epoch are authoritative. Preserve the current retry path
+   for `Reversible` and `AllocatorViewPublished`; an unwind from either
+   irreversible state permanently poisons the heap instead. Add the poison
+   admission/waiter/terminal-drop gates and a deterministic panic hook between
+   selector withdrawal and final lease-epoch publication. First latch that the
+   current implementation reopens admission after this panic, then require
+   later entry and collection to reject the poisoned heap without dispatching
+   terminal destructors.
+2. **GC6-002B — finalizer dispatch-to-commit guard.** Keep the collection in
+   `FinalizerCommitPending` from immediately before the first erased destructor
+   in a run is called until `complete_finalization_run` has durably retired the
+   complete attempted prefix. A run with no dispatched destructor never enters
+   this state. Add a deterministic hook after `drop_in_place` and local
+   terminal recording but before durable run commit. The forced panic must
+   poison the heap, prevent later admission and retry, and prove that final
+   heap release does not redispatch the already destroyed identity. Retain the
+   existing payload-`Drop` behavior: catch its panic, commit that exact
+   identity, restore `AllocatorViewPublished`, and only then resume the
+   original payload.
+3. **GC6-002C — boundary audit and closeout.** Audit every attempt-state
+   transition and every heap entry, synchronous waiter, finalizer-activity,
+   and terminal-release path against the permanent-poison rule. Ensure the
+   poison path performs no allocation and cannot itself depend on damaged
+   managed data. Update `SAFETY.md`, `VERIFY.md`, the implementation plan, and
+   this resolution ledger. Run focused ordinary-payload-panic and both
+   injected-invariant-panic fixtures under Miri, then run the complete
+   `glam-gc` verification script and repository routine checks.
+
+This repair does not change tracing, marking, allocation geometry, bitmap
+layout, the ordinary allocation fast path, or the public managed-value
+representation. Any public presentation of a poisoned heap should remain a
+small API decision at GC6-002A; internal admission must be correct regardless
+of whether `collect_full` eventually returns a dedicated error while infallible
+entry helpers panic.
+
+##### GC6-002A completion
+
+The pre-fix forced regression reached selector withdrawal, injected a panic,
+and failed because the next mutator entry completed a retry under reopened
+`Ordinary` admission. The repair replaces the two attempt booleans with
+`Reversible`, `TopologyMutation`, `AllocatorViewPublished`, and `Completed`
+states; GC6-002B adds `FinalizerCommitPending` at its narrower boundary.
+Selector withdrawal begins the irreversible state, while only publication of
+the complete swept view and allocation-lease epoch restores recoverability.
+
+An unwind from `TopologyMutation` now publishes permanent poison under the
+coordinator mutex without consulting managed data. New mutator admission and
+collection requests panic, `collect_full` returns `CollectionError::Poisoned`,
+blocked mutator and synchronous-collection waiters wake into those outcomes,
+and terminal heap release skips managed destructors. Existing admitted Rust
+borrows are not revoked, although no further heap operation is promised. A
+second forced fixture holds both waiter families behind `Exclusive` and proves
+the poison notification releases them.
+
+Both forced fixtures pass focused Miri. The complete collector check passes
+with 184 unit tests (182 passing plus two ignored scale fixtures), six Loom
+models, eight compile-fail/doc tests, and the exact unsafe audit. The change
+adds no production unsafe site; its one edge-free test `Trace` declaration is
+recorded in the inventory. It does not alter allocator geometry, mark or
+allocation bitmaps, tracing, or the allocation fast path. GC6-002 remains a
+Gate G1 blocker until GC6-002B closes destructor dispatch-to-commit and
+GC6-002C completes the boundary audit.
+
 ### GC6-003 — Finalized-word publication lacks a direct concurrent model
 
 **Priority:** medium  
@@ -346,7 +431,7 @@ appropriate.
 | Finding | Required disposition | Owner |
 | --- | --- | --- |
 | GC6-001 | Resolved with one capability/liveness contract and optional-mutator implementation evidence. | completed 2026-08-24 |
-| GC6-002 | Introduce an explicit irreversible/poison boundary and forced post-dispatch/post-mutation panic schedules. | before C6D.3 |
+| GC6-002 | GC6-002A completed; execute GC6-002B and GC6-002C to close finalizer commit and audit boundaries. | before C6D.3 |
 | GC6-003 | Add Loom and production forced-order coverage for finalized-word publication versus claims. | C6D.3 prerequisite |
 | GC6-004 | Add one mixed attached/detached terminal-topology fixture. | C6D.3 prerequisite |
 | GC6-005 | Reconcile public API, safety ledger, roadmap, integration boundary, and unsafe-module descriptions. | before C6D.3 |

@@ -602,6 +602,44 @@ All four fixtures pass Miri. The stable collector matrix contains 182 unit
 tests (180 passing and two ignored scale fixtures), six Loom models, and eight
 compile-fail/doc tests. C6D.2 adds no unsafe site.
 
+## GC6-002A Irreversible-Topology Verification
+
+`panic_after_destructive_topology_mutation_does_not_reopen_the_heap` was first
+run with only the deterministic post-withdrawal panic hook and failed: the
+attempt guard restored `Ordinary`, and the next outer mutator entered through a
+retry. After the repair, the same schedule proves the attempt remains
+`TopologyMutation` until the full swept view and allocation-lease epoch publish.
+Its unwind permanently poisons the heap; later mutator entry and collection
+requests panic, synchronous `collect_full` returns `CollectionError::Poisoned`,
+and terminal release does not dispatch an allocated drop-bearing payload.
+
+`irreversible_topology_panic_wakes_waiters_into_permanent_poison` pauses the
+collector before selector withdrawal, blocks one outer mutator and one
+synchronous collector behind `Exclusive`, then releases the collector into the
+forced topology panic. Both waiters wake: the mutator observes the permanent-
+poison panic and the collector receives `CollectionError::Poisoned`. The poison
+publication takes the coordinator mutex but never reads managed data, including
+when the injected panic has poisoned that mutex.
+
+Focused Miri runs are:
+
+```sh
+cargo +nightly miri test -p glam-gc --lib --all-features \
+  heap::tests::panic_after_destructive_topology_mutation_does_not_reopen_the_heap \
+  -- --exact
+cargo +nightly miri test -p glam-gc --lib --all-features \
+  heap::tests::irreversible_topology_panic_wakes_waiters_into_permanent_poison \
+  -- --exact
+```
+
+Both fixtures pass Miri. The complete collector check passes with 184 unit
+tests (182 passing plus two ignored scale fixtures), six Loom models, eight
+compile-fail/doc tests, and the exact unsafe inventory. The checkpoint adds no
+production unsafe site; its one edge-free fixture `Trace` declaration is
+recorded in that inventory. GC6-002B extends the attempt state across erased
+destructor dispatch and durable run commit; ordinary caught payload-destructor
+panic remains recoverable.
+
 ## Gate G0 Baseline
 
 Before changing the unsafe surface in C1, recheck the focused pre-GC semantic

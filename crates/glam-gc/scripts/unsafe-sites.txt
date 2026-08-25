@@ -89,6 +89,7 @@ crates/glam-gc/src/heap.rs:    unsafe impl Trace for InvalidEdgeHolder {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for MutatorContextDrop {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for OverflowingSlot {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for PanickingTraceNode {
+crates/glam-gc/src/heap.rs:    unsafe impl Trace for PoisonedHeapDrop {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for SecondType {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for SelectivePanickingDrop {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for TerminalPanickingDrop {

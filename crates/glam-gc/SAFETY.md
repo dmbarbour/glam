@@ -217,11 +217,13 @@ and every unsafe function, implementation, and block are checked into
   dispatch. Pointer-only `ErasedGc` carries no independent claimed type;
   canonical representation mismatch remains a typed-root construction check,
   not a second worklist-drain check.
-- If an attempt panics, Rust drops its worklist and counters before the
-  collection guard recovers and clears any managed-data mutex poison. Recovery
-  does not scan or clear partial marks. It relatches collection before
-  restoring ordinary coordinator state, and the original panic resumes. The
-  next attempt's mandatory initial clear makes every stale mark irrelevant.
+- If an attempt panics before destructive topology mutation, Rust drops its
+  worklist and counters before the collection guard recovers and clears any
+  managed-data mutex poison. Recovery does not scan or clear partial marks. It
+  relatches collection before restoring ordinary coordinator state, and the
+  original panic resumes. The next attempt's mandatory initial clear makes
+  every stale mark irrelevant. GC6-002A deliberately forbids this recovery
+  once selector withdrawal has begun.
 - Only `MarkAttempt::finish` converts scratch into a successful `MarkSummary`,
   and it requires an empty worklist. The complete scalar summary remains local
   while later exclusive/finalizer work runs. `CollectionAttempt::complete`
@@ -818,6 +820,39 @@ next high-water target under managed data. Only success subsequently publishes
 the scalar report and matching completed-collection epoch under the
 coordinator. Therefore no report can describe provisional finalizer state,
 while pressure created by finalizer allocation or recycling is never lost.
+
+### GC6-002A topology irreversibility and permanent poison
+
+`CollectionAttempt` records whether work is still reversible, destructive
+topology mutation is in progress, the complete allocator view is published,
+or the collection completed. Finalization obtains a finer-grained irreversible
+state in GC6-002B; it is not part of this checkpoint.
+
+Planning reserves capacity and validates topology before irreversibility.
+Immediately before the first allocator-frontier withdrawal, the attempt enters
+`TopologyMutation`. It cannot become recoverable again until every retirement,
+batch installation, eager sweep, final lease/frontier rebuild, and the matching
+allocation-lease epoch have published. An unwind inside this interval may have
+changed topology without publishing the cache invalidation which makes it safe
+for later allocation, so ordinary retry is forbidden.
+
+The attempt guard permanently poisons such a heap without reading managed
+data. Poison is linearized with outer admission under the coordinator mutex,
+wakes every blocked mutator and synchronous collector, and prevents later
+mutator admission, collection requests, or collection. Poison does not revoke
+a Rust borrow established before that linearization, so its scope can passively
+unwind or exit; operations which require authoritative heap state may reject
+the poisoned heap. Terminal `HeapInner::drop` performs no managed destructor
+dispatch for a poisoned heap because allocation and destructor authority may
+no longer agree. Raw arena release may therefore leak Rust-owned resources,
+but it cannot retry an uncertain destructor or expose partially published
+allocator state.
+
+After the swept allocator view and its lease epoch are authoritative, the
+attempt enters `AllocatorViewPublished`; pre-finalizer and already-committed
+payload-panic recovery retain their existing pressure publication and retry
+semantics. GC6-002B separately closes the interval between erased destructor
+dispatch and durable finalization commit.
 
 ### C6D.1 selected terminal-destruction contract
 

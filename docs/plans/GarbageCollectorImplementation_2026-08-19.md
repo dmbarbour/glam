@@ -79,6 +79,7 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C6D.1 | completed | restricted terminal-teardown decision and fixtures |
 | C6D.2 | completed | detached-first terminal teardown |
 | Post-C6 review | in progress | semantic, topology, failure, and verification reconciliation before Gate G1 |
+| Post-C6 GC6-002A | completed | topology irreversibility and permanent heap poison |
 | C6D.3 | pending | Gate G1 audit |
 | C7A | pending | shared-root and immutable-reader stress |
 | C7B | pending | allocation and coordinator stress |
@@ -4040,6 +4041,15 @@ The review is recorded in
 [`GarbageCollectorC6_2026-08-24.md`](../reviews/GarbageCollectorC6_2026-08-24.md).
 It has been performed but remains open while its Gate G1 blockers are being
 resolved.
+
+GC6-002A was completed on 2026-08-25. `CollectionAttempt` now distinguishes
+reversible work, destructive topology mutation, a completely published swept
+allocator view, and completion. An unwind during topology mutation permanently
+poisons the heap: poison is linearized with admission, wakes waiters, rejects
+later mutation and collection, and suppresses terminal managed-destructor
+dispatch. Forced direct and waiter schedules pass focused Miri. GC6-002B still
+owns the erased-destructor dispatch-to-commit boundary, and GC6-002C owns the
+complete poison-boundary audit and review closeout.
 
 The review must:
 
