@@ -12,7 +12,11 @@
 //! finalizer mutator, while C6B.3 restores completed-region allocator capacity.
 //! C6C.1 terminally retires each attempted allocation after `Drop` returns or
 //! unwinds, preserves untouched pending work for a later collection, and
-//! propagates the original panic without persistent exceptional state.
+//! propagates the original panic without persistent exceptional state. C6C.2
+//! aligns activity, pressure, and successful reports with those durable
+//! commits. C6D selects restricted last-owner teardown without mutator
+//! authority and visits detached pending runs before ordinary attached class
+//! runs.
 
 #![deny(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]
@@ -29,7 +33,7 @@ mod arena;
     reason = "C2B.1 metadata operations remain collector-private until class discovery consumes them"
 )]
 mod class;
-#[expect(unsafe_code, reason = "reviewed C2C terminal payload destruction")]
+#[expect(unsafe_code, reason = "reviewed C5/C6 trace, sweep, and drop dispatch")]
 mod heap;
 #[expect(unsafe_code, reason = "reviewed C1C mutation boundary")]
 mod mutation;

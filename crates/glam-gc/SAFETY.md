@@ -107,7 +107,24 @@ dispatching, and untouched pending identities remain in the durable batch for
 a later collection before the original panic resumes. C6C.1b indexes the
 durable batch by run and allocation word, selects runs through an ephemeral
 attempt snapshot, and commits each selected run after its local destructor
-batch returns or unwinds.
+batch returns or unwinds. C6C.2 makes queued/running finalizer activity,
+post-finalization pressure, and successful reports agree with those durable
+commits. C6D.1 selects restricted terminal destruction: the last heap owner
+supplies no mutator, propagates the first destructor panic, and requires every
+managed representation to remain safely droppable without heap capability.
+C6D.2 visits detached finalization runs first and then ordinary attached class
+runs; allocation-bit retirement makes the two walks disjoint without a
+per-object pending lookup. The mandatory post-C6 review additionally makes
+topology/finalizer-commit panics permanently poison admission, directly models
+finalized-word release versus concurrent allocation, and verifies mixed
+detached/attached terminal topology.
+
+The current collector is therefore a non-moving, stop-the-world full
+collector. A bare `Gc<T>` is not liveness evidence. Registered live root cells,
+edges traced from them, and durable pending-finalizer records preserve exact
+allocations across collection; eager sweep or finalization may reclaim every
+other allocation. A matching mutator excludes collection while client code
+holds an authorized managed reference.
 
 The crate denies unsafe code by default. `src/lib.rs` gives the reviewed
 `pointer`, `root`, `mutator`, `trace`, `mutation`, `thread_cache`, and unit-test
@@ -297,11 +314,13 @@ implementation performs the available debug/test indexed heap and canonical
 metadata checks before `as_ref`; its result lifetime is bounded by the mutator
 borrow.
 
-Correct pre-sweep calls satisfy the proof because C3's synthetic collection
-reclaims nothing and arena payloads stay live until heap teardown. Wrong-heap and
-wrong-representation tests deliberately arrange a diagnostic mismatch and
-establish that indexed validation panics before `as_ref` runs. Those checks are
-not part of the release-build proof.
+The only production caller is `Root::get`. Its still-live registered root cell
+is visited by every exclusive root walk, so the allocation is marked before
+reclamation; the matching mutator then excludes collection for the returned
+reference's lifetime. Other internal/test callers must establish equivalent
+liveness explicitly. Wrong-heap and wrong-representation tests deliberately
+arrange a diagnostic mismatch and establish that indexed validation panics
+before `as_ref` runs. Those checks are not part of the release-build proof.
 
 ### Canonical object metadata and erased dispatch
 
@@ -326,8 +345,9 @@ names a live initialized allocation whose run resolves to that exact metadata.
 The trace dispatcher forms a shared `T` reference only for the duration of the
 synchronous visit. The drop dispatcher invokes `drop_in_place::<T>` exactly
 once and does not deallocate the slot. Typed-run metadata resolution is the
-ordinary proof source, terminal heap teardown is the provisional caller, and
-C6 later owns collector-driven destruction.
+authoritative representation proof for graph tracing, ordinary finalization,
+and terminal heap teardown. Allocation and durable finalization state supply
+the separate liveness and exactly-once obligations at each call site.
 
 ## Regional Mutator Admission Invariants
 
@@ -1217,10 +1237,11 @@ value, and a root does not retain or re-enter its value domain.
 `Root::get` rejects a nonmatching mutator in every build before reconstructing
 the private typed `Gc<T>` and invoking its existing unsafe access gateway. The
 private constructor established the representation, allocation, and heap
-invariants; the live matching mutator prevents reclamation for the returned
-reference's lifetime. C4 performs no reclamation. Dropping `RootCell` releases
-only its weak heap reference and pointer bits; it never dereferences or destroys
-the managed payload and invokes no user code.
+invariants; registry publication makes every still-live root cell a collection
+seed, and the live matching mutator prevents reclamation for the returned
+reference's lifetime. Dropping `RootCell` releases only its weak heap reference
+and pointer bits; it never dereferences or destroys the managed payload and
+invokes no user code.
 
 Exclusive root traversal holds the managed-data mutex after the
 coordinator has stopped every mutator. No new root cell can therefore be

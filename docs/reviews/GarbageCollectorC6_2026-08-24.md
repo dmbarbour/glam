@@ -426,6 +426,22 @@ caller uses to decide whether a bare `Gc` is live and what `Trace`/`Drop` must
 support. Reconcile them before G1. Keep historical phase records where useful,
 but finish each section with one unambiguous current rule.
 
+#### GC6-005 completion
+
+Completed 2026-08-25. `Gc<T>` now says directly that it carries no liveness and
+may become stale while its heap remains live. `Root::get` and the safety ledger
+use the current proof: registry publication precedes observation, every live
+root cell is an exclusive mark seed, and matching mutator authority excludes
+collection for the returned borrow. The stale pre-sweep and provisional
+terminal-dispatch claims were removed.
+
+The safety phase history now reaches C6D and ends with one current non-moving
+full-collector rule. The roadmap status, resolved terminal checkpoint, runtime
+integration boundary, and `heap` unsafe-module expectation now agree that the
+isolated collector marks, reclaims, and finalizes but has not passed Gate G1.
+Doctests, Clippy with warnings denied, and the exact unsafe inventory pass.
+GC6-005 changes no runtime semantics or unsafe operation and is resolved.
+
 ### GC6-006 — Phase-local lint reasons have outlived their boundary
 
 **Priority:** low  
@@ -502,7 +518,7 @@ appropriate.
 | Finalizer activity, pressure, and reports | paused running batch, successful/panicking allocation, report/epoch tests | adequate |
 | Finalized-word concurrent release | Loom neighbor/unique-claim model plus production release-to-frontier forced schedule and focused Miri | adequate; GC6-003 resolved |
 | Terminal detached and attached traversal | mixed detached/attached/ordinary/retired fixture plus first-panic fixture and focused Miri | adequate; GC6-004 resolved |
-| Public managed-`Drop` contract | capability/liveness Rustdoc, safety ledger, and optional-mutator fixture | GC6-001 resolved; broader GC6-005 drift remains |
+| Public managed-`Drop` and pointer-liveness contract | current capability/liveness Rustdoc, safety ledger through C6D, and optional-mutator fixture | adequate; GC6-001 and GC6-005 resolved |
 | Unsafe inventory | exact checked-in inventory and passing audit | defer final certification to C6D.3 |
 
 ## Resolution Ledger
@@ -513,15 +529,14 @@ appropriate.
 | GC6-002 | Resolved with explicit topology and finalizer-commit irreversibility, permanent poison, and complete boundary verification. | completed 2026-08-25 |
 | GC6-003 | Resolved with Loom neighboring-bit, visibility, and unique-claim proof plus a production forced-order fixture. | completed 2026-08-25 |
 | GC6-004 | Resolved with one mixed detached, attached, ordinary, and retired terminal-topology fixture. | completed 2026-08-25 |
-| GC6-005 | Reconcile public API, safety ledger, roadmap, integration boundary, and unsafe-module descriptions. | before C6D.3 |
+| GC6-005 | Resolved across public API, safety ledger, roadmap, integration boundary, and unsafe-module descriptions. | completed 2026-08-25 |
 | GC6-006 | Audit stale phase-local allowances and comments. | C6D.3 cleanup or C8 if demonstrably inert |
 | GC6-007 | Reconcile C7/C8 wording and partition C7A/B before implementation. | plan update after G1 blockers |
 
 ## Review Status
 
-The post-C6 review has been performed but remains open while the remaining Gate
-G1 blockers above are unresolved. C6D.3 must audit the corrected design rather
-than absorb these semantic decisions into a verification checklist. After
-GC6-002 through GC6-005 are resolved, update this ledger with exact tests and
-commits, mark the post-C6 checkpoint complete, and begin the focused Gate G1
-audit.
+The post-C6 review checkpoint is complete and every explicit Gate G1 blocker is
+resolved. GC6-006 remains a low-risk stale-state/comment audit and GC6-007 owns
+the downstream C7/C8 plan reconciliation; complete those follow-ups before the
+focused C6D.3 certification. C6D.3 must audit the corrected design rather than
+absorb new semantic decisions into a verification checklist.

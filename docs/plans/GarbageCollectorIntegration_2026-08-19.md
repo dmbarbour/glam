@@ -31,10 +31,12 @@ interaction nets. Cross-plan invariants and enablement gates live in
 
 ## Current Boundary
 
-The collector now supplies C4's checked direct root and weak registry, but it
-does not yet mark, reclaim, finalize, or pass Gate G1. Integration may use that
-completed boundary only in isolated prototypes; no production ownership
-migration begins before G1.
+The isolated collector now supplies checked direct roots and a weak registry,
+checked non-recursive graph tracing, eager non-moving sweep and run reuse,
+durable non-rootable finalization with retry after payload panic, and restricted
+last-owner terminal teardown. It has completed C6D.2 but has not passed Gate
+G1. Integration may use that reviewed boundary only in isolated prototypes; no
+production ownership migration begins before G1.
 
 `RuntimeValueRoot` currently stores `{EvaluationRuntimeId, core::Value}`. It
 protects provenance but does not register a collector root. Recursive core

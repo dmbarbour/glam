@@ -1,9 +1,11 @@
 # Glam-Owned Garbage Collection Roadmap — 2026-08-19
 
-Status: in progress; collector Phases C0 through C5 and C6A.2b, the C2C.6
-verification follow-up, and integration Phase I0 are complete. Gate G0 is
-established, and the mandatory post-C1, post-C2C, post-C3E, post-C4, and
-post-C5 downstream reviews are complete. Collector Phase C6A.2c is next.
+Status: in progress; collector Phases C0 through C6D.2, the C2C.6 verification
+follow-up, and integration Phase I0 are complete. Gate G0 is established, and
+the mandatory post-C1, post-C2C, post-C3E, post-C4, post-C5, and post-C6
+reviews have been performed. The post-C6 Gate G1 blockers GC6-001 through
+GC6-005 are resolved; cleanup/reconciliation findings GC6-006 and GC6-007 and
+the focused C6D.3 certification remain before Gate G1.
 
 This roadmap keeps two large transitions aligned:
 
@@ -164,12 +166,15 @@ permit dereference outside a region.
    allocate fresh values, evaluate or schedule work, publish diagnostics, and
    even construct and publish a fresh equivalent of itself.
    It cannot recover a root to any allocation in the completed dead set or
-   transition its original identity back to `Allocated`. This is quining, not
-   resurrection. Finalizer timing and order remain operational rather than
-   part of Glam evaluation semantics. This describes collection while a value-
-   domain owner lease remains live. C6 must separately settle how the last
-   external heap owner initiates terminal destruction without pretending a
-   fresh public root can retain an owner which has already been dropped.
+   transition its original identity back to `Allocated`. Constructing an
+   equivalent value from independently live inputs creates a fresh identity;
+   it is not resurrection. Finalizer timing and order remain operational
+   rather than part of Glam evaluation semantics. This describes collection
+   while a value-domain owner remains live. The selected terminal path is
+   deliberately narrower: dropping the last heap owner supplies no mutator,
+   escaped roots do not retain or revive the heap, detached pending runs are
+   visited before attached class runs, and the first destructor panic stops
+   terminal dispatch.
 7. **No collector lock in callbacks or destructors.** Destruction, wakes,
    diagnostics, host callbacks, and scheduler callbacks occur only in phases
    whose lock and re-entry rules are explicit. No arbitrary callback or Rust
@@ -342,14 +347,15 @@ These choices are intentionally unresolved rather than accidental drift:
   handle, a non-generic cell containing a weak heap identity and erased `Gc`,
   and a thin weak registry entry. I2 still chooses whether public `Value` uses
   that root directly or wraps it to keep eligible scalars inline; no alternate
-  collector root-cell representation is required;
-- C4D has already made allocation capabilities mutator-scoped and removed
-  them as heap owners. C6 still selects a last-value-domain-owner terminal
-  teardown protocol which does not let escaped roots retain or revive the heap
-  and does not run mutator-capable destructors without their promised context;
-  and
+  collector root-cell representation is required.
 - I8 decides whether `SharedRuntimeNet` remains synchronized external storage
   with an exact visitor or becomes a managed outer node.
+
+C6D has resolved the collector-side terminal question: allocation capabilities
+are mutator-scoped and non-owning, roots retain their cell but only weakly name
+the heap, and last-owner teardown runs without manufacturing mutator authority.
+Integration must preserve that ownership boundary rather than choose another
+collector terminal protocol.
 
 Each choice must be resolved and latched by the named phase. None permits
 weakening runtime locality, exact tracing, or the collection-admission gates.

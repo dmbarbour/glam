@@ -6,9 +6,11 @@ use crate::{Mutator, Trace, trace::ErasedGc};
 /// A typed, non-rooting pointer to one managed allocation.
 ///
 /// `Gc<T>` carries only the pointer. It does not retain or identify its heap,
-/// keep its allocation alive, or permit safe dereference. Before collection is
-/// enabled, arena allocations remain live until their heap is dropped; later
-/// phases replace that temporary rule with roots and collection invariants.
+/// keep its allocation alive, or permit safe dereference. A collection may
+/// reclaim an allocation which is not reachable from a registered root or an
+/// explicitly retained collector source. Consequently, a copied `Gc<T>` may
+/// become stale even while its heap remains live. Every dereference must be
+/// justified independently under matching mutator authority.
 ///
 /// A reference cannot escape the mutator region which authorizes access:
 ///
@@ -64,9 +66,10 @@ impl<T: Trace> Gc<T> {
     ///
     /// # Safety
     ///
-    /// `pointer` must identify an initialized, live managed `T` registered to
-    /// the allocating heap. Its address and representation must remain valid
-    /// until the collector's liveness rules permit reclamation.
+    /// At construction, `pointer` must identify an initialized, live managed
+    /// `T` registered to the allocating heap. Constructing this handle does
+    /// not extend that liveness; every later dereference must separately prove
+    /// that collection has not reclaimed the allocation.
     pub(crate) unsafe fn from_raw(pointer: NonNull<T>) -> Self {
         Self { pointer }
     }

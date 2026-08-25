@@ -78,12 +78,13 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C6C.2 | completed | finalizer activity, reports, and pressure publication |
 | C6D.1 | completed | restricted terminal-teardown decision and fixtures |
 | C6D.2 | completed | detached-first terminal teardown |
-| Post-C6 review | in progress | semantic, topology, failure, and verification reconciliation before Gate G1 |
+| Post-C6 review | completed | semantic, topology, failure, and verification reconciliation before Gate G1 |
 | Post-C6 GC6-002A | completed | topology irreversibility and permanent heap poison |
 | Post-C6 GC6-002B | completed | finalizer dispatch-to-commit irreversibility |
 | Post-C6 GC6-002C | completed | permanent-poison boundary audit and closeout |
 | Post-C6 GC6-003 | completed | finalized-word release concurrency proof |
 | Post-C6 GC6-004 | completed | mixed attached/detached terminal-topology proof |
+| Post-C6 GC6-005 | completed | public liveness and current-boundary documentation reconciliation |
 | C6D.3 | pending | Gate G1 audit |
 | C7A | pending | shared-root and immutable-reader stress |
 | C7B | pending | allocation and coordinator stress |
@@ -4091,6 +4092,17 @@ dispatch order, leaving one detached pending run, one attached pending run,
 and one rooted ordinary allocation in the same heap. After the root is
 released, terminal teardown accounts for every original allocation exactly
 once. The fixture passes focused Miri and adds no production or unsafe code.
+
+GC6-005 was completed on 2026-08-25. Public `Gc<T>` and `Root::get` Rustdoc now
+state the current collection proof: a bare pointer carries no liveness, a live
+registered root is marked by every exclusive root walk, and matching mutator
+authority excludes reclamation during a borrow. The safety ledger now reaches
+C6D and ends its historical phase narrative with one current non-moving full-
+collector rule. The roadmap, integration boundary, and `heap` unsafe-module
+description now agree that C6D.2 is implemented while production integration
+remains blocked on Gate G1. All explicit post-C6 Gate blockers are resolved;
+GC6-006 cleanup and GC6-007 downstream-plan reconciliation remain before the
+focused C6D.3 audit.
 
 The review must:
 

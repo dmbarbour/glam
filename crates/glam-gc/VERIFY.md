@@ -772,6 +772,30 @@ Both pass. The stable collector matrix contains 187 unit tests (185 passing
 plus two ignored scale fixtures), seven Loom models, eight compile-fail/doc
 tests, and the exact unsafe inventory. GC6-004 adds no production unsafe site.
 
+## GC6-005 Public-Contract Reconciliation
+
+The public `Gc<T>` Rustdoc, `Root::get` unsafe justification, crate unsafe-
+module ownership, safety ledger, roadmap status, and integration current
+boundary now describe the implemented C6D collector rather than their C4/C5
+historical checkpoints. Historical phase descriptions remain where they are
+explicitly chronological; each authoritative section now finishes with the
+current rule that a bare pointer is not liveness evidence, registered traced
+reachability preserves an allocation, and matching mutator authority excludes
+collection during access.
+
+The documentation-bearing code is checked with:
+
+```sh
+cargo test -p glam-gc --doc --all-features
+cargo clippy -p glam-gc --all-targets --all-features -- -D warnings
+crates/glam-gc/scripts/audit-unsafe.sh
+```
+
+All pass. The stable collector matrix remains 187 unit tests (185 passing plus
+two ignored scale fixtures), seven Loom models, eight compile-fail/doc tests,
+and the exact unsafe inventory. GC6-005 changes no runtime semantics or unsafe
+operation.
+
 ## Gate G0 Baseline
 
 Before changing the unsafe surface in C1, recheck the focused pre-GC semantic

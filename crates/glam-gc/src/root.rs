@@ -53,8 +53,9 @@ impl<T: Trace> Root<T> {
         // canonical-metadata, and heap-provenance validation before sealing
         // this erased pointer behind `Root<T>`. The matching mutator keeps the
         // heap live and excludes reclamation for the returned reference's
-        // lifetime. C4 reclaims nothing; registry publication completed before
-        // this root became observable.
+        // lifetime. Registry publication completed before this root became
+        // observable, and every exclusive root walk marks a still-live cell
+        // before sweep can reclaim its allocation.
         let value = unsafe { Gc::from_raw(self.cell.value.as_ptr().cast::<T>()) };
         // SAFETY: the root invariant above proves liveness and representation,
         // and the release-visible heap identity check proves ownership.
