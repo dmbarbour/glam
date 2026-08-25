@@ -1,8 +1,10 @@
 # Glam GC Ownership and Mutation Ledger — 2026-08-20
 
-Status: Phase I0 complete for the pre-GC representation. The provisional
-collector fields in this ledger must be reconciled after collector Phase C2B
-and integration Phase I1, before Gate G2 permits production collection.
+Status: Phase I0 complete for the pre-GC representation. Stable integration
+facts are reconciled when each representation family receives its concrete
+managed wrapper and trace implementation. Collector-private class topology is
+verified inside `glam-gc` and is not part of this ledger. Every applicable
+family record must be complete before Gate G2 permits production collection.
 
 This is the graph inventory required by
 [`GarbageCollectorIntegration_2026-08-19.md`](GarbageCollectorIntegration_2026-08-19.md).
@@ -43,12 +45,33 @@ the managed graph. The term *sidecar* is avoided below because it previously
 blurred this distinction between an edge-free **C** companion and an **R**
 external root owner.
 
-`TypeId::of::<T>()` is the provisional type identity for every typed row. A
-canonical `ObjectMetadata` pointer, dense heap-local class ID, requested slot
-size, final stride, slots per fixed run, and finalizer flag do not exist yet.
-They are therefore explicitly **C2B/I1 provisional** throughout this ledger.
-No row may enter production collection while those fields or its visitor are
-unresolved.
+The stable identity of a ledger row is its named Glam representation family,
+concrete Rust type, and source owner. `TypeId`, canonical `ObjectMetadata`
+addresses, and heap-local dense class IDs are implementation mechanisms rather
+than durable documentation identities. Metadata addresses vary by process and
+class IDs vary by heap discovery order; neither appears in a production
+integration record.
+
+When a family becomes managed, its reconciliation record contains:
+
+1. the stable family name, concrete Rust type, and defining source path;
+2. the trace-review checkpoint and exact outgoing-edge enumeration policy;
+3. Rust size/alignment and the requested total slot extent selected by Glam;
+4. whether allocator discovery accepts that requested layout;
+5. whether the payload requires `Drop`, its ordinary/finalizing destruction
+   policy, and the relevant failure test;
+6. every post-publication mutation gateway, or an explicit immutable policy;
+7. its external-root classification and the source inventory proving that no
+   internal edge was hidden behind a root; and
+8. the migration phase and exact verification which authorizes collection.
+
+Final aligned stride, slots per run, dense class identity, metadata address,
+frontier state, and other derived run geometry remain collector-internal.
+`glam-gc` layout/class tests verify them from public Rust layout and requested
+extent inputs. A test-only diagnostic may report them for profiling, but Gate
+G2 never depends on copying those instance-specific results into this ledger.
+No family may enter production collection while its stable record or visitor
+is unresolved.
 
 ## Current Layout Baseline
 
@@ -152,15 +175,16 @@ inventory.
 
 | Area | Types | Classification, lifetime, and migration |
 | --- | --- | --- |
-| Runtime/public facade | `RuntimeValueRoot`, `api::Value`, `EvaluatedValue`, `Values`, `RuntimeValueFactory`, `RuntimeSharedResources`, `PromiseResolver`, `EffectTokenDomain`, `EffectTokenState` | R. Public/runtime-long-lived and cross-thread. Root registration/provenance in I2; all root surfaces audited in I9. Resolver ownership/finalization is handled with promises in I5; generic effect-token domain payloads remain explicit external root owners. Any promise coordination split from its managed cell is separately **C** and contains no value root. |
+| Runtime value domain | `RuntimeValueDomain`, `CoreValueFactory`, `Values`, `RuntimeValueFactory`, `RuntimeSharedResources` | Authorized strong value-domain leases under I1B. The domain owns the no-auto heap, IDs, cache, and weak coordinator binding; it is never managed by its own heap. Cached payloads cannot retain a factory/domain backedge. Cache roots and retained service factories are audited in I9/I10. |
+| Public root facade | `RuntimeValueRoot`, `api::Value`, `EvaluatedValue`, `PromiseResolver`, `EffectTokenDomain`, `EffectTokenDomainState` | R. Public/runtime-long-lived and cross-thread, but non-owning with respect to the value domain. Root registration/provenance and inert access are selected in I2; all root surfaces are audited in I9. Resolver ownership/finalization is handled with promises in I5; generic effect-token domain payloads remain explicit external root owners. Any promise coordination split from its managed cell is separately **C** and contains no value root. |
 | Assembly facade | `AssemblerReflectionHost`, `CompilationExecution`, `ReasoningSession`, `CompileSetup`, `BuiltModule`, `ReasoningVolume`, `Assembler`, `DiagnosticAttachment`, `AssemblerBuilder`, `ModuleBuilder` | R for stored public roots/diagnostics; T for build setup raw core values. Convert setup/compiler fields to scoped managed access in I3/I9. |
 | Diagnostics | `Diagnostic`, `DiagnosticEvent`, `DiagnosticBusState`, `DiagnosticBusInner`, `DiagnosticBus`, `DiagnosticIngressInner`, `DiagnosticIngress`, `DiagnosticSubscription`, `DiagnosticSubscriptionInner`, `Error`, `ReasoningFailure` | R. Buses/callbacks are external root owners; events retain public roots until delivery/retirement. Weak back-references remain non-owning. I9. |
 | Runtime events | `RuntimeInputRecord`, `RuntimeOutputIntent`, `RuntimeDeliveryRecord`, `RuntimeEventSnapshot`, `RuntimeEventJournal`, `RuntimePreparedInput`, `RuntimeDeliveryTicket`, `RuntimeDiagnosticRoute` | R. Persistent input snapshots and identified deliveries retain roots across threads and settlement. I9. |
 | Readiness/reporting | `QuiescenceSnapshot`, `QuiescenceReport`, `DeadlockSnapshot`, `RuntimeDeadlockWork`, `EvaluationSessionReport`, `EvaluationUnfinishedTask` | R. Host-visible snapshots may outlive sessions/runtime facade. Failures and store snapshots remain exact roots; I9. |
-| Reflection store/protocol | `State`, `Set`, `Rewrite`, `StoreSnapshot`, `StoreJournal`, `ReflectionStore`, `Scoped`, `HostSnapshot`, `TaskCommit`, `Transaction`, `ReflectionJournal`, `QueryRead` | R. Store roots are persistent public roots; journals are transaction-local snapshots/edits; store mutation uses runtime mutation admission then store/event mutex, with wakes/destruction after unlock. I9. |
+| Reflection store/protocol | `State`, `Set`, `Rewrite`, `StoreSnapshot`, `StoreJournal`, `ReflectionStore`, `Scoped`, `HostSnapshot`, `TaskCommit`, `Transaction`, `ReflectionJournal`, `QueryRead` | R. Store roots are persistent public roots; `ReflectionStore` and `StoreSnapshot` also retain an authorized factory/domain lease while they can construct transaction/query values. Journals are transaction-local snapshots/edits; store mutation uses runtime mutation admission then store/event mutex, with wakes/destruction after unlock. I9. |
 | Reflection lifecycle/search | `EffectRun`, `IsolatedTaskHost`, `IsolatedSearchBranch`, `IsolatedSearchBlock`, `IsolatedEffectSearch` | R/T. Runs and isolated search retain public roots while active; same-runtime only. I3/I9. |
 | Reflection machine | `EffectTask`, `ContextualValueEffectTask`, `Branch`, `Deliver`, `Apply`, `CutFrame`, `TaskBlock`, `FixRoot`, `ActiveFix`, `Restore`, `ResetFrame` | T transitioning to exact machine-owned roots. One claimed machine is exclusively mutable outside coordinator locks and may move between workers; any parked value must be rooted. I3/I9. |
-| Evaluation coordinator | `EvaluationDemandState`, `SettlementObligations`, `TaskOwnedPromiseObligation`, `DeferredLazyCycleMember`, `DeferredWorkRelease`, `RuntimeSettlementRelease`, `SparkDemand`, `EvaluationTaskBlock`, `PromiseProducerObligation`, `LocalPromiseObligation`, `LocalPromiseOwner`, `PendingReflectionTaskInner` | R/T. Coordinator owns parked work and registered roots; weak promise cells are non-owning. State changes use mutation admission plus one component mutex; callbacks/drop happen after unlock. I3/I5/I9. |
+| Evaluation coordinator | `EvaluationDemandState`, `SettlementObligations`, `TaskOwnedPromiseObligation`, `DeferredLazyCycleMember`, `DeferredWorkRelease`, `RuntimeSettlementRelease`, `SparkDemand`, `EvaluationTaskBlock`, `PromiseProducerObligation`, `LocalPromiseObligation`, `LocalPromiseOwner`, `PendingReflectionTaskInner` | R/T. `EvaluationDemandState` retains an authorized factory/domain lease; the coordinator route back from that domain is weak. Coordinator state owns parked work and registered roots; weak promise cells are non-owning. State changes use mutation admission plus one component mutex; callbacks/drop happen after unlock. I3/I5/I9. |
 | Evaluator machines | `LazyTaskMachine`, `LazyTaskWork`, `PromiseFollower`, `PromiseFollowerState`, annotation builtin state (`AssertUnit`, `MetadataPure`, `MetadataReflection`, `Reflection`, `Seq`, `Spark`, `Context`, `Valid`), net-construction `Data`/`NetConstructionMachine`, pattern `Found` | T. Bounded poll/quantum state, except parked machines owned by coordinator. Explicit mutator propagation in I3; managed edges in I5/I6/I8. |
 | Compiler API | `ModuleLoadArgs`, `CompileContext`, `CompileDiagnosticEmitter`, `ModuleLoader`, `BinaryFileLoader` | T/D. Compile calls are bounded, but raw core values and value-capturing callbacks require mutator scope and capture containment. I3/I4B/I10. |
 | `.g` compiler cache | `BuiltinModule`, `GCompilerValues` | R/D. Runtime extension cache, long-lived and cross-thread; raw core values hidden behind `Any` block collection until converted to exact runtime roots/cache nodes. I9/I10. |
@@ -239,7 +263,7 @@ kept with the subsystem whose contract they exercise.
 | Metadata/collection deferred cycle and graph identity | `core::tests::metadata_and_collections_can_participate_in_a_deferred_value_cycle`; `metadata_carriers_hide_unit_and_associated_metadata`; metadata update reorder/copy tests in `eval::tests`. |
 | Function/collection/net recursive graph | `evaluates_recursive_dictionary_net`; `compiled_function_values_reuse_one_shared_interaction_net`; `curried_function_partial_application_retains_a_shared_stage`; net cursor/copy runtime tests. |
 | Same-runtime worker transfer | `workers_force_sparks_and_poll_ready_reflection_tasks` and the evaluation executor worker tests. |
-| Runtime facade drop with escaped value/resources | `value_evaluator_returns_a_runtime_rooted_whnf_witness`; `runtime_shared_resources_do_not_retain_runtime_lifecycle_owners`; `evaluation_context_retains_runtime_cache_and_profile_without_a_cycle`. |
+| Runtime facade drop with escaped value/resources | `value_evaluator_returns_a_runtime_rooted_whnf_witness`; `runtime_shared_resources_do_not_retain_runtime_lifecycle_owners`; `public_values_retain_only_the_runtime_value_domain`; `bare_public_values_do_not_retain_the_runtime_value_domain`; `evaluation_context_retains_runtime_cache_and_profile_without_a_cycle`; `retained_reflection_profile_keeps_only_shared_resources_alive`; `compiler_cache_does_not_form_a_value_domain_cycle`. |
 | Reflection/task state after owner close | `blocked_machine_context_does_not_retain_its_owner_lease`; `task_handle_acknowledges_terminal_failure_after_owner_lease_closes`; `task_handle_cancellation_is_harmless_after_owner_closure`; scheduled effect lifecycle tests. |
 | Store snapshot retention | `runtime_event_snapshots_preserve_persistent_input_roots`; reflection store persistent-snapshot tests. |
 | Settlement retention | `ready_settlement_publishes_exited_once_and_retains_exit_errors`; `forced_deadlock_settlement_preserves_exits_and_kills_other_participants`; coordinator terminal-settlement tests. |
@@ -266,8 +290,16 @@ guessing/conservative classification:
    value-installing mutation-gateway inventory.
 7. Public opaque construction needs a closed leaf/root registration boundary.
 
-After C2B and I1, update every M row with its canonical metadata pointer,
-`TypeId`, dense class ID, requested slot size, actual stride, slots per fixed
-run, finalizer flag, and managed-layout-limit result. Then re-run the source
-inventory for new value fields, `Arc<dyn Fn...>`, `Any`, opaque constructors,
-and interaction-net payloads. Any unmatched result keeps Gate G2 closed.
+As each M family receives its managed representation, append the stable
+reconciliation record defined above. In particular, record its Rust
+type/source owner, reviewed edge visitor, requested extent and Rust layout,
+allocator-discovery acceptance, drop/finalization policy, mutation gateway,
+and external-root classification. Do not record its metadata address, dense
+class ID, or derived run geometry here.
+
+Before Gate G2, re-run the source inventory for new value fields,
+`Arc<dyn Fn...>`, `Any`, opaque constructors, and interaction-net payloads;
+match every result to one stable family record. Separately run the collector's
+layout/class verification for every requested extent used by those families.
+An unmatched source result, incomplete stable record, rejected layout, or
+missing collector test keeps Gate G2 closed.

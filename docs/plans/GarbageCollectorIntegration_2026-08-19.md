@@ -109,25 +109,25 @@ Completed in
 [`GarbageCollectorOwnershipLedger_2026-08-20.md`](GarbageCollectorOwnershipLedger_2026-08-20.md).
 The ledger records the pre-GC graph, current layout baseline, synchronization
 and mutation policy, semantic regression matrix, and the boundary defects that
-must remain Gate G2 blockers. Its collector metadata/class geometry is
-deliberately provisional until C2B and I1 exist.
+must remain Gate G2 blockers. Concrete managed-layout and visitor decisions
+remain provisional until their representation-migration phases; heap-local
+class geometry is deliberately outside the integration ledger.
 
 Create a dated graph inventory beside this plan. For every graph-bearing type,
 record:
 
-- owner and source path;
-- outgoing managed-value edges;
+- stable Glam representation family, concrete Rust type, and source owner;
+- outgoing managed-value edges, exact visitor policy, and trace-review
+  checkpoint;
 - whether it is immutable, replaceable, one-write, or freely mutable;
 - current synchronization and lock order;
 - whether it can live outside an evaluator call or worker quantum;
 - whether it can cross threads;
-- Rust `TypeId`, canonical object-metadata pointer, managed size/alignment, and
-  selected heap-local allocation class, including its derived slot stride and
-  slots-per-fixed-run geometry;
-- visitor-based outgoing edge enumeration;
-- required trace strategy;
+- Rust size/alignment, requested total slot extent, and whether allocator
+  discovery accepts that layout;
 - managed-edge mutation gateway, if the edge is replaceable;
-- whether its homogeneous run metadata contains `Drop`;
+- `Drop` and ordinary/finalizing destruction policy;
+- external-root classification and source-inventory evidence;
 - confirmation that it fits the collector's documented managed-layout limit;
   and
 - migration phase.
@@ -143,12 +143,13 @@ or the exact same-runtime public root wrapper it may retain. Discovering a bare
 internal managed pointer is a boundary defect, not a conservative-tracing
 classification.
 
-I0 can begin before collector class discovery exists. At that point, record
-Rust type/layout and projected trace/drop policy; mark metadata addresses,
-dense class IDs, and derived fixed-run geometry as provisional. Reconcile and
-latch those fields after C2B and I1, before Gate G2. This sequencing lets the
-layout inventory inform C2A without pretending that heap-local classes already
-exist.
+I0 can begin before collector class discovery exists. Record Rust type/layout,
+stable representation family, and projected trace/drop policy. When a concrete
+managed wrapper is selected, reconcile its requested extent, allocator-layout
+acceptance, visitor review, mutation gateway, and external-root
+classification. Canonical metadata addresses, dense class IDs, final stride,
+slots per run, and other derived heap-local topology remain private collector
+verification rather than integration-ledger fields.
 
 Add tests which latch current semantics before changing representation:
 
@@ -241,6 +242,13 @@ is allocated in the heap yet.
 
 ### Phase I1D — Layout Policy and Ownership-Ledger Reconciliation
 
+GCI-005 completed the ledger-schema half of this checkpoint on 2026-08-25.
+The ledger now identifies stable Glam representation families and records
+reviewable layout, trace, drop, mutation, and root facts. It deliberately does
+not use process-local metadata addresses or discovery-order class IDs. Each
+later representation-migration phase completes its own family record; Gate G2
+performs the final one-to-one source reconciliation.
+
 - Centralize Glam's node-size policy when constructing canonical object
   metadata. That policy may request a slot size larger than the Rust payload;
   allocation-class creation then applies it independently for each typed run.
@@ -249,9 +257,10 @@ is allocated in the heap yet.
   declaration macro is Glam's central alignment-policy point; the collector
   does not provide a mutable or per-heap alignment setting.
 
-- Reconcile the production representation inventory with the ownership ledger
-  using stable representation families rather than collector-private class
-  discovery IDs, as required by GCI-005.
+- As the initial managed shell is selected, complete its stable family record
+  and prove allocator discovery accepts its requested extent. Keep final run
+  geometry in `glam-gc` verification. Later phases repeat this for their own
+  families rather than performing one discovery-order-dependent dump.
 
 ### Phase I1E — Lifecycle Reverification
 

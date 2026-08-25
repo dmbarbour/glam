@@ -230,7 +230,7 @@ existing `Root::get` mismatch panic as a collector invariant check.
 **Classification:** documentation and verification-model drift  
 **Priority:** medium  
 **Confidence:** high  
-**Status:** open
+**Status:** resolved 2026-08-25
 
 The ownership ledger requires every managed row to record its canonical
 `ObjectMetadata` pointer and dense heap-local class ID, among other geometry
@@ -251,6 +251,21 @@ integration contract.
 Keep final stride, slots per run, and dense class identity in collector tests
 or an explicitly test-only diagnostic surface. Do not widen the production
 collector API merely to copy its internal topology into a document.
+
+**Resolution:** the ownership ledger and I0/I1D integration contract now use a
+stable representation-family reconciliation record. Each managed family is
+identified by its concrete Rust type and source owner and must record its exact
+trace review, requested extent plus Rust layout, allocator-discovery result,
+drop/finalization policy, mutation gateways, external-root classification, and
+authorizing verification. Metadata addresses, `TypeId`, dense class IDs,
+frontiers, final stride, and slots-per-run geometry are explicitly excluded
+from the production ledger.
+
+Derived topology remains covered by `glam-gc` class/layout tests and may later
+be exposed only through test or profiling diagnostics. Gate G2 instead checks
+that every source-inventoried graph-bearing representation maps to one complete
+stable family record and that every requested layout has passed collector
+verification. No collector API change was needed.
 
 ### GCI-006 — I3 lacks a concrete scoped evaluation-quantum carrier
 
@@ -437,7 +452,8 @@ Before implementing the remaining I1 ownership checkpoints:
 1. use GCI-001's completed no-auto collection mode for the production heap;
 2. preserve GCI-003's completed value-domain topology and authorized owner
    matrix;
-3. resolve GCI-005 and correct the ownership-ledger reconciliation target; and
+3. preserve GCI-005's completed stable ownership-ledger reconciliation
+   contract; and
 4. apply GCI-010's I1 partition.
 
 Before the public-root prototype or production switch:
