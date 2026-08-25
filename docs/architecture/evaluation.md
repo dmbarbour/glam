@@ -54,6 +54,16 @@ construction domain before an embedding client builds a value. Every public
 another runtime before exposing its recursive core representation or retaining
 it in runtime-owned state.
 
+The concrete value-lifetime boundary is one internal `RuntimeValueDomain`
+shared by `CoreValueFactory` clones. It owns runtime-local value IDs, canonical
+and compiler-layer caches, a no-auto collector heap, and only a weak route to
+the work coordinator. Explicit construction and evaluation capabilities retain
+the domain; a public `Value` does not. Retaining `Values`, a demand context, or
+a runtime service can therefore keep value construction usable without also
+preserving the scheduler, executor, runtime facade, or default reflection
+profile. The collector heap exists at this checkpoint, but production values
+remain in their compatibility representation and are not collected yet.
+
 Every production evaluator entry receives an `EvalContext` derived from an
 external `EvaluationSession` owner lease. An `Assembler` and its clones share
 one internal `ReasoningSession`, which retains that lease and the assembler's

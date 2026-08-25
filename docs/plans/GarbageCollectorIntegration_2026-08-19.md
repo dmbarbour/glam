@@ -188,19 +188,47 @@ mutator entries do not collect, then prove an explicit full collection still
 acknowledges the request. Existing panic/retry and running-finalizer fixtures
 cover the public finalization statistics.
 
-### Remaining Phase I1 ownership work
+### Phase I1B — Value-Domain Topology and Owner Matrix (complete)
 
-- Add one `RuntimeHeap` to `EvaluationRuntime` ownership and the internal
-  `RuntimeSharedResources` view.
-- Keep the heap inside the runtime value domain. Only explicitly authorized
-  runtime/value-domain owners retain it; escaped public roots do not. A root
-  may still be cloned or dropped after value-domain teardown, but managed
-  access through it is unavailable. I1 must identify which existing non-root
-  capabilities are authorized owners instead of accidentally preserving the
-  domain through every value-facing handle.
-- Do not create a `heap -> runtime state -> heap` ownership cycle.
+Completed on 2026-08-25 in resolution of GCI-003. The root crate now depends
+on `glam-gc`, and every `CoreValueFactory` retains one internal
+`Arc<RuntimeValueDomain>`. The domain owns the no-auto `Heap`, runtime-local ID
+allocators, canonical and compiler-layer value cache, and the weak coordinator
+binding. A scoped factory adds only its compilation-local extension lookup; it
+shares the same domain.
+
+The authoritative strong-owner matrix is:
+
+| Capability | Domain ownership | Reason |
+| --- | --- | --- |
+| `EvaluationRuntime` / `RuntimeSharedResources` | strong, transitively through the core factory | the runtime and retained service hosts must continue constructing and storing values |
+| public `Values` and crate-private `CoreValueFactory` | strong | they are explicit construction capabilities and remain usable after the facade is dropped |
+| active `EvaluationDemandState` / `EvalContext` | strong, through the factory | an admitted evaluation context must retain its value cache and construction authority |
+| `ReflectionStore` and `StoreSnapshot` | strong, through the factory | transactions and snapshots still construct path/query values after capture |
+| active compiler contexts and scoped compiler factories | strong, through the factory | compilation-local construction and cache access must remain usable |
+| a sealed reflection profile's runtime host | conditionally strong through its retained `RuntimeSharedResources` | a retained service profile may continue using its host, but the domain itself never retains the profile |
+| public `Value` / `RuntimeValueRoot` and future collector `Root` | non-owning | values may outlive the domain and become inaccessible rather than preserving the heap |
+| managed nodes, closures, opaque payloads, and cache entries | non-owning | a strong backedge would form `domain -> heap/cache -> payload -> domain` |
+| coordinator, executor, and scheduler records | non-owning | the domain stores only the reviewed weak coordinator route and cannot preserve runtime execution infrastructure |
+
+The cache is contained *inside* the domain rather than constituting another
+lease. A cached compiler bundle therefore must not capture a factory or domain
+strongly. The immutable default profile remains a sibling root of runtime
+state; service profiles may retain a host which retains shared resources, but
+no inverse domain-to-profile edge exists.
+
+Lifecycle tests separately latch retained public `Values`, shared resources,
+an evaluation context, a service profile, the compiler cache, and a bare
+public value. They prove authorized capabilities keep the domain useful after
+facade drop, bare values do not keep it alive, and the coordinator, executor,
+runtime state, and default profile remain acyclic. No production `core::Value`
+is allocated in the heap yet.
+
+### Phase I1C — Factory-Scoped Allocation
+
 - Give the value factory a narrow allocation/rooting handle, not raw collector
   internals.
+- Do not create a `heap -> runtime state -> heap` ownership cycle.
 - Let runtime/value-factory construction pre-discover common heap-owned classes,
   but do not retain public allocator capabilities across mutator regions.
   Every actual allocation uses an `Allocator<'_, T>` borrowed from its current
@@ -210,8 +238,9 @@ cover the public finalization statistics.
   heap identity rather than owning the runtime value domain. Rare classes may
   use first-use discovery; the allocation hot path must not hash `TypeId` per
   object once its scoped allocator is obtained.
-- Construct the production runtime heap with `CollectionPolicy::NoAuto`. Do
-  not enable automatic service until I12 and Gate G3 permit it.
+
+### Phase I1D — Layout Policy and Ownership-Ledger Reconciliation
+
 - Centralize Glam's node-size policy when constructing canonical object
   metadata. That policy may request a slot size larger than the Rust payload;
   allocation-class creation then applies it independently for each typed run.
@@ -219,6 +248,13 @@ cover the public finalization statistics.
   wrapper, not by runtime heap configuration. A shared managed-node wrapper or
   declaration macro is Glam's central alignment-policy point; the collector
   does not provide a mutable or per-heap alignment setting.
+
+- Reconcile the production representation inventory with the ownership ledger
+  using stable representation families rather than collector-private class
+  discovery IDs, as required by GCI-005.
+
+### Phase I1E — Lifecycle Reverification
+
 - Verify the earlier sibling allocation of runtime state and immutable profile
   remains internal to the runtime's ownership graph and acyclic once both can
   retain rooted values. Collector roots are not an ownership escape hatch for

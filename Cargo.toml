@@ -11,6 +11,7 @@ edition = "2024"
 bytes = "1.10.1"
 chumsky = "0.13.0"
 fingertrees = "0.2.11"
+glam-gc = { path = "crates/glam-gc" }
 internment = "0.8.6"
 num-bigint = "0.4.6"
 num-integer = "0.1.46"

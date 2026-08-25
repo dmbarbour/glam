@@ -8,7 +8,11 @@ control-flow overview.
 ## Values and Forcing
 
 - Constructed protocol values and compiler-layer bundles belong to one
-  runtime's `CoreValueFactory`/`RuntimeValueCache`. Keep immutable global
+  runtime's `CoreValueFactory`/`RuntimeValueDomain`. The domain contains the
+  value cache and no-auto collector heap. Factories, active evaluation or
+  compiler contexts, and reviewed runtime services may retain it; public
+  values, managed payloads, and cache entries must not. Its coordinator route
+  stays weak so a value-domain lease cannot retain runtime execution. Keep immutable global
   `Key` descriptions if useful, but do not add a production static which
   retains a constructed `Value`. Optional compiler caches publish one complete
   type-indexed bundle rather than exposing partially initialized entries.

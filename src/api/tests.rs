@@ -175,6 +175,7 @@ fn runtime_shared_resources_do_not_retain_runtime_lifecycle_owners() {
     let coordinator = Arc::downgrade(&runtime.state.work);
     let executor = Arc::downgrade(&runtime.state.executor);
     let profile = Arc::downgrade(&runtime.default_reflection_profile);
+    let value_domain = Arc::downgrade(runtime.state.shared_resources.values.core().value_domain());
     let resources = runtime.state.shared_resources.clone();
     let retained_resources = Arc::downgrade(&resources);
 
@@ -184,6 +185,7 @@ fn runtime_shared_resources_do_not_retain_runtime_lifecycle_owners() {
     assert!(coordinator.upgrade().is_none());
     assert!(executor.upgrade().is_none());
     assert!(profile.upgrade().is_none());
+    assert!(value_domain.upgrade().is_some());
     assert!(resources.work.upgrade().is_none());
     assert_eq!(resources.id, runtime_id);
     assert_eq!(resources.values.core().runtime_id(), runtime_id);
@@ -193,16 +195,54 @@ fn runtime_shared_resources_do_not_retain_runtime_lifecycle_owners() {
     publish_runtime_observation(&resources, mutation);
     assert!(resources.observations.current() > before);
     assert!(resources.ids.reasoning_session().get() > 0);
-    let _snapshot = resources
+    let snapshot = resources
         .transactions
         .state
         .lock()
         .expect("runtime transaction mutex should not be poisoned")
         .reflection
         .snapshot();
+    drop(snapshot);
 
     drop(resources);
     assert!(retained_resources.upgrade().is_none());
+    assert!(value_domain.upgrade().is_none());
+}
+
+#[test]
+fn public_values_retain_only_the_runtime_value_domain() {
+    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+    let state = Arc::downgrade(&runtime.state);
+    let coordinator = Arc::downgrade(&runtime.state.work);
+    let profile = Arc::downgrade(&runtime.default_reflection_profile);
+    let values = runtime.values();
+    let value_domain = Arc::downgrade(values.core.value_domain());
+
+    drop(runtime);
+
+    assert!(state.upgrade().is_none());
+    assert!(coordinator.upgrade().is_none());
+    assert!(profile.upgrade().is_none());
+    assert!(value_domain.upgrade().is_some());
+    assert_eq!(values.integer(42).runtime_id(), values.runtime_id());
+
+    drop(values);
+    assert!(value_domain.upgrade().is_none());
+}
+
+#[test]
+fn bare_public_values_do_not_retain_the_runtime_value_domain() {
+    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+    let values = runtime.values();
+    let runtime_id = values.runtime_id();
+    let value_domain = Arc::downgrade(values.core.value_domain());
+    let value = values.integer(42);
+
+    drop(values);
+    drop(runtime);
+
+    assert!(value_domain.upgrade().is_none());
+    assert_eq!(value.runtime_id(), runtime_id);
 }
 
 #[test]
@@ -1707,6 +1747,7 @@ fn retained_reflection_profile_keeps_only_shared_resources_alive() {
     let executor = Arc::downgrade(&runtime.state.executor);
     let default_profile = Arc::downgrade(&runtime.default_reflection_profile);
     let resources = Arc::downgrade(&runtime.state.shared_resources);
+    let value_domain = Arc::downgrade(runtime.state.shared_resources.values.core().value_domain());
     let host = Arc::new(AssemblerReflectionHost::new_unsealed(
         &runtime,
         DiagnosticBus::for_runtime(&runtime),
@@ -1732,6 +1773,7 @@ fn retained_reflection_profile_keeps_only_shared_resources_alive() {
     let retained = resources
         .upgrade()
         .expect("the retained profile host should keep runtime resources alive");
+    assert!(value_domain.upgrade().is_some());
     let (_, snapshot) = retained.reflection_snapshot();
     assert_eq!(snapshot.root(), &retained.values().empty_dict());
     let initial = retained.values().empty_dict();
@@ -1739,10 +1781,12 @@ fn retained_reflection_profile_keeps_only_shared_resources_alive() {
         .create_volume(initial.clone())
         .expect("retained resources should still create volumes");
     assert_eq!(retained.revoke_volume(volume).unwrap(), initial);
+    drop(snapshot);
     drop(retained);
 
     drop(profile);
     assert!(resources.upgrade().is_none());
+    assert!(value_domain.upgrade().is_none());
 }
 
 #[test]
@@ -1751,6 +1795,7 @@ fn evaluation_context_retains_runtime_cache_and_profile_without_a_cycle() {
     let state = Arc::downgrade(&runtime.state);
     let resources = Arc::downgrade(&runtime.state.shared_resources);
     let profile = Arc::downgrade(&runtime.default_reflection_profile);
+    let value_domain = Arc::downgrade(runtime.state.shared_resources.values.core().value_domain());
     let assembler = Assembler::builder()
         .evaluation_runtime(runtime.clone())
         .build()
@@ -1763,11 +1808,29 @@ fn evaluation_context_retains_runtime_cache_and_profile_without_a_cycle() {
     assert!(state.upgrade().is_none());
     assert!(resources.upgrade().is_some());
     assert!(profile.upgrade().is_some());
+    assert!(value_domain.upgrade().is_some());
     assert_eq!(eval::eval_value(&context, &unit).unwrap(), unit);
 
     drop(context);
     assert!(resources.upgrade().is_none());
     assert!(profile.upgrade().is_none());
+    assert!(value_domain.upgrade().is_none());
+}
+
+#[test]
+fn compiler_cache_does_not_form_a_value_domain_cycle() {
+    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+    let values = runtime.state.shared_resources.values.core();
+    let value_domain = Arc::downgrade(values.value_domain());
+
+    crate::g_syntax::initialize_cached_compiler_values(values);
+    assert!(matches!(
+        crate::g_syntax::default_diagnostic_formatter(values),
+        CoreValue::Function(_)
+    ));
+
+    drop(runtime);
+    assert!(value_domain.upgrade().is_none());
 }
 
 #[test]

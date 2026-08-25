@@ -146,7 +146,7 @@ authorized value-domain owner.
 **Classification:** ownership architecture gap  
 **Priority:** high  
 **Confidence:** high  
-**Status:** open
+**Status:** resolved 2026-08-25
 
 I1 correctly says that only explicitly authorized non-root capabilities retain
 the value domain, but it does not name those capabilities. Current ownership
@@ -180,6 +180,23 @@ backedge.
 resources, evaluation context, profile, compiler cache, and bare public values
 in separate tests. Each test must state whether the domain remains usable and
 prove scheduler/profile cycles are not introduced.
+
+**Resolution:** `CoreValueFactory` now has one strong
+`Arc<RuntimeValueDomain>` rather than four independently cloned runtime-value
+facilities. The domain owns the no-auto collector heap, runtime-local IDs,
+canonical/extension cache, and a weak coordinator binding. Public construction
+services, runtime shared resources, evaluation contexts, reflection
+stores/snapshots, and active compiler views retain it through their factory.
+Public values do not. Managed payloads and cache entries are explicitly barred
+from retaining the domain strongly.
+
+The owner matrix and conditional service-profile route are recorded in Phase
+I1B. Focused lifecycle tests cover retained shared resources, public `Values`,
+a bare public value, a retained service profile, an evaluation context, and a
+populated compiler cache. The tests also prove that keeping the domain does not
+retain runtime state, the coordinator, executor, or default profile, and that
+the compiler cache does not create an internal ownership cycle. Production
+values are not heap-managed yet, and collection remains disabled by policy.
 
 ### GCI-004 — Fallible same-heap root provenance is missing
 
@@ -418,7 +435,8 @@ destructor, and a destructor panic with untouched work retried later.
 Before implementing the remaining I1 ownership checkpoints:
 
 1. use GCI-001's completed no-auto collection mode for the production heap;
-2. resolve GCI-003 and publish the authorized owner matrix;
+2. preserve GCI-003's completed value-domain topology and authorized owner
+   matrix;
 3. resolve GCI-005 and correct the ownership-ledger reconciliation target; and
 4. apply GCI-010's I1 partition.
 

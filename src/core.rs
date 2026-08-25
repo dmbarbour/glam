@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use bytes::Bytes;
+use glam_gc::{CollectionPolicy, Heap};
 use internment::Intern;
 use rpds::RedBlackTreeMapSync;
 
@@ -269,11 +270,23 @@ pub(crate) struct PromiseCell {
 /// evaluator identities.
 #[derive(Clone)]
 pub(crate) struct CoreValueFactory {
+    domain: Arc<RuntimeValueDomain>,
+    local_extensions: Option<SharedExtensionMap>,
+}
+
+/// Strong ownership boundary for one runtime's values.
+///
+/// Factories and services which must keep constructing or evaluating values
+/// retain this domain. Public values and future managed heap nodes must not:
+/// their roots become inaccessible after the last authorized domain lease is
+/// dropped. The scheduler route is weak so retaining the value domain does not
+/// retain runtime execution infrastructure.
+pub(crate) struct RuntimeValueDomain {
     runtime: EvaluationRuntimeId,
     ids: Arc<RuntimeIds>,
-    cache: Arc<RuntimeValueCache>,
+    heap: Heap,
+    cache: RuntimeValueCache,
     work_coordinator: Arc<Mutex<Weak<EvaluationWorkCoordinator>>>,
-    local_extensions: Option<SharedExtensionMap>,
 }
 
 type ExtensionMap = HashMap<TypeId, Box<dyn Any + Send + Sync>>;
@@ -321,16 +334,21 @@ struct RuntimeValueCache {
 
 impl CoreValueFactory {
     pub(crate) fn new(runtime: EvaluationRuntimeId, ids: Arc<RuntimeIds>) -> Self {
-        Self {
+        let domain = Arc::new(RuntimeValueDomain {
             runtime,
             ids,
-            cache: Arc::new(RuntimeValueCache {
+            heap: Heap::new_with_policy(CollectionPolicy::NoAuto),
+            cache: RuntimeValueCache {
                 core: CoreValues::new(),
                 extensions: Mutex::new(HashMap::new()),
                 #[cfg(test)]
                 extension_lookups: AtomicUsize::new(0),
-            }),
+            },
             work_coordinator: Arc::new(Mutex::new(Weak::new())),
+        });
+        debug_assert_eq!(domain.heap.collection_policy(), CollectionPolicy::NoAuto);
+        Self {
+            domain,
             local_extensions: None,
         }
     }
@@ -339,17 +357,15 @@ impl CoreValueFactory {
     /// attachments without duplicating the runtime-owned values themselves.
     pub(crate) fn scoped(&self) -> Self {
         Self {
-            runtime: self.runtime,
-            ids: self.ids.clone(),
-            cache: self.cache.clone(),
-            work_coordinator: self.work_coordinator.clone(),
+            domain: self.domain.clone(),
             local_extensions: Some(Arc::new(Mutex::new(HashMap::new()))),
         }
     }
 
     pub(crate) fn attach_work_coordinator(&self, coordinator: &Arc<EvaluationWorkCoordinator>) {
-        debug_assert_eq!(coordinator.runtime_id(), self.runtime);
+        debug_assert_eq!(coordinator.runtime_id(), self.domain.runtime);
         let mut binding = self
+            .domain
             .work_coordinator
             .lock()
             .expect("runtime work-coordinator binding was poisoned");
@@ -364,7 +380,8 @@ impl CoreValueFactory {
     }
 
     pub(crate) fn work_coordinator(&self) -> Option<Arc<EvaluationWorkCoordinator>> {
-        self.work_coordinator
+        self.domain
+            .work_coordinator
             .lock()
             .expect("runtime work-coordinator binding was poisoned")
             .upgrade()
@@ -374,8 +391,9 @@ impl CoreValueFactory {
         &self,
         candidate: Arc<EvaluationWorkCoordinator>,
     ) -> Arc<EvaluationWorkCoordinator> {
-        debug_assert_eq!(candidate.runtime_id(), self.runtime);
+        debug_assert_eq!(candidate.runtime_id(), self.domain.runtime);
         let mut binding = self
+            .domain
             .work_coordinator
             .lock()
             .expect("runtime work-coordinator binding was poisoned");
@@ -388,47 +406,47 @@ impl CoreValueFactory {
     }
 
     pub(crate) fn work_coordinator_binding(&self) -> Arc<Mutex<Weak<EvaluationWorkCoordinator>>> {
-        self.work_coordinator.clone()
+        self.domain.work_coordinator.clone()
     }
 
     pub(crate) fn ids(&self) -> &Arc<RuntimeIds> {
-        &self.ids
+        &self.domain.ids
     }
 
     pub(crate) fn runtime_id(&self) -> EvaluationRuntimeId {
-        self.runtime
+        self.domain.runtime
     }
 
     fn deferred_value_id(&self) -> NonZeroU64 {
-        self.ids.deferred_value()
+        self.domain.ids.deferred_value()
     }
 
     pub(crate) fn unit(&self) -> Value {
-        self.cache.core.unit.clone()
+        self.domain.cache.core.unit.clone()
     }
 
     pub(crate) fn object_reflection_guard(&self) -> Value {
-        self.cache.core.object_reflection_guard.clone()
+        self.domain.cache.core.object_reflection_guard.clone()
     }
 
     pub(crate) fn tuple(&self) -> Value {
-        self.cache.core.tuple.clone()
+        self.domain.cache.core.tuple.clone()
     }
 
     pub(crate) fn info(&self) -> Value {
-        self.cache.core.info.clone()
+        self.domain.cache.core.info.clone()
     }
 
     pub(crate) fn warn(&self) -> Value {
-        self.cache.core.warn.clone()
+        self.domain.cache.core.warn.clone()
     }
 
     pub(crate) fn error(&self) -> Value {
-        self.cache.core.error.clone()
+        self.domain.cache.core.error.clone()
     }
 
     pub(crate) fn initial_metadata(&self) -> Value {
-        self.cache.core.initial_metadata.clone()
+        self.domain.cache.core.initial_metadata.clone()
     }
 
     fn atom(&self, atom: Atom) -> Value {
@@ -471,8 +489,12 @@ impl CoreValueFactory {
             return value;
         }
         #[cfg(test)]
-        self.cache.extension_lookups.fetch_add(1, Ordering::Relaxed);
+        self.domain
+            .cache
+            .extension_lookups
+            .fetch_add(1, Ordering::Relaxed);
         if let Some(value) = self
+            .domain
             .cache
             .extensions
             .lock()
@@ -488,6 +510,7 @@ impl CoreValueFactory {
         let candidate = Arc::new(build());
         let value = {
             let mut values = self
+                .domain
                 .cache
                 .extensions
                 .lock()
@@ -518,7 +541,12 @@ impl CoreValueFactory {
 
     #[cfg(test)]
     pub(crate) fn extension_lookup_count(&self) -> usize {
-        self.cache.extension_lookups.load(Ordering::Relaxed)
+        self.domain.cache.extension_lookups.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn value_domain(&self) -> &Arc<RuntimeValueDomain> {
+        &self.domain
     }
 }
 
@@ -657,7 +685,7 @@ impl PromisedValue {
             completion: CompletionSubscriptions::for_promise(
                 values.runtime_id(),
                 id,
-                values.work_coordinator.clone(),
+                values.work_coordinator_binding(),
             ),
             producer: OnceLock::new(),
         }))
@@ -1694,6 +1722,21 @@ mod tests {
         fn drop(&mut self) {
             self.0.store(true, Ordering::Release);
         }
+    }
+
+    #[test]
+    fn scoped_factories_share_one_no_auto_runtime_value_domain() {
+        let factory = CoreValueFactory::new(
+            crate::runtime::allocate_evaluation_runtime_id(),
+            RuntimeIds::new(),
+        );
+        let scoped = factory.scoped();
+
+        assert!(Arc::ptr_eq(factory.value_domain(), scoped.value_domain()));
+        assert_eq!(
+            factory.value_domain().heap.collection_policy(),
+            CollectionPolicy::NoAuto
+        );
     }
 
     #[test]
