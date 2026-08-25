@@ -354,6 +354,14 @@ struct CollectionAcknowledgementHook {
     release: Arc<std::sync::Barrier>,
 }
 
+#[cfg(test)]
+struct FinalizedWordReleaseHook {
+    location: RunLocation,
+    word_index: usize,
+    arrived: Arc<std::sync::Barrier>,
+    release: Arc<std::sync::Barrier>,
+}
+
 impl Default for HeapInner {
     fn default() -> Self {
         Self {
@@ -399,6 +407,8 @@ struct ManagedData {
     retired_no_drop_runs: Vec<RetiredNoDropRun>,
     finalization_batch: FinalizationBatch,
     running_finalizers: usize,
+    #[cfg(test)]
+    finalized_word_release_hook: Option<FinalizedWordReleaseHook>,
     free_runs: Vec<RunLocation>,
     allocation_pressure: AllocationPressure,
     roots: Vec<Weak<RootCell>>,
@@ -853,6 +863,11 @@ impl ManagedData {
                     completion.class_id,
                     word.word_index,
                 );
+                #[cfg(test)]
+                self.pause_after_finalized_word_release(
+                    completion.target.location,
+                    word.word_index,
+                );
                 self.classes[index].publish_released_run(completion.target);
             }
         }
@@ -878,6 +893,23 @@ impl ManagedData {
             queued_finalizers,
             running_finalizers: self.running_finalizers,
         }
+    }
+
+    #[cfg(test)]
+    fn pause_after_finalized_word_release(&mut self, location: RunLocation, word_index: usize) {
+        let matches = self
+            .finalized_word_release_hook
+            .as_ref()
+            .is_some_and(|hook| hook.location == location && hook.word_index == word_index);
+        if !matches {
+            return;
+        }
+        let hook = self
+            .finalized_word_release_hook
+            .take()
+            .expect("matching finalized-word hook disappeared");
+        hook.arrived.wait();
+        hook.release.wait();
     }
 
     fn sweep_partial_no_drop_runs(&mut self, dead_set: &DeadSetPlan) {
@@ -2512,6 +2544,30 @@ impl HeapInner {
             .lock()
             .expect("collection acknowledgement hook should not be poisoned")
             .take();
+    }
+
+    #[cfg(test)]
+    fn install_finalized_word_release_hook(
+        &self,
+        location: RunLocation,
+        word_index: usize,
+        arrived: Arc<std::sync::Barrier>,
+        release: Arc<std::sync::Barrier>,
+    ) {
+        let mut data = self
+            .data
+            .lock()
+            .expect("managed heap data should not be poisoned");
+        assert!(
+            data.finalized_word_release_hook.is_none(),
+            "finalized-word release hook already installed"
+        );
+        data.finalized_word_release_hook = Some(FinalizedWordReleaseHook {
+            location,
+            word_index,
+            arrived,
+            release,
+        });
     }
 
     #[cfg(test)]
@@ -6905,6 +6961,99 @@ mod tests {
                 .runs
                 .is_empty()
         );
+
+        drop(live_root);
+        drop(replacement_root);
+        heap.collect_full().unwrap();
+        assert_eq!(drops.load(Ordering::Relaxed), 2 * u64::BITS as usize + 2);
+    }
+
+    #[test]
+    fn finalized_word_release_publishes_retirement_before_concurrent_claim() {
+        let heap = Heap::new();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let destructor_arrived = Arc::new(Barrier::new(2));
+        let continue_finalization = Arc::new(Barrier::new(2));
+        let (values, live_root) = heap.with_mutator(|mutator| {
+            let allocator = mutator.allocator::<ConcurrentReleaseDrop>().unwrap();
+            let values = (0..=2 * u64::BITS as usize)
+                .map(|index| {
+                    allocator.alloc(ConcurrentReleaseDrop {
+                        drops: Arc::clone(&drops),
+                        pause_on_drop: index == u64::BITS as usize,
+                        released_before: Arc::clone(&destructor_arrived),
+                        continue_finalization: Arc::clone(&continue_finalization),
+                    })
+                })
+                .collect::<Vec<_>>();
+            let live_root = mutator.root(values[2 * u64::BITS as usize]);
+            (values, live_root)
+        });
+        let first_owner = collector_slot(&heap, values[0]).owner;
+        assert!(
+            values.iter().all(|value| {
+                collector_slot(&heap, *value).owner.location == first_owner.location
+            })
+        );
+
+        let word_released = Arc::new(Barrier::new(2));
+        let publish_frontier = Arc::new(Barrier::new(2));
+        heap.inner.install_finalized_word_release_hook(
+            first_owner.location,
+            0,
+            Arc::clone(&word_released),
+            Arc::clone(&publish_frontier),
+        );
+
+        let collector = std::thread::spawn({
+            let heap = heap.clone();
+            move || heap.collect_full().unwrap()
+        });
+        destructor_arrived.wait();
+
+        let (allocator_ready_tx, allocator_ready_rx) = mpsc::channel();
+        let (allocate_tx, allocate_rx) = mpsc::channel();
+        let (replacement_tx, replacement_rx) = mpsc::channel();
+        let allocator_worker = std::thread::spawn({
+            let heap = heap.clone();
+            let drops = Arc::clone(&drops);
+            let destructor_arrived = Arc::clone(&destructor_arrived);
+            let continue_finalization = Arc::clone(&continue_finalization);
+            move || {
+                heap.with_mutator(|mutator| {
+                    let allocator = mutator.allocator::<ConcurrentReleaseDrop>().unwrap();
+                    allocator_ready_tx.send(()).unwrap();
+                    allocate_rx.recv().unwrap();
+                    let replacement = allocator.alloc(ConcurrentReleaseDrop {
+                        drops,
+                        pause_on_drop: false,
+                        released_before: destructor_arrived,
+                        continue_finalization,
+                    });
+                    replacement_tx.send(replacement).unwrap();
+                });
+            }
+        });
+        allocator_ready_rx.recv().unwrap();
+
+        continue_finalization.wait();
+        word_released.wait();
+        allocate_tx.send(()).unwrap();
+        let replacement = replacement_rx
+            .recv()
+            .expect("concurrent claimant did not initialize the released word");
+        publish_frontier.wait();
+
+        allocator_worker.join().unwrap();
+        let report = collector.join().unwrap();
+        assert_eq!(report.marked_slots(), 1);
+        assert_eq!(report.finalized_slots(), 2 * u64::BITS as usize);
+        assert_eq!(drops.load(Ordering::Relaxed), 2 * u64::BITS as usize);
+
+        let replacement_owner = collector_slot(&heap, replacement).owner;
+        assert_eq!(replacement_owner.location, first_owner.location);
+        assert_eq!(replacement_owner.slot_index, first_owner.slot_index);
+        let replacement_root = heap.with_mutator(|mutator| mutator.root(replacement));
 
         drop(live_root);
         drop(replacement_root);

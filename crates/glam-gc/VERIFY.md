@@ -706,6 +706,39 @@ passing plus two ignored scale fixtures), six Loom models, eight
 compile-fail/doc tests, and the exact unsafe inventory. GC6-002 adds no
 production unsafe site and is resolved.
 
+## GC6-003 Finalized-Word Release Verification
+
+`finalized_word_release_preserves_neighbor_and_has_one_visible_winner` is a
+Loom model of the finalized-word publication protocol. A collector clears the
+allocation word before releasing its lease bit, a neighboring allocation-word
+claim races through another bit of the same lease word, and a claimant races
+for the released bit. The model verifies that the neighboring bit survives,
+the released bit has exactly one winner, and a winner overlapping the Release
+observes the prior allocation retirement through the lease Acquire/Release
+edge.
+
+`finalized_word_release_publishes_retirement_before_concurrent_claim` exercises
+the production protocol. It pauses one attached finalization run after lease
+release but before class-frontier publication. An allocator prepared while the
+destructor was paused then claims the newly available word without acquiring
+the managed-data mutex and initializes the exact retired slot before frontier
+publication resumes. The final report, destructor counts, and subsequent
+collection prove that neither the retired nor replacement identity is lost.
+
+Focused verification is:
+
+```sh
+cargo test -p glam-gc --test loom_scaffold --all-features \
+  finalized_word_release_preserves_neighbor_and_has_one_visible_winner -- --exact
+cargo +nightly miri test -p glam-gc --lib --all-features \
+  heap::tests::finalized_word_release_publishes_retirement_before_concurrent_claim \
+  -- --exact
+```
+
+Both pass. The stable collector matrix contains 186 unit tests (184 passing
+plus two ignored scale fixtures), seven Loom models, eight compile-fail/doc
+tests, and the exact unsafe inventory. GC6-003 adds no production unsafe site.
+
 ## Gate G0 Baseline
 
 Before changing the unsafe surface in C1, recheck the focused pre-GC semantic

@@ -82,6 +82,7 @@ to a later performance plan. Concurrent marking is also a later plan.
 | Post-C6 GC6-002A | completed | topology irreversibility and permanent heap poison |
 | Post-C6 GC6-002B | completed | finalizer dispatch-to-commit irreversibility |
 | Post-C6 GC6-002C | completed | permanent-poison boundary audit and closeout |
+| Post-C6 GC6-003 | completed | finalized-word release concurrency proof |
 | C6D.3 | pending | Gate G1 audit |
 | C7A | pending | shared-root and immutable-reader stress |
 | C7B | pending | allocation and coordinator stress |
@@ -4071,6 +4072,16 @@ released, and made post-poison activity reject before consulting managed data.
 The topology invariant panic, finalizer-commit invariant panic, and recoverable
 payload panic fixtures all pass focused Miri. GC6-002 is resolved; the broader
 post-C6 review remains open for its other Gate G1 findings.
+
+GC6-003 was completed on 2026-08-25. A Loom model now races finalized-word
+lease release with a neighboring lease-bit claim and a claim of the released
+bit. It proves the read-modify-write preserves the neighbor, grants the
+released bit once, and makes prior allocation retirement visible to a winning
+claimant. A production forced-order fixture pauses after lease release but
+before class-frontier publication; an already prepared allocator claims and
+reinitializes the retired slot during that interval. The fixture passes
+focused Miri, the complete Loom scaffold passes, and the checkpoint adds no
+production unsafe site.
 
 The review must:
 

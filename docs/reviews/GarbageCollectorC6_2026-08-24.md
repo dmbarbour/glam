@@ -337,6 +337,21 @@ production release/frontier boundary which verifies that the claimant observes
 the retired allocation bitmap before initializing a replacement. This is a C6
 proof obligation and should not wait for general C7 worker stress.
 
+#### GC6-003 completion
+
+Completed 2026-08-25. The new Loom model races the collector's Release
+`fetch_and` with a neighboring-bit read-modify-write and a claim of the
+released bit. It proves that the neighbor survives, the released bit has one
+winner, and a winner overlapping the release observes allocation retirement.
+
+The production fixture pauses an attached finalization run after lease release
+and before frontier publication. A prepared allocator claims the released word
+while the collector still holds managed data, observes the cleared allocation
+bitmap through the lease synchronization edge, and initializes the exact
+retired slot. It then verifies the finalization report, destructor counts, and
+later collection. The fixture passes focused Miri; all seven Loom models pass.
+No production unsafe site was added. GC6-003 is resolved.
+
 ### GC6-004 — Terminal topology is tested by halves, not as one mixed heap
 
 **Priority:** medium  
@@ -469,7 +484,7 @@ appropriate.
 | Pending identity root rejection | detached concurrent entrant plus attached paused-run root rejection | adequate |
 | Successful and panicking finalization | run commit, attached/detached release, repeated panic, invariant-panic poison, merge-on-retry, focused Miri | adequate; GC6-002 resolved |
 | Finalizer activity, pressure, and reports | paused running batch, successful/panicking allocation, report/epoch tests | adequate |
-| Finalized-word concurrent release | sequential/native reservation evidence only | GC6-003 |
+| Finalized-word concurrent release | Loom neighbor/unique-claim model plus production release-to-frontier forced schedule and focused Miri | adequate; GC6-003 resolved |
 | Terminal detached and attached traversal | separate terminal fixtures and first-panic fixture | GC6-004 mixed case missing |
 | Public managed-`Drop` contract | capability/liveness Rustdoc, safety ledger, and optional-mutator fixture | GC6-001 resolved; broader GC6-005 drift remains |
 | Unsafe inventory | exact checked-in inventory and passing audit | defer final certification to C6D.3 |
@@ -480,7 +495,7 @@ appropriate.
 | --- | --- | --- |
 | GC6-001 | Resolved with one capability/liveness contract and optional-mutator implementation evidence. | completed 2026-08-24 |
 | GC6-002 | Resolved with explicit topology and finalizer-commit irreversibility, permanent poison, and complete boundary verification. | completed 2026-08-25 |
-| GC6-003 | Add Loom and production forced-order coverage for finalized-word publication versus claims. | C6D.3 prerequisite |
+| GC6-003 | Resolved with Loom neighboring-bit, visibility, and unique-claim proof plus a production forced-order fixture. | completed 2026-08-25 |
 | GC6-004 | Add one mixed attached/detached terminal-topology fixture. | C6D.3 prerequisite |
 | GC6-005 | Reconcile public API, safety ledger, roadmap, integration boundary, and unsafe-module descriptions. | before C6D.3 |
 | GC6-006 | Audit stale phase-local allowances and comments. | C6D.3 cleanup or C8 if demonstrably inert |

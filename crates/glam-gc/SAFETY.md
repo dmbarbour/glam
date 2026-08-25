@@ -923,6 +923,33 @@ attached managed destructor traversal. Rust container and raw arena storage
 are still released normally, while resources owned by forgotten payloads may
 leak.
 
+### GC6-003 finalized-word release concurrency
+
+Attached finalization commits a completed allocation word in three ordered
+steps. First, `complete_run_attempt` clears every terminal allocation bit while
+the word remains reserved by its lease bit. Second,
+`release_finalized_allocation_word` clears only that lease bit with a Release
+read-modify-write. Finally, the class republishes or moves its frontier. The
+lease bit, rather than frontier position, is the authoritative exclusion:
+another allocation word in the same run may already keep that run visible to
+the class.
+
+An allocator observes the lease word with Acquire operations and acquires the
+released bit with an AcqRel compare-exchange before it reads the allocation
+bitmap. Therefore a winning claim observes the allocation-bit retirement
+sequenced before the collector's Release. The collector's `fetch_and` also
+preserves unrelated lease bits changed concurrently in the same machine word;
+it never replaces a whole lease word from a stale snapshot. Exactly one
+claimant can change the released bit from clear to set.
+
+The GC6-003 Loom model covers the Release/Acquire visibility edge, a concurrent
+neighboring-bit read-modify-write, and unique ownership of the released bit.
+The production forced-order fixture pauses after lease release and before
+frontier publication while a prepared allocator claims the word, sees its
+retired bitmap, and initializes the exact retired slot. This checkpoint adds
+no production unsafe operation; it directly latches the synchronization proof
+used by the existing allocation initialization boundary.
+
 ### C6D.1 selected terminal-destruction contract
 
 The public managed-`Drop` contract is capability-based, not phase-based. Every

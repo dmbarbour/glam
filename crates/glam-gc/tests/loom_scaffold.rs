@@ -107,6 +107,29 @@ fn claim_bit(lease: &AtomicU64, valid_bits: u32) -> Option<u32> {
     }
 }
 
+fn claim_exact_bit(lease: &AtomicU64, allocation: &AtomicU64, bit: u64) -> bool {
+    let observed = lease.load(Ordering::Acquire);
+    if observed & bit != 0 {
+        return false;
+    }
+    let claimed = lease
+        .compare_exchange(
+            observed,
+            observed | bit,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .is_ok();
+    if claimed {
+        assert_eq!(
+            allocation.load(Ordering::Relaxed),
+            0,
+            "winning the released lease must observe allocation retirement"
+        );
+    }
+    claimed
+}
+
 #[test]
 fn empty_heap_entry_runs_under_loom() {
     loom::model(|| {
@@ -133,6 +156,57 @@ fn lease_claim_transition_is_unique_under_loom() {
         assert_ne!(local, remote);
         assert!(local.is_some());
         assert!(remote.is_some());
+    });
+}
+
+#[test]
+fn finalized_word_release_preserves_neighbor_and_has_one_visible_winner() {
+    loom::model(|| {
+        let allocation = Arc::new(AtomicU64::new(1));
+        let lease = Arc::new(AtomicU64::new(0b01));
+
+        let finalizer = loom::thread::spawn({
+            let allocation = Arc::clone(&allocation);
+            let lease = Arc::clone(&lease);
+            move || {
+                allocation.store(0, Ordering::Relaxed);
+                let prior = lease.fetch_and(!0b01, Ordering::Release);
+                assert_ne!(prior & 0b01, 0);
+            }
+        });
+        let first_claim = loom::thread::spawn({
+            let allocation = Arc::clone(&allocation);
+            let lease = Arc::clone(&lease);
+            move || claim_exact_bit(&lease, &allocation, 0b01)
+        });
+
+        // This RMW models a concurrent claim in a neighboring allocation word
+        // represented by the same lease word.
+        assert_eq!(lease.fetch_or(0b10, Ordering::AcqRel) & 0b10, 0);
+        finalizer.join().unwrap();
+        let first_claim = first_claim.join().unwrap();
+        let published = lease.load(Ordering::Acquire);
+        assert_eq!(published & 0b10, 0b10);
+        assert_eq!(published & 0b01 != 0, first_claim);
+
+        // A claimant which overlaps the Release must observe the prior
+        // allocation retirement when it wins. If it arrived too early, two
+        // post-release allocators race for the word instead. Either way, the
+        // lease CAS grants the released bit exactly once.
+        let winners = if first_claim {
+            assert!(!claim_exact_bit(&lease, &allocation, 0b01));
+            1
+        } else {
+            let second = loom::thread::spawn({
+                let allocation = Arc::clone(&allocation);
+                let lease = Arc::clone(&lease);
+                move || claim_exact_bit(&lease, &allocation, 0b01)
+            });
+            let third = claim_exact_bit(&lease, &allocation, 0b01);
+            usize::from(second.join().unwrap()) + usize::from(third)
+        };
+        assert_eq!(winners, 1);
+        assert_eq!(lease.load(Ordering::Acquire) & 0b11, 0b11);
     });
 }
 
