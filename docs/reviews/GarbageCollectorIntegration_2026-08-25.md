@@ -59,7 +59,7 @@ wording, and verification deferred to the first legal whole-graph collection.
 **Classification:** gate violation and missing prerequisite  
 **Priority:** critical  
 **Confidence:** high  
-**Status:** open
+**Status:** resolved 2026-08-25
 
 The integration plan says production automatic and explicit collection remain
 disabled until the later graph-closure gates, and I1 calls for runtime-local
@@ -85,6 +85,16 @@ wrapper around an otherwise self-collecting heap.
 the heap again, and prove no collection occurred; separately prove an explicit
 test-only full collection still works. The production integration must use the
 manual mode until the phase which deliberately enables automatic collection.
+
+**Resolution:** `glam_gc::CollectionPolicy` is immutable per heap and provides
+`Automatic` and `NoAuto`. Under `NoAuto`, pressure and explicit requests remain
+latched and visible, but outer mutator entry cannot elect collection;
+`Heap::collect_full` remains the deliberate synchronous path. Public
+`HeapStatistics` reports assigned runs, the current high-water mark/headroom,
+the request latch, finalization-batch run count, and queued/running finalizers
+without scanning heap allocations. Focused tests cover both pressure and
+explicit requests across repeated entries, explicit acknowledgement, and
+queued/running finalization snapshots.
 
 ### GCI-002 — Weak inert roots conflict with public `Value` equality and observation
 
@@ -405,9 +415,9 @@ destructor, and a destructor panic with untouched work retried later.
 
 ## Recommended Resolution Order
 
-Before implementing I1:
+Before implementing the remaining I1 ownership checkpoints:
 
-1. resolve GCI-001 and add the true manual collection mode;
+1. use GCI-001's completed no-auto collection mode for the production heap;
 2. resolve GCI-003 and publish the authorized owner matrix;
 3. resolve GCI-005 and correct the ownership-ledger reconciliation target; and
 4. apply GCI-010's I1 partition.

@@ -45,7 +45,9 @@ mod trace;
 mod deterministic;
 
 pub use class::UnsupportedLayout;
-pub use heap::{CollectionError, CollectionReport, Heap, HeapActivity};
+pub use heap::{
+    CollectionError, CollectionPolicy, CollectionReport, Heap, HeapActivity, HeapStatistics,
+};
 pub use mutator::{Allocator, Mutator};
 pub use pointer::Gc;
 pub use root::Root;

@@ -146,6 +146,89 @@ impl HeapActivity {
     }
 }
 
+/// Policy for servicing pending collection requests from mutator admission.
+///
+/// The policy is immutable for one heap. Explicit synchronous collection via
+/// [`Heap::collect_full`] remains available under either policy.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum CollectionPolicy {
+    /// A later idle outer mutator entry may service allocation pressure or a
+    /// request recorded through [`Heap::request_collection`].
+    #[default]
+    Automatic,
+    /// Mutator entry never starts collection automatically. Pressure and
+    /// explicit requests remain latched and observable until an explicit
+    /// [`Heap::collect_full`] acknowledges them.
+    NoAuto,
+}
+
+/// A lightweight operational snapshot of one managed heap.
+///
+/// Statistics are runtime-maintenance information rather than managed-program
+/// semantics. Constructing the snapshot does not trace allocations, scan run
+/// maps, or initiate collection. It briefly reads the heap's existing managed
+/// data lock, while an explicit request may advance again immediately after
+/// the snapshot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HeapStatistics {
+    collection_policy: CollectionPolicy,
+    assigned_runs: usize,
+    run_high_water_mark: usize,
+    collection_requested: bool,
+    finalization_batch_runs: usize,
+    finalizer_activity: HeapActivity,
+}
+
+impl HeapStatistics {
+    /// Returns this heap's immutable collection policy.
+    #[must_use]
+    pub const fn collection_policy(self) -> CollectionPolicy {
+        self.collection_policy
+    }
+
+    /// Returns the number of typed runs currently charged as occupied.
+    #[must_use]
+    pub const fn assigned_runs(self) -> usize {
+        self.assigned_runs
+    }
+
+    /// Returns the assigned-run occupancy which requests another collection.
+    #[must_use]
+    pub const fn run_high_water_mark(self) -> usize {
+        self.run_high_water_mark
+    }
+
+    /// Returns the remaining run headroom before the current high-water mark.
+    #[must_use]
+    pub const fn run_headroom(self) -> usize {
+        self.run_high_water_mark.saturating_sub(self.assigned_runs)
+    }
+
+    /// Returns whether pressure or an explicit caller has requested collection.
+    #[must_use]
+    pub const fn collection_requested(self) -> bool {
+        self.collection_requested
+    }
+
+    /// Returns the number of run records in the durable finalization batch.
+    #[must_use]
+    pub const fn finalization_batch_runs(self) -> usize {
+        self.finalization_batch_runs
+    }
+
+    /// Returns queued and running finalizer obligations.
+    #[must_use]
+    pub const fn finalizer_activity(self) -> HeapActivity {
+        self.finalizer_activity
+    }
+
+    /// Returns all finalizer obligations in the durable batch.
+    #[must_use]
+    pub const fn pending_finalizers(self) -> usize {
+        self.finalizer_activity.queued_finalizers + self.finalizer_activity.running_finalizers
+    }
+}
+
 /// A synchronous collection request which cannot enter the coordinator.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CollectionError {
@@ -184,6 +267,20 @@ impl Heap {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Creates an empty managed heap with the selected collection policy.
+    #[must_use]
+    pub fn new_with_policy(policy: CollectionPolicy) -> Self {
+        Self {
+            inner: Arc::new(HeapInner::new(policy)),
+        }
+    }
+
+    /// Returns this heap's immutable collection policy.
+    #[must_use]
+    pub fn collection_policy(&self) -> CollectionPolicy {
+        self.inner.collection_policy
     }
 
     /// Releases every inactive Glam GC cache retained by the calling thread.
@@ -271,6 +368,15 @@ impl Heap {
         self.inner.activity()
     }
 
+    /// Returns current run pressure and finalization-batch statistics.
+    ///
+    /// This operation is observational and never requests or performs
+    /// collection.
+    #[must_use]
+    pub fn statistics(&self) -> HeapStatistics {
+        self.inner.statistics()
+    }
+
     /// Completes a full stop-the-world collection handshake synchronously.
     ///
     /// The collector clears mark state, seeds the stable root registry, traces
@@ -314,6 +420,7 @@ impl Heap {
 pub(crate) struct HeapInner {
     coordinator: Mutex<MutatorCoordinator>,
     data: Mutex<ManagedData>,
+    collection_policy: CollectionPolicy,
     poisoned: AtomicBool,
     collection_requested: AtomicBool,
     admission_changed: Condvar,
@@ -364,9 +471,16 @@ struct FinalizedWordReleaseHook {
 
 impl Default for HeapInner {
     fn default() -> Self {
+        Self::new(CollectionPolicy::Automatic)
+    }
+}
+
+impl HeapInner {
+    fn new(collection_policy: CollectionPolicy) -> Self {
         Self {
             coordinator: Mutex::new(MutatorCoordinator::default()),
             data: Mutex::new(ManagedData::default()),
+            collection_policy,
             poisoned: AtomicBool::new(false),
             collection_requested: AtomicBool::new(false),
             admission_changed: Condvar::new(),
@@ -2040,7 +2154,8 @@ impl HeapInner {
                 }
                 match coordinator.phase {
                     AdmissionPhase::Ordinary => {
-                        let requested = self.collection_requested.load(Ordering::Acquire);
+                        let requested = self.collection_policy == CollectionPolicy::Automatic
+                            && self.collection_requested.load(Ordering::Acquire);
                         if let Some(epoch) = coordinator.elect_idle_collection(requested) {
                             self.notify_coordinator_waiters();
                             break Some(epoch);
@@ -2128,6 +2243,23 @@ impl HeapInner {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .activity()
+    }
+
+    fn statistics(&self) -> HeapStatistics {
+        assert!(!self.is_poisoned(), "managed heap is permanently poisoned");
+        let data = self
+            .data
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let pressure = data.allocation_pressure;
+        HeapStatistics {
+            collection_policy: self.collection_policy,
+            assigned_runs: pressure.assigned_runs,
+            run_high_water_mark: pressure.high_water_mark,
+            collection_requested: self.collection_requested.load(Ordering::Acquire),
+            finalization_batch_runs: data.finalization_batch.runs.len(),
+            finalizer_activity: data.activity(),
+        }
     }
 
     fn notify_coordinator_waiters(&self) {
@@ -3523,10 +3655,10 @@ mod tests {
 
     use super::{
         AdmissionPhase, AllocationClass, AllocationPressure, AllocationPressureSnapshot,
-        CollectionError, CollectorLookupError, CollectorSlot, DeadBitmapWord, DeadSlotDisposition,
-        FIXED_SURVIVOR_RUN_HEADROOM, Heap, HeapActivity, HeapInner, MarkSummary, PrepareRunError,
-        RootValidationError, RunLocation, RunPublicationError, SURVIVOR_GROWTH_DENOMINATOR,
-        SURVIVOR_GROWTH_NUMERATOR, class_index, resolve_slot_in_state,
+        CollectionError, CollectionPolicy, CollectorLookupError, CollectorSlot, DeadBitmapWord,
+        DeadSlotDisposition, FIXED_SURVIVOR_RUN_HEADROOM, Heap, HeapActivity, HeapInner,
+        MarkSummary, PrepareRunError, RootValidationError, RunLocation, RunPublicationError,
+        SURVIVOR_GROWTH_DENOMINATOR, SURVIVOR_GROWTH_NUMERATOR, class_index, resolve_slot_in_state,
         survivor_run_high_water_mark, validate_rootable_in_state,
     };
 
@@ -6391,6 +6523,7 @@ mod tests {
     fn automatic_pressure_is_acknowledged_by_the_next_idle_entry() {
         let heap = Heap::new();
         let class = internal_class::<FirstType>(&heap);
+        assert_eq!(heap.collection_policy(), CollectionPolicy::Automatic);
 
         heap.with_mutator(|_| {
             for _ in 0..FIXED_SURVIVOR_RUN_HEADROOM {
@@ -6435,6 +6568,62 @@ mod tests {
             1,
             "acknowledged pressure must not collect again immediately"
         );
+    }
+
+    #[test]
+    fn no_auto_policy_retains_pressure_until_explicit_collection() {
+        let heap = Heap::new_with_policy(CollectionPolicy::NoAuto);
+        let class = internal_class::<FirstType>(&heap);
+        assert_eq!(heap.collection_policy(), CollectionPolicy::NoAuto);
+
+        heap.with_mutator(|_| {
+            for _ in 0..FIXED_SURVIVOR_RUN_HEADROOM {
+                heap.inner.prepare_run(&class).unwrap();
+            }
+        });
+
+        let pressured = heap.statistics();
+        assert_eq!(pressured.collection_policy(), CollectionPolicy::NoAuto);
+        assert_eq!(pressured.assigned_runs(), FIXED_SURVIVOR_RUN_HEADROOM);
+        assert_eq!(pressured.run_high_water_mark(), FIXED_SURVIVOR_RUN_HEADROOM);
+        assert_eq!(pressured.run_headroom(), 0);
+        assert!(pressured.collection_requested());
+        assert_eq!(pressured.finalization_batch_runs(), 0);
+        assert_eq!(pressured.pending_finalizers(), 0);
+
+        for _ in 0..3 {
+            heap.with_mutator(|_| {});
+        }
+        assert_eq!(
+            heap.inner.coordinator_snapshot().completed_collection_epoch,
+            0,
+            "no-auto mutator admission must not service pending pressure"
+        );
+        assert_eq!(heap.statistics(), pressured);
+
+        let report = heap.collect_full().unwrap();
+        assert_eq!(report.epoch(), 1);
+        let collected = heap.statistics();
+        assert_eq!(collected.collection_policy(), CollectionPolicy::NoAuto);
+        assert_eq!(collected.assigned_runs(), 0);
+        assert_eq!(collected.run_high_water_mark(), FIXED_SURVIVOR_RUN_HEADROOM);
+        assert!(!collected.collection_requested());
+    }
+
+    #[test]
+    fn no_auto_policy_retains_explicit_request_across_mutator_entries() {
+        let heap = Heap::new_with_policy(CollectionPolicy::NoAuto);
+
+        heap.request_collection();
+        heap.with_mutator(|_| {});
+        assert!(heap.statistics().collection_requested());
+        assert_eq!(
+            heap.inner.coordinator_snapshot().completed_collection_epoch,
+            0
+        );
+
+        assert_eq!(heap.collect_full().unwrap().epoch(), 1);
+        assert!(!heap.statistics().collection_requested());
     }
 
     #[test]
@@ -6935,6 +7124,10 @@ mod tests {
                 running_finalizers: 2 * u64::BITS as usize,
             }
         );
+        let running = heap.statistics();
+        assert_eq!(running.finalization_batch_runs(), 1);
+        assert_eq!(running.pending_finalizers(), 2 * u64::BITS as usize);
+        assert_eq!(running.finalizer_activity(), heap.activity());
 
         let (replacement_root, replacement_owner) = heap.with_mutator(|mutator| {
             assert!(
@@ -7511,6 +7704,10 @@ mod tests {
                 running_finalizers: 0,
             }
         );
+        let pending = heap.statistics();
+        assert_eq!(pending.finalization_batch_runs(), 1);
+        assert_eq!(pending.pending_finalizers(), 1);
+        assert_eq!(pending.finalizer_activity(), heap.activity());
         {
             let data = heap.inner.data.lock().unwrap();
             let metadata = metadata_for::<SelectivePanickingDrop>();
@@ -7546,6 +7743,8 @@ mod tests {
         assert_eq!(retry.reclaimed_slots(), 1);
         assert_eq!(retry.reclaimed_runs(), 1);
         assert_eq!(heap.activity(), HeapActivity::default());
+        assert_eq!(heap.statistics().finalization_batch_runs(), 0);
+        assert_eq!(heap.statistics().pending_finalizers(), 0);
         assert_eq!(*events.lock().unwrap(), vec![0, 1]);
         assert_eq!(
             heap.inner

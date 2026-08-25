@@ -839,6 +839,33 @@ GC6-007 changes planning and verification ownership only. The stable collector
 matrix remains 187 unit tests (185 passing plus two ignored scale fixtures),
 seven Loom models, eight compile-fail/doc tests, and the exact unsafe inventory.
 
+## Integration GCI-001 No-Auto Policy and Operational Statistics
+
+`CollectionPolicy::NoAuto` closes the production-integration gate which
+previously allowed allocation pressure to elect collection before Glam's
+managed graph was completely classified. The policy is immutable per heap.
+Pressure and `Heap::request_collection` still latch the request bit, but any
+number of later outer mutator entries leave the completed collection epoch
+unchanged. `Heap::collect_full` remains the explicit synchronous
+acknowledgement path and clears the request after a successful attempt.
+
+`Heap::statistics` reads assigned-run occupancy, the current high-water mark,
+the request latch, durable finalization-run count, and queued/running finalizer
+obligations under the existing constant-time state. It does not trace values or
+scan arena runs. The focused policy and statistics checks are:
+
+```sh
+cargo test -p glam-gc --lib no_auto_policy
+cargo test -p glam-gc --lib \
+  managed_destructor_panic_retires_one_and_defers_the_untouched_batch
+cargo test -p glam-gc --lib \
+  pending_run_keeps_words_reserved_from_an_ordinary_mutator_until_commit
+```
+
+The collector unit matrix now contains 189 tests (187 passing plus two ignored
+scale fixtures). GCI-001 adds no unsafe site and does not change automatic-mode
+behavior.
+
 ## Gate G1 Certification
 
 C6D.3 certified the isolated collector on 2026-08-25. The review is recorded in

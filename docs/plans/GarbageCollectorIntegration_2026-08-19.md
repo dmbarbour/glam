@@ -1,8 +1,9 @@
 # Glam GC Integration Plan — 2026-08-19
 
-Status: in progress; Phase I0 is complete and collector Gate G1 passed on
-2026-08-25. Phase I1 is unblocked; review its breakdown before beginning
-ownership integration with collection disabled.
+Status: in progress; Phase I0 and the I1A no-auto collector prerequisite are
+complete, and collector Gate G1 passed on 2026-08-25. The remaining I1
+ownership work is unblocked but must follow the integration review's owner-
+matrix and checkpoint corrections.
 
 This plan integrates the collector defined by
 [`GarbageCollectorImplementation_2026-08-19.md`](GarbageCollectorImplementation_2026-08-19.md)
@@ -15,6 +16,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | Phase | Status | Outcome |
 | --- | --- | --- |
 | I0 | complete | complete ownership and mutation ledger |
+| I1A | complete | immutable no-auto collection policy and operational pressure statistics |
 | I1 | pending | runtime-owned heap, collection disabled |
 | I2 | pending | public value and external-root prototype |
 | I3 | pending | bounded evaluator/worker mutator regions |
@@ -164,6 +166,30 @@ classified optimistically.
 
 ## Phase I1 — Runtime Heap Ownership, Collection Disabled
 
+### Phase I1A — No-Auto Collector Policy (complete)
+
+Completed on 2026-08-25 in resolution of GCI-001. `glam_gc::Heap` now accepts
+an immutable `CollectionPolicy`. The default remains `Automatic` for existing
+collector clients and verification; production migration constructs its heap
+with `CollectionPolicy::NoAuto`.
+
+Under `NoAuto`, typed-run pressure and `Heap::request_collection` still latch
+the ordinary request bit, but later outer mutator entries never elect a
+collector. `Heap::collect_full` remains the sole deliberate acknowledgement
+path, which permits isolated migration fixtures without allowing a partially
+classified production graph to collect accidentally.
+
+`Heap::statistics` exposes an O(1), observational snapshot of assigned-run
+pressure, current high-water mark and headroom, the request latch, durable
+finalization-batch run count, and queued/running finalizer obligations. It does
+not scan allocations or trigger collection. Focused tests cross the automatic
+pressure threshold and issue an explicit request under `NoAuto`, prove repeated
+mutator entries do not collect, then prove an explicit full collection still
+acknowledges the request. Existing panic/retry and running-finalizer fixtures
+cover the public finalization statistics.
+
+### Remaining Phase I1 ownership work
+
 - Add one `RuntimeHeap` to `EvaluationRuntime` ownership and the internal
   `RuntimeSharedResources` view.
 - Keep the heap inside the runtime value domain. Only explicitly authorized
@@ -184,7 +210,8 @@ classified optimistically.
   heap identity rather than owning the runtime value domain. Rare classes may
   use first-use discovery; the allocation hot path must not hash `TypeId` per
   object once its scoped allocator is obtained.
-- Add runtime-local tuning with collection disabled by default.
+- Construct the production runtime heap with `CollectionPolicy::NoAuto`. Do
+  not enable automatic service until I12 and Gate G3 permit it.
 - Centralize Glam's node-size policy when constructing canonical object
   metadata. That policy may request a slot size larger than the Rust payload;
   allocation-class creation then applies it independently for each typed run.
