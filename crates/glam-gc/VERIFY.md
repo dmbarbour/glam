@@ -739,6 +739,39 @@ Both pass. The stable collector matrix contains 186 unit tests (184 passing
 plus two ignored scale fixtures), seven Loom models, eight compile-fail/doc
 tests, and the exact unsafe inventory. GC6-003 adds no production unsafe site.
 
+## GC6-004 Mixed Terminal-Topology Verification
+
+`terminal_teardown_visits_mixed_detached_and_attached_topology_once` fills one
+run completely and places two dead values plus one rooted value in a second
+run of the same drop-bearing class. A panic-once destructor makes the first
+ordinary finalizer attempt retire exactly one identity without depending on
+the hash-map dispatch order. The resulting durable state is checked directly:
+one run is detached, one remains attached, both retain pending identities, the
+rooted allocation is still ordinary, and exactly one allocation bit is clear.
+
+After releasing the root, dropping the last heap facade must bring the total
+destructor-attempt count to exactly the original allocation count. This proves
+the detached-first walk and following class walk are disjoint while covering
+every untouched identity. The observer uses inert static atomics so the
+separate first-terminal-panic fixture remains meaningful under Miri leak
+checking even though that policy deliberately leaves untouched payloads
+undropped.
+
+Focused verification is:
+
+```sh
+cargo +nightly miri test -p glam-gc --lib --all-features \
+  heap::tests::terminal_teardown_visits_mixed_detached_and_attached_topology_once \
+  -- --exact
+cargo +nightly miri test -p glam-gc --lib --all-features \
+  heap::tests::terminal_teardown_propagates_the_first_panic_without_continuing \
+  -- --exact
+```
+
+Both pass. The stable collector matrix contains 187 unit tests (185 passing
+plus two ignored scale fixtures), seven Loom models, eight compile-fail/doc
+tests, and the exact unsafe inventory. GC6-004 adds no production unsafe site.
+
 ## Gate G0 Baseline
 
 Before changing the unsafe surface in C1, recheck the focused pre-GC semantic

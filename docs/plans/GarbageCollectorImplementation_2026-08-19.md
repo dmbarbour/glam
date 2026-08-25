@@ -83,6 +83,7 @@ to a later performance plan. Concurrent marking is also a later plan.
 | Post-C6 GC6-002B | completed | finalizer dispatch-to-commit irreversibility |
 | Post-C6 GC6-002C | completed | permanent-poison boundary audit and closeout |
 | Post-C6 GC6-003 | completed | finalized-word release concurrency proof |
+| Post-C6 GC6-004 | completed | mixed attached/detached terminal-topology proof |
 | C6D.3 | pending | Gate G1 audit |
 | C7A | pending | shared-root and immutable-reader stress |
 | C7B | pending | allocation and coordinator stress |
@@ -4082,6 +4083,14 @@ before class-frontier publication; an already prepared allocator claims and
 reinitializes the retired slot during that interval. The fixture passes
 focused Miri, the complete Loom scaffold passes, and the checkpoint adds no
 production unsafe site.
+
+GC6-004 was completed on 2026-08-25. One deterministic fixture fills a wholly
+dead run and a second partially live run in the same allocation class. A
+panic-once destructor retires exactly one identity independent of finalization
+dispatch order, leaving one detached pending run, one attached pending run,
+and one rooted ordinary allocation in the same heap. After the root is
+released, terminal teardown accounts for every original allocation exactly
+once. The fixture passes focused Miri and adds no production or unsafe code.
 
 The review must:
 

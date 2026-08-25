@@ -377,6 +377,22 @@ never retry the retired identity, and prove that detached and class traversal
 are disjoint in the same concrete topology. This is inexpensive evidence for
 the exact C6D claim which G1 will certify.
 
+#### GC6-004 completion
+
+Completed 2026-08-25. The new deterministic fixture fills one wholly dead run
+and one partially live run in the same allocation class. A panic-once
+destructor retires the first dispatched identity regardless of finalization-map
+order. Direct state inspection then proves that terminal teardown begins with
+one detached pending run, one attached pending run, one ordinary rooted value,
+and exactly one retired identity.
+
+After the root is released, dropping the last heap facade brings the total
+destructor-attempt count to exactly the number of original allocations. The
+detached and class traversals therefore neither omit nor duplicate an identity
+in the combined topology. The new fixture and the existing terminal-panic
+fixture pass focused Miri. No production or unsafe code was added. GC6-004 is
+resolved.
+
 ### GC6-005 — Current public and safety documentation still describes pre-C6 liveness
 
 **Priority:** medium  
@@ -485,7 +501,7 @@ appropriate.
 | Successful and panicking finalization | run commit, attached/detached release, repeated panic, invariant-panic poison, merge-on-retry, focused Miri | adequate; GC6-002 resolved |
 | Finalizer activity, pressure, and reports | paused running batch, successful/panicking allocation, report/epoch tests | adequate |
 | Finalized-word concurrent release | Loom neighbor/unique-claim model plus production release-to-frontier forced schedule and focused Miri | adequate; GC6-003 resolved |
-| Terminal detached and attached traversal | separate terminal fixtures and first-panic fixture | GC6-004 mixed case missing |
+| Terminal detached and attached traversal | mixed detached/attached/ordinary/retired fixture plus first-panic fixture and focused Miri | adequate; GC6-004 resolved |
 | Public managed-`Drop` contract | capability/liveness Rustdoc, safety ledger, and optional-mutator fixture | GC6-001 resolved; broader GC6-005 drift remains |
 | Unsafe inventory | exact checked-in inventory and passing audit | defer final certification to C6D.3 |
 
@@ -496,7 +512,7 @@ appropriate.
 | GC6-001 | Resolved with one capability/liveness contract and optional-mutator implementation evidence. | completed 2026-08-24 |
 | GC6-002 | Resolved with explicit topology and finalizer-commit irreversibility, permanent poison, and complete boundary verification. | completed 2026-08-25 |
 | GC6-003 | Resolved with Loom neighboring-bit, visibility, and unique-claim proof plus a production forced-order fixture. | completed 2026-08-25 |
-| GC6-004 | Add one mixed attached/detached terminal-topology fixture. | C6D.3 prerequisite |
+| GC6-004 | Resolved with one mixed detached, attached, ordinary, and retired terminal-topology fixture. | completed 2026-08-25 |
 | GC6-005 | Reconcile public API, safety ledger, roadmap, integration boundary, and unsafe-module descriptions. | before C6D.3 |
 | GC6-006 | Audit stale phase-local allowances and comments. | C6D.3 cleanup or C8 if demonstrably inert |
 | GC6-007 | Reconcile C7/C8 wording and partition C7A/B before implementation. | plan update after G1 blockers |

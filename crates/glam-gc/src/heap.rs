@@ -3802,6 +3802,7 @@ mod tests {
         fn trace(&self, _visitor: &mut Visitor<'_>) {}
     }
 
+    static TERMINAL_DESTRUCTOR_TEST_LOCK: Mutex<()> = Mutex::new(());
     static TERMINAL_DESTRUCTOR_PANIC_ONCE: AtomicBool = AtomicBool::new(false);
     static TERMINAL_DESTRUCTOR_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
 
@@ -3821,6 +3822,8 @@ mod tests {
     // SAFETY: this fixture contains only immediate values and host
     // coordination state. It has no managed edge.
     unsafe impl Trace for TerminalPanickingDrop {
+        const REQUESTED_SLOT_SIZE: Option<usize> = Some(4096);
+
         fn trace(&self, _visitor: &mut Visitor<'_>) {}
     }
 
@@ -9511,7 +9514,98 @@ mod tests {
     }
 
     #[test]
+    fn terminal_teardown_visits_mixed_detached_and_attached_topology_once() {
+        let _terminal_lock = TERMINAL_DESTRUCTOR_TEST_LOCK.lock().unwrap();
+        TERMINAL_DESTRUCTOR_ATTEMPTS.store(0, Ordering::Relaxed);
+        TERMINAL_DESTRUCTOR_PANIC_ONCE.store(true, Ordering::Relaxed);
+        let heap = Heap::new();
+        let weak = Arc::downgrade(&heap.inner);
+        let metadata = metadata_for::<TerminalPanickingDrop>();
+        let slot_count = RunGeometry::derive(metadata.layout(), metadata.requested_slot_size())
+            .expect("terminal topology fixture must have supported geometry")
+            .slot_count;
+
+        // Fill one wholly dead run, then place two dead values and one rooted
+        // ordinary value in a second run. The finalization dispatch map does
+        // not promise order, so every value shares one panic-once token: the
+        // first attempted identity retires regardless of which run is chosen.
+        let (values, live_root) = heap.with_mutator(|mutator| {
+            let allocator = mutator.allocator::<TerminalPanickingDrop>().unwrap();
+            let values = (0..slot_count + 3)
+                .map(|_| allocator.alloc(TerminalPanickingDrop { _not_zero_sized: 0 }))
+                .collect::<Vec<_>>();
+            let live_root = mutator.root(values[slot_count + 2]);
+            (values, live_root)
+        });
+        let owners = values
+            .iter()
+            .map(|value| collector_slot(&heap, *value).owner)
+            .collect::<Vec<_>>();
+        let detached_location = owners[0].location;
+        let attached_location = owners[slot_count].location;
+        assert_ne!(detached_location, attached_location);
+        assert!(
+            owners[..slot_count]
+                .iter()
+                .all(|owner| owner.location == detached_location)
+        );
+        assert!(
+            owners[slot_count..]
+                .iter()
+                .all(|owner| owner.location == attached_location)
+        );
+
+        let panic = catch_unwind(AssertUnwindSafe(|| heap.collect_full()))
+            .expect_err("the first managed destructor must propagate its panic");
+        assert_eq!(
+            panic_string(panic.as_ref()),
+            "injected terminal destructor panic"
+        );
+        assert_eq!(TERMINAL_DESTRUCTOR_ATTEMPTS.load(Ordering::Relaxed), 1);
+        assert!(!TERMINAL_DESTRUCTOR_PANIC_ONCE.load(Ordering::Relaxed));
+
+        {
+            let data = heap.inner.data.lock().unwrap();
+            assert_eq!(data.finalization_batch.runs.len(), 2);
+            assert_eq!(data.finalization_batch.detached_run_count(), 1);
+            assert_eq!(data.finalization_batch.pending_slot_count(), slot_count + 1);
+            assert!(
+                data.finalization_batch.runs[&detached_location]
+                    .target
+                    .is_detached()
+            );
+            assert!(
+                !data.finalization_batch.runs[&attached_location]
+                    .target
+                    .is_detached()
+            );
+            assert_eq!(
+                owners
+                    .iter()
+                    .filter(|owner| data.arena.owner_slot_is_allocated(**owner))
+                    .count(),
+                values.len() - 1,
+                "exactly the panicking identity must already be retired"
+            );
+            assert!(
+                data.arena.owner_slot_is_allocated(owners[slot_count + 2]),
+                "the rooted ordinary allocation must remain live"
+            );
+        }
+
+        drop(live_root);
+        drop(heap);
+        assert_eq!(
+            TERMINAL_DESTRUCTOR_ATTEMPTS.load(Ordering::Relaxed),
+            values.len(),
+            "terminal traversal must attempt every allocation exactly once"
+        );
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[test]
     fn terminal_teardown_propagates_the_first_panic_without_continuing() {
+        let _terminal_lock = TERMINAL_DESTRUCTOR_TEST_LOCK.lock().unwrap();
         TERMINAL_DESTRUCTOR_ATTEMPTS.store(0, Ordering::Relaxed);
         TERMINAL_DESTRUCTOR_PANIC_ONCE.store(true, Ordering::Relaxed);
         let heap = Heap::new();

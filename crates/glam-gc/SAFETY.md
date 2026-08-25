@@ -978,6 +978,12 @@ identities need no special terminal treatment because they remain class
 members; detached identities remain discoverable only through their retained
 run records. Thus a value retired by an earlier panicking finalizer is not
 attempted again and every untouched allocation remains terminally discoverable.
+The GC6-004 mixed-topology fixture establishes both sources in one heap: a
+wholly dead detached run, a partially live attached pending run, one ordinary
+rooted allocation, and one already retired panic identity. After releasing the
+root, final heap teardown attempts exactly the original allocation count,
+proving that neither walk omits or duplicates an identity in the combined
+topology.
 If a terminal destructor panics, Rust propagates the first panic and stops the
 raw terminal loop. The attempted identity cannot be retried because the heap
 domain is being destroyed, and untouched payloads may leak their Rust
