@@ -6,7 +6,7 @@ contract, safety ledger, and verification surface.
 
 Status: complete. The C6 representation, ordinary and terminal failure
 boundaries, current safety contract, and downstream stress/metric plan are
-reconciled. Every review finding is resolved; C6D.3 can now certify the
+reconciled. Every review finding is resolved; C6D.3 subsequently certified the
 resulting collector without absorbing new design work.
 
 ## Outcome
@@ -437,10 +437,11 @@ terminal-dispatch claims were removed.
 
 The safety phase history now reaches C6D and ends with one current non-moving
 full-collector rule. The roadmap status, resolved terminal checkpoint, runtime
-integration boundary, and `heap` unsafe-module expectation now agree that the
-isolated collector marks, reclaims, and finalizes but has not passed Gate G1.
-Doctests, Clippy with warnings denied, and the exact unsafe inventory pass.
-GC6-005 changes no runtime semantics or unsafe operation and is resolved.
+integration boundary, and `heap` unsafe-module expectation agreed at this
+checkpoint that the isolated collector marked, reclaimed, and finalized while
+still awaiting Gate G1. Doctests, Clippy with warnings denied, and the exact
+unsafe inventory pass. GC6-005 changes no runtime semantics or unsafe
+operation and is resolved; the later C6D.3 audit certified the boundary.
 
 ### GC6-006 — Phase-local lint reasons have outlived their boundary
 
@@ -552,7 +553,7 @@ GC6-007 is resolved.
 | Finalized-word concurrent release | Loom neighbor/unique-claim model plus production release-to-frontier forced schedule and focused Miri | adequate; GC6-003 resolved |
 | Terminal detached and attached traversal | mixed detached/attached/ordinary/retired fixture plus first-panic fixture and focused Miri | adequate; GC6-004 resolved |
 | Public managed-`Drop` and pointer-liveness contract | current capability/liveness Rustdoc, safety ledger through C6D, and optional-mutator fixture | adequate; GC6-001 and GC6-005 resolved |
-| Unsafe inventory | exact checked-in inventory and passing audit | defer final certification to C6D.3 |
+| Unsafe inventory | exact checked-in inventory and passing audit | adequate; certified by C6D.3 |
 
 ## Resolution Ledger
 
@@ -569,5 +570,7 @@ GC6-007 is resolved.
 ## Review Status
 
 The post-C6 review and all seven findings are complete. The focused C6D.3
-certification is next and must audit this corrected design rather than absorb
-new semantic decisions into a verification checklist.
+certification subsequently passed on 2026-08-25; see
+[`GarbageCollectorGateG1_2026-08-25.md`](GarbageCollectorGateG1_2026-08-25.md).
+It audited this corrected design without absorbing new semantic decisions into
+the verification checklist.

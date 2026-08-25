@@ -5420,22 +5420,34 @@ mod tests {
         let foreign = Heap::new();
         let value = allocate(&heap, 42_u64);
         let foreign_value = allocate(&foreign, 73_u64);
-        let interior =
-            std::ptr::NonNull::new(((value.erase().as_ptr().as_ptr() as usize) + 1) as *mut ())
-                .unwrap();
+        let interior = value.erase().as_ptr().map_addr(|address| {
+            std::num::NonZeroUsize::new(address.get().checked_add(1).unwrap()).unwrap()
+        });
 
         let class = internal_class::<FirstType>(&heap);
         let empty_run = heap.inner.prepare_run(&class).unwrap();
-        let empty_address = {
+        let empty = {
             let data = heap.inner.data.lock().unwrap();
             let geometry = RunGeometry::derive(
                 metadata_for::<FirstType>().layout(),
                 metadata_for::<FirstType>().requested_slot_size(),
             )
             .unwrap();
-            data.arena.run_at(empty_run).unwrap().address() + geometry.first_slot_offset
+            let run = data.arena.run_at(empty_run).unwrap();
+            ErasedGc::new(
+                run.pointer()
+                    .map_addr(|address| {
+                        std::num::NonZeroUsize::new(
+                            address
+                                .get()
+                                .checked_add(geometry.first_slot_offset)
+                                .unwrap(),
+                        )
+                        .unwrap()
+                    })
+                    .cast(),
+            )
         };
-        let empty = ErasedGc::new(std::ptr::NonNull::new(empty_address as *mut ()).unwrap());
 
         let (unknown_class, unpublished_run) = {
             let mut data = heap.inner.data.lock().unwrap();
@@ -5450,16 +5462,32 @@ mod tests {
             let unpublished_run = data.arena.run_address(chunk, 1).unwrap();
             (
                 ErasedGc::new(
-                    std::ptr::NonNull::new(
-                        (unknown_run.address() + geometry.first_slot_offset) as *mut (),
-                    )
-                    .unwrap(),
+                    unknown_run
+                        .pointer()
+                        .map_addr(|address| {
+                            std::num::NonZeroUsize::new(
+                                address
+                                    .get()
+                                    .checked_add(geometry.first_slot_offset)
+                                    .unwrap(),
+                            )
+                            .unwrap()
+                        })
+                        .cast(),
                 ),
                 ErasedGc::new(
-                    std::ptr::NonNull::new(
-                        (unpublished_run.address() + geometry.first_slot_offset) as *mut (),
-                    )
-                    .unwrap(),
+                    unpublished_run
+                        .pointer()
+                        .map_addr(|address| {
+                            std::num::NonZeroUsize::new(
+                                address
+                                    .get()
+                                    .checked_add(geometry.first_slot_offset)
+                                    .unwrap(),
+                            )
+                            .unwrap()
+                        })
+                        .cast(),
                 ),
             )
         };
@@ -9633,9 +9661,9 @@ mod tests {
         heap.with_mutator(|mutator| {
             let allocator = mutator.allocator::<u64>().unwrap();
             // This deliberately leaks the allocator's inert 24-byte frontier
-            // cell. The address-sanitizer harness runs this fixture separately
-            // with leak detection disabled while retaining every other ASan
-            // check; see `scripts/check-sanitizer.sh` and `VERIFY.md`.
+            // cell. The sanitizer and Miri harnesses run this fixture
+            // separately with leak detection disabled while retaining every
+            // other check; see their scripts and `VERIFY.md`.
             std::mem::forget(allocator);
         });
         drop(heap);

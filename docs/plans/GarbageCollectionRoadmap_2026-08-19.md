@@ -1,11 +1,11 @@
 # Glam-Owned Garbage Collection Roadmap — 2026-08-19
 
-Status: in progress; collector Phases C0 through C6D.2, the C2C.6 verification
-follow-up, and integration Phase I0 are complete. Gate G0 is established, and
-the mandatory post-C1, post-C2C, post-C3E, post-C4, post-C5, and post-C6
-reviews have been performed. The post-C6 Gate G1 blockers GC6-001 through
-GC6-005 are resolved; cleanup/reconciliation findings GC6-006 and GC6-007 and
-the focused C6D.3 certification remain before Gate G1.
+Status: in progress; collector Phases C0 through C6D.3, the C2C.6 verification
+follow-up, and integration Phase I0 are complete. Gates G0 and G1 are
+established, and the mandatory post-C1, post-C2C, post-C3E, post-C4, post-C5,
+and post-C6 reviews have been performed. Collector stress, metrics, and tuning
+continue in C7/C8 while production ownership integration may begin with
+collection disabled.
 
 This roadmap keeps two large transitions aligned:
 
@@ -295,6 +295,10 @@ The implementation plan has a working non-moving, stop-the-world full
 collector with explicit roots, regional mutators, deterministic race tests,
 Miri coverage, and no production Glam dependency.
 
+**Established 2026-08-25.** The certification and its two resolved
+verification-harness findings are recorded in
+[`GarbageCollectorGateG1_2026-08-25.md`](../reviews/GarbageCollectorGateG1_2026-08-25.md).
+
 Only after G1 may integration replace `Arc` ownership with `Gc` in production
 types. Production automatic or explicit reclamation remains disabled.
 
@@ -327,10 +331,10 @@ this transition.
 
 Integration Phase I0 is a read-only ownership/layout inventory and may proceed
 before G1; its measurements should inform the fixed-run geometry chosen in C2A.
-Managed ownership changes remain blocked on G1. After G1, integration API
-adaptation may proceed while the GC subcrate adds full-collection stress and
-metrics. These streams may not jointly enable collection until their shared
-gate passes.
+Managed ownership changes were blocked on G1. Now that G1 has passed,
+integration API adaptation may proceed while the GC subcrate adds
+full-collection stress and metrics. These streams may not jointly enable
+collection until their shared later gate passes.
 
 The following must remain sequential:
 
@@ -397,8 +401,8 @@ rather than waiting for the following review.
 
 For the current collector plan, the mandatory review points are after C1C,
 C2C, C3E, C4, C5, C6D, C7, and C8. Review and partition the integration phases
-again when Gate G1 permits that work; their present breakdown is not frozen by
-the collector implementation plan.
+again before I1 now that Gate G1 permits that work; their present breakdown is
+not frozen by the collector implementation plan.
 
 Completion of both child plans requires a final audit against every invariant
 above. Passing tests alone does not establish an unexamined trace edge.

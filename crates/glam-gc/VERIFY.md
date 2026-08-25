@@ -839,6 +839,39 @@ GC6-007 changes planning and verification ownership only. The stable collector
 matrix remains 187 unit tests (185 passing plus two ignored scale fixtures),
 seven Loom models, eight compile-fail/doc tests, and the exact unsafe inventory.
 
+## Gate G1 Certification
+
+C6D.3 certified the isolated collector on 2026-08-25. The review is recorded in
+[`GarbageCollectorGateG1_2026-08-25.md`](../../docs/reviews/GarbageCollectorGateG1_2026-08-25.md).
+The gate combines:
+
+```sh
+crates/glam-gc/scripts/check.sh
+crates/glam-gc/scripts/check-scale.sh
+crates/glam-gc/scripts/check-miri.sh
+crates/glam-gc/scripts/check-sanitizer.sh address
+crates/glam-gc/scripts/check-sanitizer.sh thread
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test -q
+```
+
+The native collector matrix passes with 185 tests and two isolated scale
+fixtures; all seven Loom models and all eight compile-fail/doc tests pass. The
+million-node and million-edge fixtures pass. The strict-provenance Miri main
+suite passes with 183 tests, three Miri-only ignores, and the one intentional
+leak fixture filtered out; that exact fixture then passes separately with only
+leak checking disabled. ASan similarly passes 184 main-suite tests plus the
+isolated fixture, and TSan passes all 185 routine tests.
+
+The audit corrected two verification defects. `check-miri.sh` now isolates the
+fixture which deliberately forgets one inert allocator frontier while keeping
+leak checking enabled for the rest of the suite. The negative checked-owner
+fixture now derives invalid addresses with `NonNull::map_addr`, so strict Miri
+retains the owning allocation's provenance instead of accepting exposed-
+provenance integer casts. Neither correction changes production collector
+semantics or unsafe code.
+
 ## Gate G0 Baseline
 
 Before changing the unsafe surface in C1, recheck the focused pre-GC semantic

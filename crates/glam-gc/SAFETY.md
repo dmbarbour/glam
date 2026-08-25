@@ -126,6 +126,14 @@ allocations across collection; eager sweep or finalization may reclaim every
 other allocation. A matching mutator excludes collection while client code
 holds an authorized managed reference.
 
+Gate G1 certified this isolated boundary on 2026-08-25. The audit reconciled
+all 138 unsafe constructs under 11 exact module expectations and passed the
+native, Loom, scale, strict-provenance Miri, AddressSanitizer, and
+ThreadSanitizer gates. It is recorded in
+[`GarbageCollectorGateG1_2026-08-25.md`](../../docs/reviews/GarbageCollectorGateG1_2026-08-25.md).
+This certification permits ownership integration; it does not enable
+collection over the still-unmigrated production Glam graph.
+
 The crate denies unsafe code by default. `src/lib.rs` gives the reviewed
 `pointer`, `root`, `mutator`, `trace`, `mutation`, `thread_cache`, and unit-test
 modules named lint expectations for unsafe code. The exact module expectations

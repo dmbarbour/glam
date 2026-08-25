@@ -1,9 +1,9 @@
 # Glam GC Subcrate Implementation Plan — 2026-08-19
 
-Status: in progress; Phases C0 through C6D.2 are complete, including the C2C.6
+Status: in progress; Phases C0 through C6D.3 are complete, including the C2C.6
 verification follow-up. The mandatory post-C1, post-C2C, post-C3E, post-C4,
 post-C5, and post-C6 reviews are complete. Every post-C6 finding through
-GC6-007 is resolved; the C6D.3 Gate G1 audit is next.
+GC6-007 is resolved and Gate G1 passed on 2026-08-25. C7A.1 is next.
 
 This plan implements an exact, non-moving, runtime-local tracing collector
 without depending on Glam value semantics. The governing requirements and
@@ -87,7 +87,7 @@ to a later performance plan. Concurrent marking is also a later plan.
 | Post-C6 GC6-005 | completed | public liveness and current-boundary documentation reconciliation |
 | Post-C6 GC6-006 | completed | stale lint, verification-state, and ownership-comment cleanup |
 | Post-C6 GC6-007 | completed | C7/C8 stress, metric, and checkpoint reconciliation |
-| C6D.3 | pending | Gate G1 audit |
+| C6D.3 | completed | Gate G1 audit and isolated-collector certification |
 | C7A.1 | pending | deterministic root handoff and lifetime stress |
 | C7A.2 | pending | immutable-reader and collection forced schedules |
 | C7A.3 | pending | shared-root and reader scale composition |
@@ -2052,12 +2052,12 @@ The downstream structure remains sound, with these corrections:
   const-generic fixtures rather than runtime heap options. Thresholds and
   reporting policy may remain per heap.
 
-The later integration plan remains intentionally provisional until Gate G1.
-C4 fixes the collector's direct-root representation but does not preempt I2's
-choice between using it directly and placing it behind a Glam-owned public
-value wrapper. C6D still owns the last-value-domain-owner teardown decision.
-No production integration phase is pulled into the isolated collector plan by
-this review.
+The later integration plan was intentionally provisional through Gate G1 and
+must now be reviewed before I1. C4 fixes the collector's direct-root
+representation but does not preempt I2's choice between using it directly and
+placing it behind a Glam-owned public value wrapper. C6D owns the resolved
+last-value-domain-owner teardown decision. No production integration phase is
+pulled into the isolated collector plan by this review.
 
 ## Phase C4 — External Root Registry
 
@@ -2423,8 +2423,9 @@ downstream corrections are required:
   collection/finalizer metrics from allocator/cache metrics and audit their
   consistency separately. Stabilize the report accumulated by C5 and C6 in
   C8A; build a measurement harness before selecting geometry experiments or
-  workloads. Gate G1 remains owned by C6D.3, so production integration is
-  still blocked even though C4 now supplies its direct-root primitive.
+  workloads. At this review checkpoint Gate G1 remained owned by C6D.3, so
+  production integration was still blocked even though C4 supplied its
+  direct-root primitive.
 
 The remaining deliberate decisions are localized: C6B.1 chooses whether an
 empty batch skips `Finalizing`, and C6D.1 settles the remaining terminal owner
@@ -3464,7 +3465,7 @@ and proportional headroom. Finalizer activations consume rather than redefine
 that headroom. Heap
 destruction releases retained empty chunks; ordinary collection does not.
 
-Gate G1 passes after C6D plus its focused unsafe-code audit.
+Gate G1 passed after C6D plus its focused unsafe-code audit.
 
 ### Phase C6 Completions
 
@@ -4054,8 +4055,7 @@ used to discover which C6 design is being certified.
 
 The review is recorded in
 [`GarbageCollectorC6_2026-08-24.md`](../reviews/GarbageCollectorC6_2026-08-24.md).
-It has been performed but remains open while its Gate G1 blockers are being
-resolved.
+It was closed after all seven findings were resolved.
 
 GC6-002A was completed on 2026-08-25. `CollectionAttempt` now distinguishes
 reversible work, destructive topology mutation, a completely published swept
@@ -4082,8 +4082,8 @@ collector-mutator release, and terminal teardown. It tightened finalizer poison
 publication to a run-local RAII guard which fires before finalizer admission is
 released, and made post-poison activity reject before consulting managed data.
 The topology invariant panic, finalizer-commit invariant panic, and recoverable
-payload panic fixtures all pass focused Miri. GC6-002 is resolved; the broader
-post-C6 review remains open for its other Gate G1 findings.
+payload panic fixtures all pass focused Miri. GC6-002 is resolved; the later
+findings below complete the broader post-C6 review.
 
 GC6-003 was completed on 2026-08-25. A Loom model now races finalized-word
 lease release with a neighboring lease-bit claim and a claim of the released
@@ -4108,9 +4108,10 @@ state the current collection proof: a bare pointer carries no liveness, a live
 registered root is marked by every exclusive root walk, and matching mutator
 authority excludes reclamation during a borrow. The safety ledger now reaches
 C6D and ends its historical phase narrative with one current non-moving full-
-collector rule. The roadmap, integration boundary, and `heap` unsafe-module
-description now agree that C6D.2 is implemented while production integration
-remains blocked on Gate G1. All explicit post-C6 Gate blockers are resolved;
+collector rule. At that checkpoint the roadmap, integration boundary, and
+`heap` unsafe-module description agreed that C6D.2 was implemented while
+production integration remained blocked on Gate G1. All explicit post-C6 Gate
+blockers are resolved;
 the GC6-006 and GC6-007 completions below close the remaining cleanup and
 downstream-plan follow-ups before the focused C6D.3 audit.
 
@@ -4132,9 +4133,27 @@ does not own its correctness proof. Terminal teardown metrics are explicitly
 test-only observations because last-owner release leaves no heap client to
 consume a production report. C8 retains its measurement-first policy and does
 not promote terminal probes into its reporting API. Every post-C6 finding is
-resolved; C6D.3 is next.
+resolved.
 
-The review must:
+#### C6D.3 completion
+
+Completed on 2026-08-25. The focused certification is recorded in
+[`GarbageCollectorGateG1_2026-08-25.md`](../reviews/GarbageCollectorGateG1_2026-08-25.md).
+It reconciled the exact unsafe inventory, liveness and root publication,
+allocator-view publication, attached and detached finalization ownership,
+irreversible failure boundaries, and terminal release. The complete native,
+Loom, million-edge scale, strict-provenance Miri, AddressSanitizer,
+ThreadSanitizer, and workspace gates pass.
+
+The audit found no collector soundness defect. It repaired two harness issues:
+the intentional allocator-leak fixture is now isolated under Miri exactly as
+it was under ASan, and the invalid-address lookup fixture preserves owner
+provenance under strict Miri. Neither correction changes production unsafe
+code. Gate G1 passes; C7/C8 remain stress, metrics, and tuning work, while the
+integration plan may begin ownership migration with production collection
+disabled.
+
+The review audited:
 
 1. reconcile eager no-drop sweep, drop-required finalization, destructor-panic
    recovery, and terminal teardown with the C6 plan and public safety contract;
@@ -4153,10 +4172,9 @@ The review must:
 7. reconcile `SAFETY.md`, `VERIFY.md`, the roadmap, and this plan after any
    required correction.
 
-Record the audit in a dated document under `docs/reviews/`. Resolve all
-correctness, safety, or proof gaps marked as Gate G1 blockers before changing
-this checkpoint to completed and beginning C6D.3. Performance-only work may be
-deferred to C7 or C8 when the current representation remains sound.
+The audit record above resolved every correctness, safety, and proof gap marked
+as a Gate G1 blocker. Performance-only work remains deferred to C7 or C8 where
+the current representation is sound.
 
 ## Phase C7 — Shared-Pointer and Worker-Shaped Stress
 

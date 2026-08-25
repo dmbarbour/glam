@@ -1,7 +1,8 @@
 # Glam GC Integration Plan — 2026-08-19
 
-Status: in progress; Phase I0 is complete, while managed ownership changes are
-blocked on collector Gate G1.
+Status: in progress; Phase I0 is complete and collector Gate G1 passed on
+2026-08-25. Phase I1 is unblocked; review its breakdown before beginning
+ownership integration with collection disabled.
 
 This plan integrates the collector defined by
 [`GarbageCollectorImplementation_2026-08-19.md`](GarbageCollectorImplementation_2026-08-19.md)
@@ -34,9 +35,10 @@ interaction nets. Cross-plan invariants and enablement gates live in
 The isolated collector now supplies checked direct roots and a weak registry,
 checked non-recursive graph tracing, eager non-moving sweep and run reuse,
 durable non-rootable finalization with retry after payload panic, and restricted
-last-owner terminal teardown. It has completed C6D.2 but has not passed Gate
-G1. Integration may use that reviewed boundary only in isolated prototypes; no
-production ownership migration begins before G1.
+last-owner terminal teardown. It completed C6D.3 and passed Gate G1. Production
+API and ownership migration may now use that certified boundary, but no
+production automatic or explicit collection may run before the complete graph
+passes the later roadmap gates.
 
 `RuntimeValueRoot` currently stores `{EvaluationRuntimeId, core::Value}`. It
 protects provenance but does not register a collector root. Recursive core
