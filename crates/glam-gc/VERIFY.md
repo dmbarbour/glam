@@ -669,8 +669,42 @@ cargo +nightly miri test -p glam-gc --lib --all-features \
 The complete collector check passes with 185 unit tests (183 passing plus two
 ignored scale fixtures), six Loom models, eight compile-fail/doc tests, and the
 exact unsafe inventory. The checkpoint adds no production unsafe site and no
-new test `Trace` declaration. GC6-002C retains the complete poison-boundary and
-documentation audit before the finding closes.
+new test `Trace` declaration. The GC6-002C closeout audit follows below.
+
+## GC6-002C Permanent-Poison Audit Verification
+
+The closeout audit covers every `CollectionAttemptState` transition and its
+drop disposition, the run-local finalizer commit guard, outer admission,
+nonblocking and synchronous collection, blocked waiter notification,
+finalizer activity, collector-mutator release, and terminal heap teardown.
+
+Two refinements were latched during the audit:
+
+- the run-local guard now publishes poison before the collector-owned
+  finalizer mutator admission is released; the finalizer-commit fixture checks
+  that exact release ordering; and
+- post-poison `Heap::activity` rejects before touching managed data. Both
+  invariant-panic fixtures check this, including the topology fixture whose
+  injected panic poisons the managed-data mutex.
+
+The three required focused Miri fixtures are:
+
+```sh
+cargo +nightly miri test -p glam-gc --lib --all-features \
+  heap::tests::panic_after_destructive_topology_mutation_does_not_reopen_the_heap \
+  -- --exact
+cargo +nightly miri test -p glam-gc --lib --all-features \
+  heap::tests::panic_before_finalizer_commit_permanently_poisons_without_redispatch \
+  -- --exact
+cargo +nightly miri test -p glam-gc --lib --all-features \
+  heap::tests::managed_destructor_panic_retires_one_and_defers_the_untouched_batch \
+  -- --exact
+```
+
+All three pass. The collector gate continues to contain 185 unit tests (183
+passing plus two ignored scale fixtures), six Loom models, eight
+compile-fail/doc tests, and the exact unsafe inventory. GC6-002 adds no
+production unsafe site and is resolved.
 
 ## Gate G0 Baseline
 

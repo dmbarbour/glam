@@ -219,14 +219,15 @@ Execute the repair as three independently verified checkpoints:
    existing payload-`Drop` behavior: catch its panic, commit that exact
    identity, restore `AllocatorViewPublished`, and only then resume the
    original payload.
-3. **GC6-002C — boundary audit and closeout.** Audit every attempt-state
-   transition and every heap entry, synchronous waiter, finalizer-activity,
-   and terminal-release path against the permanent-poison rule. Ensure the
-   poison path performs no allocation and cannot itself depend on damaged
-   managed data. Update `SAFETY.md`, `VERIFY.md`, the implementation plan, and
-   this resolution ledger. Run focused ordinary-payload-panic and both
-   injected-invariant-panic fixtures under Miri, then run the complete
-   `glam-gc` verification script and repository routine checks.
+3. **GC6-002C — boundary audit and closeout (completed 2026-08-25).** Audit
+   every attempt-state transition and every heap entry, synchronous waiter,
+   finalizer-activity, and terminal-release path against the permanent-poison
+   rule. Ensure the poison path performs no allocation and cannot itself
+   depend on damaged managed data. Update `SAFETY.md`, `VERIFY.md`, the
+   implementation plan, and this resolution ledger. Run focused
+   ordinary-payload-panic and both injected-invariant-panic fixtures under
+   Miri, then run the complete `glam-gc` verification script and repository
+   routine checks.
 
 This repair does not change tracing, marking, allocation geometry, bitmap
 layout, the ordinary allocation fast path, or the public managed-value
@@ -260,7 +261,8 @@ models, eight compile-fail/doc tests, and the exact unsafe audit. The change
 adds no production unsafe site; its one edge-free test `Trace` declaration is
 recorded in the inventory. It does not alter allocator geometry, mark or
 allocation bitmaps, tracing, or the allocation fast path. GC6-002 remains a
-Gate G1 blocker until GC6-002C completes the boundary audit.
+Gate G1 blocker at this historical checkpoint; the GC6-002C closeout below
+resolves it.
 
 ##### GC6-002B completion
 
@@ -283,8 +285,30 @@ untouched suffix pending.
 
 Both fixtures pass focused Miri. The stable collector library now contains 185
 tests (183 passing plus two ignored scale fixtures). GC6-002B adds no
-production unsafe site or test `Trace` declaration. GC6-002 remains open only
-for GC6-002C's complete poison-boundary and documentation audit.
+production unsafe site or test `Trace` declaration. The GC6-002C closeout
+follows below.
+
+##### GC6-002C completion
+
+The closeout audit accounts for all six attempt states and their unwind
+dispositions, every public heap operation, synchronous waiter wakeup,
+finalizer activity, collector-mutator release, and poisoned terminal teardown.
+Poison publication uses only the coordinator mutex, atomics, scalar state, and
+the existing condition variable; it neither allocates nor reads managed data.
+
+The audit corrected two residual boundaries. `FinalizerCommitGuard` now owns
+the destructor dispatch-to-commit interval and poisons during
+`run_finalization_batch` unwinding, before collector-mutator admission is
+released. `Heap::activity` now rejects calls begun after poison before locking
+potentially damaged managed data. Tests latch both details alongside request,
+entry, synchronous collection, waiter, and terminal-destructor behavior.
+
+The topology invariant panic, finalizer-commit invariant panic, and ordinary
+caught payload panic all pass focused Miri. The full collector gate contains
+185 unit tests (183 passing plus two ignored scale fixtures), six Loom models,
+eight compile-fail/doc tests, and the exact unsafe inventory. GC6-002 adds no
+production unsafe site and is resolved. The post-C6 review remains open for
+its other Gate G1 blockers.
 
 ### GC6-003 — Finalized-word publication lacks a direct concurrent model
 
@@ -443,7 +467,7 @@ appropriate.
 | Whole-run retirement and cross-class reuse | mixed topology, empty drop-class run, retry/free-pool tests, focused Miri | adequate |
 | Stale-cursor invalidation and swept allocator publication | persistent-worker epoch fixture, exact lease/frontier fixture | adequate |
 | Pending identity root rejection | detached concurrent entrant plus attached paused-run root rejection | adequate |
-| Successful and panicking finalization | run commit, attached/detached release, repeated panic, merge-on-retry, focused Miri | adequate for payload panic; GC6-002 remains for collector panic |
+| Successful and panicking finalization | run commit, attached/detached release, repeated panic, invariant-panic poison, merge-on-retry, focused Miri | adequate; GC6-002 resolved |
 | Finalizer activity, pressure, and reports | paused running batch, successful/panicking allocation, report/epoch tests | adequate |
 | Finalized-word concurrent release | sequential/native reservation evidence only | GC6-003 |
 | Terminal detached and attached traversal | separate terminal fixtures and first-panic fixture | GC6-004 mixed case missing |
@@ -455,7 +479,7 @@ appropriate.
 | Finding | Required disposition | Owner |
 | --- | --- | --- |
 | GC6-001 | Resolved with one capability/liveness contract and optional-mutator implementation evidence. | completed 2026-08-24 |
-| GC6-002 | GC6-002A and GC6-002B completed; execute GC6-002C to audit and close the poison boundary. | before C6D.3 |
+| GC6-002 | Resolved with explicit topology and finalizer-commit irreversibility, permanent poison, and complete boundary verification. | completed 2026-08-25 |
 | GC6-003 | Add Loom and production forced-order coverage for finalized-word publication versus claims. | C6D.3 prerequisite |
 | GC6-004 | Add one mixed attached/detached terminal-topology fixture. | C6D.3 prerequisite |
 | GC6-005 | Reconcile public API, safety ledger, roadmap, integration boundary, and unsafe-module descriptions. | before C6D.3 |

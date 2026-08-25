@@ -260,6 +260,12 @@ impl Heap {
     /// This is operational host information rather than managed-program
     /// semantics. Later runtime integration combines it with worker, task,
     /// diagnostic, and event activity when deciding quiescence.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the heap is permanently poisoned. An activity observation
+    /// which began before poison publication may complete with its pre-poison
+    /// snapshot, like any already-admitted host observation.
     #[must_use]
     pub fn activity(&self) -> HeapActivity {
         self.inner.activity()
@@ -329,6 +335,8 @@ pub(crate) struct HeapInner {
     #[cfg(test)]
     panic_after_finalizer_terminal_recording: AtomicBool,
     #[cfg(test)]
+    poisoned_outer_mutator_releases: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
     coordinator_notifications: std::sync::atomic::AtomicUsize,
 }
 
@@ -371,6 +379,8 @@ impl Default for HeapInner {
             panic_after_topology_mutation: AtomicBool::new(false),
             #[cfg(test)]
             panic_after_finalizer_terminal_recording: AtomicBool::new(false),
+            #[cfg(test)]
+            poisoned_outer_mutator_releases: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             coordinator_notifications: std::sync::atomic::AtomicUsize::new(0),
         }
@@ -2082,6 +2092,7 @@ impl HeapInner {
     }
 
     fn activity(&self) -> HeapActivity {
+        assert!(!self.is_poisoned(), "managed heap is permanently poisoned");
         self.data
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -2362,13 +2373,12 @@ impl HeapInner {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .prepare_finalization_run(location);
             let mut panic = None;
-            let mut commit_pending = false;
+            let mut next_work = attempt.next_work();
+            let commit = next_work
+                .is_some()
+                .then(|| FinalizerCommitGuard::new(collection));
 
-            while let Some(work) = attempt.next_work() {
-                if !commit_pending {
-                    collection.begin_finalizer_commit();
-                    commit_pending = true;
-                }
+            while let Some(work) = next_work {
                 // SAFETY: the durable map and local run snapshot were built
                 // from an initialized allocated slot with this canonical
                 // metadata. The exact word remains finalizer-owned, root/debug
@@ -2385,6 +2395,7 @@ impl HeapInner {
                     panic = Some(payload);
                     break;
                 }
+                next_work = attempt.next_work();
             }
 
             let completed_slots = attempt.next_work_index;
@@ -2393,8 +2404,8 @@ impl HeapInner {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .complete_finalization_run(attempt);
-            if commit_pending {
-                collection.publish_finalizer_commit();
+            if let Some(commit) = commit {
+                commit.publish();
             }
             summary.finalized_slots = summary
                 .finalized_slots
@@ -2418,6 +2429,11 @@ impl HeapInner {
             .coordinator
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        #[cfg(test)]
+        if coordinator.phase == AdmissionPhase::Poisoned {
+            self.poisoned_outer_mutator_releases
+                .fetch_add(1, Ordering::Relaxed);
+        }
         coordinator.active_outer_mutators = coordinator
             .active_outer_mutators
             .checked_sub(1)
@@ -2466,6 +2482,11 @@ impl HeapInner {
     #[cfg(test)]
     fn coordinator_notification_count(&self) -> usize {
         self.coordinator_notifications.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    fn poisoned_outer_mutator_release_count(&self) -> usize {
+        self.poisoned_outer_mutator_releases.load(Ordering::Relaxed)
     }
 
     #[cfg(test)]
@@ -3106,6 +3127,7 @@ enum CollectionAttemptState {
     TopologyMutation,
     AllocatorViewPublished,
     FinalizerCommitPending,
+    Poisoned,
     Completed,
 }
 
@@ -3142,6 +3164,14 @@ impl<'heap> CollectionAttempt<'heap> {
     fn publish_finalizer_commit(&mut self) {
         assert_eq!(self.state, CollectionAttemptState::FinalizerCommitPending);
         self.state = CollectionAttemptState::AllocatorViewPublished;
+    }
+
+    fn poison(&mut self) {
+        // This is an unwind-safety path: its callers establish the
+        // irreversible state structurally, and poisoning itself must not add
+        // another assertion panic while preserving the original payload.
+        self.heap.poison_collection(self.epoch);
+        self.state = CollectionAttemptState::Poisoned;
     }
 
     fn complete(&mut self, summary: CollectionSummary) {
@@ -3202,13 +3232,10 @@ impl<'heap> CollectionAttempt<'heap> {
 impl Drop for CollectionAttempt<'_> {
     fn drop(&mut self) {
         match self.state {
-            CollectionAttemptState::Completed => return,
-            CollectionAttemptState::TopologyMutation => {
-                self.heap.poison_collection(self.epoch);
-                return;
-            }
-            CollectionAttemptState::FinalizerCommitPending => {
-                self.heap.poison_collection(self.epoch);
+            CollectionAttemptState::Poisoned | CollectionAttemptState::Completed => return,
+            CollectionAttemptState::TopologyMutation
+            | CollectionAttemptState::FinalizerCommitPending => {
+                self.poison();
                 return;
             }
             CollectionAttemptState::Reversible | CollectionAttemptState::AllocatorViewPublished => {
@@ -3245,6 +3272,29 @@ impl Drop for CollectionAttempt<'_> {
             coordinator.phase = AdmissionPhase::Ordinary;
         }
         self.heap.notify_coordinator_waiters();
+    }
+}
+
+struct FinalizerCommitGuard<'attempt, 'heap> {
+    attempt: &'attempt mut CollectionAttempt<'heap>,
+}
+
+impl<'attempt, 'heap> FinalizerCommitGuard<'attempt, 'heap> {
+    fn new(attempt: &'attempt mut CollectionAttempt<'heap>) -> Self {
+        attempt.begin_finalizer_commit();
+        Self { attempt }
+    }
+
+    fn publish(self) {
+        self.attempt.publish_finalizer_commit();
+    }
+}
+
+impl Drop for FinalizerCommitGuard<'_, '_> {
+    fn drop(&mut self) {
+        if self.attempt.state == CollectionAttemptState::FinalizerCommitPending {
+            self.attempt.poison();
+        }
     }
 }
 
@@ -7717,6 +7767,11 @@ mod tests {
             "managed heap is permanently poisoned"
         );
         assert_eq!(heap.collect_full(), Err(CollectionError::Poisoned));
+        let activity = catch_unwind(AssertUnwindSafe(|| heap.activity()));
+        assert_eq!(
+            panic_string(activity.unwrap_err().as_ref()),
+            "managed heap is permanently poisoned"
+        );
         let request = catch_unwind(AssertUnwindSafe(|| heap.request_collection()));
         assert_eq!(
             panic_string(request.unwrap_err().as_ref()),
@@ -7759,6 +7814,11 @@ mod tests {
             1,
             "the erased destructor must run before the injected commit panic"
         );
+        assert_eq!(
+            heap.inner.poisoned_outer_mutator_release_count(),
+            1,
+            "the run-local guard must publish poison before finalizer admission is released"
+        );
 
         let entry = catch_unwind(AssertUnwindSafe(|| heap.with_mutator(|_| {})));
         assert_eq!(
@@ -7766,6 +7826,11 @@ mod tests {
             "managed heap is permanently poisoned"
         );
         assert_eq!(heap.collect_full(), Err(CollectionError::Poisoned));
+        let activity = catch_unwind(AssertUnwindSafe(|| heap.activity()));
+        assert_eq!(
+            panic_string(activity.unwrap_err().as_ref()),
+            "managed heap is permanently poisoned"
+        );
         let request = catch_unwind(AssertUnwindSafe(|| heap.request_collection()));
         assert_eq!(
             panic_string(request.unwrap_err().as_ref()),

@@ -878,6 +878,51 @@ poisons the heap without reading managed data. Subsequent admission and
 collection reject the heap, and terminal heap release skips every managed
 destructor rather than risk redispatching an already destroyed identity.
 
+### GC6-002C permanent-poison boundary audit
+
+The complete attempt state machine has one disposition for every unwind:
+
+- `Reversible` has published no destructive topology and may clear incidental
+  mutex poison, relatch collection, and restore ordinary admission.
+- `TopologyMutation` may have changed selector, run, bitmap, frontier, or
+  lease-epoch state without completing the allocator view, so it poisons.
+- `AllocatorViewPublished` has a complete allocator view and no uncommitted
+  destructor. It may publish the post-attempt pressure baseline, relatch
+  collection, and restore ordinary admission.
+- `FinalizerCommitPending` has dispatched at least one destructor without yet
+  publishing the complete attempted prefix, so it poisons.
+- `Poisoned` and `Completed` require no unwind action.
+
+The run-local `FinalizerCommitGuard` owns the second irreversible interval. It
+publishes poison during unwinding inside `run_finalization_batch`, before the
+collector-owned finalizer mutator admission is released. The outer collection
+guard observes `Poisoned` later and performs no duplicate recovery. Topology
+poison remains collection-scoped so the managed-data guard is released before
+the coordinator mutex is acquired. Neither poison path holds both component
+mutexes.
+
+Poison publication takes only the coordinator mutex, performs fixed atomic and
+scalar updates, and wakes the existing condition variable. It does not lock,
+inspect, clear, or destroy managed data; allocate memory; publish a completion
+report; or advance the completed collection epoch. The poison helper contains
+no assertion that could replace the original panic during unwinding.
+
+New outer mutator entry and collection requests reject poison. Synchronous
+waiters test poison before accepting a report and are awakened by publication.
+Nonblocking requests use checks on both sides of request publication so a race
+cannot leave a request latched after poison. Activity calls which begin after
+poison reject before locking managed data; an observation already in progress
+may finish with its pre-poison snapshot. Existing admitted Rust borrows are not
+revoked, but no subsequent operation through them is promised. Their ordinary
+release remains valid in `Poisoned` coordinator state.
+
+Finalizer activity may remain nonzero in damaged managed state and is never
+presented as authoritative after poison. Final `HeapInner` release tests the
+atomic poison flag before obtaining managed data and skips both detached and
+attached managed destructor traversal. Rust container and raw arena storage
+are still released normally, while resources owned by forgotten payloads may
+leak.
+
 ### C6D.1 selected terminal-destruction contract
 
 The public managed-`Drop` contract is capability-based, not phase-based. Every

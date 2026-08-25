@@ -81,6 +81,7 @@ to a later performance plan. Concurrent marking is also a later plan.
 | Post-C6 review | in progress | semantic, topology, failure, and verification reconciliation before Gate G1 |
 | Post-C6 GC6-002A | completed | topology irreversibility and permanent heap poison |
 | Post-C6 GC6-002B | completed | finalizer dispatch-to-commit irreversibility |
+| Post-C6 GC6-002C | completed | permanent-poison boundary audit and closeout |
 | C6D.3 | pending | Gate G1 audit |
 | C7A | pending | shared-root and immutable-reader stress |
 | C7B | pending | allocation and coordinator stress |
@@ -4061,6 +4062,15 @@ does not redispatch the destroyed identity. The ordinary caught payload-panic
 path still commits that identity before resuming and remains retryable. Both
 boundary fixtures pass focused Miri. GC6-002C owns the final poison-boundary
 audit and review closeout.
+
+GC6-002C was completed on 2026-08-25. The audit accounts for every attempt
+state, entry and request surface, synchronous waiter, finalizer-activity path,
+collector-mutator release, and terminal teardown. It tightened finalizer poison
+publication to a run-local RAII guard which fires before finalizer admission is
+released, and made post-poison activity reject before consulting managed data.
+The topology invariant panic, finalizer-commit invariant panic, and recoverable
+payload panic fixtures all pass focused Miri. GC6-002 is resolved; the broader
+post-C6 review remains open for its other Gate G1 findings.
 
 The review must:
 
