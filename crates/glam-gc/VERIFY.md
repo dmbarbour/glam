@@ -640,6 +640,38 @@ recorded in that inventory. GC6-002B extends the attempt state across erased
 destructor dispatch and durable run commit; ordinary caught payload-destructor
 panic remains recoverable.
 
+## GC6-002B Finalizer Commit Verification
+
+`panic_before_finalizer_commit_permanently_poisons_without_redispatch` arms a
+one-shot panic after erased `drop_in_place` and run-local terminal recording,
+but before `complete_finalization_run` publishes allocation-bit and durable
+batch retirement. It proves the destructor ran exactly once, the collection
+remained `FinalizerCommitPending`, later entry and collection reject permanent
+poison, and terminal heap release does not redispatch the uncertain identity.
+
+`managed_destructor_panic_retires_one_and_defers_the_untouched_batch` remains
+the complementary recoverable path. The collector catches the payload panic,
+commits that exact terminal identity, restores `AllocatorViewPublished`, and
+only then resumes the original panic. A later collection finalizes only the
+untouched suffix.
+
+Both boundary fixtures pass focused Miri:
+
+```sh
+cargo +nightly miri test -p glam-gc --lib --all-features \
+  heap::tests::panic_before_finalizer_commit_permanently_poisons_without_redispatch \
+  -- --exact
+cargo +nightly miri test -p glam-gc --lib --all-features \
+  heap::tests::managed_destructor_panic_retires_one_and_defers_the_untouched_batch \
+  -- --exact
+```
+
+The complete collector check passes with 185 unit tests (183 passing plus two
+ignored scale fixtures), six Loom models, eight compile-fail/doc tests, and the
+exact unsafe inventory. The checkpoint adds no production unsafe site and no
+new test `Trace` declaration. GC6-002C retains the complete poison-boundary and
+documentation audit before the finding closes.
+
 ## Gate G0 Baseline
 
 Before changing the unsafe surface in C1, recheck the focused pre-GC semantic

@@ -825,8 +825,7 @@ while pressure created by finalizer allocation or recycling is never lost.
 
 `CollectionAttempt` records whether work is still reversible, destructive
 topology mutation is in progress, the complete allocator view is published,
-or the collection completed. Finalization obtains a finer-grained irreversible
-state in GC6-002B; it is not part of this checkpoint.
+finalizer commit is pending, or the collection completed.
 
 Planning reserves capacity and validates topology before irreversibility.
 Immediately before the first allocator-frontier withdrawal, the attempt enters
@@ -851,8 +850,33 @@ allocator state.
 After the swept allocator view and its lease epoch are authoritative, the
 attempt enters `AllocatorViewPublished`; pre-finalizer and already-committed
 payload-panic recovery retain their existing pressure publication and retry
-semantics. GC6-002B separately closes the interval between erased destructor
-dispatch and durable finalization commit.
+semantics.
+
+### GC6-002B finalizer dispatch-to-commit irreversibility
+
+Each run-local finalization attempt remains recoverable until it is about to
+dispatch its first erased destructor. Immediately before that call, the
+collection enters `FinalizerCommitPending`. It stays there across every
+destructor attempted in that run, local terminal recording, managed-data lock
+reacquisition, allocation-bit retirement, durable pending-batch update, run
+release or recycling, and finalizer-activity retirement. Only successful
+`complete_finalization_run` publication restores `AllocatorViewPublished`. A
+run which dispatches no destructor never enters the irreversible state.
+
+The erased destructor itself remains inside `catch_unwind`. Whether it returns
+or panics, that exact identity is first recorded terminally in the local run
+attempt and then committed to the durable allocator and finalization state.
+After that commit the collection becomes recoverable again; only then may the
+original payload panic resume. Untouched identities remain pending for a later
+attempt. Thus an ordinary payload panic preserves the existing retry semantics
+without ever redispatching the panicking identity.
+
+An independent invariant panic after erased dispatch but before durable run
+commit cannot establish which destructor identities remain valid. The attempt
+therefore stays `FinalizerCommitPending` while it unwinds and permanently
+poisons the heap without reading managed data. Subsequent admission and
+collection reject the heap, and terminal heap release skips every managed
+destructor rather than risk redispatching an already destroyed identity.
 
 ### C6D.1 selected terminal-destruction contract
 

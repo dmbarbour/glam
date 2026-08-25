@@ -207,7 +207,8 @@ Execute the repair as three independently verified checkpoints:
    current implementation reopens admission after this panic, then require
    later entry and collection to reject the poisoned heap without dispatching
    terminal destructors.
-2. **GC6-002B — finalizer dispatch-to-commit guard.** Keep the collection in
+2. **GC6-002B — finalizer dispatch-to-commit guard (completed
+   2026-08-25).** Keep the collection in
    `FinalizerCommitPending` from immediately before the first erased destructor
    in a run is called until `complete_finalization_run` has durably retired the
    complete attempted prefix. A run with no dispatched destructor never enters
@@ -259,8 +260,31 @@ models, eight compile-fail/doc tests, and the exact unsafe audit. The change
 adds no production unsafe site; its one edge-free test `Trace` declaration is
 recorded in the inventory. It does not alter allocator geometry, mark or
 allocation bitmaps, tracing, or the allocation fast path. GC6-002 remains a
-Gate G1 blocker until GC6-002B closes destructor dispatch-to-commit and
-GC6-002C completes the boundary audit.
+Gate G1 blocker until GC6-002C completes the boundary audit.
+
+##### GC6-002B completion
+
+`CollectionAttempt` now enters `FinalizerCommitPending` immediately before the
+first erased destructor dispatched for a run. It remains irreversible through
+local terminal recording and `complete_finalization_run`, including allocation
+bit retirement, durable batch update, word release, run recycling, and
+finalizer-activity retirement. A run with no dispatched destructor does not
+enter this state. Successful durable publication restores
+`AllocatorViewPublished`.
+
+The one-shot forced fixture panics after `drop_in_place` and local terminal
+recording but before durable commit. The original destructor runs once, the
+attempt permanently poisons without consulting managed data, later entry and
+collection reject the heap, and terminal release does not redispatch the
+uncertain identity. The existing payload-panic fixture proves the recoverable
+counterpart: catch the payload, commit that exact identity, restore the
+published allocator state, then resume the original payload while leaving the
+untouched suffix pending.
+
+Both fixtures pass focused Miri. The stable collector library now contains 185
+tests (183 passing plus two ignored scale fixtures). GC6-002B adds no
+production unsafe site or test `Trace` declaration. GC6-002 remains open only
+for GC6-002C's complete poison-boundary and documentation audit.
 
 ### GC6-003 — Finalized-word publication lacks a direct concurrent model
 
@@ -431,7 +455,7 @@ appropriate.
 | Finding | Required disposition | Owner |
 | --- | --- | --- |
 | GC6-001 | Resolved with one capability/liveness contract and optional-mutator implementation evidence. | completed 2026-08-24 |
-| GC6-002 | GC6-002A completed; execute GC6-002B and GC6-002C to close finalizer commit and audit boundaries. | before C6D.3 |
+| GC6-002 | GC6-002A and GC6-002B completed; execute GC6-002C to audit and close the poison boundary. | before C6D.3 |
 | GC6-003 | Add Loom and production forced-order coverage for finalized-word publication versus claims. | C6D.3 prerequisite |
 | GC6-004 | Add one mixed attached/detached terminal-topology fixture. | C6D.3 prerequisite |
 | GC6-005 | Reconcile public API, safety ledger, roadmap, integration boundary, and unsafe-module descriptions. | before C6D.3 |

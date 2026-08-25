@@ -327,6 +327,8 @@ pub(crate) struct HeapInner {
     #[cfg(test)]
     panic_after_topology_mutation: AtomicBool,
     #[cfg(test)]
+    panic_after_finalizer_terminal_recording: AtomicBool,
+    #[cfg(test)]
     coordinator_notifications: std::sync::atomic::AtomicUsize,
 }
 
@@ -367,6 +369,8 @@ impl Default for HeapInner {
             collection_acknowledgement_hook: Mutex::new(None),
             #[cfg(test)]
             panic_after_topology_mutation: AtomicBool::new(false),
+            #[cfg(test)]
+            panic_after_finalizer_terminal_recording: AtomicBool::new(false),
             #[cfg(test)]
             coordinator_notifications: std::sync::atomic::AtomicUsize::new(0),
         }
@@ -2314,7 +2318,7 @@ impl HeapInner {
         // boundary before production destruction begins. A panic here has not
         // invoked any payload destructor and remains safely retryable.
         finalizer_work(&mutator);
-        let finalization_summary = self.run_finalization_batch(&mutator);
+        let finalization_summary = self.run_finalization_batch(&mut attempt, &mutator);
         drop(mutator);
         let admission = thread_entry.into_outer_admission();
 
@@ -2338,7 +2342,11 @@ impl HeapInner {
         }
     }
 
-    fn run_finalization_batch(&self, mutator: &Mutator<'_>) -> FinalizationSummary {
+    fn run_finalization_batch(
+        &self,
+        collection: &mut CollectionAttempt<'_>,
+        mutator: &Mutator<'_>,
+    ) -> FinalizationSummary {
         debug_assert!(std::ptr::eq(self, Arc::as_ptr(mutator.heap())));
         let mut summary = FinalizationSummary::default();
         let mut locations = self
@@ -2354,8 +2362,13 @@ impl HeapInner {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .prepare_finalization_run(location);
             let mut panic = None;
+            let mut commit_pending = false;
 
             while let Some(work) = attempt.next_work() {
+                if !commit_pending {
+                    collection.begin_finalizer_commit();
+                    commit_pending = true;
+                }
                 // SAFETY: the durable map and local run snapshot were built
                 // from an initialized allocated slot with this canonical
                 // metadata. The exact word remains finalizer-owned, root/debug
@@ -2366,6 +2379,8 @@ impl HeapInner {
                     work.metadata.drop_in_place(work.value.as_ptr())
                 }));
                 attempt.complete_terminal(work);
+                #[cfg(test)]
+                self.maybe_panic_after_finalizer_terminal_recording();
                 if let Err(payload) = result {
                     panic = Some(payload);
                     break;
@@ -2378,6 +2393,9 @@ impl HeapInner {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .complete_finalization_run(attempt);
+            if commit_pending {
+                collection.publish_finalizer_commit();
+            }
             summary.finalized_slots = summary
                 .finalized_slots
                 .checked_add(completed_slots)
@@ -2492,6 +2510,26 @@ impl HeapInner {
             .swap(false, Ordering::AcqRel)
         {
             panic!("injected panic after destructive topology mutation");
+        }
+    }
+
+    #[cfg(test)]
+    fn inject_panic_after_finalizer_terminal_recording(&self) {
+        assert!(
+            !self
+                .panic_after_finalizer_terminal_recording
+                .swap(true, Ordering::AcqRel),
+            "finalizer-terminal-recording panic is already armed"
+        );
+    }
+
+    #[cfg(test)]
+    fn maybe_panic_after_finalizer_terminal_recording(&self) {
+        if self
+            .panic_after_finalizer_terminal_recording
+            .swap(false, Ordering::AcqRel)
+        {
+            panic!("injected panic after finalizer terminal recording");
         }
     }
 
@@ -3067,6 +3105,7 @@ enum CollectionAttemptState {
     Reversible,
     TopologyMutation,
     AllocatorViewPublished,
+    FinalizerCommitPending,
     Completed,
 }
 
@@ -3092,6 +3131,16 @@ impl<'heap> CollectionAttempt<'heap> {
 
     fn publish_allocator_view(&mut self) {
         assert_eq!(self.state, CollectionAttemptState::TopologyMutation);
+        self.state = CollectionAttemptState::AllocatorViewPublished;
+    }
+
+    fn begin_finalizer_commit(&mut self) {
+        assert_eq!(self.state, CollectionAttemptState::AllocatorViewPublished);
+        self.state = CollectionAttemptState::FinalizerCommitPending;
+    }
+
+    fn publish_finalizer_commit(&mut self) {
+        assert_eq!(self.state, CollectionAttemptState::FinalizerCommitPending);
         self.state = CollectionAttemptState::AllocatorViewPublished;
     }
 
@@ -3155,6 +3204,10 @@ impl Drop for CollectionAttempt<'_> {
         match self.state {
             CollectionAttemptState::Completed => return,
             CollectionAttemptState::TopologyMutation => {
+                self.heap.poison_collection(self.epoch);
+                return;
+            }
+            CollectionAttemptState::FinalizerCommitPending => {
                 self.heap.poison_collection(self.epoch);
                 return;
             }
@@ -3665,20 +3718,22 @@ mod tests {
         fn trace(&self, _visitor: &mut Visitor<'_>) {}
     }
 
-    static POISONED_HEAP_DESTRUCTOR_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
+    static TOPOLOGY_POISON_DESTRUCTOR_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
+    static FINALIZER_COMMIT_POISON_DESTRUCTOR_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
 
     struct PoisonedHeapDrop {
-        _not_zero_sized: u8,
+        attempts: &'static AtomicUsize,
     }
 
     impl Drop for PoisonedHeapDrop {
         fn drop(&mut self) {
-            POISONED_HEAP_DESTRUCTOR_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
+            self.attempts.fetch_add(1, Ordering::Relaxed);
         }
     }
 
-    // SAFETY: this fixture contains only an immediate value and reports its
-    // destructor through static test instrumentation. It has no managed edge.
+    // SAFETY: this fixture contains only a static host-observation reference
+    // and reports its destructor through that instrumentation. It has no
+    // managed edge.
     unsafe impl Trace for PoisonedHeapDrop {
         fn trace(&self, _visitor: &mut Visitor<'_>) {}
     }
@@ -7632,12 +7687,17 @@ mod tests {
 
     #[test]
     fn panic_after_destructive_topology_mutation_does_not_reopen_the_heap() {
-        POISONED_HEAP_DESTRUCTOR_ATTEMPTS.store(0, Ordering::Relaxed);
+        TOPOLOGY_POISON_DESTRUCTOR_ATTEMPTS.store(0, Ordering::Relaxed);
         let heap = Heap::new();
         let live = allocate(&heap, 10_u64);
         let _dead = allocate(&heap, 20_u64);
         let root = heap.with_mutator(|mutator| mutator.root(live));
-        let _dropping = allocate(&heap, PoisonedHeapDrop { _not_zero_sized: 0 });
+        let _dropping = allocate(
+            &heap,
+            PoisonedHeapDrop {
+                attempts: &TOPOLOGY_POISON_DESTRUCTOR_ATTEMPTS,
+            },
+        );
 
         heap.inner.inject_panic_after_topology_mutation();
         let panic = catch_unwind(AssertUnwindSafe(|| heap.collect_full()))
@@ -7670,7 +7730,59 @@ mod tests {
 
         drop(root);
         drop(heap);
-        assert_eq!(POISONED_HEAP_DESTRUCTOR_ATTEMPTS.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            TOPOLOGY_POISON_DESTRUCTOR_ATTEMPTS.load(Ordering::Relaxed),
+            0
+        );
+    }
+
+    #[test]
+    fn panic_before_finalizer_commit_permanently_poisons_without_redispatch() {
+        FINALIZER_COMMIT_POISON_DESTRUCTOR_ATTEMPTS.store(0, Ordering::Relaxed);
+        let heap = Heap::new();
+        let _dropping = allocate(
+            &heap,
+            PoisonedHeapDrop {
+                attempts: &FINALIZER_COMMIT_POISON_DESTRUCTOR_ATTEMPTS,
+            },
+        );
+
+        heap.inner.inject_panic_after_finalizer_terminal_recording();
+        let panic = catch_unwind(AssertUnwindSafe(|| heap.collect_full()))
+            .expect_err("injected finalizer-commit panic must interrupt collection");
+        assert_eq!(
+            panic_string(panic.as_ref()),
+            "injected panic after finalizer terminal recording"
+        );
+        assert_eq!(
+            FINALIZER_COMMIT_POISON_DESTRUCTOR_ATTEMPTS.load(Ordering::Relaxed),
+            1,
+            "the erased destructor must run before the injected commit panic"
+        );
+
+        let entry = catch_unwind(AssertUnwindSafe(|| heap.with_mutator(|_| {})));
+        assert_eq!(
+            panic_string(entry.unwrap_err().as_ref()),
+            "managed heap is permanently poisoned"
+        );
+        assert_eq!(heap.collect_full(), Err(CollectionError::Poisoned));
+        let request = catch_unwind(AssertUnwindSafe(|| heap.request_collection()));
+        assert_eq!(
+            panic_string(request.unwrap_err().as_ref()),
+            "managed heap is permanently poisoned"
+        );
+        assert!(heap.inner.is_poisoned());
+        assert_eq!(
+            heap.inner.coordinator_snapshot().phase,
+            AdmissionPhase::Poisoned
+        );
+
+        drop(heap);
+        assert_eq!(
+            FINALIZER_COMMIT_POISON_DESTRUCTOR_ATTEMPTS.load(Ordering::Relaxed),
+            1,
+            "terminal release must not redispatch an uncertain identity"
+        );
     }
 
     #[test]
