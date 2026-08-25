@@ -4,10 +4,10 @@ Baseline: `7b30876`. This is the mandatory post-C6 review of the isolated
 `glam-gc` collector against the GC roadmap, implementation plan, public unsafe
 contract, safety ledger, and verification surface.
 
-Status: open. The C6 representation and normal success/destructor-panic paths
-are coherent. GC6-001's public contract gap is resolved; one panic-safety/proof
-issue and two verification gaps remain before the C6D.3 Gate G1 audit can
-certify the collector.
+Status: complete. The C6 representation, ordinary and terminal failure
+boundaries, current safety contract, and downstream stress/metric plan are
+reconciled. Every review finding is resolved; C6D.3 can now certify the
+resulting collector without absorbing new design work.
 
 ## Outcome
 
@@ -40,9 +40,9 @@ also deserve forced verification before certification rather than being
 deferred into general C7 stress.
 
 Current stable verification passes: `crates/glam-gc/scripts/check.sh` reports
-180 passing unit tests, two explicit ignored scale fixtures, six Loom models,
-and eight compile-fail doctests. The exact unsafe inventory is unchanged. This
-review did not substitute that stable run for C6D.3's required complete Miri and
+185 passing unit tests, two explicit ignored scale fixtures, seven Loom models,
+and eight compile-fail doctests. The exact unsafe inventory passes. This review
+does not substitute that stable run for C6D.3's required complete Miri and
 sanitizer audit.
 
 ## Reviewed State and Ownership
@@ -497,6 +497,23 @@ checkpoints immediately before implementation. C8's measurement-first policy,
 including paged array tracing and finalization-index measurements, remains
 appropriate.
 
+#### GC6-007 completion
+
+Completed 2026-08-25. C7A now separates deterministic root handoff,
+immutable-reader admission, and scale composition. C7B separately forces
+single-heap allocation/admission, cross-heap and external-blocking behavior,
+then allocator/coordinator scale. Repetition and randomized stress are
+supplementary; a novel ordering must become a bounded forced fixture.
+
+C6D.3 now explicitly owns certification of GC6-003's Loom and production
+finalized-word release schedules. C7 may scale and compose that transition but
+does not carry its missing correctness proof. C7C.3 treats last-owner teardown
+counts as test-only external observations: with no surviving heap client,
+terminal teardown publishes no collection report or promised runtime metric.
+C8A likewise stabilizes only observable non-terminal collection reporting.
+The remaining C8 measurement and paged-array exploration text needs no change.
+GC6-007 is resolved.
+
 ## Intentional Drift and Accepted Boundaries
 
 - **Finalization is run-at-a-time.** A transient run-local vector and word
@@ -547,12 +564,10 @@ appropriate.
 | GC6-004 | Resolved with one mixed detached, attached, ordinary, and retired terminal-topology fixture. | completed 2026-08-25 |
 | GC6-005 | Resolved across public API, safety ledger, roadmap, integration boundary, and unsafe-module descriptions. | completed 2026-08-25 |
 | GC6-006 | Resolved by removing all collector `dead_code` allowances, gating test/debug-only state, and replacing stale phase-local comments. | completed 2026-08-25 |
-| GC6-007 | Reconcile C7/C8 wording and partition C7A/B before implementation. | plan update after G1 blockers |
+| GC6-007 | Resolved with deterministic C7A/C7B checkpoints, C6D.3 ownership of the exact finalized-word proof, and test-only terminal metrics. | completed 2026-08-25 |
 
 ## Review Status
 
-The post-C6 review checkpoint is complete and every explicit Gate G1 blocker
-and cleanup finding is resolved. GC6-007 owns the remaining downstream C7/C8
-plan reconciliation before the focused C6D.3 certification. C6D.3 must audit
-the corrected design rather than absorb new semantic decisions into a
-verification checklist.
+The post-C6 review and all seven findings are complete. The focused C6D.3
+certification is next and must audit this corrected design rather than absorb
+new semantic decisions into a verification checklist.

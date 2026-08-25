@@ -2,9 +2,8 @@
 
 Status: in progress; Phases C0 through C6D.2 are complete, including the C2C.6
 verification follow-up. The mandatory post-C1, post-C2C, post-C3E, post-C4,
-post-C5, and post-C6 reviews are complete. Post-C6 findings through GC6-006
-are resolved; GC6-007 downstream-plan reconciliation is next, followed by the
-C6D.3 Gate G1 audit.
+post-C5, and post-C6 reviews are complete. Every post-C6 finding through
+GC6-007 is resolved; the C6D.3 Gate G1 audit is next.
 
 This plan implements an exact, non-moving, runtime-local tracing collector
 without depending on Glam value semantics. The governing requirements and
@@ -87,9 +86,14 @@ to a later performance plan. Concurrent marking is also a later plan.
 | Post-C6 GC6-004 | completed | mixed attached/detached terminal-topology proof |
 | Post-C6 GC6-005 | completed | public liveness and current-boundary documentation reconciliation |
 | Post-C6 GC6-006 | completed | stale lint, verification-state, and ownership-comment cleanup |
+| Post-C6 GC6-007 | completed | C7/C8 stress, metric, and checkpoint reconciliation |
 | C6D.3 | pending | Gate G1 audit |
-| C7A | pending | shared-root and immutable-reader stress |
-| C7B | pending | allocation and coordinator stress |
+| C7A.1 | pending | deterministic root handoff and lifetime stress |
+| C7A.2 | pending | immutable-reader and collection forced schedules |
+| C7A.3 | pending | shared-root and reader scale composition |
+| C7B.1 | pending | single-heap allocation/admission forced schedules |
+| C7B.2 | pending | cross-heap, external-blocking, and unwind composition |
+| C7B.3 | pending | allocator/coordinator scale composition |
 | C7C.1 | pending | collection and finalization metrics |
 | C7C.2 | pending | allocation and cache metrics |
 | C7C.3 | pending | metric consistency audit |
@@ -3171,8 +3175,12 @@ Execute C6 as the following smaller checkpoints:
 - **C6D.3 — Gate G1 audit.** After resolving every gate-blocking finding from
   the mandatory post-C6 review, reconcile the unsafe inventory, root and
   finalization proofs, Miri, Loom, sanitizers, deterministic panic schedules,
-  and terminal heap release. This focused audit closes Gate G1; C7 and C8 add
-  stress, metrics, and tuning while integration API work may begin.
+  and terminal heap release. Treat GC6-003's finalized-word protocol as gate
+  evidence here: certify the Loom neighboring-bit/unique-claim model and the
+  production release-before-frontier forced schedule under focused Miri rather
+  than deferring that exact ordering to broad C7 stress. This focused audit
+  closes Gate G1; C7 and C8 add scale, composition, metrics, and tuning while
+  integration API work may begin.
 
 Resolve these C6 decisions at the named checkpoint rather than pulling them
 into marking:
@@ -4103,8 +4111,8 @@ C6D and ends its historical phase narrative with one current non-moving full-
 collector rule. The roadmap, integration boundary, and `heap` unsafe-module
 description now agree that C6D.2 is implemented while production integration
 remains blocked on Gate G1. All explicit post-C6 Gate blockers are resolved;
-GC6-006 cleanup and GC6-007 downstream-plan reconciliation remain before the
-focused C6D.3 audit.
+the GC6-006 and GC6-007 completions below close the remaining cleanup and
+downstream-plan follow-ups before the focused C6D.3 audit.
 
 GC6-006 was completed on 2026-08-25. Every collector `dead_code` allowance is
 gone. Production topology, marking, sweep, and finalization state now compiles
@@ -4116,7 +4124,15 @@ the release library target is warning-free. Phase-numbered implementation
 comments now state enduring ownership and publication rules. The cross-thread
 managed-pointer test also retains a real root across its handoff, matching the
 current reclamation contract rather than pre-collection lifetime assumptions.
-GC6-007 is the sole remaining post-review follow-up before C6D.3.
+GC6-007 was completed on 2026-08-25. C7A and C7B are now divided into
+deterministic lifetime/admission checkpoints followed by scale-only
+composition. The exact finalized-word release race belongs to C6D.3's
+certification evidence; C7B may compose and stress that proven transition but
+does not own its correctness proof. Terminal teardown metrics are explicitly
+test-only observations because last-owner release leaves no heap client to
+consume a production report. C8 retains its measurement-first policy and does
+not promote terminal probes into its reporting API. Every post-C6 finding is
+resolved; C6D.3 is next.
 
 The review must:
 
@@ -4144,17 +4160,48 @@ deferred to C7 or C8 when the current representation remains sound.
 
 ## Phase C7 — Shared-Pointer and Worker-Shaped Stress
 
-Execute C7 as five checkpoints:
+Execute C7 as nine checkpoints. Deterministic schedules establish each
+ownership/admission claim before the later scale checkpoints compose them:
 
-- **C7A — shared-root and immutable-reader stress.** Hand roots repeatedly
-  between workers, clone/drop them around forced collections, and run many
-  readers of immutable objects under independent mutator regions.
-- **C7B — allocation and coordinator stress.** Force one thread to request or
-  synchronously join collection while other threads allocate, block on
-  semantic locks outside mutator regions, enter another heap, or unwind. Prove
-  that collection waits only for regional mutator obligations and never for a
-  pointer-local lock. Use deterministic barriers for each discovered ordering;
-  repeated randomized stress remains supplementary.
+- **C7A.1 — deterministic root handoff and lifetime stress.** Hand one root to
+  another worker, clone and drop roots on both sides of an explicitly forced
+  collection, and retain a separate heap facade while the handoff is active.
+  Prove that registry publication preserves the allocation, root transfer
+  does not retain the heap after the last facade is dropped, and a bare `Gc`
+  transferred alongside the root contributes no additional liveness. Use
+  barriers around send, collection, and final drop; do not rely on repetition
+  to encounter those orderings.
+- **C7A.2 — immutable-reader and collection forced schedules.** Hold several
+  independent mutator regions while they read one rooted immutable graph,
+  request collection, and prove exclusive admission waits for every active
+  region. Release readers in a controlled order, then reacquire fresh
+  mutators and verify the graph after collection. Cover a reader beginning
+  before the request and a fresh entrant admitted while the requested heap is
+  still active; neither case may require a pointer-local lock.
+- **C7A.3 — shared-root and reader scale composition.** Scale the already
+  forced root-transfer and immutable-reader schedules across many workers,
+  graph shapes, root clone/drop histories, and collections. Run sanitizer and
+  repeated randomized variants as supplementary evidence. This checkpoint
+  adds no new lifetime rule and should promote any discovered ordering into a
+  smaller deterministic fixture.
+- **C7B.1 — single-heap allocation/admission forced schedules.** Force
+  allocation-word exhaustion, run publication, a nonblocking request, and a
+  synchronous collector join around active and released mutator regions.
+  Verify cursor-epoch invalidation and that collection waits only for the
+  regional mutator obligations. Reuse the established C6 finalized-word
+  release protocol; its exact release/frontier ordering is certified by
+  C6D.3, not reproved here.
+- **C7B.2 — cross-heap, external-blocking, and unwind composition.** Force a
+  worker to enter another heap while one heap has requested collection, park
+  workers on semantic/test locks only after their mutator regions end, and
+  unwind from nested and allocating work. Prove that each heap coordinates
+  only its own admitted regions, external blocking cannot masquerade as a GC
+  obligation, and unwind balances admission and thread-local cursor state.
+- **C7B.3 — allocator/coordinator scale composition.** Combine many allocating
+  workers, collection requests and joins, recycled runs, nested independent-
+  heap work, and controlled unwinds after the individual schedules pass.
+  Repeated randomized stress is supplementary; every novel failure ordering
+  must be reduced to a deterministic C7B.1 or C7B.2 fixture.
 - **C7C.1 — collection and finalization metrics.** Add entry-elected
   collections, pending and coalesced request observations, synchronous joins,
   pause/trace/sweep/finalization durations, traced objects, reclaimed
@@ -4166,9 +4213,13 @@ Execute C7 as five checkpoints:
   fixed-run utilization, and partial-run fragmentation. Track cold
   `TypeId`/metadata discovery separately from retained-class allocation.
 - **C7C.3 — metric consistency audit.** Force success, coalesced request,
-  abandoned mark, finalizer panic, recycled-run, and terminal paths and prove
-  counters describe committed work without double counting. Metrics remain
-  operational observations rather than synchronization or correctness state.
+  abandoned mark, finalizer panic, and recycled-run paths and prove counters
+  describe committed work without double counting. Last-owner teardown has no
+  surviving heap client to receive a report: terminal consistency therefore
+  uses only test instrumentation or inert observers owned outside the heap.
+  It does not add a terminal `CollectionReport`, callback, diagnostic, or
+  public metric promise. All metrics remain operational observations rather
+  than synchronization or correctness state.
 
 This phase tests collector mechanisms only. It does not imitate Glam scheduler
 semantics beyond the shape needed to validate shared values.
@@ -4179,9 +4230,11 @@ Execute C8 as five checkpoints:
 
 - **C8A — tuning and reporting boundary.** Stabilize the explicit collection
   report assembled during C5 through C7 for tests and future runtime metrics.
-  Keep collection thresholds and
-  similar operational policy as private per-heap tuning. Treat arena-chunk
-  size, the single fixed run size, and the direct-mapped worker class-cache
+  The report covers observable non-terminal collection attempts; C7C.3's
+  terminal test probes are not promoted into this API. Keep collection
+  thresholds and similar operational policy as private per-heap tuning. Treat
+  arena-chunk size, the single fixed run size, and the direct-mapped worker
+  class-cache
   width as build-time/private-fixture parameters because they participate in
   layout, pointer masking, or compiled TLS shape; do not advertise them as
   runtime heap options. C8 does not introduce variable-size runs.

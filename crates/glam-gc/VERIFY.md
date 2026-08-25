@@ -821,6 +821,24 @@ ignored scale fixtures), seven Loom models, eight compile-fail/doc tests, and
 the exact unsafe inventory. GC6-006 changes no runtime semantics or unsafe
 operation.
 
+## GC6-007 Downstream Stress and Metric Reconciliation
+
+The implementation plan now assigns root handoff, immutable-reader admission,
+single-heap allocation/admission, cross-heap composition, and scale stress to
+separate C7 checkpoints. Each semantic ordering is established by a bounded
+barrier-controlled fixture before randomized or worker-scale composition.
+
+The exact finalized-word release proof remains C6 evidence: C6D.3 certifies
+the GC6-003 Loom model and production release-before-frontier schedule. C7B
+may scale that transition but does not replace its focused proof. Terminal
+teardown metrics remain test-only external observations because no heap client
+survives last-owner release to receive a collection report. C8 reporting is
+therefore limited to observable non-terminal attempts.
+
+GC6-007 changes planning and verification ownership only. The stable collector
+matrix remains 187 unit tests (185 passing plus two ignored scale fixtures),
+seven Loom models, eight compile-fail/doc tests, and the exact unsafe inventory.
+
 ## Gate G0 Baseline
 
 Before changing the unsafe surface in C1, recheck the focused pre-GC semantic
