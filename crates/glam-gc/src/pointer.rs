@@ -84,6 +84,7 @@ impl<T: Trace> Gc<T> {
         ErasedGc::new(self.pointer.cast())
     }
 
+    #[cfg(debug_assertions)]
     pub(crate) fn debug_assert_owned_by(self, mutator: &Mutator<'_>) {
         mutator.debug_assert_access(self.pointer);
     }

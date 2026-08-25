@@ -99,13 +99,6 @@ pub struct Visitor<'visit> {
 }
 
 impl<'visit> Visitor<'visit> {
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "visitor construction remains collector-private until marking"
-        )
-    )]
     pub(crate) fn new(visit: &'visit mut dyn FnMut(ErasedGc)) -> Self {
         Self { visit }
     }

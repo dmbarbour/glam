@@ -22,16 +22,8 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 #[expect(unsafe_code, reason = "reviewed C2A arena and run topology")]
-#[allow(
-    dead_code,
-    reason = "C2A arenas remain collector-private until class discovery consumes them"
-)]
 mod arena;
 #[expect(unsafe_code, reason = "reviewed C2B canonical metadata dispatch")]
-#[allow(
-    dead_code,
-    reason = "C2B.1 metadata operations remain collector-private until class discovery consumes them"
-)]
 mod class;
 #[expect(unsafe_code, reason = "reviewed C5/C6 trace, sweep, and drop dispatch")]
 mod heap;
@@ -43,10 +35,6 @@ mod mutator;
 mod pointer;
 #[expect(unsafe_code, reason = "reviewed C4 root access boundary")]
 mod root;
-#[allow(
-    dead_code,
-    reason = "C2A geometry remains collector-private until class discovery consumes it"
-)]
 mod run;
 #[expect(unsafe_code, reason = "reviewed C2C worker-local allocation")]
 mod thread_cache;
@@ -132,20 +120,25 @@ mod tests {
     #[test]
     fn managed_pointer_can_cross_threads_when_its_value_can() {
         let heap = Heap::new();
-        let value = heap.with_mutator(|mutator| mutator.allocator::<u64>().unwrap().alloc(42_u64));
+        let (value, root) = heap.with_mutator(|mutator| {
+            let value = mutator.allocator::<u64>().unwrap().alloc(42_u64);
+            let root = mutator.root(value);
+            (value, root)
+        });
         let worker_heap = heap.clone();
 
         let observed = std::thread::spawn(move || {
             worker_heap.with_mutator(|mutator| {
-                // SAFETY: `value` was allocated by `worker_heap`, arena
-                // allocations remain live until heap teardown, and its type is
-                // `u64`.
+                // SAFETY: `root` remains live in the joining thread, so every
+                // intervening collection retains `value`; the matching
+                // mutator excludes collection during this access.
                 unsafe { *value.get_unchecked(mutator) }
             })
         })
         .join()
         .expect("managed-pointer worker panicked");
 
+        drop(root);
         assert_eq!(observed, 42);
     }
 

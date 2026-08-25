@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(test)]
 use crate::Trace;
 use crate::run::{AllocationClassId, RUN_SIZE, RunGeometry, RunHeader};
 
@@ -80,6 +81,7 @@ pub(crate) struct RunOwner {
     pub(crate) slot_index: usize,
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct InitializedRun {
     pub(crate) location: RunLocation,
@@ -180,19 +182,23 @@ impl Arena {
             .expect("arena run capacity exhausted")
     }
 
+    #[cfg(test)]
     pub(crate) fn reserve_chunk(&mut self) -> Result<usize, ArenaError> {
         let candidate = ArenaChunk::allocate()?;
         self.publish_chunk(candidate)
     }
 
+    #[cfg(test)]
     pub(crate) fn run_address(&self, chunk: usize, run: usize) -> Option<RunAddress> {
         self.chunks.get(chunk)?.run_address(run)
     }
 
+    #[cfg(test)]
     pub(crate) fn run_at(&self, location: RunLocation) -> Option<RunAddress> {
         self.run_address(location.chunk, location.run)
     }
 
+    #[cfg(test)]
     pub(crate) fn find_run(&self, address: usize) -> Option<RunAddress> {
         self.chunk_containing(address)?.1.run_containing(address)
     }
@@ -291,6 +297,7 @@ impl Arena {
         Ok(RunLocation { chunk, run: 0 })
     }
 
+    #[cfg(test)]
     pub(crate) fn initialized_runs(&self) -> Vec<InitializedRun> {
         let mut runs = Vec::new();
         for (chunk_index, chunk) in self.chunks.iter().enumerate() {
@@ -440,6 +447,7 @@ impl Arena {
         cleared
     }
 
+    #[cfg(test)]
     pub(crate) fn owner_slot_is_marked(&self, owner: RunOwner) -> bool {
         let (chunk, run) = self.resolved_owner_run(owner);
         chunk.slot_is_marked(run, owner.geometry, owner.slot_index)
@@ -568,12 +576,14 @@ impl Arena {
         chunk.mark_slot(run, owner.geometry, owner.slot_index)
     }
 
+    #[cfg(test)]
     pub(crate) fn first_free_slot(&self, location: RunLocation) -> Option<usize> {
         self.chunks
             .get(location.chunk)?
             .first_free_slot(location.run)
     }
 
+    #[cfg(test)]
     pub(crate) fn initialize_slot<T: Trace>(
         &mut self,
         location: RunLocation,
@@ -615,6 +625,7 @@ impl Arena {
             .is_some_and(RunHeader::is_empty)
     }
 
+    #[cfg(test)]
     pub(crate) fn claim_allocation_word(
         &self,
         location: RunLocation,
@@ -822,6 +833,7 @@ impl ArenaChunk {
         (0..RUNS_PER_CHUNK).find(|&run| self.header_for_index(run).is_some_and(RunHeader::is_empty))
     }
 
+    #[cfg(test)]
     fn first_free_slot(&self, run: usize) -> Option<usize> {
         let address = self.run_address(run)?;
         let geometry = self.header_for(address)?.geometry()?;
@@ -858,6 +870,7 @@ impl ArenaChunk {
         words.fill(0);
     }
 
+    #[cfg(test)]
     fn initialize_slot<T: Trace>(
         &mut self,
         run: usize,
@@ -958,6 +971,7 @@ impl ArenaChunk {
         word & (1_u64 << bit_index) != 0
     }
 
+    #[cfg(test)]
     fn slot_is_marked(&self, run: RunAddress, geometry: RunGeometry, slot_index: usize) -> bool {
         let (word_index, bit) = bitmap_bit(geometry.mark_bitmap, slot_index);
         let pointer = mark_word_pointer(run, geometry, word_index);
@@ -983,6 +997,7 @@ impl ArenaChunk {
         true
     }
 
+    #[cfg(test)]
     fn allocation_word_update(
         &mut self,
         run: RunAddress,
@@ -1214,6 +1229,7 @@ impl AddressRange {
         (self.start..self.end).contains(&address)
     }
 
+    #[cfg(test)]
     fn overlaps(self, other: Self) -> bool {
         self.start < other.end && other.start < self.end
     }

@@ -461,6 +461,22 @@ the allowances rather than mechanically renaming every phase:
 This does not block G1 unless removing an allowance exposes an actually stale
 second representation.
 
+#### GC6-006 completion
+
+Completed 2026-08-25. The audit removed every `dead_code` allowance from the
+collector crate. Production tracing, topology, sweep, and class-index state
+now compile without exemptions. Synchronized allocation helpers, resolved-run
+enumeration, arena inspection conveniences, and detailed classification
+summaries are explicitly test-only; debug builds retain only the slot totals
+needed by the classification consistency assertion.
+
+Removing the blanket module allowances exposed no stale second production
+representation. A release library build is warning-free. The audit also
+replaced phase-numbered sweep comments with enduring ownership/publication
+rules and corrected a cross-thread pointer test to keep a registered root live
+instead of relying on the obsolete pre-reclamation lifetime assumption.
+GC6-006 changes no collector semantics and is resolved.
+
 ### GC6-007 — C7/C8 need minor reconciliation after the C6 representation settled
 
 **Priority:** low  
@@ -530,13 +546,13 @@ appropriate.
 | GC6-003 | Resolved with Loom neighboring-bit, visibility, and unique-claim proof plus a production forced-order fixture. | completed 2026-08-25 |
 | GC6-004 | Resolved with one mixed detached, attached, ordinary, and retired terminal-topology fixture. | completed 2026-08-25 |
 | GC6-005 | Resolved across public API, safety ledger, roadmap, integration boundary, and unsafe-module descriptions. | completed 2026-08-25 |
-| GC6-006 | Audit stale phase-local allowances and comments. | C6D.3 cleanup or C8 if demonstrably inert |
+| GC6-006 | Resolved by removing all collector `dead_code` allowances, gating test/debug-only state, and replacing stale phase-local comments. | completed 2026-08-25 |
 | GC6-007 | Reconcile C7/C8 wording and partition C7A/B before implementation. | plan update after G1 blockers |
 
 ## Review Status
 
-The post-C6 review checkpoint is complete and every explicit Gate G1 blocker is
-resolved. GC6-006 remains a low-risk stale-state/comment audit and GC6-007 owns
-the downstream C7/C8 plan reconciliation; complete those follow-ups before the
-focused C6D.3 certification. C6D.3 must audit the corrected design rather than
-absorb new semantic decisions into a verification checklist.
+The post-C6 review checkpoint is complete and every explicit Gate G1 blocker
+and cleanup finding is resolved. GC6-007 owns the remaining downstream C7/C8
+plan reconciliation before the focused C6D.3 certification. C6D.3 must audit
+the corrected design rather than absorb new semantic decisions into a
+verification checklist.

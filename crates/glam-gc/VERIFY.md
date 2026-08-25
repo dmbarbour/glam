@@ -796,6 +796,31 @@ two ignored scale fixtures), seven Loom models, eight compile-fail/doc tests,
 and the exact unsafe inventory. GC6-005 changes no runtime semantics or unsafe
 operation.
 
+## GC6-006 Phase-Local State and Lint Cleanup
+
+The collector crate contains no `dead_code` allowance. Removing the former
+module-wide exemptions verified that the production trace constructor,
+managed arena, class index, sweep plan, and finalization records all have
+current consumers. Prototype synchronized allocation, resolved-run
+enumeration, and arena inspection helpers are now compiled only for unit
+tests. Detailed dead-set run counts are likewise test-only; release builds do
+not compute them, while debug/test builds retain the slot totals used by the
+classification partition assertion.
+
+The cross-thread `Gc<T>` fixture now holds a registered root while the bare
+pointer is transferred. This latches the current rule that pointer sharing is
+permitted but does not itself preserve allocation liveness. The focused
+release lint boundary is:
+
+```sh
+cargo clippy -p glam-gc --lib --release --all-features -- -D warnings
+```
+
+The stable collector matrix remains 187 unit tests (185 passing plus two
+ignored scale fixtures), seven Loom models, eight compile-fail/doc tests, and
+the exact unsafe inventory. GC6-006 changes no runtime semantics or unsafe
+operation.
+
 ## Gate G0 Baseline
 
 Before changing the unsafe surface in C1, recheck the focused pre-GC semantic

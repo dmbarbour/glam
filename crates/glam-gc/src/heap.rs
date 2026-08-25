@@ -397,10 +397,6 @@ impl Default for HeapInner {
 
 #[derive(Default)]
 struct ManagedData {
-    #[allow(
-        dead_code,
-        reason = "C2B.3 run state becomes a live allocator path in C2C"
-    )]
     arena: Arena,
     classes_by_metadata: HashMap<MetadataIdentity, AllocationClassId>,
     classes: Vec<AllocationClassEntry>,
@@ -1042,11 +1038,8 @@ impl MutatorCoordinator {
     }
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(
-    dead_code,
-    reason = "C2B.3 run-publication failures become allocator-visible in C2C"
-)]
 enum PrepareRunError {
     ForeignClass,
     InvalidClass,
@@ -1054,23 +1047,19 @@ enum PrepareRunError {
 }
 
 #[derive(Clone, Copy)]
-#[allow(
-    dead_code,
-    reason = "C2B.3 checked slot resolution becomes the access proof in C2C"
-)]
 struct ResolvedSlot {
     metadata: &'static ObjectMetadata,
+    #[cfg(test)]
     class_id: AllocationClassId,
+    #[cfg(test)]
     geometry: RunGeometry,
+    #[cfg(test)]
     slot_index: usize,
     allocated: bool,
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy)]
-#[allow(
-    dead_code,
-    reason = "C2B.3 run enumeration becomes collector input after allocation starts"
-)]
 struct ResolvedRun {
     location: RunLocation,
     metadata: &'static ObjectMetadata,
@@ -1156,10 +1145,6 @@ struct DeadBitmapWord {
     dead_mask: u64,
 }
 
-#[allow(
-    dead_code,
-    reason = "C6A.2b consumes run identity/disposition before later C6 phases consume dead masks"
-)]
 struct DeadRunPlan {
     target: RunClaimTarget,
     class_run_index: usize,
@@ -1171,10 +1156,6 @@ struct DeadRunPlan {
     dead_words: Range<usize>,
 }
 
-#[allow(
-    dead_code,
-    reason = "C6A.2b retains detached no-drop runs until C6A.2c resets and recycles them"
-)]
 struct RetiredNoDropRun {
     target: Box<RunClaimTarget>,
     former_class_id: AllocationClassId,
@@ -1184,9 +1165,10 @@ struct RetiredNoDropRun {
 ///
 /// Partial runs remain attached to their allocation class while the batch
 /// reserves the exact words containing pending slots. Wholly dead runs move
-/// their stable boxed target here and leave ordinary class topology. C6B.2
-/// consumes these records; retaining them across a checkpoint or retry keeps
-/// root rejection, terminal teardown, and later collection nonduplicating.
+/// their stable boxed target here and leave ordinary class topology. The
+/// finalizer consumes these records outside collector locks; retaining them
+/// across a panic or terminal teardown keeps root rejection and destruction
+/// nonduplicating.
 #[derive(Default)]
 struct FinalizationBatch {
     runs: HashMap<RunLocation, FinalizationRun>,
@@ -1682,29 +1664,29 @@ impl RunFinalizationAttempt {
     }
 }
 
-#[allow(
-    dead_code,
-    reason = "C6A.2b consumes whole-run retirement before later C6 phases consume remaining fields"
-)]
 #[derive(Default)]
 struct DeadSetPlan {
+    #[cfg(any(test, debug_assertions))]
     allocated_slots: usize,
+    #[cfg(any(test, debug_assertions))]
     live_slots: usize,
     no_drop_dead_slots: usize,
+    #[cfg(any(test, debug_assertions))]
     drop_required_dead_slots: usize,
+    #[cfg(test)]
     live_runs: usize,
+    #[cfg(test)]
     empty_runs: usize,
+    #[cfg(test)]
     no_drop_dead_runs: usize,
+    #[cfg(test)]
     drop_required_dead_runs: usize,
     dead_runs: Vec<DeadRunPlan>,
     dead_words: Vec<DeadBitmapWord>,
 }
 
-#[allow(
-    dead_code,
-    reason = "C6A.2b consumes dead-set state before later C6 phases consume all summary fields"
-)]
 struct PostMarkPlan {
+    #[cfg(test)]
     summary: MarkSummary,
     dead_set: DeadSetPlan,
 }
@@ -1756,15 +1738,19 @@ impl DeadSetPlan {
                     },
                 );
 
-                plan.allocated_slots = plan
-                    .allocated_slots
-                    .checked_add(live_slots)
-                    .and_then(|slots| slots.checked_add(dead_slots))
-                    .expect("allocated-slot count exhausted");
-                plan.live_slots = plan
-                    .live_slots
-                    .checked_add(live_slots)
-                    .expect("live-slot count exhausted");
+                #[cfg(any(test, debug_assertions))]
+                {
+                    plan.allocated_slots = plan
+                        .allocated_slots
+                        .checked_add(live_slots)
+                        .and_then(|slots| slots.checked_add(dead_slots))
+                        .expect("allocated-slot count exhausted");
+                    plan.live_slots = plan
+                        .live_slots
+                        .checked_add(live_slots)
+                        .expect("live-slot count exhausted");
+                }
+                #[cfg(test)]
                 if live_slots != 0 {
                     plan.live_runs = plan
                         .live_runs
@@ -1772,10 +1758,13 @@ impl DeadSetPlan {
                         .expect("live-run count exhausted");
                 }
                 if live_slots == 0 && dead_slots == 0 {
-                    plan.empty_runs = plan
-                        .empty_runs
-                        .checked_add(1)
-                        .expect("empty-run count exhausted");
+                    #[cfg(test)]
+                    {
+                        plan.empty_runs = plan
+                            .empty_runs
+                            .checked_add(1)
+                            .expect("empty-run count exhausted");
+                    }
                     plan.dead_runs
                         .try_reserve(1)
                         .expect("collector empty-run plan capacity exhausted");
@@ -1801,20 +1790,29 @@ impl DeadSetPlan {
                             .no_drop_dead_slots
                             .checked_add(dead_slots)
                             .expect("no-drop dead-slot count exhausted");
-                        plan.no_drop_dead_runs = plan
-                            .no_drop_dead_runs
-                            .checked_add(1)
-                            .expect("no-drop dead-run count exhausted");
+                        #[cfg(test)]
+                        {
+                            plan.no_drop_dead_runs = plan
+                                .no_drop_dead_runs
+                                .checked_add(1)
+                                .expect("no-drop dead-run count exhausted");
+                        }
                     }
                     DeadSlotDisposition::DropRequired => {
-                        plan.drop_required_dead_slots = plan
-                            .drop_required_dead_slots
-                            .checked_add(dead_slots)
-                            .expect("drop-required dead-slot count exhausted");
-                        plan.drop_required_dead_runs = plan
-                            .drop_required_dead_runs
-                            .checked_add(1)
-                            .expect("drop-required dead-run count exhausted");
+                        #[cfg(any(test, debug_assertions))]
+                        {
+                            plan.drop_required_dead_slots = plan
+                                .drop_required_dead_slots
+                                .checked_add(dead_slots)
+                                .expect("drop-required dead-slot count exhausted");
+                        }
+                        #[cfg(test)]
+                        {
+                            plan.drop_required_dead_runs = plan
+                                .drop_required_dead_runs
+                                .checked_add(1)
+                                .expect("drop-required dead-run count exhausted");
+                        }
                     }
                 }
                 plan.dead_runs
@@ -1833,6 +1831,7 @@ impl DeadSetPlan {
             }
         }
 
+        #[cfg(debug_assertions)]
         debug_assert_eq!(
             plan.allocated_slots,
             plan.live_slots
@@ -2291,6 +2290,7 @@ impl HeapInner {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let post_mark = PostMarkPlan {
+                #[cfg(test)]
                 summary: mark_summary,
                 dead_set: DeadSetPlan::classify(&data),
             };
@@ -2306,23 +2306,24 @@ impl HeapInner {
             #[cfg(test)]
             self.maybe_panic_after_topology_mutation();
 
-            // C6A.2b consumes only wholly dead no-drop runs. Their stable run
-            // records leave class topology after every lock-free selector is
-            // null. C6A.2c then clears their side state and headers before
-            // publishing the locations to the heap-wide free-run pool.
+            // Wholly dead no-drop run records leave class topology only after
+            // every lock-free selector is null. Their side state and headers
+            // are then cleared before the locations enter the heap-wide
+            // free-run pool.
             let reclaimed_runs = data.retire_wholly_dead_no_drop_runs(&post_mark.dead_set);
             data.install_finalization_batch(finalization_batch);
             data.recycle_retired_no_drop_runs();
 
-            // C6A.3a eagerly clears only dead allocations in retained partial
-            // no-drop runs. Drop-bearing words remain intact for C6B.
+            // Only dead allocations in retained partial no-drop runs can be
+            // cleared immediately. Drop-bearing words remain intact under
+            // finalization-batch ownership.
             data.sweep_partial_no_drop_runs(&post_mark.dead_set);
 
-            // C6A.3b writes every lease word directly to its final swept view,
-            // keeps finalization-bearing words reserved, and selects the first
-            // eligible retained run in each class. The one Release epoch is
-            // published last, so every later outer entry discards all cursors
-            // from the old view before using these selectors.
+            // Publish each lease word from the final swept view, keep
+            // finalization-bearing words reserved, and select the first
+            // eligible retained run in each class. The Release epoch comes
+            // last so later outer entries discard every stale cursor before
+            // using these selectors.
             data.publish_swept_allocator_view();
             self.publish_allocation_lease_epoch(current_epoch, next_epoch);
             SweepSummary {
@@ -2773,10 +2774,7 @@ impl HeapInner {
         AllocationClass::new(self, metadata, next, shared)
     }
 
-    #[allow(
-        dead_code,
-        reason = "C2B.3 run publication is consumed by the C2C allocator"
-    )]
+    #[cfg(test)]
     fn prepare_run<T: Trace>(
         &self,
         class: &AllocationClass<T>,
@@ -3010,19 +3008,13 @@ impl HeapInner {
         }
     }
 
-    #[allow(
-        dead_code,
-        reason = "C2B.3 metadata resolution becomes the access proof in C2C"
-    )]
+    #[cfg(test)]
     fn resolve_slot(&self, address: usize) -> Option<ResolvedSlot> {
         let state = self.data.lock().ok()?;
         resolve_slot_in_state(&state, address)
     }
 
-    #[allow(
-        dead_code,
-        reason = "C2B.3 run enumeration becomes mark and sweep input later"
-    )]
+    #[cfg(test)]
     fn resolved_runs(&self) -> Vec<ResolvedRun> {
         let state = self.data.lock().expect("heap state should not be poisoned");
         state
@@ -3359,8 +3351,11 @@ fn resolve_slot_in_state(state: &ManagedData, address: usize) -> Option<Resolved
     let allocated = state.arena.owner_slot_is_allocated(owner);
     Some(ResolvedSlot {
         metadata,
+        #[cfg(test)]
         class_id: owner.class_id,
+        #[cfg(test)]
         geometry: owner.geometry,
+        #[cfg(test)]
         slot_index: owner.slot_index,
         allocated,
     })
@@ -3479,10 +3474,6 @@ impl Drop for HeapInner {
     }
 }
 
-#[allow(
-    dead_code,
-    reason = "C2B.3 dense class lookup becomes allocator and collector input"
-)]
 fn class_index(id: AllocationClassId) -> Option<usize> {
     usize::try_from(id.get().checked_sub(1)?).ok()
 }
@@ -10083,7 +10074,8 @@ mod tests {
         assert_eq!(resolved.class_id, class.id());
         assert!(std::ptr::eq(resolved.metadata, class.metadata()));
         // SAFETY: the synchronized test allocator returned an initialized
-        // `FirstType` pointer which remains live until this heap is dropped.
+        // `FirstType` pointer and no collection can intervene before this
+        // immediate observation.
         assert_eq!(unsafe { pointer.as_ref() }._value, 73);
     }
 

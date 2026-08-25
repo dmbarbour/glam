@@ -2,8 +2,9 @@
 
 Status: in progress; Phases C0 through C6D.2 are complete, including the C2C.6
 verification follow-up. The mandatory post-C1, post-C2C, post-C3E, post-C4,
-and post-C5 downstream reviews are complete. The mandatory post-C6 review is
-next; C6D.3 follows after its gate-blocking findings are resolved.
+post-C5, and post-C6 reviews are complete. Post-C6 findings through GC6-006
+are resolved; GC6-007 downstream-plan reconciliation is next, followed by the
+C6D.3 Gate G1 audit.
 
 This plan implements an exact, non-moving, runtime-local tracing collector
 without depending on Glam value semantics. The governing requirements and
@@ -85,6 +86,7 @@ to a later performance plan. Concurrent marking is also a later plan.
 | Post-C6 GC6-003 | completed | finalized-word release concurrency proof |
 | Post-C6 GC6-004 | completed | mixed attached/detached terminal-topology proof |
 | Post-C6 GC6-005 | completed | public liveness and current-boundary documentation reconciliation |
+| Post-C6 GC6-006 | completed | stale lint, verification-state, and ownership-comment cleanup |
 | C6D.3 | pending | Gate G1 audit |
 | C7A | pending | shared-root and immutable-reader stress |
 | C7B | pending | allocation and coordinator stress |
@@ -4103,6 +4105,18 @@ description now agree that C6D.2 is implemented while production integration
 remains blocked on Gate G1. All explicit post-C6 Gate blockers are resolved;
 GC6-006 cleanup and GC6-007 downstream-plan reconciliation remain before the
 focused C6D.3 audit.
+
+GC6-006 was completed on 2026-08-25. Every collector `dead_code` allowance is
+gone. Production topology, marking, sweep, and finalization state now compiles
+without exemptions; synchronized allocation and arena-inspection reference
+paths are explicitly test-only, while classification counters compile only
+for tests or the debug consistency proof which consumes them. Removing the
+blanket module allowances exposed no duplicate production representation, and
+the release library target is warning-free. Phase-numbered implementation
+comments now state enduring ownership and publication rules. The cross-thread
+managed-pointer test also retains a real root across its handoff, matching the
+current reclamation contract rather than pre-collection lifetime assumptions.
+GC6-007 is the sole remaining post-review follow-up before C6D.3.
 
 The review must:
 

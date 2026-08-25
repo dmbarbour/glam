@@ -274,9 +274,10 @@ and every unsafe function, implementation, and block are checked into
   const assertion rejects zero-sized types while compiling an invalid
   monomorphization, before any allocation can run. A public foreign
   allocator/heap combination is unrepresentable.
-- Before reclamation exists, arena payloads never move and remain live until
-  their heap's terminal teardown. No access is valid without a live mutator for
-  the owning heap.
+- Arena payloads do not move while allocated. A bare `Gc<T>` carries no
+  liveness; after its admitted region ends, only registered roots and traced
+  reachability can keep its allocation through a collection. No access is
+  valid without a live mutator for the owning heap.
 - In debug/test builds, access masks the address into the owning heap's indexed
   chunk set, validates run/slot/class topology, and compares the resolved
   canonical metadata pointer. It intentionally diagnoses ownership, shape, and

@@ -9,9 +9,11 @@ const BITMAP_WORD_BITS: usize = u64::BITS as usize;
 const BITMAP_WORD_SIZE: usize = std::mem::size_of::<u64>();
 
 /// Largest payload which can occupy a minimally aligned one-slot run.
+#[cfg(test)]
 pub(crate) const MAX_MANAGED_SIZE: usize = RUN_SIZE - METADATA_PAYLOAD_ALIGNMENT;
 
 /// Largest Rust alignment for which one slot can begin and end in one run.
+#[cfg(test)]
 pub(crate) const MAX_MANAGED_ALIGNMENT: usize = RUN_SIZE / 2;
 
 const _: () = assert!(RUN_SIZE.is_power_of_two());
@@ -155,6 +157,7 @@ impl RunGeometry {
         }))
     }
 
+    #[cfg(test)]
     pub(crate) fn side_metadata_bytes(self) -> usize {
         self.mark_bitmap.end() - RUN_HEADER_SIZE
     }
