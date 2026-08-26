@@ -142,11 +142,14 @@ row is approved for a large-object or multi-run exception.
 `List`, `ListNode`, `ListChunk`, `SharedSlice`, `FingerList`, and
 `RedBlackTreeMapSync<Key, Value>` are immutable persistent structures. Their
 shared spines are ordinary Rust `Arc` ownership today. The initial collector
-will trace them logically through public/internal item visitors, even if this
-revisits a shared spine more than once. No element insertion occurs after a
-node is published, so no post-construction mutation gateway is required unless
-I7 later chooses managed mutable spines. `ListThunk::{Lazy, Promised}` visits its one
-deferred cell. Bytes chunks and empty nodes are leaves.
+will trace RPDS and FingerTree contents through their public iterators, which
+already use explicit heap-backed traversal state, even if this revisits a
+shared spine more than once. Glam's unbalanced `ListNode::Concat` shell uses a
+small explicit trace worklist; lazy thunks are reported as edges and are never
+forced by tracing. No element insertion occurs after a node is published, so
+no post-construction mutation gateway is required unless I7 later chooses
+managed mutable spines. `ListThunk::{Lazy, Promised}` visits its one deferred
+cell. Bytes chunks and empty nodes are leaves.
 
 Collection constructors in `Values`, `CoreValueFactory`, evaluator builtins,
 the syntax compiler, macro expansion, reflection stores, and net operators

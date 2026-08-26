@@ -857,8 +857,17 @@ force collection; production remains `NoAuto`.
 ### Phase I4D — Persistent Collection Adapters
 
 - Trace RPDS and FingerTree/list contents logically, including keys, chunks,
-  thunks, shared slices, and mapped values. Duplicate traversal of shared spines
-  is correct but measured; do not fork or replace persistent collections.
+  thunks, shared slices, and mapped values. Use the libraries' existing
+  iterators: RPDS red-black traversal uses an explicit logarithmic navigation
+  stack and FingerTree traversal uses explicit iterator frames, so I4 need not
+  duplicate their structural algorithms merely to avoid call-stack recursion.
+- Traverse Glam's potentially unbalanced `ListNode::Concat` shell with a small
+  explicit local worklist and report thunk edges without forcing them. This is
+  a trace-adapter detail, not a commitment to a new list representation. The
+  broader evaluator stack-size limitation remains the pre-GC observation
+  recorded by Gate G0.
+- Duplicate traversal of shared spines is correct but measured; do not fork or
+  replace persistent collections.
 - Add trace-count instrumentation for the later I7 performance audit.
 
 Verification: `persistent_adapter_traces_empty_singleton_and_shared_spines`
@@ -1193,7 +1202,8 @@ fixtures, and the focused collector finalization suite. Production remains
   records for values, traces, roots, closures, opaque families, caches,
   persistent collections, nets, and runtime owners.
 - Audit every unsafe trace/downcast/mutation gateway and the I3 region/lock
-  boundaries. Resolve GCI-007 through GCI-009 and GCI-011 before certification.
+  boundaries. Preserve GCI-007's resolved exact-edge chronology and resolve
+  GCI-008, GCI-009, and GCI-011 before certification.
 - Repeat every isolated family reclamation fixture while production remains
   `NoAuto`.
 

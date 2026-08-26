@@ -639,12 +639,12 @@ It resolves the remaining inventory decisions as follows:
 I3C.1-I3E.3 in the integration plan assign each source seam and its
 forced-order verification. Production remains `NoAuto` throughout I3.
 
-### GCI-007 — I4, I7, and I8 do not cleanly assign exact trace responsibility
+### GCI-007 — Exact trace responsibility across representation phases
 
-**Classification:** trace-soundness sequencing ambiguity  
-**Priority:** high  
-**Confidence:** high  
-**Status:** open
+**Classification:** trace-soundness sequencing clarification
+**Priority:** low
+**Confidence:** high
+**Status:** resolved 2026-08-26
 
 I4 says every then-current `core::Value` variant and transitive structure
 receives an exact trace, while I7 and I8 later “audit and extend” persistent
@@ -652,23 +652,30 @@ collection and net tracing. This is safe only if later phases never introduce
 the first missing adapter after a managed edge could already occupy that
 structure.
 
-The collector's worklist bounds recursion between `Gc` allocations, but it
-does not bound arbitrary recursive traversal performed inside one `Trace`
-implementation. A logical RPDS/FingerTree adapter can therefore be edge-exact
-yet still overflow the Rust stack on a deep external spine.
+The original finding overstated traversal risk for the current persistent
+libraries. RPDS red-black trees are balanced and their iterator maintains an
+explicit `Vec` navigation stack. FingerTree's iterator maintains an explicit
+`VecDeque` of traversal frames. A logical adapter using those public iterators
+does not recursively walk either external spine on the Rust call stack.
 
-**Recommended resolution:** make phase ownership explicit:
+Glam's own `ListNode::Concat` is a narrower exception: repeated concatenation
+can construct an unbalanced tree and current list operations recurse through
+it. Gate G0 already records a pre-GC evaluator stack-overflow observation and
+the broader stack-control problem remains separate runtime work. The GC trace
+adapter can avoid adding another exposure by traversing `Concat` through a
+small explicit local worklist and reporting lazy thunk edges without forcing
+them.
 
-- I4 supplies exact, non-recursive structural adapters for every container
-  which may later contain a `Gc`, even while those adapters initially report
-  no managed edge;
-- every I5–I10 representation migration updates its adapter in the same
-  checkpoint that introduces the edge;
-- I7 reconciles concrete persistent-node coverage and duplicate-work cost; and
-- I8 reconciles concrete net storage, synchronization, and mutation gateways.
+**Resolution:** I4D now uses the supplied RPDS/FingerTree iterators and an
+explicit worklist only for Glam's concat shell. It does not introduce generic
+non-recursive structural adapters or redesign lists. I7 retains duplicate
+shared-spine measurement and the possible later migration to direct managed
+persistent nodes. I8 retains concrete net storage and mutation gateways.
 
-No later “audit” may be permission to leave a known placeholder in an unsafe
-`Trace` implementation.
+The one safety rule preserved from the original finding is phase chronology:
+every representation migration updates its exact trace adapter in the same
+checkpoint which first introduces the managed edge. No later audit permits a
+known placeholder in an active `Trace` implementation.
 
 ### GCI-008 — The interaction-net trace lock rule is incorrect
 
@@ -836,7 +843,8 @@ Before the public-root prototype or production switch:
 Before managed recursive nodes:
 
 8. **Finding GCI-006:** implement the I3A authority-carrier spike;
-9. **Finding GCI-007:** clarify exact trace ownership; and
+9. **Finding GCI-007, resolved:** preserve exact trace updates in the same
+   checkpoint which introduces each managed edge; and
 10. **Phase gate:** complete I4B before I5 introduces a managed edge into any
     type-erased boundary.
 
