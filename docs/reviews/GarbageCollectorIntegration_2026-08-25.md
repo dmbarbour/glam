@@ -5,11 +5,14 @@ review-only audit of the production-integration roadmap after the isolated
 `glam-gc` collector passed Gate G1. No production or collector implementation
 changed as part of either review pass.
 
-Status: second pass complete. I1A-I1B and the first review's plan revisions are
-complete. I1C-I1E may proceed as already partitioned. GCI-006 remains the
-implementation blocker before I3; the second-pass findings GCI-012 through
-GCI-017 must be resolved before their affected I4-I12 checkpoints. Gate G1
-remains passed; this review does not authorize production collection.
+Status: second pass complete; plan maintenance is pending. I1A-I1B and the
+first review's plan revisions are complete. Before further integration
+implementation, GCI-012 through GCI-017 must either be resolved directly in
+the integration plan or represented there by an explicit review/design
+checkpoint with named inputs, a required decision or artifact, and a hard gate
+before dependent implementation. GCI-006 remains the implementation blocker
+before I3. Gate G1 remains passed; this review does not authorize production
+collection.
 
 ## Scope
 
@@ -1122,41 +1125,47 @@ Before Gate G2 and production forced collection:
     destruction has no Glam runtime/heap authority and the design-review gate
     for any proposed managed exception.
 
-Second-pass ordering:
+Second-pass plan-maintenance ordering, before integration implementation
+resumes:
 
-Before I4F's production public-root switch:
+Apply directly to the affected phase chronology:
 
 12. **Finding GCI-012:** move structural conversion of every durable value/root
     surface to or before the first checkpoint which lets it contain a managed
-    edge.
-
-Before I5's first production managed identity:
-
+    edge;
 13. **Finding GCI-013:** distinguish passive GC-managed destruction from
     legitimate active external RAII retirement; and
 14. **Finding GCI-014:** make the managed-drop ledger/audit a prerequisite of
     every isolated managed-family collection and partition I5 accordingly.
 
-Before I10B's opaque representation work:
+Where a semantic choice is intentionally deferred, add a review checkpoint to
+the plan now rather than leaving prose which says to decide later:
 
-15. **Finding GCI-017:** select an external-only or sealed traceable managed
-    opaque representation.
+15. **Finding GCI-017:** add an opaque-representation review before I10B. Its
+    output selects external-only opaque storage or a sealed traceable managed
+    arm and rewrites I10B/I10C plus completion criteria accordingly;
+16. **Finding GCI-015:** add an I12 policy review whose output selects immutable
+    `Automatic` construction for new runtimes or permanently manual runtime
+    servicing; and
+17. **Finding GCI-016:** add a readiness-integration review before routine
+    collection. Its output fixes the activity-lease/gating protocol, wake
+    source, finalizer-panic report state, and forced-order verification.
 
-Before I12 enables routine or automatic collection:
-
-16. **Finding GCI-015:** select an immutable per-runtime collection-policy
-    transition; and
-17. **Finding GCI-016:** integrate collection/finalization activity atomically
-    with runtime readiness and wakes.
+These checkpoints are part of the implementation plan and therefore part of
+the work to be implemented. They are not reminders to reopen this review from
+memory at an unspecified later time.
 
 ## Review Decision
 
-Continue integration. Gate G1's collector is sufficient, I1A-I1B are complete,
-and I1C-I1E may proceed in their current narrow checkpoints. C7/C8 collector
-stress and tuning can continue later in response to production use.
+Pause integration implementation long enough to make the reviewed plan
+authoritative again. Apply GCI-012 through GCI-014 directly, and add the named
+GCI-015 through GCI-017 review checkpoints with their entry conditions,
+required decisions, plan-update outputs, and implementation gates. Only after
+those edits are complete should I1C resume.
 
-Do not begin I3 before implementing GCI-006's scoped authority carrier. Before
-I4F, revise the root-surface chronology for GCI-012. Resolve GCI-013/GCI-014
-before I5, GCI-017 before I10B, and GCI-015/GCI-016 before I12. None of these
-second-pass findings revokes Gate G1 or requires returning to isolated
-collector architecture work.
+This is plan maintenance, not a return to collector architecture work. Gate G1
+remains sufficient and passed; C7/C8 collector stress and tuning may continue
+later in response to production use. Once the plan update lands, I1C-I1E remain
+the next implementation checkpoints, and the newly planned reviews become
+ordinary explicit phases of that transition rather than informal future
+follow-ups.
