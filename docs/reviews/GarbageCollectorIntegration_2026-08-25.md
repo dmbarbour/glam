@@ -391,7 +391,7 @@ family's reclamation case there.
 **Classification:** implementation-risk partitioning  
 **Priority:** medium  
 **Confidence:** high  
-**Status:** open
+**Status:** resolved 2026-08-25
 
 I1, I3, I4, I6, I9, I10, and I11 each cross several independently risky
 ownership or synchronization boundaries. This conflicts with the roadmap's
@@ -417,6 +417,27 @@ unsafe or scheduler boundaries.
 
 Each checkpoint should name the representation migrated, exact tests latched,
 and collection mode permitted at its end.
+
+**Resolution:** the integration plan now partitions every identified oversized
+phase. I1 separates policy, domain topology, scoped allocation, layout/ledger,
+and lifecycle work; I2 separates provenance, inert observation/equality, and
+the production-switch inventory; I3 has six authority/boundary checkpoints;
+I4 separates shell/leaves, closure containment, argument/failure structures,
+persistent adapters, net adapters, and the public-root switch; and I6 separates
+functions, metadata, failures, and reflection/net-construction payloads.
+
+Runtime integration is divided into cache, coordinator/evaluation, reflection
+store, diagnostics/events, assembly/compiler/CLI, and final inventory
+checkpoints in I9. I10 separates deferred closures, opaque registration,
+scoped finalizable access, and the final containment audit. I11 now begins with
+Gate G2 certification, then controlled production collection, deterministic
+worker/finalizer schedules, and Gate G3 certification.
+
+Each checkpoint identifies its representation or authority boundary,
+verification fixtures, and permitted collection mode. Production remains
+`NoAuto` through I11A; I11B-I11D permit only explicit controlled collection.
+Passing G3 authorizes later I12 maintenance but does not silently enable
+automatic collection. No implementation change was required for this finding.
 
 ### GCI-011 — Finalizer access to Glam runtime services is unspecified
 
@@ -454,7 +475,8 @@ Before implementing the remaining I1 ownership checkpoints:
    matrix;
 3. preserve GCI-005's completed stable ownership-ledger reconciliation
    contract; and
-4. apply GCI-010's I1 partition.
+4. preserve GCI-010's completed checkpoint partition and collection-mode
+   boundaries.
 
 Before the public-root prototype or production switch:
 
