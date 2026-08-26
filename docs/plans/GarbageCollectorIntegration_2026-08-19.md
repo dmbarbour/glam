@@ -323,11 +323,12 @@ and tests must remain unchanged.
 
 ### Phase I2A — Wrapper and Provenance Prototype
 
-- Resolve GCI-004, then prototype C4's direct managed root against scalars and
-  one recursive test node. Separately prototype a Glam-owned public wrapper
-  whose managed arm uses that root and whose optional inline arm contains only
-  values which require no managed trace. Do not add another collector
-  registry-entry or root-cell representation for the wrapper.
+- Use GCI-004's completed `Heap::owns(&Root<T>)` provenance predicate, then
+  prototype C4's direct managed root against scalars and one recursive test
+  node. Separately prototype a Glam-owned public wrapper whose managed arm uses
+  that root and whose optional inline arm contains only values which require no
+  managed trace. Do not add another collector registry-entry or root-cell
+  representation for the wrapper.
 - Select between exposing the direct root and using the Glam wrapper based on
   public scalar construction cost and clarity. One public `Value` clone must
   preserve its root cell while the value domain lives, but must not preserve
@@ -338,9 +339,11 @@ and tests must remain unchanged.
 
 Verification: `prototype_root_moves_between_threads`,
 `prototype_root_rejects_another_heap`, `prototype_root_becomes_inert_after_domain_drop`,
-and the collector's existing mismatched-`Root::get` invariant test. Only the
-isolated prototype heap may collect; production remains `NoAuto` and retains
-its compatibility `RuntimeValueRoot`.
+the collector's `heap_ownership_predicate_accepts_only_the_recorded_live_heap`
+and `heap_ownership_predicate_tolerates_concurrent_root_clone_and_drop`, and
+the existing mismatched-`Root::get` invariant test. Only the isolated prototype
+heap may collect; production remains `NoAuto` and retains its compatibility
+`RuntimeValueRoot`.
 
 ### Phase I2B — Opaque Handles and Runtime-Mediated Observation
 

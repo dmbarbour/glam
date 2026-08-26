@@ -45,7 +45,7 @@ impl<T: Trace> Root<T> {
     #[must_use]
     pub fn get<'access>(&self, mutator: &'access Mutator<'_>) -> &'access T {
         assert!(
-            std::ptr::eq(self.cell.heap.as_ptr(), Arc::as_ptr(mutator.heap())),
+            self.belongs_to(mutator.heap()),
             "root does not belong to this heap"
         );
 
@@ -60,6 +60,12 @@ impl<T: Trace> Root<T> {
         // SAFETY: the root invariant above proves liveness and representation,
         // and the release-visible heap identity check proves ownership.
         unsafe { value.get_unchecked(mutator) }
+    }
+
+    pub(crate) fn belongs_to(&self, heap: &Arc<HeapInner>) -> bool {
+        // `Weak` retains its allocation's control block, so a dead heap's
+        // address cannot be recycled while this root can still be compared.
+        std::ptr::eq(self.cell.heap.as_ptr(), Arc::as_ptr(heap))
     }
 }
 
@@ -90,8 +96,8 @@ impl<T: Trace> fmt::Debug for Root<T> {
 #[cfg(test)]
 mod tests {
     use std::panic::{AssertUnwindSafe, catch_unwind};
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier};
 
     use crate::{Gc, Heap, Trace, Visitor};
 
@@ -232,6 +238,61 @@ mod tests {
         }));
 
         assert!(panic.is_err());
+    }
+
+    #[test]
+    fn heap_ownership_predicate_accepts_only_the_recorded_live_heap() {
+        let owner = Heap::new();
+        let owner_alias = owner.clone();
+        let observer = Heap::new();
+        let root = owner.with_mutator(|mutator| {
+            let allocator = mutator.allocator::<u64>().unwrap();
+            mutator.root(allocator.alloc(42_u64))
+        });
+
+        assert!(owner.owns(&root));
+        assert!(owner_alias.owns(&root));
+        assert!(!observer.owns(&root));
+
+        drop(owner);
+        drop(owner_alias);
+
+        assert!(root.cell.heap.upgrade().is_none());
+        assert!(!observer.owns(&root));
+    }
+
+    #[test]
+    fn heap_ownership_predicate_tolerates_concurrent_root_clone_and_drop() {
+        const THREADS: usize = 8;
+        const ITERATIONS: usize = 1_024;
+
+        let heap = Heap::new();
+        let root = heap.with_mutator(|mutator| {
+            let allocator = mutator.allocator::<u64>().unwrap();
+            mutator.root(allocator.alloc(73_u64))
+        });
+        let start = Arc::new(Barrier::new(THREADS));
+        let workers = (0..THREADS)
+            .map(|_| {
+                let heap = heap.clone();
+                let root = root.clone();
+                let start = Arc::clone(&start);
+                std::thread::spawn(move || {
+                    start.wait();
+                    for _ in 0..ITERATIONS {
+                        let alias = root.clone();
+                        assert!(heap.owns(&alias));
+                        drop(alias);
+                    }
+                    assert!(heap.owns(&root));
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for worker in workers {
+            worker.join().expect("root ownership worker panicked");
+        }
+        assert!(heap.owns(&root));
     }
 
     #[test]

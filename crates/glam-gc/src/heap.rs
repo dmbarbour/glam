@@ -283,6 +283,17 @@ impl Heap {
         self.inner.collection_policy
     }
 
+    /// Tests whether `root` records this live heap as its provenance.
+    ///
+    /// This is a constant-time identity check for boundary validation. It does
+    /// not enter a mutator region, inspect the managed value, expose the heap's
+    /// identity, or extend either argument's lifetime. It returns `false` for
+    /// roots created by another heap, including a heap which has been dropped.
+    #[must_use]
+    pub fn owns<T: Trace>(&self, root: &Root<T>) -> bool {
+        root.belongs_to(&self.inner)
+    }
+
     /// Releases every inactive Glam GC cache retained by the calling thread.
     ///
     /// This is optional maintenance for long-lived host threads which outlive

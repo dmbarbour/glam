@@ -228,7 +228,7 @@ values are not heap-managed yet, and collection remains disabled by policy.
 **Classification:** API integration prerequisite  
 **Priority:** high  
 **Confidence:** high  
-**Status:** open
+**Status:** resolved 2026-08-26
 
 `Root::get` performs a release-build heap comparison and panics on mismatch.
 That is an appropriate last safety check before the private typed-pointer
@@ -249,6 +249,17 @@ cross-runtime errors before access.
 **Required verification:** same-heap acceptance, foreign-heap rejection, an
 inert root after heap teardown, concurrent clone/drop, and preservation of the
 existing `Root::get` mismatch panic as a collector invariant check.
+
+**Resolution:** `Heap::owns(&Root<T>)` is the single public collector
+predicate. It compares the root's recorded weak heap provenance with the live
+heap in constant time, without locking, entering a mutator, upgrading the weak
+reference, inspecting the value, or exposing an identity token. A retained
+`Weak` keeps its former control-block address from being recycled, so an inert
+root cannot accidentally match a later heap. `Root::get` reuses the same
+private comparison and retains its all-build mismatch assertion as the final
+typed-pointer gateway backstop. Focused tests cover an owner and its clone,
+another heap, a dropped owner, concurrent root clone/drop, and the existing
+mismatched-access panic.
 
 ### GCI-005 — The ownership ledger requires private and unstable collector identities
 
@@ -506,7 +517,7 @@ Before implementing the remaining I1 ownership checkpoints:
 Before the public-root prototype or production switch:
 
 5. preserve GCI-002's completed opaque-value and runtime-observation contract;
-6. resolve GCI-004's fallible provenance operation; and
+6. preserve GCI-004's completed fallible provenance operation; and
 7. partition I2 around those decisions.
 
 Before managed recursive nodes:
