@@ -1,14 +1,15 @@
 # Garbage Collector Integration Review — 2026-08-25
 
-Baseline: `bb205d9`. This is a review-only audit of the production-integration
-roadmap after the isolated `glam-gc` collector passed Gate G1. No production or
-collector implementation changed as part of this review.
+Original baseline: `bb205d9`. Second-pass baseline: `bd74c13`. This is a
+review-only audit of the production-integration roadmap after the isolated
+`glam-gc` collector passed Gate G1. No production or collector implementation
+changed as part of either review pass.
 
-Status: complete. Integration is the recommended next workstream, but the
-current Phase I1 should not begin verbatim. The findings below need to be
-reflected in the plan or explicitly resolved before their affected checkpoints
-begin. Gate G1 remains passed; this review does not authorize production
-collection.
+Status: second pass complete. I1A-I1B and the first review's plan revisions are
+complete. I1C-I1E may proceed as already partitioned. GCI-006 remains the
+implementation blocker before I3; the second-pass findings GCI-012 through
+GCI-017 must be resolved before their affected I4-I12 checkpoints. Gate G1
+remains passed; this review does not authorize production collection.
 
 ## Scope
 
@@ -841,6 +842,247 @@ I11C verifies that finalization produces no diagnostics, events, tasks, or
 managed allocations. Any future exception requires a dedicated design review
 rather than a local weak-domain or TLS-capability workaround.
 
+## Second-Pass Findings — 2026-08-26
+
+The second pass reviewed the revised plan as a complete chronology rather than
+checking only whether the first findings were copied into it. The new passive
+managed-destruction rule is sound, but it exposed three earlier ownership and
+lifecycle boundaries, one unresolved opaque representation, and two later
+maintenance decisions which the current phase order does not yet resolve.
+
+### GCI-012 — Durable root surfaces migrate after managed values can escape
+
+**Classification:** managed-pointer liveness and phase chronology defect
+
+**Priority:** high
+
+**Confidence:** high
+
+**Status:** open
+
+I4F switches production `RuntimeValueRoot` and the public `Value` facade to the
+managed representation. I9 later converts canonical/compiler caches,
+coordinator state, reflection stores, diagnostics/events, and assembly/compiler
+state into explicit roots or managed edges. Those phases cannot satisfy the
+plan's structural root discipline in that order for any durable field which
+still contains a raw `core::Value` after that value can contain `Gc` edges.
+
+`Gc<T>` is deliberately non-rooting. The hard `NoAuto` plus no-explicit-
+production-collection gate can make such a migration interval operationally
+safe by preventing reclamation, but it does not make a bare managed pointer in
+a cache, parked machine, type-erased attachment, or host record a registered
+root. The plan otherwise says these pointers do not escape mutator regions and
+does not name a temporary exception. The current runtime cache demonstrates
+that this is concrete rather than hypothetical: `CoreValues` and
+`GCompilerValues` retain raw core `Value`s, and the type-indexed extension map
+retains those compiler bundles behind `Any`.
+I3A.4 correctly requires poll outcomes to root before leaving their evaluator
+scope, but its permission to assign some payloads to I5-I10 cannot defer a
+durable root conversion beyond the checkpoint which first lets that payload
+contain a managed edge.
+
+**Recommended resolution:** split I9's work by chronology rather than subsystem
+alone.
+
+- Before or atomically with I4F, complete a source-backed inventory of every
+  durable raw `core::Value` owner and convert it to `RuntimeValueRoot`, an exact
+  managed edge, or a genuinely bounded mutator-local.
+- Include canonical values, type-indexed compiler attachments, parked machine
+  payloads, stores/snapshots, diagnostics/events, and compiler intermediates;
+  do not assume the current wrapper names prove the contents are already safe.
+- Keep the later I9 lifecycle/retirement tests where useful, but make them
+  audits of an already structurally rooted representation rather than the
+  first root conversion.
+- Tighten I3A.4 and the I5-I10 verification boundary: a later checkpoint may
+  update a payload only until the checkpoint which first introduces its first
+  managed edge. Disabled collection is not an extension of unrooted pointer
+  lifetime.
+
+Verification must force a collection request immediately after each converted
+owner leaves its construction scope in a closed fixture, and a source inventory
+must reject every durable bare `core::Value`/`Gc` owner before I4F completes.
+
+### GCI-013 — Passive managed destruction was overextended to external RAII
+
+**Classification:** lifecycle semantic regression
+
+**Priority:** high
+
+**Confidence:** high
+
+**Status:** open
+
+The intended GCI-011 boundary is that a destructor invoked by the collector for
+a managed allocation receives no Glam runtime or heap authority. The revised
+roadmap and I10C go further: they require an external/rooted lifecycle record's
+eventual Rust `Drop` to be passive as well.
+
+That stronger rule conflicts with existing intentional RAII semantics.
+`PromiseResolver::drop` permanently fails an unresolved promise;
+`EvaluationSession::drop` closes the demand session and terminalizes owned
+work; `ClientDemandHandle::drop` abandons its demand; and an unactivated
+pending reflection task is cancelled on drop. These are ordinary externally
+owned Rust objects, not allocations whose `Drop` is being dispatched from a GC
+dead set. After promise and task values become managed, some of these owners
+will legitimately need a strong authorized runtime/value-domain capability and
+a registered root in order to preserve the same behavior.
+
+**Recommended resolution:** distinguish the two destruction domains
+explicitly.
+
+- A `Trace` representation reclaimed by the GC is passively droppable and
+  carries no heap/domain capability. This remains the hard managed boundary.
+- An ordinary external/rooted owner may perform active RAII cleanup through an
+  independently owned runtime capability, provided it is not reachable from
+  the managed graph and therefore cannot create a heap backedge.
+- Prefer an explicit idempotent `retire` operation internally, but permit the
+  external `Drop` fallback to call that operation where current public or
+  scheduler semantics depend on drop-triggered cleanup.
+- I9 must inventory active external `Drop` implementations, their strong
+  capability, roots, lock/callback order, and terminal behavior. Do not call
+  these external RAII paths managed finalizers.
+
+Forced tests must preserve unresolved-resolver failure, session closure,
+client-demand abandonment, and pending-reflection cancellation after their
+referenced values become managed, while ownership tests prove none of those
+external records is reachable from a managed allocation.
+
+### GCI-014 — The managed-drop contract is scheduled after its first users
+
+**Classification:** invariant placement and verification chronology
+
+**Priority:** high
+
+**Confidence:** high
+
+**Status:** open
+
+The roadmap and ownership ledger now make passive managed destruction a global
+contract, but the integration chronology still presents I10C as the checkpoint
+which gives managed `Drop` no runtime authority. I10B even says that destructor
+authority has not yet been selected. I5, I6, and I8 create managed drop-bearing
+representations and run isolated reclamation fixtures before I10.
+
+The global roadmap rule prevents this from being an intended semantic
+exception, but the implementation checkpoints are misleading: an earlier
+phase could satisfy its listed tests while deferring the direct/transitive
+`Drop` audit to I10C.
+
+**Recommended resolution:** move the enforceable managed-drop admission rule
+to the first managed-representation boundary, preferably I4's common contract
+or the I5-I10 verification boundary. Every family checkpoint must complete its
+ledger item for direct and transitive destruction before its isolated fixture
+may collect. I10C should become the final opaque/external-lifecycle audit, not
+the first selection of destructor authority, and I10B should stop saying that
+the authority remains undecided.
+
+The now-larger I5 should be partitioned into at least lazy-cell migration,
+promise-cell migration, external promise/producer lifecycle integration, and
+cross-family cycle reclamation. That keeps the managed-passive and
+external-active ownership cut reviewable.
+
+### GCI-015 — I12 assumes a mutable collection policy on an immutable heap
+
+**Classification:** maintenance-policy contradiction
+
+**Priority:** medium-high
+
+**Confidence:** high
+
+**Status:** open
+
+I1A deliberately made `CollectionPolicy` immutable for one `Heap`, and every
+production runtime is constructed with `NoAuto`. I12 first proposes explicit
+controlled collection and then says pressure will be serviced by a later outer
+mutator entry, finally enabling automatic collection after the controlled path
+is stable. The latter behavior exists only on an `Automatic` heap; there is no
+live transition from the existing `NoAuto` heap.
+
+**Recommended resolution:** split I12 into an explicit-maintenance checkpoint
+and a policy-selection checkpoint. Keep policy immutable. After G3, either:
+
+1. change construction so newly created runtimes use `Automatic`, while every
+   already-created `NoAuto` runtime remains manual for its lifetime; or
+2. retain `NoAuto` permanently and let the runtime explicitly service pressure
+   at reviewed boundaries, without claiming that ordinary mutator entry does
+   so.
+
+The first option best matches the collector's existing automatic protocol and
+is recommended unless runtime-controlled placement proves more valuable.
+Tests must distinguish new-runtime policy from live-heap mutation and exercise
+both manual and automatic runtime construction.
+
+### GCI-016 — Finalizer activity has no atomic readiness or wake integration
+
+**Classification:** runtime quiescence coordination gap
+
+**Priority:** medium-high
+
+**Confidence:** high
+
+**Status:** open
+
+I12 says queued and running finalizers count as runtime operational activity and
+that readiness waits for passive finalization. The collector currently exposes
+an observational `Heap::activity()`/`Heap::statistics()` snapshot. Runtime
+readiness is validated under a separate mutation-admission gate and parks on a
+separate activity generation. The plan does not establish an atomic relation
+between those two mechanisms or a wake when finalization becomes idle.
+
+Sampling both states is insufficient: readiness can observe the runtime as
+idle just before a mutator entry elects collection, or a waiter can observe a
+running finalizer and then sleep after it has completed without receiving a
+runtime activity wake.
+
+**Recommended resolution:** use the private runtime heap-entry/maintenance
+facade to acquire a runtime operational-activity lease before any entry which
+may elect or explicitly run collection, and release it with a runtime activity
+wake after collection/finalization returns or unwinds. Readiness then observes
+that lease through its existing authoritative gate; `glam-gc` needs no runtime
+callback. Prove that every heap entry path goes through the facade before
+automatic collection is enabled. Also decide whether a durable pending batch
+after a destructor panic is reported as maintenance/error state rather than
+permanent anonymous `Busy` activity.
+
+Forced-order tests must place readiness before collection election, during a
+blocked finalizer, at finalizer completion, and across finalizer panic/retry,
+then prove no false ready snapshot and no lost wake.
+
+### GCI-017 — The managed opaque representation is not selected
+
+**Classification:** representation and trace-boundary ambiguity
+
+**Priority:** medium
+
+**Confidence:** medium-high
+
+**Status:** open
+
+I10B permits an opaque family to become a “private traceable managed
+representation,” and I10C plans a scoped mutator-bound downcast for
+collector-owned payloads. The current `OpaqueValue` is an
+`Arc<dyn Any + Send + Sync>` with an owning `Arc` downcast. The roadmap's opaque
+invariant correctly forbids hiding a bare `Gc` in that `Any` payload. The plan
+does not yet name the representation which joins those constraints: a
+collector cannot exactly trace arbitrary `Any`, while putting a managed pointer
+inside the existing payload violates the opaque boundary.
+
+**Recommended resolution:** select one bootstrap policy before I10B:
+
+- keep `OpaqueValue` entirely external, admitting only edge-free tokens and
+  audited same-runtime public-root owners; or
+- introduce a sealed, statically registered managed arm whose concrete cell
+  and exact trace/drop functions are outside the arbitrary `Any` payload. Each
+  admitted managed family then needs a stable ledger row and scoped typed
+  access.
+
+The first option is simpler and consistent with the preference to keep rooted
+runtime machinery outside managed storage. If the second is needed, partition
+I10B/I10C into representation, registration, scoped access, passive-drop, and
+negative-boundary checkpoints. Update the integration completion criteria,
+which currently describe only no-edge or public-root opaque payloads, to match
+the selected policy.
+
 ## Recommended Resolution Order
 
 This order contains only work which resolves or preserves an integration-review
@@ -876,18 +1118,45 @@ Before Gate G2 and production forced collection:
    exact locked-trace protocol;
 10. **Finding GCI-009, resolved:** preserve the I5-I10 isolated-fixture and
     production-`NoAuto` verification boundary;
-11. **Finding GCI-011, resolved:** preserve passive managed destruction,
-    explicit external retirement, and the design-review gate for any proposed
-    exception.
+11. **Finding GCI-011, resolved:** preserve the rule that GC-managed
+    destruction has no Glam runtime/heap authority and the design-review gate
+    for any proposed managed exception.
+
+Second-pass ordering:
+
+Before I4F's production public-root switch:
+
+12. **Finding GCI-012:** move structural conversion of every durable value/root
+    surface to or before the first checkpoint which lets it contain a managed
+    edge.
+
+Before I5's first production managed identity:
+
+13. **Finding GCI-013:** distinguish passive GC-managed destruction from
+    legitimate active external RAII retirement; and
+14. **Finding GCI-014:** make the managed-drop ledger/audit a prerequisite of
+    every isolated managed-family collection and partition I5 accordingly.
+
+Before I10B's opaque representation work:
+
+15. **Finding GCI-017:** select an external-only or sealed traceable managed
+    opaque representation.
+
+Before I12 enables routine or automatic collection:
+
+16. **Finding GCI-015:** select an immutable per-runtime collection-policy
+    transition; and
+17. **Finding GCI-016:** integrate collection/finalization activity atomically
+    with runtime readiness and wakes.
 
 ## Review Decision
 
-Shift work from isolated collector development to integration. Gate G1's
-collector is sufficient for that transition, and C7/C8 stress and tuning can
-continue later in response to production use.
+Continue integration. Gate G1's collector is sufficient, I1A-I1B are complete,
+and I1C-I1E may proceed in their current narrow checkpoints. C7/C8 collector
+stress and tuning can continue later in response to production use.
 
-Do not begin the current I1 as one checkpoint. First revise the integration
-plan and ownership ledger to resolve or schedule the findings above. The first
-implementation checkpoint should be the collector's manual/non-automatic
-collection policy, followed by the runtime value-domain topology and its
-latched lifetime matrix.
+Do not begin I3 before implementing GCI-006's scoped authority carrier. Before
+I4F, revise the root-surface chronology for GCI-012. Resolve GCI-013/GCI-014
+before I5, GCI-017 before I10B, and GCI-015/GCI-016 before I12. None of these
+second-pass findings revokes Gate G1 or requires returning to isolated
+collector architecture work.
