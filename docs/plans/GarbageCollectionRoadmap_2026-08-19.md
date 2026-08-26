@@ -154,27 +154,27 @@ permit dereference outside a region.
 5. **No partially traced collection.** Production reclamation remains disabled
    until every possible edge from a production root is traced or is covered by
    an explicitly documented conservative-retention rule.
-6. **Finalization admits fresh mutation, never identity resurrection.** After
-   reachability fixes the dead set, allocations requiring Rust destruction are
-   detached into a non-rootable `Finalizing` set. Before releasing exclusive
-   mutator admission, the collector atomically converts its authority into an
-   ordinary mutator lease held by the collector thread. The heap then admits
-   other mutator regions concurrently, while that held lease and the
-   coordinator defer every new collection until the set is drained. `Drop` for
-   implementation and host-owned payloads, including embedding-client types
-   stored in `OpaqueValue`, runs inside the collector's mutator region. It may
-   allocate fresh values, evaluate or schedule work, publish diagnostics, and
-   even construct and publish a fresh equivalent of itself.
-   It cannot recover a root to any allocation in the completed dead set or
-   transition its original identity back to `Allocated`. Constructing an
-   equivalent value from independently live inputs creates a fresh identity;
-   it is not resurrection. Finalizer timing and order remain operational
-   rather than part of Glam evaluation semantics. This describes collection
-   while a value-domain owner remains live. The selected terminal path is
-   deliberately narrower: dropping the last heap owner supplies no mutator,
-   escaped roots do not retain or revive the heap, detached pending runs are
-   visited before attached class runs, and the first destructor panic stops
-   terminal dispatch.
+6. **Finalization grants no Glam runtime or heap authority.** After reachability
+   fixes the dead set, allocations requiring Rust destruction are detached into
+   a non-rootable `Finalizing` set. Before releasing exclusive mutator
+   admission, the collector atomically converts its authority into an ordinary
+   mutator lease held by the collector thread. That lease coordinates admission
+   and prevents another collection while ordinary workers may resume; it is not
+   passed to `Drop` and Glam installs no ambient TLS/runtime bridge for managed
+   destructors. Every production managed payload and every field destroyed
+   transitively from it must release resources correctly without allocating,
+   evaluating, scheduling work, publishing diagnostics/events, or otherwise
+   entering its value domain. A component needing active cleanup remains an
+   ordinary externally owned/rooted record and uses an explicit retirement
+   operation while live. Its `Drop` fallback remains passive.
+   The collector crate's general contract may still permit a destructor which
+   independently owns a `Heap` to call its ordinary scoped API, but Glam
+   managed payloads contain no such heap/domain capability. Any proposed
+   production exception requires a separate design review, named
+   representation, ownership proof, and verification before changing this
+   rule. Finalizer timing and order remain operational rather than part of Glam
+   evaluation semantics. Last-owner teardown uses the same passive destructor
+   contract without manufacturing mutator authority.
 7. **No collector lock in callbacks or destructors.** Destruction, wakes,
    diagnostics, host callbacks, and scheduler callbacks occur only in phases
    whose lock and re-entry rules are explicit. No arbitrary callback or Rust
@@ -186,7 +186,7 @@ permit dereference outside a region.
    restores mark state and recovers any poisoned managed-data mutex before
    unwinding reaches the caller. The `Finalizing` phase reopens shared mutator
    admission while the collector
-   retains one mutator lease; recursive same-heap entry reuses that region.
+   retains one mutator lease. Glam managed destructors do not re-enter it.
    Collection pressure arising before finalization completes is coalesced into
    the active collection as a heuristic hint. Successful completion clears the
    request and acknowledges the pressure baseline; a request serialized after
@@ -263,7 +263,8 @@ permit dereference outside a region.
 - **Finalizing phase** — post-mark phase in which the completed dead set is
   non-rootable, collection is deferred by a collector-held mutator lease,
   ordinary mutation is concurrently admitted, and queued Rust destructors run
-  outside collector locks.
+  outside collector locks. The lease is collector coordination state, not Glam
+  runtime authority supplied to destructors.
 - **Safepoint** — an outer mutator entry which finds its heap idle, or an
   explicit synchronous maintenance boundary, at which a requested collection
   may acquire exclusive authority. Outermost exit only publishes quiescence and

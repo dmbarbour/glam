@@ -711,7 +711,8 @@ publication each remain all-or-nothing before the next layer is added.
   lifetime, and no run or callback may be published by a loser.
 - Treat `needs_drop::<T>()` as an all-or-none property of the homogeneous run.
   There is one destruction mode: if metadata contains `drop`, unreachable
-  allocated slots run it later with the finalizer mutator installed.
+  allocated slots run it later while the collector holds finalizer mutator
+  admission. `Drop` receives no mutator argument or ambient accessor.
 
 Verification:
 
@@ -1892,13 +1893,12 @@ it is not the policy for C4 and later phases.
   thread's depth: acquiring exclusive mutator admission proves that every
   TLS cache is quiescent. It later rebuilds heap-owned run lease bitmaps and
   advances the cache epoch without inspecting any cache.
-- Provide a heap-qualified scoped current-mutator accessor for reviewed
-  destructor and runtime-integration code, for example an HRTB closure API
-  rather than a borrow which can escape. An unqualified "current mutator" API
-  is invalid because several heaps may be active. A destructor invoked by the
-  collector sees its finalizer mutator as current for that heap; a same-heap
-  public runtime operation therefore re-enters recursively instead of
-  acquiring independent admission.
+- Keep the collector-held finalizer mutator private to collection coordination;
+  provide no ambient or TLS current-mutator accessor. The generic collector
+  still permits a destructor which independently owns a `Heap` to use the
+  ordinary `Heap::with_mutator` path, including recursive same-heap entry.
+  Glam integration separately forbids production managed payloads from
+  carrying that authority; their destruction is passive.
 - Permit nested entry into a different heap. It activates a separate cache and
   active-mutator obligation; holding heap A's mutator neither authorizes heap B
   access nor permits a managed edge between them.
@@ -3001,9 +3001,11 @@ Execute C6 as the following smaller checkpoints:
   empty. It is the simpler bootstrap lifecycle; C8 measurement may justify a
   direct no-finalizer completion fast path later.
 - **C6B.2 — C3E finalizer handoff and destruction.** Use C3E's no-gap
-  `Exclusive`-to-`Finalizing` handoff, install the collector's current mutator,
-  reopen ordinary admission, and run erased Rust destructors exactly once
-  outside collector locks. Traverse the durable batch with a bounded
+  `Exclusive`-to-`Finalizing` handoff, retain the collector-owned finalizer
+  admission lease, reopen ordinary admission, and run erased Rust destructors
+  exactly once outside collector locks. `Drop` receives no implicit mutator;
+  a collector-only fixture which independently owns a `Heap` may enter through
+  its ordinary API. Traverse the durable batch with a bounded
   run/word/bit cursor instead of allocating a second per-slot work vector.
   Successful destruction clears the slot allocation bit before removing its
   exact pending identity under the managed-data mutex; fresh allocations and
@@ -3344,24 +3346,21 @@ recoverable panic injected by its own tests.
 - Before releasing exclusive admission, atomically hand the collector thread
   one ordinary mutator lease and enter `Finalizing`. Then release allocator and
   coordinator locks and reopen shared mutator admission. Invoke each erased
-  Rust destructor exactly once under that held mutator. Recursive runtime
-  operations reuse it, while worker threads may enter independent mutator
-  regions concurrently. No collection may begin while the coordinator remains
-  in `Finalizing`. Successful drain or recovered-panic cleanup releases the
-  finalizer mutator and restores ordinary admission; the latter leaves the
-  untouched batch durable and relatches a request for a later attempt.
-- Install that mutator in the scoped current-mutator slot before invoking
-  `Drop`. This is how ordinary Rust `Drop`, whose signature cannot accept a
-  context argument, may allocate through reviewed GC/runtime APIs without
-  receiving an escapable mutator reference.
+  Rust destructor exactly once while that admission lease remains held, but do
+  not pass it to `Drop` or install it in an ambient accessor. Worker threads
+  may enter independent mutator regions concurrently. No collection may begin
+  while the coordinator remains in `Finalizing`. Successful drain or
+  recovered-panic cleanup releases the finalizer mutator and restores ordinary
+  admission; the latter leaves the untouched batch durable and relatches a
+  request for a later attempt.
 - Support `Drop` for Rust implementation values and embedding-client payloads
   stored in opaque values. This operational cleanup is not a Glam-visible
   finalizer: its thread, relative order, and collection time are unspecified.
-- A destructor may allocate new values, evaluate or schedule work, publish
-  diagnostics or host events, retain public roots it already owns, and build a
-  fresh equivalent of its payload. Every such managed value is a fresh
-  allocation outside the completed dead set and is eligible only for a later
-  collection.
+- As a collector-only capability, a destructor which independently owns a
+  `Heap` may enter it through the ordinary API and allocate fresh values. Glam
+  production managed representations do not own such a capability and must be
+  passively droppable; evaluation, scheduling, diagnostics, and host events
+  belong to external lifecycle code rather than managed `Drop`.
 - Enforce non-resurrection structurally. `Root::from_gc` (or its equivalent)
   rejects every identity in the completed dead set, and an opaque payload has
   no managed handle to its containing allocation. A destructor may inspect its
@@ -3427,15 +3426,18 @@ recoverable panic injected by its own tests.
   during finalization.
 
 Verification uses drop counters, destructors containing ordinary `Arc`,
-`Mutex`, `OnceLock`, and opaque host payloads, scoped current-mutator access,
-recursive same-heap entry, bitmap-derived destruction, eager partial-run sweep,
+`Mutex`, `OnceLock`, and opaque host payloads, independent
+`Heap::with_mutator` recursive same-heap entry in a collector-only fixture,
+bitmap-derived destruction, eager partial-run sweep,
 whole-run reclamation, address reuse tests, and Miri checks for stale
 references and double destruction. Instrumentation proves an eagerly swept
 no-drop partial run is reclaimed from side bitmaps without enumerating its
 payload slots. One opaque destructor allocates and publishes a fresh
 quine and a diagnostic; the original identity is reclaimed while the published
-value survives the next collection. Another schedules work that enters the
-same heap from a worker. Uncommitted pressure raised during that finalizer
+value survives the next collection. These fixtures prove generic collector
+mechanics and do not authorize such destructors in Glam's production managed
+graph. Another schedules work that enters the same heap from a worker.
+Uncommitted pressure raised during that finalizer
 is coalesced into the completed collection, and a later outer entry proceeds
 without an immediate redundant second pass. A barrier-forced request after the
 completion transition remains pending and is serviced by a subsequent idle
@@ -3814,7 +3816,7 @@ Completed on 2026-08-24:
 - The collector drains the batch with a compact run/word/bit cursor. It derives
   one exact initialized payload under the managed-data mutex, releases every
   collector lock, then dispatches that record's canonical erased Rust
-  destructor while the C3E finalizer mutator is installed. This records the
+  destructor while holding C3E's finalizer admission lease. This records the
   completed C6B.2 checkpoint; C6C.1b later replaces the persistent cursor with
   indexed durable state and bounded attempt-local snapshots.
 - A successful destructor reacquires managed data, clears the exact atomic
@@ -3822,10 +3824,12 @@ Completed on 2026-08-24:
   root/debug validation therefore observes either a pending identity or an
   unallocated slot, never a resurrectable gap. Zero-mask records deliberately
   continue reserving their regions until C6B.3 republishes capacity.
-- Destructor code may recursively enter the same heap, allocate, and publish a
-  root through the installed mutator. A focused fixture exercises class
-  discovery and allocation from `Drop`, proving that neither the data mutex nor
-  the coordinator mutex crosses erased destructor dispatch.
+- A destructor which independently owns the heap may recursively enter it,
+  allocate, and publish a root through the ordinary `Heap::with_mutator` API.
+  A focused collector-only fixture exercises class discovery and allocation
+  from `Drop`, proving that neither the data mutex nor the coordinator mutex
+  crosses erased destructor dispatch. Glam production managed payloads do not
+  carry this authority.
 - An actual destructor panic currently inserts one exact
   `ErasedGc -> QuarantineRecord` entry before removing pending authority, then
   resumes the original panic. This was deliberately conservative checkpoint

@@ -60,8 +60,9 @@ When a family becomes managed, its reconciliation record contains:
 2. the trace-review checkpoint and exact outgoing-edge enumeration policy;
 3. Rust size/alignment and the requested total slot extent selected by Glam;
 4. whether allocator discovery accepts that requested layout;
-5. whether the payload requires `Drop`, its ordinary/finalizing destruction
-   policy, and the relevant failure test;
+5. whether the payload requires `Drop`, proof that its direct and transitive
+   destruction is passive, any external explicit-retirement owner, and the
+   relevant failure test;
 6. every post-publication mutation gateway, or an explicit immutable policy;
 7. its external-root classification and the source inventory proving that no
    internal edge was hidden behind a root; and
@@ -119,7 +120,7 @@ row is approved for a large-object or multi-run exception.
 | `Lazy` | `Arc<LazyCell>`; source and terminal result graphs. | Identity-bearing, thread-safe, long-lived; source/result publication races are supported. | Managed cell visitor; one-write result plus replaceable source protocol; I5. |
 | `Promised` | `Arc<PromiseCell>`; successful assignment root and producer obligation. | Identity-bearing, thread-safe, long-lived; assignment is one-write. | Managed cell visitor; assignment mutation gateway; I5. |
 | `Metadata` | `MetadataCarrier.metadata: Arc<Value>`. | Immutable identity-bearing sealed value, thread-safe. | Visit exactly one metadata value; I6. |
-| `Opaque` | `Arc<dyn Any + Send + Sync>`; payload-dependent. | Pointer-identity shell; arbitrary longevity/thread transfer. | No conservative trace. Each family must be leaf or hold an exact same-runtime public root; I4B/I10. |
+| `Opaque` | `Arc<dyn Any + Send + Sync>`; payload-dependent. | Pointer-identity shell; arbitrary longevity/thread transfer. | No conservative trace. Each managed family must be traceable or a leaf and passively droppable. A family requiring active cleanup remains an external exact-root owner with explicit retirement; I4B/I10. |
 
 ## Recursive Core Nodes
 
@@ -127,7 +128,7 @@ row is approved for a large-object or multi-run exception.
 | --- | --- | --- | --- |
 | `EvaluationFailure` (`core.rs`) | Emission `Value` or cycle IDs; `Arc<[Value]>` contexts. | Immutable, thread-safe, retained in task/report ledgers. | Visit emission and contexts; ordinary Rust drop initially; I6. |
 | `LazyCell` / `LazySource` (`core.rs`) | Sources include fixpoint, deferred closure, reflection computation, access arguments, application, builtin call, net construction/computation, and function call. Terminal `LazyResult` contains evaluated value or failure. | `source` is replaceable only under its mutex; `result` is one-write and published before source removal. Lock order is result check, source mutex, result recheck; destruction occurs after unlock. | Exact source/result visitor. Initial construction needs no gateway; result publication uses one. Deferred/opaque captures block I5 until I4B. Managed drop required because source/result own Rust resources. |
-| `PromiseCell` (`core.rs`) | One successful `RuntimeValueRoot`; failure; weak/coordinator producer state and subscriptions. | Assignment and producer are one-write. Coordinator mutation admission encloses task-owned publication; resolver publication uses its local path. Notifications occur after guarded publication. | Move the assignment into a traced managed edge rather than preserving its current registered-root representation. Any separated producer/subscription companion is **C** and edge-free. Assignment gateway and managed drop/finalization policy for unresolved producer ownership; I5. |
+| `PromiseCell` (`core.rs`) | One successful `RuntimeValueRoot`; failure; weak/coordinator producer state and subscriptions. | Assignment and producer are one-write. Coordinator mutation admission encloses task-owned publication; resolver publication uses its local path. Notifications occur after guarded publication. | Move the assignment into a traced managed edge rather than preserving its current registered-root representation. Any separated producer/subscription companion is **C** and edge-free. Active abandonment/notification belongs to an external explicitly retired owner; managed `Drop` is passive. Assignment gateway; I5. |
 | `MetadataCarrier` (`core.rs`) | One `Value`. | Immutable after construction. | Visit one edge; no post-construction gateway; I6. |
 | `BuiltinCall`, `Access`, `FunctionCall`, `LazyApplication` (`core.rs`) | Supplied function, arguments, and/or path leaf data. | Immutable `Arc` payloads; thread-safe. | Exact ordered visitors; I6. |
 | `FixpointComputation` (`core.rs`) | Function or object-instance `Value`. | Immutable. | Visit one value; I6. |
@@ -166,7 +167,7 @@ The core specialization fixes `Data = core::Value`,
 | --- | --- | --- |
 | `InteractionNet<CoreSpecialization>` template | Immutable node array; data nodes contain `Value`, operator nodes contain `CoreOperator`. | Exact template visitor; construction-local until published; I8. |
 | `CoreRuntimeNet` authority facade (introduced in I3D.3) | Private core handle; I8 changes its internal identity from the generic external owner to `Gc<CoreRuntimeNetCell>` or the equivalent final managed type. | Every ordinary operation which locks and inspects or mutates semantic contents requires matching `RuntimeValueAccess`; the managed handle does not escape unrooted into durable state. Generic interaction-net topology remains collector-independent. |
-| `CoreRuntimeNetCell` (introduced in I8) | One managed outer allocation owning the semantic mutex, revisions, normalization/subscriber state, and ordinary `RuntimeNet<CoreSpecialization>` containers. | One net mutex is the exclusive graph mutation boundary. No callback or destruction while locked. Exact trace uses `try_lock` under exclusive collection; reviewed internal finalization drops ordinary Rust resources. No per-agent GC allocation. |
+| `CoreRuntimeNetCell` (introduced in I8) | One managed outer allocation owning the semantic mutex, revisions, normalization/subscriber state, and ordinary `RuntimeNet<CoreSpecialization>` containers. | One net mutex is the exclusive graph mutation boundary. No callback or destruction while locked. Exact trace uses `try_lock` under exclusive collection; passive managed destruction drops only ordinary Rust resources. No per-agent GC allocation. |
 | Generic `SharedRuntimeNetInner` / `SharedRuntimeNetState` | External owner retained for generic/non-core specializations and tests after the I8A owner seam. | Shares topology and synchronization behavior without depending on `glam_gc`; it is not the production core-net owner after I8B. |
 | `RuntimeNet`, `RuntimeEntry`, `RuntimeNode` | Data/operator values, ports, active-pair and cursor state. | Free mutation only under the owning net mutex and core authority facade. Every value-installing rewrite requires the I8 mutation gateway. The exact visitor uses `try_lock` under exclusive collection; contention is an invariant defect because no ordinary scoped accessor can coexist. |
 | `CopyState`, `CursorClaim`, `PreparedCopySource`, `FrontierObservation` | Source-net references and cursor topology, abstracted from the generic external owner in I8A. | Production core source references become exact managed outer-cell edges in I8B. Copy topology remains hierarchical, while value-level paths may form collectible cycles through any net. |
@@ -220,11 +221,28 @@ inventory.
 | `ConstructionPort` (`eval/builtins/net/construction.rs`) | Brand and port ID only. | Approved leaf token. |
 | `TaskHandleCell` (`reflection/requests.rs`) | Runtime ID, task handle, query handle; no raw core value. Handles reach coordinator/store obligations, not a managed pointer. | Approved external capability; re-audit in I9. |
 | `CompilationOrigin` (`diagnostic.rs`) | **Contains raw `core::Value`.** | **D:** replace with exact same-runtime public root or non-value provenance before I4B/G2. |
-| Arbitrary host `OpaqueValue::new<T>` | Unknown by type erasure. | Public construction must remain restricted. Production families need a sealed registration declaring leaf or exact public-root fields; I4B/I10. |
+| Arbitrary host `OpaqueValue::new<T>` | Unknown by type erasure. | Public construction must remain restricted. A production managed family needs sealed exact tracing or leaf registration and passive transitive destruction. A family with active cleanup remains an external rooted owner with explicit retirement; I4B/I10. |
 
 An opaque value may not contain `Gc<T>`, an unrooted recursive core value, or a
 root belonging to another runtime. The collector will not inspect `Any` or a
 closure environment for hidden pointers.
+
+## Managed Destruction and External Retirement
+
+- A production managed `Drop` receives no runtime, value-domain, heap,
+  evaluator, scheduler, diagnostic, or event capability. This applies through
+  fields as well as direct `Drop` implementations: releasing the last `Arc`
+  from a managed payload must not invoke active runtime behavior indirectly.
+- Managed destruction may release ordinary Rust resources only. It must not
+  observe or preserve any `Gc` edge held by the dying representation.
+- State requiring cancellation, abandonment, notification, logging, or other
+  active cleanup remains in an external owner holding exact public roots. That
+  owner exposes an explicit, idempotent retirement operation while the runtime
+  is live; its eventual `Drop` is passive.
+- The generic collector may mechanically support a destructor that
+  independently owns a `Heap`, but no Glam production managed family may carry
+  that authority. Any proposed exception blocks Gate G2 pending a dedicated
+  design review and ledger update.
 
 ## Synchronization and Managed-Edge Ledger
 

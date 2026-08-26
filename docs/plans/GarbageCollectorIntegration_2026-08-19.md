@@ -1260,28 +1260,35 @@ Verification: `opaque_family_inventory_is_reconciled`,
 `opaque_registration_rejects_foreign_root`. Production remains `NoAuto`; no
 destructor authority is selected yet.
 
-### Phase I10C — Scoped Opaque Access and Finalization Authority
+### Phase I10C — Passive Managed Destruction and External Retirement
 
-- Resolve GCI-011 before implementation, selecting a finalizer-safe weak domain
-  capability or narrowly scoped TLS bridge without a managed
-  `payload -> domain -> heap` ownership cycle.
-- Put collector-owned drop-bearing payloads in typed runs with erased `Drop`.
-  Destruction runs outside collector locks during `Finalizing` with the
-  collector-installed mutator, but cannot root or observe the allocation whose
-  `Drop` is running. A fresh equivalent is a new identity, not resurrection.
-- Destruction timing and ordering remain outside Glam evaluation semantics.
-  The scoped authority may allocate, evaluate, schedule work, and emit
-  diagnostics subject to the same no-resurrection and ownership rules.
+- Give managed `Drop` no Glam runtime, value-domain, heap, evaluator,
+  scheduler, diagnostic, or event capability. The collector-held mutator
+  during `Finalizing` is collector coordination state; it is neither passed to
+  destructors nor exposed through an ambient/TLS accessor.
+- Require every production managed payload, including the transitive `Drop`
+  behavior of its fields, to release only ordinary Rust resources. A managed
+  `Drop` must not evaluate, allocate managed values, schedule work, publish
+  diagnostics/events, or inspect or preserve any `Gc` edge held by the dying
+  representation.
+- Keep resources that require active cleanup in an external/rooted lifecycle
+  record. Its owner performs an explicit, idempotent retirement operation
+  while the runtime is live; the record's eventual Rust `Drop` remains
+  passive. Not every rooted runtime element needs a managed representation.
 - Replace `OpaqueValue::downcast<T>() -> Option<Arc<T>>` for collector-owned
-  payloads with a scoped mutator-bound borrow. Explicitly external companions
-  may retain ordinary Rust ownership only when they contain no managed edge
-  and do not require collector finalization.
+  payloads with a scoped mutator-bound borrow for live access only. Explicitly
+  external companions may retain ordinary Rust ownership and public roots,
+  but are not finalized as managed graph nodes.
+- Treat any future production managed destructor that appears to need runtime
+  or heap authority as a new design-review gate. Do not introduce a weak-domain
+  capability or TLS bridge as a local exception.
 
-Verification: `opaque_drop_runs_with_scoped_runtime_authority`,
-`opaque_drop_during_domain_teardown_fails_harmlessly`,
-`opaque_drop_can_publish_diagnostics_tasks_and_fresh_identity`, and
-`opaque_drop_panic_retries_untouched_suffix`. Use an isolated closed
-runtime/opaque fixture; production remains `NoAuto`.
+Verification: `managed_drop_has_no_runtime_or_heap_capability`,
+`managed_drop_releases_transitive_rust_resources_passively`,
+`external_root_owner_retires_before_passive_drop`,
+`managed_drop_during_domain_teardown_is_passive`, and
+`opaque_drop_panic_retries_untouched_suffix`. Use isolated managed-payload and
+external-owner fixtures; production remains `NoAuto`.
 
 ### Phase I10D — Final Closure/Opaque Containment Audit
 
@@ -1306,8 +1313,8 @@ fixtures, and the focused collector finalization suite. Production remains
   persistent collections, nets, and runtime owners.
 - Audit every unsafe trace/downcast/mutation gateway and the I3 region/lock
   boundaries. Preserve GCI-007's resolved exact-edge chronology, GCI-008's
-  scoped locked-net trace, and GCI-009's isolated-fixture chronology; resolve
-  GCI-011 before certification.
+  scoped locked-net trace, GCI-009's isolated-fixture chronology, and
+  GCI-011's passive managed-destruction boundary.
 - Repeat every isolated family reclamation fixture while production remains
   `NoAuto`.
 
@@ -1335,18 +1342,18 @@ explicit controlled calls.
 
 - Force collection before, during, and after worker activity using deterministic
   barriers, then add the aggressive debug request-before-outer-entry mode.
-- Finalize opaque payloads while logger supervision and workers are active.
-  Pump destructor-produced diagnostics/tasks before reporting quiescence, and
-  preserve a freshly published equivalent independently of the dead identity.
-- Request collection from finalizer work and prove coalescing avoids recursive
-  collection or an immediate second pass. Let a finalizer wait for another
-  runtime worker while a request is concurrent, proving a heuristic request
-  does not deny that worker entry.
+- Finalize passive opaque payloads while logger supervision and workers are
+  active. Prove finalization produces no diagnostics, events, tasks, managed
+  allocations, or other runtime work.
+- Issue collection requests from external runtime work while finalization is
+  active and prove coalescing avoids recursive collection or an immediate
+  second pass. Worker entry into the same heap remains governed by ordinary
+  admission and does not depend on destructor callbacks.
 - Exercise runtime drop before and after collection.
 
 Verification: `collection_interleaves_with_worker_quantum_without_lost_work`,
-`finalizer_work_coalesces_collection_request`, and
-`finalizer_waits_on_other_runtime_without_request_deadlock`, followed by
+`passive_finalization_produces_no_runtime_work`, and
+`external_request_during_finalization_is_coalesced`, followed by
 repeated worker stress, focused Miri, and sanitizer runs. The production heap
 remains `NoAuto`; only explicit tests/maintenance collect.
 
@@ -1382,8 +1389,8 @@ focused Miri, supported sanitizers, and a dated Gate G3 review. The heap remains
   claims and individual slot allocations remain outside shared pressure
   accounting.
 - Count queued and running finalizers as runtime operational activity. A
-  readiness probe must pump consequences of finalizer diagnostics, event
-  output, and newly launched tasks before returning a stable report.
+  readiness probe waits for passive finalization to complete; there is no
+  destructor-produced diagnostic, event, or task work to pump.
 - Do not begin a requested collection while the heap is in `Finalizing`.
   Requests made before successful completion are heuristic hints coalesced into
   the active collection and are cleared with its pressure baseline; they do not

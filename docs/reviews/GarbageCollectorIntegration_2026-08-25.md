@@ -772,8 +772,8 @@ unsafe or scheduler boundaries.
   construction;
 - **I9:** runtime caches; coordinator/evaluation; reflection store;
   diagnostics/events; assembly/compiler/CLI; final source inventory;
-- **I10:** deferred closures; opaque registration; scoped opaque access and
-  finalization; final containment audit; and
+- **I10:** deferred closures; opaque registration; passive managed destruction
+  and external retirement; final containment audit; and
 - **I11:** Gate G2 audit; controlled forced collection; concurrency/finalizer
   schedules; Gate G3 certification.
 
@@ -797,9 +797,10 @@ functions, metadata, failures, and reflection/net-construction payloads.
 Runtime integration is divided into cache, coordinator/evaluation, reflection
 store, diagnostics/events, assembly/compiler/CLI, and final inventory
 checkpoints in I9. I10 separates deferred closures, opaque registration,
-scoped finalizable access, and the final containment audit. I11 now begins with
-Gate G2 certification, then controlled production collection, deterministic
-worker/finalizer schedules, and Gate G3 certification.
+passive managed destruction/external retirement, and the final containment
+audit. I11 now begins with Gate G2 certification, then controlled production
+collection, deterministic worker/finalizer schedules, and Gate G3
+certification.
 
 Each checkpoint identifies its representation or authority boundary,
 verification fixtures, and permitted collection mode. Production remains
@@ -812,27 +813,33 @@ automatic collection. No implementation change was required for this finding.
 **Classification:** lifecycle and ownership authority gap  
 **Priority:** high  
 **Confidence:** medium-high  
-**Status:** open
+**Status:** resolved in plan 2026-08-26
 
-I10 permits managed opaque destructors to allocate, evaluate, schedule work,
-and emit diagnostics while the collector has installed its finalizer mutator.
-The collector intentionally does not expose a globally discoverable “current
-mutator,” and arbitrary `Drop` receives no Glam runtime context. Giving a
-managed opaque allocation a strong factory or runtime-domain owner would form
-the heap ownership cycle which I1 is intended to prevent.
+The reviewed I10 formerly permitted managed opaque destructors to allocate,
+evaluate, schedule work, and emit diagnostics while the collector held its
+finalizer mutator. The collector intentionally does not expose a globally
+discoverable “current mutator,” and arbitrary `Drop` receives no Glam runtime
+context. Giving a managed opaque allocation a strong factory or runtime-domain
+owner would form the heap ownership cycle which I1 is intended to prevent.
 
-**Recommended resolution:** add an I10 design checkpoint. Select either:
+**Resolution:** production managed destruction is passive. It receives no Glam
+runtime, value-domain, heap, evaluator, scheduler, diagnostic, or event
+capability, whether directly or through a TLS bridge. The rule includes
+transitive field destruction: dropping the last ordinary Rust owner from a
+managed payload must not trigger active runtime behavior indirectly.
 
-- a weak `RuntimeValueDomain`/`RuntimeSharedResources` capability stored in the
-  managed payload and upgraded only during ordinary finalization; or
-- a narrowly scoped Glam TLS bridge installed alongside the collector's
-  finalizer mutator.
+Resources which require cancellation, abandonment, notification, logging, or
+other active cleanup remain external/rooted lifecycle records. Their owner
+performs an explicit, idempotent retirement operation while the runtime is
+live, and their eventual Rust `Drop` remains passive. Not every rooted runtime
+element therefore needs a managed representation.
 
-The capability must fail harmlessly during last-owner terminal teardown, must
-not make a managed allocation own its heap, and must not permit rooting or
-observing the allocation whose `Drop` is already running. Tests must cover
-ordinary finalization, domain teardown, diagnostics/tasks emitted by a
-destructor, and a destructor panic with untouched work retried later.
+The generic collector retains its mechanical ability to run a destructor that
+independently owns a `Heap`; that collector-only fixture does not authorize the
+same ownership in Glam's managed graph. I10C records the passive boundary and
+I11C verifies that finalization produces no diagnostics, events, tasks, or
+managed allocations. Any future exception requires a dedicated design review
+rather than a local weak-domain or TLS-capability workaround.
 
 ## Recommended Resolution Order
 
@@ -869,7 +876,9 @@ Before Gate G2 and production forced collection:
    exact locked-trace protocol;
 10. **Finding GCI-009, resolved:** preserve the I5-I10 isolated-fixture and
     production-`NoAuto` verification boundary;
-11. **Finding GCI-011:** resolve finalizer runtime authority.
+11. **Finding GCI-011, resolved:** preserve passive managed destruction,
+    explicit external retirement, and the design-review gate for any proposed
+    exception.
 
 ## Review Decision
 
