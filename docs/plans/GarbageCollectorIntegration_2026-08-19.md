@@ -89,9 +89,22 @@ Phase I2 decides whether `RuntimeValueRoot` is simply the collector's direct
 managed root or a Glam-owned wrapper which keeps eligible scalars inline and
 uses that same direct root for managed values. The collector does not accept an
 alternate inline root cell or generalized registry payload merely to optimize
-the public representation. A wrapper may retain a runtime ID for diagnostics
-or API compatibility, but live heap identity is the authoritative provenance
-for managed access.
+the public representation. A wrapper may privately retain a runtime ID during
+migration for diagnostics or boundary enforcement, but live heap identity is
+the authoritative provenance for managed access and neither identity is
+publicly observable from the value handle.
+
+Regardless of that representation choice, the public wrapper is an opaque
+transport handle on its own. It supports cloning, dropping, and same-runtime
+thread transfer, but no semantic equality, ordering, hashing, kind, extraction,
+formatting of contents, or public runtime-identity observation. Those
+operations require live matching runtime authority and may fail when the
+domain is inaccessible or provenance does not match. This constrains authority,
+not Rust call direction: an API may accept the value on a runtime service,
+accept a scoped service or mutator on a value method, or support both ergonomic
+forms. Clients which need a map key first obtain or compute ordinary host data
+through an authorized operation; internal root identity is not exposed as a
+substitute key.
 
 This provisional shape is not the compact tagged-word transition. That work is
 isolated in
@@ -154,7 +167,8 @@ verification rather than integration-ledger fields.
 
 Add tests which latch current semantics before changing representation:
 
-- public value clone, equality, and cross-runtime rejection;
+- public value cloning, the current compatibility-equality baseline which I2
+  deliberately removes, and cross-runtime rejection;
 - fulfilled and unfulfilled lazy/promise behavior;
 - lazy, promise, metadata, function, collection, and net cycles;
 - value transfer between workers in one runtime;
@@ -328,26 +342,39 @@ and the collector's existing mismatched-`Root::get` invariant test. Only the
 isolated prototype heap may collect; production remains `NoAuto` and retains
 its compatibility `RuntimeValueRoot`.
 
-### Phase I2B — Inert Observation, Equality, and Extraction
+### Phase I2B — Opaque Handles and Runtime-Mediated Observation
 
-- Resolve GCI-002's post-domain behavior for equality, debug/kind, and borrowed
-  extraction. Preserve current structural equality while the domain lives;
-  root-pointer identity is not semantic equality and debug remains
-  non-forcing.
-- Review reference-returning public extractors. Managed borrows must be tied to
-  a live matching mutator/access scope, while owned extraction results may
-  outlive it. Do not manufacture a hidden domain lease merely to preserve an
-  old borrowed-return signature.
-- Keep `api::Value` freely cloneable and `Send + Sync` when its contents are,
-  and preserve `EvaluatedValue` as the sole WHNF witness rather than a second
-  root model.
+- Apply GCI-002's resolved public contract. Bare `api::Value` and
+  `EvaluatedValue` expose only transport behavior: clone, drop, and `Send` plus
+  `Sync` when their representation permits it. Remove public `PartialEq`, `Eq`,
+  `PartialOrd`, `Ord`, and `Hash`; do not expose either root-cell or allocation
+  identity as a replacement relation.
+- Require live matching runtime authority for structural equality, kind
+  inspection, extraction, and value rendering. Prototype both natural Rust
+  call directions where useful: a runtime service receiving a value and a
+  value or `EvaluatedValue` method receiving a scoped service/mutator. The
+  authority and failure behavior must be identical; method placement is an
+  ergonomic choice. Runtime provenance checks remain private boundary
+  enforcement. If `Debug` remains available on a handle, it is content-free
+  and reveals no kind, provenance, runtime liveness, or managed identity.
+- Preserve `EvaluatedValue` as the sole WHNF witness rather than a second root
+  model, but do not treat that witness as independent authority to inspect its
+  value. Runtime-mediated extractors return owned host values which may outlive
+  the domain; no managed borrow escapes its matching mutator/access scope and
+  no hidden domain lease is manufactured to preserve an old signature.
+- Document that clients needing dictionary/set keys must first obtain or
+  compute an ordinary host key through the runtime. A public value handle is
+  deliberately unsuitable as a key.
 
-Verification: `prototype_values_preserve_live_structural_equality`,
-`prototype_value_debug_and_kind_are_non_forcing`,
-`prototype_borrowed_access_requires_live_domain`, and
-`prototype_owned_extraction_outlives_domain` cover the selected live/inert
-semantics. Only isolated prototype fixtures may collect; production remains
-`NoAuto`.
+Verification: compile-time API fixtures establish that public value types do
+not satisfy equality, ordering, or hash bounds;
+`prototype_runtime_compares_live_structural_values` covers equal, unequal,
+cloned, and independently constructed values;
+`prototype_value_debug_is_opaque` checks the optional content-free debug form;
+`prototype_runtime_observation_rejects_foreign_or_inaccessible_value` covers
+the fallible boundary; and `prototype_owned_extraction_outlives_domain`
+proves the owned-result rule. Only isolated prototype fixtures may collect;
+production remains `NoAuto`.
 
 ### Phase I2C — Scoped-Access and Production-Switch Inventory
 
@@ -553,10 +580,18 @@ and `net_value_adapter_cycle_marks_exactly`. Production remains `NoAuto`.
 - Replace direct `as_core` escapes with scoped access and eliminate
   ownership-taking `into_core` paths which could let an unrooted managed
   pointer escape its region.
+- Remove the compatibility facade's direct equality, ordering, hashing, kind,
+  extraction, runtime-identity, and content-rendering observations. Route each
+  retained semantic operation through the runtime authority selected in I2B,
+  using whichever call direction that checkpoint found clearest;
+  keep `EvaluatedValue` as an opaque WHNF witness and return only owned host
+  data from extraction.
 - Update each affected stable family/root record in the same checkpoint.
 
 Verification: promote every `prototype_*` I2 fixture to its production
-`public_value_*` counterpart and rerun the existing public value/factory suite.
+`public_value_*` counterpart, including the compile-time no-equality/no-hash
+checks, and rerun the existing public value/factory suite after migrating it to
+runtime-mediated observation.
 `public_value_switch_inventory_has_no_compatibility_escape` closes the access
 inventory. Production remains `NoAuto`; the switch does not authorize
 whole-graph collection while I5-I10 families remain unclassified.
@@ -995,8 +1030,9 @@ semantics.
 - Every production managed edge is exact or deliberately conservative.
 - Every opaque payload is audited to contain no managed edge or only ordinary
   runtime/public roots; no bare collector pointer crosses that boundary.
-- Public `Value` is a real runtime-local external root and remains convenient
-  to clone and share.
+- Public `Value` is a real runtime-local external root, remains convenient to
+  clone and share, and is semantically opaque without a live matching runtime
+  service.
 - Workers access managed pointers only within bounded mutator regions.
 - Every managed representation fits one slot in the documented fixed-size
   typed-run geometry; there is no hidden large-object or multi-run fallback.

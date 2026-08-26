@@ -40,8 +40,8 @@ The main corrections are:
 
 1. provide a real manual/non-automatic collector policy before production
    allocations begin;
-2. resolve the contradiction between weak inert roots and infallible public
-   structural equality;
+2. preserve the resolved boundary between opaque public value handles and
+   runtime-mediated observation;
 3. establish an explicit `RuntimeValueDomain` owner matrix;
 4. add one narrow, fallible heap-provenance check for roots;
 5. stop treating private, discovery-order collector identifiers as durable
@@ -98,10 +98,10 @@ queued/running finalization snapshots.
 
 ### GCI-002 — Weak inert roots conflict with public `Value` equality and observation
 
-**Classification:** unresolved public semantic contract  
+**Classification:** public semantic contract
 **Priority:** high  
 **Confidence:** high  
-**Status:** open
+**Status:** resolved 2026-08-26
 
 The selected collector root is weak with respect to the heap. It remains
 cloneable and droppable after heap teardown but cannot be read
@@ -122,24 +122,49 @@ The same lifecycle question applies to every infallible observer and to
 borrowed extractors on `EvaluatedValue`, not just formatting.
 
 **Recommended resolution:** keep a Glam-owned public wrapper rather than
-exposing `glam_gc::Root` directly. Resolve I2 around the following default:
+exposing `glam_gc::Root` directly, but make that wrapper an opaque transport
+handle. Resolve I2 around the following contract:
 
 - roots remain weak and do not preserve the value domain;
-- live structural comparison is an evaluator/value operation which may fail;
-- public `Value` no longer promises infallible structural `PartialEq`/`Eq` for
-  an inaccessible domain;
-- non-forcing debug may cache the stable outer kind in the wrapper, or may
-  render an explicit inaccessible state; and
-- borrowed managed data never escapes its matching access region, while owned
-  extraction results may.
+- bare `Value` and `EvaluatedValue` support transport operations such as
+  cloning, dropping, and same-runtime thread transfer, but expose no semantic
+  equality, ordering, hashing, kind, contents, or runtime identity;
+- consequently public values do not implement `PartialEq`, `Eq`, `PartialOrd`,
+  `Ord`, or `Hash`, and clients cannot use the handles themselves as semantic
+  lookup keys;
+- any retained `Debug` implementation is deliberately opaque and reveals no
+  kind, contents, provenance, or accessibility state;
+- structural comparison, kind inspection, extraction, and value rendering are
+  fallible operations authorized by a live matching runtime service rather
+  than observations a handle can perform by itself. The Rust API may pass the
+  value to that service, pass a scoped service/mutator to a value method, or
+  offer both forms when useful;
+- runtime provenance validation remains private boundary enforcement, not a
+  public observation; and
+- runtime-mediated extraction returns owned host data which may outlive the
+  value domain. Managed borrows do not escape their matching access region.
 
 Retaining the heap from every public `Value` would preserve current equality,
 but contradicts the chosen value-domain teardown model and is not recommended.
 
-**Required verification:** exercise live equal and unequal values, cloned root
-identity, separately constructed structurally equal values, debug/kind,
-borrowed extraction, and every selected behavior after dropping the final
+**Required verification:** use compile-time API checks to establish that
+public values have no equality, ordering, or hash contract; exercise
+runtime-mediated comparison of live equal, unequal, cloned, and separately
+constructed structurally equal values; verify that opaque debug cannot reveal
+value state; cover matching-runtime and foreign/inaccessible-domain
+observation failures; and prove owned extraction results outlive the final
 authorized value-domain owner.
+
+**Resolution:** public values are opaque handles outside a runtime service.
+They remain convenient to clone, drop, and transfer, but cannot themselves be
+observed or used as lookup keys. `EvaluatedValue` remains the WHNF witness, not
+an observation capability: semantic equality, kind, scalar/binary extraction,
+and rendering all require live matching runtime authority, regardless of which
+side owns the ergonomic Rust method. Internal root identity is not exposed as
+a substitute equality relation. The existing compatibility representation
+remains unchanged until the isolated I2 prototype fixes the new facade and I4F
+performs the production switch; those checkpoints now own removal of the
+unauthorized direct observation traits and methods.
 
 ### GCI-003 — The authorized value-domain owner matrix is not concrete
 
@@ -402,8 +427,8 @@ unsafe or scheduler boundaries.
 
 - **I1:** collection policy/dependency; value-domain topology; factory and
   scoped allocation; layout/ledger reconciliation; lifecycle regression;
-- **I2:** public wrapper/provenance; inert observation/equality; prototype and
-  production-switch inventory;
+- **I2:** public wrapper/provenance; opaque handles and runtime-mediated
+  observation; prototype and production-switch inventory;
 - **I4:** value shell/leaves; argument/failure structures; persistent
   adapters; net adapter; public-root switch;
 - **I6:** functions/applications/fixpoints; metadata; failures/reflection/net
@@ -420,7 +445,7 @@ and collection mode permitted at its end.
 
 **Resolution:** the integration plan now partitions every identified oversized
 phase. I1 separates policy, domain topology, scoped allocation, layout/ledger,
-and lifecycle work; I2 separates provenance, inert observation/equality, and
+and lifecycle work; I2 separates provenance, opaque-handle observation, and
 the production-switch inventory; I3 has six authority/boundary checkpoints;
 I4 separates shell/leaves, closure containment, argument/failure structures,
 persistent adapters, net adapters, and the public-root switch; and I6 separates
@@ -480,7 +505,7 @@ Before implementing the remaining I1 ownership checkpoints:
 
 Before the public-root prototype or production switch:
 
-5. resolve GCI-002's inert-value and equality semantics;
+5. preserve GCI-002's completed opaque-value and runtime-observation contract;
 6. resolve GCI-004's fallible provenance operation; and
 7. partition I2 around those decisions.
 
