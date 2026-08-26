@@ -929,6 +929,25 @@ From I4 onward, every representation change in I5-I10 updates its exact visitor
 or root classification in the same checkpoint. Collection being disabled is
 never permission to carry an incomplete unsafe `Trace` implementation.
 
+### I5-I10 Verification Boundary
+
+- The complete production runtime remains `CollectionPolicy::NoAuto`, and no
+  explicit full collection runs over it during I5-I10. Production tests in
+  these phases verify semantic behavior, exact visitor/root construction,
+  mutation-gateway placement, owner retirement, and ordinary drop behavior
+  without reclaiming the whole graph.
+- A phase may force collection only in a fresh isolated collector-ready fixture
+  whose complete reachable graph is closed over the family under test and
+  already certified prerequisite families. The fixture must not borrow a
+  production runtime, production cache, global root registry, or another
+  still-unclassified graph surface.
+- Each isolated fixture first proves rooted survival, then removes the final
+  root and proves reclamation. This is family-level trace evidence, not
+  certification that the complete runtime graph is collectible.
+- I11A repeats every isolated fixture while reconciling Gate G2. I11B owns the
+  first forced full collections over an actual production runtime and repeats
+  the I5-I10 reclamation cases through that boundary.
+
 ## Phase I5 — Lazies and Promises
 
 Migrate the principal cyclic identities first:
@@ -977,7 +996,8 @@ production runtime still does not collect.
 Verification: `managed_function_stage_cycle_reclaims`,
 `managed_partial_application_cycle_reclaims`, and
 `managed_fixpoint_cycle_reclaims`; existing shared-stage and recursive-function
-tests retain identity behavior. Production remains `NoAuto`.
+tests retain identity behavior. Reclamation tests use closed isolated family
+fixtures; production remains `NoAuto` and does not collect.
 
 ### Phase I6B — Metadata Identity
 
@@ -988,8 +1008,8 @@ tests retain identity behavior. Production remains `NoAuto`.
 
 Verification: `metadata_and_collections_can_participate_in_a_deferred_value_cycle`,
 the metadata update reorder/copy tests, and
-`managed_metadata_cycle_reclaims_in_isolated_heap`. Production remains
-`NoAuto`.
+`managed_metadata_cycle_reclaims_in_isolated_heap`. Only the named closed
+fixture collects; production remains `NoAuto`.
 
 ### Phase I6C — Failures and Context Frames
 
@@ -999,7 +1019,8 @@ the metadata update reorder/copy tests, and
 
 Verification: `managed_failure_context_cycle_reclaims`, the existing
 structured-failure suite, and `failure_trace_invokes_no_semantic_service`.
-Production remains `NoAuto`.
+The reclamation case uses a closed isolated family fixture; production remains
+`NoAuto` and does not collect.
 
 ### Phase I6D — Reflection and Net-Construction Payloads
 
@@ -1021,9 +1042,11 @@ collection.
   list thunks, concatenation nodes, and shared slices against the concrete
   representation inventory. A missing node is a soundness defect, not work
   intentionally deferred from I4.
-- In an isolated collector-ready fixture, verify a public persistent collection
-  retains all contained managed objects across full collection and dropping its
-  final external root permits a backedge cycle to be reclaimed.
+- In an isolated collector-ready fixture, construct the same persistent
+  representation exposed through the public value facade. Verify it retains
+  all contained managed objects across full collection and that dropping its
+  final fixture root permits a backedge cycle to be reclaimed. Do not run this
+  collection through a production runtime or its public-root registry.
 - Measure duplicate trace work for heavily shared versions and record a
   threshold for revisiting collector-aware physical nodes.
 
@@ -1126,8 +1149,9 @@ cases after Gate G2 closes the entire graph.
 
 Verification: existing cache initialization/race tests,
 `compiler_cache_does_not_form_a_value_domain_cycle`, and
-`runtime_cache_roots_release_after_last_domain_owner`. Production remains
-`NoAuto`.
+`runtime_cache_roots_release_after_last_domain_owner`. Production tests observe
+root/owner retirement without collecting. Any reclamation assertion uses a
+closed isolated cache fixture; production remains `NoAuto`.
 
 ### Phase I9B — Coordinator and Evaluation Ownership
 
@@ -1152,8 +1176,9 @@ closed coordinator fixtures for reclamation; production remains `NoAuto`.
 
 Verification: existing persistent-snapshot/query-retirement/volume-revoke
 tests plus `reflection_store_roots_survive_owner_close` and
-`reflection_snapshot_roots_release_after_snapshot_drop`. Production remains
-`NoAuto`.
+`reflection_snapshot_roots_release_after_snapshot_drop`. Production tests
+observe root and snapshot retirement with collection disabled. Any reclamation
+assertion uses a closed isolated store fixture; production remains `NoAuto`.
 
 ### Phase I9D — Diagnostics and Runtime Events
 
@@ -1178,7 +1203,9 @@ isolated transport fixtures may collect; production remains `NoAuto`.
 
 Verification: existing module build/import, macro protocol, configured CLI,
 and logger supervision suites plus
-`assembly_compiler_and_cli_roots_release_after_last_owner`. Production remains
+`assembly_compiler_and_cli_roots_release_after_last_owner`. This checkpoint
+proves production owner retirement without collection; a closed subsystem
+fixture may prove local reclamation where practical. Production remains
 `NoAuto`.
 
 ### Phase I9F — Runtime-Root Source Inventory
@@ -1278,8 +1305,9 @@ fixtures, and the focused collector finalization suite. Production remains
   records for values, traces, roots, closures, opaque families, caches,
   persistent collections, nets, and runtime owners.
 - Audit every unsafe trace/downcast/mutation gateway and the I3 region/lock
-  boundaries. Preserve GCI-007's resolved exact-edge chronology and resolve
-  GCI-008, GCI-009, and GCI-011 before certification.
+  boundaries. Preserve GCI-007's resolved exact-edge chronology, GCI-008's
+  scoped locked-net trace, and GCI-009's isolated-fixture chronology; resolve
+  GCI-011 before certification.
 - Repeat every isolated family reclamation fixture while production remains
   `NoAuto`.
 

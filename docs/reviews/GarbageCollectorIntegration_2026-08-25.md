@@ -722,7 +722,7 @@ cross-net references atomically with exact tracing and root discipline.
 **Classification:** verification chronology defect  
 **Priority:** high  
 **Confidence:** high  
-**Status:** open
+**Status:** resolved in plan 2026-08-26
 
 Gate G2 does not pass until closure, opaque, cache, collection, net, and
 runtime-root inventories are closed through I10. Nevertheless, I7 asks a
@@ -734,12 +734,19 @@ either point could traverse still-unclassified graph families.
 I5 already uses the correct distinction: collector-ready isolated fixtures may
 force reclamation, while the complete production graph does not collect.
 
-**Recommended resolution:** apply the same distinction throughout I5–I10.
-Each phase may use an isolated, closed fixture to prove its own trace and
-reclamation behavior. Production tests during those phases latch ownership,
-trace construction, and drop behavior with collection disabled. I11 owns the
-first forced full collection over an actual complete runtime and repeats each
-family's reclamation case there.
+**Resolution:** the integration plan now establishes one authoritative I5-I10
+verification boundary. Each family may force collection only in a fresh,
+closed collector-ready fixture containing that family and already certified
+prerequisites. Production tests latch semantics, visitor/root construction,
+mutation gateways, owner retirement, and ordinary drop behavior while the
+production heap remains `NoAuto`; they do not explicitly collect it.
+
+I7 now distinguishes a public-shape persistent representation in an isolated
+heap from an actual production public-root graph. I9 owner-release checks
+observe retirement without production reclamation and use isolated subsystem
+fixtures only where local collection adds evidence. I11A repeats all isolated
+cases while certifying Gate G2, and I11B owns the first forced collections over
+an actual complete production runtime.
 
 ### GCI-010 — Later integration phases are too large for safe verification
 
@@ -860,7 +867,8 @@ Before Gate G2 and production forced collection:
 
 9. **Finding GCI-008, resolved:** preserve the scoped core-net authority and
    exact locked-trace protocol;
-10. **Finding GCI-009:** defer whole-runtime reclamation checks as required;
+10. **Finding GCI-009, resolved:** preserve the I5-I10 isolated-fixture and
+    production-`NoAuto` verification boundary;
 11. **Finding GCI-011:** resolve finalizer runtime authority.
 
 ## Review Decision
