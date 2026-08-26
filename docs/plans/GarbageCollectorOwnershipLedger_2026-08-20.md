@@ -24,8 +24,10 @@ blocking defects rather than conservative roots.
   `Gc`, `Root`, public `Value`, or equivalent hidden managed edge. It is not an
   external root owner and cannot keep the managed node or its graph alive.
 - **T** — bounded compiler, parser, evaluator, transaction, or callback-local
-  owner. Its lifetime must be enclosed by a mutator region before managed
-  pointers replace its values.
+  owner. Any direct managed borrow in it is enclosed by a mutator region;
+  values retained between evaluator regions or across callbacks are exact
+  same-runtime roots instead. The complete transient owner's lifetime need not
+  equal one continuous mutator lifetime.
 - **E** — external immutable leaf allocation with no managed edge.
 - **D** — boundary defect which must be eliminated or converted to an exact
   same-runtime root before collection.
@@ -129,8 +131,8 @@ row is approved for a large-object or multi-run exception.
 | `MetadataCarrier` (`core.rs`) | One `Value`. | Immutable after construction. | Visit one edge; no post-construction gateway; I6. |
 | `BuiltinCall`, `Access`, `FunctionCall`, `LazyApplication` (`core.rs`) | Supplied function, arguments, and/or path leaf data. | Immutable `Arc` payloads; thread-safe. | Exact ordered visitors; I6. |
 | `FixpointComputation` (`core.rs`) | Function or object-instance `Value`. | Immutable. | Visit one value; I6. |
-| `ReflectionComputation` and gate target (`core.rs`) | Effect and gate target values; installed task result may carry a failure. | Effect/target immutable; task one-write. Cross-thread and may outlive original demand. | Visit values and failure; task-result gateway if the node is managed; I6. |
-| `DeferredComputation` (`core.rs`) | Type-erased `Arc<dyn Fn(&EvalContext) -> ...>` may capture arbitrary raw core values. | Immutable closure, callable across workers. | **D:** cannot be traced. Contain captures behind exact nodes/roots or replace production closures; I4B/I10. |
+| `ReflectionComputation` and gate target (`core.rs`) | Effect and gate target values; installed task result may carry a failure. | Effect/target immutable; reservation/activation/task result are one-write lifecycle transitions. Cross-thread and may outlive original demand. | Visit values and failure; I3D.1 reserves under pure evaluation and activates the launcher after leaving scoped access; task-result gateway if the node is managed; I6. |
+| `DeferredComputation` (`core.rs`) | Type-erased `Arc<dyn Fn(&EvalContext) -> ...>` may capture arbitrary raw core values and currently conflates semantic thunks with host loaders. | Immutable closure, callable across workers. | **D:** cannot be traced or admitted uniformly. I3E.1 splits callback-free semantic thunks from deterministic external demands; I4B/I10 then contain or replace every captured-value closure. |
 | `FunctionCode`, `FunctionValue`, `NetValue` (`core.rs`) | Shared net plus scalar arity/capture state. | Immutable shells, synchronized net interior. | Net visitor in I8; I6. |
 | `CoreOperator` variants (`core_net.rs`) | Supplied values, function code, builtin call, applicable value; keys/path elements are leaves. | Immutable operator payloads stored in mutable nets. | Variant visitor; insertion/replacement gateways at net mutation sites; I8. |
 | `CoreValues`, `RuntimeValueCache`, extension map (`core.rs`) | Cached singleton values and type-erased `Arc<T>` compiler caches such as `GCompilerValues`. | Runtime-long-lived; core set initialized once, extension map replaceable under mutex, harmless duplicate construction permitted. | Exact registered roots or managed runtime cache. Type-erased extensions are **D** until constrained; I9/I10. |
@@ -163,7 +165,8 @@ The core specialization fixes `Data = core::Value`,
 | `SharedRuntimeNetInner` / `SharedRuntimeNetState` | Own mutable `RuntimeNet`, revision/subscriber/normalization state. | One net mutex is the exclusive graph mutation boundary. No callback or destruction while locked. I8 chooses whether the outer allocation is managed or remains synchronized external storage with exact rooted contents. |
 | `RuntimeNet`, `RuntimeEntry`, `RuntimeNode` | Data/operator values, ports, active-pair and cursor state. | Free mutation only under the owning net mutex. Every value-installing rewrite requires the I8 mutation gateway. Exact visitor runs under stopped mutators and the reviewed net-lock protocol. |
 | `CopyState`, `CursorClaim`, `PreparedCopySource`, `FrontierObservation` | `SharedRuntimeNet` source references and cursor topology. | Cross-net references are hierarchical copies, but value-level fixpoints/promises can still make the surrounding value graph cyclic. Visit source net exactly if it becomes managed; I8. |
-| `NormalizationRequest`, `RequestRoot`, `Cursor`, `ActivePair`, `ResumeCursorDependency`, `NetDriverWorklist` (`eval/net.rs`) | Temporary/shared runtime-net handles. | Evaluator/work-quantum owners, movable between workers; T until enclosed by I3 mutator scope. |
+| `NormalizationRequest`, `RequestRoot`, `Cursor`, `ActivePair`, `ResumeCursorDependency`, `NetDriverWorklist` (`eval/net.rs`) | Temporary/shared runtime-net handles. | Poll-orchestration owners; direct graph/value access is T within bounded evaluator scopes. I3D.3 replaces manually paired call/cursor claim transitions with bracketed or lifetime-bound claims which cannot enter parked machine state. |
+| Active-pair/cursor claim guards and dispositions (introduced in I3D.3) | One in-flight claim identity and owned data needed to publish resumed, blocked, stable, failed, or released state. | Private scope-bound T. A claim is consumed before semantic parking; unwind republishes a safe releasable state and disturbance. It is never a registered root or durable machine owner. |
 
 ## Registered Root and Transient Owner Inventory
 
@@ -183,10 +186,10 @@ inventory.
 | Readiness/reporting | `QuiescenceSnapshot`, `QuiescenceReport`, `DeadlockSnapshot`, `RuntimeDeadlockWork`, `EvaluationSessionReport`, `EvaluationUnfinishedTask` | R. Host-visible snapshots may outlive sessions/runtime facade. Failures and store snapshots remain exact roots; I9. |
 | Reflection store/protocol | `State`, `Set`, `Rewrite`, `StoreSnapshot`, `StoreJournal`, `ReflectionStore`, `Scoped`, `HostSnapshot`, `TaskCommit`, `Transaction`, `ReflectionJournal`, `QueryRead` | R. Store roots are persistent public roots; `ReflectionStore` and `StoreSnapshot` also retain an authorized factory/domain lease while they can construct transaction/query values. Journals are transaction-local snapshots/edits; store mutation uses runtime mutation admission then store/event mutex, with wakes/destruction after unlock. I9. |
 | Reflection lifecycle/search | `EffectRun`, `IsolatedTaskHost`, `IsolatedSearchBranch`, `IsolatedSearchBlock`, `IsolatedEffectSearch` | R/T. Runs and isolated search retain public roots while active; same-runtime only. I3/I9. |
-| Reflection machine | `EffectTask`, `ContextualValueEffectTask`, `Branch`, `Deliver`, `Apply`, `CutFrame`, `TaskBlock`, `FixRoot`, `ActiveFix`, `Restore`, `ResetFrame` | T transitioning to exact machine-owned roots. One claimed machine is exclusively mutable outside coordinator locks and may move between workers; any parked value must be rooted. I3/I9. |
+| Reflection machine | `EffectTask`, `ContextualValueEffectTask`, `Branch`, `Deliver`, `Apply`, `CutFrame`, `TaskBlock`, `FixRoot`, `ActiveFix`, `Restore`, `ResetFrame` | T transitioning to exact machine-owned roots. One claimed machine is exclusively mutable outside coordinator locks and may move between workers; any parked value must be rooted. I3D.2 alternates callback-free evaluator scopes and callback-bearing interpreter phases; only roots cross that boundary. I9 audits storage. |
 | Evaluation coordinator | `EvaluationDemandState`, `SettlementObligations`, `TaskOwnedPromiseObligation`, `DeferredLazyCycleMember`, `DeferredWorkRelease`, `RuntimeSettlementRelease`, `SparkDemand`, `EvaluationTaskBlock`, `PromiseProducerObligation`, `LocalPromiseObligation`, `LocalPromiseOwner`, `PendingReflectionTaskInner` | R/T. `EvaluationDemandState` retains an authorized factory/domain lease; the coordinator route back from that domain is weak. Coordinator state owns parked work and registered roots; weak promise cells are non-owning. State changes use mutation admission plus one component mutex; callbacks/drop happen after unlock. I3/I5/I9. |
-| Evaluator machines | `LazyTaskMachine`, `LazyTaskWork`, `PromiseFollower`, `PromiseFollowerState`, annotation builtin state (`AssertUnit`, `MetadataPure`, `MetadataReflection`, `Reflection`, `Seq`, `Spark`, `Context`, `Valid`), net-construction `Data`/`NetConstructionMachine`, pattern `Found` | T. Bounded poll/quantum state, except parked machines owned by coordinator. Explicit mutator propagation in I3; managed edges in I5/I6/I8. |
-| Compiler API | `ModuleLoadArgs`, `CompileContext`, `CompileDiagnosticEmitter`, `ModuleLoader`, `BinaryFileLoader` | T/D. Compile calls are bounded, but raw core values and value-capturing callbacks require mutator scope and capture containment. I3/I4B/I10. |
+| Evaluator machines | `LazyTaskMachine`, `LazyTaskWork`, `PromiseFollower`, `PromiseFollowerState`, annotation builtin state (`AssertUnit`, `MetadataPure`, `MetadataReflection`, `Reflection`, `Seq`, `Spark`, `Context`, `Valid`), net-construction `Data`/`NetConstructionMachine`, pattern `Found` | T. A machine poll is orchestration, not one mutator lifetime. Callback-free evaluator substeps receive scoped access; parked machines own roots only. Managed edges arrive in I5/I6/I8. |
+| Compiler API | `ModuleLoadArgs`, `CompileContext`, `CompileDiagnosticEmitter`, `ModuleLoader`, `BinaryFileLoader` | T/D. Compile calls are bounded. Loader callbacks run outside inherited mutator access and return roots through deterministic external-demand gates; captured raw values still require containment in I4B/I10. |
 | `.g` compiler cache | `BuiltinModule`, `GCompilerValues` | R/D. Runtime extension cache, long-lived and cross-thread; raw core values hidden behind `Any` block collection until converted to exact runtime roots/cache nodes. I9/I10. |
 | `.g` lowering/resolution | `LoweredSource`, `g_syntax::Diagnostic`, `MacroSnapshot`, `MacroJournal`, `MacroRun`, `MacroFailure`, `ModuleLowerer`, `ResolvedNetLowerer`, `ResolvedDoBlock`, `EffectBind`, `ValueBind`, `Then`, `ResolvedBindings` | T. Compilation/macro-run scoped values; mutator scope in I3 and no parking unrooted across evaluation. |
 | `.g` lexical/parser | `LexedSource`, `Lexer`, `DeclarationMacroWork`, `StagedSourceParser`, `ParsedSource`, `InspectedSource`, `ParseSession` | T. Embedded source data and diagnostics are bounded by source compilation, but macro evaluation can suspend; I3. |
@@ -197,8 +200,8 @@ inventory.
 
 | Family | Can capture values? | Boundary decision |
 | --- | --- | --- |
-| `DeferredComputation` | Yes, raw `core::Value` today. | D. Replace/contain in I4B/I10; never conservatively trace a closure environment. |
-| `ModuleLoader`, `BinaryFileLoader`, `CompileDiagnosticEmitter` | Yes; supplied by compiler setup and may capture core/public values. | Compilation-scoped T, but any suspension/caching requires exact same-runtime roots. Audit concrete constructors in I4B. |
+| `DeferredComputation` | Yes, raw `core::Value` today. | D. I3E.1 separates semantic thunks from external demands; replace/contain captures in I4B/I10 and never conservatively trace a closure environment. |
+| `ModuleLoader`, `BinaryFileLoader`, `CompileDiagnosticEmitter` | Yes; supplied by compiler setup and may capture core/public values. | External-demand/interpreter callbacks run without inherited mutator access. Any suspension/caching/capture requires exact same-runtime roots; audit concrete constructors in I4B. |
 | `TaskStatusPublisher` and reflection launch/host closures | Indirectly; status, query, factory, or host state can retain roots. | Keep externally owned captures as registered roots. A host companion associated only with a managed task is instead **C** and may capture no value. I9/I10. |
 | Runtime input converter and output decoder/callback | Yes, arbitrary host state and public values. | External adapter. Authoritative runtime buffers contain `RuntimeValueRoot`; callbacks run after locks and receive retained public roots. I9. |
 | Diagnostic subscribers | Yes, arbitrary host state/public roots. | External root owner; subscriptions use weak bus back-references and callbacks run outside locks. I9/I10. |
@@ -280,7 +283,9 @@ guessing/conservative classification:
 
 1. `CompilationOrigin` hides a raw core value in `OpaqueValue`.
 2. `DeferredComputation` and several type-erased compiler/host closures can
-   capture raw recursive values.
+   capture raw recursive values. I3E.1 first separates callback-free semantic
+   thunks from deterministic external demands; I4B/I10 then reconcile their
+   concrete captures.
 3. `RuntimeValueCache.extensions` hides `GCompilerValues` and future arbitrary
    attachments behind `Any`.
 4. Parser/compiler/macro intermediate structures carry raw core values across

@@ -408,78 +408,359 @@ to a later migration checkpoint. Production collection remains `NoAuto`.
 
 ## Phase I3 — Mutator Regions Across Evaluation and Construction
 
-### Phase I3A — Scoped Authority Carrier
+I3 distinguishes three related but non-interchangeable meanings of purity:
 
-- Resolve GCI-006 by defining one lifetime-bound internal evaluation-quantum
-  carrier which borrows `Mutator<'heap>` and cannot be stored in a parked
-  `EvalContext`, task machine, coordinator record, or public API value.
-- Make the quantum carrier the explicit authority passed to allocation and
-  managed access. A checked TLS convenience may locate an already active
-  same-heap region, but it cannot manufacture authority or permit unguarded
-  dereference.
-- Define the poll/dispatch boundary which reconstructs that carrier around one
-  machine quantum without changing the persistent `EvaluationTaskMachine`
-  representation.
+1. **Semantic purity/reproducibility:** the result is determined by the
+   declared inputs. A securely validated local import or content-addressed
+   remote import qualifies even though obtaining its bytes uses the host.
+2. **Evaluator purity:** the evaluator itself performs no Glam-observable
+   effect. It may reduce a value or suspend on an external producer, including
+   promises, reflection gates, and validated import results, without
+   interpreting that producer inside the pure step. This does not make the
+   producer semantically pure or operationally callback-free.
+3. **Operational callback-freedom:** the current Rust step invokes no host or
+   user callback, performs no blocking semantic wait, and is therefore eligible
+   to run while a scoped mutator is active.
 
-Verification: compile-time non-escape checks plus
-`evaluation_quantum_reuses_recursive_same_heap_entry`,
-`parked_machine_contains_no_mutator_authority`, and
-`different_heap_authority_is_rejected`. Production remains `NoAuto`; no
+Only the third property authorizes one continuous mutator region. A machine
+poll is an orchestration and scheduling quantum which may open several bounded
+callback-free evaluator regions. It does not itself imply that a mutator is
+held for the complete poll.
+
+### Phase I3A.1 — Authority Types and Non-Escape Contract
+
+- Prototype one lifetime-bound managed-access carrier and its
+  evaluation-specific view. The foundational carrier borrows the matching
+  `glam_gc::Mutator`; the evaluation view pairs that authority with a reference
+  to durable task/evaluation context without making the durable context itself
+  lifetime-bound.
+- Separately prototype an ephemeral scheduler-created poll context. The poll
+  context holds the right domain/admission route but no continuously active
+  mutator. A closure/HRTB-style method opens a `RuntimeValueAccess` and thin
+  evaluation scope for one callback-free semantic substep, roots its escaping
+  values, and releases the mutator before returning to poll orchestration.
+- Keep both constructors private. The poll context may create scoped access;
+  durable contexts, individual machines, TLS, and runtime IDs may not. These
+  are two layers of one authority model, not independently creatable
+  capabilities.
+- Derive heap provenance from the admitted mutator/value domain and validate
+  context agreement once when constructing the scoped view.
+- Preserve durable machine state as owned, `Send`, and parkable. A checked TLS
+  convenience may find an already active same-heap region, but it cannot become
+  the safety basis for dereference.
+
+Verification: compile-fail fixtures reject returning or storing the access
+carrier, evaluation view, mutator, allocator, and managed borrow. Trait checks
+prove scoped authority cannot cross threads while durable context remains
+`Send`; `different_heap_authority_is_rejected` covers provenance. A focused
+fixture proves a poll context can open two separate evaluator scopes with a
+callback between them and that no mutator remains active during that callback.
+No production call site changes yet, production remains `NoAuto`, and no
 production representation is collected.
 
-### Phase I3B — Construction and Synchronous Evaluation Regions
+### Phase I3A.2 — Claimed-Work Domain Routing
 
-- Enclose public `Values` construction/composition, evaluator demand, WHNF
-  extraction, and direct isolated evaluation in one outer region per operation.
-- Nested helpers reuse the current same-runtime region and heap-qualified TLS
-  cursor cache rather than entering for every pointer access or allocation.
-- Complete payload and allocation-bit initialization before returning a managed
-  pointer, never at outer-region exit.
+- Make reflection, deferred, client-demand, and spark claims carry or obtain a
+  temporary strong demand-session reference while claimed.
+- Use that session's value domain as the sole heap-admission source. Validate
+  runtime agreement at claim/poll boundaries without storing a new strong
+  domain owner in the coordinator or durable work record.
+- Preserve claim, release, cancellation, task-handle, and owner-session
+  shutdown behavior before adding mutator entry.
 
-Verification: `recursive_construction_reuses_one_mutator`,
+Verification: forced owner-close and cross-session schedules prove a claimed
+poll keeps its existing session resources alive, an unclaimed record does not,
+and a mismatched demand session is rejected before machine execution. Existing
+claim/release and shutdown suites remain semantic regressions. Production
+remains `NoAuto`.
+
+### Phase I3A.3 — Scheduler-Owned Poll Orchestration
+
+- Change `EvaluationTaskMachine::poll` to receive the ephemeral poll context,
+  then mechanically migrate production machines and test fixtures. Pure
+  evaluation machines normally open one bounded evaluator scope; effect
+  machines may alternate several evaluator scopes with interpreter work.
+  Test-only machines which manipulate no values may ignore the context.
+- Construct the poll context only after the coordinator has detached a claim
+  from its locks. Each managed evaluator scope ends before host callbacks,
+  claim release, terminal publication, cancellation/drop hooks, coordinator
+  waits, or parked-machine publication. The poll context itself may remain on
+  the stack between scopes because it contains no active mutator or managed
+  borrow.
+- Route cooperative pumping, executor workers, client demand, and sparks
+  through the same admission helper. A nested same-heap poll reuses recursive
+  collector admission only while a scoped evaluator region is actually
+  active; nested orchestration does not manufacture another authority.
+- Keep the scheduler or synchronous driver responsible for admission;
+  individual machines do not silently enter their heap.
+
+Verification: deterministic barriers observe an active mutator during each
+evaluator substep and no active mutator during interpreter callbacks, release,
+terminal publication, sleep, or machine destruction. A poll containing two
+evaluator substeps around one callback proves entry is scoped rather than
+poll-wide. Add
+`evaluation_scope_reuses_recursive_same_heap_entry`,
+`parked_machine_contains_no_mutator_authority`, and
+`worker_releases_mutator_before_sleep`; retain existing task-order and shutdown
+suites. Production remains `NoAuto`.
+
+### Phase I3A.4 — Evaluator and Poll Outcome Ownership Boundaries
+
+- Inventory every `EvaluationMachinePoll`, task block, exit, and failure field
+  which crosses the scoped region. Convert completed values to
+  `RuntimeValueRoot` or the selected equivalent before leaving the evaluator
+  scope which produced them.
+- For payload families whose managed representation arrives only in I5-I10,
+  record the exact later checkpoint which must update this boundary in the same
+  change that introduces its first managed edge. Such a deferral remains a
+  Gate G2 blocker, not permission to leave an unrooted edge once collection is
+  enabled.
+- Ensure every value crossing from an evaluator scope into poll orchestration
+  is rooted before the mutator is released. Final poll-outcome conversion may
+  then assemble only owned/rooted data, perform no callback, and give
+  coordinator publication no scoped borrow.
+
+Verification: force another thread to request collection both between two
+substeps of one poll and at poll return, proving every already-migrated value
+remains live through callback, release, and publication.
+`evaluation_machine_poll_boundary_inventory_is_complete` covers every variant
+and records each deliberate later migration. Production remains `NoAuto`.
+
+### Phase I3B.1 — Scoped Construction and Core Evaluator Migration
+
+- Introduce the scoped evaluator view selected in I3A.1 and migrate the
+  strongly connected evaluator call graph rooted at `eval_value`. Persistent
+  context remains only in machines and other parked state.
+- Partition the mechanical migration by call-graph seams:
+  evaluator/application/sequence first, followed by ordinary builtins.
+  Reflection and interaction-net entry points remain assigned to their
+  dedicated I3 checkpoints.
+- Enclose public `Values` construction/composition, no-wait evaluator steps,
+  WHNF extraction, and direct isolated steps in bounded access regions. Nested
+  helpers reuse the current same-runtime region and heap-qualified TLS cursor
+  cache rather than entering once per pointer operation.
+- Complete payload initialization and allocation-bit publication before a
+  managed pointer becomes observable, never at outer-region exit. Authorized
+  extraction returns owned host data which can survive mutator exit.
+- Rework callback-free semantic-thunk signatures only where scoped access
+  requires it. Do not adapt host loaders to accept a scoped evaluator merely
+  to preserve the current generic closure type; I3E.1 separates those external
+  demands. Retain I4B/I10 ownership classification for captured values.
+
+Verification: a source inventory accounts for every evaluator function which
+can allocate or inspect managed data. Add
+`recursive_construction_reuses_one_mutator`,
 `composite_construction_preserves_provenance_errors`, and
-`owned_extraction_survives_mutator_exit`. Production remains `NoAuto`;
-isolated closed fixtures may force collection.
+`owned_extraction_survives_mutator_exit`; focused call-graph tests prove nested
+helpers reuse one outer admission. Existing evaluator and builtin suites remain
+behavioral regressions. Production remains `NoAuto`; isolated closed fixtures
+may force collection.
 
-### Phase I3C — Cooperative and Worker Quantum Regions
+### Phase I3B.2 — Poll/Wait Driver Separation
 
-- Wrap exactly one cooperative or worker-owned machine poll/reduction quantum.
-- Release the region before sleeping, waiting for work, publishing host
-  callbacks, or parking a machine in coordinator state.
-- Make every worker collection request observable at a bounded quantum
-  boundary without adding a mutator to scheduler records.
+- Refactor synchronous and patient evaluation so a driver alternates bounded
+  enter/poll/root/exit steps with waits outside managed access. Do not wrap an
+  entire `eval_value` call in one mutator region when it may reach
+  `wait_for_claimed_task` or another blocking coordinator operation.
+- Keep scheduled-machine paths nonblocking: dependencies return `Blocked`, the
+  machine parks after the quantum ends, and another worker may resume it later.
+- Ensure budget exhaustion and nested pumping cannot extend an outer mutator
+  across a wait. Direct isolated evaluation uses the same step driver rather
+  than a separate long-lived authority path.
+
+Verification: injected barriers force busy producers, promises, budget
+exhaustion, and patient waits, asserting zero active mutators while sleeping
+and successful resumption in a later quantum, including on another worker. Add
+`blocked_machine_parks_without_mutator` and retain direct-evaluation result and
+failure regressions. Production remains `NoAuto`.
+
+### Phase I3C.1 — Cooperative, Patient, and Worker Poll Routing
+
+- Route `ClaimedTask`, runtime pumping, patient demand, executor workers,
+  client demand, sparks, direct effect runs, and isolated searches through the
+  I3A.3 poll context. These are consumers of one orchestration carrier, not
+  independent heap-entry policies.
+- Keep coordinator selection/release, settlement, delivery activity, and
+  condition-variable waits outside active evaluator scopes. A pure machine
+  poll uses one scope unless it deliberately yields an owned intermediate
+  result; an effect poll follows the phase rules in I3D.2.
+- Make every collection request observable at a bounded evaluator-scope
+  boundary without storing a mutator or poll context in scheduler records.
 
 Verification: extend `workers_force_sparks_and_poll_ready_reflection_tasks`
-with barriers proving a worker owns authority only while polling; add
-`worker_releases_mutator_before_sleep` and
-`blocked_machine_parks_without_mutator`. Production remains `NoAuto`.
+with forced-order barriers covering ordinary tasks, client demand, sparks, and
+patient pumping. Add `worker_releases_mutator_before_sleep`,
+`blocked_machine_parks_without_mutator`, and
+`all_poll_routes_use_scheduler_context`. Production remains `NoAuto`.
 
-### Phase I3D — Reflection and Interaction-Net Regions
+### Phase I3C.2 — Poll Outcome and Release Audit
 
-- Enclose reflection-machine polling/request interpretation and each
-  interaction-net call/reduction entry in the current quantum's authority.
-- Prove semantic net/store locks do not escape the authorizing region and no
-  callback or wait occurs while both are held.
+- Move completed-value rooting from reflection/deferred release into the
+  evaluator substep which produces the value. Preserve already rooted public
+  effect-task results instead of converting them to bare core values and
+  recreating roots later.
+- Restrict `EvaluationWaitPoll::Complete` bare projections to an active
+  evaluator scope; non-evaluator observers retain or receive the owned root.
+- Prove cancellation, machine destruction, release, terminal publication, and
+  status wakes operate only on owned/rooted outcomes.
+
+Verification: force collection requests between poll return and release for
+every `EvaluationMachinePoll` variant; preserve failure identity tests and add
+`completed_effect_root_is_not_recreated_after_scope` and
+`wait_completion_projection_requires_scoped_access`. Production remains
+`NoAuto`.
+
+### Phase I3D.1 — Reflection-Gate Reservation and Activation Split
+
+- Make pure evaluation of `anno refl:Task` reserve or discover a stable task
+  handle and return an owned dependency without invoking
+  `ReflectionTaskLauncher::build` or another interpreter callback.
+- After the evaluator scope ends, let poll orchestration activate the reserved
+  task exactly once. Concurrent first observers share the reservation and
+  either observe activation or block on its task token; cancellation and
+  abandoned reservations retain their existing terminal behavior.
+- Generalize only the reserve/activate lifecycle needed later by deterministic
+  import demands. Reflection and imports retain distinct semantic policy,
+  environments, caching, and failure provenance.
+
+Verification: `reflection_gate_reserves_inside_and_activates_outside_scope`
+observes no mutator during launcher construction;
+`concurrent_reflection_gate_observers_activate_once` forces the first-observer
+race; cancellation before and during activation remains covered. Production
+remains `NoAuto`.
+
+### Phase I3D.2 — Effect Evaluation and Interpreter Phases
+
+- Refactor `EffectTask` so a monadic step has explicit phases: evaluate and
+  parse the next request in a callback-free evaluator scope; root request data
+  which must leave that scope; interpret it with no inherited mutator; then
+  enter a later evaluator scope to deliver the result or apply its
+  continuation.
+- Permit an interpreter callback to request evaluation explicitly through the
+  bounded evaluator service. Such a request opens its own scope and returns an
+  owned result; the callback never receives or retains the mutator itself.
+- Fuse a standard request with adjacent evaluator work only when a pure runner
+  could implement it as a deterministic transformation of branch-local state
+  and control. The initial candidates are `.r`, `.seq`, `.alt`, `.fail`,
+  `.cut`, task-local state, and callback-free reset/shift/fix control. Shared
+  heap/volume state, task operations, logging, reflection, and every
+  specialized request remain interpreter boundaries.
+- Make the unfused phase boundary the reference semantics. Fusion must preserve
+  alternative rollback, retry observations, continuation order, and the same
+  rooted values as the unfused path.
+
+Verification: callback probes for `TaskHost::{snapshot, commit}` and
+`TaskSpecialization::handle_request` observe no active mutator. Run each fused
+standard family against a forced-unfused test mode and compare results,
+failures, branch order, retry state, and task-local state. An admission counter
+may demonstrate reduced scope churn but is not a semantic assertion.
+Production remains `NoAuto`.
+
+### Phase I3D.3 — Interaction-Net Claim and Contention Discipline
+
+- Replace manual `Claimed` bookkeeping at callable active pairs and cursor
+  obligations with a bracketed or lifetime-bound claim protocol. A claim is
+  confined to one callback-free evaluator scope and must be consumed into an
+  exhaustive durable disposition such as resumed, blocked, stable, failed, or
+  released. `Drop`/unwind fallback republishes a safe releasable state and a
+  disturbance; `#[must_use]` and private constructors supplement but do not
+  replace that fallback.
+- Prefer a private guard plus a closure returning `CallDisposition` or
+  `CursorDisposition`, so ordinary callers cannot store or forget a raw claim.
+  If an internal claim token remains useful, bind it invariantly to the
+  evaluator-scope lifetime and give it only consuming terminal methods.
+- Preserve the existing rule that normalization batches close before Glam
+  callable/operator evaluation. Make their lease scope-bound where useful, but
+  do not conflate a batch lease with an active-pair claim.
+- Treat `NetContention::wait_for_disturbance` as a narrow synchronization
+  handoff, not a semantic dependency or deadlock edge. It may wait while the
+  same-runtime mutator is held only because another active evaluator owns the
+  normalization batch or structurally acyclic claim, collection is not needed
+  for progress, and that owner must publish a disposition before any semantic
+  park. Do not generalize this exception to promises, reflection gates,
+  imports, or coordinator waits.
+- Keep worker saturation, delayed collection, and contention wake storms as
+  profiling/tuning concerns. They do not weaken the no-escaped-claim rule.
+
+Verification: compile-fail or privacy fixtures prevent claims from entering
+machine state and poll outcomes. Forced schedules cover resume, explicit
+blocked disposition, failure, cursor completion, unwind fallback, and a
+contending evaluator wake. A claim owner forced to encounter a semantic wait
+must publish `Blocked` before the machine parks. Preserve the existing
+pairless-cursor and contention-order regressions. Production remains `NoAuto`;
+subsystem-local closed fixtures may collect.
+
+### Phase I3D.4 — Reflection and Net Region Audit
+
+- Audit scheduled reflection, isolated searches, net construction, active-pair
+  work, cursor work, and stuck-net exits against the preceding phase rules.
+- Prove semantic net/store locks do not escape their intended region. No host
+  callback runs while a net/store lock or mutator is inherited; the explicitly
+  documented net-contention handoff is the only mutator-bearing wait.
 - Keep net-lock trace policy deferred to I8/GCI-008; this checkpoint establishes
-  only the mutator and lock lifetime relation.
+  only mutator, claim, callback, and semantic-lock lifetimes.
 
-Verification: `reflection_poll_releases_mutator_on_every_exit` and
-`net_quantum_releases_mutator_on_block_or_terminal` cover scheduled
-reflection, active-pair, cursor, and stuck-net paths. Production remains
+Verification: `reflection_poll_releases_mutator_on_every_callback`,
+`net_claim_is_resolved_before_semantic_block`, and
+`net_quantum_releases_mutator_on_terminal` cover scheduled reflection,
+isolated search, active-pair, cursor, and stuck-net paths. Production remains
 `NoAuto`; subsystem-local closed fixtures may collect.
 
-### Phase I3E — Compiler, Event, and Diagnostic Regions
+### Phase I3E.1 — Semantic Thunks and Deterministic External Demands
 
-- Enclose compiler/macro closed-value construction, runtime input/output
-  encoding and decoding, diagnostic enrichment, and rendering access.
-- Release authority before invoking user callbacks, delivery endpoints, source
-  systems, or terminal writers. Parked host records retain roots, never scoped
-  borrows or mutators.
+- Split the current generic `DeferredComputation` family by operational role.
+  Internal semantic thunks remain evaluator-pure and callback-free, receive
+  only scoped evaluation access, and may execute within an evaluator region.
+  Module and binary loaders become deterministic external-demand producers:
+  forcing one reserves or discovers its demand, exits scoped access, invokes
+  the host loader, validates the declared content identity or stable secure
+  hash, publishes a rooted result, and resumes evaluation through the demand
+  token.
+- Reuse the reflection gate's reserve/activate mechanics where helpful without
+  describing imports as reflection. Imports are semantically reproducible;
+  reflection remains outside reproducibility. Their producer capabilities,
+  cache keys, environments, and error contexts stay distinct.
+- Inventory any remaining `Fn(&EvalContext)` lazy producer. Classify it as a
+  callback-free semantic thunk, an explicit external demand, or a later
+  traceable opaque boundary; no arbitrary host callback remains hidden in a
+  pure lazy-machine evaluator scope.
+
+Verification: `import_loader_callback_runs_without_mutator`,
+`concurrent_import_demands_share_one_verified_result`, and forced local-file
+replacement/hash mismatch tests cover deterministic demand. A source-backed
+inventory classifies every deferred producer; existing list/conditional lazy
+tests establish the semantic-thunk path. Production remains `NoAuto`.
+
+### Phase I3E.2 — Compiler, Macro, and Closed-Value Regions
+
+- Enclose compiler-value bundles, macro lookup/expansion, token searches,
+  diagnostic formatter helpers, and recursive module-result construction in
+  bounded evaluator scopes. Publish complete cache bundles and suspended
+  compiler state using roots only.
+- Source loading, recursive loader invocation, diagnostic publication, and
+  macro/parser host policy execute outside inherited mutator access. A host
+  component may explicitly call the evaluator service, obtaining another
+  bounded scope.
 
 Verification: `compiler_suspension_parks_only_roots`,
-`event_delivery_invokes_callback_without_mutator`, and
-`diagnostic_rendering_invokes_writer_without_mutator` prove retained values
-survive while no mutator crosses a host boundary. Production remains `NoAuto`.
+`compiler_cache_publishes_complete_rooted_bundle`, and macro/import forced
+schedules prove callback and wait separation. Production remains `NoAuto`.
+
+### Phase I3E.3 — Event, Diagnostic, and Executable Callback Regions
+
+- Enclose runtime input/output value conversion, diagnostic enrichment,
+  contextual composition, and rendering evaluation in explicit bounded
+  scopes. Retain the existing ordering in which input conversion precedes
+  mutation admission and output decode/adapter callbacks follow guarded
+  delivery detachment.
+- Release authority before delivery endpoints, diagnostic bus callbacks,
+  terminal writers, source systems, and executable policy callbacks. Parked
+  host records retain roots, never scoped borrows, poll contexts, or mutators.
+
+Verification: `event_delivery_invokes_callback_without_mutator`,
+`diagnostic_rendering_invokes_writer_without_mutator`, and input/output
+forced-order tests prove retained values survive while no managed authority
+crosses a host boundary. Production remains `NoAuto`.
 
 ### Phase I3F — Multi-Runtime and Exit Audit
 
@@ -488,14 +769,22 @@ survive while no mutator crosses a host boundary. Production remains `NoAuto`.
 - Prove opposite A-then-B and B-then-A nesting cannot deadlock when both heaps
   have pending requests. An uncommitted request does not block entry; an active
   exclusive collector does.
-- On outer exit, make the thread cache quiescent before the worker may sleep or
-  service another runtime. TLS eviction forgets cursors only; full collection
-  recovers ranges.
+- A poll context without an active evaluator scope may orchestrate nested work
+  in another runtime. It confers no heap access by itself. Opposite-runtime
+  evaluator scopes remain separate and may nest only according to the
+  collector's reviewed multi-heap admission protocol.
+- Drop every active evaluator scope before a worker sleeps. On worker
+  termination, release that thread's inactive collector caches; ordinary
+  quantum exit need not discard reusable cursors. TLS eviction forgets cursors
+  only; full collection recovers ranges.
 
 Verification: `opposite_runtime_nesting_with_pending_collection_does_not_deadlock`,
-`runtime_tls_caches_remain_heap_qualified`, and
-`all_managed_entries_have_bounded_mutator_regions`. Production remains
-`NoAuto`; passing I3 authorizes managed access, not production collection.
+`runtime_tls_caches_remain_heap_qualified`,
+`poll_context_without_scope_carries_no_heap_authority`, and
+`all_managed_entries_have_bounded_mutator_regions`. Glam-level schedules also
+cover patient waits, worker termination, and two runtime services nested on
+one host thread. Production remains `NoAuto`; passing I3 authorizes managed
+access, not production collection.
 
 ## Phase I4 — Core Trace Vocabulary and Leaf Policy
 
@@ -827,7 +1116,10 @@ checkpoint proves root classification, not whole-graph reclamation.
 
 - Reconcile every production deferred constructor with I4B and replace
   Glam-owned value captures with explicit traceable computation state wherever
-  they can participate in the managed graph.
+  they can participate in the managed graph. Preserve the I3E.1 operational
+  classification: callback-free semantic thunks and deterministic external
+  demands may use different state representations, but neither may hide an
+  untraced capture.
 - A remaining genuinely external Rust closure uses an explicit same-runtime
   public-root bundle. It may not smuggle a bare managed pointer or root back to
   an internally owning managed graph.

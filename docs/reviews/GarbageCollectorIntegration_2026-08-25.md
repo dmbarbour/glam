@@ -342,6 +342,303 @@ Then partition migration into:
 Compile-fail tests should prove that mutators, allocators, managed borrows, and
 quantum authority cannot escape their regions.
 
+#### GCI-006 Plan Update
+
+Treat this as a plan refinement before beginning I3 implementation. The
+updated integration plan should preserve these decisions:
+
+- durable task/evaluation context remains owned, `Send`, and parkable;
+- scoped managed access contains a real borrow of the matching
+  `glam_gc::Mutator`, so its lifetime and non-`Send`/non-`Sync` behavior are
+  structural rather than an ambient convention;
+- one bounded machine poll is an orchestration/scheduling quantum, not one
+  continuously active mutator region. A scheduler-created ephemeral poll
+  context may open several callback-free evaluator scopes, with rooted values
+  between them and no active mutator during interpreter callbacks;
+- the scheduler or synchronous driver owns admission. Individual machines do
+  not silently enter heaps on their own;
+- claimed work temporarily obtains its value domain from the matching demand
+  session. The coordinator does not gain a strong value-domain backedge;
+- every poll result which crosses the quantum boundary is converted to its
+  owned/rooted boundary representation before the mutator is released; and
+- scoped authority prevents mutators, allocators, and managed borrows from
+  escaping, but does not replace the separate source inventory which forbids
+  bare `Gc<T>` in parked or type-erased state.
+
+Update I3 with the following checkpoints. A foundational
+`RuntimeValueAccess` plus a thin evaluation-specific view carries actual
+mutator authority. An ephemeral poll context is the scheduler-owned capability
+which may construct those scopes; it carries no managed access between them.
+These remain two layers of one authority model rather than independently
+creatable capabilities.
+
+##### I3A.1 — Authority Types and Non-Escape Contract
+
+- Prototype the lifetime-bound managed-access carrier and its evaluation view.
+  Pair it with the durable context without making the durable context itself
+  lifetime-bound.
+- Prototype the non-storable scheduler poll context and a closure/HRTB entry
+  method which opens one evaluator scope, roots its escaping result, and drops
+  the mutator before returning to orchestration.
+- Derive heap provenance from the admitted mutator/domain and validate the
+  durable context once when constructing the scoped view.
+- Keep constructors private so neither TLS nor a runtime ID can manufacture
+  authority.
+
+Verification: compile-fail fixtures reject returning or storing the access
+carrier, evaluation view, mutator, allocator, and managed borrow; trait checks
+prove the scoped types cannot cross threads while the durable context remains
+`Send`. No production call site changes yet, and production remains `NoAuto`.
+
+##### I3A.2 — Claimed-Work Domain Routing
+
+- Make reflection, deferred, client-demand, and spark claims carry or obtain a
+  temporary strong demand-session reference while claimed.
+- Use that session's value domain as the sole heap-admission source. Validate
+  runtime agreement at claim/poll boundaries without storing a new strong
+  domain owner in the coordinator or durable work record.
+- Preserve current claim, release, cancellation, and owner-session shutdown
+  behavior before adding mutator entry.
+
+Verification: forced owner-close and cross-session schedules prove a claimed
+poll keeps its existing session resources alive, an unclaimed record does not,
+and a mismatched demand session is rejected before machine execution.
+
+##### I3A.3 — Scheduler-Owned Poll Orchestration
+
+- Change `EvaluationTaskMachine::poll` to receive the ephemeral poll context,
+  then mechanically migrate production machines and test fixtures. Pure
+  machines normally open one evaluator scope; effect machines may alternate
+  evaluator scopes and interpreter work.
+- Construct the poll context only after the coordinator has detached a claim
+  from its locks. End each evaluator scope before claim release, terminal
+  publication, host callbacks, cancellation/drop hooks, or coordinator waits.
+- Route cooperative pumping, executor workers, client demand, and sparks
+  through the same admission helper. Nested same-heap pumping reuses collector
+  admission rather than opening an unrelated capability.
+
+Verification: deterministic barriers observe an active mutator during pure
+evaluator substeps and no active mutator during an interpreter callback placed
+between two substeps, release, terminal publication, sleep, or machine
+destruction. Existing task-order and shutdown suites remain semantic
+regressions.
+
+##### I3A.4 — Poll Outcome Ownership Boundary
+
+- Inventory every `EvaluationMachinePoll`, task block, exit, and failure field
+  which crosses the scoped region. Convert completed values to
+  `RuntimeValueRoot` or the selected equivalent before leaving the evaluator
+  scope which produced them.
+- For payload families whose managed representation arrives only in I5-I10,
+  record the exact later checkpoint which must update this boundary in the same
+  change that introduces its first managed edge. Such a deferral remains a
+  Gate G2 blocker, not permission to leave an unrooted edge once collection is
+  enabled.
+- Ensure outcome conversion performs no callback and that coordinator
+  publication consumes only owned/rooted data.
+
+Verification: force another thread to request collection at poll return and
+prove every already-migrated outcome remains live through release and
+publication. A source-backed boundary inventory covers every poll variant.
+
+##### I3B.1 — Scoped Core Evaluator Migration
+
+- Introduce the scoped evaluator view selected in I3A.1 and migrate the
+  strongly connected evaluator call graph rooted at `eval_value`. Keep the
+  persistent context only in machines and other parked state.
+- Partition the mechanical migration by call-graph seams rather than one
+  repository-wide signature rewrite: evaluator/application/sequence first,
+  then ordinary builtins, leaving reflection and interaction-net entry points
+  to their dedicated I3 checkpoints.
+- Rework context-taking deferred closure signatures only where the new scoped
+  contract requires it; retain I4B/I10 ownership classification for captured
+  values.
+
+Verification: a source inventory accounts for every evaluator function which
+can allocate or inspect managed data, and focused tests prove recursive helper
+calls reuse one outer admission. Existing evaluator and builtin suites remain
+behavioral regressions.
+
+##### I3B.2 — Poll/Wait Driver Separation
+
+- Refactor synchronous and patient evaluation so a driver alternates bounded
+  enter/poll/root/exit steps with waits outside managed access. Do not wrap an
+  entire `eval_value` call in one mutator when it may reach
+  `wait_for_claimed_task` or another blocking coordinator operation.
+- Keep scheduled-machine paths nonblocking: dependencies return `Blocked`, the
+  machine parks after the quantum ends, and another worker may resume it later.
+- Ensure budget exhaustion and nested pumping cannot accidentally extend an
+  outer mutator across a wait.
+
+Verification: injected barriers force busy producers, promises, budget
+exhaustion, and patient waits, asserting zero active mutators while sleeping
+and successful resumption in a later quantum, including on another worker.
+
+##### I3C-I3F — Subsystem and Final Audits
+
+Retain the existing cooperative/worker, reflection/net,
+compiler/event/diagnostic, and multi-runtime phases, but make them consumers of
+the established carrier rather than opportunities to invent new admission
+paths. Their verification must cover callbacks after mutator release, semantic
+lock ordering, compiler suspension with roots only, opposite-runtime nesting,
+and cache quiescence before workers sleep.
+
+The call-site inventory below was completed before applying the second update.
+Its scale—many machine fixtures and roughly two hundred `&EvalContext`
+uses—justifies keeping the resulting checkpoints separate even though many
+edits will be mechanical.
+
+**Plan-update progress (2026-08-26):** both plan updates are applied. The first
+separated authority construction, claimed-work routing, scheduler polling,
+rooted outcomes, scoped core evaluation, and poll/wait driving. The second
+corrected polling to be orchestration containing bounded evaluator scopes and
+partitioned I3C-I3F around reflection activation, effect interpretation,
+interaction-net claims, deterministic import demands, compiler/diagnostic
+callbacks, and multi-runtime exit. GCI-006 remains open until implementation
+and verification are complete.
+
+#### GCI-006 Call-Site Inventory
+
+This inventory covers production execution seams rather than listing every
+transitive evaluator helper. A navigation scan excluding test modules finds
+176 current `&EvalContext` type occurrences across 36 files. Most belong to the
+strongly connected evaluator/builtin migration already assigned to I3B.1.
+The smaller inventory below identifies every distinct outer admission, wait,
+callback, or subsystem boundary which I3C-I3F must reconcile.
+
+There are five production `EvaluationTaskMachine` adapters:
+
+- `LazyTaskMachine` and `PromiseFollower` in
+  [`eval/value.rs`](../../src/eval/value.rs);
+- `ValueEffectTask`, `ContextualValueEffectTask`, and `UnitEffectTask` in
+  [`reflection/machine.rs`](../../src/reflection/machine.rs).
+
+The three reflection adapters share `EffectTask::poll`; tests contain many
+additional mechanical implementations which must receive the new poll
+signature but do not create another production authority path.
+
+##### I3C: cooperative, runtime-pump, and worker dispatch
+
+| Current seam | Work performed | Boundary implication | Intended owner |
+| --- | --- | --- | --- |
+| `ClaimedTask::{poll, release}` and `ReleasedTaskMachine::finish` in [`evaluation/pump.rs`](../../src/evaluation/pump.rs) | Type-erases reflection/deferred polling, publishes release state, then cancels or drops detached machines. | This is the narrow common task seam. Managed polling must end before release; cancellation, destruction, retirement, and terminal publication stay outside it. | I3A.3/I3A.4 establish it; I3C audits every caller. |
+| `EvaluationDemandState::run_until_quiescent` and `pump_demand` in [`evaluation/pump.rs`](../../src/evaluation/pump.rs) | Serially claim, poll, release, and sometimes wait for another claimant. | Both already put `wait_for_change` outside `claimed.poll`, but each currently spells the poll/release sequence independently. | I3B.2 owns waiting; I3C routes both through the common admitted quantum. |
+| `EvaluationWorkCoordinator::{poll_runtime_work, poll_claimed_task, poll_claimed_client_demand}` in [`evaluation/pump.rs`](../../src/evaluation/pump.rs) | Runtime-wide host pumping and shared adapters used by workers and patient demand. | These should become the only coordinator-facing admitted-poll functions. `poll_runtime_work` itself must not retain authority across selection or release. | I3A.3 implementation seam; I3C completeness check. |
+| `evaluation_worker` in [`evaluation/executor.rs`](../../src/evaluation/executor.rs) | Claims ordinary tasks, client demand, and sparks; sleeps on the coordinator condition variable. | Ordinary tasks/client demand can use the shared adapter. Spark demand is a separate direct evaluator call and needs the same scoped entry. No authority may survive `release_spark` or `wait_for_change`. | I3C. |
+| `ClientDemandOperation::poll` in [`evaluation/pump.rs`](../../src/evaluation/pump.rs) | Demands one rooted client value and immediately produces a rooted completion or dependency/failure. | Its operation is already carried by a claim with demand state, but the scoped evaluator view must be supplied by the caller instead of reconstructed by the operation. | I3A.2/I3A.3; I3C verifies worker and host-pump parity. |
+| `EvalContext::drive_client_demand` in [`evaluation/session.rs`](../../src/evaluation/session.rs) | Alternates direct client-demand polls, dependency assistance, runtime pumping, spark abandonment, and condition-variable waits. | It is the principal patient driver. Every wait and stability snapshot must occur between quanta. | I3B.2; I3C regression audit. |
+| `EvaluationRuntime::pump_until_stable` in [`api/runtime.rs`](../../src/api/runtime.rs) | Pumps runtime work, abandons quiescent sparks, takes settlement snapshots, and waits for worker/delivery activity. | It must remain an authority-free orchestration loop. A claimed quantum is wholly delegated to the coordinator adapter. | I3C. |
+| `ScheduledEffectRun::run`, `run_composed_effect_task`, and direct `EffectTask::run` in [`reflection/lifecycle.rs`](../../src/reflection/lifecycle.rs) and [`reflection/machine.rs`](../../src/reflection/machine.rs) | Patient reflection execution, child draining, task polling, and host-generation waits. | These are synchronous drivers, not new heap-entry policies. They must use I3B.2 step driving and wait with no scoped access. | I3B.2 plus the I3D reflection audit. |
+
+The release path currently converts `EvaluationMachinePoll::Complete(Value)`
+to `RuntimeValueRoot` in `release_reflection_task` and
+`release_deferred_task`, after `machine.poll` has returned. That conversion
+must move inside the admitted outcome boundary from I3A.4; I3C must not retain
+the current ordering merely because release is centralized.
+
+##### I3D: reflection and interaction nets
+
+| Current seam | Managed or semantic work | Wait/lock/callback concern |
+| --- | --- | --- |
+| `ValueEffectTask`, `ContextualValueEffectTask`, and `UnitEffectTask` in [`reflection/machine.rs`](../../src/reflection/machine.rs) | Adapt `EffectTaskPoll` to coordinator polls and currently unwrap a `PublicValue` back to bare core `Value` on completion. | Completion should preserve/root the already rooted public value before leaving scoped access. Failure contexts become managed later in I6. |
+| `EffectTask::{poll, step, effect_request}` in [`reflection/machine.rs`](../../src/reflection/machine.rs) | Evaluates applications and requests, mutates branch/control state, snapshots and commits hosts, and dispatches specialization requests. | `TaskHost::{snapshot, commit}` and `TaskSpecialization::handle_request` are public Rust callbacks invoked inside `EffectTask::poll`. A whole poll therefore is not presently a callback-free mutator region. |
+| `RequestContext::evaluate` and reusable handlers in [`reflection/protocol.rs`](../../src/reflection/protocol.rs) and [`reflection/requests.rs`](../../src/reflection/requests.rs) | Demand request arguments, construct return values, emit diagnostics, launch children, and inspect/update reflection state. | Managed access is needed while evaluating/constructing values, but immediate host emission and custom request code cannot inherit an ambient mutator accidentally. |
+| `IsolatedEffectSearch::poll` in [`reflection/search.rs`](../../src/reflection/search.rs) | Runs the same `EffectTask` engine for macros, CLI search, token parsing, and net construction, retaining rooted branches and journals. | It must consume the same scoped reflection-step primitive as scheduled tasks; callers own the outer yield/wait loop. |
+| `NetConstructionMachine::poll` in [`eval/builtins/net/construction.rs`](../../src/eval/builtins/net/construction.rs) | Advances an isolated effect search and converts successful construction-port tokens into a net. | It is nested inside `LazyTaskMachine::poll`; its search state is parkable, but any scoped access passed into it must remain non-storable. |
+| `drive_net_work`, `drive_active_pair_step`, `progress_exact_core_call`, and `progress_core_operator_call` in [`eval/net.rs`](../../src/eval/net.rs) | Poll cursor frontiers, step active pairs, close normalization batches before evaluator calls, and install success/block/failure results under net mutation. | The existing batch discipline already avoids retaining one net batch while evaluating a callable or operator. That lock separation should be preserved when managed values are added. |
+| `drive_net_interface` in [`eval/net.rs`](../../src/eval/net.rs) | Repeats cursor-WHNF work until a terminal interface result. | On `NetContention` it directly calls `wait_for_disturbance`. This is a narrow synchronization-handoff wait, not a semantic dependency: it may retain same-runtime mutator admission only after batch/claim containment proves another active evaluator must publish progress without requiring collection. |
+
+The reflection callback row is not merely a verification concern. Public
+specializations and hosts are allowed to execute arbitrary Rust code. The
+second plan update selects a machine poll as an orchestration quantum
+containing smaller evaluator scopes. `EffectTask` evaluates and roots one
+monadic request, leaves scoped access, invokes its interpreter, and later
+re-enters evaluation to deliver the result. The scheduler remains independent
+of effect-specific request vocabulary.
+
+Callback-free standard requests may fuse across that reference boundary when
+a pure runner could implement them as transformations of branch-local state
+and control. This includes task-local state but excludes shared heap/volume,
+tasks, logging, reflection, and specialized host requests.
+
+##### I3E: compiler, macros, diagnostics, events, and executable policy
+
+| Current seam | Current behavior | Boundary classification |
+| --- | --- | --- |
+| `GCompilerValues::build`/`evaluate_closed` and the cached diagnostic formatter in [`g_syntax/compiler_values.rs`](../../src/g_syntax/compiler_values.rs) and [`g_syntax/diagnostic_formatter.rs`](../../src/g_syntax/diagnostic_formatter.rs) | Build complete runtime-local compiler bundles outside the cache lock, using private closed evaluation for helper functions. | Bounded construction/evaluation. Use I3B.1 scoped construction and publish only complete rooted cache bundles; no host callback is required. |
+| `CompilationExecution` in [`api/assembly.rs`](../../src/api/assembly.rs) | Stores durable lookup and macro `EvalContext`s plus the macro owner session and diagnostic subscription. | The contexts remain parkable durable state. Individual lookup/macro polls receive scoped access; the subscription callback must not. |
+| `run_macro`/`force_result` in [`g_syntax/macro_expansion/runner.rs`](../../src/g_syntax/macro_expansion/runner.rs) and macro lookup in [`g_syntax/parser/source.rs`](../../src/g_syntax/parser/source.rs) | Poll isolated searches and alternate evaluation with `pump_wait`. | These are explicit outer drivers. Their waits already occur after an evaluator return and should use I3B.2 rather than holding authority for the complete macro invocation. |
+| `DeferredComputation` dispatch in `produce_lazy_source` in [`eval/value.rs`](../../src/eval/value.rs) | Invokes an arbitrary `Fn(&EvalContext)` from inside `LazyTaskMachine::poll`. | Split callback-free semantic thunks from external-demand producers. No arbitrary host callback remains hidden inside an evaluator scope. |
+| `CompileContext::{import_module, import_binary}` in [`compiler.rs`](../../src/compiler.rs) | Implements imports as `DeferredComputation` closures which call `ModuleLoader` or `BinaryFileLoader`. The module loader may perform source I/O, recursively compile a module, emit diagnostics, and evaluate its sealed result. | Imports remain semantically reproducible after content-address/stable-hash validation, but their host loaders use a reflection-gate-like reserve/activate lifecycle outside the mutator. They remain distinct from reflection in policy and provenance. |
+| `Assembler::build_module_inner`, `load_local_module`, `load_local_binary`, and `compile_diagnostic_emitter` in [`api/assembly.rs`](../../src/api/assembly.rs) | Own source loading, recursive compilation, final module demand, and diagnostic publication. | Source I/O and diagnostic callbacks are host work. Semantic lowering/construction receives bounded access; publication and recursive loader invocation do not inherit it. |
+| `diagnostic_object`, `apply_updates`, `prepend_contexts_with`, and `conventional_summary_with` in [`diagnostic.rs`](../../src/diagnostic.rs) | Create isolated contexts and demand diagnostic objects/fields. | Convert to ordinary scoped evaluator calls. Each successful projection returned beyond the region must be an owned/rooted value or owned host scalar/bytes. |
+| `Diagnostic::{enrich, enrich_with, apply_updates, with_context, transport_value}` in [`api/diagnostics.rs`](../../src/api/diagnostics.rs) | Validate public roots, perform semantic diagnostic composition, and retain public transport values. | Public wrappers enter scoped semantic helpers; bus publication remains outside managed access and retains roots. |
+| runtime input conversion/admission and output delivery in [`api/runtime/events.rs`](../../src/api/runtime/events.rs) | Input converters run before mutation admission and return a public root. Output decode/adapter callbacks run after a delivery record and rooted payload are detached from locks. | The current callback/lock ordering is already suitable. Converters/decoders may explicitly call runtime evaluator/value services, but receive no inherited mutator. Runtime journals continue to store roots. |
+| diagnostic bus callbacks and executable logger/rendering under [`api/diagnostics.rs`](../../src/api/diagnostics.rs) and [`bin/glam`](../../src/bin/glam) | Transport rooted diagnostics through buses, then evaluate/enrich/render through assembler services and write terminal output. | Bus callbacks and terminal writes remain mutator-free. Each semantic formatter/evaluator call opens its own bounded region and returns rooted data or owned bytes. |
+| configured CLI/token searches under [`bin/glam/command_line/configured`](../../src/bin/glam/command_line/configured) | Use `IsolatedEffectSearch`, preserve branch journals, then construct command policy outside the library scheduler. | Consume the common isolated-search scoped step. Filesystem/path callbacks and output construction do not inherit access. |
+
+##### I3F: multi-runtime admission and thread-cache exit
+
+| Current seam | Inventory result | Required audit |
+| --- | --- | --- |
+| `RuntimeValueDomain::heap` in [`core.rs`](../../src/core.rs) | Exactly one `NoAuto` collector heap belongs to each runtime value domain. Production currently has no `Heap::with_mutator` call site. | I3A.1 must expose one private domain admission method; no caller selects a heap by runtime ID alone. |
+| collector TLS in [`glam-gc/thread_cache.rs`](../../crates/glam-gc/src/thread_cache.rs) | TLS is keyed by heap identity, same-heap entry is recursive, and different heaps have independent cursor/depth records. | Glam should consume this behavior rather than add another runtime-level TLS authority system. Checked TLS lookup may optimize nesting but cannot authorize access. |
+| `evaluation_worker` in [`evaluation/executor.rs`](../../src/evaluation/executor.rs) | One OS worker can process many sessions of one runtime and may eventually process nested work which enters another runtime through host code. | Drop every scoped entry before sleeping. Release that worker's inactive collector caches when the worker terminates; ordinary quantum exit need not clear them. |
+| public host threads and synchronous drivers | May interleave or nest operations from multiple runtimes on one thread. | Opposite A-then-B/B-then-A entry must remain legal. No blocking wait or explicit `collect_full` may occur while either heap has active mutator authority. |
+| runtime/domain teardown | Public roots become inert when their weak heap/domain route can no longer be upgraded; TLS records are weak and stale cursors are epoch-invalidated. | Verify teardown does not need to enumerate other threads' TLS and that escaped inactive caches do not retain a runtime heap. |
+
+The collector already has focused tests for same-heap recursion, separate-heap
+TLS records, opposite nesting with pending collection, cache release, and
+unwind-balanced depth. I3F should reuse those as collector prerequisites and
+add Glam-level forced-order tests around worker sleep, worker termination,
+patient waits, and two runtime services nested on one thread.
+
+##### Values crossing a quantum
+
+| Boundary type | Current payload | Migration consequence |
+| --- | --- | --- |
+| `EvaluationMachinePoll::Complete` | bare core `Value` | Change to `RuntimeValueRoot` (or the selected owned equivalent) in I3A.4. Do not root later in release. |
+| `EffectTaskPoll::Complete` / `TaskTerminal::Complete` | public rooted `Value` | Preserve the root through the coordinator adapter rather than calling `into_core` and recreating it. |
+| `ClientDemandPoll::Complete` | `RuntimeValueRoot` already | No representation change; prove construction occurs under matching scoped access. |
+| `ExitIntent::Error`, `EvaluationTaskStatus::Complete`, and `EvaluationWaitTerminal::Complete` | `RuntimeValueRoot` already | Already suitable parked/terminal owners. |
+| `EvaluationWaitPoll::Complete` | clones a bare core `Value` from the terminal root | Restrict this projection to scoped evaluation or return an owned root at non-evaluator boundaries. It must not become a general authority-free managed value escape. |
+| `EvaluationTaskBlock::error`, failed poll/status/wait variants | `Arc<EvaluationFailure>` containing diagnostic values | Keep the shared failure identity, but assign its exact managed/rooted representation to I6 before collection. I3A.4 records this deliberate deferral. |
+| isolated-search branches and reflection store/event/diagnostic records | public values or `RuntimeValueRoot` | Retain their existing rooted boundary. Internal temporary `.into_core()` projections become scoped borrows/conversions. |
+| net driver work and shared runtime nets | synchronized net handles containing eventual managed data/operator edges | Temporary driver descriptors remain quantum-local; exact net graph tracing and mutation barriers remain I8. |
+
+##### Consequences and decisions for the second plan update
+
+The inventory supports narrowing I3C to routing and forced-order verification:
+I3A.3 and I3B.2 own the reusable orchestration and wait machinery. I3F is
+mostly an audit plus worker-cache retirement because `glam-gc` already owns
+multi-heap recursive admission.
+
+The second plan update records three meanings of purity:
+
+- semantic purity/reproducibility, including hash-validated imports;
+- evaluator purity, including deterministic demand and suspension; and
+- operational callback-freedom, which alone permits a continuous mutator
+  region.
+
+It resolves the remaining inventory decisions as follows:
+
+1. a machine poll is orchestration containing smaller callback-free evaluator
+   scopes, not one poll-wide mutator;
+2. reflection task reservation occurs in pure evaluation, while launcher
+   activation occurs outside scoped access;
+3. effect tasks alternate pure request evaluation, callback-bearing
+   interpretation, and pure continuation delivery, with a reference unfused
+   path and safe pure-runner fusion;
+4. callable and cursor claims become bracketed or lifetime-bound and must
+   publish a durable disposition before semantic parking;
+5. net contention remains a narrowly justified synchronization handoff rather
+   than becoming a semantic wait; and
+6. import loaders become deterministic external demands using analogous gate
+   mechanics without being classified as reflection.
+
+I3C.1-I3E.3 in the integration plan assign each source seam and its
+forced-order verification. Production remains `NoAuto` throughout I3.
+
 ### GCI-007 — I4, I7, and I8 do not cleanly assign exact trace responsibility
 
 **Classification:** trace-soundness sequencing ambiguity  
@@ -457,8 +754,13 @@ and collection mode permitted at its end.
 **Resolution:** the integration plan now partitions every identified oversized
 phase. I1 separates policy, domain topology, scoped allocation, layout/ledger,
 and lifecycle work; I2 separates provenance, the opaque prototype surface,
-runtime-authorized observation, and the production-switch inventory; I3 has
-six authority/boundary checkpoints;
+runtime-authorized observation, and the production-switch inventory. The first
+GCI-006 update divides I3A into four authority/poll checkpoints and I3B into
+two evaluator/driver checkpoints. The completed second update divides I3C into
+poll routing and outcome release; I3D into reflection activation, effect
+phases, net claims, and a subsystem audit; and I3E into deterministic external
+demands, compiler/macro construction, and event/diagnostic callbacks. I3F
+retains the final multi-runtime/TLS audit.
 I4 separates shell/leaves, closure containment, argument/failure structures,
 persistent adapters, net adapters, and the public-root switch; and I6 separates
 functions, metadata, failures, and reflection/net-construction payloads.
