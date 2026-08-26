@@ -26,7 +26,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I5 | pending | managed lazies and promises |
 | I6 | pending | functions, applications, metadata, failures |
 | I7 | pending | persistent list and dictionary tracing |
-| I8 | pending | interaction-net tracing and mutation gateways |
+| I8 | pending | managed core-net outer cells, exact tracing, and mutation gateways |
 | I9 | pending | runtime-owned root surfaces |
 | I10 | pending | deferred closures and opaque boundaries |
 | I11 | pending | whole-production-graph forced collection |
@@ -443,6 +443,10 @@ held for the complete poll.
   durable contexts, individual machines, TLS, and runtime IDs may not. These
   are two layers of one authority model, not independently creatable
   capabilities.
+- Treat subsystem capabilities which can inspect managed values as views
+  derived from `RuntimeValueAccess`, not as alternative ways to enter the
+  heap. In particular, I3D.3 introduces an authority-gated core-net view; the
+  generic interaction-net implementation remains independent of `glam_gc`.
 - Derive heap provenance from the admitted mutator/value domain and validate
   context agreement once when constructing the scoped view.
 - Preserve durable machine state as owned, `Send`, and parkable. A checked TLS
@@ -658,6 +662,14 @@ Production remains `NoAuto`.
 
 ### Phase I3D.3 — Interaction-Net Claim and Contention Discipline
 
+- Replace the `CoreRuntimeNet` type alias with a private newtype or equivalent
+  scoped facade over `SharedRuntimeNet<CoreSpecialization>`. Do not expose the
+  wrapped shared net to ordinary core/evaluator callers. Every operation which
+  can lock and inspect or mutate core semantic net state must receive a
+  same-runtime `RuntimeValueAccess`; identity-only operations which neither
+  lock nor inspect managed contents remain outside this rule. This keeps the
+  generic interaction-net topology independent of collector policy while
+  making core-net access constructively mutator-bound.
 - Replace manual `Claimed` bookkeeping at callable active pairs and cursor
   obligations with a bracketed or lifetime-bound claim protocol. A claim is
   confined to one callback-free evaluator scope and must be consumed into an
@@ -670,8 +682,9 @@ Production remains `NoAuto`.
   If an internal claim token remains useful, bind it invariantly to the
   evaluator-scope lifetime and give it only consuming terminal methods.
 - Preserve the existing rule that normalization batches close before Glam
-  callable/operator evaluation. Make their lease scope-bound where useful, but
-  do not conflate a batch lease with an active-pair claim.
+  callable/operator evaluation. Bind every core normalization lease which can
+  lock on close or `Drop` to the same access scope, but do not conflate a batch
+  lease with an active-pair claim.
 - Treat `NetContention::wait_for_disturbance` as a narrow synchronization
   handoff, not a semantic dependency or deadlock edge. It may wait while the
   same-runtime mutator is held only because another active evaluator owns the
@@ -683,12 +696,14 @@ Production remains `NoAuto`.
   profiling/tuning concerns. They do not weaken the no-escaped-claim rule.
 
 Verification: compile-fail or privacy fixtures prevent claims from entering
-machine state and poll outcomes. Forced schedules cover resume, explicit
-blocked disposition, failure, cursor completion, unwind fallback, and a
-contending evaluator wake. A claim owner forced to encounter a semantic wait
-must publish `Blocked` before the machine parks. Preserve the existing
-pairless-cursor and contention-order regressions. Production remains `NoAuto`;
-subsystem-local closed fixtures may collect.
+machine state and poll outcomes, prevent ordinary core-net inspection without
+`RuntimeValueAccess`, and prevent the raw shared-net implementation from
+escaping its core facade. Forced schedules cover resume, explicit blocked
+disposition, failure, cursor completion, unwind fallback, and a contending
+evaluator wake. A claim owner forced to encounter a semantic wait must publish
+`Blocked` before the machine parks. Preserve the existing pairless-cursor and
+contention-order regressions. Production remains `NoAuto`; subsystem-local
+closed fixtures may collect.
 
 ### Phase I3D.4 — Reflection and Net Region Audit
 
@@ -697,8 +712,10 @@ subsystem-local closed fixtures may collect.
 - Prove semantic net/store locks do not escape their intended region. No host
   callback runs while a net/store lock or mutator is inherited; the explicitly
   documented net-contention handoff is the only mutator-bearing wait.
-- Keep net-lock trace policy deferred to I8/GCI-008; this checkpoint establishes
-  only mutator, claim, callback, and semantic-lock lifetimes.
+- Establish here, rather than deferring to I8, that every legitimate ordinary
+  holder of the core semantic-net mutex also holds the matching scoped runtime
+  access. I8 still owns the collector-side lock operation and exact trace, but
+  may rely on exclusive collection excluding every ordinary lock holder.
 
 Verification: `reflection_poll_releases_mutator_on_every_callback`,
 `net_claim_is_resolved_before_semantic_block`, and
@@ -1015,29 +1032,88 @@ edge-counting soundness problem. This phase must not silently turn collection
 updates into whole-map copies. Production remains `NoAuto`; I11 repeats these
 reclamation cases only after Gate G2 closes the whole graph.
 
-## Phase I8 — Interaction-Net Migration and Trace Audit
+## Phase I8 — Managed Core Runtime Nets and Trace Audit
+
+The production representation uses one managed synchronization-owning outer
+cell per shared core runtime net. The cell owns the semantic mutex, revisions,
+normalization state, and ordinary Rust topology containers. Individual agents,
+ports, map entries, and topology allocations do not become separate GC
+allocations in this phase. Generic non-core interaction-net ownership remains
+collector-independent.
+
+### Phase I8A — Ownership-Neutral Generic Net Seam
 
 - Reconcile I0/I4's inventory of every core value stored in net templates,
-  agents, active pairs, stuck pairs, cursors, logical copies, and normalization
-  state against the concrete migration.
-- Make `NetValue`, function stages, and `SharedRuntimeNet` expose those edges
-  without reducing the net or materializing a cursor.
-- Decide whether the shared runtime net remains an external synchronized
-  allocation traced under a stopped mutator world or becomes a managed outer
-  node. Do not rewrite generic topology merely for GC aesthetics.
-- Require all net mutation which can replace a managed value edge to use the
-  mutation gateway. It is a no-op for the full collector; future moving or
+  agents, active pairs, stuck pairs, cursors, logical copies, normalization
+  state, and every concrete `SharedRuntimeNet<S>` reference embedded in generic
+  callable/copy/frontier/contention structures.
+- Refactor the generic runtime boundary so its shared-owner and cross-net
+  reference operations do not require the production core representation to
+  be `Arc<SharedRuntimeNetInner<_>>`. Use a statically typed owner seam; do not
+  type-erase net references or add a `glam_gc` dependency to generic topology.
+- Preserve I3D.3's private authority-gated `CoreRuntimeNet` facade and all
+  existing interaction-net behavior while it still uses the pre-migration
+  owner internally. This checkpoint changes neither GC reachability nor
+  production collection policy.
+
+Verification: retain the complete generic interaction-net and Cursor-WHNF
+suite; add compile-time/privacy coverage that generic topology has no collector
+dependency and core/evaluator callers cannot recover the underlying generic
+owner. Latch the concrete cross-net handle inventory for I8B. Production
+remains `NoAuto`.
+
+### Phase I8B — Managed Outer Cell, Exact Trace, and Mutation Gateways
+
+- Introduce a managed `CoreRuntimeNetCell` (final name selected during the
+  checkpoint) which directly owns the semantic mutex, revisions,
+  subscriber/normalization state, and `RuntimeNet<CoreSpecialization>`. Change
+  the private `CoreRuntimeNet` facade to carry this managed identity. The old
+  production `Arc` owner must not remain nested underneath the managed cell.
+- Convert core cross-net source/copy references to exact managed edges. Preserve
+  the proven hierarchical copy topology, while allowing value payloads to form
+  arbitrary cycles through nets, lazies, promises, functions, and other nets.
+- Keep generic/test specializations free to use their existing external owner;
+  do not make each generic runtime node a managed allocation.
+- Trace every managed data, operator, failure/stuck, pending-work, and cross-net
+  edge from the outer cell without reducing the net or materializing a cursor.
+  Trace under the semantic mutex with nonblocking `try_lock`. `WouldBlock` is an
+  invariant defect because exclusive collection precludes the scoped runtime
+  access required by every legitimate ordinary lock holder. Treat poisoning
+  according to the collector's reviewed panic policy.
+- Route every replacement of a managed edge through the representation-local
+  mutation gateway. It remains a no-op for the full collector; future moving or
   concurrent collectors may extend it under their own plans.
-- Preserve the Cursor-WHNF ownership and normalization-batch invariants.
+- In the same checkpoint, root or scope every `CoreRuntimeNet` handle which can
+  survive an evaluator region. No bare managed net handle may enter parked,
+  type-erased, callback-owned, or coordinator state. Adapt normalization
+  leases, contention observations, and weak/external ownership conventions to
+  the managed identity without weakening I3D.3's non-escape rules.
+- Give the managed outer cell the reviewed internal finalization needed to drop
+  its mutex and ordinary Rust containers. It must fit one typed-run slot; this
+  phase introduces no large-object or multi-run exception.
 
-Because collection waits for all mutators, acquiring a net lock while tracing
-should be unnecessary. Treat a still-held net lock at collection as an
-invariant defect rather than using a lossy `try_lock` trace.
+Verification: source inventory accounts for every old production
+`Arc`/`Weak<SharedRuntimeNetInner<CoreSpecialization>>` owner and every durable
+core-net handle. Exact-visitor tests cover every runtime-node and pending-state
+variant. Mutation tests cover each value-installing rewrite. Compile-time or
+privacy fixtures reject unscoped dereference and parked bare handles.
+Production remains `NoAuto`; only closed subsystem fixtures may collect.
 
-Verify cycles through net `Data`, shared function stages, cursor
-materialization, stuck nets, and values reachable only from pending active-pair
-work. Forced collection is limited to an isolated collector-ready net fixture;
-production remains `NoAuto` until I11.
+### Phase I8C — Cycle Reclamation and Final Net Audit
+
+- Force collection in isolated collector-ready fixtures covering a direct
+  net-to-value-to-the-same-net cycle, mutually linked nets through data values,
+  shared function stages, cursor materialization, stuck nets, pending
+  active-pair work, and hierarchical copy-source references.
+- Prove a rooted net and its complete topology survive collection, then prove
+  dropping the final root reclaims its outer cell and every otherwise
+  unreachable managed cycle.
+- Re-audit Cursor-WHNF ownership, normalization batches, contention waits,
+  unwind dispositions, finalization, and lock ordering against I3D and the
+  ownership ledger.
+
+The complete production runtime remains `NoAuto` until I11 repeats the net
+cases after Gate G2 closes the entire graph.
 
 ## Phase I9 — Runtime-Owned Root Surfaces
 

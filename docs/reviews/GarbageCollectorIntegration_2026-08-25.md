@@ -363,7 +363,11 @@ updated integration plan should preserve these decisions:
   owned/rooted boundary representation before the mutator is released; and
 - scoped authority prevents mutators, allocators, and managed borrows from
   escaping, but does not replace the separate source inventory which forbids
-  bare `Gc<T>` in parked or type-erased state.
+  bare `Gc<T>` in parked or type-erased state; and
+- subsystems which inspect managed values derive scoped capabilities from
+  `RuntimeValueAccess`. The core interaction-net specialization uses a private
+  authority-gated facade rather than teaching the generic interaction-net
+  implementation about `glam_gc`.
 
 Update I3 with the following checkpoints. A foundational
 `RuntimeValueAccess` plus a thin evaluation-specific view carries actual
@@ -682,25 +686,36 @@ known placeholder in an active `Trace` implementation.
 **Classification:** synchronization and trace-safety defect in plan  
 **Priority:** high  
 **Confidence:** high  
-**Status:** open
+**Status:** resolved in plan 2026-08-26
 
-I8 currently says that acquiring a net lock while tracing should be
-unnecessary because collection waits for all mutators
+The reviewed I8 previously said that acquiring a net lock while tracing should
+be unnecessary because collection waits for all mutators
 ([integration plan](../plans/GarbageCollectorIntegration_2026-08-19.md#phase-i8--interaction-net-migration-and-trace-audit)).
 Stop-the-world exclusion can prove that no legitimate mutator contends for the
 lock; it does not grant safe Rust access to data still stored behind a
 `Mutex`.
 
-**Recommended resolution:** trace the exact net state under its semantic lock.
-Prefer `try_lock().expect(...)` if I3 proves every legitimate net lock is
-released before mutator exit: this diagnoses a missing mutator boundary rather
-than deadlocking the collector. A blocking lock is acceptable only with an
-equally explicit no-contention proof. Never omit edges or inspect mutex-owned
-data unsafely merely because the world is stopped.
+**Resolution:** I3D.3 now replaces the core-net type alias with a private
+authority-gated newtype or equivalent facade. Every ordinary operation which
+locks and inspects or mutates core semantic net state requires matching
+`RuntimeValueAccess`; claims and lock-taking normalization leases are bound to
+that scope. Generic interaction-net topology remains independent of
+`glam_gc`. I3D.4 audits the facade and establishes the lock-exclusion invariant
+before managed net migration.
 
-Decide whether `SharedRuntimeNet` remains an external synchronized owner or
-becomes a managed outer allocation before its migration begins; that choice
-does not need to rewrite generic net topology.
+I8 then traces the exact state under its semantic mutex with nonblocking
+`try_lock`. Exclusive collection prevents any legitimate scoped ordinary lock
+holder from existing, so `WouldBlock` is an invariant defect rather than
+normal collector contention. Locking remains necessary for safe Rust access;
+the stopped world never licenses unsynchronized inspection. No edge may be
+omitted and tracing may neither reduce the net nor materialize a cursor.
+
+The representation decision is now closed: I8 introduces one managed outer
+cell for each production core runtime net. The cell owns the mutex and ordinary
+Rust topology containers; individual agents and map entries do not become GC
+allocations. I8A first abstracts the generic owner seam so non-core topology
+remains independent of `glam_gc`, then I8B switches the core owner and its
+cross-net references atomically with exact tracing and root discipline.
 
 ### GCI-009 — Several pre-G2 checks require production collection too early
 
@@ -814,10 +829,9 @@ destructor, and a destructor panic with untouched work retried later.
 
 ## Recommended Resolution Order
 
-This order contains both review-finding work and pre-existing phase gates.
-Finding labels identify work which resolves or preserves a review decision;
-phase-gate labels identify sequencing invariants which were not independent
-review findings.
+This order contains only work which resolves or preserves an integration-review
+finding. Ordinary numerical phase dependencies remain in the integration plan
+and are not repeated here as if they were additional deficiencies.
 
 Before implementing the remaining I1 ownership checkpoints:
 
@@ -834,28 +848,20 @@ Before the public-root prototype or production switch:
 
 5. **Finding GCI-002:** preserve the completed opaque-value and
    runtime-observation contract;
-6. **Finding GCI-004:** preserve the completed fallible provenance operation;
-   and
-7. **GCI-010 partition, complete:** preserve the I2A, I2B.1, I2B.2, and I2C
-   checkpoints which separate representation/provenance, the opaque facade,
-   authorized observation, and production-switch inventory.
+6. **Finding GCI-004:** preserve the completed fallible provenance operation.
 
 Before managed recursive nodes:
 
-8. **Finding GCI-006:** implement the I3A authority-carrier spike;
-9. **Finding GCI-007, resolved:** preserve exact trace updates in the same
-   checkpoint which introduces each managed edge; and
-10. **Phase gate:** complete I4B before I5 introduces a managed edge into any
-    type-erased boundary.
+7. **Finding GCI-006:** implement the I3A authority-carrier spike;
+8. **Finding GCI-007, resolved:** preserve exact trace updates in the same
+   checkpoint which introduces each managed edge.
 
 Before Gate G2 and production forced collection:
 
-11. **Finding GCI-008:** correct the net-lock protocol;
-12. **Finding GCI-009:** defer whole-runtime reclamation checks as required;
-13. **Finding GCI-011:** resolve finalizer runtime authority; and
-14. **Phase gate:** complete the I9F runtime-root inventory and I10D
-    closure/opaque audit, then reconcile both during I11A Gate G2
-    certification.
+9. **Finding GCI-008, resolved:** preserve the scoped core-net authority and
+   exact locked-trace protocol;
+10. **Finding GCI-009:** defer whole-runtime reclamation checks as required;
+11. **Finding GCI-011:** resolve finalizer runtime authority.
 
 ## Review Decision
 

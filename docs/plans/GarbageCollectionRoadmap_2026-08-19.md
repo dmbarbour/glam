@@ -345,15 +345,21 @@ The following must remain sequential:
 
 ## Remaining Phase Checkpoints
 
-These choices are intentionally unresolved rather than accidental drift:
+The remaining choice below is intentionally unresolved rather than accidental
+drift:
 
 - C4 supplies one direct managed root representation: a one-word typed root
   handle, a non-generic cell containing a weak heap identity and erased `Gc`,
   and a thin weak registry entry. I2 still chooses whether public `Value` uses
   that root directly or wraps it to keep eligible scalars inline; no alternate
   collector root-cell representation is required.
-- I8 decides whether `SharedRuntimeNet` remains synchronized external storage
-  with an exact visitor or becomes a managed outer node.
+
+The I8 ownership choice is closed: production core runtime nets use one
+managed synchronization-owning outer cell per shared net. Individual agents,
+ports, maps, and topology allocations remain ordinary fields/storage inside
+that cell. Generic non-core interaction-net ownership remains
+collector-independent. I8 performs this transition without introducing a
+managed allocation per net node.
 
 C6D has resolved the collector-side terminal question: allocation capabilities
 are mutator-scoped and non-owning, roots retain their cell but only weakly name

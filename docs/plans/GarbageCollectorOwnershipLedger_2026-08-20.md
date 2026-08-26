@@ -92,7 +92,7 @@ They are diagnostics for representation planning, not a stable ABI.
 | `List`, `ListThunk` | 8/8, 16/8 | Logical persistent-container trace in I7. |
 | `RuntimeValueRoot`, `CoreOperator` | 72/8, 96/8 | Root facade in I2/I9; net payload visitor in I8. |
 | `ListNode`, `ListChunk`, `SharedSlice`, `FingerList` | 40/8, 40/8, 32/8, 16/8 | Existing external persistent spines, logically visited in I7. |
-| `SharedRuntimeNet`, `SharedRuntimeNetInner`, `SharedRuntimeNetState` | 8/8, 256/8, 224/8 | Synchronized net owner; final managed boundary chosen in I8. |
+| `SharedRuntimeNet`, `SharedRuntimeNetInner`, `SharedRuntimeNetState` | 8/8, 256/8, 224/8 | Current synchronized owner/layout input. I8 replaces the production core owner with one managed outer cell; individual topology entries remain ordinary storage. |
 | `RuntimeNet`, `RuntimeEntry`, `RuntimeNode` | 200/8, 120/8, 96/8 | Freely mutable only under the shared-net mutex. |
 | `CopyState`, `ActivePairState` | 104/8, 48/8 | Net-internal mutable state and cross-net source edge. |
 
@@ -114,8 +114,8 @@ row is approved for a large-object or multi-run exception.
 | `Dict` | `RedBlackTreeMapSync<Key, Value>`; every mapped value is an edge. Keys contain no live `Value` after conversion. | Immutable/persistent and thread-safe; may be runtime-global. | Logical entry visitor; no post-publication mutation; I7. |
 | `Builtin` | Static enum only. | Immutable leaf. | Leaf; I4. |
 | `PartialBuiltin` | `BuiltinCall.arguments: Arc<[Value]>`. | Immutable, shared across threads. | Visit every supplied argument; I6. |
-| `Function` | `FunctionValue -> NetValue -> CoreRuntimeNet`; the net carries data/operator values. | Immutable shell over synchronized shared net; long-lived. | Visit the net boundary selected in I8; I6/I8. |
-| `Net` | `NetValue -> CoreRuntimeNet`. | Immutable shell over freely mutable net state protected by that net's mutex. | Exact synchronized net visitor and managed-edge gateways; I8. |
+| `Function` | `FunctionValue -> NetValue -> CoreRuntimeNet`; the net carries data/operator values. | Immutable shell over a managed synchronized core-net cell; long-lived. | Visit the managed net identity; I6/I8. |
+| `Net` | `NetValue -> CoreRuntimeNet`. | Immutable shell over a managed outer cell containing freely mutable net state protected by that cell's mutex. | Exact locked outer-cell visitor and managed-edge gateways; I8. |
 | `Lazy` | `Arc<LazyCell>`; source and terminal result graphs. | Identity-bearing, thread-safe, long-lived; source/result publication races are supported. | Managed cell visitor; one-write result plus replaceable source protocol; I5. |
 | `Promised` | `Arc<PromiseCell>`; successful assignment root and producer obligation. | Identity-bearing, thread-safe, long-lived; assignment is one-write. | Managed cell visitor; assignment mutation gateway; I5. |
 | `Metadata` | `MetadataCarrier.metadata: Arc<Value>`. | Immutable identity-bearing sealed value, thread-safe. | Visit exactly one metadata value; I6. |
@@ -165,10 +165,12 @@ The core specialization fixes `Data = core::Value`,
 | Owner | Edges and mutation | Synchronization / visitor / phase |
 | --- | --- | --- |
 | `InteractionNet<CoreSpecialization>` template | Immutable node array; data nodes contain `Value`, operator nodes contain `CoreOperator`. | Exact template visitor; construction-local until published; I8. |
-| `SharedRuntimeNetInner` / `SharedRuntimeNetState` | Own mutable `RuntimeNet`, revision/subscriber/normalization state. | One net mutex is the exclusive graph mutation boundary. No callback or destruction while locked. I8 chooses whether the outer allocation is managed or remains synchronized external storage with exact rooted contents. |
-| `RuntimeNet`, `RuntimeEntry`, `RuntimeNode` | Data/operator values, ports, active-pair and cursor state. | Free mutation only under the owning net mutex. Every value-installing rewrite requires the I8 mutation gateway. Exact visitor runs under stopped mutators and the reviewed net-lock protocol. |
-| `CopyState`, `CursorClaim`, `PreparedCopySource`, `FrontierObservation` | `SharedRuntimeNet` source references and cursor topology. | Cross-net references are hierarchical copies, but value-level fixpoints/promises can still make the surrounding value graph cyclic. Visit source net exactly if it becomes managed; I8. |
-| `NormalizationRequest`, `RequestRoot`, `Cursor`, `ActivePair`, `ResumeCursorDependency`, `NetDriverWorklist` (`eval/net.rs`) | Temporary/shared runtime-net handles. | Poll-orchestration owners; direct graph/value access is T within bounded evaluator scopes. I3D.3 replaces manually paired call/cursor claim transitions with bracketed or lifetime-bound claims which cannot enter parked machine state. |
+| `CoreRuntimeNet` authority facade (introduced in I3D.3) | Private core handle; I8 changes its internal identity from the generic external owner to `Gc<CoreRuntimeNetCell>` or the equivalent final managed type. | Every ordinary operation which locks and inspects or mutates semantic contents requires matching `RuntimeValueAccess`; the managed handle does not escape unrooted into durable state. Generic interaction-net topology remains collector-independent. |
+| `CoreRuntimeNetCell` (introduced in I8) | One managed outer allocation owning the semantic mutex, revisions, normalization/subscriber state, and ordinary `RuntimeNet<CoreSpecialization>` containers. | One net mutex is the exclusive graph mutation boundary. No callback or destruction while locked. Exact trace uses `try_lock` under exclusive collection; reviewed internal finalization drops ordinary Rust resources. No per-agent GC allocation. |
+| Generic `SharedRuntimeNetInner` / `SharedRuntimeNetState` | External owner retained for generic/non-core specializations and tests after the I8A owner seam. | Shares topology and synchronization behavior without depending on `glam_gc`; it is not the production core-net owner after I8B. |
+| `RuntimeNet`, `RuntimeEntry`, `RuntimeNode` | Data/operator values, ports, active-pair and cursor state. | Free mutation only under the owning net mutex and core authority facade. Every value-installing rewrite requires the I8 mutation gateway. The exact visitor uses `try_lock` under exclusive collection; contention is an invariant defect because no ordinary scoped accessor can coexist. |
+| `CopyState`, `CursorClaim`, `PreparedCopySource`, `FrontierObservation` | Source-net references and cursor topology, abstracted from the generic external owner in I8A. | Production core source references become exact managed outer-cell edges in I8B. Copy topology remains hierarchical, while value-level paths may form collectible cycles through any net. |
+| `NormalizationRequest`, `RequestRoot`, `Cursor`, `ActivePair`, `ResumeCursorDependency`, `NetDriverWorklist` (`eval/net.rs`) | Temporary/shared runtime-net handles. | Poll-orchestration owners; direct graph/value access passes through the core authority facade within bounded evaluator scopes. I3D.3 replaces manually paired call/cursor claim transitions with bracketed or lifetime-bound claims which cannot enter parked machine state. |
 | Active-pair/cursor claim guards and dispositions (introduced in I3D.3) | One in-flight claim identity and owned data needed to publish resumed, blocked, stable, failed, or released state. | Private scope-bound T. A claim is consumed before semantic parking; unwind republishes a safe releasable state and disturbance. It is never a registered root or durable machine owner. |
 
 ## Registered Root and Transient Owner Inventory
@@ -294,8 +296,9 @@ guessing/conservative classification:
 4. Parser/compiler/macro intermediate structures carry raw core values across
    potentially effectful work and need explicit I3 mutator bounds.
 5. RPDS and FingerTree/list nodes need reviewed exact logical visitors.
-6. `SharedRuntimeNet` needs an exact synchronized trace and complete
-   value-installing mutation-gateway inventory.
+6. I8 must replace the production core `SharedRuntimeNet` `Arc` owner with one
+   managed outer cell, then close its exact synchronized trace, durable-handle,
+   and value-installing mutation-gateway inventories.
 7. Public opaque construction needs a closed leaf/root registration boundary.
 
 As each M family receives its managed representation, append the stable
