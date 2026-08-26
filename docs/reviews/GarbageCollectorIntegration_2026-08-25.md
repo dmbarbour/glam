@@ -438,8 +438,8 @@ unsafe or scheduler boundaries.
 
 - **I1:** collection policy/dependency; value-domain topology; factory and
   scoped allocation; layout/ledger reconciliation; lifecycle regression;
-- **I2:** public wrapper/provenance; opaque handles and runtime-mediated
-  observation; prototype and production-switch inventory;
+- **I2:** public wrapper/provenance; opaque prototype surface;
+  runtime-authorized observation prototype; production-switch inventory;
 - **I4:** value shell/leaves; argument/failure structures; persistent
   adapters; net adapter; public-root switch;
 - **I6:** functions/applications/fixpoints; metadata; failures/reflection/net
@@ -456,8 +456,9 @@ and collection mode permitted at its end.
 
 **Resolution:** the integration plan now partitions every identified oversized
 phase. I1 separates policy, domain topology, scoped allocation, layout/ledger,
-and lifecycle work; I2 separates provenance, opaque-handle observation, and
-the production-switch inventory; I3 has six authority/boundary checkpoints;
+and lifecycle work; I2 separates provenance, the opaque prototype surface,
+runtime-authorized observation, and the production-switch inventory; I3 has
+six authority/boundary checkpoints;
 I4 separates shell/leaves, closure containment, argument/failure structures,
 persistent adapters, net adapters, and the public-root switch; and I6 separates
 functions, metadata, failures, and reflection/net-construction payloads.
@@ -504,35 +505,47 @@ destructor, and a destructor panic with untouched work retried later.
 
 ## Recommended Resolution Order
 
+This order contains both review-finding work and pre-existing phase gates.
+Finding labels identify work which resolves or preserves a review decision;
+phase-gate labels identify sequencing invariants which were not independent
+review findings.
+
 Before implementing the remaining I1 ownership checkpoints:
 
-1. use GCI-001's completed no-auto collection mode for the production heap;
-2. preserve GCI-003's completed value-domain topology and authorized owner
-   matrix;
-3. preserve GCI-005's completed stable ownership-ledger reconciliation
-   contract; and
-4. preserve GCI-010's completed checkpoint partition and collection-mode
-   boundaries.
+1. **Finding GCI-001:** use the completed no-auto collection mode for the
+   production heap;
+2. **Finding GCI-003:** preserve the completed value-domain topology and
+   authorized owner matrix;
+3. **Finding GCI-005:** preserve the completed stable ownership-ledger
+   reconciliation contract; and
+4. **Finding GCI-010:** preserve the completed checkpoint partition and
+   collection-mode boundaries.
 
 Before the public-root prototype or production switch:
 
-5. preserve GCI-002's completed opaque-value and runtime-observation contract;
-6. preserve GCI-004's completed fallible provenance operation; and
-7. partition I2 around those decisions.
+5. **Finding GCI-002:** preserve the completed opaque-value and
+   runtime-observation contract;
+6. **Finding GCI-004:** preserve the completed fallible provenance operation;
+   and
+7. **GCI-010 partition, complete:** preserve the I2A, I2B.1, I2B.2, and I2C
+   checkpoints which separate representation/provenance, the opaque facade,
+   authorized observation, and production-switch inventory.
 
 Before managed recursive nodes:
 
-8. implement the I3A authority-carrier spike from GCI-006;
-9. clarify exact trace ownership under GCI-007; and
-10. close I4B before I5 introduces a managed edge into any type-erased
-    boundary.
+8. **Finding GCI-006:** implement the I3A authority-carrier spike;
+9. **Finding GCI-007:** clarify exact trace ownership; and
+10. **Phase gate:** complete I4B before I5 introduces a managed edge into any
+    type-erased boundary.
 
 Before Gate G2 and production forced collection:
 
-11. correct the net-lock protocol in GCI-008;
-12. defer whole-runtime reclamation checks as required by GCI-009;
-13. resolve finalizer runtime authority under GCI-011; and
-14. finish the partitioned root/closure/opaque source audit.
+11. **Finding GCI-008:** correct the net-lock protocol;
+12. **Finding GCI-009:** defer whole-runtime reclamation checks as required;
+13. **Finding GCI-011:** resolve finalizer runtime authority; and
+14. **Phase gate:** complete the I9F runtime-root inventory and I10D
+    closure/opaque audit, then reconcile both during I11A Gate G2
+    certification.
 
 ## Review Decision
 

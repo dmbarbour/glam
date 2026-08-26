@@ -345,39 +345,50 @@ the existing mismatched-`Root::get` invariant test. Only the isolated prototype
 heap may collect; production remains `NoAuto` and retains its compatibility
 `RuntimeValueRoot`.
 
-### Phase I2B — Opaque Handles and Runtime-Mediated Observation
+### Phase I2B.1 — Opaque Prototype Surface
 
-- Apply GCI-002's resolved public contract. Bare `api::Value` and
-  `EvaluatedValue` expose only transport behavior: clone, drop, and `Send` plus
-  `Sync` when their representation permits it. Remove public `PartialEq`, `Eq`,
-  `PartialOrd`, `Ord`, and `Hash`; do not expose either root-cell or allocation
-  identity as a replacement relation.
+- Apply GCI-002's resolved contract to I2A's isolated prototype wrapper. The
+  prototype facade exposes only transport behavior: clone, drop, and `Send`
+  plus `Sync` when its representation permits it. It implements no
+  `PartialEq`, `Eq`, `PartialOrd`, `Ord`, or `Hash`, and exposes neither
+  root-cell nor allocation identity as a replacement relation.
+- If `Debug` remains available on the prototype handle, make it content-free:
+  it reveals no kind, provenance, runtime liveness, managed identity, or other
+  value state.
+- Record that clients needing dictionary/set keys must first obtain or compute
+  an ordinary host key through authorized observation. A value handle is
+  deliberately unsuitable as a key.
+- Do not change the production `api::Value` compatibility surface in this
+  prototype checkpoint. I4F owns removal of its direct traits and observers.
+
+Verification: compile-time prototype-facade fixtures establish the absence of
+equality, ordering, and hash contracts, and
+`prototype_value_debug_is_opaque` checks the optional content-free debug form.
+Only isolated prototype fixtures may collect; production remains `NoAuto` and
+retains its compatibility `RuntimeValueRoot`.
+
+### Phase I2B.2 — Runtime-Authorized Observation Prototype
+
 - Require live matching runtime authority for structural equality, kind
   inspection, extraction, and value rendering. Prototype both natural Rust
   call directions where useful: a runtime service receiving a value and a
-  value or `EvaluatedValue` method receiving a scoped service/mutator. The
+  value or evaluated-value method receiving a scoped service/mutator. The
   authority and failure behavior must be identical; method placement is an
   ergonomic choice. Runtime provenance checks remain private boundary
-  enforcement. If `Debug` remains available on a handle, it is content-free
-  and reveals no kind, provenance, runtime liveness, or managed identity.
-- Preserve `EvaluatedValue` as the sole WHNF witness rather than a second root
-  model, but do not treat that witness as independent authority to inspect its
-  value. Runtime-mediated extractors return owned host values which may outlive
-  the domain; no managed borrow escapes its matching mutator/access scope and
-  no hidden domain lease is manufactured to preserve an old signature.
-- Document that clients needing dictionary/set keys must first obtain or
-  compute an ordinary host key through the runtime. A public value handle is
-  deliberately unsuitable as a key.
+  enforcement.
+- Preserve the prototype evaluated-value facade as the sole WHNF witness
+  rather than a second root model, but do not treat that witness as independent
+  authority to inspect its value. Authorized extractors return owned host
+  values which may outlive the domain; no managed borrow escapes its matching
+  mutator/access scope and no hidden domain lease is manufactured to preserve
+  an old signature.
 
-Verification: compile-time API fixtures establish that public value types do
-not satisfy equality, ordering, or hash bounds;
-`prototype_runtime_compares_live_structural_values` covers equal, unequal,
-cloned, and independently constructed values;
-`prototype_value_debug_is_opaque` checks the optional content-free debug form;
+Verification: `prototype_runtime_compares_live_structural_values` covers
+equal, unequal, cloned, and independently constructed values;
 `prototype_runtime_observation_rejects_foreign_or_inaccessible_value` covers
 the fallible boundary; and `prototype_owned_extraction_outlives_domain`
 proves the owned-result rule. Only isolated prototype fixtures may collect;
-production remains `NoAuto`.
+production remains `NoAuto` and retains its compatibility public facade.
 
 ### Phase I2C — Scoped-Access and Production-Switch Inventory
 
@@ -585,7 +596,7 @@ and `net_value_adapter_cycle_marks_exactly`. Production remains `NoAuto`.
   pointer escape its region.
 - Remove the compatibility facade's direct equality, ordering, hashing, kind,
   extraction, runtime-identity, and content-rendering observations. Route each
-  retained semantic operation through the runtime authority selected in I2B,
+  retained semantic operation through the runtime authority selected in I2B.2,
   using whichever call direction that checkpoint found clearest;
   keep `EvaluatedValue` as an opaque WHNF witness and return only owned host
   data from extraction.
