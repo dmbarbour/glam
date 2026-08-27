@@ -35,6 +35,8 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I10B.0 | pending | opaque representation decision review gate |
 | I11 | pending | whole-production-graph forced collection |
 | I12 | pending | runtime maintenance and threshold collection |
+| I12A | pending | explicit maintenance for immutable `NoAuto` runtimes |
+| I12B.0 | pending | new-runtime collection-policy decision review gate |
 | I13 | pending | redundant ownership removal and documentation |
 
 ## Current Boundary
@@ -1642,15 +1644,19 @@ remains `NoAuto`; only explicit tests/maintenance collect.
   intentional nondeterministic reflection behavior.
 
 Passing G3 authorizes I12's controlled runtime maintenance and later threshold
-service. It does not itself switch the heap from `NoAuto` to automatic
-collection.
+service review. It does not switch any heap from `NoAuto` to `Automatic`.
+Collection policy is immutable for one heap; I12B.0 may select a different
+construction policy only for runtimes created after that decision.
 
 Verification: the routine repository checks, `cargo test --workspace -q`, the
 aggressive debug-collection suite containing every I11B/I11C named fixture,
-focused Miri, supported sanitizers, and a dated Gate G3 review. The heap remains
-`NoAuto` until a later I12 policy checkpoint deliberately changes it.
+focused Miri, supported sanitizers, and a dated Gate G3 review. Every existing
+heap remains `NoAuto` for its lifetime. A later I12 policy checkpoint may
+change only how new runtime heaps are constructed.
 
 ## Phase I12 — Explicit Runtime Maintenance and Threshold Collection
+
+### Phase I12A — Explicit Maintenance for `NoAuto` Runtimes
 
 - Expose a narrow embedding maintenance method or runtime tuning policy; do not
   expose raw heap internals.
@@ -1658,26 +1664,95 @@ focused Miri, supported sanitizers, and a dated Gate G3 review. The heap remains
   coalescing request which may be issued before a known batch boundary, and a
   synchronous full-collection operation used only outside an active mutator.
   These are Rust runtime-maintenance controls, not Glam evaluation effects.
-- Initially collect at controlled batch/idle boundaries.
-- Add allocation-pressure requests from successful typed-run publication which
-  are serviced when a later outer mutator entry finds the heap idle. Lease-word
-  claims and individual slot allocations remain outside shared pressure
-  accounting.
-- Count queued and running finalizers as runtime operational activity. A
-  readiness probe waits for passive finalization to complete; there is no
-  destructor-produced diagnostic, event, or task work to pump.
+- Collect `NoAuto` runtimes only through explicit service at reviewed
+  batch/idle boundaries. Successful typed-run publication may latch a
+  pressure request, but ordinary outer mutator entry does not service it.
+  Runtime maintenance observes the request/statistics and deliberately calls
+  synchronous collection when its boundary policy permits. Lease-word claims
+  and individual slot allocations remain outside shared pressure accounting.
+- Preserve GCI-016 as a separate readiness-integration gate before this path is
+  enabled for routine concurrent runtime operation. Until that gate fixes the
+  operational-activity lease and wake protocol, I12A may run only at the stable
+  serial boundaries already certified by I11.
 - Do not begin a requested collection while the heap is in `Finalizing`.
   Requests made before successful completion are heuristic hints coalesced into
   the active collection and are cleared with its pressure baseline; they do not
   queue a second writer or deny fresh mutator admission. A request serialized
-  after completion remains latched for a later idle outer entry.
+  after completion remains latched for the next explicit maintenance service.
 - Ensure a request cannot make a worker spin, hold settlement admission, or
   publish semantic activity merely because collection ran.
 - Report metrics for debugging and profiling without making them observable to
   pure evaluation.
 
-Automatic full collection is enabled only after controlled-boundary operation
-is stable.
+Verification: construct a production runtime with immutable `NoAuto`, cross
+its pressure threshold, prove repeated outer mutator entries do not collect,
+then explicitly service the request at each reviewed boundary. Preserve request
+coalescing, finalizer panic/retry, and no-recursive-collection behavior. Add
+`runtime_no_auto_pressure_requires_explicit_service` and
+`runtime_manual_maintenance_never_mutates_heap_policy`.
+
+### Phase I12B.0 — New-Runtime Collection-Policy Decision Review
+
+This is a hard design gate after Gate G3 and stable I12A manual maintenance.
+It does not inspect or mutate the policy of a live heap. Its inputs are:
+
+- I12A correctness, latency, throughput, pause-time, pressure, survivor, and
+  boundary-placement measurements under representative assemblies;
+- the immutable `CollectionPolicy` collector contract and the runtime/value-
+  domain construction API;
+- the list of all runtime constructors, test fixtures, embedding entry points,
+  and configuration/profile paths which select or assume a policy;
+- the GCI-016 readiness/activity decision and forced-order evidence if routine
+  or automatic concurrent collection is under consideration; and
+- operational reasons to prefer collector-elected outer-entry service over
+  runtime-selected explicit maintenance boundaries.
+
+The review selects exactly one policy for future runtime construction:
+
+1. **Automatic new runtimes.** Runtimes created after the implementation
+   checkpoint construct their heap with `CollectionPolicy::Automatic` (with
+   any explicit manual/testing construction mode retained by the selected
+   runtime API). Existing `NoAuto` runtimes remain manual forever. Successful
+   pressure requests may be elected by a later idle outer mutator entry only
+   for those new automatic heaps. This option is blocked until GCI-016's
+   activity/wake protocol covers every entry which may elect collection.
+2. **Permanently manual runtimes.** Production construction continues to use
+   `CollectionPolicy::NoAuto`. Pressure requests remain latches consumed only
+   by I12A's explicit maintenance service; no plan or documentation may claim
+   that ordinary outer mutator entry services them.
+
+The decision is recorded in a dated runtime-GC-policy review. It must choose
+the runtime construction API and default, inventory every constructor, and
+rewrite the following I12B phase, runtime documentation, test matrix, and Gate
+G4 criteria. No hybrid policy inferred from current pressure or live runtime
+state is permitted.
+
+Verification of the review artifact:
+`runtime_gc_policy_review_inventory_is_complete` maps every constructor to an
+explicit immutable policy;
+`runtime_gc_policy_plan_has_no_live_transition` rejects any `NoAuto`-to-
+`Automatic` mutation; and plan-link validation proves the decision artifact,
+I12B, readiness prerequisites, and completion criteria agree.
+
+### Phase I12B — Decision-Selected Runtime Construction Policy
+
+This phase is not implementation-ready until I12B.0 rewrites it. In either
+outcome:
+
+- store the selected policy once when constructing the runtime heap and expose
+  no live policy setter;
+- preserve an explicit `NoAuto` construction path in tests so manual service
+  remains covered;
+- test that already-created runtimes retain their original behavior after new
+  runtimes are constructed under the selected policy; and
+- keep policy, pressure, and collection counts outside pure Glam observation.
+
+If `Automatic` is selected, additionally construct and exercise both manual
+and automatic runtimes, prove pressure-triggered collection occurs only on the
+automatic heap, and require the completed GCI-016 entry/activity protocol. If
+manual service is selected, remove every remaining suggestion that mutator
+entry services production pressure and exercise each explicit maintenance
+boundary under `NoAuto`.
 
 ## Phase I13 — Retire Redundant Ownership and Document the Boundary
 
@@ -1747,6 +1822,9 @@ semantics.
 - Reflection, diagnostics, stores, events, and task handles retain exactly the
   values their semantics require.
 - Full collection preserves assembly results and runtime coordination.
+- Every heap's collection policy is fixed at construction. The I12B.0 decision
+  governs only newly created runtimes; no live `NoAuto` heap becomes
+  `Automatic`.
 - No pointer-local GC locking or atomic reference count remains on internal
   managed edges.
 - Any conservative retention through external opaque public roots is

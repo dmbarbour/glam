@@ -7,10 +7,10 @@ changed as part of either review pass.
 
 Status: second pass complete; plan maintenance is pending. I1A-I1B and the
 first review's plan revisions are complete. Before further integration
-implementation, GCI-015 through GCI-016 must be added to the integration plan
-as explicit review/design checkpoints with named inputs, a required decision
-or artifact, and a hard gate before dependent implementation. GCI-006 is
-resolved in the integration plan;
+implementation, GCI-016 must be added to the integration plan as an explicit
+review/design checkpoint with named inputs, a required decision or artifact,
+and a hard gate before dependent implementation. GCI-006 is resolved in the
+integration plan;
 I3A-I3F remain ordinary implementation work after their I1/I2 prerequisites.
 Gate G1 remains passed; this review does not authorize production collection.
 
@@ -1031,7 +1031,7 @@ than the first destructor-policy checkpoint.
 
 **Confidence:** high
 
-**Status:** open
+**Status:** resolved by planned review gate 2026-08-27
 
 I1A deliberately made `CollectionPolicy` immutable for one `Heap`, and every
 production runtime is constructed with `NoAuto`. I12 first proposes explicit
@@ -1053,6 +1053,18 @@ The first option best matches the collector's existing automatic protocol and
 is recommended unless runtime-controlled placement proves more valuable.
 Tests must distinguish new-runtime policy from live-heap mutation and exercise
 both manual and automatic runtime construction.
+
+**Plan resolution:** I12A now implements only explicit maintenance for
+immutable `NoAuto` runtimes. Pressure remains latched across ordinary mutator
+entry and is consumed deliberately at reviewed maintenance boundaries. I12B.0
+is a hard policy review after Gate G3 and stable manual maintenance; it chooses
+exactly `Automatic` construction for new runtimes or permanently manual
+`NoAuto` production service. Its inputs include measurements, every runtime
+constructor, the immutable collector contract, and GCI-016 readiness evidence.
+The dated decision must rewrite I12B, construction defaults/API,
+documentation, tests, and Gate G4 criteria. Existing heaps retain their policy
+forever, and the plan explicitly rejects a live policy setter or inferred
+hybrid transition.
 
 ### GCI-016 — Finalizer activity has no atomic readiness or wake integration
 
@@ -1197,9 +1209,9 @@ the plan now rather than leaving prose which says to decide later:
 15. **Finding GCI-017, resolved by planned review gate:** execute I10B.0 before
     I10B and require its selected policy to rewrite I10B/I10C, the ledger,
     roadmap, Gate G2 inventory, and completion criteria;
-16. **Finding GCI-015:** add an I12 policy review whose output selects immutable
-    `Automatic` construction for new runtimes or permanently manual runtime
-    servicing; and
+16. **Finding GCI-015, resolved by planned review gate:** execute I12B.0 after
+    stable I12A manual maintenance and apply its immutable new-runtime policy
+    to the rewritten I12B; and
 17. **Finding GCI-016:** add a readiness-integration review before routine
     collection. Its output fixes the activity-lease/gating protocol, wake
     source, finalizer-panic report state, and forced-order verification.
@@ -1211,9 +1223,9 @@ memory at an unspecified later time.
 ## Review Decision
 
 Pause integration implementation long enough to make the reviewed plan
-authoritative again. Add the named GCI-015 through GCI-016 review checkpoints
-with their entry conditions, required decisions, plan-update outputs, and
-implementation gates. Only after those edits are complete should I1C resume.
+authoritative again. Add the named GCI-016 review checkpoint with its entry
+conditions, required decision, plan-update outputs, and implementation gate.
+Only after that edit is complete should I1C resume.
 
 This is plan maintenance, not a return to collector architecture work. Gate G1
 remains sufficient and passed; C7/C8 collector stress and tuning may continue

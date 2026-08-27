@@ -328,6 +328,11 @@ graph.
 Forced full collections pass the complete semantic, concurrency, and drop
 tests. Full collection is then enabled at explicit runtime maintenance points.
 Automatic threshold collection remains disabled until those points are stable.
+Collection policy is immutable for one heap: the later I12B.0 policy review may
+change construction of new runtimes, but never transitions a live `NoAuto`
+runtime to `Automatic`. If it retains manual production policy, pressure is
+serviced only through explicit runtime maintenance and outer mutator entry does
+not elect collection.
 
 ### Gate G4 — legacy ownership retired
 
