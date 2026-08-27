@@ -48,6 +48,7 @@ not define language semantics or collect subsystem invariants.
 | `g_syntax/diagnostic_formatter.rs` | Cached Glam `Diagnostic -> Bytes` formatter |
 | `text_pattern.rs` | Shared capture-free text-pattern language |
 | `core.rs`, `core/` | Syntax-independent values, runtime value-domain ownership, factory-scoped managed allocation/rooting, lazies, promises, functions, keys, builtins |
+| `core/managed.rs` | Factory-qualified collector access and Glam's centralized managed-slot policy |
 | `crates/glam-gc/` | Glam-owned typed-run tracing collector; the runtime domain currently owns a no-auto heap while production values remain unmigrated |
 | `core_net.rs` | Core specialization of generic interaction nets |
 | `interaction_net/model.rs`, `builder.rs` | Generic topology and checked construction |

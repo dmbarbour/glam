@@ -1,6 +1,6 @@
 # Glam GC Integration Plan — 2026-08-19
 
-Status: in progress; Phase I0 plus I1A-I1C are complete, and collector Gate G1
+Status: in progress; Phase I0 plus I1A-I1D are complete, and collector Gate G1
 passed on 2026-08-25. The remaining integration work follows the completed
 owner-matrix, stable-ledger, and low-risk checkpoint corrections from the
 integration review.
@@ -19,6 +19,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I1A | complete | immutable no-auto collection policy and operational pressure statistics |
 | I1B | complete | runtime value-domain topology and authorized owner matrix |
 | I1C | complete | factory-scoped managed allocation and rooting authority |
+| I1D | complete | centralized managed-slot policy and stable ledger contract |
 | I1 | pending | runtime-owned heap, collection disabled |
 | I2 | pending | public value and external-root prototype |
 | I3 | pending | bounded evaluator/worker mutator regions |
@@ -330,30 +331,34 @@ checkpoint.
 
 ### Phase I1D — Layout Policy and Ownership-Ledger Reconciliation
 
-GCI-005 completed the ledger-schema half of this checkpoint on 2026-08-25.
-The ledger now identifies stable Glam representation families and records
-reviewable layout, trace, drop, mutation, and root facts. It deliberately does
-not use process-local metadata addresses or discovery-order class IDs. Each
-later representation-migration phase completes its own family record; Gate G2
-performs the final one-to-one source reconciliation.
+Completed on 2026-08-27. GCI-005 had already established the stable ledger
+schema: representation family, concrete Rust type/source owner, reviewed
+visitor, requested extent and Rust layout, allocator acceptance, destruction
+policy, mutation gateway, external-root classification, and authorizing
+verification. Process-local metadata addresses, `TypeId`, dense class IDs,
+frontiers, and derived run geometry remain collector-private.
 
-- Centralize Glam's node-size policy when constructing canonical object
-  metadata. That policy may request a slot size larger than the Rust payload;
-  allocation-class creation then applies it independently for each typed run.
-  Type alignment remains expressed by the Rust node or a common aligned
-  wrapper, not by runtime heap configuration. A shared managed-node wrapper or
-  declaration macro is Glam's central alignment-policy point; the collector
-  does not provide a mutable or per-heap alignment setting.
+`core::managed::managed_slot_extent<T>` is now Glam's single node-size policy
+for managed representations. The initial floor is one machine pointer: this
+avoids pathological sub-word typed runs without prematurely selecting the
+eventual tagged-value alignment or a larger padding target. A representation
+larger than that floor requests its natural Rust size. The collector then
+applies the type's Rust alignment independently for its typed run; Glam does
+not configure a mutable heap-wide alignment.
 
-- As the initial managed shell is selected, complete its stable family record
-  and prove allocator discovery accepts its requested extent. Keep final run
-  geometry in `glam-gc` verification. Later phases repeat this for their own
-  families rather than performing one discovery-order-dependent dump.
+No production managed shell is selected here. I2 owns the public-root
+prototype and the value-representation plan owns any later measured change to
+alignment or padding, so inventing a semantic family merely to complete I1D
+would pre-empt those decisions. A private one-byte leaf probe verifies that
+the centralized pointer-sized request is accepted through the factory scope.
+It is verification machinery, not a Gate G2 representation row. Every later
+production family must use the centralized policy, pass its own allocator
+fixture, and complete its stable ledger record when introduced.
 
-Verification: add `managed_family_requested_layout_is_accepted` for every
-requested extent selected here, require the corresponding stable ledger
-record, and rerun `glam-gc`'s requested-layout rejection suite. Production
-collection remains `NoAuto`.
+Verification: `managed_family_requested_layout_is_accepted`, plus
+`glam-gc`'s requested-total-slot-extent, undersized-request rejection, and
+unsupported-layout publication suites. Production collection remains
+`NoAuto`.
 
 ### Phase I1E — Lifecycle Reverification
 

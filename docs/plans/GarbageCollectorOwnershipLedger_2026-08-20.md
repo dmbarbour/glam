@@ -106,6 +106,14 @@ Glam's eventual compact-value policy belongs to the value-representation plan.
 Every future managed payload must fit one fixed-size typed-run slot; no current
 row is approved for a large-object or multi-run exception.
 
+I1D centralizes current Glam requests through
+`core::managed::managed_slot_extent<T>`. Its initial pointer-sized minimum is a
+conservative pre-representation baseline rather than a tagged-pointer or final
+padding decision. Rust type alignment remains authoritative. Each production
+managed family records the resulting requested extent and allocator acceptance
+when introduced; the private I1D leaf probe is verification machinery and not
+a semantic family row.
+
 ## `core::Value` Variant Ledger
 
 | Variant | Current owner and outgoing edges | Mutation, threading, and longevity | Exact visitor / mutation gateway / migration |
