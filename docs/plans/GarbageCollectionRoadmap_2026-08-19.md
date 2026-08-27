@@ -328,6 +328,14 @@ graph.
 Forced full collections pass the complete semantic, concurrency, and drop
 tests. Full collection is then enabled at explicit runtime maintenance points.
 Automatic threshold collection remains disabled until those points are stable.
+Before routine concurrent maintenance or automatic construction, I12A.0 must
+integrate every may-collect entry with authoritative runtime readiness. The
+runtime records an operational-activity lease under its mutation-admission
+gate before collection can begin and retires it with the ordinary activity wake
+after collection/finalization returns or unwinds. Collector activity snapshots
+remain observational; `glam-gc` receives no runtime callback. An inactive
+pending finalizer batch after panic must have a durable reportable or explicit
+retry-required disposition rather than anonymous permanent `Busy`.
 Collection policy is immutable for one heap: the later I12B.0 policy review may
 change construction of new runtimes, but never transitions a live `NoAuto`
 runtime to `Automatic`. If it retains manual production policy, pressure is

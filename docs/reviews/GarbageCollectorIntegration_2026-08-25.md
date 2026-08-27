@@ -5,14 +5,13 @@ review-only audit of the production-integration roadmap after the isolated
 `glam-gc` collector passed Gate G1. No production or collector implementation
 changed as part of either review pass.
 
-Status: second pass complete; plan maintenance is pending. I1A-I1B and the
-first review's plan revisions are complete. Before further integration
-implementation, GCI-016 must be added to the integration plan as an explicit
-review/design checkpoint with named inputs, a required decision or artifact,
-and a hard gate before dependent implementation. GCI-006 is resolved in the
-integration plan;
-I3A-I3F remain ordinary implementation work after their I1/I2 prerequisites.
-Gate G1 remains passed; this review does not authorize production collection.
+Status: second pass complete; reviewed plan maintenance is complete. I1A-I1B
+and the first review's plan revisions are complete, and GCI-012 through
+GCI-017 are now resolved directly or represented by explicit gated review
+checkpoints with named inputs, required artifacts, and downstream rewrite
+requirements. GCI-006 is resolved in the integration plan; I3A-I3F remain
+ordinary implementation work after their I1/I2 prerequisites. Gate G1 remains
+passed; this review does not authorize production collection.
 
 ## Scope
 
@@ -1074,7 +1073,7 @@ hybrid transition.
 
 **Confidence:** high
 
-**Status:** open
+**Status:** resolved by planned review gate 2026-08-27
 
 I12 says queued and running finalizers count as runtime operational activity and
 that readiness waits for passive finalization. The collector currently exposes
@@ -1101,6 +1100,21 @@ permanent anonymous `Busy` activity.
 Forced-order tests must place readiness before collection election, during a
 blocked finalizer, at finalizer completion, and across finalizer panic/retry,
 then prove no false ready snapshot and no lost wake.
+
+**Plan resolution:** I12A.0 is now a hard GC operational-activity/readiness
+review after Gate G3 and before routine concurrent maintenance or automatic
+runtime construction. It fixes the protocol shape: a private runtime heap
+facade registers a logical activity lease under shared mutation admission
+before any entry can collect, readiness observes its count/revision under
+exclusive admission, the collector/finalizers run without the gate, and lease
+retirement publishes authoritative state before advancing the existing parking
+generation. Collector statistics stay observational and no callback is added
+to `glam-gc`. The review inventories every entry as non-collecting,
+may-elect, or explicit-collection and requires privacy evidence against facade
+bypass. It must also choose a durable reportable or explicit retry-required
+disposition for a pending finalizer batch after panic; anonymous permanent
+`Busy` is forbidden. The artifact rewrites I12A, readiness/settlement state as
+needed, I12B prerequisites, completion criteria, and forced-order tests.
 
 ### GCI-017 — The managed opaque representation is not selected
 
@@ -1212,9 +1226,10 @@ the plan now rather than leaving prose which says to decide later:
 16. **Finding GCI-015, resolved by planned review gate:** execute I12B.0 after
     stable I12A manual maintenance and apply its immutable new-runtime policy
     to the rewritten I12B; and
-17. **Finding GCI-016:** add a readiness-integration review before routine
-    collection. Its output fixes the activity-lease/gating protocol, wake
-    source, finalizer-panic report state, and forced-order verification.
+17. **Finding GCI-016, resolved by planned review gate:** execute I12A.0 before
+    routine concurrent collection and require its activity lease, readiness
+    revision, wake, entry inventory, and pending-finalizer disposition to
+    rewrite I12A and I12B prerequisites.
 
 These checkpoints are part of the implementation plan and therefore part of
 the work to be implemented. They are not reminders to reopen this review from
@@ -1222,14 +1237,13 @@ memory at an unspecified later time.
 
 ## Review Decision
 
-Pause integration implementation long enough to make the reviewed plan
-authoritative again. Add the named GCI-016 review checkpoint with its entry
-conditions, required decision, plan-update outputs, and implementation gate.
-Only after that edit is complete should I1C resume.
+The reviewed plan is authoritative again. All second-pass findings are either
+resolved directly in the chronology or represented by hard review gates whose
+artifacts must rewrite dependent phases before those phases become
+implementation-ready.
 
-This is plan maintenance, not a return to collector architecture work. Gate G1
-remains sufficient and passed; C7/C8 collector stress and tuning may continue
-later in response to production use. Once the plan update lands, I1C-I1E remain
-the next implementation checkpoints, and the newly planned reviews become
-ordinary explicit phases of that transition rather than informal future
-follow-ups.
+Gate G1 remains sufficient and passed; C7/C8 collector stress and tuning may
+continue later in response to production use. I1C-I1E are the next integration
+implementation checkpoints. I10B.0, I12A.0, and I12B.0 are ordinary explicit
+future phases of that transition rather than reminders to reopen this review
+from memory. This review still does not authorize production collection.
