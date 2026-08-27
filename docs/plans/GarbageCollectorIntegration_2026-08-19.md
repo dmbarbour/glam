@@ -1,6 +1,6 @@
 # Glam GC Integration Plan — 2026-08-19
 
-Status: in progress; Phase I0 plus I1A-I1B are complete, and collector Gate G1
+Status: in progress; Phase I0 plus I1A-I1C are complete, and collector Gate G1
 passed on 2026-08-25. The remaining integration work follows the completed
 owner-matrix, stable-ledger, and low-risk checkpoint corrections from the
 integration review.
@@ -18,6 +18,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I0 | complete | complete ownership and mutation ledger |
 | I1A | complete | immutable no-auto collection policy and operational pressure statistics |
 | I1B | complete | runtime value-domain topology and authorized owner matrix |
+| I1C | complete | factory-scoped managed allocation and rooting authority |
 | I1 | pending | runtime-owned heap, collection disabled |
 | I2 | pending | public value and external-root prototype |
 | I3 | pending | bounded evaluator/worker mutator regions |
@@ -302,20 +303,25 @@ Production uses `NoAuto`, and no production representation is collected.
 
 ### Phase I1C — Factory-Scoped Allocation
 
-- Give the value factory a narrow allocation/rooting handle, not raw collector
-  internals.
-- Do not create a `heap -> runtime state -> heap` ownership cycle.
-- Let runtime/value-factory construction pre-discover common heap-owned classes,
-  but do not retain public allocator capabilities across mutator regions.
-  Every actual allocation uses an `Allocator<'_, T>` borrowed from its current
-  mutator. If repeated scoped lookup becomes measurable, cache canonical
-  metadata, dense class IDs, and stable frontier cells only in the collector's
-  existing per-thread/per-runtime-heap state. Such cache entries retain weak
-  heap identity rather than owning the runtime value domain. Rare classes may
-  use first-use discovery; the allocation hot path must not hash `TypeId` per
-  object once its scoped allocator is obtained.
+Completed on 2026-08-27. `CoreValueFactory::with_managed_values` is the sole
+factory-level collector bridge. Its higher-ranked callback receives a
+`CoreValueAllocationScope` which exposes narrow per-type allocator discovery,
+root publication, and same-domain rooted access without exposing `Heap` or
+`Mutator`.
 
-Verification: add `factory_scoped_allocation_uses_current_mutator` and
+`CoreValueAllocator<'_, T>` wraps the collector allocator borrowed from the
+current scope. A caller can reuse it for a batch, so class discovery and its
+`TypeId` lookup do not occur per object; its lifetime prevents the allocator
+from surviving mutator exit. The collector's existing thread/heap cache owns
+stable frontier reuse. No allocation handle owns the value domain, runtime
+state, or scheduler, and `Root<T>` remains weak with respect to the heap.
+
+There are not yet any production managed representation classes to
+pre-discover. I4 and later representation phases may add reviewed common-class
+discovery through this same bounded bridge rather than storing allocator
+capabilities. Production collection remains `NoAuto`.
+
+Verification: `factory_scoped_allocation_uses_current_mutator` and
 `scoped_factory_does_not_retain_allocator_or_scheduler` fixtures, while
 preserving `scoped_factories_share_one_no_auto_runtime_value_domain`. At this
 checkpoint production collection remains `NoAuto`; an isolated factory fixture

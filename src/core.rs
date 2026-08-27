@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use bytes::Bytes;
-use glam_gc::{CollectionPolicy, Heap};
+use glam_gc::{Allocator, CollectionPolicy, Gc, Heap, Mutator, Root, Trace, UnsupportedLayout};
 use internment::Intern;
 use rpds::RedBlackTreeMapSync;
 
@@ -274,6 +274,25 @@ pub(crate) struct CoreValueFactory {
     local_extensions: Option<SharedExtensionMap>,
 }
 
+/// Factory-qualified access to one admitted managed-allocation region.
+///
+/// The scope deliberately exposes neither the runtime heap nor the collector
+/// mutator. Managed allocation classes remain borrowed from this region. A
+/// managed pointer may leave only as an exactly traced managed edge, while a
+/// root is the only standalone access handle intended to survive the region.
+pub(crate) struct CoreValueAllocationScope<'scope> {
+    mutator: &'scope Mutator<'scope>,
+}
+
+/// One type's allocation path borrowed from a factory allocation scope.
+///
+/// Callers may reuse this value for a batch of allocations without repeating
+/// class discovery. Its lifetime prevents retaining an allocator after the
+/// current mutator region closes.
+pub(crate) struct CoreValueAllocator<'scope, T: Trace> {
+    allocator: Allocator<'scope, T>,
+}
+
 /// Strong ownership boundary for one runtime's values.
 ///
 /// Factories and services which must keep constructing or evaluating values
@@ -360,6 +379,25 @@ impl CoreValueFactory {
             domain: self.domain.clone(),
             local_extensions: Some(Arc::new(Mutex::new(HashMap::new()))),
         }
+    }
+
+    /// Runs one bounded managed-allocation region in this factory's value
+    /// domain.
+    ///
+    /// This is the sole factory-level bridge to the collector. The callback
+    /// receives only allocation, rooting, and rooted-access operations; it
+    /// cannot retain the heap, mutator, or a typed allocator.
+    #[allow(
+        dead_code,
+        reason = "Phase I1C installs the allocation seam before production managed values"
+    )]
+    pub(crate) fn with_managed_values<R>(
+        &self,
+        operation: impl for<'scope> FnOnce(CoreValueAllocationScope<'scope>) -> R,
+    ) -> R {
+        self.domain
+            .heap
+            .with_mutator(|mutator| operation(CoreValueAllocationScope { mutator }))
     }
 
     pub(crate) fn attach_work_coordinator(&self, coordinator: &Arc<EvaluationWorkCoordinator>) {
@@ -547,6 +585,51 @@ impl CoreValueFactory {
     #[cfg(test)]
     pub(crate) fn value_domain(&self) -> &Arc<RuntimeValueDomain> {
         &self.domain
+    }
+}
+
+impl CoreValueAllocationScope<'_> {
+    /// Discovers or reuses one heap-local allocation class for this region.
+    #[allow(
+        dead_code,
+        reason = "Phase I1C installs the allocation seam before production managed values"
+    )]
+    pub(crate) fn allocator<T: Trace>(
+        &self,
+    ) -> Result<CoreValueAllocator<'_, T>, UnsupportedLayout> {
+        self.mutator
+            .allocator()
+            .map(|allocator| CoreValueAllocator { allocator })
+    }
+
+    /// Publishes an external root before a managed pointer leaves this region.
+    #[allow(
+        dead_code,
+        reason = "Phase I1C installs the rooting seam before public roots migrate in I2"
+    )]
+    pub(crate) fn root<T: Trace>(&self, value: Gc<T>) -> Root<T> {
+        self.mutator.root(value)
+    }
+
+    /// Borrows one same-domain root while this region supplies access
+    /// authority.
+    #[allow(
+        dead_code,
+        reason = "Phase I1C installs the root-access seam before public roots migrate in I2"
+    )]
+    pub(crate) fn get<'access, T: Trace>(&'access self, root: &Root<T>) -> &'access T {
+        root.get(self.mutator)
+    }
+}
+
+impl<T: Trace> CoreValueAllocator<'_, T> {
+    /// Allocates through the class already selected for this region.
+    #[allow(
+        dead_code,
+        reason = "Phase I1C installs the allocation seam before production managed values"
+    )]
+    pub(crate) fn alloc(&self, value: T) -> Gc<T> {
+        self.allocator.alloc(value)
     }
 }
 
@@ -1737,6 +1820,57 @@ mod tests {
             factory.value_domain().heap.collection_policy(),
             CollectionPolicy::NoAuto
         );
+    }
+
+    #[test]
+    fn factory_scoped_allocation_uses_current_mutator() {
+        let factory = CoreValueFactory::new(
+            crate::runtime::allocate_evaluation_runtime_id(),
+            RuntimeIds::new(),
+        );
+        let scoped = factory.scoped();
+
+        let root = scoped.with_managed_values(|scope| {
+            let allocator = scope
+                .allocator::<u64>()
+                .expect("the factory fixture should fit one managed slot");
+            scope.root(allocator.alloc(42))
+        });
+
+        factory.with_managed_values(|scope| {
+            assert_eq!(*scope.get(&root), 42);
+        });
+    }
+
+    #[test]
+    fn scoped_factory_does_not_retain_allocator_or_scheduler() {
+        let factory = CoreValueFactory::new(
+            crate::runtime::allocate_evaluation_runtime_id(),
+            RuntimeIds::new(),
+        );
+        let scoped = factory.scoped();
+        let domain = Arc::downgrade(factory.value_domain());
+        let coordinator = EvaluationWorkCoordinator::new_for_test(
+            factory.clone(),
+            crate::runtime::RuntimeMutationAdmission::new(),
+        );
+        let coordinator_weak = Arc::downgrade(&coordinator);
+
+        let root = scoped.with_managed_values(|scope| {
+            let allocator = scope
+                .allocator::<u64>()
+                .expect("the factory fixture should fit one managed slot");
+            scope.root(allocator.alloc(7))
+        });
+
+        drop(coordinator);
+        assert!(coordinator_weak.upgrade().is_none());
+        assert!(factory.work_coordinator().is_none());
+
+        drop(scoped);
+        drop(factory);
+        assert!(domain.upgrade().is_none());
+        drop(root);
     }
 
     #[test]
