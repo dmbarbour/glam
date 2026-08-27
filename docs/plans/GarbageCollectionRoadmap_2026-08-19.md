@@ -166,7 +166,10 @@ permit dereference outside a region.
    evaluating, scheduling work, publishing diagnostics/events, or otherwise
    entering its value domain. A component needing active cleanup remains an
    ordinary externally owned/rooted record and uses an explicit retirement
-   operation while live. Its `Drop` fallback remains passive.
+   operation while live. It is unreachable from the managed graph and may call
+   that same idempotent operation from ordinary Rust `Drop` when existing
+   scope-exit semantics require it. This active external RAII is not managed
+   finalization and may retain independently authorized runtime capabilities.
    The collector crate's general contract may still permit a destructor which
    independently owns a `Heap` to call its ordinary scoped API, but Glam
    managed payloads contain no such heap/domain capability. Any proposed

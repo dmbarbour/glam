@@ -73,8 +73,10 @@ frontier state, and other derived run geometry remain collector-internal.
 `glam-gc` layout/class tests verify them from public Rust layout and requested
 extent inputs. A test-only diagnostic may report them for profiling, but Gate
 G2 never depends on copying those instance-specific results into this ledger.
-No family may enter production collection while its stable record or visitor
-is unresolved.
+No family may enter even an isolated collection fixture while its stable
+record, visitor, or direct/transitive destruction entry is unresolved. I4.0 is
+the common admission contract; later family phases supply their concrete
+evidence rather than deferring destructor review to I10.
 
 ## Current Layout Baseline
 
@@ -185,7 +187,8 @@ inventory.
 | Area | Types | Classification, lifetime, and migration |
 | --- | --- | --- |
 | Runtime value domain | `RuntimeValueDomain`, `CoreValueFactory`, `Values`, `RuntimeValueFactory`, `RuntimeSharedResources` | Authorized strong value-domain leases under I1B. The domain owns the no-auto heap, IDs, cache, and weak coordinator binding; it is never managed by its own heap. Cached payloads cannot retain a factory/domain backedge. I4F.1 installs cache roots before managed values escape; I9/I10 audit lifecycle and containment. |
-| Public root facade | `RuntimeValueRoot`, `api::Value`, `EvaluatedValue`, `PromiseResolver`, `EffectTokenDomain`, `EffectTokenDomainState` | R. Public/runtime-long-lived and cross-thread, but non-owning with respect to the value domain. Root registration/provenance and inert access are selected in I2, every durable owner adopts the facade in I4F.1, and I4F.2 performs the production managed-root switch. I9 audits lifecycle. Resolver ownership/finalization is handled with promises in I5; generic effect-token domain payloads remain explicit external root owners. Any promise coordination split from its managed cell is separately **C** and contains no value root. |
+| Public root facade | `RuntimeValueRoot`, `api::Value`, `EvaluatedValue`, `PromiseResolver`, `EffectTokenDomain`, `EffectTokenDomainState` | R. Public/runtime-long-lived and cross-thread, but non-owning with respect to the value domain. Root registration/provenance and inert access are selected in I2, every durable owner adopts the facade in I4F.1, and I4F.2 performs the production managed-root switch. `PromiseResolver` remains an external active-RAII owner: its idempotent retirement/`Drop` fallback preserves unresolved-promise failure and is audited in I5C/I9F. Generic effect-token domain payloads remain explicit external root owners. Any promise coordination split from its managed cell is separately **C** and contains no value root. |
+| External evaluation lifecycle | `EvaluationSession`, `ClientDemandHandle`, `PendingReflectionTask`, plus any source-inventoried successor | R or capability-owning external Rust state, never M. Their current `Drop` paths close a session, abandon demand, or cancel an unactivated task through idempotent terminal operations. They may retain exact roots and authorized runtime capabilities, but no managed allocation may reach them. I9F records the concrete capability, root, lock/callback, and terminal contracts. |
 | Assembly facade | `AssemblerReflectionHost`, `CompilationExecution`, `ReasoningSession`, `CompileSetup`, `BuiltModule`, `ReasoningVolume`, `Assembler`, `DiagnosticAttachment`, `AssemblerBuilder`, `ModuleBuilder` | R for stored public roots/diagnostics; T only for setup values proven bounded to one I3 scope. I4F.1 converts every parked setup/compiler field; I9 audits lifecycle and retirement. |
 | Diagnostics | `Diagnostic`, `DiagnosticEvent`, `DiagnosticBusState`, `DiagnosticBusInner`, `DiagnosticBus`, `DiagnosticIngressInner`, `DiagnosticIngress`, `DiagnosticSubscription`, `DiagnosticSubscriptionInner`, `Error`, `ReasoningFailure` | R. Buses/callbacks are external root owners; events retain public roots until delivery/retirement. Weak back-references remain non-owning. Converted in I4F.1; audited in I9. |
 | Runtime events | `RuntimeInputRecord`, `RuntimeOutputIntent`, `RuntimeDeliveryRecord`, `RuntimeEventSnapshot`, `RuntimeEventJournal`, `RuntimePreparedInput`, `RuntimeDeliveryTicket`, `RuntimeDiagnosticRoute` | R. Persistent input snapshots and identified deliveries retain roots across threads and settlement. Converted in I4F.1; audited in I9. |
@@ -236,9 +239,13 @@ closure environment for hidden pointers.
 - Managed destruction may release ordinary Rust resources only. It must not
   observe or preserve any `Gc` edge held by the dying representation.
 - State requiring cancellation, abandonment, notification, logging, or other
-  active cleanup remains in an external owner holding exact public roots. That
-  owner exposes an explicit, idempotent retirement operation while the runtime
-  is live; its eventual `Drop` is passive.
+  active cleanup remains in an external owner holding exact public roots and,
+  where required, an independently owned runtime/value-domain capability. The
+  owner is unreachable from the managed graph, exposes an explicit idempotent
+  retirement operation, and may invoke that same operation from ordinary Rust
+  `Drop` when existing scope-exit semantics require it. This is active external
+  RAII, not managed finalization; I9F inventories its capabilities, roots,
+  lock/callback order, and terminal behavior.
 - The generic collector may mechanically support a destructor that
   independently owns a `Heap`, but no Glam production managed family may carry
   that authority. Any proposed exception blocks Gate G2 pending a dedicated

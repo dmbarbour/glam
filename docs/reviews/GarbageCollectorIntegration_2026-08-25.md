@@ -7,10 +7,10 @@ changed as part of either review pass.
 
 Status: second pass complete; plan maintenance is pending. I1A-I1B and the
 first review's plan revisions are complete. Before further integration
-implementation, GCI-013 through GCI-017 must either be resolved directly in
-the integration plan or represented there by an explicit review/design
-checkpoint with named inputs, a required decision or artifact, and a hard gate
-before dependent implementation. GCI-006 is resolved in the integration plan;
+implementation, GCI-015 through GCI-017 must be added to the integration plan
+as explicit review/design checkpoints with named inputs, a required decision
+or artifact, and a hard gate before dependent implementation. GCI-006 is
+resolved in the integration plan;
 I3A-I3F remain ordinary implementation work after their I1/I2 prerequisites.
 Gate G1 remains passed; this review does not authorize production collection.
 
@@ -836,14 +836,17 @@ managed payload must not trigger active runtime behavior indirectly.
 Resources which require cancellation, abandonment, notification, logging, or
 other active cleanup remain external/rooted lifecycle records. Their owner
 performs an explicit, idempotent retirement operation while the runtime is
-live, and their eventual Rust `Drop` remains passive. Not every rooted runtime
-element therefore needs a managed representation.
+live. As clarified by GCI-013, ordinary Rust `Drop` may call that same operation
+as an active fallback where current scope-exit semantics require it, provided
+the external owner is unreachable from the managed graph. Not every rooted
+runtime element therefore needs a managed representation.
 
 The generic collector retains its mechanical ability to run a destructor that
 independently owns a `Heap`; that collector-only fixture does not authorize the
-same ownership in Glam's managed graph. I10C records the passive boundary and
-I11C verifies that finalization produces no diagnostics, events, tasks, or
-managed allocations. Any future exception requires a dedicated design review
+same ownership in Glam's managed graph. I4.0 records the passive boundary
+before the first managed family, I10C re-audits opaque cases, and I11C verifies
+that finalization produces no diagnostics, events, tasks, or managed
+allocations. Any future managed exception requires a dedicated design review
 rather than a local weak-domain or TLS-capability workaround.
 
 ## Second-Pass Findings — 2026-08-26
@@ -928,7 +931,7 @@ The ownership ledger records the same chronology.
 
 **Confidence:** high
 
-**Status:** open
+**Status:** resolved in plan 2026-08-27
 
 The intended GCI-011 boundary is that a destructor invoked by the collector for
 a managed allocation receives no Glam runtime or heap authority. The revised
@@ -965,6 +968,17 @@ client-demand abandonment, and pending-reflection cancellation after their
 referenced values become managed, while ownership tests prove none of those
 external records is reachable from a managed allocation.
 
+**Plan resolution:** I4.0 now defines two destruction domains. Collector-
+managed `Trace` allocations are passively droppable and receive no active Glam
+capability, directly or transitively. Ordinary external/rooted Rust owners may
+retain exact roots and an independently owned runtime capability, expose an
+idempotent retirement operation, and invoke it from `Drop` where scope exit is
+part of existing semantics, provided no managed allocation can reach them.
+I5C applies that rule to promise/producer ownership. I9F inventories all active
+external RAII starting with `PromiseResolver`, `EvaluationSession`,
+`ClientDemandHandle`, and pending reflection tasks, including lock/callback and
+terminal behavior. I10C now only re-audits opaque external owners.
+
 ### GCI-014 — The managed-drop contract is scheduled after its first users
 
 **Classification:** invariant placement and verification chronology
@@ -973,7 +987,7 @@ external records is reachable from a managed allocation.
 
 **Confidence:** high
 
-**Status:** open
+**Status:** resolved in plan 2026-08-27
 
 The roadmap and ownership ledger now make passive managed destruction a global
 contract, but the integration chronology still presents I10C as the checkpoint
@@ -998,6 +1012,16 @@ The now-larger I5 should be partitioned into at least lazy-cell migration,
 promise-cell migration, external promise/producer lifecycle integration, and
 cross-family cycle reclamation. That keeps the managed-passive and
 external-active ownership cut reviewable.
+
+**Plan resolution:** I4.0 is a hard managed-family admission gate before I4A
+or any later isolated managed-family fixture may collect. Each stable family
+record must prove direct and transitive passive destruction before collection;
+an unresolved destructor or active transitive field blocks that family. The
+I5 work is partitioned as recommended into I5A lazy cells, I5B promise cells,
+I5C external lifecycle, and I5D cross-family reclamation. The common I5-I10
+verification boundary repeats the admission rule. I10B no longer defers
+destructor authority, and I10C has become a final opaque/lifecycle audit rather
+than the first destructor-policy checkpoint.
 
 ### GCI-015 — I12 assumes a mutable collection policy on an immutable heap
 
@@ -1148,10 +1172,10 @@ Apply directly to the affected phase chronology:
 
 12. **Finding GCI-012, resolved:** preserve I4F.1's durable-owner conversion
     gate before I4F.2 and treat I9 only as a lifecycle/retirement audit;
-13. **Finding GCI-013:** distinguish passive GC-managed destruction from
-    legitimate active external RAII retirement; and
-14. **Finding GCI-014:** make the managed-drop ledger/audit a prerequisite of
-    every isolated managed-family collection and partition I5 accordingly.
+13. **Finding GCI-013, resolved:** preserve the distinction between passive
+    managed destruction and legitimate active external RAII retirement; and
+14. **Finding GCI-014, resolved:** preserve I4.0's managed-drop admission gate
+    and the partitioned I5A-I5D migration.
 
 Where a semantic choice is intentionally deferred, add a review checkpoint to
 the plan now rather than leaving prose which says to decide later:
@@ -1173,10 +1197,9 @@ memory at an unspecified later time.
 ## Review Decision
 
 Pause integration implementation long enough to make the reviewed plan
-authoritative again. Apply GCI-013 through GCI-014 directly, and add the named
-GCI-015 through GCI-017 review checkpoints with their entry conditions,
-required decisions, plan-update outputs, and implementation gates. Only after
-those edits are complete should I1C resume.
+authoritative again. Add the named GCI-015 through GCI-017 review checkpoints
+with their entry conditions, required decisions, plan-update outputs, and
+implementation gates. Only after those edits are complete should I1C resume.
 
 This is plan maintenance, not a return to collector architecture work. Gate G1
 remains sufficient and passed; C7/C8 collector stress and tuning may continue

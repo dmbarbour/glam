@@ -22,10 +22,11 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I2 | pending | public value and external-root prototype |
 | I3 | pending | bounded evaluator/worker mutator regions |
 | I4 | pending | core trace vocabulary and leaf policy |
+| I4.0 | pending | managed-family destruction admission contract |
 | I4B | pending | closure and opaque managed-edge containment |
 | I4F.1 | pending | durable root-surface conversion gate |
 | I4F.2 | pending | public managed-root production switch |
-| I5 | pending | managed lazies and promises |
+| I5 | pending | managed lazy/promise cells, external lifecycle, and cycle reclamation |
 | I6 | pending | functions, applications, metadata, failures |
 | I7 | pending | persistent list and dictionary tracing |
 | I8 | pending | managed core-net outer cells, exact tracing, and mutation gateways |
@@ -819,6 +820,43 @@ root-safe shape; I4F.2 then switches the root facade and managed value shell
 together. This ordering avoids any buildable interval in which production can
 park an unrooted `Gc` merely because collection remains disabled.
 
+### Phase I4.0 — Managed-Family Destruction Admission Contract
+
+Establish the destruction contract before the first managed family or closed
+managed fixture is allowed to collect. There are two distinct ownership
+domains:
+
+1. A collector-managed `Trace` allocation is passively droppable. Neither its
+   direct `Drop` implementation nor transitive field destruction may obtain or
+   invoke a Glam runtime, value domain, heap, evaluator, scheduler, diagnostic,
+   event, host callback, or other active semantic capability. It may release
+   ordinary Rust resources, but may not observe or preserve a `Gc` edge held by
+   the dying representation.
+2. An ordinary external/rooted Rust owner may perform active RAII cleanup
+   through an independently owned runtime capability and registered roots. It
+   is not reachable from the managed graph, is never reclaimed as a managed
+   allocation, and therefore creates no heap backedge. Prefer an explicit,
+   idempotent `retire` operation; where current semantics rely on scope exit,
+   `Drop` may invoke that same operation as a fallback.
+
+Every family checkpoint from I4A onward completes the stable ledger fields for
+direct and transitive destruction *before* its first isolated collection. A
+family with unresolved destructor authority, a transitive active `Arc` drop,
+or an external lifecycle owner reachable from the managed graph is not
+collector-ready. Any proposed managed exception requires a separate design
+review and blocks the family checkpoint; a weak-domain or TLS bridge is not an
+admissible local workaround.
+
+Verification: add a compile-time/private-construction fixture proving managed
+payloads cannot carry runtime/value-domain service capabilities, plus
+`managed_family_collection_requires_completed_drop_record`,
+`managed_drop_has_no_runtime_or_heap_capability`, and
+`external_raii_owner_is_not_reachable_from_managed_graph`. The managed fixture
+proves ordinary Rust resource release without runtime work; the external
+fixture proves idempotent explicit retirement and a semantically equivalent
+`Drop` fallback. No later isolated family fixture may collect unless this gate
+and that family's drop record pass.
+
 ### Phase I4A — Value Shell and Leaf Families
 
 - Select the managed value shell/leaf granularity and implement
@@ -1012,6 +1050,10 @@ unrooted pointer.
   exact visitor or root disposition. If a later source audit finds a durable
   bare value, the responsible earlier phase is reopened; I9 is not a safe
   holding area for delayed root conversion.
+- Before any isolated fixture collects a managed family, that family completes
+  I4.0's direct/transitive destruction record. Managed destruction is passive;
+  an active cleanup path must remain in a separately inventoried external root
+  owner and may not be reachable from the managed graph.
 - A phase may force collection only in a fresh isolated collector-ready fixture
   whose complete reachable graph is closed over the family under test and
   already certified prerequisite families. The fixture must not borrow a
@@ -1026,39 +1068,74 @@ unrooted pointer.
 
 ## Phase I5 — Lazies and Promises
 
-Migrate the principal cyclic identities first:
+### Phase I5A — Lazy-Cell Migration
 
-- replace `Arc<LazyCell>` and `Arc<PromiseCell>` with managed identity cells;
-- retain scheduler/completion host companions as ordinary `Arc` only where
-  they carry locks, notifications, task/waiter identities, or other
-  coordination data and no `Gc`, `Root`, public `Value`, or equivalent managed
-  ownership. Store promise assignments, lazy sources/results, and all other
-  logical managed edges in traceable managed cells;
-- trace lazy sources, terminal evaluated values, permanent failures, promise
-  assignments, and producer-owned data;
-- clear/release lazy sources after terminal publication as today;
-- route source replacement and terminal assignment through the managed-edge
-  mutation gateway; its collector action is empty in full stop-the-world mode
-  while preserving an auditable site for separately planned collectors;
-- discharge the raw gateway's unsafe same-heap, current-old-edge, and exact-
-  replacement obligations inside representation-local safe methods rather
-  than exposing raw `Gc` mutation to evaluator callers;
-- update the already-exact I4 visitors in the same checkpoint as each edge
-  changes from external/`Arc` ownership to `Gc`; no phase may leave a trace
-  placeholder merely because collection is disabled; and
-- preserve exact wait, cancellation, abandonment, and resolver semantics.
+- Replace `Arc<LazyCell>` with a managed identity cell and trace every lazy
+  source, terminal evaluated value, and permanent failure.
+- Preserve source replacement and terminal publication order. Route source
+  replacement and result installation through representation-local safe
+  managed-edge gateways; clear/release the source after terminal publication
+  as today.
+- Complete the `LazyCell` direct/transitive destruction record before its
+  first isolated collection. Any notification, task identity, or active
+  cleanup state remains in an edge-free external companion rather than its
+  managed fields.
+- Update I4's compatibility visitor in the same checkpoint; collection being
+  disabled permits no trace placeholder.
 
-Focused tests must construct and reclaim:
+Verification: preserve the lazy publication/wait suites and reclaim a direct,
+two-node, and many-node lazy cycle in a closed fixture. Add
+`managed_lazy_drop_is_passive_and_releases_rust_resources`. Production remains
+`NoAuto` and does not collect.
 
-- a direct lazy self-cycle;
-- two- and many-lazy cycles;
-- promise-to-lazy and lazy-to-promise graphs;
-- a resolved promise whose result contains the promise;
-- a deferred producer retained by a worker; and
-- a terminal value still reachable from another public root.
+### Phase I5B — Promise-Cell Migration
 
-Use an isolated collector-ready fixture for forced reclamation. The complete
-production runtime still does not collect.
+- Replace `Arc<PromiseCell>` with a managed identity cell. Store successful
+  assignment and other logical managed edges inside the traceable cell rather
+  than hiding them behind registered roots.
+- Keep task/waiter IDs, subscriptions, notifications, and producer
+  coordination in ordinary Rust companions only where they contain no `Gc`,
+  `Root`, public `Value`, or equivalent managed ownership.
+- Route one-write assignment through a representation-local safe gateway and
+  preserve publication-before-notification ordering.
+- Complete the `PromiseCell` direct/transitive passive-destruction record
+  before its first isolated collection.
+
+Verification: preserve resolver/task publication races and reclaim a resolved
+promise whose result contains that promise. Add
+`managed_promise_drop_is_passive_and_producer_companion_is_edge_free`.
+Production remains `NoAuto` and does not collect.
+
+### Phase I5C — External Promise and Producer Lifecycle
+
+- Keep `PromiseResolver` and any producer/task owner which performs failure,
+  cancellation, abandonment, notification, or wakeup as an external/rooted
+  owner with the exact authorized runtime capability it needs. It is not a
+  managed finalizer and must not be reachable from `PromiseCell` or another
+  managed allocation.
+- Express cleanup as an explicit idempotent retirement operation. Preserve the
+  existing `Drop` fallback where dropping the final unresolved resolver or
+  producer currently establishes a permanent failure or terminal state.
+- Preserve lock/callback ordering: terminal state is published under the
+  reviewed coordinator/component protocol; wakes, callbacks, and destruction
+  occur after locks are released.
+- Prove retirement releases its registered roots and runtime capability and
+  that duplicate explicit/`Drop` retirement is harmless.
+
+Verification: retain unresolved-resolver failure, producer cancellation,
+owner-session closure, and cross-session observation tests after promise values
+become managed. Add `promise_resolver_drop_invokes_idempotent_retire_once` and
+`external_promise_owner_has_no_managed_backedge`. Production remains `NoAuto`.
+
+### Phase I5D — Cross-Family Cycle Reclamation
+
+After I5A-I5C pass, use closed collector-ready fixtures to construct and
+reclaim promise-to-lazy and lazy-to-promise graphs, a deferred producer retained
+by a worker, and the terminal value still reachable from another public root.
+Prove the live rooted case survives, then retire the external owner/drop the
+last root and prove the otherwise unreachable cycle is reclaimed. This phase
+does not repeat or weaken the I4.0 family drop audits. The complete production
+runtime remains `NoAuto` and does not collect.
 
 ## Phase I6 — Functions, Applications, Metadata, and Failures
 
@@ -1296,16 +1373,45 @@ proves production owner retirement without collection; a closed subsystem
 fixture may prove local reclamation where practical. Production remains
 `NoAuto`.
 
-### Phase I9F — Runtime-Root Source Inventory
+### Phase I9F — External Active-RAII Lifecycle Audit
+
+- Inventory every external/rooted `Drop` implementation which performs or may
+  trigger cancellation, failure, abandonment, notification, logging, task
+  terminalization, or another runtime action. At minimum cover
+  `PromiseResolver`, `EvaluationSession`, `ClientDemandHandle`, and an
+  unactivated pending reflection task, then reconcile the source search rather
+  than treating that list as permanently exhaustive.
+- For each owner, record its strong runtime/value-domain capability, registered
+  roots, explicit idempotent retirement operation, `Drop` fallback, terminal
+  status/error semantics, lock ordering, and callback/destruction boundary.
+- Prove every such owner is ordinary external Rust state and is unreachable
+  from the managed graph. A managed allocation may retain an edge-free **C**
+  coordination companion, but never an active external owner or a capability
+  which reaches it transitively.
+- Preserve active RAII where scope exit is part of current semantics. Do not
+  rename these paths as managed finalizers and do not make them passive merely
+  because the values they control have moved into managed cells.
+
+Verification: after the referenced values become managed, preserve
+unresolved-resolver failure, session closure and owned-work terminalization,
+client-demand abandonment, and unactivated-reflection-task cancellation.
+Forced-order tests cover explicit retirement followed by `Drop`, `Drop` alone,
+and concurrent observation, proving exactly one terminal transition and no
+callback/destruction under a component lock. Add
+`active_external_raii_inventory_is_reconciled` and
+`managed_graph_reaches_no_active_raii_owner`. Production remains `NoAuto`.
+
+### Phase I9G — Runtime-Root Source Inventory
 
 - Re-run the exhaustive source search for core/public values, roots, evaluated
   values, snapshots, diagnostics, type-erased attachments, and parked machine
   fields.
 - Match every result to one stable ledger family and named owner. An unmatched
   field blocks I10/Gate G2.
-- Compare the result with the latched I4F.1 inventory. A newly discovered
+- Compare the result with the latched I4F.1 inventory and I9F active-RAII
+  inventory. A newly discovered
   durable bare value reopens and repairs its earliest managed-edge checkpoint;
-  it is not converted opportunistically in I9F.
+  it is not converted opportunistically in I9G.
 
 Verification: `runtime_root_source_inventory_is_reconciled` plus controlled
 owner-drop tests named by every root family. Production remains `NoAuto`; this
@@ -1349,23 +1455,24 @@ Verification: `opaque_family_inventory_is_reconciled`,
 `opaque_registration_rejects_bare_managed_pointer`,
 `opaque_registration_rejects_unrooted_core_value`, and
 `opaque_registration_rejects_foreign_root`. Production remains `NoAuto`; no
-destructor authority is selected yet.
+new destructor authority is selected here. Every admitted managed family is
+already subject to I4.0 before its first collection; external owners retain the
+active-RAII contract audited by I9F.
 
-### Phase I10C — Passive Managed Destruction and External Retirement
+### Phase I10C — Final Opaque Destruction and External-Lifecycle Audit
 
-- Give managed `Drop` no Glam runtime, value-domain, heap, evaluator,
-  scheduler, diagnostic, or event capability. The collector-held mutator
-  during `Finalizing` is collector coordination state; it is neither passed to
-  destructors nor exposed through an ambient/TLS accessor.
-- Require every production managed payload, including the transitive `Drop`
-  behavior of its fields, to release only ordinary Rust resources. A managed
-  `Drop` must not evaluate, allocate managed values, schedule work, publish
-  diagnostics/events, or inspect or preserve any `Gc` edge held by the dying
-  representation.
-- Keep resources that require active cleanup in an external/rooted lifecycle
-  record. Its owner performs an explicit, idempotent retirement operation
-  while the runtime is live; the record's eventual Rust `Drop` remains
-  passive. Not every rooted runtime element needs a managed representation.
+- Re-audit every opaque/closure representation against I4.0's already-active
+  managed destruction rule. The collector-held mutator during `Finalizing` is
+  collector coordination state; it is neither passed to destructors nor
+  exposed through an ambient/TLS accessor. Managed direct and transitive
+  destruction releases only ordinary Rust resources and performs no runtime
+  work or `Gc` observation.
+- Reconcile opaque external/rooted lifecycle owners with I9F. Such an owner
+  performs an explicit, idempotent retirement operation while the runtime is
+  live; where scope-exit semantics require it, its ordinary Rust `Drop` may
+  call that same operation as an active fallback. It is never reachable from a
+  managed allocation and is not a managed finalizer. Not every rooted runtime
+  element needs a managed representation.
 - Replace `OpaqueValue::downcast<T>() -> Option<Arc<T>>` for collector-owned
   payloads with a scoped mutator-bound borrow for live access only. Explicitly
   external companions may retain ordinary Rust ownership and public roots,
@@ -1374,9 +1481,10 @@ destructor authority is selected yet.
   or heap authority as a new design-review gate. Do not introduce a weak-domain
   capability or TLS bridge as a local exception.
 
-Verification: `managed_drop_has_no_runtime_or_heap_capability`,
+Verification: rerun `managed_drop_has_no_runtime_or_heap_capability`,
 `managed_drop_releases_transitive_rust_resources_passively`,
-`external_root_owner_retires_before_passive_drop`,
+`external_root_owner_drop_invokes_idempotent_retire`,
+`managed_graph_reaches_no_active_raii_owner`,
 `managed_drop_during_domain_teardown_is_passive`, and
 `opaque_drop_panic_retries_untouched_suffix`. Use isolated managed-payload and
 external-owner fixtures; production remains `NoAuto`.
@@ -1405,7 +1513,8 @@ fixtures, and the focused collector finalization suite. Production remains
 - Audit every unsafe trace/downcast/mutation gateway and the I3 region/lock
   boundaries. Preserve GCI-007's resolved exact-edge chronology, GCI-008's
   scoped locked-net trace, GCI-009's isolated-fixture chronology, and
-  GCI-011's passive managed-destruction boundary.
+  GCI-011/GCI-014's I4.0 passive managed-destruction admission boundary plus
+  GCI-013's separate active external-RAII ownership rule.
 - Repeat every isolated family reclamation fixture while production remains
   `NoAuto`.
 
