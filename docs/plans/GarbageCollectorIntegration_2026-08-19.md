@@ -40,6 +40,44 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I12B.0 | pending | new-runtime collection-policy decision review gate |
 | I13 | pending | redundant ownership removal and documentation |
 
+## Major-Stage Review Policy
+
+Every completed top-level integration phase, I1 through I13, ends with a
+post-implementation review before work begins on the next top-level phase.
+Subphases and low-risk checkpoints may proceed without separate reviews, but
+adjacent top-level phases may be grouped into one major stage only when this
+plan records that grouping before implementation of either phase begins.
+
+Each review is a dated artifact under `docs/reviews/` and audits the
+implementation against this plan, the collector implementation plan, the
+roadmap, and the ownership ledger. It must:
+
+- reconcile the implemented ownership, tracing, mutation-authority,
+  synchronization, callback, destruction, and lifecycle boundaries;
+- verify that the phase's source inventories, compile-time contracts,
+  schedule-controlled tests, reclamation tests, and routine repository checks
+  cover the boundary that was actually implemented;
+- classify discovered drift as intentional and justified, corrective new
+  information, or accidental/convenience-driven drift;
+- update the plans, ledger, and durable documentation for intentional or
+  corrective drift, rather than leaving the implementation as the only record;
+- repair accidental drift, or turn it into an explicit later design/review
+  gate with entry conditions, required evidence, and a hard blocking point;
+  and
+- record unresolved findings and the exact phase they block.
+
+Drift from an earlier design is not inherently a defect. The review asks
+whether the resulting boundary remains coherent, safe, testable, and faithful
+to Glam's current needs. A phase is not marked complete, and the next
+top-level phase does not begin, until its review has no unresolved finding
+that invalidates the completed boundary.
+
+An in-phase design gate such as I10B.0 or I12A.0 does not by itself satisfy
+this policy: it reviews a decision before implementation. A dated gate that
+also audits the completed implementation, such as the planned Gate G2 or G3
+certification, may serve as the post-stage review when its artifact covers all
+of the requirements above.
+
 ## Current Boundary
 
 The isolated collector now supplies checked direct roots and a weak registry,
