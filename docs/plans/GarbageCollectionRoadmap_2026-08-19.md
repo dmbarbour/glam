@@ -218,7 +218,13 @@ permit dereference outside a region.
     in the heap root registry; a backedge through one may conservatively leak,
     but can never be reclaimed prematurely. Cross-runtime host associations
     stay outside the value payload and communicate through validated Rust-layer
-    data/effect boundaries.
+    data/effect boundaries. Integration phase I10B.0 reviews whether the
+    bootstrap remains wholly external or also admits a separate sealed,
+    statically registered managed arm. Such an arm, if selected, is an exact
+    managed representation outside arbitrary `Any`; it does not weaken this
+    type-erased-payload rule. No managed opaque arm or Gate G2 certification is
+    authorized before that review rewrites the integration plan, ledger, and
+    completion criteria.
 11. **Failed collection attempts are recoverable until reclamation commits.**
     Marking and tracing reclaim nothing: an unwind guard abandons the partial
     worklist/epoch, restores the heap phase, and permits a later collection to

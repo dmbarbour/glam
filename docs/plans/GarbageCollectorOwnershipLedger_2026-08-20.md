@@ -122,7 +122,7 @@ row is approved for a large-object or multi-run exception.
 | `Lazy` | `Arc<LazyCell>`; source and terminal result graphs. | Identity-bearing, thread-safe, long-lived; source/result publication races are supported. | Managed cell visitor; one-write result plus replaceable source protocol; I5. |
 | `Promised` | `Arc<PromiseCell>`; successful assignment root and producer obligation. | Identity-bearing, thread-safe, long-lived; assignment is one-write. | Managed cell visitor; assignment mutation gateway; I5. |
 | `Metadata` | `MetadataCarrier.metadata: Arc<Value>`. | Immutable identity-bearing sealed value, thread-safe. | Visit exactly one metadata value; I6. |
-| `Opaque` | `Arc<dyn Any + Send + Sync>`; payload-dependent. | Pointer-identity shell; arbitrary longevity/thread transfer. | No conservative trace. Each managed family must be traceable or a leaf and passively droppable. A family requiring active cleanup remains an external exact-root owner with explicit retirement; I4B/I10. |
+| `Opaque` | `Arc<dyn Any + Send + Sync>`; payload-dependent. | Pointer-identity shell; arbitrary longevity/thread transfer. | I10B.0 is a hard review gate. Until it selects otherwise, opaque storage remains external: arbitrary `Any` is edge-free or owns audited same-runtime public roots. A possible managed arm must be a separate sealed exact representation outside `Any`, with one stable family record per admitted type. No managed opaque allocation or scoped managed downcast is authorized before the review. |
 
 ## Recursive Core Nodes
 
@@ -224,7 +224,7 @@ inventory.
 | `ConstructionPort` (`eval/builtins/net/construction.rs`) | Brand and port ID only. | Approved leaf token. |
 | `TaskHandleCell` (`reflection/requests.rs`) | Runtime ID, task handle, query handle; no raw core value. Handles reach coordinator/store obligations, not a managed pointer. | Approved external capability; re-audit in I9. |
 | `CompilationOrigin` (`diagnostic.rs`) | **Contains raw `core::Value`.** | **D:** replace with exact same-runtime public root or non-value provenance before I4B/G2. |
-| Arbitrary host `OpaqueValue::new<T>` | Unknown by type erasure. | Public construction must remain restricted. A production managed family needs sealed exact tracing or leaf registration and passive transitive destruction. A family with active cleanup remains an external rooted owner with explicit retirement; I4B/I10. |
+| Arbitrary host `OpaqueValue::new<T>` | Unknown by type erasure. | Public construction remains restricted to edge-free data or audited same-runtime external roots. I10B.0 decides whether the bootstrap also adds a distinct sealed managed arm; it never permits a bare managed edge inside this `Any` payload. A family with active cleanup remains an external rooted owner with idempotent retirement/RAII under I9F. |
 
 An opaque value may not contain `Gc<T>`, an unrooted recursive core value, or a
 root belonging to another runtime. The collector will not inspect `Any` or a
@@ -327,7 +327,10 @@ guessing/conservative classification:
 6. I8 must replace the production core `SharedRuntimeNet` `Arc` owner with one
    managed outer cell, then close its exact synchronized trace, durable-handle,
    and value-installing mutation-gateway inventories.
-7. Public opaque construction needs a closed leaf/root registration boundary.
+7. Public opaque construction needs the I10B.0 representation decision and a
+   closed leaf/root registration boundary. If that review selects a managed
+   arm, every admitted concrete family also needs its own exact stable ledger
+   record, scoped-access proof, and I4.0 destruction admission before Gate G2.
 
 As each M family receives its managed representation, append the stable
 reconciliation record defined above. In particular, record its Rust

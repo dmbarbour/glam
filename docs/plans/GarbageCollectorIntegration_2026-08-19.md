@@ -32,6 +32,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I8 | pending | managed core-net outer cells, exact tracing, and mutation gateways |
 | I9 | pending | runtime-root lifecycle and retirement audits |
 | I10 | pending | deferred closures and opaque boundaries |
+| I10B.0 | pending | opaque representation decision review gate |
 | I11 | pending | whole-production-graph forced collection |
 | I12 | pending | runtime maintenance and threshold collection |
 | I13 | pending | redundant ownership removal and documentation |
@@ -154,11 +155,13 @@ containing a core or public `Value`, every `Arc<dyn Fn...>` which can capture a
 value, every `OpaqueValue` payload family owned by Glam, and every interaction-
 net specialization carrying core data.
 
-For each opaque payload family, the inventory records either `no managed edge`
-or the exact same-runtime public root wrapper it may retain. Discovering a bare
-`Gc<T>`, unrooted recursive `core::Value`, foreign-runtime root, or equivalent
-internal managed pointer is a boundary defect, not a conservative-tracing
-classification.
+Until I10B.0 selects the bootstrap opaque representation, each arbitrary
+type-erased payload family records either `no managed edge` or the exact
+same-runtime public root wrapper it may retain. Discovering a bare `Gc<T>`,
+unrooted recursive `core::Value`, foreign-runtime root, or equivalent internal
+managed pointer in `Any` remains a boundary defect under either outcome. A
+possible sealed managed arm is a separate statically registered representation
+outside arbitrary `Any`, never a relaxation of this rule.
 
 I0 can begin before collector class discovery exists. Record Rust type/layout,
 stable representation family, and projected trace/drop policy. When a concrete
@@ -1440,11 +1443,82 @@ Verification: `managed_deferred_state_cycle_reclaims`,
 `deferred_closure_constructor_inventory_is_reconciled`. Only isolated closure
 fixtures may collect; production remains `NoAuto`.
 
-### Phase I10B — Opaque Registration and Provenance
+### Phase I10B.0 — Opaque Representation Decision Review
 
-- Keep arbitrary host payloads as tracing barriers. Each admitted family is
-  registered as an edge-free token/companion, a genuinely external owner of
-  same-runtime public roots, or a private traceable managed representation.
+This is a hard design gate, not an implementation checkpoint. It begins only
+after I4B's constructor restrictions, I4F.1's durable-owner inventory, I9F's
+external active-RAII inventory, and I10A's deferred-closure containment have
+completed. Its inputs are:
+
+- a source-backed inventory of every `OpaqueValue::new`, downcast, `Any`,
+  extension registration, token/companion, and opaque payload family;
+- the concrete use cases, if any, which require an opaque-managed edge to
+  participate in cycle reclamation rather than remaining an external root;
+- the current owning-`Arc` downcast and identity semantics relied upon by Rust
+  callers;
+- I3's scoped managed-access authority, I4.0's passive managed-destruction
+  admission rule, and I9F's external active-RAII boundary;
+- requested layout/slot constraints for every proposed managed family; and
+- the conservative-retention cost of an external public-root backedge for each
+  real payload family.
+
+The review selects exactly one bootstrap policy:
+
+1. **External-only opaque storage.** `OpaqueValue` remains an external
+   type-erased Rust owner. Admitted payloads are edge-free tokens/companions or
+   audited same-runtime public-root owners. No opaque payload is collector-
+   managed, no scoped managed downcast is introduced, and ordinary owning
+   `Arc` access may remain subject to runtime/provenance checks. Cycles hidden
+   behind external roots may be conservatively retained but never reclaimed
+   prematurely.
+2. **External storage plus a sealed managed arm.** Arbitrary `Any` remains
+   subject to the external-only rule. A distinct private arm uses a statically
+   registered concrete managed cell with exact trace and passive-drop
+   functions outside the `Any` payload. Each admitted managed family has a
+   stable ledger record, one-slot layout proof, exact edge visitor, provenance
+   rule, I4.0 destruction proof, and mutator-bound typed access. Registration
+   is sealed to reviewed Glam families; it is not a general host escape hatch,
+   and no owning managed reference may leave scoped access.
+
+The decision is recorded in a dated opaque-representation review document. It
+must state why actual payload use cases justify the selected complexity and
+must produce all of the following plan changes before this gate passes:
+
+- replace I10B with concrete representation, registration, provenance, and
+  negative-boundary checkpoints for the selected model;
+- rewrite I10C so scoped access and passive managed destruction appear only if
+  the managed arm is selected, while external active RAII remains governed by
+  I9F;
+- update the opaque rows in the ownership ledger and the roadmap invariant;
+- update the integration completion criteria and Gate G2 source inventory;
+- name migration and compatibility tests for every existing constructor and
+  downcast call site; and
+- if the managed arm is selected, partition implementation into representation,
+  family registration, scoped access, passive-drop, and negative-boundary
+  checkpoints, each with an isolated closed fixture.
+
+Verification of the review artifact:
+`opaque_representation_review_inventory_is_complete` maps every inventoried
+family and call site to the selected policy;
+`opaque_representation_plan_has_no_undecided_family` rejects a mixed or
+deferred classification; and a plan-link check proves the decision artifact,
+ledger, I10B/I10C, Gate G2, and completion criteria agree.
+
+No I10B implementation, managed opaque allocation, scoped managed downcast,
+opaque-family collection fixture, or Gate G2 certification may begin while
+I10B.0 is pending. The current arbitrary-`Any` prohibition remains
+authoritative throughout the review.
+
+### Phase I10B — Decision-Selected Opaque Registration and Provenance
+
+This phase is deliberately not implementation-ready until I10B.0 rewrites it
+into the concrete checkpoints selected by the dated review. The selected plan
+must preserve these common invariants:
+
+- Keep arbitrary host `Any` payloads as tracing barriers. Each such family is
+  registered as an edge-free token/companion or a genuinely external owner of
+  same-runtime public roots. A selected sealed managed arm is a distinct exact
+  representation, not data hidden inside `Any`.
 - Forbid bare `Gc<T>`, unrooted recursive core values, foreign roots, and
   equivalent region escapes. Keep opaque construction private and do not
   re-export collector pointers.
@@ -1473,10 +1547,11 @@ active-RAII contract audited by I9F.
   call that same operation as an active fallback. It is never reachable from a
   managed allocation and is not a managed finalizer. Not every rooted runtime
   element needs a managed representation.
-- Replace `OpaqueValue::downcast<T>() -> Option<Arc<T>>` for collector-owned
-  payloads with a scoped mutator-bound borrow for live access only. Explicitly
-  external companions may retain ordinary Rust ownership and public roots,
-  but are not finalized as managed graph nodes.
+- If I10B.0 selects a managed arm, replace owning access to that arm with a
+  scoped mutator-bound borrow for live access only. External-only payloads and
+  companions retain the access model selected by the review, may retain
+  ordinary Rust ownership and public roots, and are not finalized as managed
+  graph nodes.
 - Treat any future production managed destructor that appears to need runtime
   or heap authority as a new design-review gate. Do not introduce a weak-domain
   capability or TLS bridge as a local exception.
@@ -1655,8 +1730,12 @@ semantics.
 ## Integration Completion Criteria
 
 - Every production managed edge is exact or deliberately conservative.
-- Every opaque payload is audited to contain no managed edge or only ordinary
-  runtime/public roots; no bare collector pointer crosses that boundary.
+- Every opaque value satisfies the policy selected by I10B.0. Arbitrary `Any`
+  contains no managed edge or only ordinary same-runtime public roots. If a
+  sealed managed arm is selected, each concrete family is exact, statically
+  registered outside `Any`, passively droppable, and accessible only through
+  matching scoped runtime authority. No bare collector pointer crosses either
+  boundary.
 - Public `Value` is a real runtime-local external root, remains convenient to
   clone and share, and is semantically opaque without a live matching runtime
   service.
@@ -1670,5 +1749,6 @@ semantics.
 - Full collection preserves assembly results and runtime coordination.
 - No pointer-local GC locking or atomic reference count remains on internal
   managed edges.
-- Remaining leaks through arbitrary opaque payloads are documented,
-  conservative, and never risk premature collection.
+- Any conservative retention through external opaque public roots is
+  documented per family and never risks premature collection; no unreviewed
+  arbitrary payload is treated as traceable managed storage.

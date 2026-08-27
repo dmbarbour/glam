@@ -7,7 +7,7 @@ changed as part of either review pass.
 
 Status: second pass complete; plan maintenance is pending. I1A-I1B and the
 first review's plan revisions are complete. Before further integration
-implementation, GCI-015 through GCI-017 must be added to the integration plan
+implementation, GCI-015 through GCI-016 must be added to the integration plan
 as explicit review/design checkpoints with named inputs, a required decision
 or artifact, and a hard gate before dependent implementation. GCI-006 is
 resolved in the integration plan;
@@ -1098,7 +1098,7 @@ then prove no false ready snapshot and no lost wake.
 
 **Confidence:** medium-high
 
-**Status:** open
+**Status:** resolved by planned review gate 2026-08-27
 
 I10B permits an opaque family to become a “private traceable managed
 representation,” and I10C plans a scoped mutator-bound downcast for
@@ -1124,6 +1124,20 @@ I10B/I10C into representation, registration, scoped access, passive-drop, and
 negative-boundary checkpoints. Update the integration completion criteria,
 which currently describe only no-edge or public-root opaque payloads, to match
 the selected policy.
+
+**Plan resolution:** I10B.0 is now a hard opaque-representation decision
+review after I4B, I4F.1, I9F, and I10A and before any I10B implementation. Its
+source-backed inputs cover constructors/downcasts, arbitrary `Any`, actual
+cycle-reclamation use cases, current owning-`Arc` semantics, scoped access,
+managed destruction, layout, and conservative-retention cost. It must choose
+exactly external-only storage or external storage plus a separate sealed,
+statically registered managed arm outside `Any`. The dated decision artifact
+must rewrite I10B/I10C, the ownership ledger, roadmap invariant, Gate G2
+inventory, completion criteria, and migration tests. A managed-arm choice also
+requires separate representation, registration, scoped-access, passive-drop,
+and negative-boundary checkpoints. Until that artifact lands, arbitrary
+`Any` remains external-only and no managed opaque implementation or fixture is
+authorized.
 
 ## Recommended Resolution Order
 
@@ -1180,9 +1194,9 @@ Apply directly to the affected phase chronology:
 Where a semantic choice is intentionally deferred, add a review checkpoint to
 the plan now rather than leaving prose which says to decide later:
 
-15. **Finding GCI-017:** add an opaque-representation review before I10B. Its
-    output selects external-only opaque storage or a sealed traceable managed
-    arm and rewrites I10B/I10C plus completion criteria accordingly;
+15. **Finding GCI-017, resolved by planned review gate:** execute I10B.0 before
+    I10B and require its selected policy to rewrite I10B/I10C, the ledger,
+    roadmap, Gate G2 inventory, and completion criteria;
 16. **Finding GCI-015:** add an I12 policy review whose output selects immutable
     `Automatic` construction for new runtimes or permanently manual runtime
     servicing; and
@@ -1197,7 +1211,7 @@ memory at an unspecified later time.
 ## Review Decision
 
 Pause integration implementation long enough to make the reviewed plan
-authoritative again. Add the named GCI-015 through GCI-017 review checkpoints
+authoritative again. Add the named GCI-015 through GCI-016 review checkpoints
 with their entry conditions, required decisions, plan-update outputs, and
 implementation gates. Only after those edits are complete should I1C resume.
 
