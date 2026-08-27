@@ -7,12 +7,12 @@ changed as part of either review pass.
 
 Status: second pass complete; plan maintenance is pending. I1A-I1B and the
 first review's plan revisions are complete. Before further integration
-implementation, GCI-012 through GCI-017 must either be resolved directly in
+implementation, GCI-013 through GCI-017 must either be resolved directly in
 the integration plan or represented there by an explicit review/design
 checkpoint with named inputs, a required decision or artifact, and a hard gate
-before dependent implementation. GCI-006 remains the implementation blocker
-before I3. Gate G1 remains passed; this review does not authorize production
-collection.
+before dependent implementation. GCI-006 is resolved in the integration plan;
+I3A-I3F remain ordinary implementation work after their I1/I2 prerequisites.
+Gate G1 remains passed; this review does not authorize production collection.
 
 ## Scope
 
@@ -166,7 +166,7 @@ an observation capability: semantic equality, kind, scalar/binary extraction,
 and rendering all require live matching runtime authority, regardless of which
 side owns the ergonomic Rust method. Internal root identity is not exposed as
 a substitute equality relation. The existing compatibility representation
-remains unchanged until the isolated I2 prototype fixes the new facade and I4F
+remains unchanged until the isolated I2 prototype fixes the new facade and I4F.2
 performs the production switch; those checkpoints now own removal of the
 unauthorized direct observation traits and methods.
 
@@ -312,7 +312,7 @@ verification. No collector API change was needed.
 **Classification:** oversized phase and authority-design gap  
 **Priority:** high  
 **Confidence:** high  
-**Status:** open
+**Status:** resolved in plan 2026-08-26
 
 I3 asks mutator authority to travel through construction, evaluation,
 workers, reflection, nets, compiler/macros, events, and diagnostics. The
@@ -502,8 +502,9 @@ rooted outcomes, scoped core evaluation, and poll/wait driving. The second
 corrected polling to be orchestration containing bounded evaluator scopes and
 partitioned I3C-I3F around reflection activation, effect interpretation,
 interaction-net claims, deterministic import demands, compiler/diagnostic
-callbacks, and multi-runtime exit. GCI-006 remains open until implementation
-and verification are complete.
+callbacks, and multi-runtime exit. This resolves GCI-006 as a plan finding.
+I3A-I3F remain pending implementation and verification under the normal phase
+status; implementation incompleteness does not keep this review finding open.
 
 #### GCI-006 Call-Site Inventory
 
@@ -861,10 +862,11 @@ maintenance decisions which the current phase order does not yet resolve.
 
 **Confidence:** high
 
-**Status:** open
+**Status:** resolved in plan 2026-08-26
 
-I4F switches production `RuntimeValueRoot` and the public `Value` facade to the
-managed representation. I9 later converts canonical/compiler caches,
+The reviewed plan formerly had I4F switch production `RuntimeValueRoot` and
+the public `Value` facade to the managed representation while I9 later
+converted canonical/compiler caches,
 coordinator state, reflection stores, diagnostics/events, and assembly/compiler
 state into explicit roots or managed edges. Those phases cannot satisfy the
 plan's structural root discipline in that order for any durable field which
@@ -887,7 +889,8 @@ contain a managed edge.
 **Recommended resolution:** split I9's work by chronology rather than subsystem
 alone.
 
-- Before or atomically with I4F, complete a source-backed inventory of every
+- Before or atomically with the managed-root switch, complete a source-backed
+  inventory of every
   durable raw `core::Value` owner and convert it to `RuntimeValueRoot`, an exact
   managed edge, or a genuinely bounded mutator-local.
 - Include canonical values, type-indexed compiler attachments, parked machine
@@ -903,7 +906,19 @@ alone.
 
 Verification must force a collection request immediately after each converted
 owner leaves its construction scope in a closed fixture, and a source inventory
-must reject every durable bare `core::Value`/`Gc` owner before I4F completes.
+must reject every durable bare `core::Value`/`Gc` owner before I4F.1 completes.
+
+**Plan resolution:** I4 is now explicitly non-publishing through I4A-I4E.
+I4F is split into I4F.1, a source-backed durable-owner conversion gate, and
+I4F.2, the atomic managed-root/value-shell production switch. I4F.1 enumerates
+the cache, coordinator/machine, reflection, diagnostic/event, compiler/CLI,
+net/work, and type-erased owner classes; requires every result to be a
+registered root, exact managed edge, or proven bounded local; and latches
+survival/release fixtures immediately outside construction scope. I3A.4 now
+forbids disabled collection from extending pointer lifetime. I9 has become a
+lifecycle and retirement audit and explicitly sends any newly found bare owner
+back to its earliest managed-edge checkpoint rather than converting it late.
+The ownership ledger records the same chronology.
 
 ### GCI-013 — Passive managed destruction was overextended to external RAII
 
@@ -1111,7 +1126,8 @@ Before the public-root prototype or production switch:
 
 Before managed recursive nodes:
 
-7. **Finding GCI-006:** implement the I3A authority-carrier spike;
+7. **Finding GCI-006, resolved:** preserve the scoped authority and ephemeral
+   poll-context design while implementing I3A-I3F in their planned order;
 8. **Finding GCI-007, resolved:** preserve exact trace updates in the same
    checkpoint which introduces each managed edge.
 
@@ -1130,9 +1146,8 @@ resumes:
 
 Apply directly to the affected phase chronology:
 
-12. **Finding GCI-012:** move structural conversion of every durable value/root
-    surface to or before the first checkpoint which lets it contain a managed
-    edge;
+12. **Finding GCI-012, resolved:** preserve I4F.1's durable-owner conversion
+    gate before I4F.2 and treat I9 only as a lifecycle/retirement audit;
 13. **Finding GCI-013:** distinguish passive GC-managed destruction from
     legitimate active external RAII retirement; and
 14. **Finding GCI-014:** make the managed-drop ledger/audit a prerequisite of
@@ -1158,7 +1173,7 @@ memory at an unspecified later time.
 ## Review Decision
 
 Pause integration implementation long enough to make the reviewed plan
-authoritative again. Apply GCI-012 through GCI-014 directly, and add the named
+authoritative again. Apply GCI-013 through GCI-014 directly, and add the named
 GCI-015 through GCI-017 review checkpoints with their entry conditions,
 required decisions, plan-update outputs, and implementation gates. Only after
 those edits are complete should I1C resume.

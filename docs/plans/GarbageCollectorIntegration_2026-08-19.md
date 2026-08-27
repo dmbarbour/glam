@@ -23,11 +23,13 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I3 | pending | bounded evaluator/worker mutator regions |
 | I4 | pending | core trace vocabulary and leaf policy |
 | I4B | pending | closure and opaque managed-edge containment |
+| I4F.1 | pending | durable root-surface conversion gate |
+| I4F.2 | pending | public managed-root production switch |
 | I5 | pending | managed lazies and promises |
 | I6 | pending | functions, applications, metadata, failures |
 | I7 | pending | persistent list and dictionary tracing |
 | I8 | pending | managed core-net outer cells, exact tracing, and mutation gateways |
-| I9 | pending | runtime-owned root surfaces |
+| I9 | pending | runtime-root lifecycle and retirement audits |
 | I10 | pending | deferred closures and opaque boundaries |
 | I11 | pending | whole-production-graph forced collection |
 | I12 | pending | runtime maintenance and threshold collection |
@@ -359,7 +361,7 @@ heap may collect; production remains `NoAuto` and retains its compatibility
   an ordinary host key through authorized observation. A value handle is
   deliberately unsuitable as a key.
 - Do not change the production `api::Value` compatibility surface in this
-  prototype checkpoint. I4F owns removal of its direct traits and observers.
+  prototype checkpoint. I4F.2 owns removal of its direct traits and observers.
 
 Verification: compile-time prototype-facade fixtures establish the absence of
 equality, ordering, and hash contracts, and
@@ -399,7 +401,7 @@ production remains `NoAuto` and retains its compatibility public facade.
   wrapper.
 - Fix the selected public wrapper/provenance contract, but do not place
   production `core::Value` in a collector root until I4 supplies its exact
-  trace and I4F performs the switch.
+  trace, I4F.1 converts durable owner fields, and I4F.2 performs the switch.
 
 Verification: the complete existing public `Value` suite stays unchanged;
 `prototype_value_access_nests_in_one_mutator` exercises recursive entry; and
@@ -515,14 +517,19 @@ suites. Production remains `NoAuto`.
   `RuntimeValueRoot` or the selected equivalent before leaving the evaluator
   scope which produced them.
 - For payload families whose managed representation arrives only in I5-I10,
-  record the exact later checkpoint which must update this boundary in the same
-  change that introduces its first managed edge. Such a deferral remains a
-  Gate G2 blocker, not permission to leave an unrooted edge once collection is
-  enabled.
+  record the exact later checkpoint which updates their *interior*
+  representation in the same change that introduces its first managed edge.
+  The durable outer owner is still converted by I4F.1; only a payload proven
+  unable to contain a managed edge may remain in its old interior form until a
+  later phase.
 - Ensure every value crossing from an evaluator scope into poll orchestration
   is rooted before the mutator is released. Final poll-outcome conversion may
   then assemble only owned/rooted data, perform no callback, and give
   coordinator publication no scoped borrow.
+- Treat disabled collection as irrelevant to pointer-lifetime correctness. A
+  parked machine, coordinator record, callback payload, or type-erased holder
+  may contain only a registered root, an exact managed edge owned by a traced
+  allocation, or data proven local to the current bounded access scope.
 
 Verification: force another thread to request collection both between two
 substeps of one poll and at poll return, proving every already-migrated value
@@ -805,6 +812,13 @@ access, not production collection.
 
 ## Phase I4 — Core Trace Vocabulary and Leaf Policy
 
+I4A-I4E develop and verify the managed shell, exact visitors, and adapters in
+closed fixtures. They do not publish a production `core::Value` containing a
+bare managed edge. I4F.1 first converts every durable production owner to a
+root-safe shape; I4F.2 then switches the root facade and managed value shell
+together. This ordering avoids any buildable interval in which production can
+park an unrooted `Gc` merely because collection remains disabled.
+
 ### Phase I4A — Value Shell and Leaf Families
 
 - Select the managed value shell/leaf granularity and implement
@@ -902,10 +916,63 @@ persistent representations.
 Verification: `net_value_adapter_traces_without_reduction_or_materialization`
 and `net_value_adapter_cycle_marks_exactly`. Production remains `NoAuto`.
 
-### Phase I4F — Public-Root Production Switch
+### Phase I4F.1 — Durable Root-Surface Conversion Gate
 
-- After I3 and I4A-I4E pass, enact I2's selected `RuntimeValueRoot`
-  representation and heap-derived provenance.
+Before the production managed-root switch, complete a source-backed inventory
+of every value which can outlive its constructing mutator region. The inventory
+is organized by ownership behavior rather than wrapper name and includes:
+
+- canonical values, `CoreValues`, the type-indexed runtime extension cache,
+  `GCompilerValues`, and every future compiler attachment;
+- parked evaluation/effect machines, task and coordinator records, waits,
+  sparks, client demands, deferred producers, failures, and report snapshots;
+- reflection environments, volumes, store snapshots, journals, queries,
+  transactions, and protocol-machine state;
+- diagnostic buses, event inputs, output intents, running deliveries, retained
+  delivery failures, and callback-owned payloads;
+- assembler/module state, compiler and macro intermediates, origins, import
+  demands, configuration/logger state, and other host records;
+- synchronized net/work records and any other external Rust owner whose
+  contained value is not reached solely through an exact traced edge; and
+- every `Any`, opaque, closure, or generic attachment boundary which could
+  hide one of the preceding owners.
+
+For every source result, choose exactly one disposition:
+
+1. replace durable raw `core::Value` storage with `RuntimeValueRoot` or the
+   selected registered-root equivalent;
+2. place the value behind an exact managed edge whose owner and visitor are
+   introduced in the same checkpoint; or
+3. prove the value is a bounded mutator-local which cannot be parked, erased,
+   returned, published, or captured.
+
+Unknown type-erased attachments are not grandfathered. The extension/opaque
+registration boundary must either expose an exact rooted family or reject the
+payload. Existing traceable interior owners may retain their reviewed internal
+shape, but an external Rust owner of a managed edge must use a registered root.
+
+The field/type migration may temporarily use the compatibility
+`RuntimeValueRoot` implementation while no production value contains `Gc`.
+I4F.2 changes that wrapper and the managed value representation atomically.
+There is no permitted buildable state combining a `Gc`-bearing production
+value with the old non-registering wrapper.
+
+Verification: latch the source inventory in
+`durable_value_owner_inventory_is_complete` and reject every unmatched durable
+bare `core::Value`, `Gc`, or type-erased value owner. Closed fixtures for each
+owner class construct and publish the owner, leave its construction scope,
+immediately request full collection, and prove the retained value survives;
+then retire the owner and prove its root registration is released. The common
+fixture is named
+`durable_root_surfaces_survive_collection_after_construction_scope`.
+Production remains `NoAuto`, and this checkpoint does not run collection over
+the incomplete production graph.
+
+### Phase I4F.2 — Public-Root Production Switch
+
+- After I3, I4A-I4E, and the I4F.1 durable-owner gate pass, enact I2's selected
+  `RuntimeValueRoot` representation and heap-derived provenance together with
+  the managed value shell.
 - Replace direct `as_core` escapes with scoped access and eliminate
   ownership-taking `into_core` paths which could let an unrooted managed
   pointer escape its region.
@@ -925,9 +992,12 @@ runtime-mediated observation.
 inventory. Production remains `NoAuto`; the switch does not authorize
 whole-graph collection while I5-I10 families remain unclassified.
 
-From I4 onward, every representation change in I5-I10 updates its exact visitor
-or root classification in the same checkpoint. Collection being disabled is
-never permission to carry an incomplete unsafe `Trace` implementation.
+From I4F.2 onward, every representation change in I5-I10 updates its exact
+visitor or root classification in the same checkpoint. No later phase may
+perform the first root conversion for a durable owner which could already
+contain a managed edge. Collection being disabled is never permission to carry
+an incomplete unsafe `Trace` implementation or extend the lifetime of an
+unrooted pointer.
 
 ### I5-I10 Verification Boundary
 
@@ -936,6 +1006,12 @@ never permission to carry an incomplete unsafe `Trace` implementation.
   these phases verify semantic behavior, exact visitor/root construction,
   mutation-gateway placement, owner retirement, and ordinary drop behavior
   without reclaiming the whole graph.
+- Every value surviving a mutator region is already a registered root or an
+  exact managed edge after I4F.2. A later I5-I10 checkpoint may change a
+  payload's internal representation only if that same change supplies its
+  exact visitor or root disposition. If a later source audit finds a durable
+  bare value, the responsible earlier phase is reopened; I9 is not a safe
+  holding area for delayed root conversion.
 - A phase may force collection only in a fresh isolated collector-ready fixture
   whose complete reachable graph is closed over the family under test and
   already certified prerequisite families. The fixture must not borrow a
@@ -1138,14 +1214,22 @@ Production remains `NoAuto`; only closed subsystem fixtures may collect.
 The complete production runtime remains `NoAuto` until I11 repeats the net
 cases after Gate G2 closes the entire graph.
 
-## Phase I9 — Runtime-Owned Root Surfaces
+## Phase I9 — Runtime-Root Lifecycle and Retirement Audits
+
+I4F.1 performs the structural conversion of durable owners before managed
+values can escape. I9 revisits those already-rooted representations after the
+I5-I8 interior migrations to verify lifecycle, retirement, and exact ownership.
+Discovering a first-time root conversion here is a chronology failure: stop
+and repair the checkpoint which first allowed that owner to contain a managed
+edge.
 
 ### Phase I9A — Runtime Canonical and Compiler Caches
 
-- Convert runtime canonical values and type-indexed compiler attachments to
-  explicit external roots or managed cache edges.
+- Audit the explicit external roots or exact managed cache edges installed by
+  I4F.1 for runtime canonical values and type-indexed compiler attachments.
 - Close the `Any` registration boundary: each extension family has a stable
-  ledger record and cannot retain a factory/domain backedge.
+  ledger record, remains structurally rooted, and cannot retain a
+  factory/domain backedge.
 
 Verification: existing cache initialization/race tests,
 `compiler_cache_does_not_form_a_value_domain_cycle`, and
@@ -1155,8 +1239,9 @@ closed isolated cache fixture; production remains `NoAuto`.
 
 ### Phase I9B — Coordinator and Evaluation Ownership
 
-- Convert client demands, sparks, tasks, deferred producers, waits, failure
-  ledgers, task handles, and promise resolver state.
+- Audit the registered roots and exact managed edges for client demands,
+  sparks, tasks, deferred producers, waits, failure ledgers, task handles, and
+  promise resolver state after the I5-I8 interior migrations.
 - Do not root a value merely because an edge-free notification companion names
   its task/wait ID. Ownership follows semantic retention, not scheduler
   reachability.
@@ -1169,8 +1254,10 @@ closed coordinator fixtures for reclamation; production remains `NoAuto`.
 
 ### Phase I9C — Reflection Store and Protocol Roots
 
-- Convert reflection environments, protected volume roots, store snapshots,
-  views, journals, queries, rewrites, and parked protocol machines.
+- Audit the roots installed by I4F.1 for reflection environments, protected
+  volumes, store snapshots, views, journals, queries, rewrites, and parked
+  protocol machines; update only interior edge representations introduced by
+  their owning migration phase.
 - Preserve persistent snapshot isolation and the I1B rule that an active store
   or snapshot may retain its authorized construction domain.
 
@@ -1182,8 +1269,9 @@ assertion uses a closed isolated store fixture; production remains `NoAuto`.
 
 ### Phase I9D — Diagnostics and Runtime Events
 
-- Convert diagnostic buses/ingress, event inputs, output intents, running
-  deliveries, and retained delivery failures.
+- Audit the registered roots installed by I4F.1 for diagnostic buses/ingress,
+  event inputs, output intents, running deliveries, and retained delivery
+  failures.
 - Preserve callback-after-lock, exact delivery ownership, fallback routing, and
   settlement activity semantics.
 
@@ -1195,9 +1283,9 @@ isolated transport fixtures may collect; production remains `NoAuto`.
 
 ### Phase I9E — Assembly, Compiler, and CLI Owners
 
-- Convert assembler/module construction state, compiler setup and origins,
-  source/macro intermediates which park across evaluation, and binary-owned
-  configuration/logger records.
+- Audit the registered roots installed by I4F.1 for assembler/module
+  construction state, compiler setup and origins, source/macro intermediates
+  which park across evaluation, and binary-owned configuration/logger records.
 - Keep bounded locals under I3 regions; only semantically retained values
   become roots.
 
@@ -1215,6 +1303,9 @@ fixture may prove local reclamation where practical. Production remains
   fields.
 - Match every result to one stable ledger family and named owner. An unmatched
   field blocks I10/Gate G2.
+- Compare the result with the latched I4F.1 inventory. A newly discovered
+  durable bare value reopens and repairs its earliest managed-edge checkpoint;
+  it is not converted opportunistically in I9F.
 
 Verification: `runtime_root_source_inventory_is_reconciled` plus controlled
 owner-drop tests named by every root family. Production remains `NoAuto`; this
