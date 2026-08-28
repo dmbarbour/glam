@@ -1,10 +1,9 @@
 # Glam GC Integration Plan — 2026-08-19
 
-Status: in progress; Phase I0 plus I1A-I1E are complete, Phase I1 awaits its
-mandatory post-implementation review, and collector Gate G1 passed on
-2026-08-25. The remaining integration work follows the completed owner-matrix,
-stable-ledger, and low-risk checkpoint corrections from the integration
-review.
+Status: in progress; Phase I0 and Phase I1 are complete, including the
+mandatory post-I1 review, and collector Gate G1 passed on 2026-08-25. The
+remaining integration work follows the completed owner-matrix, stable-ledger,
+and low-risk checkpoint corrections from the integration review.
 
 This plan integrates the collector defined by
 [`GarbageCollectorImplementation_2026-08-19.md`](GarbageCollectorImplementation_2026-08-19.md)
@@ -22,7 +21,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I1C | complete | factory-scoped managed allocation and rooting authority |
 | I1D | complete | centralized managed-slot policy and stable ledger contract |
 | I1E | complete | runtime/profile/value-domain lifecycle reverification |
-| I1 | review pending | runtime-owned heap, collection disabled |
+| I1 | complete | runtime-owned heap, collection disabled; post-I1 review passed |
 | I2 | pending | public value and external-root prototype |
 | I3 | pending | bounded evaluator/worker mutator regions |
 | I4 | pending | core trace vocabulary and leaf policy |
@@ -386,7 +385,9 @@ Verification reran `public_values_retain_only_the_runtime_value_domain`,
 composed fixture. Production collection remains `NoAuto`; the managed `u64`
 is private verification data, and no production `core::Value` is reclaimed.
 
-Phase I1 now awaits the mandatory post-implementation review before I2 begins.
+The mandatory post-implementation audit is recorded in
+[`GarbageCollectorIntegrationI1_2026-08-28.md`](../reviews/GarbageCollectorIntegrationI1_2026-08-28.md).
+It found no blocking drift, so Phase I1 is complete and I2 may begin.
 
 ## Phase I2 — External Root and Public `Value` Prototype
 
