@@ -1896,6 +1896,11 @@ boundary under `NoAuto`.
 - Remove temporary collection-disable gates and migration-only adapters.
 - Update `docs/architecture/evaluation.md`, `docs/AgentContext.md`, focused
   agent notes, and `src/README.md` with current ownership and safepoint rules.
+- Document that the baseline idle-entry collector may starve under
+  continuously overlapping mutator regions. This accepted progress limitation
+  is owned by the post-integration
+  [`ConcurrentGarbageCollection_2026-08-28.md`](ConcurrentGarbageCollection_2026-08-28.md)
+  plan and does not weaken the baseline collector's safety or Gate G4.
 - Pass roadmap Gate G4 and mark the roadmap and both plans complete only after
   a final invariant and trace-edge audit.
 

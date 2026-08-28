@@ -4335,9 +4335,12 @@ before repair.
 - Unsafe contracts and copied-code provenance are auditable in the subcrate.
 - No collector API depends on Glam `Value`, scheduling, reflection, or host I/O.
 - Moving, generational, and concurrent collection remain separate future
-  designs rather than completion claims of this plan. The visitor and mutation
-  gateways must not obstruct them, but the initial collector carries no
-  generation or remembered-set machinery merely in anticipation.
+  designs rather than completion claims of this plan. Concurrent marking,
+  delayed logical sweep, and epoch-safe recycling are now scoped by
+  [`ConcurrentGarbageCollection_2026-08-28.md`](ConcurrentGarbageCollection_2026-08-28.md).
+  The visitor and mutation gateways must not obstruct those successors, but
+  the initial collector carries no concurrent, generation, or remembered-set
+  machinery merely in anticipation.
 
 Trace derive macros remain deferred. Reconsider one only if the Glam integration
 inventory demonstrates substantial mechanical visitor repetition, and treat it

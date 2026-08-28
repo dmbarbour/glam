@@ -27,6 +27,10 @@ when their historical value no longer justifies keeping them.
 
 ## Preliminary and Deferred Plans
 
+- [`ConcurrentGarbageCollection_2026-08-28.md`](ConcurrentGarbageCollection_2026-08-28.md)
+  records the post-integration transition from idle-only stop-the-world
+  election to concurrent marking, delayed logical sweep, and epoch-safe run
+  recycling across arbitrarily nested runtime heaps.
 - [`ValueRepresentationRefinement_2026-08-19.md`](ValueRepresentationRefinement_2026-08-19.md)
   records the compact tagged-value and representation-splitting transition to
   pursue after the initial collector boundary works. It is deliberately not a

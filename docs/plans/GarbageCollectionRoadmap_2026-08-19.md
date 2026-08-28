@@ -25,6 +25,11 @@ stop-the-world full collector integrated across Glam. Its purpose is controlled
 ownership and reclamation of recursive graphs such as fixpoints, not a complete
 performance-oriented GC hierarchy. Moving and generational collection return
 only under a later plan, after higher-priority performance work and profiling.
+Concurrent marking, delayed logical sweep, and epoch-safe physical recycling
+now have a preliminary post-integration successor plan in
+[`ConcurrentGarbageCollection_2026-08-28.md`](ConcurrentGarbageCollection_2026-08-28.md).
+That plan does not expand Gate G1-G4 or make concurrent progress a completion
+claim of this roadmap.
 
 Compact tagged values, their pointer-alignment policy, and representation-
 specific node-size targets belong to the deferred
@@ -395,7 +400,10 @@ weakening runtime locality, exact tracing, or the collection-admission gates.
 
 ## Explicitly Deferred
 
-- concurrent marking, concurrent sweeping, or parallel tracing;
+- concurrent marking and concurrent sweeping/recycling, now scoped by the
+  preliminary
+  [`ConcurrentGarbageCollection_2026-08-28.md`](ConcurrentGarbageCollection_2026-08-28.md);
+- parallel tracing, which remains optional even under the concurrent plan;
 - moving, copying, or compacting collection;
 - generational storage, minor collection, promotion, remembered sets, and card
   tables; these should return with a moving-nursery plan rather than precede
@@ -414,9 +422,12 @@ weakening runtime locality, exact tracing, or the collection-admission gates.
 - persistent serialization of live managed graphs; and
 - JIT-specific stack maps.
 
-These are follow-up projects. The baseline design leaves room for initial
-pause, concurrent mark, final remark, and stop-the-world sweep, but does not
-pay their synchronization cost before profiling supports them.
+These are follow-up projects. The baseline intentionally accepts that
+idle-entry collection can starve under continuously overlapping mutators; its
+correctness gates do not claim general collection-progress fairness. The
+concurrent successor separates marking, run sealing, and delayed physical
+recycling rather than retrofitting those synchronization costs into this
+roadmap.
 
 ## Plan Maintenance
 
