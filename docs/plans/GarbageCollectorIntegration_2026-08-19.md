@@ -1,8 +1,7 @@
 # Glam GC Integration Plan — 2026-08-19
 
-Status: in progress; Phases I0 through I2 are complete, including the
-mandatory post-I2 review. Phase I3 may begin. Collector Gate G1 passed on
-2026-08-25.
+Status: in progress; Phases I0 through I2 and checkpoint I3A.1 are complete.
+Phase I3 is in progress. Collector Gate G1 passed on 2026-08-25.
 The remaining integration work follows the completed owner-matrix,
 stable-ledger, and low-risk checkpoint corrections from the integration
 review.
@@ -29,7 +28,8 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I2B.2 | complete | live-runtime-authorized comparison, observation, and owned extraction prototype |
 | I2C | complete | nested scoped access and mechanically checked production compatibility-access inventory |
 | I2 | complete | opaque public-root contract, runtime-authorized observation, access inventory, and post-I2 review |
-| I3 | pending | bounded evaluator/worker mutator regions |
+| I3A.1 | complete | lifetime-bound runtime/evaluator access and mutator-free poll-context prototype |
+| I3 | in progress | bounded evaluator/worker mutator regions |
 | I4 | pending | core trace vocabulary and leaf policy |
 | I4.0 | pending | managed-family destruction admission contract |
 | I4B | pending | closure and opaque managed-edge containment |
@@ -585,8 +585,10 @@ held for the complete poll.
 - Separately prototype an ephemeral scheduler-created poll context. The poll
   context holds the right domain/admission route but no continuously active
   mutator. A closure/HRTB-style method opens a `RuntimeValueAccess` and thin
-  evaluation scope for one callback-free semantic substep, roots its escaping
-  values, and releases the mutator before returning to poll orchestration.
+  evaluation scope for one callback-free semantic substep, requires any
+  escaping value to be converted to a root or exact traced edge, and releases
+  the mutator before returning to poll orchestration. I3A.4 makes that outcome
+  conversion exhaustive for production polls.
 - Keep both constructors private. The poll context may create scoped access;
   durable contexts, individual machines, TLS, and runtime IDs may not. These
   are two layers of one authority model, not independently creatable
@@ -601,14 +603,36 @@ held for the complete poll.
   convenience may find an already active same-heap region, but it cannot become
   the safety basis for dereference.
 
-Verification: compile-fail fixtures reject returning or storing the access
-carrier, evaluation view, mutator, allocator, and managed borrow. Trait checks
-prove scoped authority cannot cross threads while durable context remains
-`Send`; `different_heap_authority_is_rejected` covers provenance. A focused
-fixture proves a poll context can open two separate evaluator scopes with a
-callback between them and that no mutator remains active during that callback.
-No production call site changes yet, production remains `NoAuto`, and no
-production representation is collected.
+Verification: the collector's compile-fail fixtures reject escaping its
+mutator, allocator, and managed borrow. The private Glam carrier and evaluator
+view retain no public construction surface merely to support an external
+doctest; their higher-ranked entry signature supplies the non-escape proof,
+while compile-time negative-trait fixtures prove neither can cross threads and
+the durable context remains `Send`. `different_heap_authority_is_rejected`
+covers provenance. A focused fixture proves a poll context can open two
+separate evaluator scopes with a callback between them and that no mutator
+remains active during that callback. No production call site changes yet,
+production remains `NoAuto`, and no production representation is collected.
+
+Completed 2026-08-28. `RuntimeValueAccess` now layers exact value-domain
+provenance over I1's lifetime-bound `CoreValueAllocationScope`, and delegates
+only scoped allocation, rooting, and root borrowing. The private
+`EvaluationValueAccess` pairs that carrier with a borrowed durable
+`EvalContext`, validating domain identity once at construction. Its provenance
+check compares the actual domain allocation rather than relying on runtime ID;
+the regression deliberately gives two distinct heaps the same ID and rejects
+their combination.
+
+The private `EvaluationPollContext` contains only a borrowed durable context.
+Its higher-ranked `with_value_access` method admits the heap for one operation
+and releases it before returning. The two-scope regression uses synchronous
+collection as the admission probe: collection reports `ActiveMutator` inside
+both evaluator regions, succeeds in the callback between them, and the second
+region can publish a root which a third region reads. Trait-selection fixtures
+prove both scoped carriers are neither `Send` nor `Sync`, while `EvalContext`
+remains `Send`. Existing collector compile-fail doctests continue to cover the
+underlying mutator, allocator, and managed-borrow escapes. Production machine
+poll signatures remain unchanged until I3A.3, and collection remains `NoAuto`.
 
 ### Phase I3A.2 — Claimed-Work Domain Routing
 

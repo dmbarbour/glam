@@ -379,7 +379,7 @@ fn prototype_root_moves_between_threads() {
     let worker_values = values.clone();
 
     let report = values
-        .collect_managed_prototype()
+        .collect_managed_for_test()
         .expect("the isolated managed prototype should collect");
     assert_eq!(report.root_entries(), 1, "a clone shares one root cell");
 
@@ -668,7 +668,7 @@ fn prototype_recursive_root_traces_child() {
     let value = PrototypeValue::managed_pair(&values, drops.clone());
 
     let live = values
-        .collect_managed_prototype()
+        .collect_managed_for_test()
         .expect("the rooted recursive prototype should collect");
     assert_eq!(live.root_entries(), 1);
     assert_eq!(live.marked_slots(), 2);
@@ -676,7 +676,7 @@ fn prototype_recursive_root_traces_child() {
 
     drop(value);
     let dead = values
-        .collect_managed_prototype()
+        .collect_managed_for_test()
         .expect("the unrooted recursive prototype should collect");
     assert_eq!(dead.root_entries(), 0);
     assert_eq!(dead.finalized_slots(), 2);

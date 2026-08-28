@@ -50,12 +50,13 @@ not define language semantics or collect subsystem invariants.
 | `g_syntax/diagnostic_formatter.rs` | Cached Glam `Diagnostic -> Bytes` formatter |
 | `text_pattern.rs` | Shared capture-free text-pattern language |
 | `core.rs`, `core/` | Syntax-independent values, runtime value-domain ownership, factory-scoped managed allocation/rooting, lazies, promises, functions, keys, builtins |
-| `core/managed.rs` | Factory-qualified collector access and Glam's centralized managed-slot policy |
+| `core/managed.rs` | Factory-qualified collector access, domain-qualified `RuntimeValueAccess`, and Glam's centralized managed-slot policy |
 | `crates/glam-gc/` | Glam-owned typed-run tracing collector; the runtime domain currently owns a no-auto heap while production values remain unmigrated |
 | `core_net.rs` | Core specialization of generic interaction nets |
 | `interaction_net/model.rs`, `builder.rs` | Generic topology and checked construction |
 | `interaction_net/runtime/` | Mutable graph, active-pair reduction, logical copies |
 | `evaluation.rs`, `evaluation/session.rs`, `evaluation/pump.rs` | Shared demand/profile contracts, session admission, cooperative and runtime pumping |
+| `evaluation/access.rs` | I3 scoped evaluator authority and mutator-free poll-context boundary |
 | `evaluation/coordinator.rs`, `evaluation/coordinator/` | Authoritative work registry/queues plus task, completion, client-demand, spark, reflection, deferred, and settlement lifecycles |
 | `evaluation/observation.rs`, `evaluation/executor.rs` | Semantic observation epochs and worker lifecycle |
 | `eval/value.rs`, `application.rs`, `operator.rs`, `net.rs` | Value forcing and semantic execution |

@@ -26,6 +26,7 @@ mod evaluation_halt;
 pub(crate) mod keys;
 pub(crate) use evaluation_halt::EvaluationHalt;
 mod managed;
+pub(crate) use managed::RuntimeValueAccess;
 #[cfg(test)]
 pub(crate) use managed::{CoreValueAllocationScope, CoreValueDomainWitness};
 

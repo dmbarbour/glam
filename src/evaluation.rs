@@ -15,6 +15,11 @@ use std::sync::{Arc, OnceLock, Weak};
 
 use crate::core::{CoreValueFactory, EvaluationFailure, Value};
 
+#[allow(
+    dead_code,
+    reason = "I3A.1 establishes scoped authority before I3A.3 migrates machine polls"
+)]
+mod access;
 mod coordinator;
 mod executor;
 mod observation;

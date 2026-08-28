@@ -2,9 +2,7 @@ use glam_gc::{Allocator, Gc, Mutator, Root, Trace, UnsupportedLayout};
 #[cfg(test)]
 use std::sync::{Arc, Weak};
 
-use super::CoreValueFactory;
-#[cfg(test)]
-use super::RuntimeValueDomain;
+use super::{CoreValueFactory, RuntimeValueDomain};
 
 /// Initial minimum slot extent for Glam-owned managed representations.
 ///
@@ -36,11 +34,27 @@ const _: () = assert!(managed_slot_extent::<usize>() == MANAGED_SLOT_SIZE_FLOOR)
 /// Factory-qualified access to one admitted managed-allocation region.
 ///
 /// The scope deliberately exposes neither the runtime heap nor the collector
-/// mutator. Managed allocation classes remain borrowed from this region. A
-/// managed pointer may leave only as an exactly traced managed edge, while a
-/// root is the only standalone access handle intended to survive the region.
+/// mutator. Managed allocation classes and borrows remain bounded by this
+/// region. Because bare `Gc<T>` is intentionally lifetime-free for use as an
+/// interior edge, integration must still ensure that any pointer leaving the
+/// region is installed as an exactly traced edge or published as a root.
 pub(crate) struct CoreValueAllocationScope<'scope> {
     mutator: &'scope Mutator<'scope>,
+}
+
+/// Domain-qualified managed access for one bounded runtime operation.
+///
+/// This is the foundational I3 authority. It combines I1's narrow allocation
+/// scope with the exact value domain which admitted its mutator. Subsystems
+/// derive shorter-lived views from this carrier rather than entering the heap
+/// independently.
+#[allow(
+    dead_code,
+    reason = "I3A.1 establishes the carrier before I3B.1 migrates evaluator access"
+)]
+pub(crate) struct RuntimeValueAccess<'scope> {
+    domain: &'scope RuntimeValueDomain,
+    scope: CoreValueAllocationScope<'scope>,
 }
 
 /// One type's allocation path borrowed from a factory allocation scope.
@@ -67,9 +81,11 @@ impl CoreValueFactory {
     /// Runs one bounded managed-allocation region in this factory's value
     /// domain.
     ///
-    /// This is the sole factory-level bridge to the collector. The callback
-    /// receives only allocation, rooting, and rooted-access operations; it
-    /// cannot retain the heap, mutator, or a typed allocator.
+    /// This is I1's construction-oriented factory bridge to the collector.
+    /// The callback receives only allocation, rooting, and rooted-access
+    /// operations; it cannot retain the heap, mutator, or a typed allocator.
+    /// I3 evaluator work instead derives its domain-qualified authority through
+    /// [`Self::with_runtime_value_access`].
     #[allow(
         dead_code,
         reason = "Phase I1C installs the allocation seam before production managed values"
@@ -81,6 +97,23 @@ impl CoreValueFactory {
         self.domain
             .heap
             .with_mutator(|mutator| operation(CoreValueAllocationScope { mutator }))
+    }
+
+    /// Opens one domain-qualified managed-access region.
+    ///
+    /// The higher-ranked callback prevents the access carrier, its mutator,
+    /// allocators, and managed borrows from escaping. I3 scheduler poll
+    /// contexts use this entry to derive evaluator-specific authority.
+    pub(crate) fn with_runtime_value_access<R>(
+        &self,
+        operation: impl for<'scope> FnOnce(RuntimeValueAccess<'scope>) -> R,
+    ) -> R {
+        self.domain.heap.with_mutator(|mutator| {
+            operation(RuntimeValueAccess {
+                domain: self.domain.as_ref(),
+                scope: CoreValueAllocationScope { mutator },
+            })
+        })
     }
 
     #[cfg(test)]
@@ -104,10 +137,41 @@ impl CoreValueFactory {
     }
 
     #[cfg(test)]
-    pub(crate) fn collect_managed_prototype(
+    pub(crate) fn collect_managed_for_test(
         &self,
     ) -> Result<glam_gc::CollectionReport, glam_gc::CollectionError> {
         self.domain.heap.collect_full()
+    }
+}
+
+#[allow(
+    dead_code,
+    reason = "I3A.1 establishes carrier operations before I3B.1 migrates evaluator access"
+)]
+impl RuntimeValueAccess<'_> {
+    /// Returns whether `values` is another authorized view of this exact value
+    /// domain. Runtime IDs are deliberately insufficient: two independently
+    /// constructed heaps must not become interchangeable even if test code
+    /// gives them the same ID.
+    pub(crate) fn belongs_to(&self, values: &CoreValueFactory) -> bool {
+        std::ptr::eq(self.domain, values.domain.as_ref())
+    }
+
+    /// Discovers or reuses one heap-local allocation class for this region.
+    pub(crate) fn allocator<T: Trace>(
+        &self,
+    ) -> Result<CoreValueAllocator<'_, T>, UnsupportedLayout> {
+        self.scope.allocator()
+    }
+
+    /// Publishes a root before a managed pointer leaves this region.
+    pub(crate) fn root<T: Trace>(&self, value: Gc<T>) -> Root<T> {
+        self.scope.root(value)
+    }
+
+    /// Borrows one same-domain root under this region's mutator authority.
+    pub(crate) fn get<'access, T: Trace>(&'access self, root: &Root<T>) -> &'access T {
+        self.scope.get(root)
     }
 }
 
