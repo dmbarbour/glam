@@ -634,6 +634,34 @@ fn prototype_owned_extraction_outlives_domain() {
 }
 
 #[test]
+fn prototype_value_access_nests_in_one_mutator() {
+    let values = prototype_factory();
+    let runtime = PrototypeRuntime::new(&values);
+    let value =
+        PrototypeValue::managed_chain(&values, &[31, 32, 33], Arc::new(AtomicUsize::new(0)));
+    let PrototypeValue::Managed { root } = &value else {
+        unreachable!("the chain constructor returns a managed value")
+    };
+
+    values.with_managed_values(|outer| {
+        let before = outer.get(root);
+        let before_address = std::ptr::from_ref(before);
+
+        let extracted = runtime
+            .extract_owned(&value)
+            .expect("nested same-runtime access should reuse mutator admission");
+        assert_eq!(
+            extracted,
+            PrototypeOwnedValue::Managed(prototype_owned_chain(&[31, 32, 33]))
+        );
+
+        let after = outer.get(root);
+        assert_eq!(std::ptr::from_ref(after), before_address);
+        assert_eq!(after.value, 31);
+    });
+}
+
+#[test]
 fn prototype_recursive_root_traces_child() {
     let values = prototype_factory();
     let drops = Arc::new(AtomicUsize::new(0));

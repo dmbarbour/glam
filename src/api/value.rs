@@ -20,6 +20,8 @@ use crate::number::Number;
 use crate::runtime::{EvaluationRuntimeId, RuntimeValueRoot};
 
 #[cfg(test)]
+mod access_inventory;
+#[cfg(test)]
 mod prototype;
 
 /// An assembly-time value rooted in exactly one [`EvaluationRuntime`].

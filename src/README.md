@@ -27,6 +27,7 @@ not define language semantics or collect subsystem invariants.
 | `lib.rs`, `api.rs` | Stable embedding facade and re-exports |
 | `api/value.rs`, `api/evaluator.rs`, `api/error.rs` | Runtime-rooted value construction, explicit demand/extraction, privileged inspection, and structured embedding failures |
 | `api/value/prototype.rs` | Test-only Phase I2 experiment for the selected opaque inline-or-managed public-root representation; production values do not use it |
+| `api/value/access_inventory.rs` | Test-only I2C source inventory that prevents unclassified bare-core compatibility access from growing before I3/I4 migration |
 | `api/diagnostics.rs` | Diagnostic values, buses, subscriptions, enrichment, and runtime ingress |
 | `api/runtime.rs`, `api/runtime/` | Runtime ownership, transactional events, delivery, readiness, deadlock reports, and settlement |
 | `api/assembly.rs` | Assembler/reasoning construction, protected volumes, sources, imports, and module builds |
@@ -150,6 +151,8 @@ focused [interaction-net invariants](../docs/agent_context/interaction_nets.md).
 - `api/value/prototype.rs` contains the isolated GC public-root representation
   fixtures; it may force collection while production collection remains
   disabled.
+- `api/value/access_inventory.rs` owns the mechanically checked production
+  `Value`/`RuntimeValueRoot` compatibility-access baseline.
 - Binary command-line and logger unit tests live below `bin/glam/`; `tests/cli.rs`
   covers the executable process contract.
 - `tests/` also covers the public library facade, valid samples, and invalid
