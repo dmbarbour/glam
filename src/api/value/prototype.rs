@@ -4,6 +4,7 @@
 //! fixtures exercise the selected private inline-or-managed shape before the
 //! production graph has exact tracing or collection enabled.
 
+use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -22,6 +23,43 @@ enum PrototypeValue {
         root: Root<PrototypeNode>,
     },
 }
+
+impl fmt::Debug for PrototypeValue {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("Value")
+    }
+}
+
+// Each module makes trait selection ambiguous if `PrototypeValue` gains the
+// forbidden trait. This keeps the absence of identity-derived public relations
+// as compile-time evidence without adding a production dependency or exposing
+// the test-only prototype to an integration-test crate.
+macro_rules! assert_prototype_does_not_implement {
+    ($module:ident, $trait:path) => {
+        mod $module {
+            use super::PrototypeValue;
+
+            trait AmbiguousIfImplemented<Discriminator> {
+                fn verify() {}
+            }
+
+            struct Implemented;
+
+            impl<T: ?Sized> AmbiguousIfImplemented<()> for T {}
+            impl<T: ?Sized + $trait> AmbiguousIfImplemented<Implemented> for T {}
+
+            const _: fn() = || {
+                <PrototypeValue as AmbiguousIfImplemented<_>>::verify();
+            };
+        }
+    };
+}
+
+assert_prototype_does_not_implement!(prototype_value_not_partial_eq, PartialEq);
+assert_prototype_does_not_implement!(prototype_value_not_eq, Eq);
+assert_prototype_does_not_implement!(prototype_value_not_partial_ord, PartialOrd);
+assert_prototype_does_not_implement!(prototype_value_not_ord, Ord);
+assert_prototype_does_not_implement!(prototype_value_not_hash, std::hash::Hash);
 
 struct PrototypeNode {
     value: u64,
@@ -132,11 +170,11 @@ fn prototype_factory() -> CoreValueFactory {
     CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new())
 }
 
-fn assert_send_sync<T: Send + Sync>() {}
+fn assert_transport_traits<T: Clone + Send + Sync>() {}
 
 #[test]
 fn prototype_root_moves_between_threads() {
-    assert_send_sync::<PrototypeValue>();
+    assert_transport_traits::<PrototypeValue>();
 
     let values = prototype_factory();
     let drops = Arc::new(AtomicUsize::new(0));
@@ -154,6 +192,22 @@ fn prototype_root_moves_between_threads() {
         .expect("prototype observation worker should not panic");
     assert_eq!(observed, Ok(PrototypeObservation::Managed(42)));
     assert_eq!(value.observe(&values), observed);
+}
+
+#[test]
+fn prototype_value_debug_is_opaque() {
+    let values = prototype_factory();
+    let first_inline = PrototypeValue::inline(&values, 1);
+    let second_inline = PrototypeValue::inline(&values, -9);
+    let managed = PrototypeValue::managed_leaf(&values, 42, Arc::new(AtomicUsize::new(0)));
+
+    assert_eq!(format!("{first_inline:?}"), "Value");
+    assert_eq!(format!("{second_inline:?}"), "Value");
+    assert_eq!(format!("{managed:?}"), "Value");
+
+    drop(values);
+    assert_eq!(format!("{first_inline:?}"), "Value");
+    assert_eq!(format!("{managed:?}"), "Value");
 }
 
 #[test]

@@ -94,7 +94,12 @@ Public api::Value
    no public contract promises that a numeric address is permanent identity.
    Rewritable edge slots and relocation are designed only in a future moving-GC
    plan.
-8. **Identity semantics survive movement.** Any use of pointer equality or
+8. **The public wrapper is not a semantic key.** It provides transport and may
+   provide content-free debugging, but no equality, ordering, or hashing based
+   on its root cell, allocation address, tag word, or domain witness. Clients
+   first obtain or compute an ordinary host key through runtime-authorized
+   semantic observation.
+9. **Identity semantics survive movement.** Any use of pointer equality or
    pointer-derived hashing is inventoried before a moving collector is
    attempted.
 

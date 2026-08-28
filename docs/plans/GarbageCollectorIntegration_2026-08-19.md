@@ -1,9 +1,10 @@
 # Glam GC Integration Plan — 2026-08-19
 
-Status: in progress; Phase I0, Phase I1, and Phase I2A are complete, including
-the mandatory post-I1 review, and collector Gate G1 passed on 2026-08-25. The
-remaining integration work follows the completed owner-matrix, stable-ledger,
-and low-risk checkpoint corrections from the integration review.
+Status: in progress; Phase I0, Phase I1, Phase I2A, and Phase I2B.1 are
+complete, including the mandatory post-I1 review, and collector Gate G1 passed
+on 2026-08-25. The remaining integration work follows the completed
+owner-matrix, stable-ledger, and low-risk checkpoint corrections from the
+integration review.
 
 This plan integrates the collector defined by
 [`GarbageCollectorImplementation_2026-08-19.md`](GarbageCollectorImplementation_2026-08-19.md)
@@ -23,6 +24,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I1E | complete | runtime/profile/value-domain lifecycle reverification |
 | I1 | complete | runtime-owned heap, collection disabled; post-I1 review passed |
 | I2A | complete | opaque inline-or-managed public-root representation prototype and provenance checks |
+| I2B.1 | complete | transport-only prototype surface with no handle-derived semantic relations |
 | I2 | pending | public value and external-root prototype |
 | I3 | pending | bounded evaluator/worker mutator regions |
 | I4 | pending | core trace vocabulary and leaf policy |
@@ -465,6 +467,15 @@ equality, ordering, and hash contracts, and
 `prototype_value_debug_is_opaque` checks the optional content-free debug form.
 Only isolated prototype fixtures may collect; production remains `NoAuto` and
 retains its compatibility `RuntimeValueRoot`.
+
+Completed 2026-08-28. The prototype exposes `Clone`, `Send`, and `Sync` as its
+transport contract and implements a constant, content-free `Debug` form.
+Compile-time ambiguity fixtures reject any future `PartialEq`, `Eq`,
+`PartialOrd`, `Ord`, or `Hash` implementation; the fixture was latched by
+temporarily adding `PartialEq` and observing the intended trait-selection
+failure. Consequently, a client must obtain or compute an ordinary host key
+through later runtime-authorized observation before using value-derived data
+in a Rust dictionary or set. No production public trait or observer changed.
 
 ### Phase I2B.2 — Runtime-Authorized Observation Prototype
 
