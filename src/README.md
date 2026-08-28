@@ -26,6 +26,7 @@ not define language semantics or collect subsystem invariants.
 | `source.rs` | Source artifacts, digests, relative resolvers, tracked local files |
 | `lib.rs`, `api.rs` | Stable embedding facade and re-exports |
 | `api/value.rs`, `api/evaluator.rs`, `api/error.rs` | Runtime-rooted value construction, explicit demand/extraction, privileged inspection, and structured embedding failures |
+| `api/value/prototype.rs` | Test-only Phase I2 experiment for the selected opaque inline-or-managed public-root representation; production values do not use it |
 | `api/diagnostics.rs` | Diagnostic values, buses, subscriptions, enrichment, and runtime ingress |
 | `api/runtime.rs`, `api/runtime/` | Runtime ownership, transactional events, delivery, readiness, deadlock reports, and settlement |
 | `api/assembly.rs` | Assembler/reasoning construction, protected volumes, sources, imports, and module builds |
@@ -146,6 +147,9 @@ focused [interaction-net invariants](../docs/agent_context/interaction_nets.md).
 - `api/tests.rs` retains cross-facade value/assembly tests;
   `api/tests/runtime_tests.rs` and `api/tests/diagnostic_tests.rs` own runtime
   event/readiness and diagnostic transport integration tests.
+- `api/value/prototype.rs` contains the isolated GC public-root representation
+  fixtures; it may force collection while production collection remains
+  disabled.
 - Binary command-line and logger unit tests live below `bin/glam/`; `tests/cli.rs`
   covers the executable process contract.
 - `tests/` also covers the public library facade, valid samples, and invalid

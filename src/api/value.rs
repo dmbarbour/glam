@@ -19,6 +19,9 @@ use crate::interaction_net::{NetBuilder as CoreNetBuilder, Port as CorePort};
 use crate::number::Number;
 use crate::runtime::{EvaluationRuntimeId, RuntimeValueRoot};
 
+#[cfg(test)]
+mod prototype;
+
 /// An assembly-time value rooted in exactly one [`EvaluationRuntime`].
 ///
 /// Values cannot be transferred between runtimes. Construct them through

@@ -66,8 +66,11 @@ Public api::Value
 1. **The internal value is cheap to copy.** Target one machine word; permit a
    two-word prototype only if measurements or provenance enforcement justify
    it.
-2. **Public values remain roots.** Compact internal values do not escape the
-   runtime or replace the public root boundary.
+2. **Public values remain a domain-qualified root boundary.** Compact internal
+   values do not escape the runtime or replace the public wrapper. A managed
+   arm owns one existing collector root cell; an immediate arm has no managed
+   allocation to keep live and therefore carries only non-owning domain
+   provenance. The distinction remains private to the wrapper.
 3. **Immediate values own no Rust resources.** Copying or discarding an
    immediate requires no `Drop`.
 4. **Heap representation is split by role.** Large numbers, binaries,
@@ -236,7 +239,10 @@ request a collector large-object fallback.
   by V0/V1 before allocating values. A canonical Rust type retains one layout
   and requested slot size; use another wrapper type rather than changing the
   policy of an existing metadata identity.
-- Make runtime roots contain the compact internal value.
+- Make the opaque public wrapper contain either a domain-qualified immediate
+  internal value or the existing collector root cell for a managed node.
+  Managed root type erasure, if required by the split node taxonomy, must reuse
+  that root cell rather than add another registry or root representation.
 - Replace V1's mock validation with real heap/run ownership, live-slot, and
   canonical-metadata assertions at the private decoding boundary. Public value
   APIs must provide no route to forge or reinterpret pointer-bearing words.

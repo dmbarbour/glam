@@ -1,6 +1,10 @@
 use glam_gc::{Allocator, Gc, Mutator, Root, Trace, UnsupportedLayout};
+#[cfg(test)]
+use std::sync::{Arc, Weak};
 
 use super::CoreValueFactory;
+#[cfg(test)]
+use super::RuntimeValueDomain;
 
 /// Initial minimum slot extent for Glam-owned managed representations.
 ///
@@ -48,6 +52,16 @@ pub(crate) struct CoreValueAllocator<'scope, T: Trace> {
     allocator: Allocator<'scope, T>,
 }
 
+/// Non-owning provenance for an inline value in the isolated public-root
+/// prototype.
+///
+/// This is deliberately private verification scaffolding until I2 fixes the
+/// production wrapper. Pointer identity is authoritative inside one process;
+/// the weak reference neither preserves nor revives the value domain.
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) struct CoreValueDomainWitness(Weak<RuntimeValueDomain>);
+
 impl CoreValueFactory {
     /// Runs one bounded managed-allocation region in this factory's value
     /// domain.
@@ -66,6 +80,40 @@ impl CoreValueFactory {
         self.domain
             .heap
             .with_mutator(|mutator| operation(CoreValueAllocationScope { mutator }))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn managed_domain_witness(&self) -> CoreValueDomainWitness {
+        CoreValueDomainWitness(Arc::downgrade(&self.domain))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn owns_managed_domain_witness(&self, witness: &CoreValueDomainWitness) -> bool {
+        Weak::ptr_eq(&witness.0, &Arc::downgrade(&self.domain))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn owns_managed_root<T: Trace>(&self, root: &Root<T>) -> bool {
+        self.domain.heap.owns(root)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn managed_statistics(&self) -> glam_gc::HeapStatistics {
+        self.domain.heap.statistics()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn collect_managed_prototype(
+        &self,
+    ) -> Result<glam_gc::CollectionReport, glam_gc::CollectionError> {
+        self.domain.heap.collect_full()
+    }
+}
+
+#[cfg(test)]
+impl CoreValueDomainWitness {
+    pub(crate) fn is_live(&self) -> bool {
+        self.0.upgrade().is_some()
     }
 }
 

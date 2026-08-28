@@ -1,7 +1,7 @@
 # Glam GC Integration Plan — 2026-08-19
 
-Status: in progress; Phase I0 and Phase I1 are complete, including the
-mandatory post-I1 review, and collector Gate G1 passed on 2026-08-25. The
+Status: in progress; Phase I0, Phase I1, and Phase I2A are complete, including
+the mandatory post-I1 review, and collector Gate G1 passed on 2026-08-25. The
 remaining integration work follows the completed owner-matrix, stable-ledger,
 and low-risk checkpoint corrections from the integration review.
 
@@ -22,6 +22,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I1D | complete | centralized managed-slot policy and stable ledger contract |
 | I1E | complete | runtime/profile/value-domain lifecycle reverification |
 | I1 | complete | runtime-owned heap, collection disabled; post-I1 review passed |
+| I2A | complete | opaque inline-or-managed public-root representation prototype and provenance checks |
 | I2 | pending | public value and external-root prototype |
 | I3 | pending | bounded evaluator/worker mutator regions |
 | I4 | pending | core trace vocabulary and leaf policy |
@@ -395,25 +396,53 @@ It found no blocking drift, so Phase I1 is complete and I2 may begin.
 
 - Use GCI-004's completed `Heap::owns(&Root<T>)` provenance predicate, then
   prototype C4's direct managed root against scalars and one recursive test
-  node. Separately prototype a Glam-owned public wrapper whose managed arm uses
-  that root and whose optional inline arm contains only values which require no
-  managed trace. Do not add another collector registry-entry or root-cell
-  representation for the wrapper.
-- Select between exposing the direct root and using the Glam wrapper based on
-  public scalar construction cost and clarity. One public `Value` clone must
-  preserve its root cell while the value domain lives, but must not preserve
-  the heap after the domain's authorized owners are dropped.
+  node. This direct root is a collector/provenance control, not a competing
+  public API design.
+- Select a Glam-owned opaque wrapper as the permanent public boundary. Its
+  private prototype representation distinguishes an allocation-free inline arm
+  from a managed-root arm. The inline arm contains only an internal value which
+  requires no managed trace plus non-owning, non-forgeable value-domain
+  provenance. The managed arm uses the collector's existing root cell; the
+  wrapper adds neither another registry entry nor another root-cell
+  representation.
+- Preserve the opportunity for the value-representation plan's eventual tagged
+  immediate-or-managed-pointer word. Constructing an inline public scalar must
+  not allocate a managed payload or register a fresh root. A public managed
+  value clone preserves its existing root cell while the value domain lives,
+  while neither arm preserves the heap after the domain's authorized owners
+  are dropped.
 - Derive authoritative managed provenance from root heap identity rather than
-  an independently forgeable runtime ID. Every safe access performs the
-  release-build same-heap check before the private typed-pointer gateway.
+  an independently forgeable runtime ID. Inline values initially use a private
+  weak value-domain witness; managed values use root heap identity. Every safe
+  access performs the release-build same-domain or same-heap check before the
+  private typed-pointer gateway.
+- Do not select the final wrapper size, tag bits, immediate range, managed node
+  taxonomy, alignment, or erased-root decoding gateway here. Those remain
+  private representation decisions for V0/V1/V4 of the value-representation
+  plan, and may change without changing the public wrapper contract.
 
 Verification: `prototype_root_moves_between_threads`,
 `prototype_root_rejects_another_heap`, `prototype_root_becomes_inert_after_domain_drop`,
+`prototype_inline_values_allocate_no_managed_slots`,
+`prototype_inline_value_rejects_another_domain`, and
+`prototype_recursive_root_traces_child`,
 the collector's `heap_ownership_predicate_accepts_only_the_recorded_live_heap`
 and `heap_ownership_predicate_tolerates_concurrent_root_clone_and_drop`, and
 the existing mismatched-`Root::get` invariant test. Only the isolated prototype
 heap may collect; production remains `NoAuto` and retains its compatibility
 `RuntimeValueRoot`.
+
+Completed 2026-08-28. The isolated test-only prototype selected a Glam-owned
+opaque wrapper with two private arms: an allocation-free scalar plus weak
+value-domain witness, or the collector's existing registered root cell. Its
+managed recursive fixture traces one child exactly, clones share one root
+registration across threads, both arms reject another runtime value domain,
+and both become inaccessible after their owning domain is gone. Constructing
+1,024 inline handles leaves heap statistics unchanged and assigns no managed
+run. The prototype deliberately uses its own private node and default
+collector layout: it tests representation and provenance only, not the later
+production family slot policy. Production `api::Value`, `RuntimeValueRoot`,
+and collection policy remain unchanged.
 
 ### Phase I2B.1 — Opaque Prototype Surface
 
