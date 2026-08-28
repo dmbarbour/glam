@@ -231,6 +231,45 @@ fn public_values_retain_only_the_runtime_value_domain() {
 }
 
 #[test]
+fn runtime_value_domain_has_no_scheduler_or_profile_backedge() {
+    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+    let state = Arc::downgrade(&runtime.state);
+    let coordinator = Arc::downgrade(&runtime.state.work);
+    let executor = Arc::downgrade(&runtime.state.executor);
+    let profile = Arc::downgrade(&runtime.default_reflection_profile);
+    let resources = Arc::downgrade(&runtime.state.shared_resources);
+    let values = runtime.values();
+    let value_domain = Arc::downgrade(values.core.value_domain());
+    let root = values.core.with_managed_values(|scope| {
+        let allocator = scope
+            .allocator::<u64>()
+            .expect("the lifecycle fixture should fit one managed slot");
+        scope.root(allocator.alloc(41))
+    });
+    let assembler = Assembler::builder()
+        .evaluation_runtime(runtime.clone())
+        .build()
+        .expect("assembler should seal the runtime reflection profile");
+
+    drop(assembler);
+    drop(runtime);
+
+    assert!(state.upgrade().is_none());
+    assert!(coordinator.upgrade().is_none());
+    assert!(executor.upgrade().is_none());
+    assert!(profile.upgrade().is_none());
+    assert!(resources.upgrade().is_none());
+    assert!(value_domain.upgrade().is_some());
+    values.core.with_managed_values(|scope| {
+        assert_eq!(*scope.get(&root), 41);
+    });
+
+    drop(values);
+    assert!(value_domain.upgrade().is_none());
+    drop(root);
+}
+
+#[test]
 fn bare_public_values_do_not_retain_the_runtime_value_domain() {
     let runtime = EvaluationRuntime::new(0).expect("runtime should build");
     let values = runtime.values();

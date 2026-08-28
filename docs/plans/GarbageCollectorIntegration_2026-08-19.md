@@ -1,9 +1,10 @@
 # Glam GC Integration Plan — 2026-08-19
 
-Status: in progress; Phase I0 plus I1A-I1D are complete, and collector Gate G1
-passed on 2026-08-25. The remaining integration work follows the completed
-owner-matrix, stable-ledger, and low-risk checkpoint corrections from the
-integration review.
+Status: in progress; Phase I0 plus I1A-I1E are complete, Phase I1 awaits its
+mandatory post-implementation review, and collector Gate G1 passed on
+2026-08-25. The remaining integration work follows the completed owner-matrix,
+stable-ledger, and low-risk checkpoint corrections from the integration
+review.
 
 This plan integrates the collector defined by
 [`GarbageCollectorImplementation_2026-08-19.md`](GarbageCollectorImplementation_2026-08-19.md)
@@ -20,7 +21,8 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I1B | complete | runtime value-domain topology and authorized owner matrix |
 | I1C | complete | factory-scoped managed allocation and rooting authority |
 | I1D | complete | centralized managed-slot policy and stable ledger contract |
-| I1 | pending | runtime-owned heap, collection disabled |
+| I1E | complete | runtime/profile/value-domain lifecycle reverification |
+| I1 | review pending | runtime-owned heap, collection disabled |
 | I2 | pending | public value and external-root prototype |
 | I3 | pending | bounded evaluator/worker mutator regions |
 | I4 | pending | core trace vocabulary and leaf policy |
@@ -360,22 +362,31 @@ Verification: `managed_family_requested_layout_is_accepted`, plus
 unsupported-layout publication suites. Production collection remains
 `NoAuto`.
 
-### Phase I1E — Lifecycle Reverification
+### Phase I1E — Lifecycle Reverification (complete)
 
-- Verify the earlier sibling allocation of runtime state and immutable profile
-  remains internal to the runtime's ownership graph and acyclic once both can
-  retain rooted values. Collector roots are not an ownership escape hatch for
-  either sibling.
+Completed on 2026-08-28. This checkpoint reverified topology rather than
+migrating a production value representation. `EvaluationRuntime` still owns
+runtime state and the immutable default reflection profile as internal sibling
+roots. A sealed profile may retain a host and the acyclic shared-resource
+bundle, while both shared resources and the value domain retain only weak
+routes back to scheduler infrastructure.
 
-Verification: rerun `public_values_retain_only_the_runtime_value_domain`,
+The composed `runtime_value_domain_has_no_scheduler_or_profile_backedge`
+fixture seals the real runtime reflection profile, allocates a direct collector
+root through a retained public factory, and then drops the assembler and
+runtime. The authorized factory lease keeps only the value domain usable: the
+runtime state, coordinator, executor, profile, and shared resources all retire.
+Dropping that factory then retires the domain even while the collector root
+still exists, proving that a root is not an ownership escape hatch.
+
+Verification reran `public_values_retain_only_the_runtime_value_domain`,
 `runtime_shared_resources_do_not_retain_runtime_lifecycle_owners`,
 `retained_reflection_profile_keeps_only_shared_resources_alive`, and
-`compiler_cache_does_not_form_a_value_domain_cycle` after I1C/I1D, plus
-`runtime_value_domain_has_no_scheduler_or_profile_backedge`. Production
-collection remains `NoAuto` and no production `core::Value` is reclaimed.
+`compiler_cache_does_not_form_a_value_domain_cycle` after I1C/I1D, plus the new
+composed fixture. Production collection remains `NoAuto`; the managed `u64`
+is private verification data, and no production `core::Value` is reclaimed.
 
-At this phase no core object is reclaimed by the new heap. Existing behavior
-and tests must remain unchanged.
+Phase I1 now awaits the mandatory post-implementation review before I2 begins.
 
 ## Phase I2 — External Root and Public `Value` Prototype
 
