@@ -110,13 +110,6 @@ impl CoreValueFactory {
     }
 }
 
-#[cfg(test)]
-impl CoreValueDomainWitness {
-    pub(crate) fn is_live(&self) -> bool {
-        self.0.upgrade().is_some()
-    }
-}
-
 impl CoreValueAllocationScope<'_> {
     /// Discovers or reuses one heap-local allocation class for this region.
     #[allow(
@@ -148,6 +141,22 @@ impl CoreValueAllocationScope<'_> {
     )]
     pub(crate) fn get<'access, T: Trace>(&'access self, root: &Root<T>) -> &'access T {
         root.get(self.mutator)
+    }
+
+    /// Borrows one exact managed edge discovered from an already authorized,
+    /// rooted prototype node.
+    ///
+    /// # Safety
+    ///
+    /// `value` must be a live, exactly typed edge in this scope's heap. This
+    /// test-only gateway models the internal trace invariant; unlike a root,
+    /// `Gc<T>` does not carry independently checkable release-build
+    /// provenance.
+    #[cfg(test)]
+    pub(crate) unsafe fn get_traced_edge<T: Trace>(&self, value: Gc<T>) -> &T {
+        // SAFETY: the caller supplies the exact same-heap traced-edge proof;
+        // this scope's mutator excludes collection for the returned borrow.
+        unsafe { value.get_unchecked(self.mutator) }
     }
 }
 

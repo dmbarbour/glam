@@ -102,6 +102,12 @@ Public api::Value
 9. **Identity semantics survive movement.** Any use of pointer equality or
    pointer-derived hashing is inventoried before a moving collector is
    attempted.
+10. **Observation requires live domain authority.** Structural comparison,
+    kind inspection, rendering, evaluation-backed extraction, and all managed
+    borrows require a matching live runtime service. An evaluated-value wrapper
+    remains the same root plus a WHNF witness rather than a second root or an
+    observation capability. Extractors return owned host data when results
+    must survive the access scope or value-domain teardown.
 
 ## Provisional Encoding Direction
 

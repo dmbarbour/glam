@@ -1,8 +1,8 @@
 # Glam GC Integration Plan — 2026-08-19
 
-Status: in progress; Phase I0, Phase I1, Phase I2A, and Phase I2B.1 are
-complete, including the mandatory post-I1 review, and collector Gate G1 passed
-on 2026-08-25. The remaining integration work follows the completed
+Status: in progress; Phase I0, Phase I1, Phase I2A, Phase I2B.1, and Phase
+I2B.2 are complete, including the mandatory post-I1 review, and collector Gate
+G1 passed on 2026-08-25. The remaining integration work follows the completed
 owner-matrix, stable-ledger, and low-risk checkpoint corrections from the
 integration review.
 
@@ -25,6 +25,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I1 | complete | runtime-owned heap, collection disabled; post-I1 review passed |
 | I2A | complete | opaque inline-or-managed public-root representation prototype and provenance checks |
 | I2B.1 | complete | transport-only prototype surface with no handle-derived semantic relations |
+| I2B.2 | complete | live-runtime-authorized comparison, observation, and owned extraction prototype |
 | I2 | pending | public value and external-root prototype |
 | I3 | pending | bounded evaluator/worker mutator regions |
 | I4 | pending | core trace vocabulary and leaf policy |
@@ -499,6 +500,22 @@ equal, unequal, cloned, and independently constructed values;
 the fallible boundary; and `prototype_owned_extraction_outlives_domain`
 proves the owned-result rule. Only isolated prototype fixtures may collect;
 production remains `NoAuto` and retains its compatibility public facade.
+
+Completed 2026-08-28. A borrowed `PrototypeRuntime` now supplies the only
+observation authority. It validates inline witnesses and managed roots before
+kind inspection, recursive structural comparison, rendering, evaluation, or
+owned extraction. `PrototypeEvaluatedValue` is a clone of the same opaque
+handle and records only that the prototype's already-WHNF outer shell was
+accessible when evaluated; it neither retains the domain nor authorizes later
+inspection. Its observation methods require the same borrowed runtime service
+and delegate to the same fallible checks. Recursive managed comparison and
+extraction remain inside one mutator region and follow exact traced child
+edges; only ordinary owned Rust data escapes. Tests cover aliases,
+independently allocated equal graphs, unequal nested graphs, foreign and dead
+domains, and extracted nested data surviving final domain teardown. The
+test-only traced-edge gateway models the eventual internal scoped-access rule;
+I2C still owns the production call-site inventory and nested-access contract.
+Production values and collection policy remain unchanged.
 
 ### Phase I2C — Scoped-Access and Production-Switch Inventory
 
