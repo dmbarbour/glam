@@ -42,7 +42,8 @@ impl AccessCounts {
             source.matches(".as_core()").count(),
             source.matches(".into_core()").count(),
             source.matches("Value::from_core(").count(),
-            source.matches("Value::from_runtime(").count(),
+            source.matches("Value::from_runtime(").count()
+                + source.matches("Self::from_runtime(").count(),
             source.matches("RuntimeValueRoot::new(").count(),
             source.matches("RuntimeValueRoot::from_runtime(").count(),
         )
@@ -107,7 +108,7 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/api/value.rs",
-        [20, 21, 0, 1, 1, 1],
+        [20, 21, 0, 2, 1, 1],
         "constructors, composite validation, observers, extraction, and net data",
         "I3B.1 scoped construction/extraction; I4F.2 public facade switch"
     ),

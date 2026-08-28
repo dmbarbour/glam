@@ -1,8 +1,8 @@
 # Glam GC Integration Plan — 2026-08-19
 
-Status: in progress; Phase I0, Phase I1, and every Phase I2 implementation
-checkpoint through I2C are complete. The mandatory post-I2 review remains
-before I2 can close and I3 can begin. Collector Gate G1 passed on 2026-08-25.
+Status: in progress; Phases I0 through I2 are complete, including the
+mandatory post-I2 review. Phase I3 may begin. Collector Gate G1 passed on
+2026-08-25.
 The remaining integration work follows the completed owner-matrix,
 stable-ledger, and low-risk checkpoint corrections from the integration
 review.
@@ -28,7 +28,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I2B.1 | complete | transport-only prototype surface with no handle-derived semantic relations |
 | I2B.2 | complete | live-runtime-authorized comparison, observation, and owned extraction prototype |
 | I2C | complete | nested scoped access and mechanically checked production compatibility-access inventory |
-| I2 | pending review | public value and external-root prototype implementation complete; mandatory post-I2 review pending |
+| I2 | complete | opaque public-root contract, runtime-authorized observation, access inventory, and post-I2 review |
 | I3 | pending | bounded evaluator/worker mutator regions |
 | I4 | pending | core trace vocabulary and leaf policy |
 | I4.0 | pending | managed-family destruction admission contract |
@@ -540,7 +540,7 @@ while an outer managed borrow remains live, completes recursive extraction,
 and returns to the still-valid outer scope. The production inventory is
 recorded in
 [`GarbageCollectorPublicValueAccessInventory_2026-08-28.md`](GarbageCollectorPublicValueAccessInventory_2026-08-28.md)
-and enforced by a source-scanning regression. Its baseline covers 232
+and enforced by a source-scanning regression. Its baseline covers 233
 compatibility occurrences in 23 non-test source modules across constructors,
 composite validation, storage, evaluator/poll paths, reflection, diagnostics,
 compiler/macro paths, and net construction. Each module is assigned to its I3
@@ -549,8 +549,10 @@ by changing one expected count and observing the exact module mismatch.
 Prototype and inventory sources are excluded deliberately; named test modules
 are outside the production inventory, while colocated fixtures remain covered
 with their owning module. No production representation or collection policy
-changed. Phase I2 implementation is complete, but the mandatory post-I2
-review must pass before I2 is marked complete or I3 begins.
+changed. The mandatory post-I2 audit is recorded in
+[`GarbageCollectorIntegrationI2_2026-08-28.md`](../reviews/GarbageCollectorIntegrationI2_2026-08-28.md).
+It found no blocking drift after resolving the inventory and verification-index
+findings, so Phase I2 is complete and I3 may begin.
 
 ## Phase I3 — Mutator Regions Across Evaluation and Construction
 

@@ -28,20 +28,20 @@ more conservative than the production build alone.
 
 ## Baseline
 
-The 23 inventoried modules contain 232 compatibility occurrences:
+The 23 inventoried modules contain 233 compatibility occurrences:
 
 | Operation family | Count |
 | --- | ---: |
 | borrowed `as_core()` projection | 81 |
 | owned `into_core()` projection | 53 |
 | `Value`/`PublicValue::from_core` construction | 80 |
-| `Value::from_runtime` construction | 6 |
+| `Value::from_runtime` construction, including facade-local `Self` delegation | 7 |
 | `RuntimeValueRoot::new` construction | 7 |
 | `RuntimeValueRoot::from_runtime` construction | 5 |
 
 | Area | Modules | Occurrences | Migration owner |
 | --- | ---: | ---: | --- |
-| Public API, assembly, diagnostics, errors, evaluation, readiness | 6 | 92 | I3B.1 and I3E.1-I3E.3 scoped operations; I4F.1 durable roots; I4F.2 facade switch |
+| Public API, assembly, diagnostics, errors, evaluation, readiness | 6 | 93 | I3B.1 and I3E.1-I3E.3 scoped operations; I4F.1 durable roots; I4F.2 facade switch |
 | Core compatibility bridge | 1 | 2 | I4A-I4E exact shell, then I4F.2 |
 | Core interaction-net construction | 1 | 10 | I3D.3-I3D.4 scoped net access; I4F.1 outcomes; I8 managed net |
 | Evaluation sessions, pump, executor, coordinator task/spark | 5 | 13 | I3A.3-I3A.4, I3B.2, and I3C.1-I3C.2; I4F.1 durable outcomes |
@@ -79,5 +79,8 @@ and checkpoint assignments behind this grouped summary.
 - The inventory fixture was latched by lowering one expected `as_core` count;
   it reported the intended `src/api/evaluator.rs` mismatch before the baseline
   was restored.
+- The post-I2 audit extended the `from_runtime` family to facade-local
+  `Self::from_runtime` delegation. Before its baseline was updated, the test
+  reported the existing `src/api/value.rs` count as two rather than one.
 - The existing public-value suite remains the compatibility behavior oracle
   until I4F.2.

@@ -55,9 +55,10 @@ pub(crate) struct CoreValueAllocator<'scope, T: Trace> {
 /// Non-owning provenance for an inline value in the isolated public-root
 /// prototype.
 ///
-/// This is deliberately private verification scaffolding until I2 fixes the
-/// production wrapper. Pointer identity is authoritative inside one process;
-/// the weak reference neither preserves nor revives the value domain.
+/// This is deliberately private verification scaffolding for I2's selected
+/// wrapper contract. I4F.2 enacts that contract in the production facade.
+/// Pointer identity is authoritative inside one process; the weak reference
+/// neither preserves nor revives the value domain.
 #[cfg(test)]
 #[derive(Clone)]
 pub(crate) struct CoreValueDomainWitness(Weak<RuntimeValueDomain>);
@@ -127,7 +128,7 @@ impl CoreValueAllocationScope<'_> {
     /// Publishes an external root before a managed pointer leaves this region.
     #[allow(
         dead_code,
-        reason = "Phase I1C installs the rooting seam before public roots migrate in I2"
+        reason = "Phase I1C installs the rooting seam before durable and public roots migrate in I4F"
     )]
     pub(crate) fn root<T: Trace>(&self, value: Gc<T>) -> Root<T> {
         self.mutator.root(value)
@@ -137,7 +138,7 @@ impl CoreValueAllocationScope<'_> {
     /// authority.
     #[allow(
         dead_code,
-        reason = "Phase I1C installs the root-access seam before public roots migrate in I2"
+        reason = "Phase I1C installs the root-access seam before the public-root switch in I4F.2"
     )]
     pub(crate) fn get<'access, T: Trace>(&'access self, root: &Root<T>) -> &'access T {
         root.get(self.mutator)
