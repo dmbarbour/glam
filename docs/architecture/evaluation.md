@@ -130,12 +130,16 @@ adapter in cooperative and executor paths; the executor contains no separate
 value-admission policy. The poll context temporarily retains the validated
 demand state but exposes neither that route nor a mutator to the machine. Its
 only managed-access operation opens a lifetime-bound region for a bounded
-callback-free substep and closes it before returning. Existing whole
-`eval_value`, lazy-source, effect, and spark operations may recursively pump,
-wait, or invoke callbacks, so they do not open one poll-wide region; later I3
-work partitions those operations before migrating their value access. Claim
-release, terminal publication, cancellation, destruction, and worker waits
-therefore run without inherited mutator authority.
+callback-free substep and closes it before returning. Whole `eval_value`,
+lazy-source, effect, and spark operations may reach dependencies or callbacks,
+so they do not open one poll-wide region. Resumable scheduler-visible machine
+boundaries publish dependencies as `Blocked`; direct and patient drivers pump
+and wait only while retaining the mutator-free evaluator-step context. An
+opaque deferred-source Rust callback cannot yet suspend and resume, so its
+temporary compatibility path may cooperatively pump a dependency, but it also
+inherits no managed-access region. Claim release, terminal publication,
+cancellation, destruction, coordinator waits, and worker sleeps therefore run
+without inherited mutator authority.
 
 Successful type-erased machine polls cross that release boundary as a
 `RuntimeValueRoot`, never a bare `core::Value`. A currently bare evaluator
@@ -167,6 +171,11 @@ one source-latched direct-compatibility gate. That gate opens no ambient access
 region: explicit deferred callbacks, reflection, net, and builtin seams receive
 only their durable evaluator context, and no `EvaluationValueAccess` crosses a
 pump, wait, callback, or machine poll.
+`wait_for_claimed_task` is an ordinary coordinator wait and retains only this
+durable, mutator-free context. The interaction-net disturbance wait is a
+separate narrow exception: its bracketed local claim and acyclic handoff prove
+that another evaluator is completing the same callback-free net work, so it
+does not establish a general permission to wait with managed access.
 
 Builtin application has a matching two-level boundary. `apply_builtin_in`
 retains the evaluator-step carrier for migrated callback-free families;

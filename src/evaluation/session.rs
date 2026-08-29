@@ -301,6 +301,8 @@ pub(crate) struct EvalContext {
     scheduled_task: bool,
     waits_for_claimed_tasks: bool,
     originating_task: Option<EvaluationTaskId>,
+    #[cfg(test)]
+    claimed_task_wait_probe: Option<std::sync::mpsc::Sender<()>>,
 }
 
 /// Direct client ownership for an isolated demand context.
@@ -353,6 +355,8 @@ impl EvalContext {
             scheduled_task: false,
             waits_for_claimed_tasks: false,
             originating_task: None,
+            #[cfg(test)]
+            claimed_task_wait_probe: None,
         }
     }
 
@@ -366,6 +370,8 @@ impl EvalContext {
             scheduled_task: false,
             waits_for_claimed_tasks: false,
             originating_task: None,
+            #[cfg(test)]
+            claimed_task_wait_probe: None,
         }
     }
 
@@ -382,6 +388,8 @@ impl EvalContext {
             scheduled_task: true,
             waits_for_claimed_tasks: false,
             originating_task: None,
+            #[cfg(test)]
+            claimed_task_wait_probe: None,
         }
     }
 
@@ -397,6 +405,8 @@ impl EvalContext {
             scheduled_task: false,
             waits_for_claimed_tasks: false,
             originating_task: None,
+            #[cfg(test)]
+            claimed_task_wait_probe: None,
         }
     }
 
@@ -426,6 +436,8 @@ impl EvalContext {
             scheduled_task: true,
             waits_for_claimed_tasks: false,
             originating_task: Some(id),
+            #[cfg(test)]
+            claimed_task_wait_probe: None,
         }
     }
 
@@ -446,6 +458,8 @@ impl EvalContext {
             scheduled_task: true,
             waits_for_claimed_tasks: false,
             originating_task,
+            #[cfg(test)]
+            claimed_task_wait_probe: None,
         }
     }
 
@@ -653,6 +667,15 @@ impl EvalContext {
         self.waits_for_claimed_tasks
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_claimed_task_wait_probe(
+        mut self,
+        probe: std::sync::mpsc::Sender<()>,
+    ) -> Self {
+        self.claimed_task_wait_probe = Some(probe);
+        self
+    }
+
     /// Waits for one scheduler change only while the target has a producer
     /// claimed by another thread.
     ///
@@ -669,6 +692,10 @@ impl EvalContext {
         let generation = coordinator.work_generation();
         if !coordinator.target_has_running_producer(target) {
             return;
+        }
+        #[cfg(test)]
+        if let Some(probe) = &self.claimed_task_wait_probe {
+            let _ = probe.send(());
         }
         coordinator.wait_for_change(generation);
     }
@@ -777,6 +804,7 @@ impl EvalContext {
             scheduled_task: false,
             waits_for_claimed_tasks: false,
             originating_task: None,
+            claimed_task_wait_probe: None,
         };
         let task = context.task_id()?;
         Ok(Self {

@@ -47,6 +47,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I3B.1d.4 | complete | weak non-retaining evaluated-value observer ergonomics |
 | I3B.1e | complete | evaluator context-surface inventory and closure verification |
 | I3B.1 | complete | scoped construction and core evaluator migration |
+| I3B.2 | complete | poll/wait driver separation |
 | I3 | in progress | bounded evaluator/worker mutator regions |
 | I4 | pending | core trace vocabulary and leaf policy |
 | I4.0 | pending | managed-family destruction admission contract |
@@ -746,7 +747,7 @@ terminal publication, sleep, or machine destruction. A poll containing two
 evaluator substeps around one callback proves entry is scoped rather than
 poll-wide. Add
 `evaluation_scope_reuses_recursive_same_heap_entry`,
-`parked_machine_contains_no_mutator_authority`, and
+`blocked_machine_parks_without_mutator`, and
 `worker_releases_mutator_before_sleep`; retain existing task-order and shutdown
 suites. Production remains `NoAuto`.
 
@@ -772,7 +773,7 @@ consume the routed capability.
 `evaluation_scope_reuses_recursive_same_heap_entry` proves nested bounded
 access shares the active same-heap admission until the outer scope exits. The
 existing two-scope callback probe remains green, while
-`parked_machine_contains_no_mutator_authority`,
+`blocked_machine_parks_without_mutator`,
 `terminal_machine_destruction_occurs_without_mutator_authority`, and
 `worker_releases_mutator_before_sleep` prove release, parking, destruction,
 and idle worker waits occur after scoped access ends. The compatibility-access
@@ -940,8 +941,8 @@ The evaluator-step context is intentionally distinct from
 `EvaluationValueAccess`. The former may survive across an evaluator
 orchestration step because it contains no mutator; the latter exists only
 inside a callback-free closure. This preserves current patient evaluation
-until I3B.2 separates its wait driver without allowing a recursive
-`eval_value` call to hold collector admission across pumping or callbacks.
+while allowing I3B.2 to separate its wait driver without letting a recursive
+`eval_value` call hold collector admission across pumping or callbacks.
 
 I3B.1a completed 2026-08-29. A claimed `EvaluatorStepContext` borrows one
 checked `EvaluationPollContext` and durable `EvalContext`, contains no mutator,
@@ -1131,17 +1132,53 @@ may force collection.
   enter/poll/root/exit steps with waits outside managed access. Do not wrap an
   entire `eval_value` call in one mutator region when it may reach
   `wait_for_claimed_task` or another blocking coordinator operation.
-- Keep scheduled-machine paths nonblocking: dependencies return `Blocked`, the
-  machine parks after the quantum ends, and another worker may resume it later.
+  `wait_for_claimed_task` is an ordinary semantic/coordinator wait: a busy
+  producer is not proof that it currently owns a callback-free same-heap
+  evaluator region or can finish without reaching another dependency or
+  collection boundary. Retain only the mutator-free `EvaluatorStepContext`
+  across this wait and reopen value access after resumption.
+- Keep resumable scheduler-visible machine paths nonblocking: dependencies
+  return `Blocked`, the machine parks after the quantum ends, and another
+  worker may resume it later. An opaque deferred-source Rust callback cannot
+  yet suspend and resume; it may temporarily cooperatively pump a dependency,
+  but only with the mutator-free step context. I3E.1's deferred-source family
+  split owns removal of that compatibility path.
 - Ensure budget exhaustion and nested pumping cannot extend an outer mutator
   across a wait. Direct isolated evaluation uses the same step driver rather
   than a separate long-lived authority path.
+- Preserve the separately reviewed `NetContention::wait_for_disturbance`
+  exception from I3D.3. That wait may retain same-runtime mutator admission
+  only under its stronger bracketed-claim, acyclic handoff, and no-collection-
+  needed-for-progress proof. It does not generalize to coordinator waits,
+  promises, reflection gates, or imports.
 
 Verification: injected barriers force busy producers, promises, budget
 exhaustion, and patient waits, asserting zero active mutators while sleeping
 and successful resumption in a later quantum, including on another worker. Add
 `blocked_machine_parks_without_mutator` and retain direct-evaluation result and
 failure regressions. Production remains `NoAuto`.
+
+Completed 2026-08-29. Direct and patient evaluation retain their cooperative
+pump driver, but its `wait_for_claimed_task` boundary carries only durable
+`EvalContext`/`EvaluatorStepContext` state and reopens managed access after the
+wait. `EvaluationValueAccess` consequently retains only the matching scoped
+value capability; it no longer carries a redundant durable context route.
+
+The audit also tested making every scheduled dependency immediately yield.
+That is not yet sound for an opaque deferred-source Rust callback: the callback
+has no resumable continuation, and restarting it may allocate a fresh
+dependency indefinitely. The temporary scheduled compatibility path therefore
+continues to cooperatively pump such dependencies, but
+`scheduled_nested_dependency_runs_without_mutator` proves that it inherits no
+managed-access region. I3E.1's deferred-source migration owns removing this
+seam.
+`patient_claimed_task_wait_releases_mutator` forces a worker-owned producer and
+performs a full collection after the patient reaches the actual
+condition-variable wait. `blocked_machine_parks_without_mutator`,
+`worker_releases_mutator_before_sleep`, and the extended budget-exhaustion
+probe cover the other release paths. The separately documented bracketed
+interaction-net disturbance wait remains unchanged; it is not coordinator
+wait policy. Production remains `NoAuto`.
 
 ### Phase I3C.1 — Cooperative, Patient, and Worker Poll Routing
 

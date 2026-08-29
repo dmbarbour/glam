@@ -19,7 +19,6 @@ use super::{EvalContext, EvaluationDemandState};
 /// A matching-runtime evaluator view over one active managed-access region.
 pub(crate) struct EvaluationValueAccess<'scope> {
     values: RuntimeValueAccess<'scope>,
-    context: &'scope EvalContext,
 }
 
 /// Thread-bound authority for one evaluator orchestration step.
@@ -53,19 +52,14 @@ impl<'scope> EvaluationValueAccess<'scope> {
         context: &'scope EvalContext,
         values: RuntimeValueAccess<'scope>,
     ) -> Result<Self, ValueAccessDomainMismatch> {
-        let access = Self { values, context };
-        if !access.values().belongs_to(access.context().values()) {
+        if !values.belongs_to(context.values()) {
             return Err(ValueAccessDomainMismatch);
         }
-        Ok(access)
+        Ok(Self { values })
     }
 
     pub(crate) fn values(&self) -> &RuntimeValueAccess<'scope> {
         &self.values
-    }
-
-    pub(crate) fn context(&self) -> &EvalContext {
-        self.context
     }
 }
 
@@ -261,7 +255,6 @@ mod tests {
         let evaluator = poll.evaluator(&context);
 
         let first = evaluator.with_value_access(|access| {
-            assert!(std::ptr::eq(access.context(), &*context));
             assert!(access.values().belongs_to(context.values()));
             assert!(matches!(
                 values.collect_managed_for_test(),

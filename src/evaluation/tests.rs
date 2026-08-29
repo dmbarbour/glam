@@ -2042,7 +2042,7 @@ fn wait_completion_subscriptions_reject_a_foreign_runtime() {
 }
 
 #[test]
-fn parked_machine_contains_no_mutator_authority() {
+fn blocked_machine_parks_without_mutator() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();
     let coordinator = context
@@ -2135,6 +2135,105 @@ fn worker_releases_mutator_before_sleep() {
         .values()
         .collect_managed_for_test()
         .expect("an idle worker must not retain mutator authority");
+}
+
+#[test]
+fn scheduled_nested_dependency_runs_without_mutator() {
+    let fixture = SameRuntimeFixture::new();
+    let context = fixture.context();
+    let nested_had_no_mutator = Arc::new(AtomicBool::new(false));
+    let nested = LazyValue::deferred(context.values(), "nested scheduled dependency", {
+        let values = context.values().clone();
+        let nested_had_no_mutator = nested_had_no_mutator.clone();
+        move |_| {
+            nested_had_no_mutator
+                .store(values.collect_managed_for_test().is_ok(), Ordering::Release);
+            Ok(crate::core::keys::unit_value())
+        }
+    });
+
+    let nested_for_outer = nested.clone();
+    let outer = LazyValue::deferred(context.values(), "outer scheduled dependency", move |ctx| {
+        crate::eval::eval_value(ctx, &Value::Lazy(nested_for_outer.clone()))
+    });
+
+    assert_eq!(
+        crate::eval::eval_value(&context, &Value::Lazy(outer)),
+        Ok(context.values().unit())
+    );
+    assert!(
+        nested_had_no_mutator.load(Ordering::Acquire),
+        "cooperative nested pumping must not inherit an outer managed-access region"
+    );
+}
+
+#[test]
+fn patient_claimed_task_wait_releases_mutator() {
+    let fixture = SameRuntimeFixture::new();
+    fixture
+        .runtime
+        .activate_workers(1)
+        .expect("test worker should activate");
+    let session = fixture
+        .runtime
+        .new_evaluation_session()
+        .expect("patient evaluation session should build");
+    let (waiting_sender, waiting_receiver) = mpsc::channel();
+    let context = EvalContext::patient_with_task_profile(
+        &session,
+        session.demand.default_reflection_profile.clone(),
+    )
+    .with_claimed_task_wait_probe(waiting_sender);
+    let coordinator = context
+        .coordinator()
+        .expect("patient wait should retain its coordinator");
+    let lazy = inert_lazy_for(context.values(), "patient worker-owned dependency");
+    let (started_sender, started_receiver) = mpsc::channel();
+    let (release_sender, release_receiver) = mpsc::channel();
+    let wait = context
+        .lazy_task(&lazy, move |_| {
+            Box::new(CompleteAfterRelease {
+                started: Some(started_sender),
+                release: release_receiver,
+            })
+        })
+        .expect("patient dependency should register");
+    assert!(coordinator.promote_deferred_wait(&wait));
+    started_receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("worker should claim the patient dependency");
+
+    let evaluation_context = context.clone();
+    let evaluated_lazy = lazy.clone();
+    let (result_sender, result_receiver) = mpsc::channel();
+    let evaluation = std::thread::spawn(move || {
+        result_sender
+            .send(crate::eval::eval_value(
+                &evaluation_context,
+                &Value::Lazy(evaluated_lazy),
+            ))
+            .expect("patient result receiver should remain live");
+    });
+    waiting_receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("patient evaluator should reach the claimed-task wait");
+
+    context
+        .values()
+        .collect_managed_for_test()
+        .expect("a patient coordinator wait must retain no active mutator");
+    release_sender
+        .send(())
+        .expect("worker release receiver should remain live");
+    assert_eq!(
+        result_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("patient evaluation should resume"),
+        Ok(context.values().unit())
+    );
+    evaluation
+        .join()
+        .expect("patient evaluator should not panic");
 }
 
 #[test]
@@ -3236,6 +3335,10 @@ fn pump_reports_budget_exhaustion_for_runnable_work() {
         context.pump_wait(&target.wait, 1),
         EvaluationPumpOutcome::BudgetExhausted
     );
+    context
+        .values()
+        .collect_managed_for_test()
+        .expect("budget exhaustion must return without retaining a mutator");
 }
 
 #[test]
