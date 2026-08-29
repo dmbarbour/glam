@@ -26,6 +26,9 @@ crate-private paths for consumers without becoming another scheduler.
 
 - `evaluation/session.rs` owns the external session lease, session reports,
   evaluation-context construction, and task/deferred/promise admission policy.
+- `evaluation/access.rs` owns the scheduler-derived poll capability and the
+  lifetime-bound managed-value view for bounded callback-free evaluator
+  substeps. A poll context is not itself an active mutator.
 - `evaluation/pump.rs` owns cooperative target pumping, claimed-machine
   dispatch and release, cross-session dependency assistance, lazy-cycle
   publication, and runtime-pump adapters.
@@ -101,12 +104,12 @@ the record claimable or returns it for terminal destruction. The weak session
 registration validates admission but does not retain demand state or survive
 owner closure. A reflection claim needs no session-owned reporting tail:
 task/wait identity and terminal publication remain in its stable coordinator
-record. Blocked reflection,
-deferred, and spark records retain their exact dependency and checked
-subscription epoch; spark records additionally retain their demand value, an
-`Arc<EvaluationDemandState>` which cannot recover the external owner lease,
-their demand-session index, and a close request while worker-owned. Completion
-sources retain
+record. Blocked reflection, deferred, and spark records retain their exact
+dependency and checked subscription epoch; parked spark records additionally
+retain their demand value, a weak demand-session route, their demand-session
+index, and a close request while worker-owned. Detaching any reflection,
+deferred, client-demand, or spark claim first upgrades the coordinator's weak
+registry to one checked temporary `ClaimedDemandSession`. Completion sources retain
 `(work ID, subscription epoch)` rather than bare IDs. A wake batch is accepted
 only while the record remains blocked on both that epoch and the same
 runtime-local dependency key; stale completion, session teardown, and
@@ -119,6 +122,20 @@ but no route recovers the owner lease. Final owner drop can therefore close
 queued and blocked work immediately while a worker safely finishes one
 already-claimed quantum. The immutable reflection environment belongs to the
 active task host rather than either scheduling component.
+
+After a claim is detached from coordinator locks, `evaluation/pump.rs` derives
+one `EvaluationPollContext` from that checked session and supplies it to every
+type-erased task poll. Client demands and sparks use the same coordinator-owned
+adapter in cooperative and executor paths; the executor contains no separate
+value-admission policy. The poll context temporarily retains the validated
+demand state but exposes neither that route nor a mutator to the machine. Its
+only managed-access operation opens a lifetime-bound region for a bounded
+callback-free substep and closes it before returning. Existing whole
+`eval_value`, lazy-source, effect, and spark operations may recursively pump,
+wait, or invoke callbacks, so they do not open one poll-wide region; later I3
+work partitions those operations before migrating their value access. Claim
+release, terminal publication, cancellation, destruction, and worker waits
+therefore run without inherited mutator authority.
 
 Machine-visible admission uses demand state and a weak coordinator route, not
 an upgraded owner lease. Its fast closed-flag check is advisory; reflection

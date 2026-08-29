@@ -2,15 +2,18 @@
 //!
 //! A scheduler-created poll context carries no active mutator. It may open a
 //! bounded callback-free evaluator region, whose lifetime-bound authority
-//! cannot enter durable machine state or cross a thread. I3A.3 later routes
-//! production machine polls through this boundary.
+//! cannot enter durable machine state or cross a thread. Production machine,
+//! client-demand, and spark polls receive this context; I3B-I3D partition the
+//! opaque evaluator operations which may safely open it.
 
 use crate::core::RuntimeValueAccess;
+use std::sync::Arc;
 
-use super::EvalContext;
+use super::coordinator::ClaimedDemandSession;
+use super::{EvalContext, EvaluationDemandState};
 
 /// A matching-runtime evaluator view over one active managed-access region.
-struct EvaluationValueAccess<'scope> {
+pub(crate) struct EvaluationValueAccess<'scope> {
     values: RuntimeValueAccess<'scope>,
     context: &'scope EvalContext,
 }
@@ -23,17 +26,18 @@ impl<'scope> EvaluationValueAccess<'scope> {
         context: &'scope EvalContext,
         values: RuntimeValueAccess<'scope>,
     ) -> Result<Self, ValueAccessDomainMismatch> {
-        if !values.belongs_to(context.values()) {
+        let access = Self { values, context };
+        if !access.values().belongs_to(access.context().values()) {
             return Err(ValueAccessDomainMismatch);
         }
-        Ok(Self { values, context })
+        Ok(access)
     }
 
-    fn values(&self) -> &RuntimeValueAccess<'scope> {
+    pub(crate) fn values(&self) -> &RuntimeValueAccess<'scope> {
         &self.values
     }
 
-    fn context(&self) -> &EvalContext {
+    pub(crate) fn context(&self) -> &EvalContext {
         self.context
     }
 }
@@ -43,23 +47,36 @@ impl<'scope> EvaluationValueAccess<'scope> {
 /// This context contains no mutator or managed borrow and may remain on the
 /// orchestration stack while a callback, wait, or publication occurs. Only
 /// `with_value_access` activates the matching heap, and that activation ends
-/// before the method returns.
-#[derive(Clone, Copy)]
-struct EvaluationPollContext<'context> {
-    context: &'context EvalContext,
+/// before the method returns. Its temporary strong demand route is cloned from
+/// a detached, runtime-checked claim and is not exposed to the machine.
+pub(crate) struct EvaluationPollContext {
+    demand: Arc<EvaluationDemandState>,
 }
 
-impl<'context> EvaluationPollContext<'context> {
-    fn new(context: &'context EvalContext) -> Self {
-        Self { context }
+impl EvaluationPollContext {
+    pub(in crate::evaluation) fn for_claim(claim: &ClaimedDemandSession) -> Self {
+        Self {
+            demand: claim.demand(),
+        }
     }
 
-    fn with_value_access<R>(
+    #[cfg(test)]
+    pub(crate) fn for_context(context: &EvalContext) -> Self {
+        Self {
+            demand: context.session.clone(),
+        }
+    }
+
+    pub(crate) fn with_value_access<R>(
         &self,
+        context: &EvalContext,
         operation: impl for<'scope> FnOnce(EvaluationValueAccess<'scope>) -> R,
     ) -> R {
-        let context = self.context;
-        context.values().with_runtime_value_access(|values| {
+        assert!(
+            Arc::ptr_eq(&self.demand, &context.session),
+            "poll context and evaluator context must share one demand session"
+        );
+        self.demand.values.with_runtime_value_access(|values| {
             let access = EvaluationValueAccess::try_new(context, values)
                 .expect("poll context and managed access must share one value domain");
             operation(access)
@@ -137,9 +154,9 @@ mod tests {
     fn poll_context_opens_two_scopes_around_a_mutator_free_callback() {
         let values = value_factory();
         let context = EvalContext::isolated(values.clone());
-        let poll = EvaluationPollContext::new(&context);
+        let poll = EvaluationPollContext::for_context(&context);
 
-        let first = poll.with_value_access(|access| {
+        let first = poll.with_value_access(&context, |access| {
             assert!(std::ptr::eq(access.context(), &*context));
             assert!(access.values().belongs_to(context.values()));
             assert!(matches!(
@@ -160,7 +177,7 @@ mod tests {
         assert!(callback_ran);
         assert_eq!(callback_result.root_entries(), 0);
 
-        let second = poll.with_value_access(|access| {
+        let second = poll.with_value_access(&context, |access| {
             assert!(matches!(
                 values.collect_managed_for_test(),
                 Err(CollectionError::ActiveMutator)
@@ -172,9 +189,39 @@ mod tests {
             access.values().root(allocator.alloc(29))
         });
 
-        poll.with_value_access(|access| {
+        poll.with_value_access(&context, |access| {
             assert_eq!(*access.values().get(&second), 29);
         });
+    }
+
+    #[test]
+    fn evaluation_scope_reuses_recursive_same_heap_entry() {
+        let values = value_factory();
+        let context = EvalContext::isolated(values.clone());
+        let poll = EvaluationPollContext::for_context(&context);
+
+        poll.with_value_access(&context, |outer| {
+            assert!(matches!(
+                values.collect_managed_for_test(),
+                Err(CollectionError::ActiveMutator)
+            ));
+            poll.with_value_access(&context, |inner| {
+                assert!(outer.values().belongs_to(context.values()));
+                assert!(inner.values().belongs_to(context.values()));
+                assert!(matches!(
+                    values.collect_managed_for_test(),
+                    Err(CollectionError::ActiveMutator)
+                ));
+            });
+            assert!(matches!(
+                values.collect_managed_for_test(),
+                Err(CollectionError::ActiveMutator)
+            ));
+        });
+
+        values
+            .collect_managed_for_test()
+            .expect("recursive admission must release the outermost mutator once");
     }
 
     #[test]

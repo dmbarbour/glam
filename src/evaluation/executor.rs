@@ -5,8 +5,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::thread;
 
-use super::coordinator::{CoordinatorSelection, SparkWorkPoll, WorkDependency};
-use super::{EvalContext, EvaluationWorkCoordinator};
+use super::EvaluationWorkCoordinator;
+use super::coordinator::{CoordinatorSelection, SparkWorkPoll};
 
 struct EvaluationExecutorInner {
     coordinator: Weak<EvaluationWorkCoordinator>,
@@ -152,24 +152,7 @@ fn evaluation_worker(inner: Arc<EvaluationExecutorInner>) {
                     coordinator.release_spark(claimed, SparkWorkPoll::Complete);
                     return;
                 }
-                claimed.assert_runtime(coordinator.runtime_id());
-                let context = EvalContext::for_spark(claimed.demand_session());
-                let result =
-                    crate::eval::demand_strategy_value(&context, claimed.value().as_core());
-                let poll = match result {
-                    Ok(()) => SparkWorkPoll::Complete,
-                    Err(halt) => {
-                        if let Some(wait) = halt.blocked_on() {
-                            SparkWorkPoll::Blocked(WorkDependency::Wait(wait.0))
-                        } else if let Some(promise) = halt.unassigned_promise() {
-                            SparkWorkPoll::Blocked(WorkDependency::Promise(promise.clone()))
-                        } else {
-                            SparkWorkPoll::Complete
-                        }
-                    }
-                };
-                drop(context);
-                coordinator.release_spark(claimed, poll);
+                coordinator.poll_claimed_spark(claimed);
             }
             CoordinatorSelection::ClientDemand(claimed) => {
                 if inner.stopping.load(Ordering::Acquire) {

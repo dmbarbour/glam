@@ -436,18 +436,23 @@ pub(in crate::evaluation) struct ClaimedDeferredWork {
 }
 
 impl ClaimedDeferredWork {
+    pub(in crate::evaluation) fn demand(&self) -> &ClaimedDemandSession {
+        &self.demand
+    }
+
     pub(in crate::evaluation) fn id(&self) -> EvaluationWorkId {
         self.id
     }
 
     pub(in crate::evaluation) fn poll(
         &mut self,
+        context: &super::super::EvaluationPollContext,
         step_budget: usize,
     ) -> super::EvaluationMachinePoll {
         self.machine
             .as_mut()
             .expect("claimed deferred work must retain its detached machine")
-            .poll(step_budget)
+            .poll(context, step_budget)
     }
 }
 

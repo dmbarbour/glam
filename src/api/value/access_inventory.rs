@@ -137,15 +137,9 @@ const INVENTORY: &[InventoryEntry] = &[
         "I3A.4/I3C.2 poll outcomes; I4F.1 coordinator roots"
     ),
     entry!(
-        "src/evaluation/executor.rs",
-        [1, 0, 0, 0, 0, 0],
-        "worker spark evaluation",
-        "I3A.3/I3C.1 scheduler-scoped access"
-    ),
-    entry!(
         "src/evaluation/pump.rs",
-        [1, 0, 0, 0, 1, 3],
-        "client demand and pump completion",
+        [2, 0, 0, 0, 1, 3],
+        "client demand, centralized spark evaluation, and pump completion",
         "I3A.3/I3B.2/I3C.2 scoped polling; I4F.1 outcomes"
     ),
     entry!(

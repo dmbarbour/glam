@@ -169,7 +169,11 @@ impl LazyTaskMachine {
 }
 
 impl EvaluationTaskMachine for LazyTaskMachine {
-    fn poll(&mut self, step_budget: usize) -> EvaluationMachinePoll {
+    fn poll(
+        &mut self,
+        _poll_context: &crate::evaluation::EvaluationPollContext,
+        step_budget: usize,
+    ) -> EvaluationMachinePoll {
         if let Some(result) = self.lazy.cached() {
             return match result {
                 Ok(value) => EvaluationMachinePoll::Complete(value.into_value()),
@@ -207,7 +211,8 @@ impl EvaluationTaskMachine for LazyTaskMachine {
         let LazyTaskWork::Follow(target) = &self.work else {
             unreachable!("non-producing lazy work must follow a value or construct a net")
         };
-        self.finish_poll(eval_value(&self.context, target))
+        let result = eval_value(&self.context, target);
+        self.finish_poll(result)
     }
 }
 
@@ -255,7 +260,11 @@ struct PromiseFollower {
 }
 
 impl EvaluationTaskMachine for PromiseFollower {
-    fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+    fn poll(
+        &mut self,
+        _poll_context: &crate::evaluation::EvaluationPollContext,
+        _step_budget: usize,
+    ) -> EvaluationMachinePoll {
         let result = match &self.state {
             PromiseFollowerState::AwaitAssignment => match self.promise.assignment() {
                 Some(result) => result.map_err(EvaluationHalt::failure),

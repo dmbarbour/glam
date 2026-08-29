@@ -104,6 +104,10 @@ impl CoreValueFactory {
     /// The higher-ranked callback prevents the access carrier, its mutator,
     /// allocators, and managed borrows from escaping. I3 scheduler poll
     /// contexts use this entry to derive evaluator-specific authority.
+    #[allow(
+        dead_code,
+        reason = "I3A establishes scoped authority before I3B migrates production evaluator substeps"
+    )]
     pub(crate) fn with_runtime_value_access<R>(
         &self,
         operation: impl for<'scope> FnOnce(RuntimeValueAccess<'scope>) -> R,

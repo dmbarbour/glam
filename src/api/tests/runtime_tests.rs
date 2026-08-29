@@ -863,7 +863,11 @@ fn quiescence_report_snapshots_failures_independently_of_acknowledgement() {
         .schedule_task(|_| {
             struct CompleteTask;
             impl EvaluationTaskMachine for CompleteTask {
-                fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+                fn poll(
+                    &mut self,
+                    _context: &crate::evaluation::EvaluationPollContext,
+                    _step_budget: usize,
+                ) -> EvaluationMachinePoll {
                     EvaluationMachinePoll::Complete(crate::core::keys::unit_value())
                 }
             }

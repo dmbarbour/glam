@@ -82,7 +82,11 @@ impl ReflectionTaskLauncher for GateFailureLauncher {
 struct GateFailureMachine(Arc<EvaluationFailure>);
 
 impl EvaluationTaskMachine for GateFailureMachine {
-    fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+    fn poll(
+        &mut self,
+        _context: &crate::evaluation::EvaluationPollContext,
+        _step_budget: usize,
+    ) -> EvaluationMachinePoll {
         EvaluationMachinePoll::Failed(self.0.clone())
     }
 }
@@ -123,7 +127,11 @@ struct FixtureTaskMachine {
 }
 
 impl EvaluationTaskMachine for FixtureTaskMachine {
-    fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+    fn poll(
+        &mut self,
+        _context: &crate::evaluation::EvaluationPollContext,
+        _step_budget: usize,
+    ) -> EvaluationMachinePoll {
         match self
             .terminal
             .take()

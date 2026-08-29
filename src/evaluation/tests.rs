@@ -1,6 +1,7 @@
 //! Cross-layer evaluation lifecycle and concurrency tests.
 
 use super::*;
+use glam_gc::CollectionError;
 use std::sync::{Barrier, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
@@ -887,7 +888,11 @@ fn running_deferred_machine_is_coordinator_owned_after_owner_drop() {
 struct Complete;
 
 impl EvaluationTaskMachine for Complete {
-    fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+    fn poll(
+        &mut self,
+        _context: &crate::evaluation::EvaluationPollContext,
+        _step_budget: usize,
+    ) -> EvaluationMachinePoll {
         EvaluationMachinePoll::Complete(crate::core::keys::unit_value())
     }
 }
@@ -895,7 +900,11 @@ impl EvaluationTaskMachine for Complete {
 struct ExitVote(EvaluationExitBlock);
 
 impl EvaluationTaskMachine for ExitVote {
-    fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+    fn poll(
+        &mut self,
+        _context: &crate::evaluation::EvaluationPollContext,
+        _step_budget: usize,
+    ) -> EvaluationMachinePoll {
         EvaluationMachinePoll::Exit(self.0.clone())
     }
 }
@@ -906,7 +915,11 @@ struct ExitUntilObservation {
 }
 
 impl EvaluationTaskMachine for ExitUntilObservation {
-    fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+    fn poll(
+        &mut self,
+        _context: &crate::evaluation::EvaluationPollContext,
+        _step_budget: usize,
+    ) -> EvaluationMachinePoll {
         if self.context.current_observation_epoch() == self.observed {
             EvaluationMachinePoll::Exit(EvaluationExitBlock {
                 intent: ExitIntent::Success,
@@ -1092,7 +1105,11 @@ struct Await {
 }
 
 impl EvaluationTaskMachine for Await {
-    fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+    fn poll(
+        &mut self,
+        _context: &crate::evaluation::EvaluationPollContext,
+        _step_budget: usize,
+    ) -> EvaluationMachinePoll {
         match self.context.poll_wait(&self.dependency) {
             EvaluationWaitPoll::Pending(wait) => {
                 EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
@@ -1124,7 +1141,11 @@ struct AwaitPromise {
 }
 
 impl EvaluationTaskMachine for AwaitPromise {
-    fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+    fn poll(
+        &mut self,
+        _context: &crate::evaluation::EvaluationPollContext,
+        _step_budget: usize,
+    ) -> EvaluationMachinePoll {
         match self.promise.assignment() {
             None => EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
                 dependency: Some(WorkDependency::Promise(self.promise.clone())),
@@ -1143,7 +1164,11 @@ struct AwaitCell {
 }
 
 impl EvaluationTaskMachine for AwaitCell {
-    fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+    fn poll(
+        &mut self,
+        _context: &crate::evaluation::EvaluationPollContext,
+        _step_budget: usize,
+    ) -> EvaluationMachinePoll {
         let dependency = self
             .dependency
             .get()
@@ -1234,7 +1259,11 @@ fn dependency_cycle(lazy: &LazyValue) -> Arc<LazyCycle> {
 struct AlwaysBlocked;
 
 impl EvaluationTaskMachine for AlwaysBlocked {
-    fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+    fn poll(
+        &mut self,
+        _context: &crate::evaluation::EvaluationPollContext,
+        _step_budget: usize,
+    ) -> EvaluationMachinePoll {
         EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
             dependency: None,
             observed_epoch: Some(RuntimeObservationEpoch::from_raw(7)),
@@ -1245,12 +1274,77 @@ impl EvaluationTaskMachine for AlwaysBlocked {
     }
 }
 
+struct ScopedThenBlocked {
+    context: EvalContext,
+    polled: Option<mpsc::Sender<()>>,
+}
+
+impl EvaluationTaskMachine for ScopedThenBlocked {
+    fn poll(
+        &mut self,
+        poll_context: &crate::evaluation::EvaluationPollContext,
+        _step_budget: usize,
+    ) -> EvaluationMachinePoll {
+        poll_context.with_value_access(&self.context, |access| {
+            assert!(access.values().belongs_to(self.context.values()));
+            assert!(matches!(
+                self.context.values().collect_managed_for_test(),
+                Err(CollectionError::ActiveMutator)
+            ));
+        });
+        if let Some(polled) = self.polled.take() {
+            polled
+                .send(())
+                .expect("scoped-poll observer should remain live");
+        }
+        EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
+            dependency: None,
+            observed_epoch: Some(RuntimeObservationEpoch::from_raw(7)),
+            error: None,
+        })
+    }
+}
+
+struct ScopedCompleteWithDropCheck {
+    context: EvalContext,
+    dropped_without_mutator: Arc<AtomicBool>,
+}
+
+impl EvaluationTaskMachine for ScopedCompleteWithDropCheck {
+    fn poll(
+        &mut self,
+        poll_context: &crate::evaluation::EvaluationPollContext,
+        _step_budget: usize,
+    ) -> EvaluationMachinePoll {
+        poll_context.with_value_access(&self.context, |_| {
+            assert!(matches!(
+                self.context.values().collect_managed_for_test(),
+                Err(CollectionError::ActiveMutator)
+            ));
+        });
+        EvaluationMachinePoll::Complete(crate::core::keys::unit_value())
+    }
+}
+
+impl Drop for ScopedCompleteWithDropCheck {
+    fn drop(&mut self) {
+        self.dropped_without_mutator.store(
+            self.context.values().collect_managed_for_test().is_ok(),
+            Ordering::Release,
+        );
+    }
+}
+
 struct CountedBlocked {
     polls: Arc<Mutex<usize>>,
 }
 
 impl EvaluationTaskMachine for CountedBlocked {
-    fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+    fn poll(
+        &mut self,
+        _context: &crate::evaluation::EvaluationPollContext,
+        _step_budget: usize,
+    ) -> EvaluationMachinePoll {
         *self
             .polls
             .lock()
@@ -1266,7 +1360,11 @@ impl EvaluationTaskMachine for CountedBlocked {
 struct AlwaysYields;
 
 impl EvaluationTaskMachine for AlwaysYields {
-    fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+    fn poll(
+        &mut self,
+        _context: &crate::evaluation::EvaluationPollContext,
+        _step_budget: usize,
+    ) -> EvaluationMachinePoll {
         EvaluationMachinePoll::Yielded
     }
 }
@@ -1278,7 +1376,11 @@ struct RecordPollOrder {
 }
 
 impl EvaluationTaskMachine for RecordPollOrder {
-    fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+    fn poll(
+        &mut self,
+        _context: &crate::evaluation::EvaluationPollContext,
+        _step_budget: usize,
+    ) -> EvaluationMachinePoll {
         self.polls
             .lock()
             .expect("task-order trace was poisoned")
@@ -1294,7 +1396,11 @@ impl EvaluationTaskMachine for RecordPollOrder {
 struct Fail;
 
 impl EvaluationTaskMachine for Fail {
-    fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+    fn poll(
+        &mut self,
+        _context: &crate::evaluation::EvaluationPollContext,
+        _step_budget: usize,
+    ) -> EvaluationMachinePoll {
         EvaluationMachinePoll::Failed(evaluation_failure("reasoning failed"))
     }
 }
@@ -1302,7 +1408,11 @@ impl EvaluationTaskMachine for Fail {
 struct Signal(Option<mpsc::Sender<()>>);
 
 impl EvaluationTaskMachine for Signal {
-    fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+    fn poll(
+        &mut self,
+        _context: &crate::evaluation::EvaluationPollContext,
+        _step_budget: usize,
+    ) -> EvaluationMachinePoll {
         if let Some(signal) = self.0.take() {
             signal.send(()).expect("test receiver should remain open");
         }
@@ -1316,7 +1426,11 @@ struct SpawnSignal {
 }
 
 impl EvaluationTaskMachine for SpawnSignal {
-    fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+    fn poll(
+        &mut self,
+        _context: &crate::evaluation::EvaluationPollContext,
+        _step_budget: usize,
+    ) -> EvaluationMachinePoll {
         let signal = self
             .signal
             .take()
@@ -1334,7 +1448,11 @@ struct CompleteAfterRelease {
 }
 
 impl EvaluationTaskMachine for CompleteAfterRelease {
-    fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+    fn poll(
+        &mut self,
+        _context: &crate::evaluation::EvaluationPollContext,
+        _step_budget: usize,
+    ) -> EvaluationMachinePoll {
         if let Some(started) = self.started.take() {
             started
                 .send(())
@@ -1355,7 +1473,11 @@ struct AssignPromiseAfterRelease {
 }
 
 impl EvaluationTaskMachine for AssignPromiseAfterRelease {
-    fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+    fn poll(
+        &mut self,
+        _context: &crate::evaluation::EvaluationPollContext,
+        _step_budget: usize,
+    ) -> EvaluationMachinePoll {
         if let Some(started) = self.started.take() {
             started
                 .send(())
@@ -1377,7 +1499,11 @@ struct FailAfterRelease {
 }
 
 impl EvaluationTaskMachine for FailAfterRelease {
-    fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+    fn poll(
+        &mut self,
+        _context: &crate::evaluation::EvaluationPollContext,
+        _step_budget: usize,
+    ) -> EvaluationMachinePoll {
         if let Some(started) = self.started.take() {
             started
                 .send(())
@@ -1397,7 +1523,11 @@ struct CancellableAfterRelease {
 }
 
 impl EvaluationTaskMachine for CancellableAfterRelease {
-    fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+    fn poll(
+        &mut self,
+        _context: &crate::evaluation::EvaluationPollContext,
+        _step_budget: usize,
+    ) -> EvaluationMachinePoll {
         if let Some(started) = self.started.take() {
             started
                 .send(())
@@ -1422,7 +1552,11 @@ struct AssignPromiseThenYield {
 }
 
 impl EvaluationTaskMachine for AssignPromiseThenYield {
-    fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+    fn poll(
+        &mut self,
+        _context: &crate::evaluation::EvaluationPollContext,
+        _step_budget: usize,
+    ) -> EvaluationMachinePoll {
         let promise = self
             .promise
             .take()
@@ -1444,7 +1578,11 @@ struct CompleteAndSignalDrop {
 }
 
 impl EvaluationTaskMachine for CompleteAndSignalDrop {
-    fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+    fn poll(
+        &mut self,
+        _context: &crate::evaluation::EvaluationPollContext,
+        _step_budget: usize,
+    ) -> EvaluationMachinePoll {
         EvaluationMachinePoll::Complete(crate::core::keys::unit_value())
     }
 }
@@ -1467,7 +1605,11 @@ struct CompleteAndCheckTerminalPublication {
 }
 
 impl EvaluationTaskMachine for CompleteAndCheckTerminalPublication {
-    fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+    fn poll(
+        &mut self,
+        _context: &crate::evaluation::EvaluationPollContext,
+        _step_budget: usize,
+    ) -> EvaluationMachinePoll {
         EvaluationMachinePoll::Complete(crate::core::keys::unit_value())
     }
 }
@@ -1483,7 +1625,11 @@ impl Drop for CompleteAndCheckTerminalPublication {
 }
 
 impl EvaluationTaskMachine for CompleteAndCheckReflectionDrop {
-    fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+    fn poll(
+        &mut self,
+        _context: &crate::evaluation::EvaluationPollContext,
+        _step_budget: usize,
+    ) -> EvaluationMachinePoll {
         EvaluationMachinePoll::Complete(crate::core::keys::unit_value())
     }
 }
@@ -1505,7 +1651,11 @@ struct CacheLazyFailure {
 }
 
 impl EvaluationTaskMachine for CacheLazyFailure {
-    fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+    fn poll(
+        &mut self,
+        _context: &crate::evaluation::EvaluationPollContext,
+        _step_budget: usize,
+    ) -> EvaluationMachinePoll {
         match self.lazy.cache(Err(self.failure.clone())) {
             Ok(value) => EvaluationMachinePoll::Complete(value.into_value()),
             Err(error) => EvaluationMachinePoll::Failed(error),
@@ -1519,7 +1669,11 @@ struct SpawnOnce {
 }
 
 impl EvaluationTaskMachine for SpawnOnce {
-    fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+    fn poll(
+        &mut self,
+        _context: &crate::evaluation::EvaluationPollContext,
+        _step_budget: usize,
+    ) -> EvaluationMachinePoll {
         if !self.spawned {
             self.spawned = true;
             self.context
@@ -1535,7 +1689,11 @@ struct Cancellable {
 }
 
 impl EvaluationTaskMachine for Cancellable {
-    fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+    fn poll(
+        &mut self,
+        _context: &crate::evaluation::EvaluationPollContext,
+        _step_budget: usize,
+    ) -> EvaluationMachinePoll {
         EvaluationMachinePoll::Yielded
     }
 
@@ -1798,6 +1956,102 @@ fn wait_completion_subscriptions_reject_a_foreign_runtime() {
         CompletionSubscriptionOutcome::ForeignRuntime
     );
     assert_eq!(task.wait().exact_subscription_count(), 0);
+}
+
+#[test]
+fn parked_machine_contains_no_mutator_authority() {
+    let fixture = SameRuntimeFixture::new();
+    let context = fixture.context();
+    let coordinator = context
+        .coordinator()
+        .expect("parked machine should retain its coordinator");
+    let task = context
+        .schedule_task(|task_context| {
+            Ok(Box::new(ScopedThenBlocked {
+                context: task_context,
+                polled: None,
+            }))
+        })
+        .expect("scoped blocking task should schedule");
+
+    assert!(poll_one_runtime_work(&coordinator));
+    assert!(matches!(
+        context.poll_reflection_task(&task),
+        EvaluationWaitPoll::Pending(_)
+    ));
+    context
+        .values()
+        .collect_managed_for_test()
+        .expect("a parked machine must retain no active mutator");
+}
+
+#[test]
+fn terminal_machine_destruction_occurs_without_mutator_authority() {
+    let fixture = SameRuntimeFixture::new();
+    let context = fixture.context();
+    let dropped_without_mutator = Arc::new(AtomicBool::new(false));
+    let task = context
+        .schedule_task({
+            let dropped_without_mutator = dropped_without_mutator.clone();
+            move |task_context| {
+                Ok(Box::new(ScopedCompleteWithDropCheck {
+                    context: task_context,
+                    dropped_without_mutator,
+                }))
+            }
+        })
+        .expect("scoped terminal task should schedule");
+
+    assert_eq!(
+        context.pump_wait(task.wait(), 256),
+        EvaluationPumpOutcome::TargetReady
+    );
+    assert!(
+        dropped_without_mutator.load(Ordering::Acquire),
+        "machine destruction must occur after scoped value access is released"
+    );
+}
+
+#[test]
+fn worker_releases_mutator_before_sleep() {
+    let fixture = SameRuntimeFixture::new();
+    fixture
+        .runtime
+        .activate_workers(1)
+        .expect("test worker should activate");
+    let context = fixture.context();
+    let coordinator = context
+        .coordinator()
+        .expect("worker fixture should retain its coordinator");
+    let (polled, observed_poll) = mpsc::channel();
+    let task = context
+        .schedule_task(move |task_context| {
+            Ok(Box::new(ScopedThenBlocked {
+                context: task_context,
+                polled: Some(polled),
+            }))
+        })
+        .expect("worker-scoped blocking task should schedule");
+    observed_poll
+        .recv_timeout(Duration::from_secs(2))
+        .expect("worker should finish its scoped evaluator substep");
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while coordinator.session_machine_is_busy(context.session.id) && Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    assert!(
+        !coordinator.session_machine_is_busy(context.session.id),
+        "worker should publish the blocked machine before becoming idle"
+    );
+    assert!(matches!(
+        context.poll_reflection_task(&task),
+        EvaluationWaitPoll::Pending(_)
+    ));
+    context
+        .values()
+        .collect_managed_for_test()
+        .expect("an idle worker must not retain mutator authority");
 }
 
 #[test]
@@ -4114,7 +4368,11 @@ fn forced_kill_publishes_task_status_and_fails_owned_promises() {
     }
 
     impl EvaluationTaskMachine for BlockedWithDropCheck {
-        fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+        fn poll(
+            &mut self,
+            _context: &crate::evaluation::EvaluationPollContext,
+            _step_budget: usize,
+        ) -> EvaluationMachinePoll {
             EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
                 dependency: None,
                 observed_epoch: Some(RuntimeObservationEpoch::from_raw(7)),
@@ -4228,7 +4486,11 @@ fn exit_settlement_fails_owned_promises_and_drops_reusable_machine_after_unlock(
     }
 
     impl EvaluationTaskMachine for ExitWithDropCheck {
-        fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+        fn poll(
+            &mut self,
+            _context: &crate::evaluation::EvaluationPollContext,
+            _step_budget: usize,
+        ) -> EvaluationMachinePoll {
             EvaluationMachinePoll::Exit(EvaluationExitBlock {
                 intent: ExitIntent::Success,
                 observed_epoch: Some(RuntimeObservationEpoch::from_raw(1)),

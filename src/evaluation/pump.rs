@@ -17,10 +17,14 @@ use super::session::{
     EvalContext, EvaluationSessionReport, EvaluationSessionRun, EvaluationUnfinishedState,
     EvaluationUnfinishedTask, client_demand_halt_poll,
 };
-use super::{EvaluationDemandState, evaluation_failure};
+use super::{EvaluationDemandState, EvaluationPollContext, evaluation_failure};
 
 impl ClientDemandOperation {
-    pub(super) fn poll(&mut self, context: &EvalContext) -> coordinator::ClientDemandPoll {
+    pub(super) fn poll(
+        &mut self,
+        _poll_context: &EvaluationPollContext,
+        context: &EvalContext,
+    ) -> coordinator::ClientDemandPoll {
         match crate::eval::eval_value(context, self.0.as_core()) {
             Ok(value) => coordinator::ClientDemandPoll::Complete(RuntimeValueRoot::new(
                 context.values(),
@@ -142,9 +146,10 @@ impl ClaimedTask {
     }
 
     fn poll(&mut self, step_budget: usize) -> EvaluationMachinePoll {
+        let context = EvaluationPollContext::for_claim(self.kind.demand());
         match &mut self.kind {
-            ClaimedTaskKind::Reflection(task) => task.poll(step_budget),
-            ClaimedTaskKind::Deferred(task) => task.poll(step_budget),
+            ClaimedTaskKind::Reflection(task) => task.poll(&context, step_budget),
+            ClaimedTaskKind::Deferred(task) => task.poll(&context, step_budget),
         }
     }
 
@@ -154,6 +159,15 @@ impl ClaimedTask {
                 release_reflection_task(&self.coordinator, task, poll)
             }
             ClaimedTaskKind::Deferred(task) => release_deferred_task(&self.coordinator, task, poll),
+        }
+    }
+}
+
+impl ClaimedTaskKind {
+    fn demand(&self) -> &coordinator::ClaimedDemandSession {
+        match self {
+            Self::Reflection(task) => task.demand(),
+            Self::Deferred(task) => task.demand(),
         }
     }
 }
@@ -605,8 +619,30 @@ impl EvaluationWorkCoordinator {
         self: &Arc<Self>,
         mut claimed: coordinator::ClaimedClientDemand,
     ) {
-        let poll = claimed.poll();
+        let context = EvaluationPollContext::for_claim(&claimed.demand);
+        let poll = claimed.poll(&context);
         self.release_client_demand(claimed, poll);
+    }
+
+    pub(super) fn poll_claimed_spark(self: &Arc<Self>, claimed: coordinator::ClaimedSparkWork) {
+        claimed.assert_runtime(self.runtime_id());
+        let _poll_context = EvaluationPollContext::for_claim(claimed.demand());
+        let context = EvalContext::for_spark(claimed.demand_session());
+        let result = crate::eval::demand_strategy_value(&context, claimed.value().as_core());
+        let poll = match result {
+            Ok(()) => coordinator::SparkWorkPoll::Complete,
+            Err(halt) => {
+                if let Some(wait) = halt.blocked_on() {
+                    coordinator::SparkWorkPoll::Blocked(WorkDependency::Wait(wait.0))
+                } else if let Some(promise) = halt.unassigned_promise() {
+                    coordinator::SparkWorkPoll::Blocked(WorkDependency::Promise(promise.clone()))
+                } else {
+                    coordinator::SparkWorkPoll::Complete
+                }
+            }
+        };
+        drop(context);
+        self.release_spark(claimed, poll);
     }
 }
 

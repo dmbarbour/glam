@@ -1,6 +1,6 @@
 # Glam GC Integration Plan — 2026-08-19
 
-Status: in progress; Phases I0 through I2 and checkpoints I3A.1-I3A.2 are
+Status: in progress; Phases I0 through I2 and checkpoints I3A.1-I3A.3 are
 complete. Phase I3 is in progress. Collector Gate G1 passed on 2026-08-25.
 The remaining integration work follows the completed owner-matrix,
 stable-ledger, and low-risk checkpoint corrections from the integration
@@ -30,6 +30,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I2 | complete | opaque public-root contract, runtime-authorized observation, access inventory, and post-I2 review |
 | I3A.1 | complete | lifetime-bound runtime/evaluator access and mutator-free poll-context prototype |
 | I3A.2 | complete | weak parked demand routes and checked temporary claim-owned domain access |
+| I3A.3 | complete | claim-derived scheduler poll context, common task/client/spark routing, and mutator-free release/wait boundaries |
 | I3 | in progress | bounded evaluator/worker mutator regions |
 | I4 | pending | core trace vocabulary and leaf policy |
 | I4.0 | pending | managed-family destruction admission contract |
@@ -624,7 +625,12 @@ check compares the actual domain allocation rather than relying on runtime ID;
 the regression deliberately gives two distinct heaps the same ID and rejects
 their combination.
 
-The private `EvaluationPollContext` contains only a borrowed durable context.
+At this checkpoint, the private `EvaluationPollContext` contained only a
+borrowed durable context. I3A.3 replaced that prototype representation with a
+temporary strong route cloned from the detached claim so the scheduler can
+mutably poll the machine without borrowing another field of the same claimed
+enum. The machine still receives only a shared, non-cloneable view of the poll
+context, and the context still contains no mutator or managed borrow.
 Its higher-ranked `with_value_access` method admits the heap for one operation
 and releases it before returning. The two-scope regression uses synchronous
 collection as the admission probe: collection reports `ActiveMutator` inside
@@ -677,11 +683,34 @@ green. Production still uses `NoAuto` and opens no mutator in this checkpoint.
 
 ### Phase I3A.3 — Scheduler-Owned Poll Orchestration
 
+Implementation checkpoints:
+
+1. **I3A.3a — Claim-derived poll context and trait migration.** Derive the
+   ephemeral poll context from the checked `ClaimedDemandSession`, pass it
+   through `EvaluationTaskMachine::poll`, and migrate production and test
+   implementations mechanically. The context may temporarily retain that
+   already-authorized demand route to avoid a claim-field borrow conflict, but
+   machines receive only a shared view and cannot extract or store the route.
+2. **I3A.3b — Common poll-capability routing.** Route task, client-demand, and
+   spark polling through scheduler adapters which construct the same
+   claim-derived context. Only an explicitly bounded, callback-free substep
+   may open value access. Existing opaque `eval_value`, lazy-source, effect,
+   and spark calls can pump, wait, or invoke callbacks, so they receive or
+   travel beside the capability but do not acquire one poll-wide mutator;
+   I3B-I3D split and migrate those substeps.
+3. **I3A.3c — Boundary verification and completion.** Add deterministic
+   probes for recursive same-heap entry, two evaluator scopes around a
+   mutator-free callback, release/destruction outside admission, and worker
+   sleep without mutator authority. Then run the complete scheduler and
+   repository verification suites.
+
 - Change `EvaluationTaskMachine::poll` to receive the ephemeral poll context,
-  then mechanically migrate production machines and test fixtures. Pure
-  evaluation machines normally open one bounded evaluator scope; effect
-  machines may alternate several evaluator scopes with interpreter work.
-  Test-only machines which manipulate no values may ignore the context.
+  then mechanically migrate production machines and test fixtures. A proven
+  callback-free evaluation substep may open one bounded evaluator scope;
+  effect machines will alternate several evaluator scopes with interpreter
+  work after I3D. Existing unsplit evaluator calls must ignore the capability
+  until I3B separates their polling and waiting paths. Test-only machines
+  which manipulate no values may also ignore the context.
 - Construct the poll context only after the coordinator has detached a claim
   from its locks. Each managed evaluator scope ends before host callbacks,
   claim release, terminal publication, cancellation/drop hooks, coordinator
@@ -704,6 +733,35 @@ poll-wide. Add
 `parked_machine_contains_no_mutator_authority`, and
 `worker_releases_mutator_before_sleep`; retain existing task-order and shutdown
 suites. Production remains `NoAuto`.
+
+Completed 2026-08-29. Every detached reflection/deferred claim now constructs
+one `EvaluationPollContext` before invoking the type-erased machine, and
+`EvaluationTaskMachine::poll` carries that capability through all production
+and test adapters. Client demands and sparks use the same coordinator-owned
+poll helpers in cooperative and executor paths; spark evaluation no longer has
+a second worker-local implementation. The poll context retains a temporary
+strong `Arc<EvaluationDemandState>` cloned from the validated claim. It owns no
+mutator, is not cloneable by machines, exposes no demand route, and is dropped
+with the poll adapter.
+
+The first implementation briefly wrapped whole lazy-source, client-demand,
+and spark evaluator calls. A full-suite regression exposed why that was
+incorrect: those calls may recursively pump work, wait, invoke deferred
+thunks, or activate reflection, and recursive mutator-entry frames exhausted a
+pattern fixture's ordinary test stack. The wrappers were removed rather than
+raising the stack. Production opens no managed scope around an opaque call;
+I3B.1/I3B.2 and I3D create the smaller callback-free steps which may safely
+consume the routed capability.
+
+`evaluation_scope_reuses_recursive_same_heap_entry` proves nested bounded
+access shares the active same-heap admission until the outer scope exits. The
+existing two-scope callback probe remains green, while
+`parked_machine_contains_no_mutator_authority`,
+`terminal_machine_destruction_occurs_without_mutator_authority`, and
+`worker_releases_mutator_before_sleep` prove release, parking, destruction,
+and idle worker waits occur after scoped access ends. The compatibility-access
+inventory records centralizing spark evaluation from `executor.rs` into
+`pump.rs`. Production remains `NoAuto`.
 
 ### Phase I3A.4 — Evaluator and Poll Outcome Ownership Boundaries
 

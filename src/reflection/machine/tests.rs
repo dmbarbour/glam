@@ -1100,9 +1100,12 @@ fn effect_task_poll_yields_and_resumes_with_bounded_fuel() {
     assert_eq!(assembler.to_binary(&value).unwrap(), b"AB".as_slice());
 }
 
-fn poll_machine_exit(machine: &mut dyn EvaluationTaskMachine) -> EvaluationExitBlock {
+fn poll_machine_exit(
+    machine: &mut dyn EvaluationTaskMachine,
+    poll_context: &crate::evaluation::EvaluationPollContext,
+) -> EvaluationExitBlock {
     loop {
-        match machine.poll(256) {
+        match machine.poll(poll_context, 256) {
             EvaluationMachinePoll::Yielded => {}
             EvaluationMachinePoll::Exit(exit) => return exit,
             EvaluationMachinePoll::Blocked(_) => {
@@ -1127,6 +1130,7 @@ fn internal_exit_success_projects_through_both_scheduled_effect_wrappers() {
 
     for require_unit in [false, true] {
         let (context, owner) = EvalContext::isolated(assembler.core_values()).into_parts();
+        let poll_context = crate::evaluation::EvaluationPollContext::for_context(&context);
         let task = EffectTask::new_exit_in_context(
             effect.as_core().clone(),
             TestEffects,
@@ -1140,11 +1144,11 @@ fn internal_exit_success_projects_through_both_scheduled_effect_wrappers() {
             Box::new(ValueEffectTask(task))
         };
 
-        let exit = poll_machine_exit(machine.as_mut());
+        let exit = poll_machine_exit(machine.as_mut(), &poll_context);
         assert_eq!(exit.intent, ExitIntent::Success);
         assert_eq!(exit.observed_epoch, None);
         assert!(matches!(
-            machine.poll(1),
+            machine.poll(&poll_context, 1),
             EvaluationMachinePoll::Exit(EvaluationExitBlock {
                 intent: ExitIntent::Success,
                 observed_epoch: None,
@@ -1159,6 +1163,7 @@ fn internal_exit_error_forces_and_roots_its_message() {
     let (assembler, effect) =
         compile_effect(".exit.error ((\\message -> message) {msg:{text:\"stop\"}, detail:7})");
     let (context, owner) = EvalContext::isolated(assembler.core_values()).into_parts();
+    let poll_context = crate::evaluation::EvaluationPollContext::for_context(&context);
     let task = EffectTask::new_exit_in_context(
         effect.as_core().clone(),
         TestEffects,
@@ -1168,7 +1173,7 @@ fn internal_exit_error_forces_and_roots_its_message() {
     .expect("internal exit task should initialize");
     let mut machine = ValueEffectTask(task);
 
-    let exit = poll_machine_exit(&mut machine);
+    let exit = poll_machine_exit(&mut machine, &poll_context);
     let ExitIntent::Error(message) = exit.intent else {
         panic!("error exit should retain its message")
     };
@@ -1234,6 +1239,7 @@ fn permanent_exit_discards_every_speculative_cut_resource() {
         .install_reflection_launcher(launcher)
         .expect("fresh exit fixture should accept its task profile");
     let (context, owner) = owned.into_parts();
+    let poll_context = crate::evaluation::EvaluationPollContext::for_context(&context);
     let observer = context.clone();
     let task = EffectTask::new_exit_in_context(
         effect.as_core().clone(),
@@ -1244,7 +1250,7 @@ fn permanent_exit_discards_every_speculative_cut_resource() {
     .expect("internal exit task should initialize");
     let mut machine = ValueEffectTask(task);
 
-    let exit = poll_machine_exit(&mut machine);
+    let exit = poll_machine_exit(&mut machine, &poll_context);
     assert_eq!(exit.intent, ExitIntent::Success);
     assert_eq!(exit.observed_epoch, None);
     assert!(
@@ -1270,6 +1276,7 @@ fn retryable_exit_restarts_with_a_fresh_transaction_after_disturbance() {
     );
     let host = Arc::new(TestHost::with_values(assembler.core_values()));
     let (context, owner) = EvalContext::isolated(assembler.core_values()).into_parts();
+    let poll_context = crate::evaluation::EvaluationPollContext::for_context(&context);
     let task = EffectTask::new_exit_in_context(
         effect.as_core().clone(),
         TestEffects,
@@ -1279,7 +1286,7 @@ fn retryable_exit_restarts_with_a_fresh_transaction_after_disturbance() {
     .expect("internal exit task should initialize");
     let mut machine = ValueEffectTask(task);
 
-    let first = poll_machine_exit(&mut machine);
+    let first = poll_machine_exit(&mut machine, &poll_context);
     assert_eq!(first.intent, ExitIntent::Success);
     assert!(first.observed_epoch.is_some());
     assert!(
@@ -1290,7 +1297,7 @@ fn retryable_exit_restarts_with_a_fresh_transaction_after_disturbance() {
     assert!(host.stderr().is_empty());
     assert!(host.diagnostics().is_empty());
     assert!(matches!(
-        machine.poll(256),
+        machine.poll(&poll_context, 256),
         EvaluationMachinePoll::Exit(EvaluationExitBlock {
             intent: ExitIntent::Success,
             observed_epoch: Some(_),
@@ -1305,7 +1312,7 @@ fn retryable_exit_restarts_with_a_fresh_transaction_after_disturbance() {
     ));
 
     let value = loop {
-        match machine.poll(256) {
+        match machine.poll(&poll_context, 256) {
             EvaluationMachinePoll::Yielded => {}
             EvaluationMachinePoll::Complete(value) => break value,
             EvaluationMachinePoll::Blocked(_) => {

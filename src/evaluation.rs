@@ -17,7 +17,7 @@ use crate::core::{CoreValueFactory, EvaluationFailure, Value};
 
 #[allow(
     dead_code,
-    reason = "I3A.1 establishes scoped authority before I3A.3 migrates machine polls"
+    reason = "I3A establishes scoped authority before I3B migrates production evaluator substeps"
 )]
 mod access;
 mod coordinator;
@@ -25,6 +25,7 @@ mod executor;
 mod observation;
 mod pump;
 mod session;
+pub(crate) use access::EvaluationPollContext;
 pub(crate) use coordinator::{
     CompletionSubscriptionOutcome, CompletionSubscriptions, CompletionWake, EvaluationExitBlock,
     EvaluationMachinePoll, EvaluationSessionId, EvaluationTaskBlock, EvaluationTaskCancellation,
@@ -96,7 +97,11 @@ struct PendingTestPromiseTask;
 
 #[cfg(test)]
 impl EvaluationTaskMachine for PendingTestPromiseTask {
-    fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+    fn poll(
+        &mut self,
+        _context: &crate::evaluation::EvaluationPollContext,
+        _step_budget: usize,
+    ) -> EvaluationMachinePoll {
         EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
             dependency: None,
             observed_epoch: Some(RuntimeObservationEpoch::from_raw(7)),

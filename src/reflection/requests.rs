@@ -870,7 +870,11 @@ mod tests {
     struct CompleteTask(CoreValue);
 
     impl EvaluationTaskMachine for CompleteTask {
-        fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+        fn poll(
+            &mut self,
+            _context: &crate::evaluation::EvaluationPollContext,
+            _step_budget: usize,
+        ) -> EvaluationMachinePoll {
             EvaluationMachinePoll::Complete(self.0.clone())
         }
     }

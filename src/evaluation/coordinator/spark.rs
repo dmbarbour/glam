@@ -31,6 +31,10 @@ pub(crate) struct ClaimedSparkWork {
 }
 
 impl ClaimedSparkWork {
+    pub(in crate::evaluation) fn demand(&self) -> &ClaimedDemandSession {
+        &self.session
+    }
+
     pub(crate) fn demand_session(&self) -> Arc<EvaluationDemandState> {
         self.session.demand()
     }

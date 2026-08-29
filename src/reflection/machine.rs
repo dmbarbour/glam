@@ -1863,7 +1863,11 @@ pub(super) struct ContextualValueEffectTask<S: TaskSpecialization> {
 }
 
 impl<S: TaskSpecialization> EvaluationTaskMachine for ValueEffectTask<S> {
-    fn poll(&mut self, step_budget: usize) -> EvaluationMachinePoll {
+    fn poll(
+        &mut self,
+        _context: &crate::evaluation::EvaluationPollContext,
+        step_budget: usize,
+    ) -> EvaluationMachinePoll {
         poll_value_effect_task(&mut self.0, step_budget)
     }
 
@@ -1873,7 +1877,11 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for ValueEffectTask<S> {
 }
 
 impl<S: TaskSpecialization> EvaluationTaskMachine for ContextualValueEffectTask<S> {
-    fn poll(&mut self, step_budget: usize) -> EvaluationMachinePoll {
+    fn poll(
+        &mut self,
+        _context: &crate::evaluation::EvaluationPollContext,
+        step_budget: usize,
+    ) -> EvaluationMachinePoll {
         match poll_value_effect_task(&mut self.task, step_budget) {
             EvaluationMachinePoll::Failed(error) => {
                 EvaluationMachinePoll::Failed(Arc::new(error.with_context(self.context.clone())))
@@ -1910,7 +1918,11 @@ fn poll_value_effect_task<S: TaskSpecialization>(
 }
 
 impl<S: TaskSpecialization> EvaluationTaskMachine for UnitEffectTask<S> {
-    fn poll(&mut self, step_budget: usize) -> EvaluationMachinePoll {
+    fn poll(
+        &mut self,
+        _context: &crate::evaluation::EvaluationPollContext,
+        step_budget: usize,
+    ) -> EvaluationMachinePoll {
         let observed_epoch = self.0.eval_context.current_observation_epoch();
         match self.0.poll(step_budget) {
             EffectTaskPoll::Yielded => EvaluationMachinePoll::Yielded,
