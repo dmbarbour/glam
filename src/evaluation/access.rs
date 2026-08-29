@@ -10,6 +10,7 @@
 use crate::core::RuntimeValueAccess;
 use crate::core::Value;
 use crate::runtime::RuntimeValueRoot;
+use std::cell::RefCell;
 use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -17,7 +18,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use super::coordinator::ClaimedDemandSession;
-use super::{EvalContext, EvaluationDemandState};
+use super::{EvalContext, EvaluationDemandState, ReflectionTaskReservation};
 
 /// A matching-runtime evaluator view over one active managed-access region.
 pub(crate) struct EvaluationValueAccess<'scope> {
@@ -34,6 +35,7 @@ pub(crate) struct EvaluationValueAccess<'scope> {
 pub(crate) struct EvaluatorStepContext<'step> {
     admission: EvaluatorStepAdmission<'step>,
     context: &'step EvalContext,
+    pending_reflection_activations: RefCell<Vec<ReflectionTaskReservation>>,
     _thread_bound: PhantomData<Rc<()>>,
 }
 
@@ -71,6 +73,7 @@ impl EvaluatorStepContext<'_> {
         EvaluatorStepContext {
             admission: EvaluatorStepAdmission::DirectCompatibility,
             context,
+            pending_reflection_activations: RefCell::new(Vec::new()),
             _thread_bound: PhantomData,
         }
     }
@@ -114,6 +117,18 @@ impl EvaluatorStepContext<'_> {
             "wait completion and evaluator context must share one value domain"
         );
         self.with_value_access(|_| root.as_core().clone())
+    }
+
+    pub(crate) fn defer_reflection_activation(&self, task: ReflectionTaskReservation) {
+        self.pending_reflection_activations.borrow_mut().push(task);
+    }
+
+    pub(crate) fn finish(mut self) {
+        let pending = std::mem::take(self.pending_reflection_activations.get_mut());
+        drop(self);
+        for task in pending {
+            task.activate();
+        }
     }
 }
 
@@ -183,8 +198,22 @@ impl EvaluationPollContext {
         EvaluatorStepContext {
             admission: EvaluatorStepAdmission::Poll(self),
             context,
+            pending_reflection_activations: RefCell::new(Vec::new()),
             _thread_bound: PhantomData,
         }
+    }
+
+    /// Runs one callback-free evaluator phase, then activates every external
+    /// reflection task it discovered only after its evaluator carrier ends.
+    pub(crate) fn evaluate<R>(
+        &self,
+        context: &EvalContext,
+        operation: impl FnOnce(&EvaluatorStepContext<'_>) -> R,
+    ) -> R {
+        let evaluator = self.evaluator(context);
+        let result = operation(&evaluator);
+        evaluator.finish();
+        result
     }
 
     /// Wrap one currently bare evaluator result before it leaves the machine

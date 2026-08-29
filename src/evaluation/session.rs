@@ -87,6 +87,64 @@ pub(crate) struct PendingReflectionTask {
     inner: Arc<PendingReflectionTaskInner>,
 }
 
+/// One lazily activated `anno refl:...` task reservation.
+///
+/// Pure evaluation may discover this reservation and retain its stable wait,
+/// but launcher construction belongs to the evaluator-step boundary. Every
+/// observer may request activation; the first request owns construction and
+/// later requests are inexpensive no-ops.
+#[derive(Clone)]
+pub(crate) struct ReflectionTaskReservation {
+    inner: Arc<ReflectionTaskReservationInner>,
+}
+
+struct ReflectionTaskReservationInner {
+    context: EvalContext,
+    handle: EvaluationTaskHandle,
+    activation: Option<ReflectionTaskActivation>,
+    activated: AtomicBool,
+}
+
+struct ReflectionTaskActivation {
+    effect: RuntimeValueRoot,
+    result_policy: ReflectionTaskResultPolicy,
+    task_profile: Arc<super::ReflectionTaskProfile>,
+}
+
+impl ReflectionTaskReservation {
+    pub(crate) fn handle(&self) -> &EvaluationTaskHandle {
+        &self.inner.handle
+    }
+
+    pub(crate) fn activate(&self) {
+        let Some(activation) = &self.inner.activation else {
+            return;
+        };
+        if self.inner.activated.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        if self.inner.handle.wait.terminal_poll().is_some() {
+            return;
+        }
+        self.inner.context.activate_reflection_task(
+            &self.inner.handle,
+            activation.effect.as_core().clone(),
+            activation.result_policy,
+            activation.task_profile.clone(),
+            None,
+            false,
+        );
+    }
+}
+
+impl Drop for ReflectionTaskReservationInner {
+    fn drop(&mut self) {
+        if self.activation.is_some() && !self.activated.load(Ordering::Acquire) {
+            self.context.cancel_reserved_task(&self.handle);
+        }
+    }
+}
+
 struct PendingReflectionTaskInner {
     context: EvalContext,
     handle: EvaluationTaskHandle,
@@ -1132,24 +1190,27 @@ impl EvalContext {
         })
     }
 
-    pub(crate) fn start_reflection_task(
+    pub(crate) fn reserve_reflection_activation(
         &self,
         effect: Value,
         result_policy: ReflectionTaskResultPolicy,
-    ) -> Result<EvaluationTaskHandle, Arc<str>> {
+    ) -> Result<ReflectionTaskReservation, Arc<str>> {
         let coordinator = self.coordinator_for_admission()?;
         let default_profile = self.session.default_reflection_profile.clone();
         if default_profile.is_sealed() {
             let handle = self.reserve_task()?;
-            self.activate_reflection_task(
-                &handle,
-                effect,
-                result_policy,
-                default_profile,
-                None,
-                false,
-            );
-            return Ok(handle);
+            return Ok(ReflectionTaskReservation {
+                inner: Arc::new(ReflectionTaskReservationInner {
+                    context: self.clone(),
+                    handle,
+                    activation: Some(ReflectionTaskActivation {
+                        effect: RuntimeValueRoot::new(self.values(), effect),
+                        result_policy,
+                        task_profile: default_profile,
+                    }),
+                    activated: AtomicBool::new(false),
+                }),
+            });
         }
 
         if self.session.require_default_reflection_profile {
@@ -1164,13 +1225,14 @@ impl EvalContext {
         let id = allocate_task_id(self.values())?;
         let wait = allocate_wait_token(&self.session, id)?;
         let work = coordinator.register_dormant_reflection(&self.session, id, wait.clone())?;
-        Ok(EvaluationTaskHandle::new(
-            &coordinator,
-            self.session.id,
-            id,
-            work,
-            wait,
-        ))
+        Ok(ReflectionTaskReservation {
+            inner: Arc::new(ReflectionTaskReservationInner {
+                context: self.clone(),
+                handle: EvaluationTaskHandle::new(&coordinator, self.session.id, id, work, wait),
+                activation: None,
+                activated: AtomicBool::new(true),
+            }),
+        })
     }
 
     pub(crate) fn poll_reflection_task(&self, task: &EvaluationTaskHandle) -> EvaluationWaitPoll {

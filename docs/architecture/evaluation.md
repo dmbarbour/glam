@@ -316,6 +316,18 @@ asserting that it remains reserved. Blocked reflection and deferred work
 retain their machines in their coordinator records. Terminal work retires from
 coordinator indexes and destroys its detached machine outside runtime locks.
 
+An `anno refl:Task` or metadata-reflection computation caches a stable task
+reservation, not a launched machine. The evaluator phase may reserve or
+discover that handle and report its wait, while its thread-bound step carrier
+collects an activation request. Poll orchestration drops the evaluator carrier
+before draining those requests. The first request builds and queues the task;
+concurrent observers share the reservation and subsequent requests are
+no-ops. A task terminal before activation skips the launcher. Cancellation or
+owner closure racing an entered launcher retains the terminal result and makes
+machine installation discard the unused machine outside coordinator locks.
+Annotation tasks always use the runtime-default reflection profile; this split
+does not make their host policy observer-dependent.
+
 Every scheduler wait token is one shared cell containing runtime-local
 identity, scalar producer/owner provenance, an optional terminal result, and
 exact weak work registrations routed through the runtime coordinator.

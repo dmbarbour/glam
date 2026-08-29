@@ -68,7 +68,9 @@ fn with_direct_evaluator<R>(
     operation: impl FnOnce(&EvaluatorStepContext<'_>) -> R,
 ) -> R {
     let evaluator = EvaluatorStepContext::for_direct_compatibility(context);
-    operation(&evaluator)
+    let result = operation(&evaluator);
+    evaluator.finish();
+    result
 }
 
 #[cfg(test)]

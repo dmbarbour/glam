@@ -56,7 +56,7 @@ not define language semantics or collect subsystem invariants.
 | `interaction_net/model.rs`, `builder.rs` | Generic topology and checked construction |
 | `interaction_net/runtime/` | Mutable graph, active-pair reduction, logical copies |
 | `evaluation.rs`, `evaluation/session.rs`, `evaluation/pump.rs` | Shared demand/profile contracts, session admission, cooperative and runtime pumping |
-| `evaluation/access.rs` | I3 scoped evaluator authority, thread-bound mutator-free evaluator-step context, claim/direct-owner poll admission, scoped wait-completion projection, one source-latched direct-evaluator compatibility seam, and temporary machine-completion root seam |
+| `evaluation/access.rs` | I3 scoped evaluator authority, thread-bound mutator-free evaluator-step context, claim/direct-owner poll admission, scoped wait-completion projection, post-scope reflection activation, one source-latched direct-evaluator compatibility seam, and temporary machine-completion root seam |
 | `evaluation/coordinator.rs`, `evaluation/coordinator/` | Authoritative work registry/queues plus task, completion, client-demand, spark, reflection, deferred, and settlement lifecycles; completed wait observations retain roots, parked demand routing is weak, and detached claims temporarily upgrade the exact registered session/domain |
 | `evaluation/observation.rs`, `evaluation/executor.rs` | Semantic observation epochs and worker lifecycle |
 | `eval/value.rs`, `application.rs`, `operator.rs`, `net.rs` | Value forcing and semantic execution |

@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Barrier, Mutex};
 
 use bytes::Bytes;
 
@@ -242,6 +242,52 @@ struct FixtureTaskLauncher {
     terminal: FixtureTaskTerminal,
     builds: Arc<AtomicUsize>,
     result_policies: Arc<Mutex<Vec<ReflectionTaskResultPolicy>>>,
+}
+
+struct ScopedReflectionLauncher {
+    values: crate::core::CoreValueFactory,
+    builds: Arc<AtomicUsize>,
+}
+
+struct BlockingReflectionLauncher {
+    entered: std::sync::mpsc::Sender<()>,
+    release: Arc<Barrier>,
+    builds: Arc<AtomicUsize>,
+}
+
+impl ReflectionTaskLauncher for BlockingReflectionLauncher {
+    fn build(
+        &self,
+        _context: EvalContext,
+        _effect: Value,
+        _result_policy: ReflectionTaskResultPolicy,
+    ) -> Result<Box<dyn EvaluationTaskMachine>, Arc<EvaluationFailure>> {
+        self.builds.fetch_add(1, Ordering::SeqCst);
+        self.entered
+            .send(())
+            .expect("activation test must retain its entry receiver");
+        self.release.wait();
+        Ok(Box::new(FixtureTaskMachine {
+            terminal: Some(FixtureTaskTerminal::Complete(unit_value())),
+        }))
+    }
+}
+
+impl ReflectionTaskLauncher for ScopedReflectionLauncher {
+    fn build(
+        &self,
+        _context: EvalContext,
+        _effect: Value,
+        _result_policy: ReflectionTaskResultPolicy,
+    ) -> Result<Box<dyn EvaluationTaskMachine>, Arc<EvaluationFailure>> {
+        self.values
+            .collect_managed_for_test()
+            .expect("reflection launcher construction must run without a mutator");
+        self.builds.fetch_add(1, Ordering::SeqCst);
+        Ok(Box::new(FixtureTaskMachine {
+            terminal: Some(FixtureTaskTerminal::Complete(unit_value())),
+        }))
+    }
 }
 
 impl ReflectionTaskLauncher for FixtureTaskLauncher {
@@ -4787,6 +4833,181 @@ fn reflection_annotation(context: &EvalContext, effect: Value, target: Value) ->
     let annotation = Value::Dict(Dict::new_sync().insert(Key::atom_from_text("refl"), effect));
     apply_builtin(context, Builtin::Anno, vec![annotation], target)
         .expect("reflection annotation should construct a lazy gate")
+}
+
+fn reflection_computation(value: &Value) -> Arc<crate::core::ReflectionComputation> {
+    let Value::Lazy(lazy) = value else {
+        panic!("reflection computation must be represented by a lazy value")
+    };
+    let Some(crate::core::LazySource::ReflectionTask(computation)) = lazy.source_snapshot() else {
+        panic!("reflection lazy value must retain its unobserved computation")
+    };
+    computation
+}
+
+#[test]
+fn reflection_gate_reserves_inside_and_activates_outside_scope() {
+    let context = test_context();
+    let builds = Arc::new(AtomicUsize::new(0));
+    context
+        .install_reflection_launcher(Arc::new(ScopedReflectionLauncher {
+            values: context.values().clone(),
+            builds: builds.clone(),
+        }))
+        .expect("fresh test session should accept its reflection launcher");
+    let computation =
+        reflection_computation(&Value::reflection_task_result(context.values(), n(0)));
+    let poll = crate::evaluation::EvaluationPollContext::for_context(&context);
+
+    let task = poll.evaluate(&context, |evaluator| {
+        let task = computation
+            .task(&context)
+            .expect("reflection observation should reserve its task")
+            .clone();
+        evaluator.defer_reflection_activation(task.clone());
+        assert_eq!(
+            builds.load(Ordering::SeqCst),
+            0,
+            "reservation must not construct the launcher inside evaluator scope"
+        );
+        assert!(matches!(
+            context.poll_reflection_task(task.handle()),
+            EvaluationWaitPoll::Pending(_)
+        ));
+        task
+    });
+
+    assert_eq!(builds.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        context.run_until_quiescent(),
+        crate::evaluation::EvaluationSessionRun::Complete(_)
+    ));
+    assert!(matches!(
+        context.poll_reflection_task(task.handle()),
+        EvaluationWaitPoll::Complete(_)
+    ));
+}
+
+#[test]
+fn concurrent_reflection_gate_observers_activate_once() {
+    let (owner, observer, _executor) = same_runtime_contexts();
+    let builds = Arc::new(AtomicUsize::new(0));
+    owner
+        .install_reflection_launcher(Arc::new(FixtureTaskLauncher {
+            terminal: FixtureTaskTerminal::Complete(unit_value()),
+            builds: builds.clone(),
+            result_policies: Arc::new(Mutex::new(Vec::new())),
+        }))
+        .expect("fresh test session should accept its reflection launcher");
+    let computation = reflection_computation(&Value::reflection_task_result(owner.values(), n(0)));
+    let start = Arc::new(Barrier::new(3));
+
+    let observers = [(*owner).clone(), (*observer).clone()]
+        .into_iter()
+        .map(|context| {
+            let computation = computation.clone();
+            let start = start.clone();
+            std::thread::spawn(move || {
+                let poll = crate::evaluation::EvaluationPollContext::for_context(&context);
+                poll.evaluate(&context, |evaluator| {
+                    let task = computation
+                        .task(&context)
+                        .expect("concurrent observation should share the reservation")
+                        .clone();
+                    evaluator.defer_reflection_activation(task.clone());
+                    start.wait();
+                    task
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+    start.wait();
+    let tasks = observers
+        .into_iter()
+        .map(|observer| observer.join().expect("reflection observer must not panic"))
+        .collect::<Vec<_>>();
+
+    assert_eq!(tasks[0].handle().id(), tasks[1].handle().id());
+    assert_eq!(builds.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        owner.run_until_quiescent(),
+        crate::evaluation::EvaluationSessionRun::Complete(_)
+    ));
+}
+
+#[test]
+fn reflection_gate_cancellation_before_and_during_activation_is_terminal() {
+    let before = test_context();
+    let before_builds = Arc::new(AtomicUsize::new(0));
+    before
+        .install_reflection_launcher(Arc::new(FixtureTaskLauncher {
+            terminal: FixtureTaskTerminal::Complete(unit_value()),
+            builds: before_builds.clone(),
+            result_policies: Arc::new(Mutex::new(Vec::new())),
+        }))
+        .expect("fresh test session should accept its reflection launcher");
+    let before_computation =
+        reflection_computation(&Value::reflection_task_result(before.values(), n(0)));
+    let before_task = before_computation
+        .task(&before)
+        .expect("reflection observation should reserve its task")
+        .clone();
+    assert_eq!(
+        before_task.handle().cancel(),
+        crate::evaluation::EvaluationTaskCancellation::Requested
+    );
+    let before_poll = crate::evaluation::EvaluationPollContext::for_context(&before);
+    before_poll.evaluate(&before, |evaluator| {
+        evaluator.defer_reflection_activation(before_task.clone());
+    });
+    assert_eq!(before_builds.load(Ordering::SeqCst), 0);
+    assert!(matches!(
+        before.poll_reflection_task(before_task.handle()),
+        EvaluationWaitPoll::Cancelled
+    ));
+
+    let during = test_context();
+    let during_builds = Arc::new(AtomicUsize::new(0));
+    let release = Arc::new(Barrier::new(2));
+    let (entered, entry) = std::sync::mpsc::channel();
+    during
+        .install_reflection_launcher(Arc::new(BlockingReflectionLauncher {
+            entered,
+            release: release.clone(),
+            builds: during_builds.clone(),
+        }))
+        .expect("fresh test session should accept its reflection launcher");
+    let during_computation =
+        reflection_computation(&Value::reflection_task_result(during.values(), n(0)));
+    let during_task = during_computation
+        .task(&during)
+        .expect("reflection observation should reserve its task")
+        .clone();
+    let activation_context = (*during).clone();
+    let activation_task = during_task.clone();
+    let activation = std::thread::spawn(move || {
+        let poll = crate::evaluation::EvaluationPollContext::for_context(&activation_context);
+        poll.evaluate(&activation_context, |evaluator| {
+            evaluator.defer_reflection_activation(activation_task);
+        });
+    });
+    entry
+        .recv()
+        .expect("launcher must expose its in-progress activation");
+    assert_eq!(
+        during_task.handle().cancel(),
+        crate::evaluation::EvaluationTaskCancellation::Requested
+    );
+    release.wait();
+    activation
+        .join()
+        .expect("cancelled activation must not panic");
+
+    assert_eq!(during_builds.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        during.poll_reflection_task(during_task.handle()),
+        EvaluationWaitPoll::Cancelled
+    ));
 }
 
 #[test]

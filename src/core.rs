@@ -15,8 +15,8 @@ use rpds::RedBlackTreeMapSync;
 
 use crate::core_net::{CoreDataKey, CoreRuntimeNet};
 use crate::evaluation::{
-    CompletionSubscriptionOutcome, CompletionSubscriptions, EvalContext, EvaluationTaskHandle,
-    EvaluationWorkCoordinator, PromiseProducerObligation, PromiseProducerPublication,
+    CompletionSubscriptionOutcome, CompletionSubscriptions, EvalContext, EvaluationWorkCoordinator,
+    PromiseProducerObligation, PromiseProducerPublication, ReflectionTaskReservation,
     ReflectionTaskResultPolicy, WakeRegistration,
 };
 use crate::number::Number;
@@ -1261,7 +1261,7 @@ pub(crate) type DeferredComputation =
 pub(crate) struct ReflectionComputation {
     effect: Value,
     completion: ReflectionCompletion,
-    task: OnceLock<Result<EvaluationTaskHandle, Arc<EvaluationFailure>>>,
+    task: OnceLock<Result<ReflectionTaskReservation, Arc<EvaluationFailure>>>,
 }
 
 pub(crate) enum ReflectionCompletion {
@@ -1273,11 +1273,11 @@ impl ReflectionComputation {
     pub(crate) fn task(
         &self,
         context: &EvalContext,
-    ) -> Result<&EvaluationTaskHandle, &Arc<EvaluationFailure>> {
+    ) -> Result<&ReflectionTaskReservation, &Arc<EvaluationFailure>> {
         self.task
             .get_or_init(|| {
                 context
-                    .start_reflection_task(self.effect.clone(), self.result_policy())
+                    .reserve_reflection_activation(self.effect.clone(), self.result_policy())
                     .map_err(|error| Arc::new(EvaluationFailure::message(error)))
             })
             .as_ref()

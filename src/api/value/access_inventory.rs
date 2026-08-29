@@ -144,9 +144,9 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/evaluation/session.rs",
-        [1, 0, 0, 0, 3, 0],
-        "session demand, effect entry, and patient completion",
-        "I3A.3/I3B.2/I3C.1-I3C.2 scoped polling; I4F.1 outcomes"
+        [2, 0, 0, 0, 4, 0],
+        "session demand, reserved reflection activation, effect entry, and patient completion",
+        "I3A.3/I3B.2/I3C.1-I3D.1 scoped polling and activation; I4F.1 outcomes"
     ),
     entry!(
         "src/g_syntax/macro_expansion/effects.rs",

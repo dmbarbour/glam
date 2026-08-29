@@ -1,8 +1,7 @@
 # Glam GC Integration Plan — 2026-08-19
 
-Status: in progress; Phases I0 through I2 and checkpoints I3A.1-I3A.4 and
-I3B.1a-I3B.1b are complete. Phase I3 is in progress. Collector Gate G1 passed
-on 2026-08-25.
+Status: in progress; Phases I0 through I2 and checkpoints I3A.1-I3D.1 are
+complete. Phase I3 is in progress. Collector Gate G1 passed on 2026-08-25.
 The remaining integration work follows the completed owner-matrix,
 stable-ledger, and low-risk checkpoint corrections from the integration
 review.
@@ -50,6 +49,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I3B.2 | complete | poll/wait driver separation |
 | I3C.1 | complete | unified claimed/direct poll routing and scoped spark demand |
 | I3C.2 | complete | rooted wait observations, scoped projection, and release audit |
+| I3D.1 | complete | stable reflection reservations and post-evaluator one-time activation |
 | I3 | in progress | bounded evaluator/worker mutator regions |
 | I4 | pending | core trace vocabulary and leaf policy |
 | I4.0 | pending | managed-family destruction admission contract |
@@ -1289,6 +1289,36 @@ observes no mutator during launcher construction;
 `concurrent_reflection_gate_observers_activate_once` forces the first-observer
 race; cancellation before and during activation remains covered. Production
 remains `NoAuto`.
+
+I3D.1 completed 2026-08-29. A `ReflectionComputation` now caches one
+`ReflectionTaskReservation` rather than starting a machine from its
+`OnceLock` initializer. Pure evaluation reserves or discovers the stable task
+and records its activation on the thread-bound `EvaluatorStepContext`.
+`EvaluationPollContext::evaluate` and the direct-compatibility wrapper end that
+carrier before draining recorded activations, so
+`ReflectionTaskLauncher::build` cannot inherit evaluator authority. Client
+demand, deferred lazy/promise work, and spark demand use this explicit
+evaluate-then-activate boundary.
+
+The reservation's atomic first activation owns launcher construction;
+concurrent observers retain the same handle and wait while later activation
+requests become no-ops. A cancellation which is already terminal skips
+construction. Cancellation or demand closure racing construction still wins
+through the existing coordinator install/terminalization protocol, and the
+unused machine is destroyed after locks are released. Bare test sessions keep
+their prior dormant record behavior, and annotation tasks continue to select
+the immutable runtime-default reflection profile rather than the observing
+task's profile. The reservation roots its effect across this boundary and
+projects it only during activation, adding two explicitly classified
+compatibility-access sites until I4F converts the underlying representation.
+
+`reflection_gate_reserves_inside_and_activates_outside_scope` latches both
+zero builds inside the evaluator phase and successful forced collection from
+launcher construction. `concurrent_reflection_gate_observers_activate_once`
+uses a barrier to race two same-runtime observers and proves one task identity
+and one build. A separate forced-order fixture covers cancellation before and
+during activation. Existing gate/result failure identity and metadata
+reflection fixtures remain in force. Production remains `NoAuto`.
 
 ### Phase I3D.2 — Effect Evaluation and Interpreter Phases
 

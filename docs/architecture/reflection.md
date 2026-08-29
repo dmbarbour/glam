@@ -37,6 +37,14 @@ assembler, macro, logger, or other demand session happened to claim the lazy
 annotation first. Children launched by an annotation inherit that default
 profile from the annotation task.
 
+Demanding one of those annotations first reserves a stable task and wait
+inside pure evaluation. The evaluator-step boundary then ends before a
+one-time activation invokes the type-erased launcher. Concurrent observers
+share the reservation rather than constructing competing machines. A
+pre-activation cancellation suppresses launcher construction; cancellation
+or demand closure racing an already-entered launcher keeps the terminal state
+and discards the unused machine.
+
 Core operators merely construct tagged request values. Host operations occur
 when the effect task dispatches those requests.
 

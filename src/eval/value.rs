@@ -186,48 +186,49 @@ impl EvaluationTaskMachine for LazyTaskMachine {
         step_budget: usize,
     ) -> EvaluationMachinePoll {
         let durable_context = self.context.clone();
-        let context = poll_context.evaluator(&durable_context);
-        if let Some(result) = self.lazy.cached() {
-            return match result {
-                Ok(value) => {
-                    EvaluationMachinePoll::Complete(context.root_value(value.into_value()))
-                }
-                Err(error) => EvaluationMachinePoll::Failed(error),
-            };
-        }
-
-        if matches!(self.work, LazyTaskWork::Produce) {
-            let Some(source) = self.lazy.source_snapshot() else {
-                return self.cached_poll(&context);
-            };
-            if let LazySource::NetConstruction(effect) = source {
-                let machine = match NetConstructionMachine::new(
-                    durable_context.clone(),
-                    effect.as_ref().clone(),
-                ) {
-                    Ok(machine) => machine,
-                    Err(error) => return self.fail(&context, error),
+        poll_context.evaluate(&durable_context, |context| {
+            if let Some(result) = self.lazy.cached() {
+                return match result {
+                    Ok(value) => {
+                        EvaluationMachinePoll::Complete(context.root_value(value.into_value()))
+                    }
+                    Err(error) => EvaluationMachinePoll::Failed(error),
                 };
-                self.work = LazyTaskWork::NetConstruction(Box::new(machine));
-                return EvaluationMachinePoll::Yielded;
             }
-            let result = produce_lazy_source_in(&context, &self.lazy, &source);
-            return self.finish_poll(&context, result);
-        }
 
-        if let LazyTaskWork::NetConstruction(machine) = &mut self.work {
-            return match machine.poll(context.context(), step_budget) {
-                Ok(Some(value)) => self.complete(&context, value),
-                Ok(None) => EvaluationMachinePoll::Yielded,
-                Err(error) => self.fail(&context, error),
+            if matches!(self.work, LazyTaskWork::Produce) {
+                let Some(source) = self.lazy.source_snapshot() else {
+                    return self.cached_poll(context);
+                };
+                if let LazySource::NetConstruction(effect) = source {
+                    let machine = match NetConstructionMachine::new(
+                        durable_context.clone(),
+                        effect.as_ref().clone(),
+                    ) {
+                        Ok(machine) => machine,
+                        Err(error) => return self.fail(context, error),
+                    };
+                    self.work = LazyTaskWork::NetConstruction(Box::new(machine));
+                    return EvaluationMachinePoll::Yielded;
+                }
+                let result = produce_lazy_source_in(context, &self.lazy, &source);
+                return self.finish_poll(context, result);
+            }
+
+            if let LazyTaskWork::NetConstruction(machine) = &mut self.work {
+                return match machine.poll(context.context(), step_budget) {
+                    Ok(Some(value)) => self.complete(context, value),
+                    Ok(None) => EvaluationMachinePoll::Yielded,
+                    Err(error) => self.fail(context, error),
+                };
+            }
+
+            let LazyTaskWork::Follow(target) = &self.work else {
+                unreachable!("non-producing lazy work must follow a value or construct a net")
             };
-        }
-
-        let LazyTaskWork::Follow(target) = &self.work else {
-            unreachable!("non-producing lazy work must follow a value or construct a net")
-        };
-        let result = eval_value_in(&context, target);
-        self.finish_poll(&context, result)
+            let result = eval_value_in(context, target);
+            self.finish_poll(context, result)
+        })
     }
 }
 
@@ -285,29 +286,30 @@ impl EvaluationTaskMachine for PromiseFollower {
         _step_budget: usize,
     ) -> EvaluationMachinePoll {
         let durable_context = self.context.clone();
-        let context = poll_context.evaluator(&durable_context);
-        let result = match &self.state {
-            PromiseFollowerState::AwaitAssignment => match self.promise.assignment() {
-                Some(result) => result.map_err(EvaluationHalt::failure),
-                None => {
-                    return EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
-                        dependency: Some(WorkDependency::Promise(self.promise.clone())),
-                        observed_epoch: None,
-                        error: None,
-                    });
-                }
-            },
-            PromiseFollowerState::FollowAssignment(target) => eval_value_in(&context, target),
-        };
+        poll_context.evaluate(&durable_context, |context| {
+            let result = match &self.state {
+                PromiseFollowerState::AwaitAssignment => match self.promise.assignment() {
+                    Some(result) => result.map_err(EvaluationHalt::failure),
+                    None => {
+                        return EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
+                            dependency: Some(WorkDependency::Promise(self.promise.clone())),
+                            observed_epoch: None,
+                            error: None,
+                        });
+                    }
+                },
+                PromiseFollowerState::FollowAssignment(target) => eval_value_in(context, target),
+            };
 
-        match result {
-            Ok(value) if is_deferred(&value) => {
-                self.state = PromiseFollowerState::FollowAssignment(value);
-                EvaluationMachinePoll::Yielded
+            match result {
+                Ok(value) if is_deferred(&value) => {
+                    self.state = PromiseFollowerState::FollowAssignment(value);
+                    EvaluationMachinePoll::Yielded
+                }
+                Ok(value) => EvaluationMachinePoll::Complete(context.root_value(value)),
+                Err(error) => block_or_fail(context.context(), error),
             }
-            Ok(value) => EvaluationMachinePoll::Complete(context.root_value(value)),
-            Err(error) => block_or_fail(context.context(), error),
-        }
+        })
     }
 }
 
@@ -573,14 +575,16 @@ fn eval_reflection_task_source(
         EvaluationHalt::failure(Arc::clone(error))
             .with_context(evaluation_context_frame(context_name))
     })?;
-    match context.context().poll_reflection_task(task) {
+    context.defer_reflection_activation(task.clone());
+    let handle = task.handle();
+    match context.context().poll_reflection_task(handle) {
         EvaluationWaitPoll::Pending(wait) => Err(EvaluationHalt::blocked(CoreWaitToken(wait))),
         EvaluationWaitPoll::Complete(value) => match computation.completion() {
             crate::core::ReflectionCompletion::Gate { target } => Ok(target.clone()),
             crate::core::ReflectionCompletion::ReturnValue => Ok(context.project_root(&value)),
         },
         EvaluationWaitPoll::Failed(error) => {
-            task.acknowledge_propagated_failure();
+            handle.acknowledge_propagated_failure();
             Err(EvaluationHalt::failure(error).with_context(evaluation_context_frame(context_name)))
         }
         EvaluationWaitPoll::Cancelled => Err(EvaluationHalt::new(cancellation_message)),
