@@ -193,7 +193,7 @@ impl EvaluationWorkCoordinator {
                 .work
                 .get(&claimed.id)
                 .expect("claimed test reflection work must remain registered");
-            assert_eq!(record.demand_session, claimed.demand_session);
+            assert_eq!(record.demand_session, claimed.demand.id());
             assert_eq!(reflection_work(record).task, claimed.task);
             assert!(matches!(record.state, WorkState::Running));
             let reflection = reflection_work_mut(
@@ -262,7 +262,7 @@ impl EvaluationWorkCoordinator {
                 .get(&claimed.id)
                 .expect("claimed test spark work must remain registered");
             assert_eq!(record.id, claimed.id);
-            assert_eq!(record.demand_session, claimed.demand_session);
+            assert_eq!(record.demand_session, claimed.session.id());
             assert!(matches!(record.state, WorkState::Running));
             assert!(record.control.close_reason.is_none());
 
@@ -374,6 +374,15 @@ struct TestTaskMachine;
 impl EvaluationTaskMachine for TestTaskMachine {
     fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
         panic!("coordinator lifecycle tests drive deferred polls explicitly")
+    }
+}
+
+struct CountTaskPolls(Arc<AtomicUsize>);
+
+impl EvaluationTaskMachine for CountTaskPolls {
+    fn poll(&mut self, _step_budget: usize) -> EvaluationMachinePoll {
+        self.0.fetch_add(1, Ordering::AcqRel);
+        EvaluationMachinePoll::Yielded
     }
 }
 
@@ -1000,14 +1009,70 @@ fn serial_ready_selection_filters_exact_work_by_demand_session() {
 
     let right_claim = claim_ready_test_reflection(&coordinator, right.demand.id);
     assert_eq!(right_claim.task(), right_task);
+    assert!(Arc::ptr_eq(&right_claim.demand.demand(), &right.demand));
     let release = coordinator.release_reflection(right_claim, ReflectionWorkPoll::Terminal);
     assert!(release.terminal);
     settle_test_reflection(&coordinator, right_work);
 
     let left_claim = claim_ready_test_reflection(&coordinator, left.demand.id);
+    assert!(Arc::ptr_eq(&left_claim.demand.demand(), &left.demand));
     let release = coordinator.release_reflection(left_claim, ReflectionWorkPoll::Terminal);
     assert!(release.terminal);
     settle_test_reflection(&coordinator, left_work);
+}
+
+#[test]
+fn claim_rejects_a_mismatched_registered_demand_before_machine_execution() {
+    let (coordinator, _executor) =
+        super::super::test_execution_resources(0).expect("test execution resources should build");
+    let session = TestDemand::new(&coordinator);
+    let task = super::super::allocate_task_id(&session.demand.values)
+        .expect("reflection task identity should allocate");
+    let wait = super::super::allocate_wait_token(&session.demand, task)
+        .expect("reflection wait identity should allocate");
+    let work = coordinator
+        .reserve_reflection(&session.demand, task, wait)
+        .expect("open test session should reserve reflection work");
+    let polls = Arc::new(AtomicUsize::new(0));
+    coordinator
+        .install_reflection_machine(work, Box::new(CountTaskPolls(polls.clone())))
+        .unwrap_or_else(|_| panic!("reserved test reflection must accept its machine"));
+    assert!(coordinator.activate_reflection(work));
+
+    let foreign_values = CoreValueFactory::new(
+        crate::runtime::allocate_evaluation_runtime_id(),
+        crate::runtime::RuntimeIds::new(),
+    );
+    let mismatched = Arc::new(EvaluationDemandState {
+        id: session.demand.id,
+        values: foreign_values,
+        default_reflection_profile: session.demand.default_reflection_profile.clone(),
+        require_default_reflection_profile: false,
+        closed: Arc::new(AtomicBool::new(false)),
+        coordinator: Arc::downgrade(&coordinator),
+    });
+    let original = coordinator
+        .state
+        .lock()
+        .expect("evaluation work coordinator was poisoned")
+        .demand_sessions
+        .insert(session.demand.id, Arc::downgrade(&mismatched))
+        .expect("the real demand session should already be registered");
+
+    assert!(
+        coordinator
+            .claim_ready_task_for_session(session.demand.id)
+            .is_none(),
+        "a mismatched registered demand must be rejected"
+    );
+    assert_eq!(polls.load(Ordering::Acquire), 0);
+
+    coordinator
+        .state
+        .lock()
+        .expect("evaluation work coordinator was poisoned")
+        .demand_sessions
+        .insert(session.demand.id, original);
 }
 
 #[test]
@@ -1659,6 +1724,7 @@ fn queued_sparks_are_abandoned_when_their_demand_session_closes() {
     let session = TestDemand::new(&coordinator);
     coordinator.executor_started(1);
     coordinator.submit_spark(session.demand.clone(), crate::core::keys::unit_value());
+    let demand = Arc::downgrade(&session.demand);
     let [work] = coordinator
         .state
         .lock()
@@ -1675,8 +1741,32 @@ fn queued_sparks_are_abandoned_when_their_demand_session_closes() {
 
     drop(session);
 
+    assert!(
+        demand.upgrade().is_none(),
+        "an unclaimed spark record must not retain its demand domain"
+    );
     assert_eq!(coordinator.spark_work_counts(), (0, 0, 0));
     assert_eq!(coordinator.retained_spark_count(), 0);
+}
+
+#[test]
+fn claimed_spark_keeps_its_demand_domain_alive_through_owner_close() {
+    let (coordinator, _executor, session, claimed) = claimed_test_spark();
+    let demand = Arc::downgrade(&session.demand);
+
+    drop(session);
+
+    let retained = demand
+        .upgrade()
+        .expect("the detached claim must temporarily retain its demand domain");
+    assert!(Arc::ptr_eq(&retained, &claimed.demand_session()));
+    drop(retained);
+
+    coordinator.release_spark(claimed, SparkWorkPoll::Complete);
+    assert!(
+        demand.upgrade().is_none(),
+        "releasing the final claim must release its temporary demand route"
+    );
 }
 
 #[test]

@@ -6,8 +6,10 @@ use std::sync::Arc;
 use crate::core::{DeferredValueId, LazyValue, PromisedValue};
 
 use super::super::{EvaluationDemandState, EvaluationTaskBlock};
+#[cfg(test)]
+use super::EvaluationSessionId;
 use super::{
-    EvaluationSessionId, EvaluationTaskId, EvaluationTaskMachine, EvaluationWaitToken,
+    ClaimedDemandSession, EvaluationTaskId, EvaluationTaskMachine, EvaluationWaitToken,
     EvaluationWorkCoordinator, EvaluationWorkId, SettlementObligations, WorkCloseReason,
     WorkControl, WorkCoordinatorState, WorkDependency, WorkKind, WorkRecord, WorkState,
     demand_session_is_closed, prune_closed_session_registration, publish_task_block_locked,
@@ -182,7 +184,7 @@ impl EvaluationWorkCoordinator {
                     .work
                     .get_mut(&claimed.id)
                     .expect("claimed deferred work must remain registered");
-                assert_eq!(record.demand_session, claimed.demand_session);
+                assert_eq!(record.demand_session, claimed.demand.id());
                 assert!(matches!(record.state, WorkState::Running));
                 let deferred = deferred_work_mut(record);
                 assert_eq!(deferred.task, claimed.task);
@@ -426,7 +428,7 @@ pub(super) struct DeferredIndexes {
 pub(in crate::evaluation) struct ClaimedDeferredWork {
     pub(super) id: EvaluationWorkId,
     pub(super) task: EvaluationTaskId,
-    pub(super) demand_session: EvaluationSessionId,
+    pub(super) demand: ClaimedDemandSession,
     pub(super) producer: DeferredValueId,
     pub(super) prior_block: Option<EvaluationTaskBlock>,
     pub(super) requeue_on_yield: bool,
@@ -527,10 +529,13 @@ pub(super) fn remove_ready_deferred(state: &mut WorkCoordinatorState, id: Evalua
 
 pub(super) fn claim_deferred(
     state: &mut WorkCoordinatorState,
+    runtime: crate::runtime::EvaluationRuntimeId,
     id: EvaluationWorkId,
     requeue_on_yield: bool,
 ) -> Option<ClaimedDeferredWork> {
-    let (task, demand_session, producer, prior_block, machine) = {
+    let demand_session = state.work.get(&id)?.demand_session;
+    let demand = ClaimedDemandSession::registered(state, demand_session, runtime)?;
+    let (task, producer, prior_block, machine) = {
         let record = state.work.get_mut(&id)?;
         if !matches!(record.kind, WorkKind::Deferred(_))
             || !matches!(record.state, WorkState::Dormant | WorkState::Queued)
@@ -538,11 +543,9 @@ pub(super) fn claim_deferred(
             return None;
         }
         record.state = WorkState::Running;
-        let demand_session = record.demand_session;
         let deferred = deferred_work_mut(record);
         (
             deferred.task,
-            demand_session,
             deferred.producer.id(),
             deferred.block.take(),
             deferred
@@ -556,7 +559,7 @@ pub(super) fn claim_deferred(
     Some(ClaimedDeferredWork {
         id,
         task,
-        demand_session,
+        demand,
         producer,
         prior_block,
         requeue_on_yield,

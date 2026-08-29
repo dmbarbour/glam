@@ -152,8 +152,8 @@ fn evaluation_worker(inner: Arc<EvaluationExecutorInner>) {
                     coordinator.release_spark(claimed, SparkWorkPoll::Complete);
                     return;
                 }
+                claimed.assert_runtime(coordinator.runtime_id());
                 let context = EvalContext::for_spark(claimed.demand_session());
-                debug_assert_eq!(claimed.value().runtime_id(), context.values().runtime_id());
                 let result =
                     crate::eval::demand_strategy_value(&context, claimed.value().as_core());
                 let poll = match result {

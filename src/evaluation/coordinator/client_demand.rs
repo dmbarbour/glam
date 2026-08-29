@@ -8,9 +8,9 @@ use crate::runtime::{EvaluationRuntimeId, RuntimeValueRoot};
 use super::super::EvaluationDemandState;
 use super::deferred::promote_deferred_wait_locked;
 use super::{
-    EvaluationWorkCoordinator, EvaluationWorkId, SettlementObligations, WakeRegistration,
-    WorkCloseReason, WorkControl, WorkCoordinatorState, WorkDependency, WorkKind, WorkRecord,
-    WorkState, demand_session_is_closed, prune_closed_session_registration,
+    ClaimedDemandSession, EvaluationWorkCoordinator, EvaluationWorkId, SettlementObligations,
+    WakeRegistration, WorkCloseReason, WorkControl, WorkCoordinatorState, WorkDependency, WorkKind,
+    WorkRecord, WorkState, demand_session_is_closed, prune_closed_session_registration,
     queue_current_registration,
 };
 
@@ -235,14 +235,14 @@ impl ClientDemandSubscription {
 }
 
 pub(crate) struct ClientDemandWork {
-    pub(super) demand: Arc<EvaluationDemandState>,
+    pub(super) demand: Weak<EvaluationDemandState>,
     pub(super) operation: Option<ClientDemandOperation>,
     pub(super) subscription: Option<ClientDemandSubscription>,
 }
 
 pub(crate) struct ClaimedClientDemand {
     pub(in crate::evaluation) id: EvaluationWorkId,
-    pub(in crate::evaluation) demand: Arc<EvaluationDemandState>,
+    pub(in crate::evaluation) demand: ClaimedDemandSession,
     pub(in crate::evaluation) operation: Option<ClientDemandOperation>,
     pub(super) prior_subscription: Option<ClientDemandSubscription>,
 }
@@ -311,7 +311,7 @@ impl EvaluationWorkCoordinator {
                 obligations: SettlementObligations::client_demand(sink),
                 state: WorkState::Queued,
                 kind: WorkKind::ClientDemand(ClientDemandWork {
-                    demand,
+                    demand: Arc::downgrade(&demand),
                     operation: Some(operation),
                     subscription: None,
                 }),
@@ -366,7 +366,7 @@ impl EvaluationWorkCoordinator {
                 .state
                 .lock()
                 .expect("evaluation work coordinator was poisoned");
-            let claimed = claim_client_demand(&mut state, id);
+            let claimed = claim_client_demand(&mut state, self.runtime, id);
             if claimed.is_some() {
                 state.work_generation = state.work_generation.wrapping_add(1);
             }
@@ -429,7 +429,7 @@ impl EvaluationWorkCoordinator {
                     .work
                     .get(&claimed.id)
                     .expect("claimed client demand must remain registered");
-                assert_eq!(record.demand_session, claimed.demand.id);
+                assert_eq!(record.demand_session, claimed.demand.id());
                 assert!(matches!(record.state, WorkState::Running));
                 assert!(matches!(record.kind, WorkKind::ClientDemand(_)));
                 record.control.close_reason
@@ -691,10 +691,11 @@ pub(super) fn queue_client_demand(state: &mut WorkCoordinatorState, id: Evaluati
 
 pub(super) fn claim_ready_client_demand(
     state: &mut WorkCoordinatorState,
+    runtime: EvaluationRuntimeId,
 ) -> Option<ClaimedClientDemand> {
     while let Some(id) = state.ready_client_demands.pop_front() {
         state.ready_client_demand_set.remove(&id);
-        if let Some(claimed) = claim_client_demand(state, id) {
+        if let Some(claimed) = claim_client_demand(state, runtime, id) {
             return Some(claimed);
         }
     }
@@ -703,21 +704,33 @@ pub(super) fn claim_ready_client_demand(
 
 fn claim_client_demand(
     state: &mut WorkCoordinatorState,
+    runtime: EvaluationRuntimeId,
     id: EvaluationWorkId,
 ) -> Option<ClaimedClientDemand> {
-    let record = state.work.get_mut(&id)?;
+    let demand_session = state.work.get(&id)?.demand_session;
+    let demand = ClaimedDemandSession::registered(state, demand_session, runtime)?;
+    let record = state.work.get(&id)?;
     if !matches!(record.state, WorkState::Queued)
         || !matches!(record.kind, WorkKind::ClientDemand(_))
     {
+        return None;
+    }
+    let WorkKind::ClientDemand(client) = &record.kind else {
+        unreachable!("validated client demand must preserve its work kind")
+    };
+    if !Weak::ptr_eq(&client.demand, &Arc::downgrade(&demand.demand())) {
         return None;
     }
     state.ready_client_demand_set.remove(&id);
     state
         .ready_client_demands
         .retain(|candidate| *candidate != id);
+    let record = state
+        .work
+        .get_mut(&id)
+        .expect("claimable client demand must remain registered");
     record.state = WorkState::Running;
     let client = client_demand_work_mut(record);
-    let demand = client.demand.clone();
     let operation = client
         .operation
         .take()

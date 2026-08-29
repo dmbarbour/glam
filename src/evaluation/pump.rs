@@ -133,6 +133,7 @@ enum ClaimedTaskKind {
 
 impl ClaimedTask {
     fn new(coordinator: Arc<EvaluationWorkCoordinator>, work: ClaimedTaskWork) -> Self {
+        work.demand().assert_runtime(coordinator.runtime_id());
         let kind = match work {
             ClaimedTaskWork::Reflection(claim) => ClaimedTaskKind::Reflection(claim),
             ClaimedTaskWork::Deferred(claim) => ClaimedTaskKind::Deferred(claim),

@@ -1,6 +1,6 @@
 //! Best-effort background evaluation demand.
 
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use crate::core::Value;
 use crate::runtime::RuntimeValueRoot;
@@ -8,13 +8,13 @@ use crate::runtime::RuntimeValueRoot;
 use super::super::EvaluationDemandState;
 use super::deferred::promote_deferred_wait_locked;
 use super::{
-    EvaluationSessionId, EvaluationWorkCoordinator, EvaluationWorkId, SettlementObligations,
+    ClaimedDemandSession, EvaluationWorkCoordinator, EvaluationWorkId, SettlementObligations,
     WakeRegistration, WorkControl, WorkCoordinatorState, WorkDependency, WorkKind, WorkRecord,
     WorkState, demand_session_is_closed, prune_closed_session_registration,
 };
 
 pub(super) struct SparkDemand {
-    session: Arc<EvaluationDemandState>,
+    session: Weak<EvaluationDemandState>,
     value: RuntimeValueRoot,
 }
 
@@ -25,18 +25,27 @@ pub(crate) struct SparkWork {
 
 pub(crate) struct ClaimedSparkWork {
     pub(super) id: EvaluationWorkId,
-    pub(super) demand_session: EvaluationSessionId,
+    pub(super) session: ClaimedDemandSession,
     pub(super) demand: SparkDemand,
     pub(super) prior_dependency: Option<WorkDependency>,
 }
 
 impl ClaimedSparkWork {
     pub(crate) fn demand_session(&self) -> Arc<EvaluationDemandState> {
-        self.demand.session.clone()
+        self.session.demand()
     }
 
     pub(crate) fn value(&self) -> &RuntimeValueRoot {
         &self.demand.value
+    }
+
+    pub(crate) fn assert_runtime(&self, runtime: crate::runtime::EvaluationRuntimeId) {
+        self.session.assert_runtime(runtime);
+        assert_eq!(
+            self.value().runtime_id(),
+            runtime,
+            "spark value must match its claimed demand session runtime"
+        );
     }
 }
 
@@ -69,7 +78,7 @@ impl EvaluationWorkCoordinator {
         debug_assert_eq!(session.values.runtime_id(), self.runtime);
         let id = EvaluationWorkId(self.ids.evaluation_work());
         let demand = SparkDemand {
-            session: session.clone(),
+            session: Arc::downgrade(&session),
             value: RuntimeValueRoot::new(&session.values, value),
         };
         let mutation = self.admission.mutation_guard();
@@ -169,7 +178,7 @@ impl EvaluationWorkCoordinator {
                 return;
             };
             assert_eq!(record.id, claimed.id);
-            assert_eq!(record.demand_session, claimed.demand_session);
+            assert_eq!(record.demand_session, claimed.session.id());
             assert!(matches!(record.state, WorkState::Running));
             let close_requested = record.control.close_reason.is_some();
 
@@ -316,15 +325,31 @@ pub(super) fn queue_spark(state: &mut WorkCoordinatorState, id: EvaluationWorkId
     }
 }
 
-pub(super) fn claim_ready_spark(state: &mut WorkCoordinatorState) -> Option<ClaimedSparkWork> {
+pub(super) fn claim_ready_spark(
+    state: &mut WorkCoordinatorState,
+    runtime: crate::runtime::EvaluationRuntimeId,
+) -> Option<ClaimedSparkWork> {
     while let Some(id) = state.ready_sparks.pop_front() {
         state.ready_spark_set.remove(&id);
-        let Some(record) = state.work.get_mut(&id) else {
+        let Some(record) = state.work.get(&id) else {
             continue;
         };
         if !matches!(record.state, WorkState::Queued) {
             continue;
         }
+        let demand_session = record.demand_session;
+        let session = ClaimedDemandSession::registered(state, demand_session, runtime)?;
+        if !spark_work(record)
+            .demand
+            .as_ref()
+            .is_some_and(|demand| Weak::ptr_eq(&demand.session, &Arc::downgrade(&session.demand())))
+        {
+            return None;
+        }
+        let record = state
+            .work
+            .get_mut(&id)
+            .expect("claimable spark work must remain registered");
         record.state = WorkState::Running;
         let spark = spark_work_mut(record);
         let demand = spark
@@ -334,7 +359,7 @@ pub(super) fn claim_ready_spark(state: &mut WorkCoordinatorState) -> Option<Clai
         let prior_dependency = spark.dependency.take();
         return Some(ClaimedSparkWork {
             id,
-            demand_session: record.demand_session,
+            session,
             demand,
             prior_dependency,
         });

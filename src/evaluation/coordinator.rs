@@ -6,10 +6,8 @@ use std::num::NonZeroU64;
 use std::sync::{Arc, Condvar, Mutex, Weak};
 
 #[cfg(test)]
-use crate::core::CoreValueFactory;
-#[cfg(test)]
 use crate::core::LazyValue;
-use crate::core::{PromiseCell, PromiseId, PromisedValue};
+use crate::core::{CoreValueFactory, PromiseCell, PromiseId, PromisedValue};
 #[cfg(test)]
 use crate::runtime::RuntimeValueRoot;
 use crate::runtime::{
@@ -351,6 +349,53 @@ struct WorkRecord {
     kind: WorkKind,
 }
 
+/// Temporary strong route from one detached work claim to its demand domain.
+///
+/// The coordinator registry remains weak. A claim upgrades that registry only
+/// while its machine or operation is detached, so later scheduler admission
+/// has one authoritative source for the matching value domain without adding
+/// another durable coordinator-to-domain edge.
+pub(super) struct ClaimedDemandSession {
+    demand: Arc<EvaluationDemandState>,
+}
+
+impl ClaimedDemandSession {
+    fn registered(
+        state: &WorkCoordinatorState,
+        session: EvaluationSessionId,
+        runtime: EvaluationRuntimeId,
+    ) -> Option<Self> {
+        let demand = state.demand_sessions.get(&session)?.upgrade()?;
+        if demand.is_closed() {
+            return None;
+        }
+        if demand.id != session || demand.values.runtime_id() != runtime {
+            return None;
+        }
+        Some(Self { demand })
+    }
+
+    pub(in crate::evaluation) fn id(&self) -> EvaluationSessionId {
+        self.demand.id
+    }
+
+    pub(in crate::evaluation) fn demand(&self) -> Arc<EvaluationDemandState> {
+        self.demand.clone()
+    }
+
+    pub(in crate::evaluation) fn values(&self) -> &CoreValueFactory {
+        &self.demand.values
+    }
+
+    pub(in crate::evaluation) fn assert_runtime(&self, runtime: EvaluationRuntimeId) {
+        assert_eq!(
+            self.values().runtime_id(),
+            runtime,
+            "claimed demand session must match the polling coordinator runtime"
+        );
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ObservationRegistration {
     wake: WakeRegistration,
@@ -360,6 +405,15 @@ struct ObservationRegistration {
 pub(super) enum ClaimedTaskWork {
     Reflection(ClaimedReflectionWork),
     Deferred(ClaimedDeferredWork),
+}
+
+impl ClaimedTaskWork {
+    pub(in crate::evaluation) fn demand(&self) -> &ClaimedDemandSession {
+        match self {
+            Self::Reflection(work) => &work.demand,
+            Self::Deferred(work) => &work.demand,
+        }
+    }
 }
 
 pub(super) struct SessionClosureWork {
@@ -397,7 +451,15 @@ impl Drop for SessionClosureWork {
 
 impl ClaimedClientDemand {
     pub(super) fn poll(&mut self) -> ClientDemandPoll {
-        let context = super::EvalContext::for_client_demand(self.demand.clone());
+        assert_eq!(
+            self.operation
+                .as_ref()
+                .expect("claimed client demand must retain its operation")
+                .runtime_id(),
+            self.demand.values().runtime_id(),
+            "client-demand operation must match its claimed demand session"
+        );
+        let context = super::EvalContext::for_client_demand(self.demand.demand());
         let operation = self
             .operation
             .as_mut()
@@ -873,21 +935,23 @@ impl EvaluationWorkCoordinator {
             let had_ready_task = !state.ready_tasks.is_empty();
             let had_ready_spark = !state.ready_sparks.is_empty();
             let had_ready_client = !state.ready_client_demands.is_empty();
-            let selection = claim_ready_client_demand(&mut state)
+            let selection = claim_ready_client_demand(&mut state, self.runtime)
                 .map(CoordinatorSelection::ClientDemand)
                 .unwrap_or_else(|| {
                     if state.prefer_spark {
-                        claim_ready_spark(&mut state)
+                        claim_ready_spark(&mut state, self.runtime)
                             .map(CoordinatorSelection::Spark)
                             .or_else(|| {
-                                claim_ready_task(&mut state, None).map(CoordinatorSelection::Task)
+                                claim_ready_task(&mut state, self.runtime, None)
+                                    .map(CoordinatorSelection::Task)
                             })
                             .unwrap_or(CoordinatorSelection::None)
                     } else {
-                        claim_ready_task(&mut state, None)
+                        claim_ready_task(&mut state, self.runtime, None)
                             .map(CoordinatorSelection::Task)
                             .or_else(|| {
-                                claim_ready_spark(&mut state).map(CoordinatorSelection::Spark)
+                                claim_ready_spark(&mut state, self.runtime)
+                                    .map(CoordinatorSelection::Spark)
                             })
                             .unwrap_or(CoordinatorSelection::None)
                     }
@@ -928,9 +992,11 @@ impl EvaluationWorkCoordinator {
             let initial_generation = state.work_generation;
             let had_ready_task = !state.ready_tasks.is_empty();
             let had_ready_client = !state.ready_client_demands.is_empty();
-            let selection = claim_ready_client_demand(&mut state)
+            let selection = claim_ready_client_demand(&mut state, self.runtime)
                 .map(CoordinatorSelection::ClientDemand)
-                .or_else(|| claim_ready_task(&mut state, None).map(CoordinatorSelection::Task))
+                .or_else(|| {
+                    claim_ready_task(&mut state, self.runtime, None).map(CoordinatorSelection::Task)
+                })
                 .unwrap_or(CoordinatorSelection::None);
             if !matches!(selection, CoordinatorSelection::None)
                 || had_ready_task
@@ -1011,7 +1077,7 @@ impl EvaluationWorkCoordinator {
                 .state
                 .lock()
                 .expect("evaluation work coordinator was poisoned");
-            let claimed = claim_ready_task(&mut state, Some(session));
+            let claimed = claim_ready_task(&mut state, self.runtime, Some(session));
             if claimed.is_some() {
                 state.work_generation = state.work_generation.wrapping_add(1);
             }
@@ -1041,10 +1107,9 @@ impl EvaluationWorkCoordinator {
                 .or_else(|| state.deferred.by_task.get(&task))
                 .copied()?;
             let work = match state.work.get(&id)?.kind {
-                WorkKind::Reflection(_) => claim_reflection_task(&mut state, id),
-                WorkKind::Deferred(_) => {
-                    claim_deferred(&mut state, id, false).map(ClaimedTaskWork::Deferred)
-                }
+                WorkKind::Reflection(_) => claim_reflection_task(&mut state, self.runtime, id),
+                WorkKind::Deferred(_) => claim_deferred(&mut state, self.runtime, id, false)
+                    .map(ClaimedTaskWork::Deferred),
                 WorkKind::Spark(_) | WorkKind::ClientDemand(_) => None,
             }?;
             state.work_generation = state.work_generation.wrapping_add(1);
@@ -1794,6 +1859,7 @@ fn remove_ready_task(state: &mut WorkCoordinatorState, id: EvaluationWorkId) {
 
 fn claim_ready_task(
     state: &mut WorkCoordinatorState,
+    runtime: EvaluationRuntimeId,
     session: Option<EvaluationSessionId>,
 ) -> Option<ClaimedTaskWork> {
     loop {
@@ -1823,8 +1889,10 @@ fn claim_ready_task(
             continue;
         };
         let claimed = match &record.kind {
-            WorkKind::Reflection(_) => claim_reflection_task(state, id),
-            WorkKind::Deferred(_) => claim_deferred(state, id, true).map(ClaimedTaskWork::Deferred),
+            WorkKind::Reflection(_) => claim_reflection_task(state, runtime, id),
+            WorkKind::Deferred(_) => {
+                claim_deferred(state, runtime, id, true).map(ClaimedTaskWork::Deferred)
+            }
             WorkKind::Spark(_) | WorkKind::ClientDemand(_) => None,
         };
         if let Some(claimed) = claimed {
@@ -1835,9 +1903,10 @@ fn claim_ready_task(
 
 fn claim_reflection_task(
     state: &mut WorkCoordinatorState,
+    runtime: EvaluationRuntimeId,
     id: EvaluationWorkId,
 ) -> Option<ClaimedTaskWork> {
-    claim_reflection(state, id).map(ClaimedTaskWork::Reflection)
+    claim_reflection(state, runtime, id).map(ClaimedTaskWork::Reflection)
 }
 
 fn demand_session_is_closed(state: &WorkCoordinatorState, session: EvaluationSessionId) -> bool {

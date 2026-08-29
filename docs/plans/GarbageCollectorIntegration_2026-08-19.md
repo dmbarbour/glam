@@ -1,7 +1,7 @@
 # Glam GC Integration Plan — 2026-08-19
 
-Status: in progress; Phases I0 through I2 and checkpoint I3A.1 are complete.
-Phase I3 is in progress. Collector Gate G1 passed on 2026-08-25.
+Status: in progress; Phases I0 through I2 and checkpoints I3A.1-I3A.2 are
+complete. Phase I3 is in progress. Collector Gate G1 passed on 2026-08-25.
 The remaining integration work follows the completed owner-matrix,
 stable-ledger, and low-risk checkpoint corrections from the integration
 review.
@@ -29,6 +29,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I2C | complete | nested scoped access and mechanically checked production compatibility-access inventory |
 | I2 | complete | opaque public-root contract, runtime-authorized observation, access inventory, and post-I2 review |
 | I3A.1 | complete | lifetime-bound runtime/evaluator access and mutator-free poll-context prototype |
+| I3A.2 | complete | weak parked demand routes and checked temporary claim-owned domain access |
 | I3 | in progress | bounded evaluator/worker mutator regions |
 | I4 | pending | core trace vocabulary and leaf policy |
 | I4.0 | pending | managed-family destruction admission contract |
@@ -649,6 +650,30 @@ poll keeps its existing session resources alive, an unclaimed record does not,
 and a mismatched demand session is rejected before machine execution. Existing
 claim/release and shutdown suites remain semantic regressions. Production
 remains `NoAuto`.
+
+Completed 2026-08-28. Every reflection, deferred, client-demand, and spark
+claim now carries `ClaimedDemandSession`, obtained by upgrading the
+coordinator's weak demand registry before the work payload is detached. The
+upgrade validates the indexed session identity and coordinator runtime; poll
+adapters assert the same runtime again outside coordinator locks before
+machine or operation execution. A malformed registration is rejected without
+panicking under and poisoning the coordinator mutex.
+
+Parked `SparkDemand` and `ClientDemandWork` now retain weak session routes;
+their claim is the only new strong demand lease. Reflection and deferred work
+already carry arbitrary opaque machines, and those machines may independently
+contain an authorized strong `EvalContext` lease under I1B. This checkpoint
+does not rewrite those internals before I3A.3 changes the poll contract:
+"an unclaimed record does not" therefore means that the coordinator envelope
+and domain-routing mechanism add no strong lease beyond semantic values or
+contexts deliberately stored by the machine itself.
+
+Forced regressions verify exact routing when two same-runtime sessions compete,
+reject a registered same-session route backed by another runtime before its
+machine is polled, prove an unclaimed spark cannot retain its demand domain,
+and prove a detached spark claim keeps that domain alive across owner closure
+until release. Existing coordinator and evaluator lifecycle suites remain
+green. Production still uses `NoAuto` and opens no mutator in this checkpoint.
 
 ### Phase I3A.3 — Scheduler-Owned Poll Orchestration
 

@@ -8,12 +8,12 @@ use crate::runtime::{EvaluationRuntimeId, RuntimeMutationAuthority};
 use super::super::{EvaluationDemandState, EvaluationFailure, EvaluationTaskBlock};
 use super::deferred::promote_deferred_wait_locked;
 use super::{
-    EvaluationExitBlock, EvaluationSessionId, EvaluationTaskId, EvaluationTaskMachine,
-    EvaluationTaskStatus, EvaluationWaitToken, EvaluationWorkCoordinator, EvaluationWorkId,
-    ExitIntent, ObservationRegistration, ProducerSettlementObligation, RuntimeFailureLedger,
-    SettlementObligations, TaskFailureLedger, TaskStatusPublisher, WakeRegistration,
-    WorkCloseReason, WorkControl, WorkCoordinatorState, WorkDependency, WorkKind, WorkRecord,
-    WorkState, demand_session_is_closed, prune_closed_session_registration,
+    ClaimedDemandSession, EvaluationExitBlock, EvaluationSessionId, EvaluationTaskId,
+    EvaluationTaskMachine, EvaluationTaskStatus, EvaluationWaitToken, EvaluationWorkCoordinator,
+    EvaluationWorkId, ExitIntent, ObservationRegistration, ProducerSettlementObligation,
+    RuntimeFailureLedger, SettlementObligations, TaskFailureLedger, TaskStatusPublisher,
+    WakeRegistration, WorkCloseReason, WorkControl, WorkCoordinatorState, WorkDependency, WorkKind,
+    WorkRecord, WorkState, demand_session_is_closed, prune_closed_session_registration,
     publish_task_block_locked, queue_task, remove_ready_task,
 };
 
@@ -440,10 +440,11 @@ impl EvaluationWorkCoordinator {
         let ClaimedReflectionWork {
             id,
             task,
-            demand_session,
+            demand,
             prior_block,
             mut machine,
         } = claimed;
+        let demand_session = demand.id();
         let mutation = self.admission.mutation_guard();
         let (mut release, exact_subscription) = {
             let mut state = self
@@ -684,7 +685,7 @@ pub(super) struct ReflectionIndexes {
 pub(in crate::evaluation) struct ClaimedReflectionWork {
     pub(super) id: EvaluationWorkId,
     pub(super) task: EvaluationTaskId,
-    pub(super) demand_session: EvaluationSessionId,
+    pub(super) demand: ClaimedDemandSession,
     pub(super) prior_block: Option<EvaluationTaskBlock>,
     pub(super) machine: Option<Box<dyn EvaluationTaskMachine>>,
 }
@@ -845,9 +846,12 @@ pub(super) fn remove_ready_reflection(state: &mut WorkCoordinatorState, id: Eval
 
 pub(super) fn claim_reflection(
     state: &mut WorkCoordinatorState,
+    runtime: EvaluationRuntimeId,
     id: EvaluationWorkId,
 ) -> Option<ClaimedReflectionWork> {
-    let (task, demand_session, prior_block, machine) = {
+    let demand_session = state.work.get(&id)?.demand_session;
+    let demand = ClaimedDemandSession::registered(state, demand_session, runtime)?;
+    let (task, prior_block, machine) = {
         let record = state.work.get_mut(&id)?;
         if !matches!(record.kind, WorkKind::Reflection(_))
             || !matches!(record.state, WorkState::Queued)
@@ -855,11 +859,9 @@ pub(super) fn claim_reflection(
             return None;
         }
         record.state = WorkState::Running;
-        let demand_session = record.demand_session;
         let reflection = reflection_work_mut(record);
         (
             reflection.task,
-            demand_session,
             reflection.block.take(),
             reflection
                 .machine
@@ -872,7 +874,7 @@ pub(super) fn claim_reflection(
     Some(ClaimedReflectionWork {
         id,
         task,
-        demand_session,
+        demand,
         prior_block,
         machine: Some(machine),
     })
