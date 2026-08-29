@@ -186,7 +186,7 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/reflection/protocol.rs",
-        [2, 1, 3, 0, 0, 0],
+        [2, 1, 2, 0, 0, 0],
         "task-host evaluation, results, and failures",
         "I3D.2 interpreter boundary; I4F.1 task roots"
     ),

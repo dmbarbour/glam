@@ -4892,13 +4892,21 @@ fn reflection_gate_reserves_inside_and_activates_outside_scope() {
 fn concurrent_reflection_gate_observers_activate_once() {
     let (owner, observer, _executor) = same_runtime_contexts();
     let builds = Arc::new(AtomicUsize::new(0));
+    let launcher = Arc::new(FixtureTaskLauncher {
+        terminal: FixtureTaskTerminal::Complete(unit_value()),
+        builds: builds.clone(),
+        result_policies: Arc::new(Mutex::new(Vec::new())),
+    });
+    // These focused bare sessions intentionally own separate unsealed default
+    // profiles. Seal both with the same launcher so whichever session wins the
+    // reservation race exercises activation rather than the bare-session
+    // dormant fallback.
     owner
-        .install_reflection_launcher(Arc::new(FixtureTaskLauncher {
-            terminal: FixtureTaskTerminal::Complete(unit_value()),
-            builds: builds.clone(),
-            result_policies: Arc::new(Mutex::new(Vec::new())),
-        }))
-        .expect("fresh test session should accept its reflection launcher");
+        .install_reflection_launcher(launcher.clone())
+        .expect("fresh owner session should accept its reflection launcher");
+    observer
+        .install_reflection_launcher(launcher)
+        .expect("fresh observer session should accept the same reflection launcher");
     let computation = reflection_computation(&Value::reflection_task_result(owner.values(), n(0)));
     let start = Arc::new(Barrier::new(3));
 

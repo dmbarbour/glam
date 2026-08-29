@@ -500,7 +500,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
 
         for _ in 0..steps {
             let work = self.execution.work.clone();
-            match self.step(work) {
+            match self.step(context, work) {
                 Ok(MachineStep::Continue(work)) => self.execution.work = work,
                 Ok(MachineStep::Blocked(blocked)) => {
                     self.blocked = Some(blocked);
@@ -533,12 +533,16 @@ impl<S: TaskSpecialization> EffectTask<S> {
         EffectTaskPoll::Yielded
     }
 
-    fn step(&mut self, work: MachineWork<S>) -> Result<MachineStep<S>, TaskHalt> {
+    fn step(
+        &mut self,
+        context: &EvaluationPollContext,
+        work: MachineWork<S>,
+    ) -> Result<MachineStep<S>, TaskHalt> {
         match work {
             MachineWork::Drive {
                 branch,
                 scope_depth,
-            } => self.drive_step(branch, scope_depth),
+            } => self.drive_step(context, branch, scope_depth),
             MachineWork::Deliver {
                 value,
                 branch,
@@ -565,6 +569,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
 
     fn drive_step(
         &mut self,
+        context: &EvaluationPollContext,
         mut branch: Branch<S>,
         scope_depth: usize,
     ) -> Result<MachineStep<S>, TaskHalt> {
@@ -1015,6 +1020,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     arguments,
                     &mut RequestContext {
                         eval_context: &self.eval_context,
+                        poll_context: context,
                         host: &self.host,
                         transaction: branch.transaction.as_mut(),
                         activity: &mut activity,

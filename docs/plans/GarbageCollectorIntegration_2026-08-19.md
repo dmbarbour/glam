@@ -1322,29 +1322,88 @@ reflection fixtures remain in force. Production remains `NoAuto`.
 
 ### Phase I3D.2 — Effect Evaluation and Interpreter Phases
 
+This phase is partitioned because callback authority, machine-state ownership,
+and control fusion have distinct failure modes. The unfused machine remains
+the reference semantics throughout; no checkpoint combines this work with net
+claims or import loading.
+
+#### Phase I3D.2a — Bounded Interpreter Evaluation Service
+
+- Thread the admitted `EvaluationPollContext` to specialized-request dispatch
+  without opening a poll-wide evaluator scope.
+- Permit an interpreter callback to request evaluation explicitly through a
+  private bounded service on `RequestContext`. Each request opens and closes
+  its own callback-free evaluator scope, roots its WHNF result before leaving
+  that scope, and returns the existing owned public `EvaluatedValue` view.
+  The callback never receives or retains a mutator or evaluator carrier.
+- Keep `TaskHost::{snapshot, commit}` and
+  `TaskSpecialization::handle_request` outside every evaluator scope. Do not
+  alter request parsing, delivery, transactions, or branch control here.
+
+Verification: forced callback probes for `TaskHost::{snapshot, commit}` and
+`TaskSpecialization::handle_request` can request collection successfully,
+while a specialized handler can explicitly evaluate a lazy argument and keep
+the owned result after that bounded call. Production remains `NoAuto`.
+
+I3D.2a completed 2026-08-29. `EffectTask::poll_with_context` now threads its
+admitted poll authority only to the drive substep which dispatches a
+specialized request; it does not open a poll-wide evaluator region.
+`RequestContext::evaluate` re-enters through that authority, reduces the
+requested value to WHNF, and roots the result before the evaluator carrier is
+finished. The public handler receives the same owned `EvaluatedValue` API as
+before and cannot obtain either the carrier or its scoped managed access.
+
+`effect_interpreter_callbacks_do_not_inherit_evaluator_mutators` forces the
+specialized handler and both host transaction callbacks to request collection.
+Its handler explicitly evaluates a lazy concatenation, carries the result
+through a cut transaction, and returns it after commit. All three callbacks
+therefore demonstrate mutator-free entry, while the returned value demonstrates
+the bounded re-entry path. Existing reflection-machine coverage remains in
+force. Production remains `NoAuto`.
+
+#### Phase I3D.2b — Explicit Effect-Machine Phases
+
 - Refactor `EffectTask` so a monadic step has explicit phases: evaluate and
   parse the next request in a callback-free evaluator scope; root request data
   which must leave that scope; interpret it with no inherited mutator; then
   enter a later evaluator scope to deliver the result or apply its
   continuation.
-- Permit an interpreter callback to request evaluation explicitly through the
-  bounded evaluator service. Such a request opens its own scope and returns an
-  owned result; the callback never receives or retains the mutator itself.
+- Replace the remaining direct-compatibility evaluator calls in request
+  decoding, continuation application, and delivery with the admitted bounded
+  service. Durable `MachineWork` and branch state retain only owned/runtime-
+  rooted values; no evaluator carrier or scoped access enters machine state.
+
+Verification: phase-latched tests observe request parsing, interpreter entry,
+and continuation delivery in order; callbacks continue to collect; blocked
+evaluation resumes without retaining scoped authority. Production remains
+`NoAuto`.
+
+#### Phase I3D.2c — Reference Path and Standard-Effect Fusion
+
+- Add a test-only forced-unfused mode and make that phase boundary the
+  reference semantics.
 - Fuse a standard request with adjacent evaluator work only when a pure runner
   could implement it as a deterministic transformation of branch-local state
   and control. The initial candidates are `.r`, `.seq`, `.alt`, `.fail`,
   `.cut`, task-local state, and callback-free reset/shift/fix control. Shared
   heap/volume state, task operations, logging, reflection, and every
   specialized request remain interpreter boundaries.
-- Make the unfused phase boundary the reference semantics. Fusion must preserve
-  alternative rollback, retry observations, continuation order, and the same
-  rooted values as the unfused path.
+- Fusion must preserve alternative rollback, retry observations, continuation
+  order, and exactly the owned values retained by the unfused path.
 
-Verification: callback probes for `TaskHost::{snapshot, commit}` and
-`TaskSpecialization::handle_request` observe no active mutator. Run each fused
-standard family against a forced-unfused test mode and compare results,
-failures, branch order, retry state, and task-local state. An admission counter
-may demonstrate reduced scope churn but is not a semantic assertion.
+Verification: run each fused standard family against forced-unfused execution
+and compare results, permanent failures, branch order, retry state, task-local
+state, and retained roots. An admission counter may demonstrate reduced scope
+churn but is not a semantic assertion. Production remains `NoAuto`.
+
+#### Phase I3D.2d — Closure and Boundary Audit
+
+- Audit every `EffectTask` evaluation call and interpreter callback against
+  the explicit phase model. Remove the temporary direct-compatibility seams
+  assigned to this phase and document any deliberately unfused family.
+- Run the callback and equivalence matrices under forced scheduling and close
+  the phase only when machine state contains no scoped evaluator authority.
+
 Production remains `NoAuto`.
 
 ### Phase I3D.3 — Interaction-Net Claim and Contention Discipline

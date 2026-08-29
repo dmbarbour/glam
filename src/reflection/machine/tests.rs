@@ -86,6 +86,7 @@ enum TestRequest {
     ReadLog,
     WriteStderr,
     Alternatives,
+    Evaluate,
 }
 
 #[derive(Clone)]
@@ -136,6 +137,12 @@ impl TaskSpecialization for TestEffects {
                     0,
                     TestRequest::Alternatives,
                 ),
+                EffectRequestSpec::new(
+                    "evaluate",
+                    ["reflection_test", "request", "evaluate"],
+                    1,
+                    TestRequest::Evaluate,
+                ),
             ])
             .collect()
     }
@@ -146,6 +153,9 @@ impl TaskSpecialization for TestEffects {
         arguments: Vec<PublicValue>,
         context: &mut RequestContext<'_, Self>,
     ) -> Result<RequestResult, TaskHalt> {
+        context
+            .host()
+            .probe_callback_boundary(CallbackProbeKind::Specialization);
         match request {
             TestRequest::Reflection(request) => {
                 handle_reflection_request(request, arguments, context)
@@ -174,6 +184,14 @@ impl TaskSpecialization for TestEffects {
                     Value::binary_from_text("second"),
                 ),
             ])),
+            TestRequest::Evaluate => {
+                let [value]: [PublicValue; 1] = arguments
+                    .try_into()
+                    .map_err(|_| TaskHalt::new("test evaluate request received the wrong arity"))?;
+                Ok(RequestResult::Return(
+                    context.evaluate(&value)?.into_value(),
+                ))
+            }
         }
     }
 }
@@ -247,7 +265,16 @@ struct TestHostState {
     wake_diagnostic: Option<Diagnostic>,
     wake_heap: Option<PublicValue>,
     wait_count: usize,
+    callback_probe: bool,
+    callback_probe_counts: [usize; 3],
     closed: bool,
+}
+
+#[derive(Clone, Copy)]
+enum CallbackProbeKind {
+    Snapshot = 0,
+    Commit = 1,
+    Specialization = 2,
 }
 
 impl Default for TestHostState {
@@ -264,6 +291,8 @@ impl Default for TestHostState {
             wake_diagnostic: None,
             wake_heap: None,
             wait_count: 0,
+            callback_probe: false,
+            callback_probe_counts: [0; 3],
             closed: false,
         }
     }
@@ -311,6 +340,35 @@ impl TestHost {
                 ..TestHostState::default()
             })),
         }
+    }
+
+    fn with_callback_probe(values: CoreValueFactory) -> Self {
+        Self {
+            reasoning_session: None,
+            state: Arc::new(Mutex::new(TestHostState {
+                store: ReflectionStore::new(values, Arc::new(ExactConflictAnalysis)),
+                callback_probe: true,
+                ..TestHostState::default()
+            })),
+        }
+    }
+
+    fn probe_callback_boundary(&self, kind: CallbackProbeKind) {
+        let values = {
+            let mut state = self.state.lock().unwrap();
+            if !state.callback_probe {
+                return;
+            }
+            state.callback_probe_counts[kind as usize] += 1;
+            state.store.values().clone()
+        };
+        values
+            .collect_managed_for_test()
+            .expect("effect interpreter callback must not inherit a mutator");
+    }
+
+    fn callback_probe_count(&self, kind: CallbackProbeKind) -> usize {
+        self.state.lock().unwrap().callback_probe_counts[kind as usize]
     }
 
     fn stderr(&self) -> Vec<Bytes> {
@@ -460,6 +518,7 @@ impl ReflectionQueryWriter for TestQueryWriter {
 
 impl TaskHost<TestEffects> for TestHost {
     fn snapshot(&self) -> HostSnapshot<TestEffects> {
+        self.probe_callback_boundary(CallbackProbeKind::Snapshot);
         let state = self.state.lock().unwrap();
         HostSnapshot::new(
             state.generation,
@@ -472,6 +531,7 @@ impl TaskHost<TestEffects> for TestHost {
     }
 
     fn commit(&self, commit: TaskCommit<TestEffects>) -> CommitResult {
+        self.probe_callback_boundary(CallbackProbeKind::Commit);
         let (store, snapshot, journal) = commit.into_parts();
         {
             let mut state = self.state.lock().unwrap();
@@ -816,6 +876,27 @@ fn specialized_requests_can_resume_each_ordered_alternative() {
         .map(|value| assembler.to_binary(value).unwrap())
         .collect::<Vec<_>>();
     assert_eq!(values, [b"first result".as_slice(), b"second result"]);
+}
+
+#[test]
+fn effect_interpreter_callbacks_do_not_inherit_evaluator_mutators() {
+    let (assembler, effect) = compile_effect(
+        ".cut (.evaluate (\"left\" ++ \"right\") >>= (\\value -> (.heap.set ['value] value) =>> .r value))",
+    );
+    let host = Arc::new(TestHost::with_callback_probe(assembler.core_values()));
+
+    let TaskOutcome::Complete(value) = run_log_test(&assembler, &effect, host.clone()).unwrap()
+    else {
+        panic!("bounded interpreter evaluation should complete")
+    };
+
+    assert_eq!(
+        assembler.to_binary(&value).unwrap(),
+        b"leftright".as_slice()
+    );
+    assert!(host.callback_probe_count(CallbackProbeKind::Snapshot) > 0);
+    assert!(host.callback_probe_count(CallbackProbeKind::Commit) > 0);
+    assert!(host.callback_probe_count(CallbackProbeKind::Specialization) > 0);
 }
 
 #[test]

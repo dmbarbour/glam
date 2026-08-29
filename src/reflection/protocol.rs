@@ -15,7 +15,7 @@ use crate::core::{Dict, EvaluationFailure, EvaluationHalt, Key, List, Value};
 use crate::core_net::CoreWaitToken;
 use crate::diagnostic::Severity;
 use crate::eval;
-use crate::evaluation::{EvalContext, EvaluationWaitToken};
+use crate::evaluation::{EvalContext, EvaluationPollContext, EvaluationWaitToken};
 
 /// One additional effect constructor contributed by a task specialization.
 pub struct EffectRequestSpec<R> {
@@ -472,6 +472,7 @@ impl<S: TaskSpecialization> Transaction<S> {
 /// Restricted access to the host and current transaction for extra effects.
 pub struct RequestContext<'a, S: TaskSpecialization> {
     pub(super) eval_context: &'a EvalContext,
+    pub(super) poll_context: &'a EvaluationPollContext,
     pub(super) host: &'a Arc<S::Host>,
     pub(super) transaction: Option<&'a mut Transaction<S>>,
     pub(super) activity: &'a mut RequestActivity,
@@ -494,12 +495,17 @@ impl<'a, S: TaskSpecialization> RequestContext<'a, S> {
                 "effect request value belongs to another runtime",
             ));
         }
-        let value =
-            eval::eval_value(self.eval_context, value.as_core()).map_err(task_eval_error)?;
+        let value = self
+            .poll_context
+            .evaluate(self.eval_context, |evaluator| {
+                eval::eval_value_in(evaluator, value.as_core())
+                    .map(|value| evaluator.root_value(value))
+            })
+            .map_err(task_eval_error)?;
         let values = Values::from_core_factory(self.eval_context.values().clone());
         Ok(EvaluatedValue::from_whnf(
             &values,
-            PublicValue::from_core(self.eval_context.values(), value),
+            PublicValue::from_runtime_root(value),
         ))
     }
 
