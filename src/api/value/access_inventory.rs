@@ -96,7 +96,7 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/api/evaluator.rs",
-        [4, 0, 5, 0, 0, 0],
+        [3, 0, 4, 0, 0, 0],
         "WHNF demand, reflection inspection, and owned extraction",
         "I3B.1 scoped evaluation; I4F.2 public facade switch"
     ),
@@ -108,7 +108,7 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/api/value.rs",
-        [20, 21, 0, 2, 1, 1],
+        [8, 3, 0, 1, 1, 1],
         "constructors, composite validation, observers, extraction, and net data",
         "I3B.1 scoped construction/extraction; I4F.2 public facade switch"
     ),

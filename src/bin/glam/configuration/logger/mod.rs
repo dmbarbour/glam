@@ -45,7 +45,13 @@ pub(crate) fn start_logger(
         })
         .and_then(|selected| assembler.evaluator().eval(&selected))
     {
-        Ok(logger) if logger.array_items().is_some_and(|items| items.is_empty()) => None,
+        Ok(logger)
+            if logger
+                .array_items(&values)
+                .is_ok_and(|items| items.is_some_and(|items| items.is_empty())) =>
+        {
+            None
+        }
         Ok(logger) => Some(logger.into_value()),
         Err(error) => {
             let diagnostic = error

@@ -41,6 +41,9 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I3B.1c.4 | complete | scoped object and pure conditional/list-effect construction |
 | I3B.1c.5 | complete | scoped pure annotations and source-latched durable builtin seams |
 | I3B.1c | complete | ordinary builtin cluster migration |
+| I3B.1d.1 | complete | scoped public value construction and nested helper reuse |
+| I3B.1d.2 | complete | matching-runtime owned evaluated-value extraction |
+| I3B.1d.3 | complete | public construction/extraction closure audit |
 | I3B.1 | in progress | scoped construction and core evaluator migration |
 | I3 | in progress | bounded evaluator/worker mutator regions |
 | I4 | pending | core trace vocabulary and leaf policy |
@@ -895,6 +898,23 @@ Implementation checkpoints:
    batch nested helpers under one admission where practical, and make
    `EvaluatedValue` extraction borrow managed data only inside a matching
    scope while returning owned bytes/scalars/collections.
+   The concrete checkpoints are:
+   - **I3B.1d.1 — Scoped public construction.** Add one private
+     runtime-qualified construction carrier beneath `Values`, route immediate
+     and composite constructors through it, and make nested helpers call the
+     already-admitted carrier instead of reopening the runtime. User callbacks
+     and durable resolver/net state retain only `Values` or roots, never the
+     scoped carrier.
+   - **I3B.1d.2 — Matching-runtime owned extraction.** Keep
+     `EvaluatedValue` as only the WHNF witness. Require a borrowed `Values`
+     service for scalar, binary, and strict-array extraction; validate the
+     exact runtime before inspection, borrow only inside one scoped access,
+     and return owned `Bytes`, scalars, strings, or public roots.
+   - **I3B.1d.3 — Closure and verification.** Latch the single construction
+     entry, nested helper reuse, foreign-runtime failures, and owned-result
+     lifetime. Audit public construction/extraction compatibility escapes and
+     update current architecture and ownership records without claiming the
+     I4F.2 managed-root representation early.
 5. **I3B.1e — Inventory closure and verification.** Latch every evaluator
    function which may allocate or inspect managed data, every deliberate
    compatibility entry, and every I3D/I3E boundary. Run the recursive
@@ -997,6 +1017,41 @@ and the test-only binary-extraction wrapper was classified explicitly. Claimed
 annotation, focused metadata/annotation, source-inventory, Clippy, and full
 suite checks pass without semantic changes. This closes the ordinary builtin
 cluster; production remains `NoAuto`.
+
+I3B.1d.1 completed 2026-08-29. Every immediate and composite `Values`
+constructor now enters through one private lifetime-bound `ScopedValues`
+carrier. Nested path, annotation, and application helpers reuse that carrier
+rather than recursively invoking public constructors; public net-building
+callbacks retain only durable `Values` and open one bounded region for each
+data insertion. Composite construction clones the compatibility core payload
+inside the matching scope instead of consuming public roots through
+`into_core`. The compatibility inventory records four fewer borrowed escapes
+and eighteen fewer owned escapes in `api/value.rs`. A focused fixture proves
+recursive construction has one active outer mutator and releases it on return;
+the complete API unit suite and strict Clippy pass. No public semantics or
+collection policy changed, and production remains `NoAuto`.
+
+I3B.1d.2 completed 2026-08-29. `EvaluatedValue` remains only an outer-WHNF
+witness: binary, scalar, canonical-number-text, and strict-array extraction
+now require a borrowed matching `Values` service. Each operation validates
+runtime provenance and inspects the compatibility payload only inside one
+bounded runtime-value access region. Binary and text views return owned
+`Bytes`/`String`; strict arrays return cloned public roots. Effect-token
+resolution follows the same fallible authority boundary, so a token from a
+different runtime is an error rather than an apparent domain miss. Output
+adapters, configured effects, logging, rendering, and public fixtures retain
+or obtain their runtime service explicitly.
+
+I3B.1d.3 completed 2026-08-29. The compatibility inventory was deliberately
+allowed to fail, then relatched at 198 occurrences after public construction
+and extraction removed eleven more facade/evaluator escapes. Dedicated
+fixtures cover one nested construction admission, foreign composite rejection,
+foreign extraction authority, effect-token provenance, and owned bytes/text
+surviving teardown of every source handle. Current architecture and ownership
+records now state that the public WHNF witness is not observation authority.
+Focused tests, the full suite, formatting, and strict Clippy pass; production
+still uses compatibility `RuntimeValueRoot` storage and remains `NoAuto` until
+the I4F.2 representation switch.
 
 - Introduce the scoped evaluator view selected in I3A.1 and migrate the
   strongly connected evaluator call graph rooted at `eval_value`. Persistent

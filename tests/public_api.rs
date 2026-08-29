@@ -50,11 +50,11 @@ fn evaluated_value(assembler: &Assembler, value: &Value) -> Result<Value, glam::
 }
 
 fn binary_value(assembler: &Assembler, value: Value) -> Result<Bytes, glam::Error> {
-    let binary = assembler.values().anno_binary(value)?;
+    let values = assembler.values();
+    let binary = values.anno_binary(value)?;
     evaluate(assembler, &binary).and_then(|binary| {
         binary
-            .as_bytes()
-            .map(Bytes::copy_from_slice)
+            .as_bytes(&values)?
             .ok_or_else(|| glam::Error::new("value did not evaluate to binary data"))
     })
 }
@@ -166,17 +166,18 @@ fn absolute_path_text(path: impl AsRef<Path>) -> String {
 }
 
 fn diagnostic_contexts(assembler: &Assembler, diagnostic: &Diagnostic) -> Vec<Value> {
+    let values = assembler.values();
     let contexts = required_access(assembler, diagnostic.emission(), "msg.context")
         .expect("structured evaluation failure should define msg.context");
-    let array = assembler
-        .values()
+    let array = values
         .anno_array(contexts)
         .expect("diagnostic context array should construct");
     assembler
         .evaluator()
         .eval(&array)
         .expect("diagnostic contexts should form a list")
-        .array_items()
+        .array_items(&values)
+        .expect("array extraction should use the matching runtime")
         .expect("array annotation should produce a strict value array")
 }
 
@@ -243,8 +244,10 @@ fn public_values_construct_semantic_access_and_annotations() {
     assert_eq!(
         evaluate(&assembler, &annotated)
             .expect("binary annotation should evaluate")
-            .as_bytes(),
-        Some(b"B".as_slice())
+            .as_bytes(&values)
+            .unwrap()
+            .as_deref(),
+        Some(b"B".as_slice()),
     );
 }
 
@@ -356,7 +359,8 @@ fn public_promise_resolver_completes_a_cloneable_consumer() {
     assert_eq!(
         evaluate(&assembler, &cloned)
             .expect("the cloned consumer should observe completion")
-            .as_i64(),
+            .as_i64(&values)
+            .unwrap(),
         Some(42)
     );
 }
@@ -429,7 +433,8 @@ fn public_promise_resolver_preserves_structured_failures() {
                 .expect("the structured diagnostic should retain its ad hoc field"),
         )
         .expect("detail should evaluate")
-        .as_i64(),
+        .as_i64(&values)
+        .unwrap(),
         Some(7)
     );
     assert_eq!(
@@ -497,6 +502,7 @@ fn public_promise_completion_resumes_blocked_reasoning_in_its_session() {
 #[test]
 fn public_reasoning_report_exposes_retryable_blocked_errors() {
     let assembler = Assembler::default();
+    let values = assembler.values();
     let module = assembler
         .module(["blocked_error"])
         .script(
@@ -530,7 +536,8 @@ fn public_reasoning_report_exposes_retryable_blocked_errors() {
                 .expect("the retryable diagnostic should retain ad hoc fields"),
         )
         .expect("diagnostic detail should evaluate")
-        .as_i64(),
+        .as_i64(&values)
+        .unwrap(),
         Some(7)
     );
     let projected = blocked
@@ -545,7 +552,8 @@ fn public_reasoning_report_exposes_retryable_blocked_errors() {
                 .expect("the projected diagnostic should retain ad hoc fields"),
         )
         .expect("projected diagnostic detail should evaluate")
-        .as_i64(),
+        .as_i64(&values)
+        .unwrap(),
         Some(7)
     );
 
@@ -640,7 +648,10 @@ fn protected_volume_rewrite_uses_the_commit_time_value() {
 
     let final_value = volume.revoke().unwrap();
     assert_eq!(
-        evaluate(&assembler, &final_value).unwrap().as_i64(),
+        evaluate(&assembler, &final_value)
+            .unwrap()
+            .as_i64(&values)
+            .unwrap(),
         Some(2)
     );
 }
@@ -923,7 +934,8 @@ fn diagnostic_value_updates_preserve_structured_evaluation_failures() {
                 .expect("diagnostic update failure should retain ad hoc fields"),
         )
         .expect("diagnostic detail should evaluate")
-        .as_i64(),
+        .as_i64(&values)
+        .unwrap(),
         Some(9)
     );
     let contexts = diagnostic_contexts(&assembler, &diagnostic);
@@ -948,12 +960,23 @@ fn public_reflection_inspects_container_structure_and_atom_identity() {
         .evaluator()
         .eval(&array)
         .expect("array annotation should evaluate")
-        .array_items()
+        .array_items(&values)
+        .unwrap()
         .expect("strict array should enumerate values");
-    assert_eq!(evaluate(&assembler, &items[0]).unwrap().as_i64(), Some(1));
     assert_eq!(
-        evaluate(&assembler, &items[1]).unwrap().as_bytes(),
-        Some(b"two".as_slice())
+        evaluate(&assembler, &items[0])
+            .unwrap()
+            .as_i64(&values)
+            .unwrap(),
+        Some(1)
+    );
+    assert_eq!(
+        evaluate(&assembler, &items[1])
+            .unwrap()
+            .as_bytes(&values)
+            .unwrap()
+            .as_deref(),
+        Some(b"two".as_slice()),
     );
 
     let entries = reflection
@@ -962,7 +985,13 @@ fn public_reflection_inspects_container_structure_and_atom_identity() {
     let [(key, value)] = entries.as_slice() else {
         panic!("the singleton record should have one reflected entry");
     };
-    assert_eq!(evaluate(&assembler, value).unwrap().as_i64(), Some(7));
+    assert_eq!(
+        evaluate(&assembler, value)
+            .unwrap()
+            .as_i64(&values)
+            .unwrap(),
+        Some(7)
+    );
     assert_eq!(
         binary_value(
             &assembler,
@@ -1057,7 +1086,8 @@ fn semantic_path_lookup_leaves_required_and_fallback_policy_to_glam_helpers() {
                 .expect("present path access should construct"),
         )
         .expect("present value should evaluate")
-        .as_i64(),
+        .as_i64(&values)
+        .unwrap(),
         Some(1)
     );
     assert!(
@@ -1467,7 +1497,8 @@ fn repeated_source_compilations_have_distinct_invocations() {
                 .expect("diagnostic should identify its compilation invocation"),
         )
         .expect("compilation invocation should evaluate")
-        .as_i64()
+        .as_i64(&assembler.values())
+        .unwrap()
         .expect("small invocation ID should fit i64")
     };
     assert_ne!(
@@ -1619,25 +1650,73 @@ fn public_values_convert_numbers_without_exposing_big_number_types() {
         .expect("value evaluator should build");
     let integer = values.integer(-42);
     let integer = evaluate(&assembler, &integer).unwrap();
-    assert_eq!(integer.as_i64(), Some(-42));
-    assert_eq!(integer.as_rational_i64(), Some((-42, 1)));
-    assert_eq!(integer.as_f64(), Some(-42.0));
-    assert_eq!(integer.number_text().as_deref(), Some("-42"));
+    assert_eq!(integer.as_i64(&values).unwrap(), Some(-42));
+    assert_eq!(integer.as_rational_i64(&values).unwrap(), Some((-42, 1)));
+    assert_eq!(integer.as_f64(&values).unwrap(), Some(-42.0));
+    assert_eq!(
+        integer.number_text(&values).unwrap().as_deref(),
+        Some("-42")
+    );
 
     let ratio = values
         .number_from_text("-6/4")
         .expect("exact rational should parse");
     let ratio = evaluate(&assembler, &ratio).unwrap();
-    assert_eq!(ratio.number_text().as_deref(), Some("-3/2"));
-    assert_eq!(ratio.as_rational_i64(), Some((-3, 2)));
-    assert_eq!(ratio.as_i64(), None);
-    assert_eq!(ratio.as_f64(), Some(-1.5));
+    assert_eq!(ratio.number_text(&values).unwrap().as_deref(), Some("-3/2"));
+    assert_eq!(ratio.as_rational_i64(&values).unwrap(), Some((-3, 2)));
+    assert_eq!(ratio.as_i64(&values).unwrap(), None);
+    assert_eq!(ratio.as_f64(&values).unwrap(), Some(-1.5));
     assert_eq!(values.rational(1, 0), None);
 
     assert_eq!(values.number_from_f64(1.5), values.rational(3, 2));
     assert_eq!(values.number_from_f64(f64::NAN), None);
     assert_eq!(values.number_from_f64(f64::INFINITY), None);
     assert!(values.number_from_text("1/0").is_err());
+}
+
+#[test]
+fn owned_extraction_survives_mutator_exit() {
+    let runtime = EvaluationRuntime::new(0).expect("value runtime should build");
+    let values = runtime.values();
+    let assembler = Assembler::builder()
+        .evaluation_runtime(runtime.clone())
+        .build()
+        .expect("value evaluator should build");
+
+    let binary = evaluate(&assembler, &values.bytes(Bytes::from_static(b"owned"))).unwrap();
+    let number = evaluate(
+        &assembler,
+        &values
+            .number_from_text("123456789012345678901234567890")
+            .unwrap(),
+    )
+    .unwrap();
+    let array = values
+        .anno_array(list(&values, [values.integer(1), values.integer(2)]))
+        .and_then(|array| evaluate(&assembler, &array))
+        .unwrap();
+
+    let bytes = binary.as_bytes(&values).unwrap().unwrap();
+    let number_text = number.number_text(&values).unwrap().unwrap();
+    let items = array.array_items(&values).unwrap().unwrap();
+    assert_eq!(items.len(), 2);
+
+    let foreign = EvaluationRuntime::new(0).expect("foreign runtime should build");
+    let foreign_values = foreign.values();
+    assert!(binary.as_bytes(&foreign_values).is_err());
+    assert!(number.number_text(&foreign_values).is_err());
+    assert!(array.array_items(&foreign_values).is_err());
+
+    drop(items);
+    drop(array);
+    drop(number);
+    drop(binary);
+    drop(assembler);
+    drop(values);
+    drop(runtime);
+
+    assert_eq!(bytes, Bytes::from_static(b"owned"));
+    assert_eq!(number_text, "123456789012345678901234567890");
 }
 
 #[test]
@@ -1661,7 +1740,8 @@ fn assembler_applies_and_evaluates_functions() {
     assert_eq!(
         evaluate(&assembler, &sum)
             .expect("application should evaluate")
-            .as_i64(),
+            .as_i64(&values)
+            .unwrap(),
         Some(42)
     );
 }

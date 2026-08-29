@@ -515,7 +515,7 @@ fn write_path(
     let (snapshot, journal) = transaction.parts();
     let handle = snapshot
         .path_tokens
-        .resolve(&handle)
+        .resolve(&handle)?
         .ok_or_else(|| TaskHalt::new("CLI path writer requires a path handle"))?;
     let path = snapshot
         .invocation
@@ -597,9 +597,10 @@ fn write_worker_count(
     let [count]: [Value; 1] = arguments.try_into().map_err(|_| {
         TaskHalt::new("`.write.worker_count` received the wrong number of arguments")
     })?;
+    let values = context.values();
     let count = context
         .evaluate(&count)?
-        .as_u64()
+        .as_u64(&values)?
         .and_then(|count| usize::try_from(count).ok())
         .ok_or_else(|| {
             TaskHalt::new("`.write.worker_count` requires a supported non-negative integer")
@@ -625,10 +626,11 @@ fn text_value(
     request: &str,
 ) -> Result<String, TaskHalt> {
     let value = context.evaluate(&value)?;
+    let values = context.values();
     let bytes = value
-        .as_bytes()
+        .as_bytes(&values)?
         .ok_or_else(|| TaskHalt::new(format!("{request} requires text")))?;
-    String::from_utf8(bytes.to_vec())
+    String::from_utf8(bytes.into())
         .map_err(|_| TaskHalt::new(format!("{request} requires UTF-8 text")))
 }
 

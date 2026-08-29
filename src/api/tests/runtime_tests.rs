@@ -909,6 +909,7 @@ fn output_journaling_preserves_lazy_payload_until_decoder_demand() {
         )),
     );
     let decoder = assembler.clone();
+    let decoder_values = decoder.values();
     let delivered = Arc::new(Mutex::new(Vec::new()));
     let delivered_values = delivered.clone();
     let endpoint = runtime
@@ -917,7 +918,7 @@ fn output_journaling_preserves_lazy_payload_until_decoder_demand() {
                 decoder
                     .evaluator()
                     .eval(&value)?
-                    .as_i64()
+                    .as_i64(&decoder_values)?
                     .ok_or_else(|| Error::new("integer output expected"))
             },
             move |value| {

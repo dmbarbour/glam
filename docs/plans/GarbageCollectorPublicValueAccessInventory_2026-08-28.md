@@ -28,20 +28,22 @@ more conservative than the production build alone.
 
 ## Baseline
 
-The 24 inventoried modules contain 231 compatibility occurrences:
+The 24 inventoried modules contain 198 compatibility occurrences after
+I3B.1d.1 moved public construction behind `ScopedValues` and I3B.1d.2 moved
+public evaluated-value extraction behind matching runtime authority:
 
 | Operation family | Count |
 | --- | ---: |
-| borrowed `as_core()` projection | 81 |
-| owned `into_core()` projection | 52 |
-| `Value`/`PublicValue::from_core` construction | 80 |
-| `Value::from_runtime` construction, including facade-local `Self` delegation | 7 |
+| borrowed `as_core()` projection | 68 |
+| owned `into_core()` projection | 34 |
+| `Value`/`PublicValue::from_core` construction | 79 |
+| `Value::from_runtime` construction, including facade-local `Self` delegation | 6 |
 | `RuntimeValueRoot::new` construction | 8 |
 | `RuntimeValueRoot::from_runtime` construction | 3 |
 
 | Area | Modules | Occurrences | Migration owner |
 | --- | ---: | ---: | --- |
-| Public API, assembly, diagnostics, errors, evaluation, readiness | 6 | 93 | I3B.1 and I3E.1-I3E.3 scoped operations; I4F.1 durable roots; I4F.2 facade switch |
+| Public API, assembly, diagnostics, errors, evaluation, readiness | 6 | 60 | I3B.1 and I3E.1-I3E.3 scoped operations; I4F.1 durable roots; I4F.2 facade switch |
 | Core compatibility bridge | 1 | 2 | I4A-I4E exact shell, then I4F.2 |
 | Core interaction-net construction | 1 | 10 | I3D.3-I3D.4 scoped net access; I4F.1 outcomes; I8 managed net |
 | Evaluation access, sessions, pump, executor, coordinator task/spark | 6 | 12 | I3A.3-I3A.4, I3B.2, and I3C.1-I3C.2; I4F.1 durable outcomes |
@@ -82,5 +84,11 @@ and checkpoint assignments behind this grouped summary.
 - The post-I2 audit extended the `from_runtime` family to facade-local
   `Self::from_runtime` delegation. Before its baseline was updated, the test
   reported the existing `src/api/value.rs` count as two rather than one.
+- I3B.1d.1 deliberately tripped the inventory after routing public
+  construction through `ScopedValues`; the relatched baseline removed four
+  borrowed and eighteen owned projections from `src/api/value.rs`.
+- I3B.1d.2 deliberately tripped the same inventory after moving evaluation
+  and extraction through matching `Values` authority. The new baseline removes
+  nine borrowed/construction escapes and two evaluator conversion escapes.
 - The existing public-value suite remains the compatibility behavior oracle
   until I4F.2.

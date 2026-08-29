@@ -2,6 +2,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::Path;
 
+use bytes::Bytes;
 use glam::{Assembler, Error, EvaluatedValue, Value};
 
 use super::{
@@ -34,8 +35,10 @@ impl TestValueFacade for Assembler {
 }
 
 impl TestEvaluated<'_> {
-    fn as_binary(&self) -> Option<&[u8]> {
-        self.value.as_bytes()
+    fn as_binary(&self) -> Option<Bytes> {
+        self.value
+            .as_bytes(&self.assembler.values())
+            .expect("test value should belong to its assembler")
     }
 
     fn into_value(self) -> Value {
@@ -50,7 +53,7 @@ impl TestEvaluated<'_> {
                 [values.integer(1), self.value.as_value().clone()],
             )
             .and_then(|value| self.assembler.evaluator().eval(&value))
-            .is_ok_and(|value| value.as_i64() == Some(1))
+            .is_ok_and(|value| value.as_i64(&values).is_ok_and(|value| value == Some(1)))
     }
 }
 
@@ -554,7 +557,8 @@ fn explained_cli_cases_render_furthest_parse_context() {
         assembler
             .get(error.explanations()[0].value(), "usage")
             .expect("usage should be readable")
-            .as_binary(),
+            .as_binary()
+            .as_deref(),
         Some(b"build FILE".as_slice())
     );
     assert!(
@@ -610,14 +614,16 @@ fn nested_cli_cases_attach_context_to_completion_candidates() {
         assembler
             .get(explanations[0].value(), "summary")
             .expect("outer summary should be readable")
-            .as_binary(),
+            .as_binary()
+            .as_deref(),
         Some(b"Build commands".as_slice())
     );
     assert_eq!(
         assembler
             .get(explanations[1].value(), "summary")
             .expect("inner summary should be readable")
-            .as_binary(),
+            .as_binary()
+            .as_deref(),
         Some(b"Build one input".as_slice())
     );
 }
@@ -655,7 +661,8 @@ fn explained_cli_cases_attach_context_to_completion_expectations() {
         assembler
             .get(expectation.explanations()[0].value(), "summary")
             .expect("summary should be readable")
-            .as_binary(),
+            .as_binary()
+            .as_deref(),
         Some(b"Name the output".as_slice())
     );
 }
@@ -968,7 +975,8 @@ fn configured_cli_rejects_nonunit_unconsumed_and_ambiguous_results() {
             .anno_array(contexts.into_value())
             .and_then(|array| assembler.evaluator().eval(&array))
             .expect("configured CLI contexts should be a list")
-            .array_items()
+            .array_items(&assembler.values())
+            .expect("context array should belong to the CLI assembler")
             .expect("array annotation should produce strict context items");
         assert_eq!(
             assembler
@@ -979,7 +987,8 @@ fn configured_cli_rejects_nonunit_unconsumed_and_ambiguous_results() {
                     "conf.entry",
                 )
                 .expect("configured CLI frame should identify its entry")
-                .as_binary(),
+                .as_binary()
+                .as_deref(),
             Some(b"cli".as_slice())
         );
     }

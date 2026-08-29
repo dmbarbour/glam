@@ -77,7 +77,12 @@ fn external_effect_specialization_uses_only_public_embedding_apis() {
                     .value()
                     .expect("echo branch should complete successfully");
                 assert_eq!(
-                    assembler.evaluator().eval(result).unwrap().as_i64(),
+                    assembler
+                        .evaluator()
+                        .eval(result)
+                        .unwrap()
+                        .as_i64(&assembler.values())
+                        .unwrap(),
                     Some(42)
                 );
                 break;

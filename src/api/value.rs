@@ -13,6 +13,7 @@ use super::error::net_build_error;
 use crate::core::Value as CoreValue;
 use crate::core::{
     Builtin, CoreValueFactory, Dict, EvaluationFailure, Key, LazyValue, List, PromisedValue,
+    RuntimeValueAccess,
 };
 use crate::core_net::{CoreDataKey, CoreSpecialization};
 use crate::interaction_net::{NetBuilder as CoreNetBuilder, Port as CorePort};
@@ -23,6 +24,51 @@ use crate::runtime::{EvaluationRuntimeId, RuntimeValueRoot};
 mod access_inventory;
 #[cfg(test)]
 mod prototype;
+#[cfg(test)]
+mod scoped_construction_tests {
+    use super::*;
+    use crate::runtime::{RuntimeIds, allocate_evaluation_runtime_id};
+    use glam_gc::CollectionError;
+
+    fn values() -> Values {
+        Values::from_core_factory(CoreValueFactory::new(
+            allocate_evaluation_runtime_id(),
+            RuntimeIds::new(),
+        ))
+    }
+
+    #[test]
+    fn recursive_construction_reuses_one_mutator() {
+        let values = values();
+
+        let constructed = values.with_access(|access| {
+            assert!(matches!(
+                values.core.collect_managed_for_test(),
+                Err(CollectionError::ActiveMutator)
+            ));
+            let target = access.wrap(CoreValue::Number(Number::integer(42)));
+            let annotation = access.atom_from_text("array");
+            let annotated = access
+                .anno(&annotation, &target)
+                .expect("nested annotation construction should succeed");
+            let key = access.atom_from_text("member");
+            let selected = access
+                .access(&annotated, &key)
+                .expect("nested access construction should succeed");
+            assert!(matches!(
+                values.core.collect_managed_for_test(),
+                Err(CollectionError::ActiveMutator)
+            ));
+            selected
+        });
+
+        assert_eq!(constructed.runtime_id(), values.runtime_id());
+        values
+            .core
+            .collect_managed_for_test()
+            .expect("the one outer construction region must release its mutator");
+    }
+}
 
 /// An assembly-time value rooted in exactly one [`EvaluationRuntime`].
 ///
@@ -35,7 +81,8 @@ pub struct Value(pub(super) RuntimeValueRoot);
 ///
 /// Nested dictionary members, list elements, function results, and other
 /// contained values may remain lazy. Converting this witness back to [`Value`]
-/// discards only the static outer-WHNF guarantee.
+/// discards only the static outer-WHNF guarantee. Observation requires a
+/// borrowed matching [`Values`] service; this witness is not runtime authority.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EvaluatedValue(Value);
 
@@ -48,6 +95,16 @@ pub struct EvaluatedValue(Value);
 pub struct Values {
     pub(super) runtime: EvaluationRuntimeId,
     pub(super) core: CoreValueFactory,
+}
+
+/// One bounded, runtime-qualified public-value construction region.
+///
+/// This carrier is private and lifetime-bound: public constructors may batch
+/// nested semantic helpers through it, but callbacks and durable public state
+/// retain only [`Values`] or rooted [`Value`] handles.
+struct ScopedValues<'scope> {
+    owner: &'scope Values,
+    access: RuntimeValueAccess<'scope>,
 }
 
 /// Host-owned domain for unforgeable values exchanged with one effect
@@ -126,20 +183,25 @@ where
     }
 
     /// Resolves a token only when it was issued by this exact domain.
-    pub fn resolve(&self, token: &EvaluatedValue) -> Option<Arc<T>> {
-        let CoreValue::Opaque(token) = token.as_value().as_core() else {
-            return None;
-        };
-        let token = token.downcast::<EffectToken<T>>()?;
-        if !Weak::ptr_eq(&token.domain, &Arc::downgrade(&self.state)) {
-            return None;
-        }
-        self.state
-            .payloads
-            .lock()
-            .expect("effect token domain mutex should not be poisoned")
-            .get(&token.id)
-            .cloned()
+    ///
+    /// A same-runtime value of another kind or from another token domain is a
+    /// successful miss. A value from another runtime is rejected.
+    pub fn resolve(&self, token: &EvaluatedValue) -> Result<Option<Arc<T>>, Error> {
+        token.with_core(&self.values, |value| {
+            let CoreValue::Opaque(token) = value else {
+                return None;
+            };
+            let token = token.downcast::<EffectToken<T>>()?;
+            if !Weak::ptr_eq(&token.domain, &Arc::downgrade(&self.state)) {
+                return None;
+            }
+            self.state
+                .payloads
+                .lock()
+                .expect("effect token domain mutex should not be poisoned")
+                .get(&token.id)
+                .cloned()
+        })
     }
 }
 
@@ -165,9 +227,18 @@ impl Values {
         &self.core
     }
 
+    fn with_access<R>(&self, operation: impl for<'scope> FnOnce(ScopedValues<'scope>) -> R) -> R {
+        self.core.with_runtime_value_access(|access| {
+            debug_assert!(access.belongs_to(&self.core));
+            operation(ScopedValues {
+                owner: self,
+                access,
+            })
+        })
+    }
+
     pub(super) fn wrap(&self, value: CoreValue) -> Value {
-        debug_assert_eq!(self.runtime, self.core.runtime_id());
-        Value(RuntimeValueRoot::new(&self.core, value))
+        self.with_access(|values| values.wrap(value))
     }
 
     pub(crate) fn from_core_factory(core: CoreValueFactory) -> Self {
@@ -181,53 +252,61 @@ impl Values {
         value.require_runtime(self.runtime)
     }
 
+    pub(super) fn clone_core(&self, value: &Value) -> Result<CoreValue, Error> {
+        self.with_access(|values| values.clone_core(value))
+    }
+
     /// Injects host bytes as compact binary data.
     pub fn bytes(&self, bytes: impl Into<Bytes>) -> Value {
-        self.wrap(CoreValue::Binary(bytes.into()))
+        self.with_access(|values| values.wrap(CoreValue::Binary(bytes.into())))
     }
 
     pub fn text(&self, text: impl AsRef<str>) -> Value {
-        self.wrap(CoreValue::binary_from_text(text.as_ref()))
+        self.with_access(|values| values.wrap(CoreValue::binary_from_text(text.as_ref())))
     }
 
     pub fn atom_from_text(&self, text: impl AsRef<str>) -> Value {
-        let key = Key::binary_from_text(text.as_ref());
-        self.wrap(CoreValue::Atom(crate::core::Atom::from_key(&key)))
+        self.with_access(|values| values.atom_from_text(text.as_ref()))
     }
 
     pub fn integer(&self, value: i64) -> Value {
-        self.wrap(CoreValue::Number(Number::integer(value)))
+        self.with_access(|values| values.wrap(CoreValue::Number(Number::integer(value))))
     }
 
     /// Returns Glam's cached semantic unit value `()`.
     pub fn unit(&self) -> Value {
-        self.wrap(self.core.unit())
+        self.with_access(|values| values.wrap(values.core().unit()))
     }
 
     pub fn rational(&self, numerator: i64, denominator: i64) -> Option<Value> {
-        Number::from_ratio_i64(numerator, denominator)
-            .map(|number| self.wrap(CoreValue::Number(number)))
+        self.with_access(|values| {
+            Number::from_ratio_i64(numerator, denominator)
+                .map(|number| values.wrap(CoreValue::Number(number)))
+        })
     }
 
     pub fn number_from_f64(&self, value: f64) -> Option<Value> {
-        Number::from_f64(value).map(|number| self.wrap(CoreValue::Number(number)))
+        self.with_access(|values| {
+            Number::from_f64(value).map(|number| values.wrap(CoreValue::Number(number)))
+        })
     }
 
     pub fn number_from_text(&self, text: impl AsRef<str>) -> Result<Value, Error> {
-        Number::parse(text.as_ref())
-            .map(|number| self.wrap(CoreValue::Number(number)))
-            .map_err(Error::new)
+        self.with_access(|values| {
+            Number::parse(text.as_ref())
+                .map(|number| values.wrap(CoreValue::Number(number)))
+                .map_err(Error::new)
+        })
     }
 
     pub fn list(&self, values: impl IntoIterator<Item = Value>) -> Result<Value, Error> {
-        let values = values
-            .into_iter()
-            .map(|value| {
-                self.require(&value)?;
-                Ok(value.into_core())
-            })
-            .collect::<Result<Vec<_>, Error>>()?;
-        Ok(self.wrap(CoreValue::List(List::from_values(values))))
+        self.with_access(|access| {
+            let values = values
+                .into_iter()
+                .map(|value| access.clone_core(&value))
+                .collect::<Result<Vec<_>, Error>>()?;
+            Ok(access.wrap(CoreValue::List(List::from_values(values))))
+        })
     }
 
     pub fn record<I, S>(&self, entries: I) -> Result<Value, Error>
@@ -235,32 +314,33 @@ impl Values {
         I: IntoIterator<Item = (S, Value)>,
         S: AsRef<str>,
     {
-        let mut dict = Dict::new_sync();
-        for (name, value) in entries {
-            self.require(&value)?;
-            dict = dict.insert(Key::atom_from_text(name), value.into_core());
-        }
-        Ok(self.wrap(CoreValue::Dict(dict)))
+        self.with_access(|values| {
+            let mut dict = Dict::new_sync();
+            for (name, value) in entries {
+                dict = dict.insert(Key::atom_from_text(name), values.clone_core(&value)?);
+            }
+            Ok(values.wrap(CoreValue::Dict(dict)))
+        })
     }
 
     pub fn dictionary(
         &self,
         entries: impl IntoIterator<Item = (Value, Value)>,
     ) -> Result<Value, Error> {
-        let mut dict = Dict::new_sync();
-        for (key, value) in entries {
-            self.require(&key)?;
-            self.require(&value)?;
-            let key = Key::from_value(key.as_core())
-                .ok_or_else(|| Error::new("dictionary key is not immediately keyable"))?;
-            dict = dict.insert(key, value.into_core());
-        }
-        Ok(self.wrap(CoreValue::Dict(dict)))
+        self.with_access(|values| {
+            let mut dict = Dict::new_sync();
+            for (key, value) in entries {
+                let key = Key::from_value(values.core_value(&key)?)
+                    .ok_or_else(|| Error::new("dictionary key is not immediately keyable"))?;
+                dict = dict.insert(key, values.clone_core(&value)?);
+            }
+            Ok(values.wrap(CoreValue::Dict(dict)))
+        })
     }
 
     /// Constructs Glam's immediate empty dictionary/undefined value.
     pub fn empty_dict(&self) -> Value {
-        self.wrap(CoreValue::Dict(Dict::new_sync()))
+        self.with_access(|values| values.wrap(CoreValue::Dict(Dict::new_sync())))
     }
 
     /// Constructs the ordinary lazy `base.[key]` semantic accessor.
@@ -270,15 +350,7 @@ impl Values {
     /// access semantics as `.g` source, including returning `{}` for a
     /// missing key.
     pub fn access(&self, base: &Value, key: Value) -> Result<Value, Error> {
-        self.require(base)?;
-        self.require(&key)?;
-        Ok(
-            self.wrap(CoreValue::Lazy(crate::core::LazyValue::from_access(
-                &self.core,
-                Arc::from([CoreDataKey::Index]),
-                Arc::from([base.as_core().clone(), key.into_core()]),
-            ))),
-        )
+        self.with_access(|values| values.access(base, &key))
     }
 
     /// Constructs the ordinary lazy `anno Annotation Target` semantic value.
@@ -287,13 +359,7 @@ impl Values {
     /// demanded; this method does not provide a separate host-side annotation
     /// interpreter.
     pub fn anno(&self, annotation: Value, target: Value) -> Result<Value, Error> {
-        self.require(&annotation)?;
-        self.require(&target)?;
-        Ok(self.wrap(CoreValue::builtin_call(
-            &self.core,
-            Builtin::Anno,
-            vec![annotation.into_core(), target.into_core()],
-        )))
+        self.with_access(|values| values.anno(&annotation, &target))
     }
 
     /// Constructs ordinary left-associated application without demanding the
@@ -306,22 +372,7 @@ impl Values {
         function: &Value,
         arguments: impl IntoIterator<Item = Value>,
     ) -> Result<Value, Error> {
-        self.require(function)?;
-        let arguments = arguments
-            .into_iter()
-            .map(|argument| {
-                self.require(&argument)?;
-                Ok(argument.into_core())
-            })
-            .collect::<Result<Vec<_>, Error>>()?;
-        if arguments.is_empty() {
-            return Ok(function.clone());
-        }
-        Ok(self.wrap(CoreValue::Lazy(LazyValue::from_application(
-            &self.core,
-            function.as_core().clone(),
-            Arc::from(arguments),
-        ))))
+        self.with_access(|values| values.apply(function, arguments))
     }
 
     /// Constructs successive ordinary dictionary accesses without demanding
@@ -331,16 +382,11 @@ impl Values {
         root: &Value,
         keys: impl IntoIterator<Item = Value>,
     ) -> Result<Value, Error> {
-        self.require(root)?;
-        let keys = keys
-            .into_iter()
-            .map(|key| {
-                self.require(&key)?;
-                Ok(key)
-            })
-            .collect::<Result<Vec<_>, Error>>()?;
-        keys.into_iter()
-            .try_fold(root.clone(), |value, key| self.access(&value, key))
+        self.with_access(|values| {
+            values.require(root)?;
+            keys.into_iter()
+                .try_fold(root.clone(), |value, key| values.access(&value, &key))
+        })
     }
 
     /// Constructs successive atom-key accesses from complete names.
@@ -352,68 +398,81 @@ impl Values {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        self.require(root)?;
-        names.into_iter().try_fold(root.clone(), |value, name| {
-            self.access(&value, self.atom_from_text(name))
+        self.with_access(|values| {
+            values.require(root)?;
+            names.into_iter().try_fold(root.clone(), |value, name| {
+                let key = values.atom_from_text(name.as_ref());
+                values.access(&value, &key)
+            })
         })
     }
 
     /// Constructs the ordinary `slice Start End Value` computation without
     /// demanding the list or binary value.
     pub fn list_slice(&self, value: &Value, range: Range<usize>) -> Result<Value, Error> {
-        self.require(value)?;
-        Ok(self.wrap(CoreValue::builtin_call(
-            &self.core,
-            Builtin::Slice,
-            vec![
-                CoreValue::Number(Number::from_usize(range.start)),
-                CoreValue::Number(Number::from_usize(range.end)),
-                value.as_core().clone(),
-            ],
-        )))
+        self.with_access(|values| {
+            Ok(values.wrap(CoreValue::builtin_call(
+                values.core(),
+                Builtin::Slice,
+                vec![
+                    CoreValue::Number(Number::from_usize(range.start)),
+                    CoreValue::Number(Number::from_usize(range.end)),
+                    values.clone_core(value)?,
+                ],
+            )))
+        })
     }
 
     /// Constructs `anno 'binary Value` without demanding `Value`.
     pub fn anno_binary(&self, value: Value) -> Result<Value, Error> {
-        self.anno(self.atom_from_text("binary"), value)
+        self.with_access(|values| {
+            let annotation = values.atom_from_text("binary");
+            values.anno(&annotation, &value)
+        })
     }
 
     /// Constructs `anno 'array Value` without demanding `Value`.
     pub fn anno_array(&self, value: Value) -> Result<Value, Error> {
-        self.require(&value)?;
-        if matches!(value.as_core(), CoreValue::List(list) if list.value_slice().is_some()) {
-            return Ok(value);
-        }
-        self.anno(self.atom_from_text("array"), value)
+        self.with_access(|values| {
+            if matches!(values.core_value(&value)?, CoreValue::List(list) if list.value_slice().is_some())
+            {
+                return Ok(value);
+            }
+            let annotation = values.atom_from_text("array");
+            values.anno(&annotation, &value)
+        })
     }
 
     /// Constructs `anno 'deque Value` without demanding `Value`.
     pub fn anno_deque(&self, value: Value) -> Result<Value, Error> {
-        self.anno(self.atom_from_text("deque"), value)
+        self.with_access(|values| {
+            let annotation = values.atom_from_text("deque");
+            values.anno(&annotation, &value)
+        })
     }
 
     /// Constructs an ordinary semantic singleton dictionary without
     /// demanding its key or value.
     pub fn dict_singleton(&self, key: Value, value: Value) -> Result<Value, Error> {
-        self.require(&key)?;
-        self.require(&value)?;
-        Ok(self.wrap(CoreValue::builtin_call(
-            &self.core,
-            Builtin::DictSingleton,
-            vec![key.into_core(), value.into_core()],
-        )))
+        self.with_access(|values| {
+            Ok(values.wrap(CoreValue::builtin_call(
+                values.core(),
+                Builtin::DictSingleton,
+                vec![values.clone_core(&key)?, values.clone_core(&value)?],
+            )))
+        })
     }
 
     /// Constructs ordinary hierarchical dictionary union without demanding
     /// either dictionary.
     pub fn dict_union(&self, left: Value, right: Value) -> Result<Value, Error> {
-        self.require(&left)?;
-        self.require(&right)?;
-        Ok(self.wrap(CoreValue::builtin_call(
-            &self.core,
-            Builtin::DictUnion,
-            vec![left.into_core(), right.into_core()],
-        )))
+        self.with_access(|values| {
+            Ok(values.wrap(CoreValue::builtin_call(
+                values.core(),
+                Builtin::DictUnion,
+                vec![values.clone_core(&left)?, values.clone_core(&right)?],
+            )))
+        })
     }
 
     /// Constructs an ordinary semantic dictionary path update without
@@ -424,70 +483,72 @@ impl Values {
         path: Value,
         new_value: Value,
     ) -> Result<Value, Error> {
-        self.require(&dictionary)?;
-        self.require(&path)?;
-        self.require(&new_value)?;
-        Ok(self.wrap(CoreValue::builtin_call(
-            &self.core,
-            Builtin::DictUpdate,
-            vec![
-                path.into_core(),
-                new_value.into_core(),
-                dictionary.into_core(),
-            ],
-        )))
+        self.with_access(|values| {
+            Ok(values.wrap(CoreValue::builtin_call(
+                values.core(),
+                Builtin::DictUpdate,
+                vec![
+                    values.clone_core(&path)?,
+                    values.clone_core(&new_value)?,
+                    values.clone_core(&dictionary)?,
+                ],
+            )))
+        })
     }
 
     /// Returns the cached closed Glam helper `\fallback value -> ...` which
     /// selects `fallback` exactly when `value` is logically equal to `{}`.
     pub fn defined_or_function(&self) -> Value {
-        self.wrap(crate::g_syntax::defined_or_value(&self.core))
+        self.with_access(|values| values.wrap(crate::g_syntax::defined_or_value(values.core())))
     }
 
     /// Constructs the standard failing effect without evaluating anything.
     pub fn fail_effect(&self) -> Value {
-        self.wrap(crate::g_syntax::fail_effect_value(&self.core))
+        self.with_access(|values| values.wrap(crate::g_syntax::fail_effect_value(values.core())))
     }
 
     /// Returns the cached closed Glam helper which asserts that its second
     /// argument is logically defined, using its first argument as the name in
     /// a structured failure.
     pub fn require_defined_function(&self) -> Value {
-        self.wrap(crate::g_syntax::require_defined_value(&self.core))
+        self.with_access(|values| {
+            values.wrap(crate::g_syntax::require_defined_value(values.core()))
+        })
     }
 
     pub fn empty_object(&self, name: Value) -> Result<Value, Error> {
-        self.require(&name)?;
-        let spec = CoreValue::Dict(
-            Dict::new_sync()
-                .insert(Key::atom_from_text("name"), name.into_core())
-                .insert(
-                    Key::atom_from_text("deps"),
-                    CoreValue::List(List::from_values(Vec::new())),
-                )
-                .insert(
-                    Key::atom_from_text("defs"),
-                    CoreValue::Builtin(Builtin::ObjectDefaultDefs),
-                ),
-        );
-        Ok(self.wrap(CoreValue::builtin_call(
-            &self.core,
-            Builtin::ObjectInstance,
-            vec![spec],
-        )))
+        self.with_access(|values| {
+            let spec = CoreValue::Dict(
+                Dict::new_sync()
+                    .insert(Key::atom_from_text("name"), values.clone_core(&name)?)
+                    .insert(
+                        Key::atom_from_text("deps"),
+                        CoreValue::List(List::from_values(Vec::new())),
+                    )
+                    .insert(
+                        Key::atom_from_text("defs"),
+                        CoreValue::Builtin(Builtin::ObjectDefaultDefs),
+                    ),
+            );
+            Ok(values.wrap(CoreValue::builtin_call(
+                values.core(),
+                Builtin::ObjectInstance,
+                vec![spec],
+            )))
+        })
     }
 
     pub fn after_reflection(&self, effect: Value, target: Value) -> Result<Value, Error> {
-        self.require(&effect)?;
-        self.require(&target)?;
-        let annotation = CoreValue::Dict(
-            Dict::new_sync().insert(Key::atom_from_text("refl"), effect.into_core()),
-        );
-        Ok(self.wrap(CoreValue::builtin_call(
-            &self.core,
-            Builtin::Anno,
-            vec![annotation, target.into_core()],
-        )))
+        self.with_access(|values| {
+            let annotation = CoreValue::Dict(
+                Dict::new_sync().insert(Key::atom_from_text("refl"), values.clone_core(&effect)?),
+            );
+            Ok(values.wrap(CoreValue::builtin_call(
+                values.core(),
+                Builtin::Anno,
+                vec![annotation, values.clone_core(&target)?],
+            )))
+        })
     }
 
     pub fn abstract_global_path<I, S>(&self, parts: I) -> Value
@@ -495,9 +556,82 @@ impl Values {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        self.wrap(CoreValue::Atom(crate::core::Atom::from_key(
-            &Key::abstract_global_path(parts),
+        self.with_access(|values| {
+            values.wrap(CoreValue::Atom(crate::core::Atom::from_key(
+                &Key::abstract_global_path(parts),
+            )))
+        })
+    }
+}
+
+impl ScopedValues<'_> {
+    fn core(&self) -> &CoreValueFactory {
+        self.owner.core()
+    }
+
+    fn wrap(&self, value: CoreValue) -> Value {
+        debug_assert_eq!(self.owner.runtime, self.core().runtime_id());
+        debug_assert!(self.access.belongs_to(self.core()));
+        Value(RuntimeValueRoot::new(self.core(), value))
+    }
+
+    fn require(&self, value: &Value) -> Result<(), Error> {
+        self.owner.require(value)
+    }
+
+    fn core_value<'access>(
+        &'access self,
+        value: &'access Value,
+    ) -> Result<&'access CoreValue, Error> {
+        self.require(value)?;
+        Ok(value.as_core())
+    }
+
+    fn clone_core(&self, value: &Value) -> Result<CoreValue, Error> {
+        self.core_value(value).cloned()
+    }
+
+    fn atom_from_text(&self, text: &str) -> Value {
+        let key = Key::binary_from_text(text);
+        self.wrap(CoreValue::Atom(crate::core::Atom::from_key(&key)))
+    }
+
+    fn access(&self, base: &Value, key: &Value) -> Result<Value, Error> {
+        Ok(
+            self.wrap(CoreValue::Lazy(crate::core::LazyValue::from_access(
+                self.core(),
+                Arc::from([CoreDataKey::Index]),
+                Arc::from([self.clone_core(base)?, self.clone_core(key)?]),
+            ))),
+        )
+    }
+
+    fn anno(&self, annotation: &Value, target: &Value) -> Result<Value, Error> {
+        Ok(self.wrap(CoreValue::builtin_call(
+            self.core(),
+            Builtin::Anno,
+            vec![self.clone_core(annotation)?, self.clone_core(target)?],
         )))
+    }
+
+    fn apply(
+        &self,
+        function: &Value,
+        arguments: impl IntoIterator<Item = Value>,
+    ) -> Result<Value, Error> {
+        self.require(function)?;
+        let arguments = arguments
+            .into_iter()
+            .map(|argument| self.clone_core(&argument))
+            .collect::<Result<Vec<_>, Error>>()?;
+        if arguments.is_empty() {
+            return Ok(function.clone());
+        }
+        Ok(self.wrap(CoreValue::Lazy(LazyValue::from_application(
+            self.core(),
+            self.clone_core(function)?,
+            Arc::from(arguments),
+        ))))
     }
 }
 
@@ -604,62 +738,77 @@ impl EvaluatedValue {
         self.0
     }
 
-    pub fn as_bytes(&self) -> Option<&[u8]> {
-        match self.0.as_core() {
-            CoreValue::Binary(bytes) => Some(bytes.as_ref()),
-            _ => None,
-        }
+    fn with_core<R>(
+        &self,
+        values: &Values,
+        operation: impl for<'scope> FnOnce(&'scope CoreValue) -> R,
+    ) -> Result<R, Error> {
+        values.with_access(|access| {
+            let value = access.core_value(self.as_value())?;
+            Ok(operation(value))
+        })
     }
 
-    pub fn as_i64(&self) -> Option<i64> {
-        match self.0.as_core() {
+    /// Extracts owned compact binary data under matching live runtime
+    /// authority. The returned bytes do not borrow the value domain.
+    pub fn as_bytes(&self, values: &Values) -> Result<Option<Bytes>, Error> {
+        self.with_core(values, |value| match value {
+            CoreValue::Binary(bytes) => Some(bytes.clone()),
+            _ => None,
+        })
+    }
+
+    pub fn as_i64(&self, values: &Values) -> Result<Option<i64>, Error> {
+        self.with_core(values, |value| match value {
             CoreValue::Number(number) => number.to_i64_if_integer(),
             _ => None,
-        }
+        })
     }
 
-    pub fn as_u64(&self) -> Option<u64> {
-        match self.0.as_core() {
+    pub fn as_u64(&self, values: &Values) -> Result<Option<u64>, Error> {
+        self.with_core(values, |value| match value {
             CoreValue::Number(number) => number.to_u64_if_integer(),
             _ => None,
-        }
+        })
     }
 
-    pub fn as_rational_i64(&self) -> Option<(i64, i64)> {
-        match self.0.as_core() {
+    pub fn as_rational_i64(&self, values: &Values) -> Result<Option<(i64, i64)>, Error> {
+        self.with_core(values, |value| match value {
             CoreValue::Number(number) => number.to_ratio_i64(),
             _ => None,
-        }
+        })
     }
 
     /// Converts a number lossily to a finite `f64`.
-    pub fn as_f64(&self) -> Option<f64> {
-        match self.0.as_core() {
+    pub fn as_f64(&self, values: &Values) -> Result<Option<f64>, Error> {
+        self.with_core(values, |value| match value {
             CoreValue::Number(number) => number.to_f64(),
             _ => None,
-        }
+        })
     }
 
     /// Returns canonical exact integer or `numerator/denominator` text.
-    pub fn number_text(&self) -> Option<String> {
-        match self.0.as_core() {
+    pub fn number_text(&self, values: &Values) -> Result<Option<String>, Error> {
+        self.with_core(values, |value| match value {
             CoreValue::Number(number) => Some(number.to_string()),
             _ => None,
-        }
+        })
     }
 
     /// Clones the members of one strict value-array representation without
     /// demanding any member.
-    pub fn array_items(&self) -> Option<Vec<Value>> {
-        let CoreValue::List(list) = self.0.as_core() else {
-            return None;
-        };
-        list.value_slice().map(|items| {
-            items
-                .iter()
-                .cloned()
-                .map(|item| Value::from_runtime(self.0.runtime_id(), item))
-                .collect()
+    pub fn array_items(&self, values: &Values) -> Result<Option<Vec<Value>>, Error> {
+        values.with_access(|access| {
+            let CoreValue::List(list) = access.core_value(self.as_value())? else {
+                return Ok(None);
+            };
+            Ok(list.value_slice().map(|items| {
+                items
+                    .iter()
+                    .cloned()
+                    .map(|item| access.wrap(item))
+                    .collect()
+            }))
         })
     }
 }
@@ -844,8 +993,10 @@ impl<'net> NetBuilder<'net> {
     }
 
     pub fn data(&mut self, value: Value) -> Result<NetPort<'net>, Error> {
-        self.values.require(&value)?;
-        let port = self.builder.data(value.into_core());
+        let value = self
+            .values
+            .with_access(|values| values.clone_core(&value))?;
+        let port = self.builder.data(value);
         Ok(self.port(port))
     }
 

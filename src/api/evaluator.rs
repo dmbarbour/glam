@@ -26,12 +26,12 @@ pub struct ValueEvaluator<'a> {
 impl ValueEvaluator<'_> {
     /// Demands `value` to outer weak-head normal form.
     pub fn eval(&self, value: &Value) -> Result<EvaluatedValue, Error> {
-        value.require_runtime(self.assembler.reasoning.runtime.id())?;
-        let values = self.assembler.core_values();
+        let values = self.assembler.values();
+        let value = values.clone_core(value)?;
         self.assembler
             .eval_context()
-            .evaluate_whnf(value.as_core())
-            .map(|value| EvaluatedValue::from_whnf(Value::from_core(&values, value)))
+            .evaluate_whnf(&value)
+            .map(|value| EvaluatedValue::from_whnf(values.wrap(value)))
             .map_err(|error| self.assembler.evaluation_error(error))
     }
 }

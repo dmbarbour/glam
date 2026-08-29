@@ -406,13 +406,16 @@ fn render_explanation_detail(assembler: &Assembler, explanations: &[Value]) -> S
 }
 
 fn render_explanation(assembler: &Assembler, explanation: &Value) -> String {
+    let values = assembler.values();
     let explanation = match assembler.evaluator().eval(explanation) {
         Ok(value) => value,
         Err(error) => return format!("explanation unavailable ({error})"),
     };
     if let Some(text) = explanation
-        .as_bytes()
-        .and_then(|bytes| String::from_utf8(bytes.to_vec()).ok())
+        .as_bytes(&values)
+        .ok()
+        .flatten()
+        .and_then(|bytes| String::from_utf8(bytes.into()).ok())
     {
         return text;
     }
@@ -437,6 +440,8 @@ fn explanation_field(assembler: &Assembler, explanation: &Value, field: &str) ->
     let value = values.access_names(explanation, [field]).ok()?;
     let value = assembler.evaluator().eval(&value).ok()?;
     value
-        .as_bytes()
-        .and_then(|bytes| String::from_utf8(bytes.to_vec()).ok())
+        .as_bytes(&values)
+        .ok()
+        .flatten()
+        .and_then(|bytes| String::from_utf8(bytes.into()).ok())
 }

@@ -108,8 +108,8 @@ impl TaskSpecialization for MainEffects {
                     .and_then(|binary| self.assembler.evaluator().eval(&binary))
                     .map_err(glam::reflection::TaskHalt::from)?;
                 let bytes = binary
-                    .as_bytes()
-                    .map(Bytes::copy_from_slice)
+                    .as_bytes(&values)
+                    .map_err(glam::reflection::TaskHalt::from)?
                     .ok_or_else(|| {
                         glam::reflection::TaskHalt::new(
                             "`.write_stderr` argument did not evaluate to binary data",
@@ -234,11 +234,11 @@ impl LoggerTaskHost {
             .runtime
             .output_endpoint(
                 move |value| {
+                    let values = assembler.values();
                     assembler
                         .evaluator()
                         .eval(&value)?
-                        .as_bytes()
-                        .map(Bytes::copy_from_slice)
+                        .as_bytes(&values)?
                         .ok_or_else(|| Error::new("stderr output requires binary data"))
                 },
                 |bytes: Bytes| {
