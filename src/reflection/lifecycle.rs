@@ -248,9 +248,8 @@ impl ScheduledEffectRun {
                 }
                 EvaluationWaitPoll::Complete(value) => {
                     return combine_composed_result(
-                        Ok(TaskOutcome::Complete(PublicValue::from_core(
-                            self.context.values(),
-                            value,
+                        Ok(TaskOutcome::Complete(PublicValue::from_runtime_root(
+                            *value,
                         ))),
                         children,
                     );

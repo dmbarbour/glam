@@ -1116,6 +1116,22 @@ fn scheduled_effect_wrapper_rejects_an_unrelated_poll_context() {
     let _ = machine.poll(&poll_context, 1);
 }
 
+#[test]
+fn completed_effect_root_is_not_recreated_after_scope() {
+    let source = include_str!("../machine.rs");
+    assert_eq!(
+        source
+            .matches("EvaluationMachinePoll::Complete(value.into_runtime_root())")
+            .count(),
+        2,
+        "value-returning and unit-returning scheduled effects must preserve their public roots"
+    );
+    assert!(
+        !source.contains("root_value(value.into_core())"),
+        "scheduled effect completion must not extract and recreate a root"
+    );
+}
+
 fn poll_machine_exit(
     machine: &mut dyn EvaluationTaskMachine,
     poll_context: &crate::evaluation::EvaluationPollContext,
@@ -1463,7 +1479,7 @@ fn reflection_task_launcher_returns_arbitrary_effect_result_when_requested() {
     let EvaluationWaitPoll::Complete(value) = context.poll_reflection_task(&task) else {
         panic!("the result-returning task should complete")
     };
-    assert_eq!(value, Value::Number(Number::from(42)));
+    assert_eq!(value.as_core(), &Value::Number(Number::from(42)));
 }
 
 #[test]
@@ -2031,7 +2047,7 @@ fn reflection_task_returns_a_joinable_result() {
     };
     assert_eq!(
         assembler
-            .to_binary(&PublicValue::from_core(&assembler.core_values(), value))
+            .to_binary(&PublicValue::from_runtime_root(*value))
             .unwrap(),
         b"child".as_slice()
     );
@@ -2048,6 +2064,7 @@ fn dictionary_items_are_available_to_reflection_in_key_order() {
     let EvaluationWaitPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
         panic!("dict_items task should complete");
     };
+    let value = value.into_core();
     let Value::List(items) = value else {
         panic!("dict_items should return a list");
     };
@@ -2081,9 +2098,10 @@ fn metadata_inspection_returns_hidden_values_without_forcing_them() {
         &initial,
         Arc::new(TestHost::with_values(assembler.core_values())),
     );
-    let EvaluationWaitPoll::Complete(Value::Dict(metadata)) =
-        pump_composed_test_task(&context, &task)
-    else {
+    let EvaluationWaitPoll::Complete(metadata) = pump_composed_test_task(&context, &task) else {
+        panic!("metadata inspection should return the initial hidden dictionary");
+    };
+    let Value::Dict(metadata) = metadata.into_core() else {
         panic!("metadata inspection should return the initial hidden dictionary");
     };
     assert!(metadata.is_empty());
@@ -2104,13 +2122,12 @@ fn metadata_inspection_returns_hidden_values_without_forcing_them() {
         &effect,
         Arc::new(TestHost::with_values(assembler.core_values())),
     );
-    let EvaluationWaitPoll::Complete(metadata @ Value::Lazy(_)) =
-        pump_composed_test_task(&context, &task)
-    else {
+    let EvaluationWaitPoll::Complete(metadata) = pump_composed_test_task(&context, &task) else {
         panic!("metadata inspection must not demand its hidden value");
     };
+    assert!(matches!(metadata.as_core(), Value::Lazy(_)));
     let error = assembler
-        .evaluate(&PublicValue::from_core(&assembler.core_values(), metadata))
+        .evaluate(&PublicValue::from_runtime_root(*metadata))
         .expect_err("the returned hidden failure should remain demandable");
     assert_eq!(error.to_string(), "latent metadata failure");
 }
@@ -2128,7 +2145,7 @@ fn effectful_metadata_update_observes_environment_and_commits_log_once() {
     };
     assert_eq!(
         assembler
-            .to_binary(&PublicValue::from_core(&assembler.core_values(), metadata))
+            .to_binary(&PublicValue::from_runtime_root(*metadata))
             .unwrap(),
         env!("CARGO_PKG_VERSION").as_bytes()
     );
@@ -2163,7 +2180,7 @@ fn effectful_metadata_update_retries_after_observed_state_changes() {
     };
     assert_eq!(
         assembler
-            .to_binary(&PublicValue::from_core(&assembler.core_values(), metadata))
+            .to_binary(&PublicValue::from_runtime_root(*metadata))
             .unwrap(),
         b"arrived for metadata".as_slice()
     );
@@ -2186,7 +2203,7 @@ fn metadata_inspection_mismatches_are_unobserved_effect_failures() {
         };
         assert_eq!(
             assembler
-                .to_binary(&PublicValue::from_core(&assembler.core_values(), value))
+                .to_binary(&PublicValue::from_runtime_root(*value))
                 .unwrap(),
             b"fallback".as_slice()
         );
@@ -2212,9 +2229,10 @@ fn reflection_eval_returns_a_tagged_whnf_result() {
         &effect,
         Arc::new(TestHost::with_values(assembler.core_values())),
     );
-    let EvaluationWaitPoll::Complete(Value::Dict(result)) =
-        pump_composed_test_task(&context, &task)
-    else {
+    let EvaluationWaitPoll::Complete(result) = pump_composed_test_task(&context, &task) else {
+        panic!("eval should return an ok result");
+    };
+    let Value::Dict(result) = result.into_core() else {
         panic!("eval should return an ok result");
     };
     assert_eq!(
@@ -2228,9 +2246,10 @@ fn reflection_eval_returns_a_tagged_whnf_result() {
         &nested,
         Arc::new(TestHost::with_values(assembler.core_values())),
     );
-    let EvaluationWaitPoll::Complete(Value::Dict(result)) =
-        pump_composed_test_task(&context, &task)
-    else {
+    let EvaluationWaitPoll::Complete(result) = pump_composed_test_task(&context, &task) else {
+        panic!("eval should return a tagged dictionary");
+    };
+    let Value::Dict(result) = result.into_core() else {
         panic!("eval should return a tagged dictionary");
     };
     let Some(Value::Dict(payload)) = result.get(&*keys::OK) else {
@@ -2253,7 +2272,7 @@ fn reflection_eval_returns_evaluator_errors_as_data() {
     let EvaluationWaitPoll::Complete(error) = pump_composed_test_task(&context, &task) else {
         panic!("eval should contain an evaluator error instead of failing its task");
     };
-    let error = PublicValue::from_core(&assembler.core_values(), error);
+    let error = PublicValue::from_runtime_root(*error);
     let error = assembler
         .to_binary(
             &assembler
@@ -2275,7 +2294,7 @@ fn reflection_eval_retries_terminal_lazy_dependencies() {
     };
     assert_eq!(
         assembler
-            .to_binary(&PublicValue::from_core(&assembler.core_values(), value))
+            .to_binary(&PublicValue::from_runtime_root(*value))
             .unwrap(),
         b"ready".as_slice()
     );
@@ -2287,7 +2306,7 @@ fn reflection_eval_retries_terminal_lazy_dependencies() {
     let EvaluationWaitPoll::Complete(error) = pump_composed_test_task(&context, &task) else {
         panic!("eval should convert a failed lazy dependency to err");
     };
-    let error = PublicValue::from_core(&assembler.core_values(), error);
+    let error = PublicValue::from_runtime_root(*error);
     let error = assembler
         .to_binary(
             &assembler
@@ -2358,6 +2377,7 @@ fn effect_map_runs_left_to_right_and_preserves_result_order() {
     let EvaluationWaitPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
         panic!("effect map task should complete");
     };
+    let value = value.into_core();
     let Value::List(items) = value else {
         panic!("effect map should return a list");
     };
@@ -2393,7 +2413,7 @@ fn reflection_environment_is_available_as_plain_data() {
     };
     assert_eq!(
         assembler
-            .to_binary(&PublicValue::from_core(&assembler.core_values(), version))
+            .to_binary(&PublicValue::from_runtime_root(*version))
             .unwrap(),
         env!("CARGO_PKG_VERSION").as_bytes()
     );
@@ -2411,8 +2431,11 @@ fn reflection_environment_is_available_as_plain_data() {
     let (_, arguments) = compile_effect(".env ['process,'args]");
     let (context, task) = schedule_composed_test_task(&assembler, &arguments, host.clone());
     let poll = pump_composed_test_task(&context, &task);
-    let EvaluationWaitPoll::Complete(Value::List(arguments)) = poll else {
+    let EvaluationWaitPoll::Complete(arguments) = poll else {
         panic!("process arguments should return a list, got {poll:?}")
+    };
+    let Value::List(arguments) = arguments.into_core() else {
+        panic!("process arguments should return a list")
     };
     assert_eq!(
         eval::list_to_value_items(&context, &arguments).unwrap(),
@@ -2425,10 +2448,11 @@ fn reflection_environment_is_available_as_plain_data() {
     let (_, child_environment) =
         compile_effect(".task.new (.env ['process,'args]) >>= (\\task -> .task.join task)");
     let (context, task) = schedule_composed_test_task(&assembler, &child_environment, host.clone());
-    let EvaluationWaitPoll::Complete(Value::List(arguments)) =
-        pump_composed_test_task(&context, &task)
-    else {
+    let EvaluationWaitPoll::Complete(arguments) = pump_composed_test_task(&context, &task) else {
         panic!("child reflection task should inherit its parent profile environment")
+    };
+    let Value::List(arguments) = arguments.into_core() else {
+        panic!("child reflection task should inherit a list environment")
     };
     assert_eq!(
         eval::list_to_value_items(&context, &arguments).unwrap(),
@@ -2460,7 +2484,7 @@ fn task_value_is_symmetric_with_task_error() {
     };
     assert_eq!(
         assembler
-            .to_binary(&PublicValue::from_core(&assembler.core_values(), value))
+            .to_binary(&PublicValue::from_runtime_root(*value))
             .unwrap(),
         b"result".as_slice()
     );
@@ -2478,7 +2502,7 @@ fn task_join_remains_available_after_the_child_is_terminal() {
     };
     assert_eq!(
         assembler
-            .to_binary(&PublicValue::from_core(&assembler.core_values(), value))
+            .to_binary(&PublicValue::from_runtime_root(*value))
             .unwrap(),
         b"result".as_slice()
     );
@@ -2527,7 +2551,10 @@ fn task_observers_accept_handles_from_another_same_runtime_session() {
     else {
         panic!("a same-runtime observer should read the pre-pump task status")
     };
-    assert_eq!(launched, assembler.core_values().key_value(&keys::LAUNCHED));
+    assert_eq!(
+        launched.as_core(),
+        &assembler.core_values().key_value(&keys::LAUNCHED)
+    );
     drop(launched_observer);
 
     let EvaluationSessionRun::Deadlocked(before_observation) = owner.run_until_quiescent() else {
@@ -2545,8 +2572,8 @@ fn task_observers_accept_handles_from_another_same_runtime_session() {
     else {
         panic!("same-runtime task observations should complete")
     };
-    let observed =
-        eval::eval_value(&observer, &observed).expect("task observation result should evaluate");
+    let observed = eval::eval_value(&observer, observed.as_core())
+        .expect("task observation result should evaluate");
     let Value::Dict(observed) = observed else {
         panic!("task observation fixture should return a dictionary")
     };
@@ -2606,8 +2633,8 @@ fn task_observers_accept_handles_from_another_same_runtime_session() {
         panic!("a retained same-runtime handle should remain observable after owner closure")
     };
     assert_eq!(
-        abandoned,
-        assembler.core_values().key_value(&keys::ABANDONED),
+        abandoned.as_core(),
+        &assembler.core_values().key_value(&keys::ABANDONED),
         "observer-held task handles must not keep their producer demand open"
     );
 }
@@ -2630,10 +2657,7 @@ fn task_acknowledgement_routes_across_sessions_to_the_producer_ledger() {
         "\\task -> .cut (.task.ack_error task)",
     );
     let acknowledge = assembler
-        .apply(
-            &acknowledge,
-            [PublicValue::from_core(&assembler.core_values(), handle)],
-        )
+        .apply(&acknowledge, [PublicValue::from_runtime_root(*handle)])
         .expect("non-owner task acknowledgement should apply");
     let (second_context, second_task) = schedule_composed_test_task(&assembler, &acknowledge, host);
     assert!(matches!(
@@ -2681,7 +2705,7 @@ fn task_join_accepts_same_runtime_handles_across_all_terminal_states() {
     else {
         panic!("a same-runtime observer should read the published task handles")
     };
-    let Value::Dict(handles) = eval::eval_value(&handle_reader, &handles)
+    let Value::Dict(handles) = eval::eval_value(&handle_reader, handles.as_core())
         .expect("the published task-handle dictionary should evaluate")
     else {
         panic!("the task-handle fixture should publish a dictionary")
@@ -2714,7 +2738,10 @@ fn task_join_accepts_same_runtime_handles_across_all_terminal_states() {
     else {
         panic!("a same-runtime observer should join a completed task")
     };
-    assert_eq!(complete_result, Value::binary_from_text("complete result"));
+    assert_eq!(
+        complete_result.as_core(),
+        &Value::binary_from_text("complete result")
+    );
 
     let join_failed = join(handle("failed"));
     let (failed_observer, failed_join) =
@@ -2774,7 +2801,10 @@ fn task_join_accepts_same_runtime_handles_across_all_terminal_states() {
     else {
         panic!("the same-runtime join should resume when its child completes")
     };
-    assert_eq!(pending_result, Value::binary_from_text("pending result"));
+    assert_eq!(
+        pending_result.as_core(),
+        &Value::binary_from_text("pending result")
+    );
 
     let join_abandoned = join(handle("abandoned"));
     let (abandoned_observer, abandoned_join) =
@@ -2844,7 +2874,7 @@ fn cancellation_is_transactional_and_late_cancellation_is_harmless() {
     };
     assert_eq!(
         assembler
-            .to_binary(&PublicValue::from_core(&assembler.core_values(), value))
+            .to_binary(&PublicValue::from_runtime_root(*value))
             .unwrap(),
         b"alive".as_slice()
     );
@@ -2879,10 +2909,7 @@ fn cancellation_is_transactional_and_late_cancellation_is_harmless() {
     let cancel_non_owner = assembler
         .apply(
             &cancel_non_owner,
-            [PublicValue::from_core(
-                &assembler.core_values(),
-                non_owner_handle,
-            )],
+            [PublicValue::from_runtime_root(*non_owner_handle)],
         )
         .expect("non-owner cancellation should apply");
     let (non_owner_context, non_owner_task) =
@@ -2956,7 +2983,7 @@ fn reflection_task_launch_is_buffered_until_cut_commit() {
     };
     assert_eq!(
         assembler
-            .to_binary(&PublicValue::from_core(&assembler.core_values(), value))
+            .to_binary(&PublicValue::from_runtime_root(*value))
             .unwrap(),
         b"committed".as_slice()
     );
@@ -3017,7 +3044,7 @@ fn join_propagates_task_error_and_task_error_extracts_it() {
     let EvaluationWaitPoll::Complete(value) = poll else {
         panic!("task_error should return the child task error, got {poll:?}")
     };
-    let value = PublicValue::from_core(&assembler.core_values(), value);
+    let value = PublicValue::from_runtime_root(*value);
     let text = assembler
         .to_binary(
             &assembler
@@ -3039,7 +3066,7 @@ fn acknowledged_task_failure_remains_observable_but_is_not_reported() {
     else {
         panic!("acknowledged failure should remain observable as data")
     };
-    let observation = PublicValue::from_core(&assembler.core_values(), observation);
+    let observation = PublicValue::from_runtime_root(*observation);
     let error = assembler
         .evaluate(
             &assembler
@@ -3117,7 +3144,7 @@ fn task_errors_preserve_structured_emissions_and_contexts() {
     let EvaluationWaitPoll::Complete(error) = pump_composed_test_task(&context, &task) else {
         panic!("task.error should return the child's structured failure");
     };
-    let error = PublicValue::from_core(&assembler.core_values(), error);
+    let error = PublicValue::from_runtime_root(*error);
     assert_eq!(
         assembler
             .to_binary(&assembler.get(&error, "msg.text").unwrap())
@@ -3366,7 +3393,7 @@ fn pending_task_error_is_an_effect_failure_before_it_is_a_wait() {
     };
     assert_eq!(
         assembler
-            .to_binary(&PublicValue::from_core(&assembler.core_values(), value))
+            .to_binary(&PublicValue::from_runtime_root(*value))
             .unwrap(),
         b"fallback".as_slice()
     );
@@ -3384,7 +3411,7 @@ fn spawned_tasks_inherit_the_parent_task_profile() {
     };
     assert_eq!(
         assembler
-            .to_binary(&PublicValue::from_core(&assembler.core_values(), value))
+            .to_binary(&PublicValue::from_runtime_root(*value))
             .unwrap(),
         b"done".as_slice()
     );
@@ -3802,7 +3829,10 @@ fn task_failure_propagates_one_structured_failure_to_owned_promises() {
     );
     assert_eq!(
         owner.poll_wait(&resolved_wait),
-        EvaluationWaitPoll::Complete(Value::Number(Number::integer(42)))
+        EvaluationWaitPoll::Complete(Box::new(crate::runtime::RuntimeValueRoot::new(
+            owner.values(),
+            Value::Number(Number::integer(42)),
+        )))
     );
     let counts = context.task_registry_counts();
     assert_eq!(counts.promises_active, 0);
@@ -4028,7 +4058,7 @@ fn child_tasks_start_with_fresh_local_state_and_share_heap() {
     let EvaluationWaitPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
         panic!("child task should complete")
     };
-    let value = PublicValue::from_core(&assembler.core_values(), value);
+    let value = PublicValue::from_runtime_root(*value);
     assert_eq!(
         assembler
             .evaluate(&assembler.get(&value, "local").unwrap())

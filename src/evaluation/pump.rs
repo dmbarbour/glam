@@ -608,6 +608,21 @@ impl EvaluationWorkCoordinator {
         }
     }
 
+    #[cfg(test)]
+    pub(super) fn poll_claimed_task_with_probe(
+        self: &Arc<Self>,
+        work: ClaimedTaskWork,
+        probe: impl FnOnce(&EvaluationMachinePoll),
+    ) {
+        let mut claimed = ClaimedTask::new(self.clone(), work);
+        let poll = claimed.poll(TASK_POLL_QUANTUM);
+        probe(&poll);
+        let (_, _, released) = claimed.release(poll);
+        if let Some(machine) = released {
+            machine.finish();
+        }
+    }
+
     pub(super) fn poll_claimed_client_demand(
         self: &Arc<Self>,
         mut claimed: coordinator::ClaimedClientDemand,

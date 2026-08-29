@@ -49,6 +49,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I3B.1 | complete | scoped construction and core evaluator migration |
 | I3B.2 | complete | poll/wait driver separation |
 | I3C.1 | complete | unified claimed/direct poll routing and scoped spark demand |
+| I3C.2 | complete | rooted wait observations, scoped projection, and release audit |
 | I3 | in progress | bounded evaluator/worker mutator regions |
 | I4 | pending | core trace vocabulary and leaf policy |
 | I4.0 | pending | managed-family destruction admission contract |
@@ -1238,6 +1239,37 @@ every `EvaluationMachinePoll` variant; preserve failure identity tests and add
 `completed_effect_root_is_not_recreated_after_scope` and
 `wait_completion_projection_requires_scoped_access`. Production remains
 `NoAuto`.
+
+I3C.2 completed 2026-08-29. The I3A.4 audit had already moved
+`EvaluationMachinePoll::Complete` rooting into the producing evaluator substep
+and made coordinator release publish that root directly. This checkpoint
+closed the remaining wait-observation hole: `EvaluationWaitPoll::Complete`
+now returns an owned `RuntimeValueRoot`, and only
+`EvaluatorStepContext::project_root` exposes its bare semantic value inside a
+bounded managed-access region. Deferred lazy/promise evaluation uses that
+scoped projection. Scheduled-effect lifecycle code and `.task.join` instead
+transfer the root directly into `PublicValue`, without extracting and
+recreating it. The compatibility-access inventory consequently shrank from
+198 to 195 entries.
+
+The current compatibility root embeds the still-large `core::Value`. Embedding
+it directly widened recursive evaluator frames enough to reproduce a stack
+overflow in `dictionary_tag_and_tuple_patterns_match_or_fall_through`.
+`EvaluationWaitPoll` therefore boxes only its completed-root observation and
+has a compile-time two-word size bound. The authoritative terminal record
+continues to own the root inline. I4F.2 should remove the transitional box when
+the managed root representation itself becomes pointer-sized.
+
+`every_poll_outcome_releases_managed_access_before_publication` inserts a
+test-only probe after machine poll return and before coordinator release, then
+successfully forces collection for yielded, blocked, complete, failed,
+cancelled, and exit outcomes. It also verifies runtime provenance for the two
+value-bearing variants. `wait_completion_projection_requires_scoped_access`
+latches the owned poll result and its only evaluator projection route, while
+`completed_effect_root_is_not_recreated_after_scope` source-latches both
+scheduled effect completion adapters. Existing failure-identity, parked
+machine, terminal-publication, cancellation, and destruction fixtures remain
+in force. Production remains `NoAuto`.
 
 ### Phase I3D.1 — Reflection-Gate Reservation and Activation Split
 

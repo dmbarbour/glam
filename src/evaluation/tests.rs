@@ -971,6 +971,48 @@ impl EvaluationTaskMachine for Complete {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+enum ProbePollOutcome {
+    Yielded,
+    Blocked,
+    Complete,
+    Failed,
+    Cancelled,
+    Exit,
+}
+
+struct ProbePollOutcomeMachine(ProbePollOutcome);
+
+impl EvaluationTaskMachine for ProbePollOutcomeMachine {
+    fn poll(
+        &mut self,
+        context: &crate::evaluation::EvaluationPollContext,
+        _step_budget: usize,
+    ) -> EvaluationMachinePoll {
+        match self.0 {
+            ProbePollOutcome::Yielded => EvaluationMachinePoll::Yielded,
+            ProbePollOutcome::Blocked => EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
+                dependency: None,
+                observed_epoch: Some(RuntimeObservationEpoch::from_raw(7)),
+                error: None,
+            }),
+            ProbePollOutcome::Complete => {
+                EvaluationMachinePoll::Complete(context.root_value(crate::core::keys::unit_value()))
+            }
+            ProbePollOutcome::Failed => {
+                EvaluationMachinePoll::Failed(evaluation_failure("probe failure"))
+            }
+            ProbePollOutcome::Cancelled => EvaluationMachinePoll::Cancelled,
+            ProbePollOutcome::Exit => EvaluationMachinePoll::Exit(EvaluationExitBlock {
+                intent: ExitIntent::Error(
+                    context.root_value(Value::binary_from_text("probe exit")),
+                ),
+                observed_epoch: None,
+            }),
+        }
+    }
+}
+
 struct ExitVote(EvaluationExitBlock);
 
 impl EvaluationTaskMachine for ExitVote {
@@ -1192,9 +1234,7 @@ impl EvaluationTaskMachine for Await {
                     error: None,
                 })
             }
-            EvaluationWaitPoll::Complete(value) => {
-                EvaluationMachinePoll::Complete(_context.root_value(value))
-            }
+            EvaluationWaitPoll::Complete(value) => EvaluationMachinePoll::Complete(*value),
             EvaluationWaitPoll::Failed(error) => self
                 .context
                 .lazy_failure_for_wait(&self.dependency)
@@ -1257,9 +1297,7 @@ impl EvaluationTaskMachine for AwaitCell {
                     error: None,
                 })
             }
-            EvaluationWaitPoll::Complete(value) => {
-                EvaluationMachinePoll::Complete(_context.root_value(value))
-            }
+            EvaluationWaitPoll::Complete(value) => EvaluationMachinePoll::Complete(*value),
             EvaluationWaitPoll::Failed(error) => self
                 .context
                 .lazy_failure_for_wait(dependency)
@@ -1803,6 +1841,94 @@ fn terminal_waits_retain_runtime_root_provenance() {
         context.poll_reflection_task(&task),
         EvaluationWaitPoll::Complete(_)
     ));
+}
+
+#[test]
+fn wait_completion_projection_requires_scoped_access() {
+    let context = EvalContext::standalone();
+    let task = context
+        .schedule_task(|_| Ok(Box::new(Complete)))
+        .expect("completion projection task should schedule");
+    assert_eq!(
+        context.pump_wait(task.wait(), 256),
+        EvaluationPumpOutcome::TargetReady
+    );
+    let EvaluationWaitPoll::Complete(root) = context.poll_reflection_task(&task) else {
+        panic!("completed wait should expose an owned root")
+    };
+    assert_eq!(root.runtime_id(), context.values().runtime_id());
+
+    let poll = EvaluationPollContext::for_context(&context);
+    let evaluator = poll.evaluator(&context);
+    assert_eq!(
+        evaluator.project_root(&root),
+        crate::core::keys::unit_value()
+    );
+    context
+        .values()
+        .collect_managed_for_test()
+        .expect("the poll and evaluator carriers must retain no mutator after projection");
+}
+
+#[test]
+fn every_poll_outcome_releases_managed_access_before_publication() {
+    for expected in [
+        ProbePollOutcome::Yielded,
+        ProbePollOutcome::Blocked,
+        ProbePollOutcome::Complete,
+        ProbePollOutcome::Failed,
+        ProbePollOutcome::Cancelled,
+        ProbePollOutcome::Exit,
+    ] {
+        let fixture = SameRuntimeFixture::new();
+        let context = fixture.context();
+        let coordinator = context
+            .coordinator()
+            .expect("poll-outcome fixture should retain its coordinator");
+        context
+            .schedule_task(move |_| Ok(Box::new(ProbePollOutcomeMachine(expected))))
+            .expect("poll-outcome task should schedule");
+        let coordinator::CoordinatorSelection::Task(work) = coordinator.select() else {
+            panic!("poll-outcome task should be ready")
+        };
+
+        coordinator.poll_claimed_task_with_probe(work, |poll| {
+            let matched = matches!(
+                (expected, poll),
+                (ProbePollOutcome::Yielded, EvaluationMachinePoll::Yielded)
+                    | (ProbePollOutcome::Blocked, EvaluationMachinePoll::Blocked(_))
+                    | (
+                        ProbePollOutcome::Complete,
+                        EvaluationMachinePoll::Complete(_)
+                    )
+                    | (ProbePollOutcome::Failed, EvaluationMachinePoll::Failed(_))
+                    | (
+                        ProbePollOutcome::Cancelled,
+                        EvaluationMachinePoll::Cancelled
+                    )
+                    | (ProbePollOutcome::Exit, EvaluationMachinePoll::Exit(_))
+            );
+            assert!(matched, "poll returned the wrong outcome for {expected:?}");
+            match poll {
+                EvaluationMachinePoll::Complete(root) => {
+                    assert_eq!(root.runtime_id(), context.values().runtime_id());
+                }
+                EvaluationMachinePoll::Exit(EvaluationExitBlock {
+                    intent: ExitIntent::Error(root),
+                    ..
+                }) => {
+                    assert_eq!(root.runtime_id(), context.values().runtime_id());
+                }
+                _ => {}
+            }
+            context
+                .values()
+                .collect_managed_for_test()
+                .unwrap_or_else(|error| {
+                    panic!("{expected:?} retained managed access after poll return: {error:?}")
+                });
+        });
+    }
 }
 
 #[test]
@@ -2798,7 +2924,7 @@ fn assigned_task_promise_is_removed_before_later_task_terminalization() {
     );
     assert!(matches!(
         context.poll_wait(&promise_wait),
-        EvaluationWaitPoll::Complete(value) if value == context.values().unit()
+        EvaluationWaitPoll::Complete(value) if value.as_core() == &context.values().unit()
     ));
 
     assert_eq!(task.cancel(), EvaluationTaskCancellation::Requested);
@@ -2808,7 +2934,7 @@ fn assigned_task_promise_is_removed_before_later_task_terminalization() {
     );
     assert!(matches!(
         context.poll_wait(&promise_wait),
-        EvaluationWaitPoll::Complete(value) if value == context.values().unit()
+        EvaluationWaitPoll::Complete(value) if value.as_core() == &context.values().unit()
     ));
     assert_eq!(context.task_registry_counts().promises_active, 0);
 }

@@ -376,21 +376,21 @@ pub(super) fn eval_lazy_in(
                 })
             })
             .map_err(|error| EvaluationHalt::new(error.as_ref()))?;
-        if let Some(value) = await_deferred_task(context.context(), wait, "lazy value")? {
+        if let Some(value) = await_deferred_task(context, wait, "lazy value")? {
             return Ok(value);
         }
     }
 }
 
 fn await_deferred_task(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     wait: crate::evaluation::EvaluationWaitToken,
     kind: &str,
 ) -> Result<Option<Value>, EvaluationHalt> {
-    match context.poll_wait(&wait) {
-        EvaluationWaitPoll::Complete(value) => return Ok(Some(value)),
+    match context.context().poll_wait(&wait) {
+        EvaluationWaitPoll::Complete(value) => return Ok(Some(context.project_root(&value))),
         EvaluationWaitPoll::Failed(error) => {
-            return Err(deferred_task_failure(context, &wait, error));
+            return Err(deferred_task_failure(context.context(), &wait, error));
         }
         EvaluationWaitPoll::Cancelled => {
             return Err(EvaluationHalt::new(format!(
@@ -406,12 +406,12 @@ fn await_deferred_task(
         EvaluationWaitPoll::Killed(error) => return Err(EvaluationHalt::failure(error)),
         EvaluationWaitPoll::Pending(_) => {}
     }
-    if context.runs_scheduled_task() {
-        return match context.pump_wait(&wait, 256) {
-            EvaluationPumpOutcome::TargetReady => match context.poll_wait(&wait) {
-                EvaluationWaitPoll::Complete(value) => Ok(Some(value)),
+    if context.context().runs_scheduled_task() {
+        return match context.context().pump_wait(&wait, 256) {
+            EvaluationPumpOutcome::TargetReady => match context.context().poll_wait(&wait) {
+                EvaluationWaitPoll::Complete(value) => Ok(Some(context.project_root(&value))),
                 EvaluationWaitPoll::Failed(error) => {
-                    Err(deferred_task_failure(context, &wait, error))
+                    Err(deferred_task_failure(context.context(), &wait, error))
                 }
                 EvaluationWaitPoll::Pending(wait) => {
                     Err(EvaluationHalt::blocked(CoreWaitToken(wait)))
@@ -433,10 +433,10 @@ fn await_deferred_task(
         };
     }
     loop {
-        match context.pump_wait(&wait, 256) {
+        match context.context().pump_wait(&wait, 256) {
             EvaluationPumpOutcome::TargetReady => break,
-            EvaluationPumpOutcome::Busy if context.waits_for_claimed_tasks() => {
-                context.wait_for_claimed_task(&wait);
+            EvaluationPumpOutcome::Busy if context.context().waits_for_claimed_tasks() => {
+                context.context().wait_for_claimed_task(&wait);
             }
             EvaluationPumpOutcome::Busy => {
                 return Err(EvaluationHalt::blocked(CoreWaitToken(wait)));
@@ -447,9 +447,11 @@ fn await_deferred_task(
             EvaluationPumpOutcome::BudgetExhausted => {}
         }
     }
-    match context.poll_wait(&wait) {
-        EvaluationWaitPoll::Complete(value) => Ok(Some(value)),
-        EvaluationWaitPoll::Failed(error) => Err(deferred_task_failure(context, &wait, error)),
+    match context.context().poll_wait(&wait) {
+        EvaluationWaitPoll::Complete(value) => Ok(Some(context.project_root(&value))),
+        EvaluationWaitPoll::Failed(error) => {
+            Err(deferred_task_failure(context.context(), &wait, error))
+        }
         EvaluationWaitPoll::Pending(wait) => Err(EvaluationHalt::blocked(CoreWaitToken(wait))),
         EvaluationWaitPoll::Cancelled => Err(EvaluationHalt::new(format!(
             "{kind} evaluation was cancelled"
@@ -486,7 +488,7 @@ fn produce_lazy_source_in(
             eval_computed_fixpoint_in(context, lazy, fixpoint)
         }
         LazySource::Deferred(thunk) => thunk(context.context()),
-        LazySource::ReflectionTask(task) => eval_reflection_task_source(context.context(), task),
+        LazySource::ReflectionTask(task) => eval_reflection_task_source(context, task),
         LazySource::Access { path, arguments } => {
             resolve_core_access(context.context(), arguments, path)
         }
@@ -530,7 +532,7 @@ fn eval_promised_in(
             }
             let wait = promise_wait(context.context(), promise)
                 .map_err(|error| EvaluationHalt::new(error.as_ref()))?;
-            if let Some(value) = await_deferred_task(context.context(), wait, "promised value")? {
+            if let Some(value) = await_deferred_task(context, wait, "promised value")? {
                 return Ok(value);
             }
             continue;
@@ -545,7 +547,7 @@ fn eval_promised_in(
             }
             let wait = promise_wait(context.context(), promise)
                 .map_err(|error| EvaluationHalt::new(error.as_ref()))?;
-            if let Some(value) = await_deferred_task(context.context(), wait, "promised value")? {
+            if let Some(value) = await_deferred_task(context, wait, "promised value")? {
                 return Ok(value);
             }
             continue;
@@ -555,7 +557,7 @@ fn eval_promised_in(
 }
 
 fn eval_reflection_task_source(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     computation: &crate::core::ReflectionComputation,
 ) -> Result<Value, EvaluationHalt> {
     let (context_name, cancellation_message) = match computation.completion() {
@@ -567,15 +569,15 @@ fn eval_reflection_task_source(
             ("reflection_task", "reflection result task was cancelled")
         }
     };
-    let task = computation.task(context).map_err(|error| {
+    let task = computation.task(context.context()).map_err(|error| {
         EvaluationHalt::failure(Arc::clone(error))
             .with_context(evaluation_context_frame(context_name))
     })?;
-    match context.poll_reflection_task(task) {
+    match context.context().poll_reflection_task(task) {
         EvaluationWaitPoll::Pending(wait) => Err(EvaluationHalt::blocked(CoreWaitToken(wait))),
         EvaluationWaitPoll::Complete(value) => match computation.completion() {
             crate::core::ReflectionCompletion::Gate { target } => Ok(target.clone()),
-            crate::core::ReflectionCompletion::ReturnValue => Ok(value),
+            crate::core::ReflectionCompletion::ReturnValue => Ok(context.project_root(&value)),
         },
         EvaluationWaitPoll::Failed(error) => {
             task.acknowledge_propagated_failure();

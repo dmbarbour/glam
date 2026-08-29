@@ -1175,7 +1175,10 @@ fn task_owned_fixpoint_rejects_recursive_demand_and_blocks_other_tasks() {
     assert_eq!(eval_value(&observer, &value).unwrap(), n(42));
     assert_eq!(
         session.poll_wait(&wait),
-        EvaluationWaitPoll::Complete(n(42)),
+        EvaluationWaitPoll::Complete(Box::new(crate::runtime::RuntimeValueRoot::new(
+            session.values(),
+            n(42),
+        ))),
         "the retired promise wait must preserve late terminal observation"
     );
     let counts = session.task_registry_counts();

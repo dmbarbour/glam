@@ -153,6 +153,17 @@ This is the compatibility shape before managed semantic values: I3B moves root
 construction to the evaluator-step publication boundary, and I4F.2 replaces
 the root's interior representation without reopening the scheduler boundary.
 
+Terminal wait records likewise retain `RuntimeValueRoot`. A general
+`EvaluationWaitPoll::Complete` observation receives that owned root; only
+`EvaluatorStepContext::project_root` may clone its semantic value back into a
+bounded evaluator region. Non-evaluator consumers, including scheduled effect
+lifecycle and `.task.join`, transfer the root directly into the public value
+facade. While `RuntimeValueRoot` still embeds the large compatibility `Value`,
+the poll variant boxes the observation and is compile-time limited to two
+machine words so recursive evaluator frames do not regress. The authoritative
+terminal record remains inline, and I4F.2 may remove this transitional box once
+the managed root itself is pointer-sized.
+
 Within a claimed or explicitly owner-driven poll, `EvaluatorStepContext` pairs
 the poll authority with the durable evaluator context without activating the
 collector. It is thread-bound and may survive dependency/callback

@@ -126,20 +126,14 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/evaluation/access.rs",
-        [0, 0, 0, 0, 2, 0],
-        "poll/evaluator-step compatibility root constructors at machine completion",
-        "I3A.4 outcome typing; I3B.1b scoped evaluator spine; I4F.2 managed root switch"
+        [1, 0, 0, 0, 2, 0],
+        "poll/evaluator-step completion rooting and scoped projection",
+        "I3A.4/I3C.2 outcome typing and projection; I4F.2 managed root switch"
     ),
     entry!(
         "src/evaluation/coordinator/spark.rs",
         [0, 0, 0, 0, 1, 0],
         "durable spark demand",
-        "I3A.4/I3C.2 poll outcomes; I4F.1 coordinator roots"
-    ),
-    entry!(
-        "src/evaluation/coordinator/task.rs",
-        [1, 0, 0, 0, 0, 0],
-        "task completion projection",
         "I3A.4/I3C.2 poll outcomes; I4F.1 coordinator roots"
     ),
     entry!(
@@ -150,9 +144,9 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/evaluation/session.rs",
-        [1, 1, 0, 0, 3, 0],
+        [1, 0, 0, 0, 3, 0],
         "session demand, effect entry, and patient completion",
-        "I3A.3/I3B.2/I3C.1 scoped polling; I4F.1 outcomes"
+        "I3A.3/I3B.2/I3C.1-I3C.2 scoped polling; I4F.1 outcomes"
     ),
     entry!(
         "src/g_syntax/macro_expansion/effects.rs",
@@ -180,9 +174,9 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/reflection/lifecycle.rs",
-        [1, 2, 1, 0, 0, 0],
+        [1, 2, 0, 0, 0, 0],
         "effect lifecycle activation and completion",
-        "I3D.1/I3D.2 reflection phases; I4F.1 lifecycle roots"
+        "I3C.2 root-preserving completion; I3D.1/I3D.2 reflection phases"
     ),
     entry!(
         "src/reflection/machine.rs",
@@ -198,9 +192,9 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/reflection/requests.rs",
-        [13, 10, 21, 0, 0, 0],
+        [13, 10, 20, 0, 0, 0],
         "standard reflection request parsing and results",
-        "I3D.2 interpreter boundary; I4F.1 request roots"
+        "I3C.2 rooted task joins; I3D.2 interpreter boundary; I4F.1 request roots"
     ),
     entry!(
         "src/reflection/search.rs",

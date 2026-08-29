@@ -449,10 +449,9 @@ where
             ensure_runtime_task(context.eval_context(), &handle)?;
             match context.eval_context().poll_reflection_task(&handle.task) {
                 EvaluationWaitPoll::Pending(wait) => Err(TaskHalt::blocked(wait)),
-                EvaluationWaitPoll::Complete(value) => Ok(RequestResult::Return(Value::from_core(
-                    context.eval_context().values(),
-                    value,
-                ))),
+                EvaluationWaitPoll::Complete(value) => {
+                    Ok(RequestResult::Return(Value::from_runtime_root(*value)))
+                }
                 EvaluationWaitPoll::Failed(error) => {
                     handle.task.acknowledge_propagated_failure();
                     Err(TaskHalt::failure(error)

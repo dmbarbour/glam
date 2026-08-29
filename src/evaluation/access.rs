@@ -101,6 +101,20 @@ impl EvaluatorStepContext<'_> {
     pub(crate) fn root_value(&self, value: Value) -> RuntimeValueRoot {
         RuntimeValueRoot::new(self.context.values(), value)
     }
+
+    /// Projects one owned completion back into the active evaluator step.
+    ///
+    /// Wait and task observers outside evaluation retain the root. The bare
+    /// semantic value exists only inside this explicitly bounded managed
+    /// access region.
+    pub(crate) fn project_root(&self, root: &RuntimeValueRoot) -> Value {
+        assert_eq!(
+            root.runtime_id(),
+            self.context.values().runtime_id(),
+            "wait completion and evaluator context must share one value domain"
+        );
+        self.with_value_access(|_| root.as_core().clone())
+    }
 }
 
 /// Ephemeral poll authority for opening bounded evaluator regions.

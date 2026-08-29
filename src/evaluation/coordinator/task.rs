@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use rpds::RedBlackTreeMapSync;
 
-use crate::core::{EvaluationFailure, PromiseAssignment, PromiseCell, PromiseId, Value};
+use crate::core::{EvaluationFailure, PromiseAssignment, PromiseCell, PromiseId};
 use crate::runtime::{EvaluationRuntimeId, RuntimeMutationAuthority, RuntimeValueRoot};
 
 use super::super::{EvaluationDemandState, RuntimeObservationEpoch, evaluation_failure};
@@ -57,13 +57,21 @@ pub(crate) struct EvaluationTaskBlock {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum EvaluationWaitPoll {
     Pending(EvaluationWaitToken),
-    Complete(Value),
+    // The compatibility root still embeds a large `Value`. Keep the poll
+    // itself pointer-sized until I4F.2 replaces that interior with a managed
+    // root; recursive evaluator drivers carry this enum in several frames.
+    Complete(Box<RuntimeValueRoot>),
     Failed(Arc<EvaluationFailure>),
     Cancelled,
     Abandoned,
     Exited,
     Killed(Arc<EvaluationFailure>),
 }
+
+const _: () = assert!(
+    std::mem::size_of::<EvaluationWaitPoll>() <= 2 * std::mem::size_of::<usize>(),
+    "wait polls must remain small enough for recursive evaluator frames"
+);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EvaluationTaskCancellation {
@@ -447,7 +455,7 @@ impl EvaluationWaitToken {
 impl EvaluationWaitTerminal {
     pub(crate) fn to_poll(&self) -> EvaluationWaitPoll {
         match self {
-            Self::Complete(value) => EvaluationWaitPoll::Complete(value.as_core().clone()),
+            Self::Complete(value) => EvaluationWaitPoll::Complete(Box::new(value.clone())),
             Self::Failed(error) => EvaluationWaitPoll::Failed(error.clone()),
             Self::Cancelled => EvaluationWaitPoll::Cancelled,
             Self::Abandoned => EvaluationWaitPoll::Abandoned,
