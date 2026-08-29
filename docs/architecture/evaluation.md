@@ -142,17 +142,26 @@ Successful type-erased machine polls cross that release boundary as a
 result is wrapped through the checked poll domain, while an effect result keeps
 the public root it already owns. Coordinator release only publishes the root.
 This is the compatibility shape before managed semantic values: I3B moves root
-construction into callback-free evaluator scopes, and I4F.2 replaces the
-root's interior representation without reopening the scheduler boundary.
+construction to the evaluator-step publication boundary, and I4F.2 replaces
+the root's interior representation without reopening the scheduler boundary.
 
 Within a claimed poll, `EvaluatorStepContext` pairs the poll authority with
 the durable evaluator context without activating the collector. It is
 thread-bound and may survive dependency/callback orchestration. Only its
 `with_value_access` operation enters a callback-free managed region, so the
 recursive evaluator can be migrated without making a whole `eval_value` call
-one mutator lifetime. Direct compatibility evaluator entries are
-source-inventoried and assigned to the later reflection/compiler boundaries
-which own their removal.
+one mutator lifetime. One direct-compatibility gate temporarily serves the
+remaining builtin seams plus source-inventoried reflection/compiler entries;
+I3B.1c, I3D, and I3E own its removal.
+
+The core value/application/sequence spine now consumes this step context.
+Client demand and deferred lazy/promise machines derive it from their checked
+poll claim; result rooting also occurs through that same carrier. Legacy
+compiler, reflection, and diagnostic callers enter the identical spine through
+one source-latched direct-compatibility gate. That gate opens no ambient access
+region: explicit deferred callbacks, reflection, net, and builtin seams receive
+only their durable evaluator context, and no `EvaluationValueAccess` crosses a
+pump, wait, callback, or machine poll.
 
 Machine-visible admission uses demand state and a weak coordinator route, not
 an upgraded owner lease. Its fast closed-flag check is advisory; reflection

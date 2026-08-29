@@ -4,7 +4,14 @@ pub(crate) fn eval_key_path_list(
     context: &EvalContext,
     value: &Value,
 ) -> Result<Vec<Key>, EvaluationHalt> {
-    let value = eval_value(context, value)?;
+    with_direct_evaluator(context, |evaluator| eval_key_path_list_in(evaluator, value))
+}
+
+fn eval_key_path_list_in(
+    context: &EvaluatorStepContext<'_>,
+    value: &Value,
+) -> Result<Vec<Key>, EvaluationHalt> {
+    let value = eval_value_in(context, value)?;
     let Value::List(list) = value else {
         return Err(EvaluationHalt::new(
             "path-list operand must evaluate to a list value",
@@ -21,18 +28,18 @@ pub(crate) fn eval_key_path_list(
         },
         &mut |values| {
             for value in values.iter() {
-                let value = eval_value(context, value)?;
-                items.borrow_mut().push(value_to_key(context, &value)?);
+                let value = eval_value_in(context, value)?;
+                items.borrow_mut().push(value_to_key_in(context, &value)?);
             }
             Ok(())
         },
-        &mut |thunk| force_list_thunk(context, thunk),
+        &mut |thunk| force_list_thunk_in(context, thunk),
     )?;
     Ok(items.into_inner())
 }
 
-pub(super) fn list_to_key_items(
-    context: &EvalContext,
+pub(super) fn list_to_key_items_in(
+    context: &EvaluatorStepContext<'_>,
     list: &List,
 ) -> Result<Arc<[Key]>, EvaluationHalt> {
     let items = std::cell::RefCell::new(Vec::new());
@@ -45,18 +52,25 @@ pub(super) fn list_to_key_items(
         },
         &mut |values| {
             for value in values.iter() {
-                let value = eval_value(context, value)?;
-                items.borrow_mut().push(value_to_key(context, &value)?);
+                let value = eval_value_in(context, value)?;
+                items.borrow_mut().push(value_to_key_in(context, &value)?);
             }
             Ok(())
         },
-        &mut |thunk| force_list_thunk(context, thunk),
+        &mut |thunk| force_list_thunk_in(context, thunk),
     )?;
     Ok(Arc::from(items.into_inner()))
 }
 
 pub(crate) fn list_to_value_items(
     context: &EvalContext,
+    list: &List,
+) -> Result<Vec<Value>, EvaluationHalt> {
+    with_direct_evaluator(context, |evaluator| list_to_value_items_in(evaluator, list))
+}
+
+fn list_to_value_items_in(
+    context: &EvaluatorStepContext<'_>,
     list: &List,
 ) -> Result<Vec<Value>, EvaluationHalt> {
     let items = std::cell::RefCell::new(Vec::new());
@@ -73,13 +87,23 @@ pub(crate) fn list_to_value_items(
             items.borrow_mut().extend(values.iter().cloned());
             Ok(())
         },
-        &mut |thunk| force_list_thunk(context, thunk),
+        &mut |thunk| force_list_thunk_in(context, thunk),
     )?;
     Ok(items.into_inner())
 }
 
 pub(super) fn list_to_binary_bytes(
     context: &EvalContext,
+    list: &List,
+    subject: &str,
+) -> Result<Vec<u8>, EvaluationHalt> {
+    with_direct_evaluator(context, |evaluator| {
+        list_to_binary_bytes_in(evaluator, list, subject)
+    })
+}
+
+fn list_to_binary_bytes_in(
+    context: &EvaluatorStepContext<'_>,
     list: &List,
     subject: &str,
 ) -> Result<Vec<u8>, EvaluationHalt> {
@@ -91,7 +115,7 @@ pub(super) fn list_to_binary_bytes(
         },
         &mut |values| {
             for value in values.iter() {
-                match eval_value(context, value).map_err(|error| {
+                match eval_value_in(context, value).map_err(|error| {
                     error.with_context(evaluation_context_frame("binary_extraction"))
                 })? {
                     Value::Number(number) => {
@@ -112,7 +136,7 @@ pub(super) fn list_to_binary_bytes(
             Ok(())
         },
         &mut |thunk| {
-            force_list_thunk(context, thunk)
+            force_list_thunk_in(context, thunk)
                 .map_err(|error| error.with_context(evaluation_context_frame("binary_extraction")))
         },
     )?;

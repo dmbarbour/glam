@@ -25,7 +25,7 @@ mod executor;
 mod observation;
 mod pump;
 mod session;
-pub(crate) use access::EvaluationPollContext;
+pub(crate) use access::{EvaluationPollContext, EvaluatorStepContext};
 pub(crate) use coordinator::{
     CompletionSubscriptionOutcome, CompletionSubscriptions, CompletionWake, EvaluationExitBlock,
     EvaluationMachinePoll, EvaluationSessionId, EvaluationTaskBlock, EvaluationTaskCancellation,

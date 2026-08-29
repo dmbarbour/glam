@@ -44,6 +44,23 @@ fn cached_value(lazy: &LazyValue) -> Value {
         .into_value()
 }
 
+#[test]
+fn claimed_and_direct_evaluator_entries_share_the_application_spine() {
+    let context = test_context();
+    let poll = crate::evaluation::EvaluationPollContext::for_context(&context);
+    let evaluator = poll.evaluator(&context);
+
+    let direct = apply_values(&context, Value::Builtin(Builtin::Add), vec![n(19), n(23)])
+        .and_then(|value| eval_value(&context, &value))
+        .expect("direct compatibility entry should evaluate the application");
+    let claimed = apply_values_in(&evaluator, Value::Builtin(Builtin::Add), vec![n(19), n(23)])
+        .and_then(|value| eval_value_in(&evaluator, &value))
+        .expect("claimed evaluator entry should evaluate the application");
+
+    assert_eq!(claimed, direct);
+    assert_eq!(claimed, n(42));
+}
+
 struct DropSignal(Arc<AtomicBool>);
 
 impl Drop for DropSignal {

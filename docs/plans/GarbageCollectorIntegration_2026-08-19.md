@@ -1,7 +1,8 @@
 # Glam GC Integration Plan — 2026-08-19
 
-Status: in progress; Phases I0 through I2 and checkpoints I3A.1-I3A.4 are
-complete. Phase I3 is in progress. Collector Gate G1 passed on 2026-08-25.
+Status: in progress; Phases I0 through I2 and checkpoints I3A.1-I3A.4 and
+I3B.1a-I3B.1b are complete. Phase I3 is in progress. Collector Gate G1 passed
+on 2026-08-25.
 The remaining integration work follows the completed owner-matrix,
 stable-ledger, and low-risk checkpoint corrections from the integration
 review.
@@ -33,6 +34,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I3A.3 | complete | claim-derived scheduler poll context, common task/client/spark routing, and mutator-free release/wait boundaries |
 | I3A.4 | complete | runtime-rooted machine completion outcomes, preserved effect roots, and exhaustive deferred-interior inventory |
 | I3B.1a | complete | thread-bound evaluator-step authority and source-latched direct-entry compatibility inventory |
+| I3B.1b | complete | claimed value/application/sequence spine with one latched direct-compatibility gate |
 | I3B.1 | in progress | scoped construction and core evaluator migration |
 | I3 | in progress | bounded evaluator/worker mutator regions |
 | I4 | pending | core trace vocabulary and leaf policy |
@@ -879,21 +881,41 @@ inside a callback-free closure. This preserves current patient evaluation
 until I3B.2 separates its wait driver without allowing a recursive
 `eval_value` call to hold collector admission across pumping or callbacks.
 
-I3B.1a completed 2026-08-29. `EvaluatorStepContext` borrows one checked
-`EvaluationPollContext` and durable `EvalContext`, contains no mutator, and is
-statically neither `Send` nor `Sync`. Its only managed operation delegates a
+I3B.1a completed 2026-08-29. A claimed `EvaluatorStepContext` borrows one
+checked `EvaluationPollContext` and durable `EvalContext`, contains no mutator,
+and is statically neither `Send` nor `Sync`. Its managed operation delegates a
 callback-free closure to `EvaluationValueAccess`; the existing two-region
 probe now exercises this carrier and still permits cross-thread collection
-between regions. Construction remains private to the poll authority.
+between regions. I3B.1b adds one temporary direct-compatibility admission for
+I3B.1c's internal builtin seams and the source-inventoried I3D/I3E callers. It
+likewise activates no mutator until a bounded callback-free closure requests
+access, and one source latch prevents that exceptional constructor from
+spreading.
 
-`direct_evaluator_compatibility_entries_are_complete` records all 40 direct
+`direct_evaluator_compatibility_entries_are_complete` records all 39 direct
 production calls to recursive evaluation, application, strategy demand, path
 evaluation, and list materialization outside `src/eval`. The runtime pump's
-two entries belong to I3B.1b/I3C; reflection entries belong to I3D; assembly,
+remaining strategy-demand entry belongs to I3C; reflection entries belong to I3D; assembly,
 compiler, `.g`, macro, and diagnostic entries belong to I3E. No compatibility
 entry is treated as permission to inspect a managed value without authority;
 production remains `NoAuto`, and the inventory must shrink as those owners
 migrate.
+
+I3B.1b completed 2026-08-29. Immediate value dispatch, recursive application,
+function saturation, semantic tagged-dictionary selection, key conversion,
+and list/key/binary traversal now share internal functions parameterized by
+`EvaluatorStepContext`. Client demand, lazy production/following, and promise
+following derive that context from their checked poll claim and publish their
+terminal value through it. Existing public and compiler/reflection entries
+enter the same spine only through `with_direct_evaluator`; the inventory both
+counts those callers and asserts that there is exactly one compatibility gate.
+Deferred host callbacks, reflection gates, net execution, fixpoint-object
+construction, and builtin dispatch receive only the durable `EvalContext` at
+explicit seams; I3B.1c and I3D own their narrower migrations. No active
+`EvaluationValueAccess` crosses a wait, pump, callback, or machine poll. A
+paired direct/claimed application test latches semantic equivalence, while
+the production direct-entry count falls from 40 to 39. Production remains
+`NoAuto`; managed semantic result survival remains an I4F.2 obligation.
 
 - Introduce the scoped evaluator view selected in I3A.1 and migrate the
   strongly connected evaluator call graph rooted at `eval_value`. Persistent

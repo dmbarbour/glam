@@ -126,9 +126,9 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/evaluation/access.rs",
-        [0, 0, 0, 0, 1, 0],
-        "claim-derived compatibility root at the machine completion boundary",
-        "I3A.4 outcome typing; I3B scoped construction; I4F.2 managed root switch"
+        [0, 0, 0, 0, 2, 0],
+        "poll/evaluator-step compatibility root constructors at machine completion",
+        "I3A.4 outcome typing; I3B.1b scoped evaluator spine; I4F.2 managed root switch"
     ),
     entry!(
         "src/evaluation/coordinator/spark.rs",
@@ -144,9 +144,9 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/evaluation/pump.rs",
-        [2, 0, 0, 0, 1, 1],
-        "client demand, centralized spark evaluation, and exceptional lazy-cycle publication",
-        "I3A.3/I3B.2/I3C.2 scoped polling; I4F.1 outcomes"
+        [2, 0, 0, 0, 0, 1],
+        "centralized client/spark evaluation and exceptional lazy-cycle publication",
+        "I3A.3/I3B.1b/I3B.2/I3C.2 scoped polling; I4F.1 outcomes"
     ),
     entry!(
         "src/evaluation/session.rs",

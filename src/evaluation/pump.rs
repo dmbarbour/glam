@@ -3,9 +3,6 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use crate::core::{EvaluationFailure, LazyCycle, LazyCycleMember};
-use crate::runtime::RuntimeValueRoot;
-
 use super::coordinator::{
     self, ClaimedDeferredWork, ClaimedReflectionWork, ClaimedTaskWork, ClientDemandOperation,
     DeferredLazyCycleMember, DeferredWorkPoll, EvaluationMachinePoll, EvaluationSessionId,
@@ -18,18 +15,18 @@ use super::session::{
     EvaluationUnfinishedTask, client_demand_halt_poll,
 };
 use super::{EvaluationDemandState, EvaluationPollContext, evaluation_failure};
+use crate::core::{EvaluationFailure, LazyCycle, LazyCycleMember};
+use crate::runtime::RuntimeValueRoot;
 
 impl ClientDemandOperation {
     pub(super) fn poll(
         &mut self,
-        _poll_context: &EvaluationPollContext,
+        poll_context: &EvaluationPollContext,
         context: &EvalContext,
     ) -> coordinator::ClientDemandPoll {
-        match crate::eval::eval_value(context, self.0.as_core()) {
-            Ok(value) => coordinator::ClientDemandPoll::Complete(RuntimeValueRoot::new(
-                context.values(),
-                value,
-            )),
+        let evaluator = poll_context.evaluator(context);
+        match crate::eval::eval_value_in(&evaluator, self.0.as_core()) {
+            Ok(value) => coordinator::ClientDemandPoll::Complete(evaluator.root_value(value)),
             Err(halt) => client_demand_halt_poll(halt),
         }
     }

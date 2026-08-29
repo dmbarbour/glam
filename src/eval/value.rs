@@ -7,17 +7,17 @@ use crate::core::{
 use crate::core_net::CoreWaitToken;
 use crate::evaluation::{
     EvalContext, EvaluationMachinePoll, EvaluationPumpOutcome, EvaluationTaskBlock,
-    EvaluationTaskMachine, EvaluationWaitPoll, WorkDependency,
+    EvaluationTaskMachine, EvaluationWaitPoll, EvaluatorStepContext, WorkDependency,
 };
 use crate::list::ListItem;
 use crate::number::Number;
 
-use super::application::{apply_value, apply_values};
+use super::application::{apply_value_in, apply_values_in};
 use super::builtins::{
     NetConstructionMachine, apply_builtin, construct_fixpoint_object, is_undefined_value,
 };
 use super::net::*;
-use super::sequence::list_to_key_items;
+use super::sequence::list_to_key_items_in;
 
 pub(crate) fn failure_diagnostic_value(failure: &EvaluationFailure) -> Value {
     let emission = match failure.emission_value() {
@@ -116,9 +116,16 @@ fn fallback_failure_diagnostic(
 }
 
 pub fn eval_value(context: &EvalContext, value: &Value) -> Result<Value, EvaluationHalt> {
+    super::with_direct_evaluator(context, |evaluator| eval_value_in(evaluator, value))
+}
+
+pub(crate) fn eval_value_in(
+    context: &EvaluatorStepContext<'_>,
+    value: &Value,
+) -> Result<Value, EvaluationHalt> {
     match value {
-        Value::Lazy(lazy) => eval_lazy(context, lazy),
-        Value::Promised(promise) => eval_promised(context, promise),
+        Value::Lazy(lazy) => eval_lazy_in(context, lazy),
+        Value::Promised(promise) => eval_promised_in(context, promise),
         other => Ok(other.clone()),
     }
 }
@@ -136,40 +143,29 @@ struct LazyTaskMachine {
 }
 
 impl LazyTaskMachine {
-    fn complete(
-        &self,
-        poll_context: &crate::evaluation::EvaluationPollContext,
-        value: Value,
-    ) -> EvaluationMachinePoll {
+    fn complete(&self, context: &EvaluatorStepContext<'_>, value: Value) -> EvaluationMachinePoll {
         let value = EvaluatedValue::try_from(value)
             .expect("WHNF demand must eliminate the outer deferred variant");
         match self.lazy.cache(Ok(value)) {
-            Ok(value) => {
-                EvaluationMachinePoll::Complete(poll_context.root_value(value.into_value()))
-            }
+            Ok(value) => EvaluationMachinePoll::Complete(context.root_value(value.into_value())),
             Err(error) => EvaluationMachinePoll::Failed(error),
         }
     }
 
-    fn cached_poll(
-        &self,
-        poll_context: &crate::evaluation::EvaluationPollContext,
-    ) -> EvaluationMachinePoll {
+    fn cached_poll(&self, context: &EvaluatorStepContext<'_>) -> EvaluationMachinePoll {
         match self
             .lazy
             .cached()
             .expect("a released lazy source must have a terminal cache")
         {
-            Ok(value) => {
-                EvaluationMachinePoll::Complete(poll_context.root_value(value.into_value()))
-            }
+            Ok(value) => EvaluationMachinePoll::Complete(context.root_value(value.into_value())),
             Err(error) => EvaluationMachinePoll::Failed(error),
         }
     }
 
     fn finish_poll(
         &mut self,
-        poll_context: &crate::evaluation::EvaluationPollContext,
+        context: &EvaluatorStepContext<'_>,
         result: Result<Value, EvaluationHalt>,
     ) -> EvaluationMachinePoll {
         match result {
@@ -177,8 +173,8 @@ impl LazyTaskMachine {
                 self.work = LazyTaskWork::Follow(value);
                 EvaluationMachinePoll::Yielded
             }
-            Ok(value) => self.complete(poll_context, value),
-            Err(error) => self.fail(poll_context, error),
+            Ok(value) => self.complete(context, value),
+            Err(error) => self.fail(context, error),
         }
     }
 }
@@ -189,10 +185,12 @@ impl EvaluationTaskMachine for LazyTaskMachine {
         poll_context: &crate::evaluation::EvaluationPollContext,
         step_budget: usize,
     ) -> EvaluationMachinePoll {
+        let durable_context = self.context.clone();
+        let context = poll_context.evaluator(&durable_context);
         if let Some(result) = self.lazy.cached() {
             return match result {
                 Ok(value) => {
-                    EvaluationMachinePoll::Complete(poll_context.root_value(value.into_value()))
+                    EvaluationMachinePoll::Complete(context.root_value(value.into_value()))
                 }
                 Err(error) => EvaluationMachinePoll::Failed(error),
             };
@@ -200,43 +198,43 @@ impl EvaluationTaskMachine for LazyTaskMachine {
 
         if matches!(self.work, LazyTaskWork::Produce) {
             let Some(source) = self.lazy.source_snapshot() else {
-                return self.cached_poll(poll_context);
+                return self.cached_poll(&context);
             };
             if let LazySource::NetConstruction(effect) = source {
                 let machine = match NetConstructionMachine::new(
-                    self.context.clone(),
+                    durable_context.clone(),
                     effect.as_ref().clone(),
                 ) {
                     Ok(machine) => machine,
-                    Err(error) => return self.fail(poll_context, error),
+                    Err(error) => return self.fail(&context, error),
                 };
                 self.work = LazyTaskWork::NetConstruction(Box::new(machine));
                 return EvaluationMachinePoll::Yielded;
             }
-            let result = produce_lazy_source(&self.context, &self.lazy, &source);
-            return self.finish_poll(poll_context, result);
+            let result = produce_lazy_source_in(&context, &self.lazy, &source);
+            return self.finish_poll(&context, result);
         }
 
         if let LazyTaskWork::NetConstruction(machine) = &mut self.work {
-            return match machine.poll(&self.context, step_budget) {
-                Ok(Some(value)) => self.complete(poll_context, value),
+            return match machine.poll(context.context(), step_budget) {
+                Ok(Some(value)) => self.complete(&context, value),
                 Ok(None) => EvaluationMachinePoll::Yielded,
-                Err(error) => self.fail(poll_context, error),
+                Err(error) => self.fail(&context, error),
             };
         }
 
         let LazyTaskWork::Follow(target) = &self.work else {
             unreachable!("non-producing lazy work must follow a value or construct a net")
         };
-        let result = eval_value(&self.context, target);
-        self.finish_poll(poll_context, result)
+        let result = eval_value_in(&context, target);
+        self.finish_poll(&context, result)
     }
 }
 
 impl LazyTaskMachine {
     fn fail(
         &self,
-        poll_context: &crate::evaluation::EvaluationPollContext,
+        context: &EvaluatorStepContext<'_>,
         error: EvaluationHalt,
     ) -> EvaluationMachinePoll {
         if let Some(wait) = error.blocked_on() {
@@ -247,7 +245,7 @@ impl LazyTaskMachine {
             });
         }
         if let Some(promise) = error.unassigned_promise() {
-            let wait = match promise_wait(&self.context, promise) {
+            let wait = match promise_wait(context.context(), promise) {
                 Ok(wait) => wait,
                 Err(error) => {
                     return EvaluationMachinePoll::Failed(Arc::new(EvaluationFailure::message(
@@ -263,9 +261,7 @@ impl LazyTaskMachine {
         }
         let failure = error.into_permanent_failure();
         match self.lazy.cache(Err(failure)) {
-            Ok(value) => {
-                EvaluationMachinePoll::Complete(poll_context.root_value(value.into_value()))
-            }
+            Ok(value) => EvaluationMachinePoll::Complete(context.root_value(value.into_value())),
             Err(error) => EvaluationMachinePoll::Failed(error),
         }
     }
@@ -288,6 +284,8 @@ impl EvaluationTaskMachine for PromiseFollower {
         poll_context: &crate::evaluation::EvaluationPollContext,
         _step_budget: usize,
     ) -> EvaluationMachinePoll {
+        let durable_context = self.context.clone();
+        let context = poll_context.evaluator(&durable_context);
         let result = match &self.state {
             PromiseFollowerState::AwaitAssignment => match self.promise.assignment() {
                 Some(result) => result.map_err(EvaluationHalt::failure),
@@ -299,7 +297,7 @@ impl EvaluationTaskMachine for PromiseFollower {
                     });
                 }
             },
-            PromiseFollowerState::FollowAssignment(target) => eval_value(&self.context, target),
+            PromiseFollowerState::FollowAssignment(target) => eval_value_in(&context, target),
         };
 
         match result {
@@ -307,8 +305,8 @@ impl EvaluationTaskMachine for PromiseFollower {
                 self.state = PromiseFollowerState::FollowAssignment(value);
                 EvaluationMachinePoll::Yielded
             }
-            Ok(value) => EvaluationMachinePoll::Complete(poll_context.root_value(value)),
-            Err(error) => block_or_fail(&self.context, error),
+            Ok(value) => EvaluationMachinePoll::Complete(context.root_value(value)),
+            Err(error) => block_or_fail(context.context(), error),
         }
     }
 }
@@ -353,7 +351,15 @@ fn block_or_fail(context: &EvalContext, error: EvaluationHalt) -> EvaluationMach
     EvaluationMachinePoll::Failed(error.into_permanent_failure())
 }
 
+#[cfg(test)]
 pub(super) fn eval_lazy(context: &EvalContext, lazy: &LazyValue) -> Result<Value, EvaluationHalt> {
+    super::with_direct_evaluator(context, |evaluator| eval_lazy_in(evaluator, lazy))
+}
+
+pub(super) fn eval_lazy_in(
+    context: &EvaluatorStepContext<'_>,
+    lazy: &LazyValue,
+) -> Result<Value, EvaluationHalt> {
     loop {
         if let Some(result) = lazy.cached() {
             return result
@@ -361,6 +367,7 @@ pub(super) fn eval_lazy(context: &EvalContext, lazy: &LazyValue) -> Result<Value
                 .map_err(EvaluationHalt::failure);
         }
         let wait = context
+            .context()
             .lazy_task(lazy, |task_context| {
                 Box::new(LazyTaskMachine {
                     context: task_context,
@@ -369,7 +376,7 @@ pub(super) fn eval_lazy(context: &EvalContext, lazy: &LazyValue) -> Result<Value
                 })
             })
             .map_err(|error| EvaluationHalt::new(error.as_ref()))?;
-        if let Some(value) = await_deferred_task(context, wait, "lazy value")? {
+        if let Some(value) = await_deferred_task(context.context(), wait, "lazy value")? {
             return Ok(value);
         }
     }
@@ -466,8 +473,8 @@ fn deferred_task_failure(
         .unwrap_or_else(|| EvaluationHalt::failure(failure))
 }
 
-fn produce_lazy_source(
-    context: &EvalContext,
+fn produce_lazy_source_in(
+    context: &EvaluatorStepContext<'_>,
     lazy: &LazyValue,
     source: &LazySource,
 ) -> Result<Value, EvaluationHalt> {
@@ -475,11 +482,15 @@ fn produce_lazy_source(
         LazySource::Error => Err(EvaluationHalt::new(
             "initialized lazy errors must be returned from their result cache",
         )),
-        LazySource::ComputedFixpoint(fixpoint) => eval_computed_fixpoint(context, lazy, fixpoint),
-        LazySource::Deferred(thunk) => thunk(context),
-        LazySource::ReflectionTask(task) => eval_reflection_task_source(context, task),
-        LazySource::Access { path, arguments } => resolve_core_access(context, arguments, path),
-        LazySource::Application(application) => apply_values(
+        LazySource::ComputedFixpoint(fixpoint) => {
+            eval_computed_fixpoint_in(context, lazy, fixpoint)
+        }
+        LazySource::Deferred(thunk) => thunk(context.context()),
+        LazySource::ReflectionTask(task) => eval_reflection_task_source(context.context(), task),
+        LazySource::Access { path, arguments } => {
+            resolve_core_access(context.context(), arguments, path)
+        }
+        LazySource::Application(application) => apply_values_in(
             context,
             application.function().clone(),
             application.arguments().to_vec(),
@@ -489,7 +500,7 @@ fn produce_lazy_source(
             let argument = arguments
                 .pop()
                 .expect("saturated builtin thunk must contain an argument");
-            apply_builtin(context, call.builtin, arguments, argument)
+            apply_builtin(context.context(), call.builtin, arguments, argument)
         }
         LazySource::NetConstruction(_) => {
             unreachable!("net construction must retain its pollable effect machine")
@@ -497,41 +508,44 @@ fn produce_lazy_source(
         LazySource::NetComputation(net) => {
             let runtime = net.runtime().clone();
             let exposed = runtime.with(|runtime| runtime.exposed());
-            extract_net_data(context, runtime, exposed, "lazy net computation")
+            extract_net_data(context.context(), runtime, exposed, "lazy net computation")
                 .map_err(|error| error.with_context(evaluation_context_frame("net_computation")))
         }
         LazySource::FunctionCall {
             function,
             arguments,
-        } => evaluate_function_call(context, function, arguments),
+        } => evaluate_function_call(context.context(), function, arguments),
     }
 }
 
-fn eval_promised(context: &EvalContext, promise: &PromisedValue) -> Result<Value, EvaluationHalt> {
+fn eval_promised_in(
+    context: &EvaluatorStepContext<'_>,
+    promise: &PromisedValue,
+) -> Result<Value, EvaluationHalt> {
     loop {
         if let Some(assignment) = promise.assignment() {
             let value = assignment.map_err(EvaluationHalt::failure)?;
             if !is_deferred(&value) {
                 return Ok(value);
             }
-            let wait = promise_wait(context, promise)
+            let wait = promise_wait(context.context(), promise)
                 .map_err(|error| EvaluationHalt::new(error.as_ref()))?;
-            if let Some(value) = await_deferred_task(context, wait, "promised value")? {
+            if let Some(value) = await_deferred_task(context.context(), wait, "promised value")? {
                 return Ok(value);
             }
             continue;
         }
         if let Some(task) = promise.task() {
-            if context.observes_as_task(task.owner()) {
+            if context.context().observes_as_task(task.owner()) {
                 return Err(EvaluationHalt::new(format!(
                     "reflection promise {} recursively observed itself in task {}",
                     promise.id().get(),
                     task.owner().get()
                 )));
             }
-            let wait = promise_wait(context, promise)
+            let wait = promise_wait(context.context(), promise)
                 .map_err(|error| EvaluationHalt::new(error.as_ref()))?;
-            if let Some(value) = await_deferred_task(context, wait, "promised value")? {
+            if let Some(value) = await_deferred_task(context.context(), wait, "promised value")? {
                 return Ok(value);
             }
             continue;
@@ -582,17 +596,19 @@ fn eval_reflection_task_source(
     }
 }
 
-fn eval_computed_fixpoint(
-    context: &EvalContext,
+fn eval_computed_fixpoint_in(
+    context: &EvaluatorStepContext<'_>,
     lazy: &LazyValue,
     computation: &FixpointComputation,
 ) -> Result<Value, EvaluationHalt> {
     let marker = Value::Lazy(lazy.clone());
     match computation {
-        FixpointComputation::Function(function) => apply_value(context, function.clone(), marker)
-            .and_then(|application| eval_value(context, &application)),
+        FixpointComputation::Function(function) => {
+            apply_value_in(context, function.clone(), marker)
+                .and_then(|application| eval_value_in(context, &application))
+        }
         FixpointComputation::ObjectInstance(spec) => {
-            construct_fixpoint_object(context, spec, marker)
+            construct_fixpoint_object(context.context(), spec, marker)
         }
     }
 }
@@ -611,16 +627,23 @@ pub(super) fn format_name_part(key: &Key) -> String {
 }
 
 pub(super) fn value_to_key(context: &EvalContext, value: &Value) -> Result<Key, EvaluationHalt> {
-    let value = eval_value(context, value)?;
+    super::with_direct_evaluator(context, |evaluator| value_to_key_in(evaluator, value))
+}
+
+pub(super) fn value_to_key_in(
+    context: &EvaluatorStepContext<'_>,
+    value: &Value,
+) -> Result<Key, EvaluationHalt> {
+    let value = eval_value_in(context, value)?;
     match &value {
         Value::Atom(atom) => Ok(Key::Atom(*atom)),
         Value::Number(number) => Ok(Key::Number(number.clone())),
         Value::Binary(bytes) => Ok(Key::Binary(bytes.clone())),
-        Value::List(list) => Ok(Key::List(list_to_key_items(context, list)?)),
+        Value::List(list) => Ok(Key::List(list_to_key_items_in(context, list)?)),
         Value::Dict(dict) => Ok(Key::Dict(Arc::from(
             dict.iter()
                 .map(|(key, value)| {
-                    let value = value_to_key(context, value)?;
+                    let value = value_to_key_in(context, value)?;
                     if matches!(&value, Key::Dict(entries) if entries.is_empty()) {
                         return Ok(None);
                     }
@@ -648,11 +671,18 @@ pub(super) fn force_list_thunk(
     context: &EvalContext,
     thunk: &ListThunk,
 ) -> Result<List, EvaluationHalt> {
+    super::with_direct_evaluator(context, |evaluator| force_list_thunk_in(evaluator, thunk))
+}
+
+pub(super) fn force_list_thunk_in(
+    context: &EvaluatorStepContext<'_>,
+    thunk: &ListThunk,
+) -> Result<List, EvaluationHalt> {
     let thunk = match thunk {
         ListThunk::Lazy(lazy) => Value::Lazy(lazy.clone()),
         ListThunk::Promised(promise) => Value::Promised(promise.clone()),
     };
-    match eval_value(context, &thunk)? {
+    match eval_value_in(context, &thunk)? {
         Value::Binary(bytes) => Ok(List::from_bytes(bytes)),
         Value::List(list) => Ok(list),
         other => Err(EvaluationHalt::new(format!(
@@ -749,29 +779,40 @@ impl TaggedDictExt for crate::core::Dict {
         context: &EvalContext,
         tag: &Key,
     ) -> Result<Option<Value>, EvaluationHalt> {
-        let Some(payload) = self.get(tag) else {
-            return Ok(None);
-        };
-        if is_semantically_undefined(context, payload)? {
-            return Ok(None);
-        }
-
-        for (key, value) in self.iter() {
-            if key != tag && !is_semantically_undefined(context, value)? {
-                return Ok(None);
-            }
-        }
-        Ok(Some(payload.clone()))
+        super::with_direct_evaluator(context, |evaluator| tagged_payload_in(self, evaluator, tag))
     }
 }
 
-fn is_semantically_undefined(context: &EvalContext, value: &Value) -> Result<bool, EvaluationHalt> {
-    let value = eval_value(context, value)?;
+pub(super) fn tagged_payload_in(
+    dict: &crate::core::Dict,
+    context: &EvaluatorStepContext<'_>,
+    tag: &Key,
+) -> Result<Option<Value>, EvaluationHalt> {
+    let Some(payload) = dict.get(tag) else {
+        return Ok(None);
+    };
+    if is_semantically_undefined_in(context, payload)? {
+        return Ok(None);
+    }
+
+    for (key, value) in dict.iter() {
+        if key != tag && !is_semantically_undefined_in(context, value)? {
+            return Ok(None);
+        }
+    }
+    Ok(Some(payload.clone()))
+}
+
+fn is_semantically_undefined_in(
+    context: &EvaluatorStepContext<'_>,
+    value: &Value,
+) -> Result<bool, EvaluationHalt> {
+    let value = eval_value_in(context, value)?;
     let Value::Dict(dict) = value else {
         return Ok(false);
     };
     for (_, value) in dict.iter() {
-        if !is_semantically_undefined(context, value)? {
+        if !is_semantically_undefined_in(context, value)? {
             return Ok(false);
         }
     }

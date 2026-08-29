@@ -30,9 +30,19 @@ pub(crate) struct EvaluationValueAccess<'scope> {
 /// to open smaller managed-access regions. Its private construction preserves
 /// the scheduler-owned admission route established by I3A.
 pub(crate) struct EvaluatorStepContext<'step> {
-    poll: &'step EvaluationPollContext,
+    admission: EvaluatorStepAdmission<'step>,
     context: &'step EvalContext,
     _thread_bound: PhantomData<Rc<()>>,
+}
+
+enum EvaluatorStepAdmission<'step> {
+    Claimed(&'step EvaluationPollContext),
+    /// Temporary direct entry for I3B.1c builtin seams and the
+    /// source-inventoried I3D/I3E callers.
+    ///
+    /// This route does not keep a mutator active. It exists only until those
+    /// callers receive their scheduler- or runtime-service-owned authority.
+    DirectCompatibility,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -60,6 +70,14 @@ impl<'scope> EvaluationValueAccess<'scope> {
 }
 
 impl EvaluatorStepContext<'_> {
+    pub(crate) fn for_direct_compatibility(context: &EvalContext) -> EvaluatorStepContext<'_> {
+        EvaluatorStepContext {
+            admission: EvaluatorStepAdmission::DirectCompatibility,
+            context,
+            _thread_bound: PhantomData,
+        }
+    }
+
     pub(crate) fn context(&self) -> &EvalContext {
         self.context
     }
@@ -68,7 +86,25 @@ impl EvaluatorStepContext<'_> {
         &self,
         operation: impl for<'scope> FnOnce(EvaluationValueAccess<'scope>) -> R,
     ) -> R {
-        self.poll.with_value_access(self.context, operation)
+        match self.admission {
+            EvaluatorStepAdmission::Claimed(poll) => {
+                poll.with_value_access(self.context, operation)
+            }
+            EvaluatorStepAdmission::DirectCompatibility => {
+                self.context.values().with_runtime_value_access(|values| {
+                    let access = EvaluationValueAccess::try_new(self.context, values)
+                        .expect("direct evaluator access must retain its value domain");
+                    operation(access)
+                })
+            }
+        }
+    }
+
+    /// Compatibility root publication for a currently bare evaluator result.
+    /// I4F.2 replaces the wrapper with a collector root without changing this
+    /// step-owned boundary.
+    pub(crate) fn root_value(&self, value: Value) -> RuntimeValueRoot {
+        RuntimeValueRoot::new(self.context.values(), value)
     }
 }
 
@@ -123,7 +159,7 @@ impl EvaluationPollContext {
             "poll context and evaluator context must share one demand session"
         );
         EvaluatorStepContext {
-            poll: self,
+            admission: EvaluatorStepAdmission::Claimed(self),
             context,
             _thread_bound: PhantomData,
         }

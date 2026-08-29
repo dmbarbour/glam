@@ -10,7 +10,7 @@ use crate::core::{
     LazyValue, List, NetValue, PromisedValue, Value, keys,
 };
 use crate::core_net::{CoreDataKey, CoreOperator, CoreSpecialization};
-use crate::evaluation::EvalContext;
+use crate::evaluation::{EvalContext, EvaluatorStepContext};
 #[cfg(test)]
 use crate::interaction_net::Reduction;
 use crate::interaction_net::{
@@ -42,6 +42,7 @@ pub(crate) use operator::{
 pub(crate) use sequence::list_output_bytes;
 pub(crate) use sequence::{eval_key_path_list, list_to_value_items};
 pub use value::eval_value;
+pub(crate) use value::eval_value_in;
 #[cfg(test)]
 pub(crate) use value::halt_diagnostic_value;
 pub(crate) use value::{
@@ -57,6 +58,14 @@ use sequence::*;
 #[cfg(test)]
 use test_support::*;
 use value::*;
+
+fn with_direct_evaluator<R>(
+    context: &EvalContext,
+    operation: impl FnOnce(&EvaluatorStepContext<'_>) -> R,
+) -> R {
+    let evaluator = EvaluatorStepContext::for_direct_compatibility(context);
+    operation(&evaluator)
+}
 
 #[cfg(test)]
 mod tests;

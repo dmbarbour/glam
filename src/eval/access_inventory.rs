@@ -64,7 +64,7 @@ const INVENTORY: &[InventoryEntry] = &[
     entry!("src/api/assembly.rs", [1, 0, 0, 0, 0], "I3E.1"),
     entry!("src/compiler.rs", [3, 0, 0, 0, 0], "I3E.1"),
     entry!("src/diagnostic.rs", [10, 2, 0, 0, 0], "I3E.3"),
-    entry!("src/evaluation/pump.rs", [1, 0, 1, 0, 0], "I3B.1b/I3C"),
+    entry!("src/evaluation/pump.rs", [0, 0, 1, 0, 0], "I3C"),
     entry!("src/g_syntax/compiler_values.rs", [1, 0, 0, 0, 0], "I3E.2"),
     entry!(
         "src/g_syntax/diagnostic_formatter.rs",
@@ -139,4 +139,18 @@ fn direct_evaluator_compatibility_entries_are_complete() {
         .collect::<BTreeMap<_, _>>();
 
     assert_eq!(actual, expected);
+}
+
+#[test]
+fn direct_evaluator_admission_has_one_internal_compatibility_gate() {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let source = fs::read_to_string(manifest.join("src/eval.rs"))
+        .expect("evaluator module source should be readable");
+    assert_eq!(
+        source
+            .matches("EvaluatorStepContext::for_direct_compatibility(")
+            .count(),
+        1,
+        "direct evaluation must remain centralized until I3D/I3E remove it"
+    );
 }
