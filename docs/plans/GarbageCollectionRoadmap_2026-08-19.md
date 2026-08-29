@@ -2,7 +2,8 @@
 
 Status: in progress; collector Phases C0 through C6D.3, the C2C.6 verification
 follow-up, integration Phases I0 through I2, and integration checkpoints
-I3A.1-I3A.4 are complete. Gates G0 and G1 are established, and all mandatory
+I3A.1-I3A.4 plus I3B.1a are complete. Gates G0 and G1 are established, and all
+mandatory
 collector reviews through post-C6 plus the post-I1 and post-I2 integration
 reviews have been performed. Collector stress, metrics, and tuning continue in
 C7/C8 while production ownership integration proceeds with collection disabled.

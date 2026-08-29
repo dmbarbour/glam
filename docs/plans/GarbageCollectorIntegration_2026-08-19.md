@@ -32,6 +32,8 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I3A.2 | complete | weak parked demand routes and checked temporary claim-owned domain access |
 | I3A.3 | complete | claim-derived scheduler poll context, common task/client/spark routing, and mutator-free release/wait boundaries |
 | I3A.4 | complete | runtime-rooted machine completion outcomes, preserved effect roots, and exhaustive deferred-interior inventory |
+| I3B.1a | complete | thread-bound evaluator-step authority and source-latched direct-entry compatibility inventory |
+| I3B.1 | in progress | scoped construction and core evaluator migration |
 | I3 | in progress | bounded evaluator/worker mutator regions |
 | I4 | pending | core trace vocabulary and leaf policy |
 | I4.0 | pending | managed-family destruction admission contract |
@@ -838,6 +840,60 @@ must extend the existing provenance fixture in the same change. Production
 remains `NoAuto`.
 
 ### Phase I3B.1 — Scoped Construction and Core Evaluator Migration
+
+Implementation checkpoints:
+
+1. **I3B.1a — Evaluator-step authority and compatibility inventory.** Add one
+   thread-bound, lifetime-borrowed evaluator-step context containing the
+   durable `EvalContext` plus scheduler poll authority, but no active mutator.
+   Its callback-free operations may open `EvaluationValueAccess`; waits and
+   callbacks see only the durable context after such access has ended. Record
+   every temporary direct/legacy evaluator entry owned by I3D or I3E rather
+   than letting it manufacture scheduler authority implicitly.
+2. **I3B.1b — Value/application/sequence spine.** Migrate the internal
+   evaluator spine rooted at immediate `eval_value` dispatch, application,
+   ordinary function sequencing, key/list traversal, and callback-free value
+   construction to the evaluator-step context. Keep wait/pump operations
+   outside active `EvaluationValueAccess`, and leave explicit net/reflection
+   seams for I3D rather than threading access through them.
+3. **I3B.1c — Ordinary builtin clusters.** Migrate callback-free numeric,
+   comparison, dictionary, list, object, pattern, assertion, and pure
+   annotation helpers in small cluster checkpoints. Effect interpretation,
+   reflection annotations, net construction/driving, and externally supplied
+   deferred computations remain explicit I3D/I3E boundaries.
+4. **I3B.1d — Public construction and owned extraction.** Give public
+   `Values` composition one runtime-service-owned scoped construction path,
+   batch nested helpers under one admission where practical, and make
+   `EvaluatedValue` extraction borrow managed data only inside a matching
+   scope while returning owned bytes/scalars/collections.
+5. **I3B.1e — Inventory closure and verification.** Latch every evaluator
+   function which may allocate or inspect managed data, every deliberate
+   compatibility entry, and every I3D/I3E boundary. Run the recursive
+   construction, provenance-error, and owned-extraction fixtures before
+   declaring I3B.1 complete.
+
+The evaluator-step context is intentionally distinct from
+`EvaluationValueAccess`. The former may survive across an evaluator
+orchestration step because it contains no mutator; the latter exists only
+inside a callback-free closure. This preserves current patient evaluation
+until I3B.2 separates its wait driver without allowing a recursive
+`eval_value` call to hold collector admission across pumping or callbacks.
+
+I3B.1a completed 2026-08-29. `EvaluatorStepContext` borrows one checked
+`EvaluationPollContext` and durable `EvalContext`, contains no mutator, and is
+statically neither `Send` nor `Sync`. Its only managed operation delegates a
+callback-free closure to `EvaluationValueAccess`; the existing two-region
+probe now exercises this carrier and still permits cross-thread collection
+between regions. Construction remains private to the poll authority.
+
+`direct_evaluator_compatibility_entries_are_complete` records all 40 direct
+production calls to recursive evaluation, application, strategy demand, path
+evaluation, and list materialization outside `src/eval`. The runtime pump's
+two entries belong to I3B.1b/I3C; reflection entries belong to I3D; assembly,
+compiler, `.g`, macro, and diagnostic entries belong to I3E. No compatibility
+entry is treated as permission to inspect a managed value without authority;
+production remains `NoAuto`, and the inventory must shrink as those owners
+migrate.
 
 - Introduce the scoped evaluator view selected in I3A.1 and migrate the
   strongly connected evaluator call graph rooted at `eval_value`. Persistent

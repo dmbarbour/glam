@@ -9,6 +9,8 @@
 use crate::core::RuntimeValueAccess;
 use crate::core::Value;
 use crate::runtime::RuntimeValueRoot;
+use std::marker::PhantomData;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use super::coordinator::ClaimedDemandSession;
@@ -18,6 +20,19 @@ use super::{EvalContext, EvaluationDemandState};
 pub(crate) struct EvaluationValueAccess<'scope> {
     values: RuntimeValueAccess<'scope>,
     context: &'scope EvalContext,
+}
+
+/// Thread-bound authority for one evaluator orchestration step.
+///
+/// Unlike [`EvaluationValueAccess`], this carrier contains no active mutator
+/// and may remain live while evaluation reports a dependency or invokes a
+/// callback. Callback-free semantic operations use [`Self::with_value_access`]
+/// to open smaller managed-access regions. Its private construction preserves
+/// the scheduler-owned admission route established by I3A.
+pub(crate) struct EvaluatorStepContext<'step> {
+    poll: &'step EvaluationPollContext,
+    context: &'step EvalContext,
+    _thread_bound: PhantomData<Rc<()>>,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -41,6 +56,19 @@ impl<'scope> EvaluationValueAccess<'scope> {
 
     pub(crate) fn context(&self) -> &EvalContext {
         self.context
+    }
+}
+
+impl EvaluatorStepContext<'_> {
+    pub(crate) fn context(&self) -> &EvalContext {
+        self.context
+    }
+
+    pub(crate) fn with_value_access<R>(
+        &self,
+        operation: impl for<'scope> FnOnce(EvaluationValueAccess<'scope>) -> R,
+    ) -> R {
+        self.poll.with_value_access(self.context, operation)
     }
 }
 
@@ -83,6 +111,22 @@ impl EvaluationPollContext {
                 .expect("poll context and managed access must share one value domain");
             operation(access)
         })
+    }
+
+    /// Derives the thread-bound evaluator authority for one machine substep.
+    pub(crate) fn evaluator<'step>(
+        &'step self,
+        context: &'step EvalContext,
+    ) -> EvaluatorStepContext<'step> {
+        assert!(
+            Arc::ptr_eq(&self.demand, &context.session),
+            "poll context and evaluator context must share one demand session"
+        );
+        EvaluatorStepContext {
+            poll: self,
+            context,
+            _thread_bound: PhantomData,
+        }
     }
 
     /// Wrap one currently bare evaluator result before it leaves the machine
@@ -147,6 +191,16 @@ mod tests {
         EvaluationValueAccess<'static>,
         Sync
     );
+    assert_does_not_implement!(
+        evaluator_step_context_is_not_send,
+        EvaluatorStepContext<'static>,
+        Send
+    );
+    assert_does_not_implement!(
+        evaluator_step_context_is_not_sync,
+        EvaluatorStepContext<'static>,
+        Sync
+    );
 
     fn value_factory() -> CoreValueFactory {
         CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new())
@@ -168,8 +222,9 @@ mod tests {
         let values = value_factory();
         let context = EvalContext::isolated(values.clone());
         let poll = EvaluationPollContext::for_context(&context);
+        let evaluator = poll.evaluator(&context);
 
-        let first = poll.with_value_access(&context, |access| {
+        let first = evaluator.with_value_access(|access| {
             assert!(std::ptr::eq(access.context(), &*context));
             assert!(access.values().belongs_to(context.values()));
             assert!(matches!(
@@ -192,7 +247,7 @@ mod tests {
         assert!(callback_ran);
         assert_eq!(callback_result.root_entries(), 0);
 
-        let second = poll.with_value_access(&context, |access| {
+        let second = evaluator.with_value_access(|access| {
             assert!(matches!(
                 values.collect_managed_for_test(),
                 Err(CollectionError::ActiveMutator)
@@ -204,7 +259,7 @@ mod tests {
             access.values().root(allocator.alloc(29))
         });
 
-        poll.with_value_access(&context, |access| {
+        evaluator.with_value_access(|access| {
             assert_eq!(*access.values().get(&second), 29);
         });
     }

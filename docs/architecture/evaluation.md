@@ -145,6 +145,15 @@ This is the compatibility shape before managed semantic values: I3B moves root
 construction into callback-free evaluator scopes, and I4F.2 replaces the
 root's interior representation without reopening the scheduler boundary.
 
+Within a claimed poll, `EvaluatorStepContext` pairs the poll authority with
+the durable evaluator context without activating the collector. It is
+thread-bound and may survive dependency/callback orchestration. Only its
+`with_value_access` operation enters a callback-free managed region, so the
+recursive evaluator can be migrated without making a whole `eval_value` call
+one mutator lifetime. Direct compatibility evaluator entries are
+source-inventoried and assigned to the later reflection/compiler boundaries
+which own their removal.
+
 Machine-visible admission uses demand state and a weak coordinator route, not
 an upgraded owner lease. Its fast closed-flag check is advisory; reflection
 and deferred reservation repeat the decisive check against registered open

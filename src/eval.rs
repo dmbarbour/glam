@@ -21,6 +21,8 @@ use crate::number::Number;
 #[cfg(test)]
 use crate::{evaluation::OwnedEvalContext, list::ListItem};
 
+#[cfg(test)]
+mod access_inventory;
 mod application;
 mod builtins;
 mod net;
