@@ -5458,26 +5458,84 @@ fn executor_shutdown_explicitly_abandons_dependency_blocked_sparks() {
 }
 
 #[test]
+fn all_poll_routes_use_scheduler_context() {
+    let (coordinator, _executor) = test_execution_resources(0).unwrap();
+    let session = EvaluationSession::shared(&coordinator);
+    let context = EvalContext::new(&session);
+
+    let cooperative_before = context.poll_context_count();
+    let cooperative = context
+        .schedule_task(|_| Ok(Box::new(Complete)))
+        .expect("cooperative task should schedule");
+    assert_eq!(
+        context.pump_wait(cooperative.wait(), 256),
+        EvaluationPumpOutcome::TargetReady
+    );
+    assert!(context.poll_context_count() > cooperative_before);
+
+    let patient = EvalContext::patient_with_task_profile(
+        &session,
+        session.demand.default_reflection_profile.clone(),
+    );
+    let patient_before = context.poll_context_count();
+    let patient_task = patient
+        .schedule_task(|_| Ok(Box::new(Complete)))
+        .expect("patient task should schedule");
+    assert_eq!(
+        patient.pump_wait(patient_task.wait(), 256),
+        EvaluationPumpOutcome::TargetReady
+    );
+    assert!(context.poll_context_count() > patient_before);
+
+    let client_before = context.poll_context_count();
+    let demand = context
+        .demand_whnf(RuntimeValueRoot::new(
+            context.values(),
+            context.values().unit(),
+        ))
+        .expect("client demand should be admitted");
+    assert!(poll_one_runtime_work(&coordinator));
+    assert!(matches!(
+        demand.poll(),
+        Some(ClientDemandResult::Complete(_))
+    ));
+    assert!(context.poll_context_count() > client_before);
+
+    coordinator.executor_started(1);
+    let promise = PromisedValue::new(context.values(), "poll route spark");
+    promise
+        .set(context.values().unit())
+        .expect("test promise should accept its assignment");
+    let spark_before = context.poll_context_count();
+    context.spark(Value::Promised(promise));
+    let coordinator::CoordinatorSelection::Spark(claimed) = coordinator.select() else {
+        panic!("assigned promise spark should be ready")
+    };
+    coordinator.poll_claimed_spark(claimed);
+    assert!(context.poll_context_count() > spark_before);
+    coordinator.executor_stopped();
+}
+
+#[test]
 fn workers_force_sparks_and_poll_ready_reflection_tasks() {
     let (coordinator, _executor) = test_execution_resources(1).unwrap();
     let session = EvaluationSession::shared(&coordinator);
     let context = EvalContext::new(&session);
+    let spark_before = context.poll_context_count();
     let (spark_sender, spark_receiver) = mpsc::channel();
-    let lazy = crate::core::LazyValue::deferred(
-        &crate::core::test_value_factory(),
-        "worker spark",
-        move |_| {
-            spark_sender
-                .send(())
-                .expect("spark receiver should remain open");
-            Ok(crate::core::keys::unit_value())
-        },
-    );
+    let lazy = crate::core::LazyValue::deferred(context.values(), "worker spark", move |_| {
+        spark_sender
+            .send(())
+            .expect("spark receiver should remain open");
+        Ok(crate::core::keys::unit_value())
+    });
     context.spark(Value::Lazy(lazy));
     spark_receiver
         .recv_timeout(Duration::from_secs(2))
         .expect("worker should force queued spark");
+    assert!(context.poll_context_count() > spark_before);
 
+    let task_before = context.poll_context_count();
     let (task_sender, task_receiver) = mpsc::channel();
     context
         .schedule_task(move |_| Ok(Box::new(Signal(Some(task_sender)))))
@@ -5485,4 +5543,5 @@ fn workers_force_sparks_and_poll_ready_reflection_tasks() {
     task_receiver
         .recv_timeout(Duration::from_secs(2))
         .expect("worker should poll ready reflection task");
+    assert!(context.poll_context_count() > task_before);
 }

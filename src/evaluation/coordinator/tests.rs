@@ -1066,6 +1066,7 @@ fn claim_rejects_a_mismatched_registered_demand_before_machine_execution() {
         require_default_reflection_profile: false,
         closed: Arc::new(AtomicBool::new(false)),
         coordinator: Arc::downgrade(&coordinator),
+        poll_contexts: AtomicUsize::new(0),
     });
     let original = coordinator
         .state

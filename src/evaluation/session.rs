@@ -4,6 +4,8 @@ use std::fmt;
 use std::ops::Deref;
 #[cfg(test)]
 use std::sync::Mutex;
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
@@ -226,6 +228,8 @@ impl EvaluationSession {
             require_default_reflection_profile,
             closed: Arc::new(AtomicBool::new(false)),
             coordinator: Arc::downgrade(&coordinator),
+            #[cfg(test)]
+            poll_contexts: AtomicUsize::new(0),
         });
         Arc::new(Self {
             demand,
@@ -661,6 +665,11 @@ impl EvalContext {
 
     pub(crate) fn runs_scheduled_task(&self) -> bool {
         self.scheduled_task
+    }
+
+    #[cfg(test)]
+    pub(crate) fn poll_context_count(&self) -> usize {
+        self.session.poll_contexts.load(Ordering::Acquire)
     }
 
     pub(crate) fn waits_for_claimed_tasks(&self) -> bool {

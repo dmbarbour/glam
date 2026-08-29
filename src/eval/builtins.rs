@@ -19,7 +19,9 @@ use super::*;
 pub(super) use annotation::is_undefined_value;
 pub(super) use net::NetConstructionMachine;
 pub(super) use object::construct_fixpoint_object;
+#[cfg(test)]
 pub(crate) use strategy::demand as demand_strategy_value;
+pub(crate) use strategy::demand_in as demand_strategy_value_in;
 
 #[cfg(test)]
 pub(super) fn apply_builtin(

@@ -48,6 +48,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I3B.1e | complete | evaluator context-surface inventory and closure verification |
 | I3B.1 | complete | scoped construction and core evaluator migration |
 | I3B.2 | complete | poll/wait driver separation |
+| I3C.1 | complete | unified claimed/direct poll routing and scoped spark demand |
 | I3 | in progress | bounded evaluator/worker mutator regions |
 | I4 | pending | core trace vocabulary and leaf policy |
 | I4.0 | pending | managed-family destruction admission contract |
@@ -955,14 +956,13 @@ likewise activates no mutator until a bounded callback-free closure requests
 access, and one source latch prevents that exceptional constructor from
 spreading.
 
-`direct_evaluator_compatibility_entries_are_complete` records all 39 direct
+`direct_evaluator_compatibility_entries_are_complete` records all 38 direct
 production calls to recursive evaluation, application, strategy demand, path
-evaluation, and list materialization outside `src/eval`. The runtime pump's
-remaining strategy-demand entry belongs to I3C; reflection entries belong to I3D; assembly,
-compiler, `.g`, macro, and diagnostic entries belong to I3E. No compatibility
-entry is treated as permission to inspect a managed value without authority;
-production remains `NoAuto`, and the inventory must shrink as those owners
-migrate.
+evaluation, and list materialization outside `src/eval`. Reflection entries
+belong to I3D; assembly, compiler, `.g`, macro, and diagnostic entries belong
+to I3E. No compatibility entry is treated as permission to inspect a managed
+value without authority; production remains `NoAuto`, and the inventory must
+shrink as those owners migrate.
 
 I3B.1b completed 2026-08-29. Immediate value dispatch, recursive application,
 function saturation, semantic tagged-dictionary selection, key conversion,
@@ -1087,7 +1087,7 @@ I3B.1e completed 2026-08-29. The closure audit now source-latches all 112
 `EvaluatorStepContext` function surfaces under `src/eval` and all 50 remaining
 durable `EvalContext` surfaces, assigning the latter explicitly to I3B.2,
 I3C, I3D, I3E, or I10. This complements rather than replaces the existing
-39-call external direct-entry inventory, the single compatibility-gate latch,
+38-call external direct-entry inventory, the single compatibility-gate latch,
 the exhaustive builtin downgrade check, and the 198-entry public-value
 compatibility inventory. The recursive-construction, composite-provenance,
 claimed/direct application, owned-extraction, weak-observer, and inventory
@@ -1194,10 +1194,33 @@ wait policy. Production remains `NoAuto`.
   boundary without storing a mutator or poll context in scheduler records.
 
 Verification: extend `workers_force_sparks_and_poll_ready_reflection_tasks`
-with forced-order barriers covering ordinary tasks, client demand, sparks, and
-patient pumping. Add `worker_releases_mutator_before_sleep`,
+with channel-synchronized worker observations, and cover ordinary cooperative
+tasks, client demand, sparks, and patient pumping with deterministic route
+counters. Add `worker_releases_mutator_before_sleep`,
 `blocked_machine_parks_without_mutator`, and
 `all_poll_routes_use_scheduler_context`. Production remains `NoAuto`.
+
+I3C.1 completed 2026-08-29. `EvaluationPollContext` now has two explicit
+admission sources: a checked detached coordinator claim for scheduled work,
+and the already-owned demand session for caller-driven effect runs and
+isolated searches. Both carriers are mutator-free and validate the exact
+demand session before opening a bounded evaluator scope. Scheduled effect
+wrappers consume the coordinator-provided carrier rather than silently
+constructing another one, while their direct `EffectTask::poll` counterpart
+constructs the same carrier from its explicit owner. Spark forcing now uses
+the scoped strategy-demand implementation, removing the runtime pump from the
+direct-evaluator compatibility inventory. The internal evaluate/interpret
+partition of an effect quantum remains assigned to I3D.2; this checkpoint
+unifies admission without pretending that the entire effect poll is one
+callback-free scope.
+
+`all_poll_routes_use_scheduler_context` latches cooperative, patient,
+client-demand, and spark routes. The worker fixture independently observes
+both a spark and a scheduled task after their poll carriers are constructed,
+and `scheduled_effect_wrapper_rejects_an_unrelated_poll_context` proves that a
+scheduled effect cannot substitute another demand session. Existing bounded
+direct-effect and isolated-search fixtures exercise the explicit-owner route.
+Production remains `NoAuto`.
 
 ### Phase I3C.2 — Poll Outcome and Release Audit
 

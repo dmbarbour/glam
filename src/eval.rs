@@ -33,7 +33,9 @@ mod test_support;
 mod value;
 
 pub(crate) use application::apply_values;
+#[cfg(test)]
 pub(crate) use builtins::demand_strategy_value;
+pub(crate) use builtins::demand_strategy_value_in;
 pub(crate) use operator::{
     access_operator, apply_arity_operator, computation_capture_operator, constant_effect,
     function_capture_operator, list_operator, request_operator,

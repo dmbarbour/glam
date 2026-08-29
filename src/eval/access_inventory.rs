@@ -106,7 +106,6 @@ const INVENTORY: &[InventoryEntry] = &[
     entry!("src/api/assembly.rs", [1, 0, 0, 0, 0], "I3E.1"),
     entry!("src/compiler.rs", [3, 0, 0, 0, 0], "I3E.1"),
     entry!("src/diagnostic.rs", [10, 2, 0, 0, 0], "I3E.3"),
-    entry!("src/evaluation/pump.rs", [0, 0, 1, 0, 0], "I3C"),
     entry!("src/g_syntax/compiler_values.rs", [1, 0, 0, 0, 0], "I3E.2"),
     entry!(
         "src/g_syntax/diagnostic_formatter.rs",
@@ -264,8 +263,8 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/builtins/strategy.rs",
-        [0, 4],
-        "I3C strategy scheduling boundary"
+        [1, 4],
+        "I3C scoped strategy demand and durable scheduling boundary"
     ),
     context_entry!(
         "src/eval/net.rs",

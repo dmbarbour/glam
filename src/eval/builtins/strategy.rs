@@ -32,9 +32,16 @@ pub(in crate::eval) fn spark(context: &EvalContext, first: Value, target: &Value
 /// Demands an ordinary strategy input, then its hidden value when that input
 /// resolves to a sealed metadata carrier.
 pub(crate) fn demand(context: &EvalContext, value: &Value) -> Result<(), EvaluationHalt> {
-    let value = eval_value(context, value)?;
+    with_direct_evaluator(context, |evaluator| demand_in(evaluator, value))
+}
+
+pub(crate) fn demand_in(
+    context: &EvaluatorStepContext<'_>,
+    value: &Value,
+) -> Result<(), EvaluationHalt> {
+    let value = eval_value_in(context, value)?;
     if let Some(metadata) = value.associated_metadata() {
-        eval_value(context, &metadata)?;
+        eval_value_in(context, &metadata)?;
     }
     Ok(())
 }

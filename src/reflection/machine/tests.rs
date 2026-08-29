@@ -1100,6 +1100,22 @@ fn effect_task_poll_yields_and_resumes_with_bounded_fuel() {
     assert_eq!(assembler.to_binary(&value).unwrap(), b"AB".as_slice());
 }
 
+#[test]
+#[should_panic(expected = "poll context and evaluator context must share one demand session")]
+fn scheduled_effect_wrapper_rejects_an_unrelated_poll_context() {
+    let (assembler, effect) = compile_effect(".r ()");
+    let host = Arc::new(TestHost::with_values(assembler.core_values()));
+    let (task_context, _task_owner) = EvalContext::isolated(assembler.core_values()).into_parts();
+    let unrelated = EvalContext::isolated(assembler.core_values());
+    let poll_context = crate::evaluation::EvaluationPollContext::for_context(&unrelated);
+    let task =
+        EffectTask::new_in_context(effect.as_core().clone(), TestEffects, host, task_context)
+            .expect("effect task should build");
+    let mut machine = ValueEffectTask(task);
+
+    let _ = machine.poll(&poll_context, 1);
+}
+
 fn poll_machine_exit(
     machine: &mut dyn EvaluationTaskMachine,
     poll_context: &crate::evaluation::EvaluationPollContext,

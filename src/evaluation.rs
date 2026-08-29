@@ -10,6 +10,8 @@
 //! behind a small type-erased task-machine boundary.
 
 use std::fmt;
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
 
@@ -175,6 +177,8 @@ pub(crate) struct EvaluationDemandState {
     require_default_reflection_profile: bool,
     closed: Arc<AtomicBool>,
     coordinator: Weak<EvaluationWorkCoordinator>,
+    #[cfg(test)]
+    poll_contexts: AtomicUsize,
 }
 
 impl fmt::Debug for EvaluationDemandState {

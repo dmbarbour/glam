@@ -26,9 +26,10 @@ crate-private paths for consumers without becoming another scheduler.
 
 - `evaluation/session.rs` owns the external session lease, session reports,
   evaluation-context construction, and task/deferred/promise admission policy.
-- `evaluation/access.rs` owns the scheduler-derived poll capability and the
-  lifetime-bound managed-value view for bounded callback-free evaluator
-  substeps. A poll context is not itself an active mutator.
+- `evaluation/access.rs` owns the scheduler-claim or direct-owner-derived poll
+  capability and the lifetime-bound managed-value view for bounded
+  callback-free evaluator substeps. A poll context is not itself an active
+  mutator.
 - `evaluation/pump.rs` owns cooperative target pumping, claimed-machine
   dispatch and release, cross-session dependency assistance, lazy-cycle
   publication, and runtime-pump adapters.
@@ -125,19 +126,22 @@ active task host rather than either scheduling component.
 
 After a claim is detached from coordinator locks, `evaluation/pump.rs` derives
 one `EvaluationPollContext` from that checked session and supplies it to every
-type-erased task poll. Client demands and sparks use the same coordinator-owned
-adapter in cooperative and executor paths; the executor contains no separate
-value-admission policy. The poll context temporarily retains the validated
-demand state but exposes neither that route nor a mutator to the machine. Its
-only managed-access operation opens a lifetime-bound region for a bounded
-callback-free substep and closes it before returning. Whole `eval_value`,
-lazy-source, effect, and spark operations may reach dependencies or callbacks,
-so they do not open one poll-wide region. Resumable scheduler-visible machine
-boundaries publish dependencies as `Blocked`; direct and patient drivers pump
-and wait only while retaining the mutator-free evaluator-step context. An
-opaque deferred-source Rust callback cannot yet suspend and resume, so its
-temporary compatibility path may cooperatively pump a dependency, but it also
-inherits no managed-access region. Claim release, terminal publication,
+type-erased task poll. Caller-driven effect runs and isolated searches derive
+the same carrier from their explicitly owned demand session; they do not
+manufacture a coordinator claim. Client demands and sparks use the common
+coordinator-owned adapter in cooperative and executor paths, so the executor
+contains no separate value-admission policy. Every carrier temporarily retains
+the validated demand state but exposes neither that route nor a mutator to the
+machine. Its only managed-access operation opens a lifetime-bound region for a
+bounded callback-free substep and closes it before returning. Whole
+`eval_value`, lazy-source, and effect operations may reach dependencies or
+callbacks, so they do not open one poll-wide region; spark demand now enters
+through its scoped strategy implementation. Resumable scheduler-visible
+machine boundaries publish dependencies as `Blocked`; direct and patient
+drivers pump and wait only while retaining the mutator-free evaluator-step
+context. An opaque deferred-source Rust callback cannot yet suspend and resume,
+so its temporary compatibility path may cooperatively pump a dependency, but
+it also inherits no managed-access region. Claim release, terminal publication,
 cancellation, destruction, coordinator waits, and worker sleeps therefore run
 without inherited mutator authority.
 
@@ -149,19 +153,20 @@ This is the compatibility shape before managed semantic values: I3B moves root
 construction to the evaluator-step publication boundary, and I4F.2 replaces
 the root's interior representation without reopening the scheduler boundary.
 
-Within a claimed poll, `EvaluatorStepContext` pairs the poll authority with
-the durable evaluator context without activating the collector. It is
-thread-bound and may survive dependency/callback orchestration. Only its
-`with_value_access` operation enters a callback-free managed region, so the
-recursive evaluator can be migrated without making a whole `eval_value` call
-one mutator lifetime. One direct-compatibility gate temporarily serves the
-remaining builtin seams plus source-inventoried reflection/compiler entries;
-I3D and I3E own its eventual removal after I3B.2 separates direct wait
-driving. A closure inventory accounts for every context-bearing function below
-`src/eval`: scoped functions retain `EvaluatorStepContext`, while every
-remaining durable `EvalContext` surface names its I3B.2/I3C/I3D/I3E or I10
-owner. Separate latches cover all external direct calls, the single
-compatibility constructor, and the dispatcher downgrade set.
+Within a claimed or explicitly owner-driven poll, `EvaluatorStepContext` pairs
+the poll authority with the durable evaluator context without activating the
+collector. It is thread-bound and may survive dependency/callback
+orchestration. Only its `with_value_access` operation enters a callback-free
+managed region, so the recursive evaluator can be migrated without making a
+whole `eval_value` call one mutator lifetime. One direct-compatibility gate
+temporarily serves the remaining builtin seams plus source-inventoried
+reflection/compiler entries; I3D and I3E own its eventual removal after I3B.2
+separates direct wait driving. A closure inventory accounts for every
+context-bearing function below `src/eval`: scoped functions retain
+`EvaluatorStepContext`, while every remaining durable `EvalContext` surface
+names its I3B.2/I3C/I3D/I3E or I10 owner. Separate latches cover all external
+direct calls, the single compatibility constructor, and the dispatcher
+downgrade set.
 
 The core value/application/sequence spine now consumes this step context.
 Client demand and deferred lazy/promise machines derive it from their checked

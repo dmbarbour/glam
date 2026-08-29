@@ -619,9 +619,10 @@ impl EvaluationWorkCoordinator {
 
     pub(super) fn poll_claimed_spark(self: &Arc<Self>, claimed: coordinator::ClaimedSparkWork) {
         claimed.assert_runtime(self.runtime_id());
-        let _poll_context = EvaluationPollContext::for_claim(claimed.demand());
+        let poll_context = EvaluationPollContext::for_claim(claimed.demand());
         let context = EvalContext::for_spark(claimed.demand_session());
-        let result = crate::eval::demand_strategy_value(&context, claimed.value().as_core());
+        let evaluator = poll_context.evaluator(&context);
+        let result = crate::eval::demand_strategy_value_in(&evaluator, claimed.value().as_core());
         let poll = match result {
             Ok(()) => coordinator::SparkWorkPoll::Complete,
             Err(halt) => {

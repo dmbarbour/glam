@@ -1,10 +1,11 @@
 //! Scoped managed-value authority for evaluator substeps.
 //!
-//! A scheduler-created poll context carries no active mutator. It may open a
+//! A poll context carries no active mutator. It may open a
 //! bounded callback-free evaluator region, whose lifetime-bound authority
 //! cannot enter durable machine state or cross a thread. Production machine,
-//! client-demand, and spark polls receive this context; I3B-I3D partition the
-//! opaque evaluator operations which may safely open it.
+//! client-demand, spark, direct-effect, and isolated-search polls receive this
+//! context; I3B-I3D partition the opaque evaluator operations which may safely
+//! open it.
 
 use crate::core::RuntimeValueAccess;
 use crate::core::Value;
@@ -12,6 +13,8 @@ use crate::runtime::RuntimeValueRoot;
 use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::atomic::Ordering;
 
 use super::coordinator::ClaimedDemandSession;
 use super::{EvalContext, EvaluationDemandState};
@@ -27,7 +30,7 @@ pub(crate) struct EvaluationValueAccess<'scope> {
 /// and may remain live while evaluation reports a dependency or invokes a
 /// callback. Callback-free semantic operations use [`Self::with_value_access`]
 /// to open smaller managed-access regions. Its private construction preserves
-/// the scheduler-owned admission route established by I3A.
+/// the poll admission route established by I3A and completed by I3C.
 pub(crate) struct EvaluatorStepContext<'step> {
     admission: EvaluatorStepAdmission<'step>,
     context: &'step EvalContext,
@@ -35,7 +38,7 @@ pub(crate) struct EvaluatorStepContext<'step> {
 }
 
 enum EvaluatorStepAdmission<'step> {
-    Claimed(&'step EvaluationPollContext),
+    Poll(&'step EvaluationPollContext),
     /// Temporary direct entry for I3B.1c builtin seams and the
     /// source-inventoried I3D/I3E callers.
     ///
@@ -81,9 +84,7 @@ impl EvaluatorStepContext<'_> {
         operation: impl for<'scope> FnOnce(EvaluationValueAccess<'scope>) -> R,
     ) -> R {
         match self.admission {
-            EvaluatorStepAdmission::Claimed(poll) => {
-                poll.with_value_access(self.context, operation)
-            }
+            EvaluatorStepAdmission::Poll(poll) => poll.with_value_access(self.context, operation),
             EvaluatorStepAdmission::DirectCompatibility => {
                 self.context.values().with_runtime_value_access(|values| {
                     let access = EvaluationValueAccess::try_new(self.context, values)
@@ -102,29 +103,48 @@ impl EvaluatorStepContext<'_> {
     }
 }
 
-/// Ephemeral scheduler authority for opening bounded evaluator regions.
+/// Ephemeral poll authority for opening bounded evaluator regions.
 ///
 /// This context contains no mutator or managed borrow and may remain on the
 /// orchestration stack while a callback, wait, or publication occurs. Only
 /// `with_value_access` activates the matching heap, and that activation ends
-/// before the method returns. Its temporary strong demand route is cloned from
-/// a detached, runtime-checked claim and is not exposed to the machine.
+/// before the method returns. Its temporary strong demand route comes from
+/// either a detached, runtime-checked claim or the explicit owner of a direct
+/// effect/search poll and is not exposed to the machine.
 pub(crate) struct EvaluationPollContext {
     demand: Arc<EvaluationDemandState>,
 }
 
 impl EvaluationPollContext {
     pub(in crate::evaluation) fn for_claim(claim: &ClaimedDemandSession) -> Self {
-        Self {
-            demand: claim.demand(),
-        }
+        let demand = claim.demand();
+        #[cfg(test)]
+        demand.poll_contexts.fetch_add(1, Ordering::Relaxed);
+        Self { demand }
     }
 
-    #[cfg(test)]
+    /// Opens the same ephemeral orchestration carrier for a caller-driven
+    /// poll which has no detached coordinator claim.
+    ///
+    /// Direct effect runs and isolated searches own an explicit demand
+    /// session instead. This constructor does not activate managed access;
+    /// it only retains that checked session for the duration of one poll.
     pub(crate) fn for_context(context: &EvalContext) -> Self {
+        #[cfg(test)]
+        context
+            .session
+            .poll_contexts
+            .fetch_add(1, Ordering::Relaxed);
         Self {
             demand: context.session.clone(),
         }
+    }
+
+    pub(crate) fn assert_context(&self, context: &EvalContext) {
+        assert!(
+            Arc::ptr_eq(&self.demand, &context.session),
+            "poll context and evaluator context must share one demand session"
+        );
     }
 
     pub(crate) fn with_value_access<R>(
@@ -132,10 +152,7 @@ impl EvaluationPollContext {
         context: &EvalContext,
         operation: impl for<'scope> FnOnce(EvaluationValueAccess<'scope>) -> R,
     ) -> R {
-        assert!(
-            Arc::ptr_eq(&self.demand, &context.session),
-            "poll context and evaluator context must share one demand session"
-        );
+        self.assert_context(context);
         self.demand.values.with_runtime_value_access(|values| {
             let access = EvaluationValueAccess::try_new(context, values)
                 .expect("poll context and managed access must share one value domain");
@@ -148,12 +165,9 @@ impl EvaluationPollContext {
         &'step self,
         context: &'step EvalContext,
     ) -> EvaluatorStepContext<'step> {
-        assert!(
-            Arc::ptr_eq(&self.demand, &context.session),
-            "poll context and evaluator context must share one demand session"
-        );
+        self.assert_context(context);
         EvaluatorStepContext {
-            admission: EvaluatorStepAdmission::Claimed(self),
+            admission: EvaluatorStepAdmission::Poll(self),
             context,
             _thread_bound: PhantomData,
         }

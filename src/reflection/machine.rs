@@ -17,9 +17,9 @@ use crate::eval;
 #[cfg(test)]
 use crate::evaluation::OwnedEvalContext;
 use crate::evaluation::{
-    EvalContext, EvaluationExitBlock, EvaluationMachinePoll, EvaluationPumpOutcome,
-    EvaluationSession, EvaluationTaskBlock, EvaluationTaskId, EvaluationTaskMachine,
-    EvaluationWaitPoll, EvaluationWaitToken, ExitIntent, WorkDependency,
+    EvalContext, EvaluationExitBlock, EvaluationMachinePoll, EvaluationPollContext,
+    EvaluationPumpOutcome, EvaluationSession, EvaluationTaskBlock, EvaluationTaskId,
+    EvaluationTaskMachine, EvaluationWaitPoll, EvaluationWaitToken, ExitIntent, WorkDependency,
 };
 use crate::interaction_net::NetBuilder;
 use crate::number::Number;
@@ -478,6 +478,16 @@ impl<S: TaskSpecialization> EffectTask<S> {
     }
 
     pub(super) fn poll(&mut self, steps: usize) -> EffectTaskPoll {
+        let context = EvaluationPollContext::for_context(&self.eval_context);
+        self.poll_with_context(&context, steps)
+    }
+
+    pub(super) fn poll_with_context(
+        &mut self,
+        context: &EvaluationPollContext,
+        steps: usize,
+    ) -> EffectTaskPoll {
+        context.assert_context(&self.eval_context);
         if let Some(terminal) = &self.terminal {
             return terminal.poll();
         }
@@ -1865,10 +1875,10 @@ pub(super) struct ContextualValueEffectTask<S: TaskSpecialization> {
 impl<S: TaskSpecialization> EvaluationTaskMachine for ValueEffectTask<S> {
     fn poll(
         &mut self,
-        _context: &crate::evaluation::EvaluationPollContext,
+        context: &crate::evaluation::EvaluationPollContext,
         step_budget: usize,
     ) -> EvaluationMachinePoll {
-        poll_value_effect_task(&mut self.0, step_budget)
+        poll_value_effect_task(&mut self.0, context, step_budget)
     }
 
     fn cancel(&mut self) {
@@ -1879,10 +1889,10 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for ValueEffectTask<S> {
 impl<S: TaskSpecialization> EvaluationTaskMachine for ContextualValueEffectTask<S> {
     fn poll(
         &mut self,
-        _context: &crate::evaluation::EvaluationPollContext,
+        context: &crate::evaluation::EvaluationPollContext,
         step_budget: usize,
     ) -> EvaluationMachinePoll {
-        match poll_value_effect_task(&mut self.task, step_budget) {
+        match poll_value_effect_task(&mut self.task, context, step_budget) {
             EvaluationMachinePoll::Failed(error) => {
                 EvaluationMachinePoll::Failed(Arc::new(error.with_context(self.context.clone())))
             }
@@ -1897,10 +1907,11 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for ContextualValueEffectTask<
 
 fn poll_value_effect_task<S: TaskSpecialization>(
     task: &mut EffectTask<S>,
+    context: &crate::evaluation::EvaluationPollContext,
     step_budget: usize,
 ) -> EvaluationMachinePoll {
     let observed_epoch = task.eval_context.current_observation_epoch();
-    match task.poll(step_budget) {
+    match task.poll_with_context(context, step_budget) {
         EffectTaskPoll::Yielded => EvaluationMachinePoll::Yielded,
         EffectTaskPoll::Blocked(blocked) => EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
             dependency: blocked.lazy.map(WorkDependency::Wait),
@@ -1922,11 +1933,11 @@ fn poll_value_effect_task<S: TaskSpecialization>(
 impl<S: TaskSpecialization> EvaluationTaskMachine for UnitEffectTask<S> {
     fn poll(
         &mut self,
-        _context: &crate::evaluation::EvaluationPollContext,
+        context: &crate::evaluation::EvaluationPollContext,
         step_budget: usize,
     ) -> EvaluationMachinePoll {
         let observed_epoch = self.0.eval_context.current_observation_epoch();
-        match self.0.poll(step_budget) {
+        match self.0.poll_with_context(context, step_budget) {
             EffectTaskPoll::Yielded => EvaluationMachinePoll::Yielded,
             EffectTaskPoll::Blocked(blocked) => {
                 EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
