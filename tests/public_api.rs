@@ -54,7 +54,7 @@ fn binary_value(assembler: &Assembler, value: Value) -> Result<Bytes, glam::Erro
     let binary = values.anno_binary(value)?;
     evaluate(assembler, &binary).and_then(|binary| {
         binary
-            .as_bytes(&values)?
+            .as_bytes()?
             .ok_or_else(|| glam::Error::new("value did not evaluate to binary data"))
     })
 }
@@ -176,7 +176,7 @@ fn diagnostic_contexts(assembler: &Assembler, diagnostic: &Diagnostic) -> Vec<Va
         .evaluator()
         .eval(&array)
         .expect("diagnostic contexts should form a list")
-        .array_items(&values)
+        .array_items()
         .expect("array extraction should use the matching runtime")
         .expect("array annotation should produce a strict value array")
 }
@@ -244,7 +244,7 @@ fn public_values_construct_semantic_access_and_annotations() {
     assert_eq!(
         evaluate(&assembler, &annotated)
             .expect("binary annotation should evaluate")
-            .as_bytes(&values)
+            .as_bytes()
             .unwrap()
             .as_deref(),
         Some(b"B".as_slice()),
@@ -359,7 +359,7 @@ fn public_promise_resolver_completes_a_cloneable_consumer() {
     assert_eq!(
         evaluate(&assembler, &cloned)
             .expect("the cloned consumer should observe completion")
-            .as_i64(&values)
+            .as_i64()
             .unwrap(),
         Some(42)
     );
@@ -433,7 +433,7 @@ fn public_promise_resolver_preserves_structured_failures() {
                 .expect("the structured diagnostic should retain its ad hoc field"),
         )
         .expect("detail should evaluate")
-        .as_i64(&values)
+        .as_i64()
         .unwrap(),
         Some(7)
     );
@@ -502,7 +502,6 @@ fn public_promise_completion_resumes_blocked_reasoning_in_its_session() {
 #[test]
 fn public_reasoning_report_exposes_retryable_blocked_errors() {
     let assembler = Assembler::default();
-    let values = assembler.values();
     let module = assembler
         .module(["blocked_error"])
         .script(
@@ -536,7 +535,7 @@ fn public_reasoning_report_exposes_retryable_blocked_errors() {
                 .expect("the retryable diagnostic should retain ad hoc fields"),
         )
         .expect("diagnostic detail should evaluate")
-        .as_i64(&values)
+        .as_i64()
         .unwrap(),
         Some(7)
     );
@@ -552,7 +551,7 @@ fn public_reasoning_report_exposes_retryable_blocked_errors() {
                 .expect("the projected diagnostic should retain ad hoc fields"),
         )
         .expect("projected diagnostic detail should evaluate")
-        .as_i64(&values)
+        .as_i64()
         .unwrap(),
         Some(7)
     );
@@ -650,7 +649,7 @@ fn protected_volume_rewrite_uses_the_commit_time_value() {
     assert_eq!(
         evaluate(&assembler, &final_value)
             .unwrap()
-            .as_i64(&values)
+            .as_i64()
             .unwrap(),
         Some(2)
     );
@@ -934,7 +933,7 @@ fn diagnostic_value_updates_preserve_structured_evaluation_failures() {
                 .expect("diagnostic update failure should retain ad hoc fields"),
         )
         .expect("diagnostic detail should evaluate")
-        .as_i64(&values)
+        .as_i64()
         .unwrap(),
         Some(9)
     );
@@ -960,20 +959,17 @@ fn public_reflection_inspects_container_structure_and_atom_identity() {
         .evaluator()
         .eval(&array)
         .expect("array annotation should evaluate")
-        .array_items(&values)
+        .array_items()
         .unwrap()
         .expect("strict array should enumerate values");
     assert_eq!(
-        evaluate(&assembler, &items[0])
-            .unwrap()
-            .as_i64(&values)
-            .unwrap(),
+        evaluate(&assembler, &items[0]).unwrap().as_i64().unwrap(),
         Some(1)
     );
     assert_eq!(
         evaluate(&assembler, &items[1])
             .unwrap()
-            .as_bytes(&values)
+            .as_bytes()
             .unwrap()
             .as_deref(),
         Some(b"two".as_slice()),
@@ -986,10 +982,7 @@ fn public_reflection_inspects_container_structure_and_atom_identity() {
         panic!("the singleton record should have one reflected entry");
     };
     assert_eq!(
-        evaluate(&assembler, value)
-            .unwrap()
-            .as_i64(&values)
-            .unwrap(),
+        evaluate(&assembler, value).unwrap().as_i64().unwrap(),
         Some(7)
     );
     assert_eq!(
@@ -1086,7 +1079,7 @@ fn semantic_path_lookup_leaves_required_and_fallback_policy_to_glam_helpers() {
                 .expect("present path access should construct"),
         )
         .expect("present value should evaluate")
-        .as_i64(&values)
+        .as_i64()
         .unwrap(),
         Some(1)
     );
@@ -1497,7 +1490,7 @@ fn repeated_source_compilations_have_distinct_invocations() {
                 .expect("diagnostic should identify its compilation invocation"),
         )
         .expect("compilation invocation should evaluate")
-        .as_i64(&assembler.values())
+        .as_i64()
         .unwrap()
         .expect("small invocation ID should fit i64")
     };
@@ -1650,22 +1643,19 @@ fn public_values_convert_numbers_without_exposing_big_number_types() {
         .expect("value evaluator should build");
     let integer = values.integer(-42);
     let integer = evaluate(&assembler, &integer).unwrap();
-    assert_eq!(integer.as_i64(&values).unwrap(), Some(-42));
-    assert_eq!(integer.as_rational_i64(&values).unwrap(), Some((-42, 1)));
-    assert_eq!(integer.as_f64(&values).unwrap(), Some(-42.0));
-    assert_eq!(
-        integer.number_text(&values).unwrap().as_deref(),
-        Some("-42")
-    );
+    assert_eq!(integer.as_i64().unwrap(), Some(-42));
+    assert_eq!(integer.as_rational_i64().unwrap(), Some((-42, 1)));
+    assert_eq!(integer.as_f64().unwrap(), Some(-42.0));
+    assert_eq!(integer.number_text().unwrap().as_deref(), Some("-42"));
 
     let ratio = values
         .number_from_text("-6/4")
         .expect("exact rational should parse");
     let ratio = evaluate(&assembler, &ratio).unwrap();
-    assert_eq!(ratio.number_text(&values).unwrap().as_deref(), Some("-3/2"));
-    assert_eq!(ratio.as_rational_i64(&values).unwrap(), Some((-3, 2)));
-    assert_eq!(ratio.as_i64(&values).unwrap(), None);
-    assert_eq!(ratio.as_f64(&values).unwrap(), Some(-1.5));
+    assert_eq!(ratio.number_text().unwrap().as_deref(), Some("-3/2"));
+    assert_eq!(ratio.as_rational_i64().unwrap(), Some((-3, 2)));
+    assert_eq!(ratio.as_i64().unwrap(), None);
+    assert_eq!(ratio.as_f64().unwrap(), Some(-1.5));
     assert_eq!(values.rational(1, 0), None);
 
     assert_eq!(values.number_from_f64(1.5), values.rational(3, 2));
@@ -1696,16 +1686,12 @@ fn owned_extraction_survives_mutator_exit() {
         .and_then(|array| evaluate(&assembler, &array))
         .unwrap();
 
-    let bytes = binary.as_bytes(&values).unwrap().unwrap();
-    let number_text = number.number_text(&values).unwrap().unwrap();
-    let items = array.array_items(&values).unwrap().unwrap();
+    let bytes = binary.as_bytes().unwrap().unwrap();
+    let number_text = number.number_text().unwrap().unwrap();
+    let items = array.array_items().unwrap().unwrap();
     assert_eq!(items.len(), 2);
 
-    let foreign = EvaluationRuntime::new(0).expect("foreign runtime should build");
-    let foreign_values = foreign.values();
-    assert!(binary.as_bytes(&foreign_values).is_err());
-    assert!(number.number_text(&foreign_values).is_err());
-    assert!(array.array_items(&foreign_values).is_err());
+    let expired_observer = binary.clone();
 
     drop(items);
     drop(array);
@@ -1715,6 +1701,7 @@ fn owned_extraction_survives_mutator_exit() {
     drop(values);
     drop(runtime);
 
+    assert!(expired_observer.as_bytes().is_err());
     assert_eq!(bytes, Bytes::from_static(b"owned"));
     assert_eq!(number_text, "123456789012345678901234567890");
 }
@@ -1740,7 +1727,7 @@ fn assembler_applies_and_evaluates_functions() {
     assert_eq!(
         evaluate(&assembler, &sum)
             .expect("application should evaluate")
-            .as_i64(&values)
+            .as_i64()
             .unwrap(),
         Some(42)
     );

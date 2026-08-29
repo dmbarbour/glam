@@ -75,7 +75,7 @@ impl TestValueFacade for Assembler {
         let binary = values.anno_binary(value.clone())?;
         let evaluated = self.evaluator().eval(&binary)?;
         evaluated
-            .as_bytes(&values)?
+            .as_bytes()?
             .ok_or_else(|| Error::new("test value did not evaluate to binary data"))
     }
 }

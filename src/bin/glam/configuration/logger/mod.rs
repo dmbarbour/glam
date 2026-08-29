@@ -47,7 +47,7 @@ pub(crate) fn start_logger(
     {
         Ok(logger)
             if logger
-                .array_items(&values)
+                .array_items()
                 .is_ok_and(|items| items.is_some_and(|items| items.is_empty())) =>
         {
             None

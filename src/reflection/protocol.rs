@@ -496,10 +496,11 @@ impl<'a, S: TaskSpecialization> RequestContext<'a, S> {
         }
         let value =
             eval::eval_value(self.eval_context, value.as_core()).map_err(task_eval_error)?;
-        Ok(EvaluatedValue::from_whnf(PublicValue::from_core(
-            self.eval_context.values(),
-            value,
-        )))
+        let values = Values::from_core_factory(self.eval_context.values().clone());
+        Ok(EvaluatedValue::from_whnf(
+            &values,
+            PublicValue::from_core(self.eval_context.values(), value),
+        ))
     }
 
     /// Starts a nested isolated search in the current evaluation session.

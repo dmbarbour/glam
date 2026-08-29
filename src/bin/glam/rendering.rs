@@ -54,7 +54,7 @@ impl DefaultLogger {
         let binary = values.anno_binary(rendered)?;
         let evaluated = self.evaluator.evaluator().eval(&binary)?;
         evaluated
-            .as_bytes(&values)?
+            .as_bytes()?
             .ok_or_else(|| Error::new("diagnostic formatter did not return binary data"))
     }
 
@@ -143,7 +143,7 @@ impl DefaultLogger {
             .and_then(|array| self.evaluator.evaluator().eval(&array))
             .and_then(|array| {
                 array
-                    .array_items(&values)?
+                    .array_items()?
                     .ok_or_else(|| glam::Error::new("context array did not materialize"))
             }) {
             Ok(frames) => frames,
@@ -498,14 +498,13 @@ impl DefaultLogger {
 }
 
 fn diagnostic_text(assembler: &Assembler, value: &Value) -> Option<String> {
-    let values = assembler.values();
     let value = assembler.evaluator().eval(value).ok()?;
     value
-        .as_bytes(&values)
+        .as_bytes()
         .ok()
         .flatten()
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-        .or_else(|| value.number_text(&values).ok().flatten())
+        .or_else(|| value.number_text().ok().flatten())
 }
 
 fn diagnostic_value_kind(assembler: &Assembler, value: &Value) -> &'static str {
@@ -1137,7 +1136,7 @@ mod tests {
                 .evaluator
                 .get_evaluated(&enriched, "viewer.auto_indent")
                 .expect("viewer should declare automatic indentation")
-                .as_i64(&values)
+                .as_i64()
                 .unwrap(),
             Some(4)
         );
@@ -1146,7 +1145,7 @@ mod tests {
                 .evaluator
                 .get_evaluated(&enriched, "viewer.header")
                 .expect("viewer should materialize the complete message header")
-                .as_bytes(&values)
+                .as_bytes()
                 .unwrap()
                 .as_deref(),
             Some(b"\x1b[36minfo\x1b[0m: ".as_slice())
@@ -1156,7 +1155,7 @@ mod tests {
                 .evaluator
                 .get_evaluated(&enriched, "viewer.anchor_indent")
                 .expect("viewer should expose its section anchor indentation")
-                .as_bytes(&values)
+                .as_bytes()
                 .unwrap()
                 .as_deref(),
             Some(b"  ".as_slice())
@@ -1166,7 +1165,7 @@ mod tests {
                 .evaluator
                 .get_evaluated(&enriched, "viewer.term")
                 .expect("viewer should declare its terminal")
-                .as_bytes(&values)
+                .as_bytes()
                 .unwrap()
                 .as_deref(),
             Some(b"xterm-256color".as_slice())

@@ -806,47 +806,47 @@ fn evaluated_values_preserve_whnf_identity_and_scalar_views() {
 
     for integer in [i64::MIN, -1, 0, 1, i64::MAX] {
         let original = values.integer(integer);
-        let evaluated = EvaluatedValue::from_whnf(original.clone());
+        let evaluated = EvaluatedValue::from_whnf(&values, original.clone());
         assert_eq!(evaluated.as_value(), &original);
         assert_eq!(evaluated.clone().into_value(), original);
         assert_eq!(Value::from(evaluated.clone()), original);
-        assert_eq!(evaluated.as_i64(&values).unwrap(), Some(integer));
-        assert_eq!(
-            evaluated.number_text(&values).unwrap(),
-            Some(integer.to_string())
-        );
+        assert_eq!(evaluated.as_i64().unwrap(), Some(integer));
+        assert_eq!(evaluated.number_text().unwrap(), Some(integer.to_string()));
         assert_eq!(evaluated.as_value().runtime_id(), values.runtime_id());
     }
 
     let rational = EvaluatedValue::from_whnf(
+        &values,
         values
             .rational(-3, 4)
             .expect("nonzero denominator should construct"),
     );
-    assert_eq!(rational.as_rational_i64(&values).unwrap(), Some((-3, 4)));
-    assert_eq!(
-        rational.number_text(&values).unwrap().as_deref(),
-        Some("-3/4")
-    );
-    assert_eq!(rational.as_f64(&values).unwrap(), Some(-0.75));
+    assert_eq!(rational.as_rational_i64().unwrap(), Some((-3, 4)));
+    assert_eq!(rational.number_text().unwrap().as_deref(), Some("-3/4"));
+    assert_eq!(rational.as_f64().unwrap(), Some(-0.75));
 
     let large = EvaluatedValue::from_whnf(
+        &values,
         values
             .number_from_text("123456789012345678901234567890")
             .expect("arbitrary precision integer should parse"),
     );
-    assert_eq!(large.as_i64(&values).unwrap(), None);
+    assert_eq!(large.as_i64().unwrap(), None);
     assert_eq!(
-        large.number_text(&values).unwrap().as_deref(),
+        large.number_text().unwrap().as_deref(),
         Some("123456789012345678901234567890")
     );
 
-    let bytes = EvaluatedValue::from_whnf(values.bytes(Bytes::from_static(b"bytes")));
+    let bytes = EvaluatedValue::from_whnf(&values, values.bytes(Bytes::from_static(b"bytes")));
     assert_eq!(
-        bytes.as_bytes(&values).unwrap().as_deref(),
+        bytes.as_bytes().unwrap().as_deref(),
         Some(b"bytes".as_slice())
     );
-    assert_eq!(bytes.as_i64(&values).unwrap(), None);
+    assert_eq!(bytes.as_i64().unwrap(), None);
+    values
+        .core
+        .collect_managed_for_test()
+        .expect("completed extraction must release its temporary mutator");
 }
 
 #[test]
@@ -907,6 +907,7 @@ fn evaluated_array_items_accept_only_one_strict_value_leaf() {
         )),
     );
     let array = EvaluatedValue::from_whnf(
+        &values,
         values
             .list([lazy_element.clone(), values.integer(2)])
             .expect("strict value leaf should construct"),
@@ -919,7 +920,7 @@ fn evaluated_array_items_accept_only_one_strict_value_leaf() {
         "an existing strict array should not allocate new demand work"
     );
     let items = array
-        .array_items(&values)
+        .array_items()
         .unwrap()
         .expect("strict value leaf should extract as an array");
     assert_eq!(items.len(), 2);
@@ -927,14 +928,14 @@ fn evaluated_array_items_accept_only_one_strict_value_leaf() {
     assert_unclaimed_lazy(&items[0]);
 
     assert_eq!(
-        EvaluatedValue::from_whnf(values.list([]).unwrap())
-            .array_items(&values)
+        EvaluatedValue::from_whnf(&values, values.list([]).unwrap())
+            .array_items()
             .unwrap(),
         Some(Vec::new())
     );
     assert!(
-        EvaluatedValue::from_whnf(values.bytes(Bytes::from_static(b"bytes")))
-            .array_items(&values)
+        EvaluatedValue::from_whnf(&values, values.bytes(Bytes::from_static(b"bytes")))
+            .array_items()
             .unwrap()
             .is_none()
     );
@@ -947,8 +948,8 @@ fn evaluated_array_items_accept_only_one_strict_value_leaf() {
         )),
     );
     assert!(
-        EvaluatedValue::from_whnf(concatenated)
-            .array_items(&values)
+        EvaluatedValue::from_whnf(&values, concatenated)
+            .array_items()
             .unwrap()
             .is_none()
     );
@@ -958,8 +959,8 @@ fn evaluated_array_items_accept_only_one_strict_value_leaf() {
         .and_then(|value| assembler.evaluate(&value))
         .expect("deque should evaluate");
     assert!(
-        EvaluatedValue::from_whnf(deque)
-            .array_items(&values)
+        EvaluatedValue::from_whnf(&values, deque)
+            .array_items()
             .unwrap()
             .is_none()
     );
@@ -973,8 +974,8 @@ fn evaluated_array_items_accept_only_one_strict_value_leaf() {
         CoreValue::List(List::from_thunk(promise_core.clone().into())),
     );
     assert!(
-        EvaluatedValue::from_whnf(deferred_spine)
-            .array_items(&values)
+        EvaluatedValue::from_whnf(&values, deferred_spine)
+            .array_items()
             .unwrap()
             .is_none()
     );
@@ -1001,11 +1002,36 @@ fn value_evaluator_returns_a_runtime_rooted_whnf_witness() {
         .evaluator()
         .eval(&value)
         .expect("an immediate value should evaluate");
-    assert_eq!(evaluated.as_i64(&values).unwrap(), Some(42));
+    assert_eq!(evaluated.as_i64().unwrap(), Some(42));
     assert_eq!(evaluated.as_value().runtime_id(), value.runtime_id());
     drop(assembler);
-    assert_eq!(evaluated.as_i64(&values).unwrap(), Some(42));
+    assert_eq!(evaluated.as_i64().unwrap(), Some(42));
     assert_eq!(evaluated.into_value(), value);
+}
+
+#[test]
+fn evaluated_observer_does_not_retain_the_runtime_value_domain() {
+    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+    let values = runtime.values();
+    let domain = Arc::downgrade(values.core.value_domain());
+    let assembler = Assembler::builder()
+        .evaluation_runtime(runtime.clone())
+        .build()
+        .expect("assembler should build");
+    let evaluated = assembler
+        .evaluator()
+        .eval(&values.integer(42))
+        .expect("immediate value should evaluate");
+    let runtime_id = evaluated.as_value().runtime_id();
+
+    assert_eq!(evaluated.as_i64().unwrap(), Some(42));
+    drop(assembler);
+    drop(values);
+    drop(runtime);
+
+    assert!(domain.upgrade().is_none());
+    assert!(evaluated.as_i64().is_err());
+    assert_eq!(evaluated.into_value().runtime_id(), runtime_id);
 }
 
 #[test]
@@ -1034,7 +1060,7 @@ fn value_evaluator_resumes_a_retained_resolver_promise_subscription() {
         .eval(&waiting)
         .expect("promise completion should resume evaluation");
     assert_eq!(
-        evaluated.as_bytes(&values).unwrap().as_deref(),
+        evaluated.as_bytes().unwrap().as_deref(),
         Some(b"resolved".as_slice())
     );
     assert_eq!(promise_core.exact_subscription_count(), 0);
@@ -1059,21 +1085,11 @@ fn value_evaluator_caches_lazy_success_and_preserves_structured_failure() {
         )),
     );
     assert_eq!(
-        assembler
-            .evaluator()
-            .eval(&lazy)
-            .unwrap()
-            .as_i64(&values)
-            .unwrap(),
+        assembler.evaluator().eval(&lazy).unwrap().as_i64().unwrap(),
         Some(42)
     );
     assert_eq!(
-        assembler
-            .evaluator()
-            .eval(&lazy)
-            .unwrap()
-            .as_i64(&values)
-            .unwrap(),
+        assembler.evaluator().eval(&lazy).unwrap().as_i64().unwrap(),
         Some(42)
     );
     assert_eq!(evaluations.load(Ordering::SeqCst), 1);
@@ -1126,7 +1142,7 @@ fn semantic_binary_slice_does_not_force_an_unused_poisoned_tail() {
         .eval(&binary)
         .expect("prefix extraction should not observe the tail");
     assert_eq!(
-        evaluated.as_bytes(&values).unwrap().as_deref(),
+        evaluated.as_bytes().unwrap().as_deref(),
         Some(b"ok".as_slice())
     );
     assert!(poison.cached().is_none());
@@ -1144,7 +1160,7 @@ fn semantic_array_materialization_replaces_reflective_list_enumeration() {
         .anno_array(list)
         .and_then(|array| assembler.evaluator().eval(&array))
         .expect("semantic array should evaluate")
-        .array_items(&values)
+        .array_items()
         .unwrap()
         .expect("array annotation should produce one strict value leaf");
     assert_eq!(semantic.len(), 2);
@@ -1153,7 +1169,7 @@ fn semantic_array_materialization_replaces_reflective_list_enumeration() {
             .evaluator()
             .eval(&semantic[0])
             .unwrap()
-            .as_i64(&values)
+            .as_i64()
             .unwrap(),
         Some(1)
     );
@@ -1162,7 +1178,7 @@ fn semantic_array_materialization_replaces_reflective_list_enumeration() {
             .evaluator()
             .eval(&semantic[1])
             .unwrap()
-            .as_bytes(&values)
+            .as_bytes()
             .unwrap()
             .as_deref(),
         Some(b"two".as_slice()),
@@ -1172,7 +1188,7 @@ fn semantic_array_materialization_replaces_reflective_list_enumeration() {
         .anno_array(values.bytes(Bytes::from_static(&[0, 255])))
         .and_then(|array| assembler.evaluator().eval(&array))
         .expect("compact binary should materialize as an array")
-        .array_items(&values)
+        .array_items()
         .unwrap()
         .expect("binary array should use a strict value leaf");
     assert_eq!(
@@ -1180,7 +1196,7 @@ fn semantic_array_materialization_replaces_reflective_list_enumeration() {
             .evaluator()
             .eval(&bytes[0])
             .unwrap()
-            .as_i64(&values)
+            .as_i64()
             .unwrap(),
         Some(0)
     );
@@ -1189,7 +1205,7 @@ fn semantic_array_materialization_replaces_reflective_list_enumeration() {
             .evaluator()
             .eval(&bytes[1])
             .unwrap()
-            .as_i64(&values)
+            .as_i64()
             .unwrap(),
         Some(255)
     );

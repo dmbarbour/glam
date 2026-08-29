@@ -26,9 +26,9 @@ mod evaluation_halt;
 pub(crate) mod keys;
 pub(crate) use evaluation_halt::EvaluationHalt;
 mod managed;
-pub(crate) use managed::RuntimeValueAccess;
 #[cfg(test)]
 pub(crate) use managed::{CoreValueAllocationScope, CoreValueDomainWitness};
+pub(crate) use managed::{RuntimeValueAccess, RuntimeValueObserver};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct LazyId(NonZeroU64);

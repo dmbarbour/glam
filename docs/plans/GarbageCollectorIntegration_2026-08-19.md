@@ -44,6 +44,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I3B.1d.1 | complete | scoped public value construction and nested helper reuse |
 | I3B.1d.2 | complete | matching-runtime owned evaluated-value extraction |
 | I3B.1d.3 | complete | public construction/extraction closure audit |
+| I3B.1d.4 | complete | weak non-retaining evaluated-value observer ergonomics |
 | I3B.1 | in progress | scoped construction and core evaluator migration |
 | I3 | in progress | bounded evaluator/worker mutator regions |
 | I4 | pending | core trace vocabulary and leaf policy |
@@ -909,12 +910,25 @@ Implementation checkpoints:
      `EvaluatedValue` as only the WHNF witness. Require a borrowed `Values`
      service for scalar, binary, and strict-array extraction; validate the
      exact runtime before inspection, borrow only inside one scoped access,
-     and return owned `Bytes`, scalars, strings, or public roots.
+     and return owned `Bytes`, scalars, strings, or public roots. I3B.1d.4
+     supersedes the public parameter shape without weakening this matching-
+     domain or bounded-access requirement.
    - **I3B.1d.3 — Closure and verification.** Latch the single construction
      entry, nested helper reuse, foreign-runtime failures, and owned-result
      lifetime. Audit public construction/extraction compatibility escapes and
      update current architecture and ownership records without claiming the
      I4F.2 managed-root representation early.
+   - **I3B.1d.4 — Weak evaluated observer adjustment.** Correct the public
+     extraction ergonomics before I3B.1 closure. A successfully evaluated
+     value carries a weak, exact value-domain observer issued by its evaluator;
+     it does not retain the heap and does not hold a mutator between calls.
+     Scalar, binary, canonical-number-text, and strict-array methods upgrade
+     that observer, enter one bounded access region, and return owned results
+     directly from `evaluated.as_*()`. If the value domain has disappeared,
+     observation fails explicitly. `into_value` discards the observer, and
+     bare `Value` remains transport-only. Do not introduce a public lifetime
+     parameter, a strong `Values` back-reference, or a second public observer
+     type unless implementation evidence requires one.
 5. **I3B.1e — Inventory closure and verification.** Latch every evaluator
    function which may allocate or inspect managed data, every deliberate
    compatibility entry, and every I3D/I3E boundary. Run the recursive
@@ -1048,10 +1062,24 @@ and extraction removed eleven more facade/evaluator escapes. Dedicated
 fixtures cover one nested construction admission, foreign composite rejection,
 foreign extraction authority, effect-token provenance, and owned bytes/text
 surviving teardown of every source handle. Current architecture and ownership
-records now state that the public WHNF witness is not observation authority.
+records established the matching-domain observation boundary, whose public
+parameter shape is refined by I3B.1d.4.
 Focused tests, the full suite, formatting, and strict Clippy pass; production
 still uses compatibility `RuntimeValueRoot` storage and remains `NoAuto` until
 the I4F.2 representation switch.
+
+I3B.1d.4 completed 2026-08-29. `EvaluatedValue` now pairs its WHNF value with
+an exact weak observer for the evaluator's value domain. Public extractors no
+longer require callers to retain and repeatedly pass `Values`; each call
+briefly upgrades the observer, enters one bounded access region, and returns
+only owned Rust data or public value roots. The observer retains neither the
+runtime heap nor a mutator, and observation reports an error after the value
+domain disappears. `into_value` deliberately discards this observation route,
+leaving bare `Value` transport-only. Effect-token resolution retains its exact
+token-domain check in addition to the weak value-domain check. Focused tests
+cover successful extraction, post-call collection admission, dead-domain
+failure, owned-result survival, and token provenance without changing the
+198-entry compatibility-access inventory. Production remains `NoAuto`.
 
 - Introduce the scoped evaluator view selected in I3A.1 and migrate the
   strongly connected evaluator call graph rooted at `eval_value`. Persistent

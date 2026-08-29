@@ -81,7 +81,7 @@ fn external_effect_specialization_uses_only_public_embedding_apis() {
                         .evaluator()
                         .eval(result)
                         .unwrap()
-                        .as_i64(&assembler.values())
+                        .as_i64()
                         .unwrap(),
                     Some(42)
                 );

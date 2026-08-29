@@ -426,7 +426,7 @@ fn assemble(
         .and_then(|binary| assembler.evaluator().eval(&binary))
         .and_then(|binary| {
             binary
-                .as_bytes(&values)?
+                .as_bytes()?
                 .ok_or_else(|| Error::new("asm.result did not evaluate to binary data"))
         })
         .map_err(|error| {

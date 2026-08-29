@@ -20,7 +20,7 @@ fn binary_at(assembler: &Assembler, root: &Value, path: &str) -> Result<Bytes, E
     let binary = values.anno_binary(value)?;
     let evaluated = assembler.evaluator().eval(&binary)?;
     evaluated
-        .as_bytes(&values)?
+        .as_bytes()?
         .ok_or_else(|| Error::new("macro protocol result did not evaluate to binary data"))
 }
 

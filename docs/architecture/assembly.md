@@ -27,10 +27,12 @@ public paths without becoming another implementation owner.
 The embedding value boundary has three explicit roles. `Assembler::values`
 constructs runtime-local literals and lazy semantic composition without
 demand. `Assembler::evaluator().eval` performs ordinary outer-WHNF demand and
-returns `EvaluatedValue`, whose scalar, binary, and strict-array extractors
-require a borrowed matching `Values` service. Extraction borrows only within
-that runtime-qualified operation and returns owned Rust data or public roots;
-the WHNF witness itself carries no observation authority.
+returns `EvaluatedValue`, whose scalar, binary, and strict-array extractors use
+an exact weak observer for the evaluator's value domain. Each extraction
+briefly enters one runtime-qualified operation and returns owned Rust data or
+public roots. The observer retains neither the runtime heap nor a mutator; an
+extractor reports an error if the domain has disappeared. Converting the WHNF
+witness back into bare `Value` deliberately discards this observation route.
 `Assembler::reflection` owns runtime-specific pre-demand kind, atom-key,
 dictionary-entry, associated metadata, and opaque-origin inspection. Bare
 `Value` exposes runtime identity but no scalar, kind, undefined, or structural
@@ -42,7 +44,7 @@ Runtime input and output FIFOs retain unrestricted `Value` roots. Admission,
 journaling, commit, and delivery do not demand a payload or require WHNF. A
 host output decoder which needs semantic data explicitly captures an assembler
 and evaluates the delivered value before using `EvaluatedValue` extraction
-with that assembler's `Values` service.
+while that assembler's runtime remains alive.
 This is not an isolation boundary: nested values may remain lazy, and a future
 phase barrier would require an explicit opaque envelope and opening
 capability.

@@ -238,9 +238,8 @@ fn text_value(
     request: &str,
 ) -> Result<String, TaskHalt> {
     let value = context.evaluate(&value)?;
-    let values = context.values();
     let bytes = value
-        .as_bytes(&values)?
+        .as_bytes()?
         .ok_or_else(|| TaskHalt::new(format!("{request} requires text")))?;
     String::from_utf8(bytes.into())
         .map_err(|_| TaskHalt::new(format!("{request} requires UTF-8 text")))

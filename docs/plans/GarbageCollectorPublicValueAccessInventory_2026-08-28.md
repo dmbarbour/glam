@@ -90,5 +90,9 @@ and checkpoint assignments behind this grouped summary.
 - I3B.1d.2 deliberately tripped the same inventory after moving evaluation
   and extraction through matching `Values` authority. The new baseline removes
   nine borrowed/construction escapes and two evaluator conversion escapes.
+- I3B.1d.4 moved the matching-domain authority into an exact weak observer on
+  `EvaluatedValue`. This restores direct `as_*()` ergonomics without adding a
+  compatibility projection, retaining the runtime heap, or changing the
+  198-entry baseline.
 - The existing public-value suite remains the compatibility behavior oracle
   until I4F.2.

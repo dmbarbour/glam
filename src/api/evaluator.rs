@@ -31,7 +31,7 @@ impl ValueEvaluator<'_> {
         self.assembler
             .eval_context()
             .evaluate_whnf(&value)
-            .map(|value| EvaluatedValue::from_whnf(values.wrap(value)))
+            .map(|value| EvaluatedValue::from_whnf(&values, values.wrap(value)))
             .map_err(|error| self.assembler.evaluation_error(error))
     }
 }

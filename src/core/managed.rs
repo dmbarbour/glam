@@ -1,8 +1,8 @@
 use glam_gc::{Allocator, Gc, Mutator, Root, Trace, UnsupportedLayout};
-#[cfg(test)]
 use std::sync::{Arc, Weak};
 
 use super::{CoreValueFactory, RuntimeValueDomain};
+use crate::runtime::EvaluationRuntimeId;
 
 /// Initial minimum slot extent for Glam-owned managed representations.
 ///
@@ -55,6 +55,18 @@ pub(crate) struct CoreValueAllocationScope<'scope> {
 pub(crate) struct RuntimeValueAccess<'scope> {
     domain: &'scope RuntimeValueDomain,
     scope: CoreValueAllocationScope<'scope>,
+}
+
+/// Weak, non-retaining authority to reopen bounded observation in one value
+/// domain.
+///
+/// Public evaluated-value witnesses carry this handle so extraction can remain
+/// ergonomic without retaining the heap or holding a mutator between calls.
+/// Bare public values deliberately do not expose it.
+#[derive(Clone)]
+pub(crate) struct RuntimeValueObserver {
+    runtime: EvaluationRuntimeId,
+    domain: Weak<RuntimeValueDomain>,
 }
 
 /// One type's allocation path borrowed from a factory allocation scope.
@@ -120,6 +132,15 @@ impl CoreValueFactory {
         })
     }
 
+    /// Issues one weak observer for values successfully evaluated by this
+    /// exact domain.
+    pub(crate) fn runtime_value_observer(&self) -> RuntimeValueObserver {
+        RuntimeValueObserver {
+            runtime: self.runtime_id(),
+            domain: Arc::downgrade(&self.domain),
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn managed_domain_witness(&self) -> CoreValueDomainWitness {
         CoreValueDomainWitness(Arc::downgrade(&self.domain))
@@ -145,6 +166,27 @@ impl CoreValueFactory {
         &self,
     ) -> Result<glam_gc::CollectionReport, glam_gc::CollectionError> {
         self.domain.heap.collect_full()
+    }
+}
+
+impl RuntimeValueObserver {
+    pub(crate) fn runtime_id(&self) -> EvaluationRuntimeId {
+        self.runtime
+    }
+
+    /// Returns whether this observer was issued by `values`' exact domain.
+    pub(crate) fn belongs_to(&self, values: &CoreValueFactory) -> bool {
+        Weak::ptr_eq(&self.domain, &Arc::downgrade(&values.domain))
+    }
+
+    /// Temporarily upgrades observation authority without creating a durable
+    /// heap owner. The returned factory has no compilation-local extensions;
+    /// scalar and structural extraction needs only runtime-owned values.
+    pub(crate) fn upgrade(&self) -> Option<CoreValueFactory> {
+        self.domain.upgrade().map(|domain| CoreValueFactory {
+            domain,
+            local_extensions: None,
+        })
     }
 }
 

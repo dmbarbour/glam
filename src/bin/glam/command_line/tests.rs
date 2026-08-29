@@ -37,7 +37,7 @@ impl TestValueFacade for Assembler {
 impl TestEvaluated<'_> {
     fn as_binary(&self) -> Option<Bytes> {
         self.value
-            .as_bytes(&self.assembler.values())
+            .as_bytes()
             .expect("test value should belong to its assembler")
     }
 
@@ -53,7 +53,7 @@ impl TestEvaluated<'_> {
                 [values.integer(1), self.value.as_value().clone()],
             )
             .and_then(|value| self.assembler.evaluator().eval(&value))
-            .is_ok_and(|value| value.as_i64(&values).is_ok_and(|value| value == Some(1)))
+            .is_ok_and(|value| value.as_i64().is_ok_and(|value| value == Some(1)))
     }
 }
 
@@ -975,7 +975,7 @@ fn configured_cli_rejects_nonunit_unconsumed_and_ambiguous_results() {
             .anno_array(contexts.into_value())
             .and_then(|array| assembler.evaluator().eval(&array))
             .expect("configured CLI contexts should be a list")
-            .array_items(&assembler.values())
+            .array_items()
             .expect("context array should belong to the CLI assembler")
             .expect("array annotation should produce strict context items");
         assert_eq!(

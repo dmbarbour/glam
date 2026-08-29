@@ -13,7 +13,7 @@ use super::error::net_build_error;
 use crate::core::Value as CoreValue;
 use crate::core::{
     Builtin, CoreValueFactory, Dict, EvaluationFailure, Key, LazyValue, List, PromisedValue,
-    RuntimeValueAccess,
+    RuntimeValueAccess, RuntimeValueObserver,
 };
 use crate::core_net::{CoreDataKey, CoreSpecialization};
 use crate::interaction_net::{NetBuilder as CoreNetBuilder, Port as CorePort};
@@ -81,10 +81,14 @@ pub struct Value(pub(super) RuntimeValueRoot);
 ///
 /// Nested dictionary members, list elements, function results, and other
 /// contained values may remain lazy. Converting this witness back to [`Value`]
-/// discards only the static outer-WHNF guarantee. Observation requires a
-/// borrowed matching [`Values`] service; this witness is not runtime authority.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct EvaluatedValue(Value);
+/// discards only the static outer-WHNF guarantee. The witness carries weak,
+/// non-retaining authority to attempt observation through its issuing runtime;
+/// extraction fails after that value domain disappears.
+#[derive(Clone)]
+pub struct EvaluatedValue {
+    value: Value,
+    observer: RuntimeValueObserver,
+}
 
 /// Runtime-selected construction service for Glam values.
 ///
@@ -187,7 +191,8 @@ where
     /// A same-runtime value of another kind or from another token domain is a
     /// successful miss. A value from another runtime is rejected.
     pub fn resolve(&self, token: &EvaluatedValue) -> Result<Option<Arc<T>>, Error> {
-        token.with_core(&self.values, |value| {
+        token.require_observer(&self.values)?;
+        token.with_core(|value| {
             let CoreValue::Opaque(token) = value else {
                 return None;
             };
@@ -722,27 +727,55 @@ impl Value {
 }
 
 impl EvaluatedValue {
-    pub(crate) fn from_whnf(value: Value) -> Self {
+    pub(crate) fn from_whnf(values: &Values, value: Value) -> Self {
         debug_assert!(!matches!(
             value.as_core(),
             CoreValue::Lazy(_) | CoreValue::Promised(_)
         ));
-        Self(value)
+        debug_assert_eq!(value.runtime_id(), values.runtime_id());
+        Self {
+            value,
+            observer: values.core.runtime_value_observer(),
+        }
     }
 
     pub fn as_value(&self) -> &Value {
-        &self.0
+        &self.value
     }
 
     pub fn into_value(self) -> Value {
-        self.0
+        self.value
+    }
+
+    fn require_observer(&self, values: &Values) -> Result<(), Error> {
+        self.value.require_runtime(values.runtime)?;
+        if self.observer.belongs_to(values.core()) {
+            Ok(())
+        } else {
+            Err(Error::new(
+                "evaluated value observer belongs to another value domain",
+            ))
+        }
+    }
+
+    fn observation_values(&self) -> Result<Values, Error> {
+        self.value.require_runtime(self.observer.runtime_id())?;
+        self.observer
+            .upgrade()
+            .map(Values::from_core_factory)
+            .ok_or_else(|| {
+                Error::new(format!(
+                    "evaluation runtime {} is no longer available for value observation",
+                    self.observer.runtime_id().get()
+                ))
+            })
     }
 
     fn with_core<R>(
         &self,
-        values: &Values,
         operation: impl for<'scope> FnOnce(&'scope CoreValue) -> R,
     ) -> Result<R, Error> {
+        let values = self.observation_values()?;
         values.with_access(|access| {
             let value = access.core_value(self.as_value())?;
             Ok(operation(value))
@@ -751,45 +784,45 @@ impl EvaluatedValue {
 
     /// Extracts owned compact binary data under matching live runtime
     /// authority. The returned bytes do not borrow the value domain.
-    pub fn as_bytes(&self, values: &Values) -> Result<Option<Bytes>, Error> {
-        self.with_core(values, |value| match value {
+    pub fn as_bytes(&self) -> Result<Option<Bytes>, Error> {
+        self.with_core(|value| match value {
             CoreValue::Binary(bytes) => Some(bytes.clone()),
             _ => None,
         })
     }
 
-    pub fn as_i64(&self, values: &Values) -> Result<Option<i64>, Error> {
-        self.with_core(values, |value| match value {
+    pub fn as_i64(&self) -> Result<Option<i64>, Error> {
+        self.with_core(|value| match value {
             CoreValue::Number(number) => number.to_i64_if_integer(),
             _ => None,
         })
     }
 
-    pub fn as_u64(&self, values: &Values) -> Result<Option<u64>, Error> {
-        self.with_core(values, |value| match value {
+    pub fn as_u64(&self) -> Result<Option<u64>, Error> {
+        self.with_core(|value| match value {
             CoreValue::Number(number) => number.to_u64_if_integer(),
             _ => None,
         })
     }
 
-    pub fn as_rational_i64(&self, values: &Values) -> Result<Option<(i64, i64)>, Error> {
-        self.with_core(values, |value| match value {
+    pub fn as_rational_i64(&self) -> Result<Option<(i64, i64)>, Error> {
+        self.with_core(|value| match value {
             CoreValue::Number(number) => number.to_ratio_i64(),
             _ => None,
         })
     }
 
     /// Converts a number lossily to a finite `f64`.
-    pub fn as_f64(&self, values: &Values) -> Result<Option<f64>, Error> {
-        self.with_core(values, |value| match value {
+    pub fn as_f64(&self) -> Result<Option<f64>, Error> {
+        self.with_core(|value| match value {
             CoreValue::Number(number) => number.to_f64(),
             _ => None,
         })
     }
 
     /// Returns canonical exact integer or `numerator/denominator` text.
-    pub fn number_text(&self, values: &Values) -> Result<Option<String>, Error> {
-        self.with_core(values, |value| match value {
+    pub fn number_text(&self) -> Result<Option<String>, Error> {
+        self.with_core(|value| match value {
             CoreValue::Number(number) => Some(number.to_string()),
             _ => None,
         })
@@ -797,7 +830,8 @@ impl EvaluatedValue {
 
     /// Clones the members of one strict value-array representation without
     /// demanding any member.
-    pub fn array_items(&self, values: &Values) -> Result<Option<Vec<Value>>, Error> {
+    pub fn array_items(&self) -> Result<Option<Vec<Value>>, Error> {
+        let values = self.observation_values()?;
         values.with_access(|access| {
             let CoreValue::List(list) = access.core_value(self.as_value())? else {
                 return Ok(None);
@@ -812,6 +846,23 @@ impl EvaluatedValue {
         })
     }
 }
+
+impl fmt::Debug for EvaluatedValue {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("EvaluatedValue")
+            .field(&self.value)
+            .finish()
+    }
+}
+
+impl PartialEq for EvaluatedValue {
+    fn eq(&self, other: &Self) -> bool {
+        self.value == other.value
+    }
+}
+
+impl Eq for EvaluatedValue {}
 
 impl From<EvaluatedValue> for Value {
     fn from(value: EvaluatedValue) -> Self {

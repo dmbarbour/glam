@@ -181,7 +181,7 @@ fn completion_script_command(name: &std::ffi::OsStr, cli_arguments: CliArguments
         .ok()
         .and_then(|selected| {
             selected
-                .array_items(&values)
+                .array_items()
                 .ok()
                 .flatten()
                 .filter(Vec::is_empty)
@@ -243,7 +243,7 @@ fn configured_completion_script(
         .and_then(|binary| assembler.evaluator().eval(&binary))
         .and_then(|binary| {
             binary
-                .as_bytes(&values)?
+                .as_bytes()?
                 .map(|bytes| bytes.to_vec())
                 .ok_or_else(|| Error::new("completion script did not evaluate to binary data"))
         })
@@ -344,7 +344,6 @@ mod tests {
     #[test]
     fn assembly_result_context_names_the_executable_output_boundary() {
         let assembler = Assembler::default();
-        let values = assembler.values();
         assert_eq!(
             assembler
                 .get_evaluated(
@@ -353,7 +352,7 @@ mod tests {
                     "asm.result",
                 )
                 .expect("assembly result context should identify its output")
-                .as_bytes(&values)
+                .as_bytes()
                 .unwrap()
                 .as_deref(),
             Some(b"asm.result".as_slice())
@@ -753,12 +752,11 @@ mod tests {
                 _ => None,
             })
             .expect("report should retain the exit message");
-        let values = assembler.values();
         assert_eq!(
             assembler
                 .get_evaluated(exit_message, "msg.text")
                 .expect("exit error should retain its structured message")
-                .as_bytes(&values)
+                .as_bytes()
                 .unwrap()
                 .as_deref(),
             Some(b"settled exit failure".as_slice())
