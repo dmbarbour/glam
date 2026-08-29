@@ -35,6 +35,12 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I3A.4 | complete | runtime-rooted machine completion outcomes, preserved effect roots, and exhaustive deferred-interior inventory |
 | I3B.1a | complete | thread-bound evaluator-step authority and source-latched direct-entry compatibility inventory |
 | I3B.1b | complete | claimed value/application/sequence spine with one latched direct-compatibility gate |
+| I3B.1c.1 | complete | scoped builtin dispatcher plus numeric and unit-assertion migration |
+| I3B.1c.2 | complete | scoped recursive comparison and compiler-pattern inspection |
+| I3B.1c.3 | complete | scoped dictionary and list transformation families |
+| I3B.1c.4 | complete | scoped object and pure conditional/list-effect construction |
+| I3B.1c.5 | complete | scoped pure annotations and source-latched durable builtin seams |
+| I3B.1c | complete | ordinary builtin cluster migration |
 | I3B.1 | in progress | scoped construction and core evaluator migration |
 | I3 | in progress | bounded evaluator/worker mutator regions |
 | I4 | pending | core trace vocabulary and leaf policy |
@@ -863,6 +869,27 @@ Implementation checkpoints:
    annotation helpers in small cluster checkpoints. Effect interpretation,
    reflection annotations, net construction/driving, and externally supplied
    deferred computations remain explicit I3D/I3E boundaries.
+   The concrete checkpoints are:
+   - **I3B.1c.1 — Dispatch, numeric, and assertion.** Add one scoped builtin
+     dispatcher behind the existing direct-compatibility wrapper, route the
+     evaluator spine through it, and migrate numeric arithmetic plus unit
+     assertion. Non-migrated families receive only the durable context at an
+     explicit dispatcher branch.
+   - **I3B.1c.2 — Comparison and pattern inspection.** Migrate recursive
+     equality/ordering, list and dictionary traversal, and compiler-private
+     pattern probes without retaining access across suspension.
+   - **I3B.1c.3 — Dictionary and list transformation.** Migrate singleton,
+     union/update/merge and list slicing, mapping, splitting, indexing, and
+     text conversion, reusing the scoped sequence helpers from I3B.1b.
+   - **I3B.1c.4 — Object and pure effect construction.** Migrate object
+     specification/definition composition plus the callback-free conditional
+     and list-effect constructors. Keep actual effect interpretation and net
+     construction on their I3D boundaries.
+   - **I3B.1c.5 — Annotation partition and closure.** Migrate only assertion,
+     context, validity, and other demonstrably pure annotation branches;
+     retain explicit durable seams for reflection, metadata-reflection,
+     strategy, provenance, and externally supplied computation, then latch
+     the remaining ownership assignments.
 4. **I3B.1d — Public construction and owned extraction.** Give public
    `Values` composition one runtime-service-owned scoped construction path,
    batch nested helpers under one admission where practical, and make
@@ -916,6 +943,60 @@ explicit seams; I3B.1c and I3D own their narrower migrations. No active
 paired direct/claimed application test latches semantic equivalence, while
 the production direct-entry count falls from 40 to 39. Production remains
 `NoAuto`; managed semantic result survival remains an I4F.2 obligation.
+
+I3B.1c.1 completed 2026-08-29. `apply_builtin_in` is now the scoped dispatcher
+used by the value/application spine, while the legacy `apply_builtin` surface
+is one direct-compatibility wrapper for test fixtures and not-yet-migrated
+internal callers. Numeric arithmetic and unit assertion carry the existing
+`EvaluatorStepContext` through all recursive demands. Every other builtin
+family is deliberately visible as a dispatcher downgrade to the durable
+`EvalContext`; no branch receives `EvaluationValueAccess`, and the later
+I3B.1c/I3D checkpoints own those seams. Claimed arithmetic and assertion
+fixtures preserve their existing results. Production remains `NoAuto`.
+
+I3B.1c.2 completed 2026-08-29. Recursive equality and ordering, tuple-tag
+inspection, list traversal, and all compiler-private pattern probes now carry
+`EvaluatorStepContext`. Shared list/key helpers gained scoped variants rather
+than reopening the direct-compatibility gate. Patient forcing remains outside
+active `EvaluationValueAccess`: the carrier may survive a lazy/promise wait,
+but it contains no mutator. Direct-versus-claimed comparison and pattern
+fixtures match, the focused pattern/equality suites pass, and the full suite
+passes. No semantic choice was required; production remains `NoAuto`.
+
+I3B.1c.3 completed 2026-08-29. Dictionary singleton/union/update/merge and all
+ordinary list transformations now retain `EvaluatorStepContext` through
+recursive value, key, application, and lazy-list traversal. Sequence and index
+helpers expose scoped variants, avoiding nested direct admission. The only
+temporary dictionary-union wrapper serves the not-yet-migrated object family
+and is removed by I3B.1c.4. No access region spans patient forcing. Focused
+dictionary/list suites and the full suite pass without semantic changes;
+production remains `NoAuto`.
+
+I3B.1c.4 completed 2026-08-29. Object specification, C3 linearization,
+definition composition, instance/fixpoint construction, conditional result
+selection, and callback-free list-effect constructors now retain the
+evaluator-step carrier. Object fixpoint production no longer downgrades and
+re-enters compatibility admission. Actual list-effect handling remains inside
+the deferred closures which already receive only durable `EvalContext`; this
+is an intentional interpreter boundary, not incomplete constructor migration.
+The obsolete dictionary-union compatibility wrapper was removed. Focused
+object/list-effect tests and the full suite pass without semantic changes;
+production remains `NoAuto`.
+
+I3B.1c.5 completed 2026-08-29. Annotation recognition, assertion payloads,
+context/error handling, metadata initialization and pure transformation, and
+array/deque/binary conversion now retain the evaluator-step carrier through
+their recursive demands. Metadata-reflection validates its carrier inputs on
+that scoped route, then hands only the deferred reflection task to a named
+durable seam. Reflection gates likewise use a named durable handoff, while
+`seq` and `spark` retain their existing durable strategy boundary. A source
+latch fixes the complete dispatch-time downgrade set at effects, strategies,
+nets, and provenance and separately records the two annotation reflection
+handoffs. The obsolete direct unit-assertion compatibility wrapper was removed
+and the test-only binary-extraction wrapper was classified explicitly. Claimed
+annotation, focused metadata/annotation, source-inventory, Clippy, and full
+suite checks pass without semantic changes. This closes the ordinary builtin
+cluster; production remains `NoAuto`.
 
 - Introduce the scoped evaluator view selected in I3A.1 and migrate the
   strongly connected evaluator call graph rooted at `eval_value`. Persistent

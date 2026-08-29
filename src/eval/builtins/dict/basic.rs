@@ -2,12 +2,12 @@ use super::super::super::*;
 use super::merge::{merge_dicts, update_dict_path};
 
 pub(super) fn eval_singleton_builtin(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     key: &Value,
     value: &Value,
 ) -> Result<Value, EvaluationHalt> {
-    let key = eval_value(context, key)?;
-    let key = value_to_key(context, &key)?;
+    let key = eval_value_in(context, key)?;
+    let key = value_to_key_in(context, &key)?;
     if matches!(value, Value::Dict(dict) if dict.is_empty()) {
         return Ok(Value::Dict(crate::core::Dict::new_sync()));
     }
@@ -17,13 +17,13 @@ pub(super) fn eval_singleton_builtin(
     ))
 }
 
-pub(in crate::eval::builtins) fn eval_dict_union_builtin(
-    context: &EvalContext,
+pub(in crate::eval::builtins) fn eval_dict_union_builtin_in(
+    context: &EvaluatorStepContext<'_>,
     left: &Value,
     right: &Value,
 ) -> Result<Value, EvaluationHalt> {
-    let left = eval_value(context, left)?;
-    let right = eval_value(context, right)?;
+    let left = eval_value_in(context, left)?;
+    let right = eval_value_in(context, right)?;
     let Value::Dict(left_dict) = left else {
         return Err(EvaluationHalt::new(
             "dictionary union requires dictionary values",
@@ -36,32 +36,32 @@ pub(in crate::eval::builtins) fn eval_dict_union_builtin(
     };
 
     Ok(Value::Dict(merge_dicts(
-        context.values(),
+        context.context().values(),
         &left_dict,
         &right_dict,
     )))
 }
 
 pub(super) fn eval_dict_update_builtin(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     path: &Value,
     new_value: &Value,
     dict: &Value,
 ) -> Result<Value, EvaluationHalt> {
-    let path = eval_key_path_list(context, path)?;
+    let path = eval_key_path_list_in(context, path)?;
     if path.is_empty() {
         return Err(EvaluationHalt::new(
             "dict update builtin requires a non-empty path",
         ));
     }
-    let dict = eval_value(context, dict)?;
+    let dict = eval_value_in(context, dict)?;
     let Value::Dict(dict) = dict else {
         return Err(EvaluationHalt::new(
             "dict update builtin requires a dictionary",
         ));
     };
     Ok(Value::Dict(update_dict_path(
-        context.values(),
+        context.context().values(),
         &dict,
         &path,
         new_value.clone(),

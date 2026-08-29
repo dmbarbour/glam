@@ -1,12 +1,12 @@
 use super::super::super::*;
 use crate::list::ListItem;
 
-pub(in crate::eval::builtins) fn list_like_value(
-    context: &EvalContext,
+pub(in crate::eval::builtins) fn list_like_value_in(
+    context: &EvaluatorStepContext<'_>,
     value: Value,
     name: &str,
 ) -> Result<List, EvaluationHalt> {
-    match eval_value(context, &value)? {
+    match eval_value_in(context, &value)? {
         Value::Binary(bytes) => Ok(List::from_bytes(bytes)),
         Value::List(list) => Ok(list),
         other => Err(EvaluationHalt::new(format!(
@@ -16,20 +16,20 @@ pub(in crate::eval::builtins) fn list_like_value(
 }
 
 pub(super) fn eval_slice_builtin(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     start: &Value,
     end: &Value,
     value: &Value,
 ) -> Result<Value, EvaluationHalt> {
-    let start = eval_index_number(context, start, "slice", "list_index")?;
-    let end = eval_index_number(context, end, "slice", "list_index")?;
+    let start = eval_index_number_in(context, start, "slice", "list_index")?;
+    let end = eval_index_number_in(context, end, "slice", "list_index")?;
     if start > end {
         return Err(EvaluationHalt::new(
             "slice builtin requires start to be less than or equal to end",
         ));
     }
 
-    match eval_value(context, value)? {
+    match eval_value_in(context, value)? {
         Value::Binary(bytes) => {
             if end > bytes.len() {
                 return Err(EvaluationHalt::new("slice builtin end is out of bounds"));
@@ -38,7 +38,7 @@ pub(super) fn eval_slice_builtin(
         }
         Value::List(list) => {
             let Some(slice) =
-                list.try_slice(start, end, &mut |thunk| force_list_thunk(context, thunk))?
+                list.try_slice(start, end, &mut |thunk| force_list_thunk_in(context, thunk))?
             else {
                 return Err(EvaluationHalt::new("slice builtin end is out of bounds"));
             };
@@ -51,25 +51,25 @@ pub(super) fn eval_slice_builtin(
 }
 
 pub(super) fn eval_map_builtin(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     function: &Value,
     value: &Value,
 ) -> Result<Value, EvaluationHalt> {
-    let function = eval_value(context, function)?;
-    let mapped = match eval_value(context, value)? {
+    let function = eval_value_in(context, function)?;
+    let mapped = match eval_value_in(context, value)? {
         Value::Binary(bytes) => bytes
             .iter()
             .map(|byte| {
-                apply_value(
+                apply_value_in(
                     context,
                     function.clone(),
                     Value::Number(Number::from_u8(*byte)),
                 )
             })
             .collect::<Result<Vec<_>, _>>()?,
-        Value::List(list) => list_to_value_items(context, &list)?
+        Value::List(list) => list_to_value_items_in(context, &list)?
             .into_iter()
-            .map(|item| apply_value(context, function.clone(), item))
+            .map(|item| apply_value_in(context, function.clone(), item))
             .collect::<Result<Vec<_>, _>>()?,
         _ => {
             return Err(EvaluationHalt::new(
@@ -82,15 +82,15 @@ pub(super) fn eval_map_builtin(
 }
 
 pub(super) fn eval_list_concat_builtin(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     value: &Value,
 ) -> Result<Value, EvaluationHalt> {
-    let Value::List(list) = eval_value(context, value)? else {
+    let Value::List(list) = eval_value_in(context, value)? else {
         return Err(EvaluationHalt::new(
             "list concat builtin requires a list of lists",
         ));
     };
-    let concatenated = list_to_value_items(context, &list)?
+    let concatenated = list_to_value_items_in(context, &list)?
         .into_iter()
         .try_fold(List::empty(), |result, item| {
             Ok::<_, EvaluationHalt>(List::concat(result, append_sequence(item)?))
@@ -99,13 +99,13 @@ pub(super) fn eval_list_concat_builtin(
 }
 
 pub(super) fn eval_list_len_builtin(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     value: &Value,
 ) -> Result<Value, EvaluationHalt> {
-    match eval_value(context, value)? {
+    match eval_value_in(context, value)? {
         Value::Binary(bytes) => Ok(Value::Number(Number::from_usize(bytes.len()))),
         Value::List(list) => Ok(Value::Number(Number::from_usize(
-            list.try_len(&mut |thunk| force_list_thunk(context, thunk))?,
+            list.try_len(&mut |thunk| force_list_thunk_in(context, thunk))?,
         ))),
         _ => Err(EvaluationHalt::new(
             "list len builtin requires a list or binary value",
@@ -114,12 +114,12 @@ pub(super) fn eval_list_len_builtin(
 }
 
 pub(super) fn eval_list_split_builtin(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     index: &Value,
     value: &Value,
 ) -> Result<Value, EvaluationHalt> {
-    let index = eval_index_number(context, index, "split", "list_index")?;
-    match eval_value(context, value)? {
+    let index = eval_index_number_in(context, index, "split", "list_index")?;
+    match eval_value_in(context, value)? {
         Value::Binary(bytes) => {
             if index > bytes.len() {
                 return Err(EvaluationHalt::new("split builtin index is out of bounds"));
@@ -131,7 +131,7 @@ pub(super) fn eval_list_split_builtin(
         }
         Value::List(list) => {
             let Some((left, right)) =
-                list.try_split_at(index, &mut |thunk| force_list_thunk(context, thunk))?
+                list.try_split_at(index, &mut |thunk| force_list_thunk_in(context, thunk))?
             else {
                 return Err(EvaluationHalt::new("split builtin index is out of bounds"));
             };
@@ -144,12 +144,12 @@ pub(super) fn eval_list_split_builtin(
 }
 
 pub(super) fn eval_list_split_end_builtin(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     count: &Value,
     value: &Value,
 ) -> Result<Value, EvaluationHalt> {
-    let count = eval_index_number(context, count, "split_end", "list count")?;
-    match eval_value(context, value)? {
+    let count = eval_index_number_in(context, count, "split_end", "list count")?;
+    match eval_value_in(context, value)? {
         Value::Binary(bytes) => {
             if count > bytes.len() {
                 return Err(EvaluationHalt::new(
@@ -164,7 +164,7 @@ pub(super) fn eval_list_split_end_builtin(
         }
         Value::List(list) => {
             let Some((left, right)) =
-                list.try_split_from_end(count, &mut |thunk| force_list_thunk(context, thunk))?
+                list.try_split_from_end(count, &mut |thunk| force_list_thunk_in(context, thunk))?
             else {
                 return Err(EvaluationHalt::new(
                     "split_end builtin count is out of bounds",
@@ -179,14 +179,16 @@ pub(super) fn eval_list_split_end_builtin(
 }
 
 pub(super) fn eval_list_at_builtin(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     index: &Value,
     value: &Value,
 ) -> Result<Value, EvaluationHalt> {
-    let index = eval_index_number(context, index, "list at", "list_index")?;
-    let item = match eval_value(context, value)? {
+    let index = eval_index_number_in(context, index, "list at", "list_index")?;
+    let item = match eval_value_in(context, value)? {
         Value::Binary(bytes) => bytes.get(index).copied().map(ListItem::Byte),
-        Value::List(list) => list.try_at(index, &mut |thunk| force_list_thunk(context, thunk))?,
+        Value::List(list) => {
+            list.try_at(index, &mut |thunk| force_list_thunk_in(context, thunk))?
+        }
         _ => {
             return Err(EvaluationHalt::new(
                 "list at builtin requires a list or binary value",
@@ -202,17 +204,17 @@ pub(super) fn eval_list_at_builtin(
 }
 
 pub(super) fn eval_list_head_builtin(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     value: &Value,
 ) -> Result<Value, EvaluationHalt> {
-    match eval_value(context, value)? {
+    match eval_value_in(context, value)? {
         Value::Binary(bytes) => bytes
             .first()
             .map(|byte| Value::Number(Number::from_u8(*byte)))
             .ok_or_else(|| {
                 EvaluationHalt::new("list head builtin requires a non-empty list or binary")
             }),
-        Value::List(list) => pop_list_front(context, &list)?
+        Value::List(list) => pop_list_front_in(context, &list)?
             .map(|(head, _)| head)
             .ok_or_else(|| {
                 EvaluationHalt::new("list head builtin requires a non-empty list or binary")
@@ -224,10 +226,10 @@ pub(super) fn eval_list_head_builtin(
 }
 
 pub(super) fn eval_list_tail_builtin(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     value: &Value,
 ) -> Result<Value, EvaluationHalt> {
-    match eval_value(context, value)? {
+    match eval_value_in(context, value)? {
         Value::Binary(bytes) => {
             if bytes.is_empty() {
                 Err(EvaluationHalt::new(
@@ -238,7 +240,7 @@ pub(super) fn eval_list_tail_builtin(
             }
         }
         Value::List(list) => {
-            let Some((_, tail)) = pop_list_front(context, &list)? else {
+            let Some((_, tail)) = pop_list_front_in(context, &list)? else {
                 return Err(EvaluationHalt::new(
                     "list tail builtin requires a non-empty list or binary",
                 ));
@@ -252,14 +254,16 @@ pub(super) fn eval_list_tail_builtin(
 }
 
 pub(super) fn eval_text_lines_builtin(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     value: &Value,
 ) -> Result<Value, EvaluationHalt> {
-    let bytes = match eval_value(context, value)? {
+    let bytes = match eval_value_in(context, value)? {
         Value::Binary(bytes) => bytes,
-        Value::List(list) => {
-            Bytes::from(list_to_binary_bytes(context, &list, "text lines builtin")?)
-        }
+        Value::List(list) => Bytes::from(list_to_binary_bytes_in(
+            context,
+            &list,
+            "text lines builtin",
+        )?),
         _ => {
             return Err(EvaluationHalt::new(
                 "text lines builtin requires a binary-compatible list or binary value",

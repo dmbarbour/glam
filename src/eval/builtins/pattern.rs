@@ -8,7 +8,7 @@ use crate::core::Dict;
 use crate::list::ListItem;
 
 pub(super) fn apply(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     builtin: Builtin,
     arguments: Vec<Value>,
 ) -> Result<Value, EvaluationHalt> {
@@ -57,15 +57,21 @@ pub(super) fn apply(
     }
 }
 
-fn pattern_is_list(context: &EvalContext, value: &Value) -> Result<Value, EvaluationHalt> {
-    Ok(match eval_value(context, value)? {
-        Value::Binary(_) | Value::List(_) => pattern_success(context.values().unit()),
+fn pattern_is_list(
+    context: &EvaluatorStepContext<'_>,
+    value: &Value,
+) -> Result<Value, EvaluationHalt> {
+    Ok(match eval_value_in(context, value)? {
+        Value::Binary(_) | Value::List(_) => pattern_success(context.context().values().unit()),
         _ => pattern_failure(),
     })
 }
 
-fn pattern_list_try_uncons(context: &EvalContext, value: &Value) -> Result<Value, EvaluationHalt> {
-    let parts = match eval_value(context, value)? {
+fn pattern_list_try_uncons(
+    context: &EvaluatorStepContext<'_>,
+    value: &Value,
+) -> Result<Value, EvaluationHalt> {
+    let parts = match eval_value_in(context, value)? {
         Value::Binary(bytes) => bytes.first().map(|byte| {
             (
                 Value::Number(Number::from_u8(*byte)),
@@ -73,7 +79,7 @@ fn pattern_list_try_uncons(context: &EvalContext, value: &Value) -> Result<Value
             )
         }),
         Value::List(list) => list
-            .try_pop_front(&mut |thunk| force_list_thunk(context, thunk))?
+            .try_pop_front(&mut |thunk| force_list_thunk_in(context, thunk))?
             .map(|(head, tail)| (list_item_value(head), Value::List(tail))),
         _ => None,
     };
@@ -86,8 +92,11 @@ fn pattern_list_try_uncons(context: &EvalContext, value: &Value) -> Result<Value
     }))
 }
 
-fn pattern_list_try_unsnoc(context: &EvalContext, value: &Value) -> Result<Value, EvaluationHalt> {
-    let parts = match eval_value(context, value)? {
+fn pattern_list_try_unsnoc(
+    context: &EvaluatorStepContext<'_>,
+    value: &Value,
+) -> Result<Value, EvaluationHalt> {
+    let parts = match eval_value_in(context, value)? {
         Value::Binary(bytes) => bytes.last().map(|byte| {
             (
                 Value::Binary(bytes.slice(0..bytes.len() - 1)),
@@ -95,7 +104,7 @@ fn pattern_list_try_unsnoc(context: &EvalContext, value: &Value) -> Result<Value
             )
         }),
         Value::List(list) => list
-            .try_pop_back(&mut |thunk| force_list_thunk(context, thunk))?
+            .try_pop_back(&mut |thunk| force_list_thunk_in(context, thunk))?
             .map(|(init, last)| (Value::List(init), list_item_value(last))),
         _ => None,
     };
@@ -108,28 +117,31 @@ fn pattern_list_try_unsnoc(context: &EvalContext, value: &Value) -> Result<Value
     }))
 }
 
-fn pattern_list_is_empty(context: &EvalContext, value: &Value) -> Result<Value, EvaluationHalt> {
-    let empty = match eval_value(context, value)? {
+fn pattern_list_is_empty(
+    context: &EvaluatorStepContext<'_>,
+    value: &Value,
+) -> Result<Value, EvaluationHalt> {
+    let empty = match eval_value_in(context, value)? {
         Value::Binary(bytes) => bytes.is_empty(),
         Value::List(list) => list
-            .try_pop_front(&mut |thunk| force_list_thunk(context, thunk))?
+            .try_pop_front(&mut |thunk| force_list_thunk_in(context, thunk))?
             .is_none(),
         _ => false,
     };
     Ok(if empty {
-        pattern_success(context.values().unit())
+        pattern_success(context.context().values().unit())
     } else {
         pattern_failure()
     })
 }
 
 fn pattern_equal(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     expected: &Value,
     value: &Value,
 ) -> Result<Value, EvaluationHalt> {
-    let expected = eval_value(context, expected)?;
-    let value = eval_value(context, value)?;
+    let expected = eval_value_in(context, expected)?;
+    let value = eval_value_in(context, value)?;
     let equal = match (expected, value) {
         (Value::Atom(expected), Value::Atom(value)) => expected == value,
         (Value::Number(expected), Value::Number(value)) => expected == value,
@@ -145,33 +157,33 @@ fn pattern_equal(
         }
     };
     Ok(if equal {
-        pattern_success(context.values().unit())
+        pattern_success(context.context().values().unit())
     } else {
         pattern_failure()
     })
 }
 
 fn pattern_path_equal(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     expected: &Value,
     value: &Value,
 ) -> Result<Value, EvaluationHalt> {
-    let expected = eval_key_path_list(context, expected)?;
+    let expected = eval_key_path_list_in(context, expected)?;
     let Some(value) = pattern_path_keys(context, value)? else {
         return Ok(pattern_failure());
     };
     Ok(if expected == value {
-        pattern_success(context.values().unit())
+        pattern_success(context.context().values().unit())
     } else {
         pattern_failure()
     })
 }
 
 fn pattern_path_keys(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     value: &Value,
 ) -> Result<Option<Vec<Key>>, EvaluationHalt> {
-    match eval_value(context, value)? {
+    match eval_value_in(context, value)? {
         Value::Binary(bytes) => Ok(Some(
             bytes
                 .iter()
@@ -184,11 +196,11 @@ fn pattern_path_keys(
 }
 
 fn pattern_list_keys(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     mut list: List,
 ) -> Result<Option<Vec<Key>>, EvaluationHalt> {
     let mut keys = Vec::new();
-    while let Some((value, tail)) = pop_list_front(context, &list)? {
+    while let Some((value, tail)) = pop_list_front_in(context, &list)? {
         let Some(key) = pattern_value_key(context, &value)? else {
             return Ok(None);
         };
@@ -198,8 +210,11 @@ fn pattern_list_keys(
     Ok(Some(keys))
 }
 
-fn pattern_value_key(context: &EvalContext, value: &Value) -> Result<Option<Key>, EvaluationHalt> {
-    Ok(match eval_value(context, value)? {
+fn pattern_value_key(
+    context: &EvaluatorStepContext<'_>,
+    value: &Value,
+) -> Result<Option<Key>, EvaluationHalt> {
+    Ok(match eval_value_in(context, value)? {
         Value::Atom(atom) => Some(Key::Atom(atom)),
         Value::Number(number) => Some(Key::Number(number)),
         Value::Binary(bytes) => Some(Key::Binary(bytes)),
@@ -229,26 +244,29 @@ fn pattern_value_key(context: &EvalContext, value: &Value) -> Result<Option<Key>
     })
 }
 
-fn pattern_is_dict(context: &EvalContext, value: &Value) -> Result<Value, EvaluationHalt> {
-    Ok(match eval_value(context, value)? {
-        Value::Dict(_) => pattern_success(context.values().unit()),
+fn pattern_is_dict(
+    context: &EvaluatorStepContext<'_>,
+    value: &Value,
+) -> Result<Value, EvaluationHalt> {
+    Ok(match eval_value_in(context, value)? {
+        Value::Dict(_) => pattern_success(context.context().values().unit()),
         _ => pattern_failure(),
     })
 }
 
 fn pattern_dict_try_take(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     path: &Value,
     value: &Value,
     optional: bool,
 ) -> Result<Value, EvaluationHalt> {
-    let path = eval_key_path_list(context, path)?;
+    let path = eval_key_path_list_in(context, path)?;
     if path.is_empty() {
         return Err(EvaluationHalt::new(
             "pattern-dict-try-take received an empty compiler path",
         ));
     }
-    let Value::Dict(dict) = eval_value(context, value)? else {
+    let Value::Dict(dict) = eval_value_in(context, value)? else {
         return Ok(pattern_failure());
     };
     let (value, rest) = match take_dict_path(context, &dict, &path)? {
@@ -272,7 +290,7 @@ enum DictPathTake {
 }
 
 fn take_dict_path(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     dict: &Dict,
     path: &[Key],
 ) -> Result<DictPathTake, EvaluationHalt> {
@@ -282,7 +300,7 @@ fn take_dict_path(
     let Some(selected) = dict.get(head) else {
         return Ok(DictPathTake::Absent);
     };
-    let selected = eval_value(context, selected)?;
+    let selected = eval_value_in(context, selected)?;
     if tail.is_empty() {
         if value_is_logically_undefined(context, &selected)? {
             return Ok(DictPathTake::Absent);
@@ -308,29 +326,35 @@ fn take_dict_path(
     Ok(DictPathTake::Found { value, rest })
 }
 
-fn pattern_dict_is_empty(context: &EvalContext, value: &Value) -> Result<Value, EvaluationHalt> {
-    let empty = match eval_value(context, value)? {
+fn pattern_dict_is_empty(
+    context: &EvaluatorStepContext<'_>,
+    value: &Value,
+) -> Result<Value, EvaluationHalt> {
+    let empty = match eval_value_in(context, value)? {
         Value::Dict(dict) => dict_is_logically_empty(context, &dict)?,
         _ => false,
     };
     Ok(if empty {
-        pattern_success(context.values().unit())
+        pattern_success(context.context().values().unit())
     } else {
         pattern_failure()
     })
 }
 
 fn value_is_logically_undefined(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     value: &Value,
 ) -> Result<bool, EvaluationHalt> {
-    match eval_value(context, value)? {
+    match eval_value_in(context, value)? {
         Value::Dict(dict) => dict_is_logically_empty(context, &dict),
         _ => Ok(false),
     }
 }
 
-fn dict_is_logically_empty(context: &EvalContext, dict: &Dict) -> Result<bool, EvaluationHalt> {
+fn dict_is_logically_empty(
+    context: &EvaluatorStepContext<'_>,
+    dict: &Dict,
+) -> Result<bool, EvaluationHalt> {
     for (_, value) in dict.iter() {
         if !value_is_logically_undefined(context, value)? {
             return Ok(false);
@@ -340,20 +364,20 @@ fn dict_is_logically_empty(context: &EvalContext, dict: &Dict) -> Result<bool, E
 }
 
 fn binary_equals_list(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     expected: &[u8],
     mut value: List,
 ) -> Result<bool, EvaluationHalt> {
     let mut index = 0;
     loop {
-        let item = value.try_pop_front(&mut |thunk| force_list_thunk(context, thunk))?;
+        let item = value.try_pop_front(&mut |thunk| force_list_thunk_in(context, thunk))?;
         let Some((item, tail)) = item else {
             return Ok(index == expected.len());
         };
         let Some(expected) = expected.get(index) else {
             return Ok(false);
         };
-        let actual = eval_value(context, &list_item_value(item))?;
+        let actual = eval_value_in(context, &list_item_value(item))?;
         if actual != Value::Number(Number::from_u8(*expected)) {
             return Ok(false);
         }

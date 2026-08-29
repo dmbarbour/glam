@@ -3,12 +3,12 @@ use super::super::*;
 mod basic;
 mod merge;
 
-pub(super) use basic::eval_dict_union_builtin;
+pub(super) use basic::eval_dict_union_builtin_in;
 use basic::*;
 use merge::*;
 
 pub(super) fn apply(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     builtin: Builtin,
     arguments: Vec<Value>,
 ) -> Result<Value, EvaluationHalt> {
@@ -19,7 +19,7 @@ pub(super) fn apply(
         }
         Builtin::DictUnion => {
             let [left, right] = super::exact(arguments, "dict union")?;
-            eval_dict_union_builtin(context, &left, &right)
+            eval_dict_union_builtin_in(context, &left, &right)
         }
         Builtin::DictUpdate => {
             let [path, new_value, dict] = super::exact(arguments, "dict update")?;

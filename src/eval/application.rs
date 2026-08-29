@@ -16,9 +16,9 @@ pub(super) fn apply_value_in(
     argument: Value,
 ) -> Result<Value, EvaluationHalt> {
     match function {
-        Value::Builtin(builtin) => apply_builtin(context.context(), builtin, Vec::new(), argument),
-        Value::PartialBuiltin(call) => apply_builtin(
-            context.context(),
+        Value::Builtin(builtin) => apply_builtin_in(context, builtin, Vec::new(), argument),
+        Value::PartialBuiltin(call) => apply_builtin_in(
+            context,
             call.builtin,
             call.arguments.iter().cloned().collect(),
             argument,

@@ -2,18 +2,18 @@ use super::super::super::*;
 use crate::core::FixpointComputation;
 
 pub(super) fn eval_object_instance_builtin(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     spec: &Value,
 ) -> Result<Value, EvaluationHalt> {
     Ok(Value::Lazy(LazyValue::computed_fixpoint(
-        context.values(),
+        context.context().values(),
         "object self",
         FixpointComputation::ObjectInstance(spec.clone()),
     )))
 }
 
-pub(in crate::eval) fn construct_object_instance(
-    context: &EvalContext,
+pub(in crate::eval) fn construct_object_instance_in(
+    context: &EvaluatorStepContext<'_>,
     spec: &Value,
     self_marker: Value,
 ) -> Result<Value, EvaluationHalt> {
@@ -26,9 +26,13 @@ pub(in crate::eval) fn construct_object_instance(
             .get(&*keys::DEFS)
             .cloned()
             .unwrap_or_else(default_object_defs_value);
-        let mixed = apply_value(context, eval_value(context, &defs)?, base)?;
-        let mixed = apply_value(context, eval_value(context, &mixed)?, self_marker.clone())?;
-        let Value::Dict(mixed_dict) = eval_value(context, &mixed)? else {
+        let mixed = apply_value_in(context, eval_value_in(context, &defs)?, base)?;
+        let mixed = apply_value_in(
+            context,
+            eval_value_in(context, &mixed)?,
+            self_marker.clone(),
+        )?;
+        let Value::Dict(mixed_dict) = eval_value_in(context, &mixed)? else {
             return Err(EvaluationHalt::new(
                 "object definition mixin must produce a dictionary",
             ));
@@ -44,7 +48,7 @@ pub(in crate::eval) fn construct_object_instance(
 }
 
 pub(super) fn eval_object_instance_from_parts_builtin(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     name: Value,
     deps: Value,
     defs: Value,
@@ -66,24 +70,24 @@ fn object_spec_from_parts(name: Value, deps: Value, defs: Value) -> crate::core:
 /// resulting `spec`. Plain dictionaries use the same fixpoint application but
 /// remain dictionaries.
 pub(super) fn eval_object_with_defs_builtin(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     object: &Value,
     extension_defs: Value,
 ) -> Result<Value, EvaluationHalt> {
-    let object = eval_value(context, object)?;
+    let object = eval_value_in(context, object)?;
     let Value::Dict(object_dict) = &object else {
         return Err(EvaluationHalt::new(
             "ordinary `with` requires a dictionary or object value",
         ));
     };
     let Some(spec) = object_dict.get(&*keys::SPEC) else {
-        let extension = apply_value(context, extension_defs, object)?;
-        return super::super::apply_builtin(context, Builtin::Fixpoint, Vec::new(), extension);
+        let extension = apply_value_in(context, extension_defs, object)?;
+        return super::super::apply_builtin_in(context, Builtin::Fixpoint, Vec::new(), extension);
     };
-    let spec = eval_value(context, spec)?;
+    let spec = eval_value_in(context, spec)?;
     if is_undefined_dict_value(&spec) {
-        let extension = apply_value(context, extension_defs, object)?;
-        return super::super::apply_builtin(context, Builtin::Fixpoint, Vec::new(), extension);
+        let extension = apply_value_in(context, extension_defs, object)?;
+        return super::super::apply_builtin_in(context, Builtin::Fixpoint, Vec::new(), extension);
     }
     let spec = object_spec_dict(context, &spec)?;
     let name = object_spec_name_value(&spec);
@@ -103,28 +107,28 @@ pub(super) fn eval_object_with_defs_builtin(
 }
 
 pub(super) fn eval_object_composed_defs_builtin(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     prior_defs: Value,
     extension_defs: Value,
     base: Value,
     self_value: Value,
 ) -> Result<Value, EvaluationHalt> {
-    let prior = apply_value(context, prior_defs, base)?;
-    let prior = apply_value(context, prior, self_value.clone())?;
-    let extended = apply_value(context, extension_defs, prior)?;
-    apply_value(context, extended, self_value)
+    let prior = apply_value_in(context, prior_defs, base)?;
+    let prior = apply_value_in(context, prior, self_value.clone())?;
+    let extended = apply_value_in(context, extension_defs, prior)?;
+    apply_value_in(context, extended, self_value)
 }
 
 /// Implements the small right-biased record mixin used for assembler-owned
 /// diagnostic fields. It is an internal definitions adapter, not the language
 /// `with` surface or its assertion policy.
 pub(super) fn eval_object_override_defs_builtin(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     updates: &Value,
     base: &Value,
 ) -> Result<Value, EvaluationHalt> {
-    let updates = eval_value(context, updates)?;
-    let base = eval_value(context, base)?;
+    let updates = eval_value_in(context, updates)?;
+    let base = eval_value_in(context, base)?;
     let (Value::Dict(updates), Value::Dict(base)) = (updates, base) else {
         return Err(EvaluationHalt::new(
             "object override definitions require dictionary values",
@@ -134,14 +138,14 @@ pub(super) fn eval_object_override_defs_builtin(
 }
 
 fn override_dict(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     base: &crate::core::Dict,
     updates: &crate::core::Dict,
 ) -> Result<crate::core::Dict, EvaluationHalt> {
     let mut result = base.clone();
     for (key, update) in updates.iter() {
         let update = match (result.get(key), update) {
-            (Some(prior), Value::Dict(update)) => match eval_value(context, prior)? {
+            (Some(prior), Value::Dict(update)) => match eval_value_in(context, prior)? {
                 Value::Dict(prior) => Value::Dict(override_dict(context, &prior, update)?),
                 _ => Value::Dict(update.clone()),
             },
@@ -153,10 +157,10 @@ fn override_dict(
 }
 
 pub(super) fn eval_object_spec_builtin(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     value: &Value,
 ) -> Result<Value, EvaluationHalt> {
-    let value = eval_value(context, value)?;
+    let value = eval_value_in(context, value)?;
     let Value::Dict(dict) = value else {
         return Err(EvaluationHalt::new(
             "object spec builtin requires an object value",
@@ -168,7 +172,7 @@ pub(super) fn eval_object_spec_builtin(
             "object value requires a defined `spec`; use `object_from_dict` to convert a dictionary",
         ));
     };
-    let spec = eval_value(context, spec)?;
+    let spec = eval_value_in(context, spec)?;
     if is_undefined_dict_value(&spec) {
         return Err(EvaluationHalt::new(
             "object value requires a defined `spec`; use `object_from_dict` to convert a dictionary",
@@ -183,10 +187,10 @@ pub(super) fn eval_object_spec_builtin(
 }
 
 pub(super) fn eval_object_from_dict_builtin(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     value: &Value,
 ) -> Result<Value, EvaluationHalt> {
-    let value = eval_value(context, value)?;
+    let value = eval_value_in(context, value)?;
     let Value::Dict(dict) = value else {
         return Err(EvaluationHalt::new(
             "object_from_dict requires a dictionary value",
@@ -194,7 +198,7 @@ pub(super) fn eval_object_from_dict_builtin(
     };
 
     if let Some(spec) = dict.get(&*keys::SPEC)
-        && !is_undefined_dict_value(&eval_value(context, spec)?)
+        && !is_undefined_dict_value(&eval_value_in(context, spec)?)
     {
         return Err(EvaluationHalt::new(
             "object_from_dict requires a plain dictionary, not an object",
@@ -205,7 +209,7 @@ pub(super) fn eval_object_from_dict_builtin(
 }
 
 pub(super) fn eval_object_local_name_builtin(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     host: &Value,
     parts: &Value,
 ) -> Result<Value, EvaluationHalt> {
@@ -213,9 +217,9 @@ pub(super) fn eval_object_local_name_builtin(
     let host_spec = object_spec_dict(context, &host_spec)?;
     let host_name = object_spec_name_value(&host_spec);
 
-    let mut name_parts = vec![eval_value(context, &host_name)?];
-    name_parts.extend(match eval_value(context, parts)? {
-        Value::List(parts) => list_to_value_items(context, &parts)?,
+    let mut name_parts = vec![eval_value_in(context, &host_name)?];
+    name_parts.extend(match eval_value_in(context, parts)? {
+        Value::List(parts) => list_to_value_items_in(context, &parts)?,
         Value::Dict(dict) if dict.is_empty() => Vec::new(),
         _ => {
             return Err(EvaluationHalt::new(
@@ -227,10 +231,10 @@ pub(super) fn eval_object_local_name_builtin(
 }
 
 fn object_spec_dict(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     spec: &Value,
 ) -> Result<crate::core::Dict, EvaluationHalt> {
-    let spec = eval_value(context, spec)?;
+    let spec = eval_value_in(context, spec)?;
     let Value::Dict(spec_dict) = spec else {
         return Err(EvaluationHalt::new(
             "object instance builtin requires a specification dictionary",
@@ -255,7 +259,7 @@ fn dict_object_spec(dict: crate::core::Dict) -> Value {
 }
 
 fn object_application_order(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     spec: &crate::core::Dict,
 ) -> Result<Vec<crate::core::Dict>, EvaluationHalt> {
     let mut seen = BTreeMap::new();
@@ -277,7 +281,7 @@ struct LinearizedObjectSpec {
 
 impl LinearizedObjectSpec {
     fn new(
-        context: &EvalContext,
+        context: &EvaluatorStepContext<'_>,
         spec: crate::core::Dict,
         next_anonymous_id: &mut u64,
     ) -> Result<Self, EvaluationHalt> {
@@ -298,7 +302,7 @@ impl LinearizedObjectSpec {
 }
 
 fn object_c3_linearization(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     spec: &crate::core::Dict,
     seen: &mut BTreeMap<Key, crate::core::Dict>,
     next_anonymous_id: &mut u64,
@@ -396,11 +400,11 @@ fn same_linearized_object_spec(left: &LinearizedObjectSpec, right: &LinearizedOb
 }
 
 fn object_spec_name(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     spec: &crate::core::Dict,
 ) -> Result<Key, EvaluationHalt> {
-    let name = eval_value(context, &object_spec_name_value(spec))?;
-    value_to_key(context, &name)
+    let name = eval_value_in(context, &object_spec_name_value(spec))?;
+    value_to_key_in(context, &name)
 }
 
 fn object_spec_name_value(spec: &crate::core::Dict) -> Value {
@@ -430,9 +434,12 @@ fn remember_object_spec(
     }
 }
 
-fn object_dep_specs(context: &EvalContext, deps: &Value) -> Result<Vec<Value>, EvaluationHalt> {
-    match eval_value(context, deps)? {
-        Value::List(list) => list_to_value_items(context, &list),
+fn object_dep_specs(
+    context: &EvaluatorStepContext<'_>,
+    deps: &Value,
+) -> Result<Vec<Value>, EvaluationHalt> {
+    match eval_value_in(context, deps)? {
+        Value::List(list) => list_to_value_items_in(context, &list),
         Value::Dict(dict) if dict.is_empty() => Ok(Vec::new()),
         _ => Err(EvaluationHalt::new(
             "object specification deps must evaluate to a list",

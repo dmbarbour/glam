@@ -1,10 +1,10 @@
 use std::cmp::Ordering;
 
 use super::super::super::*;
-use super::super::list::list_like_value;
+use super::super::list::list_like_value_in;
 
 pub(super) fn eval_compare_ordering_builtin(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     name: &str,
     left: &Value,
     right: &Value,
@@ -15,7 +15,7 @@ pub(super) fn eval_compare_ordering_builtin(
 }
 
 pub(super) fn eval_compare_equality_builtin(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     name: &str,
     left: &Value,
     right: &Value,
@@ -50,13 +50,13 @@ fn builtin_unit_value() -> Value {
 }
 
 fn compare_ordered_values(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     left: &Value,
     right: &Value,
     name: &str,
 ) -> Result<Ordering, EvaluationHalt> {
-    let left = eval_value(context, left)?;
-    let right = eval_value(context, right)?;
+    let left = eval_value_in(context, left)?;
+    let right = eval_value_in(context, right)?;
     match (left, right) {
         (Value::Number(left), Value::Number(right)) => Ok(left.cmp(&right)),
         (Value::Binary(left), Value::Binary(right)) => Ok(left.cmp(&right)),
@@ -70,18 +70,18 @@ fn compare_ordered_values(
             compare_lists_ordered(context, left, right, name)
         }
         (Value::Dict(left), Value::Dict(right)) => {
-            let Some(left) = left.tagged_payload(context, &keys::TUPLE)? else {
+            let Some(left) = tagged_payload_in(&left, context, &keys::TUPLE)? else {
                 return Err(EvaluationHalt::new(format!(
                     "{name} builtin can only order dictionaries tagged as `tuple`"
                 )));
             };
-            let Some(right) = right.tagged_payload(context, &keys::TUPLE)? else {
+            let Some(right) = tagged_payload_in(&right, context, &keys::TUPLE)? else {
                 return Err(EvaluationHalt::new(format!(
                     "{name} builtin can only order dictionaries tagged as `tuple`"
                 )));
             };
-            let left = list_like_value(context, left, name)?;
-            let right = list_like_value(context, right, name)?;
+            let left = list_like_value_in(context, left, name)?;
+            let right = list_like_value_in(context, right, name)?;
             compare_lists_ordered(context, left, right, name)
         }
         (Value::Builtin(_), _)
@@ -107,15 +107,15 @@ fn compare_ordered_values(
 }
 
 fn compare_lists_ordered(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     mut left: List,
     mut right: List,
     name: &str,
 ) -> Result<Ordering, EvaluationHalt> {
     loop {
         match (
-            pop_list_front(context, &left)?,
-            pop_list_front(context, &right)?,
+            pop_list_front_in(context, &left)?,
+            pop_list_front_in(context, &right)?,
         ) {
             (None, None) => return Ok(Ordering::Equal),
             (None, Some(_)) => return Ok(Ordering::Less),
@@ -134,13 +134,13 @@ fn compare_lists_ordered(
 }
 
 fn equal_values(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     left: &Value,
     right: &Value,
     name: &str,
 ) -> Result<bool, EvaluationHalt> {
-    let left = eval_value(context, left)?;
-    let right = eval_value(context, right)?;
+    let left = eval_value_in(context, left)?;
+    let right = eval_value_in(context, right)?;
     match (left, right) {
         (Value::Atom(left), Value::Atom(right)) => Ok(left == right),
         (Value::Number(left), Value::Number(right)) => Ok(left == right),
@@ -183,15 +183,15 @@ fn equal_values(
 }
 
 fn equal_lists(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     mut left: List,
     mut right: List,
     name: &str,
 ) -> Result<bool, EvaluationHalt> {
     loop {
         match (
-            pop_list_front(context, &left)?,
-            pop_list_front(context, &right)?,
+            pop_list_front_in(context, &left)?,
+            pop_list_front_in(context, &right)?,
         ) {
             (None, None) => return Ok(true),
             (None, Some(_)) | (Some(_), None) => return Ok(false),
@@ -207,7 +207,7 @@ fn equal_lists(
 }
 
 fn equal_dicts(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     left: &crate::core::Dict,
     right: &crate::core::Dict,
     name: &str,

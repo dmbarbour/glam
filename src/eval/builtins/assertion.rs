@@ -2,26 +2,29 @@
 
 use super::super::*;
 
-pub(super) fn apply(context: &EvalContext, arguments: Vec<Value>) -> Result<Value, EvaluationHalt> {
+pub(super) fn apply(
+    context: &EvaluatorStepContext<'_>,
+    arguments: Vec<Value>,
+) -> Result<Value, EvaluationHalt> {
     let [diagnostic_context, value, target] = super::exact(arguments, "assert_unit")?;
-    assert_unit(context, Some(&diagnostic_context), &value, &target)
+    assert_unit_in(context, Some(&diagnostic_context), &value, &target)
 }
 
-pub(in crate::eval) fn assert_unit(
-    context: &EvalContext,
+pub(in crate::eval) fn assert_unit_in(
+    context: &EvaluatorStepContext<'_>,
     diagnostic_context: Option<&Value>,
     value: &Value,
     target: &Value,
 ) -> Result<Value, EvaluationHalt> {
-    let value = eval_value(context, value)?;
-    if value == context.values().unit() {
+    let value = eval_value_in(context, value)?;
+    if value == context.context().values().unit() {
         return Ok(target.clone());
     }
 
     let received = value.diagnostic_kind_name();
     let message = match diagnostic_context {
         Some(diagnostic_context) => {
-            let diagnostic_context = eval_value(context, diagnostic_context)?;
+            let diagnostic_context = eval_value_in(context, diagnostic_context)?;
             let Value::Binary(diagnostic_context) = diagnostic_context else {
                 return Err(EvaluationHalt::new(
                     "unit assertion diagnostic context must be text",

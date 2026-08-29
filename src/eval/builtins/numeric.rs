@@ -5,7 +5,7 @@ mod implementation;
 use implementation::*;
 
 pub(super) fn apply(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     builtin: Builtin,
     arguments: Vec<Value>,
 ) -> Result<Value, EvaluationHalt> {

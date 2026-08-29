@@ -163,6 +163,17 @@ region: explicit deferred callbacks, reflection, net, and builtin seams receive
 only their durable evaluator context, and no `EvaluationValueAccess` crosses a
 pump, wait, callback, or machine poll.
 
+Builtin application has a matching two-level boundary. `apply_builtin_in`
+retains the evaluator-step carrier for migrated callback-free families;
+`apply_builtin` is the one temporary direct-compatibility wrapper. Numeric
+arithmetic, comparison, dictionaries, lists, objects, patterns, assertions,
+pure conditional/list-effect construction, and pure annotation work use the
+scoped route. The source-latched dispatch-time downgrade set is effects,
+strategies, nets, and provenance. Reflection and metadata-reflection
+annotations perform scoped recognition and input validation, then cross named
+durable handoffs; `seq` and `spark` cross the existing strategy seam. No
+ordinary builtin can accidentally inherit an active managed-access region.
+
 Machine-visible admission uses demand state and a weak coordinator route, not
 an upgraded owner lease. Its fast closed-flag check is advisory; reflection
 and deferred reservation repeat the decisive check against registered open

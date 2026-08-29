@@ -14,7 +14,7 @@ use crate::number::Number;
 
 use super::application::{apply_value_in, apply_values_in};
 use super::builtins::{
-    NetConstructionMachine, apply_builtin, construct_fixpoint_object, is_undefined_value,
+    NetConstructionMachine, apply_builtin_in, construct_fixpoint_object, is_undefined_value,
 };
 use super::net::*;
 use super::sequence::list_to_key_items_in;
@@ -500,7 +500,7 @@ fn produce_lazy_source_in(
             let argument = arguments
                 .pop()
                 .expect("saturated builtin thunk must contain an argument");
-            apply_builtin(context.context(), call.builtin, arguments, argument)
+            apply_builtin_in(context, call.builtin, arguments, argument)
         }
         LazySource::NetConstruction(_) => {
             unreachable!("net construction must retain its pollable effect machine")
@@ -608,7 +608,7 @@ fn eval_computed_fixpoint_in(
                 .and_then(|application| eval_value_in(context, &application))
         }
         FixpointComputation::ObjectInstance(spec) => {
-            construct_fixpoint_object(context.context(), spec, marker)
+            construct_fixpoint_object(context, spec, marker)
         }
     }
 }
@@ -695,8 +695,15 @@ pub(crate) fn pop_list_front(
     context: &EvalContext,
     list: &List,
 ) -> Result<Option<(Value, List)>, EvaluationHalt> {
+    super::with_direct_evaluator(context, |evaluator| pop_list_front_in(evaluator, list))
+}
+
+pub(crate) fn pop_list_front_in(
+    context: &EvaluatorStepContext<'_>,
+    list: &List,
+) -> Result<Option<(Value, List)>, EvaluationHalt> {
     Ok(list
-        .try_pop_front(&mut |thunk| force_list_thunk(context, thunk))?
+        .try_pop_front(&mut |thunk| force_list_thunk_in(context, thunk))?
         .map(|(item, tail)| {
             let value = match item {
                 ListItem::Byte(byte) => Value::Number(Number::from_u8(byte)),
@@ -714,12 +721,12 @@ pub(super) fn split_result_value(left: Value, right: Value) -> Value {
     )
 }
 
-pub(super) fn eval_number(
-    context: &EvalContext,
+pub(super) fn eval_number_in(
+    context: &EvaluatorStepContext<'_>,
     value: &Value,
     builtin_name: &str,
 ) -> Result<Number, EvaluationHalt> {
-    let value = eval_value(context, value)?;
+    let value = eval_value_in(context, value)?;
     let Value::Number(number) = value else {
         return Err(EvaluationHalt::new(format!(
             "{builtin_name} builtin requires number values"
@@ -734,7 +741,18 @@ pub(super) fn eval_index_number(
     builtin_name: &str,
     evaluation_label: &str,
 ) -> Result<usize, EvaluationHalt> {
-    let value = eval_value(context, value)
+    super::with_direct_evaluator(context, |evaluator| {
+        eval_index_number_in(evaluator, value, builtin_name, evaluation_label)
+    })
+}
+
+pub(super) fn eval_index_number_in(
+    context: &EvaluatorStepContext<'_>,
+    value: &Value,
+    builtin_name: &str,
+    evaluation_label: &str,
+) -> Result<usize, EvaluationHalt> {
+    let value = eval_value_in(context, value)
         .map_err(|error| error.with_context(evaluation_context_frame(evaluation_label)))?;
     let Value::Number(number) = value else {
         return Err(EvaluationHalt::new(format!(
@@ -765,6 +783,7 @@ pub(super) fn is_undefined_dict_value(value: &Value) -> bool {
 /// Other dictionary entries are ignored only when their values recursively
 /// evaluate to undefined dictionaries. The tagged payload must itself be
 /// semantically defined.
+#[cfg(test)]
 pub(super) trait TaggedDictExt {
     fn tagged_payload(
         &self,
@@ -773,6 +792,7 @@ pub(super) trait TaggedDictExt {
     ) -> Result<Option<Value>, EvaluationHalt>;
 }
 
+#[cfg(test)]
 impl TaggedDictExt for crate::core::Dict {
     fn tagged_payload(
         &self,

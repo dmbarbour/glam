@@ -51,7 +51,9 @@ pub(crate) use value::{
 };
 
 use application::*;
+#[cfg(test)]
 use builtins::apply_builtin;
+use builtins::apply_builtin_in;
 use net::*;
 use operator::*;
 use sequence::*;

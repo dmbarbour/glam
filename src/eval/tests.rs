@@ -61,6 +61,129 @@ fn claimed_and_direct_evaluator_entries_share_the_application_spine() {
     assert_eq!(claimed, n(42));
 }
 
+#[test]
+fn claimed_evaluator_dispatches_unit_assertion_through_the_scoped_builtin_path() {
+    let context = test_context();
+    let poll = crate::evaluation::EvaluationPollContext::for_context(&context);
+    let evaluator = poll.evaluator(&context);
+
+    let target = Value::binary_from_text("assertion target");
+    let result = apply_values_in(
+        &evaluator,
+        Value::Builtin(Builtin::AssertUnit),
+        vec![
+            Value::binary_from_text("scoped assertion"),
+            unit_value(),
+            target.clone(),
+        ],
+    )
+    .expect("a scoped unit assertion should return its target");
+
+    assert_eq!(result, target);
+}
+
+#[test]
+fn claimed_evaluator_dispatches_comparison_and_pattern_builtins() {
+    let context = test_context();
+    let poll = crate::evaluation::EvaluationPollContext::for_context(&context);
+    let evaluator = poll.evaluator(&context);
+
+    for (builtin, arguments) in [
+        (Builtin::Equal, vec![n(42), n(42)]),
+        (
+            Builtin::PatternIsList,
+            vec![Value::List(List::from_values(vec![n(42)]))],
+        ),
+    ] {
+        let direct = apply_values(&context, Value::Builtin(builtin), arguments.clone())
+            .expect("direct builtin application should succeed");
+        let claimed = apply_values_in(&evaluator, Value::Builtin(builtin), arguments)
+            .expect("claimed builtin application should succeed");
+        assert_eq!(claimed, direct);
+    }
+}
+
+#[test]
+fn claimed_evaluator_dispatches_dictionary_and_list_builtins() {
+    let context = test_context();
+    let poll = crate::evaluation::EvaluationPollContext::for_context(&context);
+    let evaluator = poll.evaluator(&context);
+
+    for (builtin, arguments) in [
+        (
+            Builtin::DictSingleton,
+            vec![Value::binary_from_text("answer"), n(42)],
+        ),
+        (
+            Builtin::ListAt,
+            vec![n(1), Value::List(List::from_values(vec![n(19), n(42)]))],
+        ),
+    ] {
+        let direct = apply_values(&context, Value::Builtin(builtin), arguments.clone())
+            .expect("direct builtin application should succeed");
+        let claimed = apply_values_in(&evaluator, Value::Builtin(builtin), arguments)
+            .expect("claimed builtin application should succeed");
+        assert_eq!(claimed, direct);
+    }
+}
+
+#[test]
+fn claimed_evaluator_dispatches_object_conditional_and_list_effect_construction() {
+    let context = test_context();
+    let poll = crate::evaluation::EvaluationPollContext::for_context(&context);
+    let evaluator = poll.evaluator(&context);
+    let dictionary = Value::Dict(Dict::new_sync().insert(Key::binary_from_text("answer"), n(42)));
+
+    let object_defs = apply_values_in(
+        &evaluator,
+        Value::Builtin(Builtin::ObjectDefaultDefs),
+        vec![dictionary.clone(), unit_value()],
+    )
+    .expect("claimed default object definitions should preserve their base");
+    assert_eq!(object_defs, dictionary);
+
+    let selected = apply_values_in(
+        &evaluator,
+        Value::Builtin(Builtin::IfResult),
+        vec![Value::List(List::from_values(vec![n(42)]))],
+    )
+    .expect("claimed conditional selection should return its first result");
+    assert_eq!(selected, n(42));
+
+    let returned = apply_values_in(
+        &evaluator,
+        Value::Builtin(Builtin::ListEffectReturn),
+        vec![n(42)],
+    )
+    .expect("claimed list-effect return should construct one result");
+    assert_eq!(returned, Value::List(List::from_values(vec![n(42)])));
+}
+
+#[test]
+fn claimed_evaluator_dispatches_pure_annotation_branches() {
+    let context = test_context();
+    let poll = crate::evaluation::EvaluationPollContext::for_context(&context);
+    let evaluator = poll.evaluator(&context);
+    let annotation = Value::Atom(crate::core::Atom::from_key(&Key::binary_from_text("array")));
+    let target = Value::Binary(Bytes::from_static(&[19, 42]));
+
+    let direct = apply_values(
+        &context,
+        Value::Builtin(Builtin::Anno),
+        vec![annotation.clone(), target.clone()],
+    )
+    .expect("direct array annotation should succeed");
+    let claimed = apply_values_in(
+        &evaluator,
+        Value::Builtin(Builtin::Anno),
+        vec![annotation, target],
+    )
+    .expect("claimed array annotation should succeed");
+
+    assert_eq!(claimed, direct);
+    assert_eq!(claimed, Value::List(List::from_values(vec![n(19), n(42)])));
+}
+
 struct DropSignal(Arc<AtomicBool>);
 
 impl Drop for DropSignal {

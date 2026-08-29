@@ -1,58 +1,58 @@
 use super::super::super::*;
 
 pub(super) fn eval_list_effect_builtin(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     effect: &Value,
 ) -> Result<Value, EvaluationHalt> {
     Ok(Value::List(lazy_run_list_effect(
-        context.values(),
+        context.context().values(),
         effect.clone(),
     )))
 }
 
 pub(super) fn eval_list_effect_seq_builtin(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     operation: &Value,
     continuation: &Value,
 ) -> Result<Value, EvaluationHalt> {
     Ok(Value::List(flat_map_list_effect_results(
-        context.values(),
-        lazy_run_list_effect(context.values(), operation.clone()),
+        context.context().values(),
+        lazy_run_list_effect(context.context().values(), operation.clone()),
         continuation.clone(),
     )))
 }
 
 pub(super) fn eval_list_effect_alt_builtin(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     left: &Value,
     right: &Value,
 ) -> Result<Value, EvaluationHalt> {
     Ok(Value::List(List::concat(
-        lazy_run_list_effect(context.values(), left.clone()),
-        lazy_run_list_effect(context.values(), right.clone()),
+        lazy_run_list_effect(context.context().values(), left.clone()),
+        lazy_run_list_effect(context.context().values(), right.clone()),
     )))
 }
 
 pub(super) fn eval_list_effect_cut_builtin(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     operation: &Value,
 ) -> Result<Value, EvaluationHalt> {
     Ok(Value::List(cut_list_effect_results(
-        context.values(),
+        context.context().values(),
         operation.clone(),
     )))
 }
 
 pub(super) fn eval_list_effect_fix_builtin(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     function: &Value,
 ) -> Result<Value, EvaluationHalt> {
-    let function = eval_value(context, function)?;
-    let handle = PromisedValue::new(context.values(), "list effect fixpoint");
+    let function = eval_value_in(context, function)?;
+    let handle = PromisedValue::new(context.context().values(), "list effect fixpoint");
     let marker = Value::Promised(handle.clone());
-    let operation = apply_value(context, function, marker.clone())?;
+    let operation = apply_value_in(context, function, marker.clone())?;
     Ok(Value::List(fix_list_effect_results(
-        context.values(),
+        context.context().values(),
         operation,
         handle,
     )))

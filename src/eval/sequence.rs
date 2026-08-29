@@ -7,7 +7,7 @@ pub(crate) fn eval_key_path_list(
     with_direct_evaluator(context, |evaluator| eval_key_path_list_in(evaluator, value))
 }
 
-fn eval_key_path_list_in(
+pub(super) fn eval_key_path_list_in(
     context: &EvaluatorStepContext<'_>,
     value: &Value,
 ) -> Result<Vec<Key>, EvaluationHalt> {
@@ -69,7 +69,7 @@ pub(crate) fn list_to_value_items(
     with_direct_evaluator(context, |evaluator| list_to_value_items_in(evaluator, list))
 }
 
-fn list_to_value_items_in(
+pub(super) fn list_to_value_items_in(
     context: &EvaluatorStepContext<'_>,
     list: &List,
 ) -> Result<Vec<Value>, EvaluationHalt> {
@@ -92,6 +92,7 @@ fn list_to_value_items_in(
     Ok(items.into_inner())
 }
 
+#[cfg(test)]
 pub(super) fn list_to_binary_bytes(
     context: &EvalContext,
     list: &List,
@@ -102,7 +103,7 @@ pub(super) fn list_to_binary_bytes(
     })
 }
 
-fn list_to_binary_bytes_in(
+pub(super) fn list_to_binary_bytes_in(
     context: &EvaluatorStepContext<'_>,
     list: &List,
     subject: &str,

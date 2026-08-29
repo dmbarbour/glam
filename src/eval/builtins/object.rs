@@ -1,13 +1,13 @@
 use super::super::*;
-use super::dict::eval_dict_union_builtin;
+use super::dict::eval_dict_union_builtin_in;
 
 mod implementation;
 
-pub(in crate::eval) use implementation::construct_object_instance as construct_fixpoint_object;
+pub(in crate::eval) use implementation::construct_object_instance_in as construct_fixpoint_object;
 use implementation::*;
 
 pub(super) fn apply(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     builtin: Builtin,
     arguments: Vec<Value>,
 ) -> Result<Value, EvaluationHalt> {
@@ -34,12 +34,12 @@ pub(super) fn apply(
         }
         Builtin::ObjectDefaultDefs => {
             let [base, _self_value] = super::exact(arguments, "default object definitions")?;
-            eval_value(context, &base)
+            eval_value_in(context, &base)
         }
         Builtin::ObjectDictDefs => {
             let [dict, base, _self_value] =
                 super::exact(arguments, "dictionary object definitions")?;
-            eval_dict_union_builtin(context, &base, &dict)
+            eval_dict_union_builtin_in(context, &base, &dict)
         }
         Builtin::ObjectWithDefs => {
             let [object, extension_defs] = super::exact(arguments, "object with definitions")?;

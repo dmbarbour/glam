@@ -154,3 +154,46 @@ fn direct_evaluator_admission_has_one_internal_compatibility_gate() {
         "direct evaluation must remain centralized until I3D/I3E remove it"
     );
 }
+
+#[test]
+fn builtin_durable_context_downgrades_are_explicit_and_complete() {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let dispatcher = fs::read_to_string(manifest.join("src/eval/builtins.rs"))
+        .expect("builtin dispatcher source should be readable");
+
+    assert_eq!(
+        dispatcher.matches("context.context()").count(),
+        4,
+        "only effects, strategies, nets, and provenance may downgrade in the dispatcher"
+    );
+    for durable_call in [
+        "effect::apply(context.context(), builtin, arguments)",
+        "strategy::apply(context.context(), builtin, arguments)",
+        "net::apply(context.context(), builtin, arguments)",
+        "provenance::apply(context.context(), arguments)",
+    ] {
+        assert!(
+            dispatcher.contains(durable_call),
+            "missing durable builtin boundary `{durable_call}`"
+        );
+    }
+    assert!(
+        dispatcher.contains("Builtin::Anno => annotation::apply(context, arguments)"),
+        "annotation dispatch must retain evaluator-step authority"
+    );
+
+    let annotation =
+        fs::read_to_string(manifest.join("src/eval/builtins/annotation/implementation.rs"))
+            .expect("annotation implementation source should be readable");
+    for durable_annotation_seam in [
+        "fn defer_reflection_annotation(context: &EvalContext",
+        "fn defer_metadata_reflection(context: &EvalContext",
+        "strategy::seq(context.context(), &value, target)",
+        "strategy::spark(\n            context.context(),",
+    ] {
+        assert!(
+            annotation.contains(durable_annotation_seam),
+            "missing durable annotation seam `{durable_annotation_seam}`"
+        );
+    }
+}

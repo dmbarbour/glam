@@ -3,7 +3,7 @@
 use super::*;
 
 pub(super) fn apply(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     builtin: Builtin,
     arguments: Vec<Value>,
 ) -> Result<Value, EvaluationHalt> {
@@ -13,13 +13,13 @@ pub(super) fn apply(
         _ => unreachable!("conditional dispatcher received another builtin"),
     };
     let [results] = super::exact(arguments, name)?;
-    let Value::List(results) = eval_value(context, &results)? else {
+    let Value::List(results) = eval_value_in(context, &results)? else {
         return Err(EvaluationHalt::new(format!(
             "{name} search did not produce a result list"
         )));
     };
 
-    match pop_list_front(context, &results)? {
+    match pop_list_front_in(context, &results)? {
         Some((result, _)) => Ok(result),
         None if builtin == Builtin::IfResult => Err(EvaluationHalt::new(
             "if search exhausted despite its required `else` branch",
@@ -39,10 +39,11 @@ mod tests {
 
     fn select(builtin: Builtin, values: Vec<Value>) -> Result<Value, EvaluationHalt> {
         let context = crate::eval::test_support::test_context();
-        apply(
+        super::super::apply_builtin(
             &context,
             builtin,
-            vec![Value::List(List::from_values(values))],
+            Vec::new(),
+            Value::List(List::from_values(values)),
         )
     }
 

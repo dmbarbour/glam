@@ -21,8 +21,20 @@ pub(super) use net::NetConstructionMachine;
 pub(super) use object::construct_fixpoint_object;
 pub(crate) use strategy::demand as demand_strategy_value;
 
+#[cfg(test)]
 pub(super) fn apply_builtin(
     context: &EvalContext,
+    builtin: Builtin,
+    arguments: Vec<Value>,
+    argument: Value,
+) -> Result<Value, EvaluationHalt> {
+    super::with_direct_evaluator(context, |evaluator| {
+        apply_builtin_in(evaluator, builtin, arguments, argument)
+    })
+}
+
+pub(super) fn apply_builtin_in(
+    context: &EvaluatorStepContext<'_>,
     builtin: Builtin,
     mut arguments: Vec<Value>,
     argument: Value,
@@ -95,10 +107,12 @@ pub(super) fn apply_builtin(
         | Builtin::EffectCall
         | Builtin::EffectMap
         | Builtin::EffectMapRun
-        | Builtin::EffectMapContinue => effect::apply(context, builtin, arguments),
-        Builtin::Seq | Builtin::Spark => strategy::apply(context, builtin, arguments),
-        Builtin::InteractionNet | Builtin::NetArity => net::apply(context, builtin, arguments),
-        Builtin::InspectOrigin => provenance::apply(context, arguments),
+        | Builtin::EffectMapContinue => effect::apply(context.context(), builtin, arguments),
+        Builtin::Seq | Builtin::Spark => strategy::apply(context.context(), builtin, arguments),
+        Builtin::InteractionNet | Builtin::NetArity => {
+            net::apply(context.context(), builtin, arguments)
+        }
+        Builtin::InspectOrigin => provenance::apply(context.context(), arguments),
         Builtin::AssertUnit => assertion::apply(context, arguments),
         Builtin::Anno => annotation::apply(context, arguments),
     }
