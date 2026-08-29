@@ -137,6 +137,14 @@ work partitions those operations before migrating their value access. Claim
 release, terminal publication, cancellation, destruction, and worker waits
 therefore run without inherited mutator authority.
 
+Successful type-erased machine polls cross that release boundary as a
+`RuntimeValueRoot`, never a bare `core::Value`. A currently bare evaluator
+result is wrapped through the checked poll domain, while an effect result keeps
+the public root it already owns. Coordinator release only publishes the root.
+This is the compatibility shape before managed semantic values: I3B moves root
+construction into callback-free evaluator scopes, and I4F.2 replaces the
+root's interior representation without reopening the scheduler boundary.
+
 Machine-visible admission uses demand state and a weak coordinator route, not
 an upgraded owner lease. Its fast closed-flag check is advisory; reflection
 and deferred reservation repeat the decisive check against registered open

@@ -136,34 +136,49 @@ struct LazyTaskMachine {
 }
 
 impl LazyTaskMachine {
-    fn complete(&self, value: Value) -> EvaluationMachinePoll {
+    fn complete(
+        &self,
+        poll_context: &crate::evaluation::EvaluationPollContext,
+        value: Value,
+    ) -> EvaluationMachinePoll {
         let value = EvaluatedValue::try_from(value)
             .expect("WHNF demand must eliminate the outer deferred variant");
         match self.lazy.cache(Ok(value)) {
-            Ok(value) => EvaluationMachinePoll::Complete(value.into_value()),
+            Ok(value) => {
+                EvaluationMachinePoll::Complete(poll_context.root_value(value.into_value()))
+            }
             Err(error) => EvaluationMachinePoll::Failed(error),
         }
     }
 
-    fn cached_poll(&self) -> EvaluationMachinePoll {
+    fn cached_poll(
+        &self,
+        poll_context: &crate::evaluation::EvaluationPollContext,
+    ) -> EvaluationMachinePoll {
         match self
             .lazy
             .cached()
             .expect("a released lazy source must have a terminal cache")
         {
-            Ok(value) => EvaluationMachinePoll::Complete(value.into_value()),
+            Ok(value) => {
+                EvaluationMachinePoll::Complete(poll_context.root_value(value.into_value()))
+            }
             Err(error) => EvaluationMachinePoll::Failed(error),
         }
     }
 
-    fn finish_poll(&mut self, result: Result<Value, EvaluationHalt>) -> EvaluationMachinePoll {
+    fn finish_poll(
+        &mut self,
+        poll_context: &crate::evaluation::EvaluationPollContext,
+        result: Result<Value, EvaluationHalt>,
+    ) -> EvaluationMachinePoll {
         match result {
             Ok(value) if is_deferred(&value) => {
                 self.work = LazyTaskWork::Follow(value);
                 EvaluationMachinePoll::Yielded
             }
-            Ok(value) => self.complete(value),
-            Err(error) => self.fail(error),
+            Ok(value) => self.complete(poll_context, value),
+            Err(error) => self.fail(poll_context, error),
         }
     }
 }
@@ -171,19 +186,21 @@ impl LazyTaskMachine {
 impl EvaluationTaskMachine for LazyTaskMachine {
     fn poll(
         &mut self,
-        _poll_context: &crate::evaluation::EvaluationPollContext,
+        poll_context: &crate::evaluation::EvaluationPollContext,
         step_budget: usize,
     ) -> EvaluationMachinePoll {
         if let Some(result) = self.lazy.cached() {
             return match result {
-                Ok(value) => EvaluationMachinePoll::Complete(value.into_value()),
+                Ok(value) => {
+                    EvaluationMachinePoll::Complete(poll_context.root_value(value.into_value()))
+                }
                 Err(error) => EvaluationMachinePoll::Failed(error),
             };
         }
 
         if matches!(self.work, LazyTaskWork::Produce) {
             let Some(source) = self.lazy.source_snapshot() else {
-                return self.cached_poll();
+                return self.cached_poll(poll_context);
             };
             if let LazySource::NetConstruction(effect) = source {
                 let machine = match NetConstructionMachine::new(
@@ -191,20 +208,20 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                     effect.as_ref().clone(),
                 ) {
                     Ok(machine) => machine,
-                    Err(error) => return self.fail(error),
+                    Err(error) => return self.fail(poll_context, error),
                 };
                 self.work = LazyTaskWork::NetConstruction(Box::new(machine));
                 return EvaluationMachinePoll::Yielded;
             }
             let result = produce_lazy_source(&self.context, &self.lazy, &source);
-            return self.finish_poll(result);
+            return self.finish_poll(poll_context, result);
         }
 
         if let LazyTaskWork::NetConstruction(machine) = &mut self.work {
             return match machine.poll(&self.context, step_budget) {
-                Ok(Some(value)) => self.complete(value),
+                Ok(Some(value)) => self.complete(poll_context, value),
                 Ok(None) => EvaluationMachinePoll::Yielded,
-                Err(error) => self.fail(error),
+                Err(error) => self.fail(poll_context, error),
             };
         }
 
@@ -212,12 +229,16 @@ impl EvaluationTaskMachine for LazyTaskMachine {
             unreachable!("non-producing lazy work must follow a value or construct a net")
         };
         let result = eval_value(&self.context, target);
-        self.finish_poll(result)
+        self.finish_poll(poll_context, result)
     }
 }
 
 impl LazyTaskMachine {
-    fn fail(&self, error: EvaluationHalt) -> EvaluationMachinePoll {
+    fn fail(
+        &self,
+        poll_context: &crate::evaluation::EvaluationPollContext,
+        error: EvaluationHalt,
+    ) -> EvaluationMachinePoll {
         if let Some(wait) = error.blocked_on() {
             return EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
                 dependency: Some(WorkDependency::Wait(wait.0)),
@@ -242,7 +263,9 @@ impl LazyTaskMachine {
         }
         let failure = error.into_permanent_failure();
         match self.lazy.cache(Err(failure)) {
-            Ok(value) => EvaluationMachinePoll::Complete(value.into_value()),
+            Ok(value) => {
+                EvaluationMachinePoll::Complete(poll_context.root_value(value.into_value()))
+            }
             Err(error) => EvaluationMachinePoll::Failed(error),
         }
     }
@@ -262,7 +285,7 @@ struct PromiseFollower {
 impl EvaluationTaskMachine for PromiseFollower {
     fn poll(
         &mut self,
-        _poll_context: &crate::evaluation::EvaluationPollContext,
+        poll_context: &crate::evaluation::EvaluationPollContext,
         _step_budget: usize,
     ) -> EvaluationMachinePoll {
         let result = match &self.state {
@@ -284,7 +307,7 @@ impl EvaluationTaskMachine for PromiseFollower {
                 self.state = PromiseFollowerState::FollowAssignment(value);
                 EvaluationMachinePoll::Yielded
             }
-            Ok(value) => EvaluationMachinePoll::Complete(value),
+            Ok(value) => EvaluationMachinePoll::Complete(poll_context.root_value(value)),
             Err(error) => block_or_fail(&self.context, error),
         }
     }

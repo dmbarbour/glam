@@ -392,9 +392,7 @@ fn release_reflection_task(
         EvaluationMachinePoll::Exit(exit) => (ReflectionWorkPoll::Exit(exit), None),
         EvaluationMachinePoll::Complete(value) => (
             ReflectionWorkPoll::Terminal,
-            Some(EvaluationWaitTerminal::Complete(
-                RuntimeValueRoot::from_runtime(coordinator.runtime_id(), value),
-            )),
+            Some(EvaluationWaitTerminal::Complete(value)),
         ),
         EvaluationMachinePoll::Failed(error) => (
             ReflectionWorkPoll::Terminal,
@@ -474,9 +472,7 @@ fn release_deferred_task(
         }
         EvaluationMachinePoll::Complete(value) => (
             DeferredWorkPoll::Terminal,
-            Some(EvaluationWaitTerminal::Complete(
-                RuntimeValueRoot::from_runtime(coordinator.runtime_id(), value),
-            )),
+            Some(EvaluationWaitTerminal::Complete(value)),
         ),
         EvaluationMachinePoll::Failed(error) => (
             DeferredWorkPoll::Terminal,

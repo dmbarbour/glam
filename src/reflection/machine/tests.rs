@@ -1331,7 +1331,7 @@ fn retryable_exit_restarts_with_a_fresh_transaction_after_disturbance() {
     };
     assert_eq!(
         assembler
-            .to_binary(&PublicValue::from_core(&assembler.core_values(), value))
+            .to_binary(&PublicValue::from_runtime_root(value))
             .unwrap(),
         b"done".as_slice()
     );

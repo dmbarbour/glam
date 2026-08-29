@@ -14,6 +14,80 @@ use super::coordinator::{
 };
 use super::session::EvaluationUnfinishedState;
 
+/// Compile-exhaustive ownership inventory for every value-bearing machine
+/// poll boundary established by I3A.4.
+///
+/// The function need not execute: compiling its field and variant matches is
+/// the latch. Adding a new boundary payload requires assigning it an explicit
+/// root/edge policy here and in the adjacent checkpoint table.
+fn assert_evaluation_machine_poll_boundary_inventory(poll: &EvaluationMachinePoll) {
+    match poll {
+        EvaluationMachinePoll::Yielded | EvaluationMachinePoll::Cancelled => {}
+        EvaluationMachinePoll::Blocked(block) => {
+            let EvaluationTaskBlock {
+                dependency,
+                observed_epoch,
+                error,
+            } = block;
+            match dependency {
+                Some(WorkDependency::Wait(wait)) => {
+                    let _: &EvaluationWaitToken = wait;
+                }
+                Some(WorkDependency::Promise(promise)) => {
+                    let _: &PromisedValue = promise;
+                }
+                Some(WorkDependency::Test(_)) | None => {}
+            }
+            let _: &Option<RuntimeObservationEpoch> = observed_epoch;
+            let _: &Option<Arc<EvaluationFailure>> = error;
+        }
+        EvaluationMachinePoll::Exit(exit) => {
+            let EvaluationExitBlock {
+                intent,
+                observed_epoch,
+            } = exit;
+            match intent {
+                ExitIntent::Success => {}
+                ExitIntent::Error(value) => {
+                    let _: &RuntimeValueRoot = value;
+                }
+            }
+            let _: &Option<RuntimeObservationEpoch> = observed_epoch;
+        }
+        EvaluationMachinePoll::Complete(value) => {
+            let _: &RuntimeValueRoot = value;
+        }
+        EvaluationMachinePoll::Failed(failure) => {
+            let _: &Arc<EvaluationFailure> = failure;
+        }
+    }
+}
+
+#[test]
+fn evaluation_machine_poll_boundary_inventory_is_complete() {
+    const CHECKPOINTS: &[(&str, &str)] = &[
+        ("Complete(RuntimeValueRoot)", "I4F.2"),
+        ("Exit::Error(RuntimeValueRoot)", "I4F.2"),
+        ("Block::Wait terminal root", "I4F.2"),
+        ("Block::Promise task-owned cell", "I5B"),
+        ("Block::Promise resolver-owned cell", "I5C"),
+        ("Block::error(EvaluationFailure)", "I6C"),
+        ("Failed(EvaluationFailure)", "I6C"),
+        (
+            "Yielded/Cancelled/epoch/test dependency",
+            "no managed payload",
+        ),
+    ];
+
+    let _: fn(&EvaluationMachinePoll) = assert_evaluation_machine_poll_boundary_inventory;
+    assert_eq!(CHECKPOINTS.len(), 8);
+    assert!(
+        CHECKPOINTS
+            .iter()
+            .all(|(boundary, checkpoint)| !boundary.is_empty() && !checkpoint.is_empty())
+    );
+}
+
 struct SameRuntimeFixture {
     _assembler: crate::api::Assembler,
     runtime: crate::api::EvaluationRuntime,
@@ -893,7 +967,7 @@ impl EvaluationTaskMachine for Complete {
         _context: &crate::evaluation::EvaluationPollContext,
         _step_budget: usize,
     ) -> EvaluationMachinePoll {
-        EvaluationMachinePoll::Complete(crate::core::keys::unit_value())
+        EvaluationMachinePoll::Complete(_context.root_value(crate::core::keys::unit_value()))
     }
 }
 
@@ -926,7 +1000,7 @@ impl EvaluationTaskMachine for ExitUntilObservation {
                 observed_epoch: Some(self.observed),
             })
         } else {
-            EvaluationMachinePoll::Complete(crate::core::keys::unit_value())
+            EvaluationMachinePoll::Complete(_context.root_value(crate::core::keys::unit_value()))
         }
     }
 }
@@ -1118,7 +1192,9 @@ impl EvaluationTaskMachine for Await {
                     error: None,
                 })
             }
-            EvaluationWaitPoll::Complete(value) => EvaluationMachinePoll::Complete(value),
+            EvaluationWaitPoll::Complete(value) => {
+                EvaluationMachinePoll::Complete(_context.root_value(value))
+            }
             EvaluationWaitPoll::Failed(error) => self
                 .context
                 .lazy_failure_for_wait(&self.dependency)
@@ -1152,7 +1228,7 @@ impl EvaluationTaskMachine for AwaitPromise {
                 observed_epoch: None,
                 error: None,
             }),
-            Some(Ok(value)) => EvaluationMachinePoll::Complete(value),
+            Some(Ok(value)) => EvaluationMachinePoll::Complete(_context.root_value(value)),
             Some(Err(error)) => EvaluationMachinePoll::Failed(error),
         }
     }
@@ -1181,7 +1257,9 @@ impl EvaluationTaskMachine for AwaitCell {
                     error: None,
                 })
             }
-            EvaluationWaitPoll::Complete(value) => EvaluationMachinePoll::Complete(value),
+            EvaluationWaitPoll::Complete(value) => {
+                EvaluationMachinePoll::Complete(_context.root_value(value))
+            }
             EvaluationWaitPoll::Failed(error) => self
                 .context
                 .lazy_failure_for_wait(dependency)
@@ -1322,7 +1400,7 @@ impl EvaluationTaskMachine for ScopedCompleteWithDropCheck {
                 Err(CollectionError::ActiveMutator)
             ));
         });
-        EvaluationMachinePoll::Complete(crate::core::keys::unit_value())
+        EvaluationMachinePoll::Complete(poll_context.root_value(crate::core::keys::unit_value()))
     }
 }
 
@@ -1388,7 +1466,7 @@ impl EvaluationTaskMachine for RecordPollOrder {
         if std::mem::take(&mut self.yield_once) {
             EvaluationMachinePoll::Yielded
         } else {
-            EvaluationMachinePoll::Complete(crate::core::keys::unit_value())
+            EvaluationMachinePoll::Complete(_context.root_value(crate::core::keys::unit_value()))
         }
     }
 }
@@ -1416,7 +1494,7 @@ impl EvaluationTaskMachine for Signal {
         if let Some(signal) = self.0.take() {
             signal.send(()).expect("test receiver should remain open");
         }
-        EvaluationMachinePoll::Complete(crate::core::keys::unit_value())
+        EvaluationMachinePoll::Complete(_context.root_value(crate::core::keys::unit_value()))
     }
 }
 
@@ -1438,7 +1516,7 @@ impl EvaluationTaskMachine for SpawnSignal {
         self.target
             .schedule_task(move |_| Ok(Box::new(Signal(Some(signal)))))
             .expect("runtime pump should permit cross-session task admission");
-        EvaluationMachinePoll::Complete(crate::core::keys::unit_value())
+        EvaluationMachinePoll::Complete(_context.root_value(crate::core::keys::unit_value()))
     }
 }
 
@@ -1461,7 +1539,7 @@ impl EvaluationTaskMachine for CompleteAfterRelease {
         self.release
             .recv_timeout(Duration::from_secs(2))
             .expect("test should release the task");
-        EvaluationMachinePoll::Complete(crate::core::keys::unit_value())
+        EvaluationMachinePoll::Complete(_context.root_value(crate::core::keys::unit_value()))
     }
 }
 
@@ -1489,7 +1567,7 @@ impl EvaluationTaskMachine for AssignPromiseAfterRelease {
         self.promise
             .set(self.value.clone())
             .expect("worker should resolve the host promise once");
-        EvaluationMachinePoll::Complete(crate::core::keys::unit_value())
+        EvaluationMachinePoll::Complete(_context.root_value(crate::core::keys::unit_value()))
     }
 }
 
@@ -1583,7 +1661,7 @@ impl EvaluationTaskMachine for CompleteAndSignalDrop {
         _context: &crate::evaluation::EvaluationPollContext,
         _step_budget: usize,
     ) -> EvaluationMachinePoll {
-        EvaluationMachinePoll::Complete(crate::core::keys::unit_value())
+        EvaluationMachinePoll::Complete(_context.root_value(crate::core::keys::unit_value()))
     }
 }
 
@@ -1610,7 +1688,7 @@ impl EvaluationTaskMachine for CompleteAndCheckTerminalPublication {
         _context: &crate::evaluation::EvaluationPollContext,
         _step_budget: usize,
     ) -> EvaluationMachinePoll {
-        EvaluationMachinePoll::Complete(crate::core::keys::unit_value())
+        EvaluationMachinePoll::Complete(_context.root_value(crate::core::keys::unit_value()))
     }
 }
 
@@ -1630,7 +1708,7 @@ impl EvaluationTaskMachine for CompleteAndCheckReflectionDrop {
         _context: &crate::evaluation::EvaluationPollContext,
         _step_budget: usize,
     ) -> EvaluationMachinePoll {
-        EvaluationMachinePoll::Complete(crate::core::keys::unit_value())
+        EvaluationMachinePoll::Complete(_context.root_value(crate::core::keys::unit_value()))
     }
 }
 
@@ -1657,7 +1735,7 @@ impl EvaluationTaskMachine for CacheLazyFailure {
         _step_budget: usize,
     ) -> EvaluationMachinePoll {
         match self.lazy.cache(Err(self.failure.clone())) {
-            Ok(value) => EvaluationMachinePoll::Complete(value.into_value()),
+            Ok(value) => EvaluationMachinePoll::Complete(_context.root_value(value.into_value())),
             Err(error) => EvaluationMachinePoll::Failed(error),
         }
     }
@@ -1680,7 +1758,7 @@ impl EvaluationTaskMachine for SpawnOnce {
                 .schedule_task(|_| Ok(Box::new(Complete)))
                 .expect("child should schedule while its parent is polled");
         }
-        EvaluationMachinePoll::Complete(crate::core::keys::unit_value())
+        EvaluationMachinePoll::Complete(_context.root_value(crate::core::keys::unit_value()))
     }
 }
 
@@ -1716,6 +1794,11 @@ fn terminal_waits_retain_runtime_root_provenance() {
         panic!("completed wait should retain a terminal value")
     };
     assert_eq!(value.runtime_id(), context.values().runtime_id());
+    let collector_values = context.values().clone();
+    std::thread::spawn(move || collector_values.collect_managed_for_test())
+        .join()
+        .expect("the cross-thread collection probe must not panic")
+        .expect("poll return and terminal publication must retain no active mutator");
     assert!(matches!(
         context.poll_reflection_task(&task),
         EvaluationWaitPoll::Complete(_)

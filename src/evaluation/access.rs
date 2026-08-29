@@ -7,6 +7,8 @@
 //! opaque evaluator operations which may safely open it.
 
 use crate::core::RuntimeValueAccess;
+use crate::core::Value;
+use crate::runtime::RuntimeValueRoot;
 use std::sync::Arc;
 
 use super::coordinator::ClaimedDemandSession;
@@ -81,6 +83,17 @@ impl EvaluationPollContext {
                 .expect("poll context and managed access must share one value domain");
             operation(access)
         })
+    }
+
+    /// Wrap one currently bare evaluator result before it leaves the machine
+    /// poll boundary.
+    ///
+    /// This is the I3A.4 compatibility seam. `RuntimeValueRoot` still stores a
+    /// bare `Value`, so no managed pointer is being rooted here yet. I3B moves
+    /// this operation into the bounded evaluator scope before I4F.2 changes
+    /// the root's representation.
+    pub(crate) fn root_value(&self, value: Value) -> RuntimeValueRoot {
+        RuntimeValueRoot::new(&self.demand.values, value)
     }
 }
 
@@ -170,8 +183,10 @@ mod tests {
         let mut callback_ran = false;
         let callback_result = invoke_callback(|| {
             callback_ran = true;
-            values
-                .collect_managed_for_test()
+            let collector_values = values.clone();
+            std::thread::spawn(move || collector_values.collect_managed_for_test())
+                .join()
+                .expect("the cross-thread collection probe must not panic")
                 .expect("the callback must run without an active mutator")
         });
         assert!(callback_ran);

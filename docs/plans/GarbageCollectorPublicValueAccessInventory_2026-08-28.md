@@ -28,25 +28,25 @@ more conservative than the production build alone.
 
 ## Baseline
 
-The 23 inventoried modules contain 233 compatibility occurrences:
+The 24 inventoried modules contain 231 compatibility occurrences:
 
 | Operation family | Count |
 | --- | ---: |
 | borrowed `as_core()` projection | 81 |
-| owned `into_core()` projection | 53 |
+| owned `into_core()` projection | 52 |
 | `Value`/`PublicValue::from_core` construction | 80 |
 | `Value::from_runtime` construction, including facade-local `Self` delegation | 7 |
-| `RuntimeValueRoot::new` construction | 7 |
-| `RuntimeValueRoot::from_runtime` construction | 5 |
+| `RuntimeValueRoot::new` construction | 8 |
+| `RuntimeValueRoot::from_runtime` construction | 3 |
 
 | Area | Modules | Occurrences | Migration owner |
 | --- | ---: | ---: | --- |
 | Public API, assembly, diagnostics, errors, evaluation, readiness | 6 | 93 | I3B.1 and I3E.1-I3E.3 scoped operations; I4F.1 durable roots; I4F.2 facade switch |
 | Core compatibility bridge | 1 | 2 | I4A-I4E exact shell, then I4F.2 |
 | Core interaction-net construction | 1 | 10 | I3D.3-I3D.4 scoped net access; I4F.1 outcomes; I8 managed net |
-| Evaluation sessions, pump, executor, coordinator task/spark | 5 | 13 | I3A.3-I3A.4, I3B.2, and I3C.1-I3C.2; I4F.1 durable outcomes |
+| Evaluation access, sessions, pump, executor, coordinator task/spark | 6 | 12 | I3A.3-I3A.4, I3B.2, and I3C.1-I3C.2; I4F.1 durable outcomes |
 | Built-in `.g` compiler, macro expansion, logical/source parsing | 4 | 16 | I3E.2 compiler/macro regions; I4F.1 retained roots |
-| Reflection lifecycle, machine, protocol, requests, search, store | 6 | 99 | I3D.1-I3D.4 phase boundaries; I4F.1 machine/store roots |
+| Reflection lifecycle, machine, protocol, requests, search, store | 6 | 98 | I3D.1-I3D.4 phase boundaries; I4F.1 machine/store roots |
 
 The executable table supplies the exact per-module counts, role descriptions,
 and checkpoint assignments behind this grouped summary.

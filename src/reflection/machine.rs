@@ -1911,7 +1911,9 @@ fn poll_value_effect_task<S: TaskSpecialization>(
             intent: exit.intent,
             observed_epoch: exit.observed_generation.map(|_| observed_epoch),
         }),
-        EffectTaskPoll::Complete(value) => EvaluationMachinePoll::Complete(value.into_core()),
+        EffectTaskPoll::Complete(value) => {
+            EvaluationMachinePoll::Complete(value.into_runtime_root())
+        }
         EffectTaskPoll::Failed(error) => EvaluationMachinePoll::Failed(error.into_failure()),
         EffectTaskPoll::Cancelled => EvaluationMachinePoll::Cancelled,
     }
@@ -1940,7 +1942,7 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for UnitEffectTask<S> {
             EffectTaskPoll::Complete(value)
                 if value.as_core() == &self.0.eval_context.values().unit() =>
             {
-                EvaluationMachinePoll::Complete(self.0.eval_context.values().unit())
+                EvaluationMachinePoll::Complete(value.into_runtime_root())
             }
             EffectTaskPoll::Complete(value) => {
                 EvaluationMachinePoll::Failed(Arc::new(EvaluationFailure::message(format!(

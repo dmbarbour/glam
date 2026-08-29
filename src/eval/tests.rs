@@ -137,7 +137,9 @@ impl EvaluationTaskMachine for FixtureTaskMachine {
             .take()
             .expect("a terminal fixture task must be polled only once")
         {
-            FixtureTaskTerminal::Complete(value) => EvaluationMachinePoll::Complete(value),
+            FixtureTaskTerminal::Complete(value) => {
+                EvaluationMachinePoll::Complete(_context.root_value(value))
+            }
             FixtureTaskTerminal::Failed(error) => EvaluationMachinePoll::Failed(error),
             FixtureTaskTerminal::Cancelled => EvaluationMachinePoll::Cancelled,
         }

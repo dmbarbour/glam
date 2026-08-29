@@ -875,7 +875,7 @@ mod tests {
             _context: &crate::evaluation::EvaluationPollContext,
             _step_budget: usize,
         ) -> EvaluationMachinePoll {
-            EvaluationMachinePoll::Complete(self.0.clone())
+            EvaluationMachinePoll::Complete(_context.root_value(self.0.clone()))
         }
     }
 

@@ -125,6 +125,12 @@ const INVENTORY: &[InventoryEntry] = &[
         "I3D.3/I3D.4 scoped net access; I4F.1 outcomes; I8 managed net"
     ),
     entry!(
+        "src/evaluation/access.rs",
+        [0, 0, 0, 0, 1, 0],
+        "claim-derived compatibility root at the machine completion boundary",
+        "I3A.4 outcome typing; I3B scoped construction; I4F.2 managed root switch"
+    ),
+    entry!(
         "src/evaluation/coordinator/spark.rs",
         [0, 0, 0, 0, 1, 0],
         "durable spark demand",
@@ -138,8 +144,8 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/evaluation/pump.rs",
-        [2, 0, 0, 0, 1, 3],
-        "client demand, centralized spark evaluation, and pump completion",
+        [2, 0, 0, 0, 1, 1],
+        "client demand, centralized spark evaluation, and exceptional lazy-cycle publication",
         "I3A.3/I3B.2/I3C.2 scoped polling; I4F.1 outcomes"
     ),
     entry!(
@@ -180,7 +186,7 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/reflection/machine.rs",
-        [4, 5, 13, 0, 1, 0],
+        [4, 4, 13, 0, 1, 0],
         "persistent effect machine, continuations, and store access",
         "I3D.2/I3D.4 interpreter phases; I4F.1 machine roots"
     ),

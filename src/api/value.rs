@@ -581,6 +581,10 @@ impl Value {
     pub(crate) fn into_core(self) -> CoreValue {
         self.0.into_core()
     }
+
+    pub(crate) fn into_runtime_root(self) -> RuntimeValueRoot {
+        self.0
+    }
 }
 
 impl EvaluatedValue {

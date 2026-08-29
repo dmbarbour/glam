@@ -1,6 +1,6 @@
 # Glam GC Integration Plan — 2026-08-19
 
-Status: in progress; Phases I0 through I2 and checkpoints I3A.1-I3A.3 are
+Status: in progress; Phases I0 through I2 and checkpoints I3A.1-I3A.4 are
 complete. Phase I3 is in progress. Collector Gate G1 passed on 2026-08-25.
 The remaining integration work follows the completed owner-matrix,
 stable-ledger, and low-risk checkpoint corrections from the integration
@@ -31,6 +31,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I3A.1 | complete | lifetime-bound runtime/evaluator access and mutator-free poll-context prototype |
 | I3A.2 | complete | weak parked demand routes and checked temporary claim-owned domain access |
 | I3A.3 | complete | claim-derived scheduler poll context, common task/client/spark routing, and mutator-free release/wait boundaries |
+| I3A.4 | complete | runtime-rooted machine completion outcomes, preserved effect roots, and exhaustive deferred-interior inventory |
 | I3 | in progress | bounded evaluator/worker mutator regions |
 | I4 | pending | core trace vocabulary and leaf policy |
 | I4.0 | pending | managed-family destruction admission contract |
@@ -765,6 +766,32 @@ inventory records centralizing spark evaluation from `executor.rs` into
 
 ### Phase I3A.4 — Evaluator and Poll Outcome Ownership Boundaries
 
+Implementation checkpoints:
+
+1. **I3A.4a — Outcome type and compatibility-root seam.** Change
+   `EvaluationMachinePoll::Complete` from bare `core::Value` to
+   `RuntimeValueRoot`. Add one claim-derived construction seam which uses the
+   checked poll domain while the compatibility root still contains
+   `{runtime ID, Value}`. Remove late result reconstruction from reflection and
+   deferred release.
+2. **I3A.4b — Producer migration and root preservation.** Migrate every
+   production and test task machine. Preserve a `PublicValue`'s existing
+   `RuntimeValueRoot` when an effect task completes instead of extracting its
+   core value and recreating a root; use the claim-derived seam only for
+   currently bare evaluator results.
+3. **I3A.4c — Exhaustive boundary inventory and provenance verification.** Add
+   a compile-exhaustive inventory for every poll, block, exit, dependency, and
+   failure payload, recording the exact I4-I6 checkpoint for each deferred
+   interior migration. Verify same-runtime completion publication and that
+   collection requests at substep/poll boundaries retain no active mutator.
+
+There is no managed production `core::Value` payload at this checkpoint, so
+I3A.4 cannot yet prove survival of a managed semantic completion by forcing
+collection. The root-shaped outcome is nevertheless required now: I4F.2
+changes `RuntimeValueRoot` to the managed representation atomically, and I3B
+must move root construction inside the evaluator scope before introducing any
+managed value which could cross this boundary.
+
 - Inventory every `EvaluationMachinePoll`, task block, exit, and failure field
   which crosses the scoped region. Convert completed values to
   `RuntimeValueRoot` or the selected equivalent before leaving the evaluator
@@ -789,6 +816,26 @@ substeps of one poll and at poll return, proving every already-migrated value
 remains live through callback, release, and publication.
 `evaluation_machine_poll_boundary_inventory_is_complete` covers every variant
 and records each deliberate later migration. Production remains `NoAuto`.
+
+Completed 2026-08-29. `EvaluationMachinePoll::Complete` now carries
+`RuntimeValueRoot`; coordinator release publishes that root directly rather
+than reconstructing one from a bare value. The claim-derived poll context owns
+the single temporary constructor for bare evaluator results. Effect machines
+preserve an existing public root through successful value and unit completion,
+so the boundary no longer discards and recreates runtime provenance.
+
+`evaluation_machine_poll_boundary_inventory_is_complete` destructures every
+poll, block, exit, dependency, and failure-bearing variant and records the
+remaining interior migrations: durable completion/exit/wait roots switch in
+I4F.2, promise cells in I5B/I5C, and structured failure payloads in I6C.
+`evaluation_failure_boundary_inventory_is_complete` separately latches the
+private failure-kind and context fields. Cross-thread forced-collection probes
+run between two scoped substeps and after terminal publication, confirming
+that neither boundary retains a mutator. Because production `core::Value`
+still contains no managed semantic pointer, this checkpoint deliberately does
+not claim a managed completion-survival test; I4F.2 supplies that payload and
+must extend the existing provenance fixture in the same change. Production
+remains `NoAuto`.
 
 ### Phase I3B.1 — Scoped Construction and Core Evaluator Migration
 
@@ -1272,7 +1319,8 @@ the incomplete production graph.
   using whichever call direction that checkpoint found clearest;
   keep `EvaluatedValue` as an opaque WHNF witness and return only owned host
   data from extraction.
-- Update each affected stable family/root record in the same checkpoint.
+- Update each affected stable family/roo
+t record in the same checkpoint.
 
 Verification: promote every `prototype_*` I2 fixture to its production
 `public_value_*` counterpart, including the compile-time no-equality/no-hash

@@ -124,7 +124,7 @@ pub(crate) enum EvaluationMachinePoll {
     Yielded,
     Blocked(EvaluationTaskBlock),
     Exit(EvaluationExitBlock),
-    Complete(Value),
+    Complete(RuntimeValueRoot),
     Failed(Arc<EvaluationFailure>),
     Cancelled,
 }

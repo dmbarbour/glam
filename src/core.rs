@@ -1724,6 +1724,33 @@ mod tests {
 
     struct ManagedFamilyLayoutProbe([u8; 1]);
 
+    /// Compile-exhaustive latch for the failure interiors deliberately left to
+    /// I6C by the I3A.4 poll-boundary migration.
+    fn assert_evaluation_failure_boundary_inventory(failure: &EvaluationFailure) {
+        let EvaluationFailure { kind, contexts } = failure;
+        match kind {
+            EvaluationFailureKind::Emission(value) => {
+                let _: &Value = value;
+            }
+            EvaluationFailureKind::DependencyCycle(cycle) => {
+                let _: &Arc<LazyCycle> = cycle;
+            }
+        }
+        let _: &Arc<[Value]> = contexts;
+    }
+
+    #[test]
+    fn evaluation_failure_boundary_inventory_is_complete() {
+        const CHECKPOINTS: &[(&str, &str)] = &[
+            ("EvaluationFailureKind::Emission(Value)", "I6C"),
+            ("EvaluationFailure.contexts: Arc<[Value]>", "I6C"),
+            ("EvaluationFailureKind::DependencyCycle", "I5B/I6C"),
+        ];
+
+        let _: fn(&EvaluationFailure) = assert_evaluation_failure_boundary_inventory;
+        assert_eq!(CHECKPOINTS.len(), 3);
+    }
+
     // SAFETY: this layout-policy probe contains no managed edges.
     unsafe impl glam_gc::Trace for ManagedFamilyLayoutProbe {
         const REQUESTED_SLOT_SIZE: Option<usize> = Some(managed::managed_slot_extent::<Self>());
