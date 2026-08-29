@@ -152,7 +152,12 @@ thread-bound and may survive dependency/callback orchestration. Only its
 recursive evaluator can be migrated without making a whole `eval_value` call
 one mutator lifetime. One direct-compatibility gate temporarily serves the
 remaining builtin seams plus source-inventoried reflection/compiler entries;
-I3B.1c, I3D, and I3E own its removal.
+I3D and I3E own its eventual removal after I3B.2 separates direct wait
+driving. A closure inventory accounts for every context-bearing function below
+`src/eval`: scoped functions retain `EvaluatorStepContext`, while every
+remaining durable `EvalContext` surface names its I3B.2/I3C/I3D/I3E or I10
+owner. Separate latches cover all external direct calls, the single
+compatibility constructor, and the dispatcher downgrade set.
 
 The core value/application/sequence spine now consumes this step context.
 Client demand and deferred lazy/promise machines derive it from their checked

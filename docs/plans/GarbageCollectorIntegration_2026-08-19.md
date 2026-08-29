@@ -45,7 +45,8 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I3B.1d.2 | complete | matching-runtime owned evaluated-value extraction |
 | I3B.1d.3 | complete | public construction/extraction closure audit |
 | I3B.1d.4 | complete | weak non-retaining evaluated-value observer ergonomics |
-| I3B.1 | in progress | scoped construction and core evaluator migration |
+| I3B.1e | complete | evaluator context-surface inventory and closure verification |
+| I3B.1 | complete | scoped construction and core evaluator migration |
 | I3 | in progress | bounded evaluator/worker mutator regions |
 | I4 | pending | core trace vocabulary and leaf policy |
 | I4.0 | pending | managed-family destruction admission contract |
@@ -1080,6 +1081,21 @@ token-domain check in addition to the weak value-domain check. Focused tests
 cover successful extraction, post-call collection admission, dead-domain
 failure, owned-result survival, and token provenance without changing the
 198-entry compatibility-access inventory. Production remains `NoAuto`.
+
+I3B.1e completed 2026-08-29. The closure audit now source-latches all 112
+`EvaluatorStepContext` function surfaces under `src/eval` and all 50 remaining
+durable `EvalContext` surfaces, assigning the latter explicitly to I3B.2,
+I3C, I3D, I3E, or I10. This complements rather than replaces the existing
+39-call external direct-entry inventory, the single compatibility-gate latch,
+the exhaustive builtin downgrade check, and the 198-entry public-value
+compatibility inventory. The recursive-construction, composite-provenance,
+claimed/direct application, owned-extraction, weak-observer, and inventory
+fixtures pass. No compatibility entry was silently promoted to permanent API:
+poll/wait driving, strategies, effects/reflection, nets, deterministic external
+demands, diagnostics, and opaque origin inspection retain their named later
+owners. Formatting, strict Clippy, and the full suite pass; production remains
+`NoAuto`. This closes I3B.1 without claiming I3B.2's wait separation or the
+I3D/I3E callback and subsystem migrations.
 
 - Introduce the scoped evaluator view selected in I3A.1 and migrate the
   strongly connected evaluator call graph rooted at `eval_value`. Persistent

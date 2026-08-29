@@ -60,6 +60,7 @@ not define language semantics or collect subsystem invariants.
 | `evaluation/coordinator.rs`, `evaluation/coordinator/` | Authoritative work registry/queues plus task, completion, client-demand, spark, reflection, deferred, and settlement lifecycles; parked demand routing is weak and detached claims temporarily upgrade the exact registered session/domain |
 | `evaluation/observation.rs`, `evaluation/executor.rs` | Semantic observation epochs and worker lifecycle |
 | `eval/value.rs`, `application.rs`, `operator.rs`, `net.rs` | Value forcing and semantic execution |
+| `eval/access_inventory.rs` | Test-only I3B closure inventory for scoped evaluator functions, durable subsystem seams, external direct calls, and builtin downgrades |
 | `eval/builtins/` | Builtin implementations by semantic family; I3B's scoped dispatcher keeps ordinary pure work on `EvaluatorStepContext` and source-latches durable effect, strategy, net, provenance, and reflection handoffs |
 | `eval/builtins/net/construction.rs` | Source interaction-net construction search |
 | `eval/sequence.rs` | Lazy sequence and binary extraction |
