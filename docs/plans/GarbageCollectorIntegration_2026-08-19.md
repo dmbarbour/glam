@@ -1513,29 +1513,117 @@ existing value-domain rule. Production remains `NoAuto`.
 
 ### Phase I3D.3 — Interaction-Net Claim and Contention Discipline
 
+This phase is partitioned because the current `CoreRuntimeNet` alias, the
+normalization lease, callable and operator claims, cursor claims, and the
+contention wait each have different ownership and unwind behavior. The
+generic topology remains collector-independent throughout. Production remains
+`NoAuto`; subsystem-local closed fixtures may collect.
+
+#### Phase I3D.3a — Exact-Domain Core-Net Facade
+
 - Replace the `CoreRuntimeNet` type alias with a private newtype or equivalent
-  scoped facade over `SharedRuntimeNet<CoreSpecialization>`. Do not expose the
-  wrapped shared net to ordinary core/evaluator callers. Every operation which
-  can lock and inspect or mutate core semantic net state must receive a
-  same-runtime `RuntimeValueAccess`; identity-only operations which neither
-  lock nor inspect managed contents remain outside this rule. This keeps the
-  generic interaction-net topology independent of collector policy while
-  making core-net access constructively mutator-bound.
-- Replace manual `Claimed` bookkeeping at callable active pairs and cursor
-  obligations with a bracketed or lifetime-bound claim protocol. A claim is
-  confined to one callback-free evaluator scope and must be consumed into an
-  exhaustive durable disposition such as resumed, blocked, stable, failed, or
-  released. `Drop`/unwind fallback republishes a safe releasable state and a
-  disturbance; `#[must_use]` and private constructors supplement but do not
-  replace that fallback.
-- Prefer a private guard plus a closure returning `CallDisposition` or
-  `CursorDisposition`, so ordinary callers cannot store or forget a raw claim.
-  If an internal claim token remains useful, bind it invariantly to the
-  evaluator-scope lifetime and give it only consuming terminal methods.
-- Preserve the existing rule that normalization batches close before Glam
-  callable/operator evaluation. Bind every core normalization lease which can
-  lock on close or `Drop` to the same access scope, but do not conflate a batch
-  lease with an active-pair claim.
+  facade over `SharedRuntimeNet<CoreSpecialization>`. The facade carries
+  non-retaining provenance for the exact `RuntimeValueDomain` which owns its
+  semantic values; an `EvaluationRuntimeId` alone is not sufficient because
+  independently constructed heaps may deliberately share an ID in tests.
+- Route core-net construction through the matching `CoreValueFactory` or
+  scoped runtime authority. Migrate `NetValue`, `FunctionCode`, net lowering,
+  reflection-created functions, public assembly reconstruction, and test
+  helpers without exposing the wrapped generic net.
+- Keep clone, pointer identity, and other operations which neither lock nor
+  inspect managed contents access-free. Do not yet change claim or
+  normalization behavior in this checkpoint.
+
+Verification: a same-ID/different-domain fixture rejects construction or use,
+ordinary core callers cannot recover `SharedRuntimeNet<CoreSpecialization>`,
+and all existing net construction and evaluation tests retain their behavior.
+
+#### Phase I3D.3b — Scoped Core-Net Observation and Mutation
+
+- Derive a private core-net access view only from a matching
+  `RuntimeValueAccess`. Move every ordinary operation which locks, inspects, or
+  mutates core semantic net contents behind that view, including interface
+  inspection, active-pair and cursor stepping, source-frontier inspection,
+  stuck-pair diagnostics, and result extraction.
+- Inventory the access-free facade surface explicitly. Durable net identity
+  may remain in values and work descriptors, but no such descriptor carries a
+  scoped access view or managed borrow.
+- Keep the existing normalization lease, raw claimed dispositions, and
+  contention handle as narrow, named transitional exceptions assigned to the
+  following checkpoints. Do not broaden those exceptions while migrating call
+  sites.
+
+Verification: compile-fail, privacy, or source-inventory fixtures reject
+ordinary `with`/`with_mut`-style inspection and semantic stepping without
+matching access, while identity-only worklist operations remain usable after
+the access scope ends.
+
+#### Phase I3D.3c — Scoped Normalization Batches
+
+- Bind every core normalization lease which can lock on explicit close or
+  `Drop` to the same access scope that admitted its batch. Reshape the net
+  driver as needed so neither the lease nor its lock-capable fallback can
+  enter durable machine or work-queue state.
+- Preserve the existing rule that a normalization batch closes before Glam
+  callable or operator evaluation. Do not conflate the batch lease with an
+  active-pair claim: the lease serializes a local normalization quantum,
+  whereas a claim records one durable semantic transition.
+
+Verification: forced normal close, cross-net batch switching, contention, and
+unwind all publish the expected disturbance. A latched callable/operator test
+observes the batch closed before semantic evaluation begins.
+
+#### Phase I3D.3d — Callable Active-Pair Claims
+
+- Replace manual `Claimed` bookkeeping for `Bind >< Data` calls with a private
+  bracketed guard or closure returning an exhaustive `CallDisposition`.
+  Cover resume with a copied net, resume with an operator, explicit blocking
+  on an exact wait, permanent failure, and release. A stale initial claim or
+  mismatched blocked-call retry fails before a guard is issued; it is not a
+  terminal disposition of a claim the caller never owned.
+- Confine the claim to one callback-free evaluator scope. Consuming terminal
+  methods publish the selected durable state. `Drop`/unwind restores a safe
+  replay state and publishes a disturbance: a fresh claim becomes ready again,
+  while an exact retried claim restores its prior blocked wait. `#[must_use]`
+  and private constructors supplement but do not replace that fallback.
+
+Verification: forced schedules cover every disposition, exact blocked-call
+reclamation, and panic/unwind fallback. Compile/privacy coverage prevents a
+call claim from entering machine state or a poll outcome.
+
+#### Phase I3D.3e — Operator Active-Pair Claims
+
+- Apply the proven claim shape to `Operator >< Data` without erasing the
+  operator-specific completion which rewrites the topology. Keep successful
+  data/operator yield, exact blocking and retry, permanent failure, release,
+  and unwind as exhaustive dispositions. As with callable claims, stale
+  acquisition and retry mismatch occur before ownership is issued.
+- Share machinery with callable claims only where the resulting API remains
+  clearer than the two state machines. Do not force cursor claims into the
+  same abstraction.
+
+Verification: force data and operator yields, retryable and permanent errors,
+exact retry mismatch, and unwind. Preserve the structured operator failure in
+the stuck pair.
+
+#### Phase I3D.3f — Cursor Claim Lifecycles
+
+- Replace manual cursor claims with a `CursorDisposition` protocol covering
+  both active-pair-owned cursors and pairless cursor obligations. Preserve the
+  rule that source-frontier inspection and target completion never hold two
+  net mutexes simultaneously.
+- Make progressed, blocked on a local/source dependency, stable, disturbed or
+  gone, and released/unwound outcomes exhaustive. A claim token, if retained
+  internally, is invariant in the evaluator-scope lifetime and exposes only
+  consuming terminal methods.
+
+Verification: preserve the complete pairless-cursor, converging-cursor,
+source-frontier, ownership-transfer, and cursor-WHNF regressions. Add forced
+unwind and each terminal disposition, and prevent cursor claims from entering
+the driver worklist.
+
+#### Phase I3D.3g — Contention Handoff and Local Closure Audit
+
 - Treat `NetContention::wait_for_disturbance` as a narrow synchronization
   handoff, not a semantic dependency or deadlock edge. It may wait while the
   same-runtime mutator is held only because another active evaluator owns the
@@ -1543,18 +1631,16 @@ existing value-domain rule. Production remains `NoAuto`.
   for progress, and that owner must publish a disposition before any semantic
   park. Do not generalize this exception to promises, reflection gates,
   imports, or coordinator waits.
-- Keep worker saturation, delayed collection, and contention wake storms as
-  profiling/tuning concerns. They do not weaken the no-escaped-claim rule.
+- Remove the transitional raw lease, claim, and contention entry points from
+  ordinary core/evaluator callers. Keep worker saturation, delayed collection,
+  and contention wake storms as later profiling concerns; they do not weaken
+  the no-escaped-claim rule.
 
-Verification: compile-fail or privacy fixtures prevent claims from entering
-machine state and poll outcomes, prevent ordinary core-net inspection without
-`RuntimeValueAccess`, and prevent the raw shared-net implementation from
-escaping its core facade. Forced schedules cover resume, explicit blocked
-disposition, failure, cursor completion, unwind fallback, and a contending
-evaluator wake. A claim owner forced to encounter a semantic wait must publish
-`Blocked` before the machine parks. Preserve the existing pairless-cursor and
-contention-order regressions. Production remains `NoAuto`; subsystem-local
-closed fixtures may collect.
+Verification: forced schedules cover a contending evaluator wake and a claim
+owner encountering a semantic wait; the latter must publish `Blocked` before
+the machine parks. Privacy and source inventories close the local core-net
+facade and preserve existing contention-order regressions. I3D.4 retains the
+subsequent system-wide reflection and net-region audit.
 
 ### Phase I3D.4 — Reflection and Net Region Audit
 
