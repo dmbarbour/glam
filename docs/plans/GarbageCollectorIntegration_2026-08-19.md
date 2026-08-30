@@ -1,6 +1,6 @@
 # Glam GC Integration Plan — 2026-08-19
 
-Status: in progress; Phases I0 through I2 and checkpoints I3A.1-I3D.1 are
+Status: in progress; Phases I0 through I2 and checkpoints I3A.1-I3D.2d are
 complete. Phase I3 is in progress. Collector Gate G1 passed on 2026-08-25.
 The remaining integration work follows the completed owner-matrix,
 stable-ledger, and low-risk checkpoint corrections from the integration
@@ -50,6 +50,10 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I3C.1 | complete | unified claimed/direct poll routing and scoped spark demand |
 | I3C.2 | complete | rooted wait observations, scoped projection, and release audit |
 | I3D.1 | complete | stable reflection reservations and post-evaluator one-time activation |
+| I3D.2a | complete | bounded request-interpreter evaluation service |
+| I3D.2b | complete | explicit request, interpreter, and continuation phases |
+| I3D.2c | complete | forced-unfused reference path and bounded standard-effect fusion |
+| I3D.2d | complete | effect-machine closure and callback-boundary audit |
 | I3 | in progress | bounded evaluator/worker mutator regions |
 | I4 | pending | core trace vocabulary and leaf policy |
 | I4.0 | pending | managed-family destruction admission contract |
@@ -1477,6 +1481,35 @@ remains `NoAuto`.
   the phase only when machine state contains no scoped evaluator authority.
 
 Production remains `NoAuto`.
+
+I3D.2d completed 2026-08-30. Every reusable reflection request and macro
+effect callback now performs demand through `RequestContext`'s bounded
+poll-admitted service. Path parsing and selection are also bounded services:
+they return owned keys or a rooted public value before control returns to the
+interpreter. The two `reflection::machine` helpers which manufactured an
+`EvaluatorStepContext` directly have been removed, and the source inventory
+now rejects durable-context evaluator calls anywhere in the effect machine,
+request protocol, reusable requests, or macro specialization.
+
+`EvaluationPollContext` is thread-bound as well as mutator-free. Because an
+`EffectTask` must implement the `Send` evaluation-machine contract, neither a
+poll context nor the already thread-bound evaluator context can enter its
+durable state without defeating a compile-time bound. The callback collection
+matrix continues to cover host snapshot, host commit, and specialization
+dispatch. The forced-unfused equivalence matrix covers successful chains,
+permanent failures, alternatives and cuts, reset/shift/fix control, isolated
+branch order, retry observations, local state, the cooperative fusion budget,
+and retained compatibility roots.
+
+The audit keeps `.alt`, `.fail`, `.cut`, reset/shift/fix, specialized requests,
+shared heap/volume state, task operations, logging, reflection, and non-Glam
+deliveries deliberately unfused. Those operations publish choice,
+transaction, captured-control, promise, or host obligations; their explicit
+machine boundary is part of the reference semantics rather than an
+optimization omission. One test fixture which paired an assembler value with
+a synthetic coordinator from another runtime was corrected to use a
+same-runtime session after bounded request evaluation began enforcing the
+existing value-domain rule. Production remains `NoAuto`.
 
 ### Phase I3D.3 — Interaction-Net Claim and Contention Discipline
 

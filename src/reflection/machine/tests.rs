@@ -646,7 +646,8 @@ impl TaskHost<ReflectionEffects> for TestHost {
 
 fn value_bytes(value: &Value) -> Result<Bytes, TaskHalt> {
     let context = EvalContext::standalone();
-    match evaluate(&context, value.clone())? {
+    let poll = EvaluationPollContext::for_context(&context);
+    match poll.evaluate(&context, |evaluator| evaluate_in(evaluator, value.clone()))? {
         Value::Binary(bytes) => Ok(bytes),
         Value::List(list) => eval::list_output_bytes(&context, &list)
             .map(Bytes::from)
@@ -3235,9 +3236,11 @@ fn same_transaction_cancellation_prevents_worker_launch_and_machine_construction
         ".cut (.task.new (.log 'error { msg:{ text:\"cancelled task ran\" } }) >>= (\\task -> (.task.cancel task) =>> .r task)) >>= (\\task -> .task.status task >>= (\\status -> (status == 'canceled) =>> .r ()))",
     );
     let host = Arc::new(TestHost::with_values(assembler.core_values()));
-    let (coordinator, _executor) =
-        crate::evaluation::test_execution_resources(2).expect("test executor should start");
-    let session = EvaluationSession::shared(&coordinator);
+    let coordinator = assembler
+        .core_values()
+        .work_coordinator()
+        .expect("assembler runtime coordinator should remain live");
+    let session = EvaluationSession::shared_with_values(&coordinator, assembler.core_values());
     let context = EvalContext::new(&session);
     let builds = Arc::new(AtomicUsize::new(0));
     let launcher: Arc<dyn ReflectionTaskLauncher> = Arc::new(CountingLauncher {
@@ -3259,7 +3262,11 @@ fn same_transaction_cancellation_prevents_worker_launch_and_machine_construction
     let EvaluationSessionRun::Complete(report) = context.run_until_quiescent() else {
         panic!("atomically cancelled child should leave no unfinished work")
     };
-    assert!(report.failures.is_empty());
+    assert!(
+        report.failures.is_empty(),
+        "atomically cancelled child left failures: {:?}",
+        report.failures
+    );
     assert!(matches!(
         context.poll_reflection_task(&task),
         EvaluationWaitPoll::Complete(_)

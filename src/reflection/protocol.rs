@@ -16,6 +16,7 @@ use crate::core_net::CoreWaitToken;
 use crate::diagnostic::Severity;
 use crate::eval;
 use crate::evaluation::{EvalContext, EvaluationPollContext, EvaluationWaitToken};
+use crate::runtime::RuntimeValueRoot;
 
 /// One additional effect constructor contributed by a task specialization.
 pub struct EffectRequestSpec<R> {
@@ -490,23 +491,76 @@ impl<'a, S: TaskSpecialization> RequestContext<'a, S> {
 
     /// Demands the outer weak-head normal form of a request argument.
     pub fn evaluate(&self, value: &PublicValue) -> Result<EvaluatedValue, TaskHalt> {
-        if value.runtime_id() != self.eval_context.values().runtime_id() {
-            return Err(TaskHalt::new(
-                "effect request value belongs to another runtime",
-            ));
-        }
-        let value = self
-            .poll_context
-            .evaluate(self.eval_context, |evaluator| {
-                eval::eval_value_in(evaluator, value.as_core())
-                    .map(|value| evaluator.root_value(value))
-            })
-            .map_err(task_eval_error)?;
+        let value = self.evaluate_root(value)?;
         let values = Values::from_core_factory(self.eval_context.values().clone());
         Ok(EvaluatedValue::from_whnf(
             &values,
             PublicValue::from_runtime_root(value),
         ))
+    }
+
+    /// Evaluates one path expression entirely inside a bounded evaluator
+    /// phase. The resulting keys contain no managed value authority and may
+    /// safely cross back into the request interpreter.
+    pub(crate) fn evaluate_key_path(&self, value: &PublicValue) -> Result<Vec<Key>, TaskHalt> {
+        self.require_runtime_value(value)?;
+        self.poll_context
+            .evaluate(self.eval_context, |evaluator| {
+                eval::eval_key_path_list_in(evaluator, value.as_core())
+            })
+            .map_err(task_eval_error)
+    }
+
+    /// Selects a path through a runtime-local value in one bounded evaluator
+    /// phase and roots the selected value before returning to the interpreter.
+    pub(crate) fn evaluate_path(
+        &self,
+        value: &PublicValue,
+        path: &[Key],
+    ) -> Result<PublicValue, TaskHalt> {
+        self.require_runtime_value(value)?;
+        let value = self
+            .poll_context
+            .evaluate(self.eval_context, |evaluator| {
+                let mut current = value.as_core().clone();
+                for key in path {
+                    let Value::Dict(dict) = eval::eval_value_in(evaluator, &current)? else {
+                        return Err(EvaluationHalt::new(
+                            "state path traverses a non-dictionary value",
+                        ));
+                    };
+                    current = dict
+                        .get(key)
+                        .cloned()
+                        .unwrap_or_else(|| Value::Dict(Dict::new_sync()));
+                }
+                Ok(evaluator.root_value(current))
+            })
+            .map_err(task_eval_error)?;
+        Ok(PublicValue::from_runtime_root(value))
+    }
+
+    fn evaluate_root(&self, value: &PublicValue) -> Result<RuntimeValueRoot, TaskHalt> {
+        self.require_runtime_value(value)?;
+        self.poll_context
+            .evaluate(self.eval_context, |evaluator| {
+                let mut value = value.as_core().clone();
+                while matches!(value, Value::Lazy(_) | Value::Promised(_)) {
+                    value = eval::eval_value_in(evaluator, &value)?;
+                }
+                Ok(evaluator.root_value(value))
+            })
+            .map_err(task_eval_error)
+    }
+
+    fn require_runtime_value(&self, value: &PublicValue) -> Result<(), TaskHalt> {
+        if value.runtime_id() != self.eval_context.values().runtime_id() {
+            Err(TaskHalt::new(
+                "effect request value belongs to another runtime",
+            ))
+        } else {
+            Ok(())
+        }
     }
 
     /// Starts a nested isolated search in the current evaluation session.

@@ -12,7 +12,6 @@ use crate::evaluation::{
 };
 use crate::number::Number;
 
-use super::machine::{evaluate, get_value_path, task_eval_error};
 use super::protocol::{
     CommitResult, EffectRequestSpec, RequestContext, RequestResult, TaskCommit, TaskEnvironment,
     TaskHalt, TaskHost, TaskSpecialization,
@@ -282,20 +281,18 @@ where
             let [path]: [Value; 1] = arguments
                 .try_into()
                 .map_err(|_| TaskHalt::new("`.env` received the wrong number of arguments"))?;
-            let path = eval::eval_key_path_list(context.eval_context(), path.as_core())
-                .map_err(task_eval_error)?;
-            let environment = context.host().reflection_environment().into_core();
-            let value = get_value_path(context.eval_context(), &environment, &path)?;
-            Ok(RequestResult::Return(Value::from_core(
-                context.eval_context().values(),
-                value,
-            )))
+            let path = context.evaluate_key_path(&path)?;
+            let environment = context.host().reflection_environment();
+            Ok(RequestResult::Return(
+                context.evaluate_path(&environment, &path)?,
+            ))
         }
         ReflectionRequest::DictItems => {
             let [dict]: [Value; 1] = arguments.try_into().map_err(|_| {
                 TaskHalt::new("`.dict_items` received the wrong number of arguments")
             })?;
-            let CoreValue::Dict(dict) = evaluate(context.eval_context(), dict.into_core())? else {
+            let dict = context.evaluate(&dict)?;
+            let CoreValue::Dict(dict) = dict.as_value().as_core() else {
                 return Err(TaskHalt::new("`.dict_items` requires a dictionary"));
             };
             Ok(RequestResult::Return(Value::from_core(
@@ -316,13 +313,13 @@ where
                 )),
             )))
         }
-        ReflectionRequest::Eval => evaluate_request(arguments, context.eval_context()),
+        ReflectionRequest::Eval => evaluate_request(arguments, context),
         ReflectionRequest::MetadataInspect => {
             let [value]: [Value; 1] = arguments.try_into().map_err(|_| {
                 TaskHalt::new("`.meta.inspect` received the wrong number of arguments")
             })?;
-            let value = evaluate(context.eval_context(), value.into_core())?;
-            let Some(metadata) = value.associated_metadata() else {
+            let value = context.evaluate(&value)?;
+            let Some(metadata) = value.as_value().as_core().associated_metadata() else {
                 return Ok(RequestResult::Fail);
             };
             Ok(RequestResult::Return(Value::from_core(
@@ -334,11 +331,8 @@ where
             let [severity, message]: [Value; 2] = arguments
                 .try_into()
                 .map_err(|_| TaskHalt::new("`.log` received the wrong number of arguments"))?;
-            let message = prepare_message(context.eval_context(), message)?;
-            let diagnostic = Diagnostic::from_emission(
-                parse_severity(context.eval_context(), severity)?,
-                message,
-            );
+            let message = prepare_message(context, message)?;
+            let diagnostic = Diagnostic::from_emission(parse_severity(context, severity)?, message);
             if let Some(mut transaction) = context.transaction() {
                 transaction
                     .parts()
@@ -445,7 +439,7 @@ where
             )))
         }
         ReflectionRequest::TaskJoin => {
-            let handle = task_handle_argument(context.eval_context(), arguments, "task.join")?;
+            let handle = task_handle_argument(context, arguments, "task.join")?;
             ensure_runtime_task(context.eval_context(), &handle)?;
             match context.eval_context().poll_reflection_task(&handle.task) {
                 EvaluationWaitPoll::Pending(wait) => Err(TaskHalt::blocked(wait)),
@@ -524,7 +518,7 @@ where
             }
         }
         ReflectionRequest::TaskAcknowledgeError => {
-            let handle = task_handle_argument(context.eval_context(), arguments, "task.ack_error")?;
+            let handle = task_handle_argument(context, arguments, "task.ack_error")?;
             ensure_runtime_task(context.eval_context(), &handle)?;
             if let Some(mut transaction) = context.transaction() {
                 transaction
@@ -540,7 +534,7 @@ where
             Ok(RequestResult::ReturnUnit)
         }
         ReflectionRequest::TaskCancel => {
-            let handle = task_handle_argument(context.eval_context(), arguments, "task.cancel")?;
+            let handle = task_handle_argument(context, arguments, "task.cancel")?;
             ensure_runtime_task(context.eval_context(), &handle)?;
             if let Some(mut transaction) = context.transaction() {
                 transaction
@@ -560,37 +554,34 @@ where
     }
 }
 
-fn evaluate_request(
+fn evaluate_request<S: TaskSpecialization>(
     arguments: Vec<Value>,
-    context: &EvalContext,
+    context: &RequestContext<'_, S>,
 ) -> Result<RequestResult, TaskHalt> {
     let [value]: [Value; 1] = arguments
         .try_into()
         .map_err(|_| TaskHalt::new("`.eval` received the wrong number of arguments"))?;
-    let mut value = value.into_core();
-    while matches!(value, CoreValue::Lazy(_) | CoreValue::Promised(_)) {
-        value = match eval::eval_value(context, &value) {
-            Ok(value) => value,
-            Err(error) => {
-                if let Some(wait) = error.blocked_on() {
-                    return Err(TaskHalt::blocked(wait.0));
-                }
-                return Ok(RequestResult::Return(tagged_result(
-                    context,
-                    &keys::ERR,
-                    Value::from_core(
-                        context.values(),
-                        eval::halt_diagnostic_value_with(context.values(), &error)
-                            .expect("non-blocked evaluator error must have a failure value"),
-                    ),
-                )));
-            }
-        };
-    }
+    let value = match context.evaluate(&value) {
+        Ok(value) => value,
+        Err(error) if error.blocked_on().is_some() => return Err(error),
+        Err(error) => {
+            let failure = error
+                .permanent_failure()
+                .expect("non-blocked request evaluation must retain a permanent failure");
+            return Ok(RequestResult::Return(tagged_result(
+                context.eval_context(),
+                &keys::ERR,
+                Value::from_core(
+                    context.eval_context().values(),
+                    eval::failure_diagnostic_value_with(context.eval_context().values(), failure),
+                ),
+            )));
+        }
+    };
     Ok(RequestResult::Return(tagged_result(
-        context,
+        context.eval_context(),
         &keys::OK,
-        Value::from_core(context.values(), value),
+        value.into_value(),
     )))
 }
 
@@ -724,8 +715,8 @@ fn tagged_task_state(
     Err(TaskHalt::new("reflection task status is malformed"))
 }
 
-fn task_handle_argument(
-    context: &EvalContext,
+fn task_handle_argument<S: TaskSpecialization>(
+    context: &RequestContext<'_, S>,
     arguments: Vec<Value>,
     request: &str,
 ) -> Result<Arc<TaskHandleCell>, TaskHalt> {
@@ -734,7 +725,8 @@ fn task_handle_argument(
             "`.{request}` received the wrong number of arguments"
         ))
     })?;
-    let CoreValue::Opaque(handle) = evaluate(context, handle.into_core())? else {
+    let handle = context.evaluate(&handle)?;
+    let CoreValue::Opaque(handle) = handle.as_value().as_core() else {
         return Err(TaskHalt::new(format!(
             "`.{request}` requires a reflection task handle"
         )));
@@ -764,7 +756,7 @@ fn read_task_status<S: TaskSpecialization>(
     arguments: Vec<Value>,
     request: &str,
 ) -> Result<(Arc<TaskHandleCell>, QueryRead), TaskHalt> {
-    let handle = task_handle_argument(context.eval_context(), arguments, request)?;
+    let handle = task_handle_argument(context, arguments, request)?;
     ensure_runtime_task(context.eval_context(), &handle)?;
     let status = read_query(context, &handle.status)?;
     Ok((handle, status))
@@ -788,12 +780,13 @@ fn read_query<S: TaskSpecialization>(
             "query handle does not belong to this runtime's protected query domain",
         ));
     };
-    let state = evaluate(context.eval_context(), value.into_core())?;
-    let value = match decode_query_state(context.eval_context().values(), &state) {
-        Some(EvaluationQueryState::Pending) => None,
-        Some(EvaluationQueryState::Complete(result)) => Some(result),
-        None => return Err(TaskHalt::new("query handle has been retired")),
-    };
+    let state = context.evaluate(&value)?;
+    let value =
+        match decode_query_state(context.eval_context().values(), state.as_value().as_core()) {
+            Some(EvaluationQueryState::Pending) => None,
+            Some(EvaluationQueryState::Complete(result)) => Some(result),
+            None => return Err(TaskHalt::new("query handle has been retired")),
+        };
     Ok(QueryRead { value, generation })
 }
 
@@ -812,31 +805,46 @@ fn observe_query_change<S: TaskSpecialization>(
     }
 }
 
-pub(crate) fn prepare_message(context: &EvalContext, message: Value) -> Result<Value, TaskHalt> {
+pub(crate) fn prepare_message<S: TaskSpecialization>(
+    context: &RequestContext<'_, S>,
+    message: Value,
+) -> Result<Value, TaskHalt> {
     let log_message_context = || eval::evaluation_context_frame("log_message");
-    let CoreValue::Dict(mut message) = evaluate(context, message.into_core())
-        .map_err(|error| error.with_core_context(log_message_context()))?
-    else {
+    let evaluated_message = context
+        .evaluate(&message)
+        .map_err(|error| error.with_core_context(log_message_context()))?;
+    let CoreValue::Dict(mut message) = evaluated_message.as_value().as_core().clone() else {
         return Err(TaskHalt::new("`.log` message must evaluate to an object"));
     };
     if let Some(interface) = message.get(&*keys::MSG) {
+        let interface = Value::from_core(context.eval_context().values(), interface.clone());
         message = message.insert(
             (*keys::MSG).clone(),
-            evaluate(context, interface.clone())
-                .map_err(|error| error.with_core_context(log_message_context()))?,
+            context
+                .evaluate(&interface)
+                .map_err(|error| error.with_core_context(log_message_context()))?
+                .into_value()
+                .into_core(),
         );
     }
-    Ok(Value::from_core(context.values(), CoreValue::Dict(message)))
+    Ok(Value::from_core(
+        context.eval_context().values(),
+        CoreValue::Dict(message),
+    ))
 }
 
-pub(crate) fn parse_severity(context: &EvalContext, value: Value) -> Result<Severity, TaskHalt> {
-    let value = evaluate(context, value.into_core())
+pub(crate) fn parse_severity<S: TaskSpecialization>(
+    context: &RequestContext<'_, S>,
+    value: Value,
+) -> Result<Severity, TaskHalt> {
+    let value = context
+        .evaluate(&value)
         .map_err(|error| error.with_core_context(eval::evaluation_context_frame("log_severity")))?;
-    if severity_matches(&value, "info", &keys::INFO) {
+    if severity_matches(value.as_value().as_core(), "info", &keys::INFO) {
         Ok(Severity::Info)
-    } else if severity_matches(&value, "warn", &keys::WARN) {
+    } else if severity_matches(value.as_value().as_core(), "warn", &keys::WARN) {
         Ok(Severity::Warning)
-    } else if severity_matches(&value, "error", &keys::ERROR) {
+    } else if severity_matches(value.as_value().as_core(), "error", &keys::ERROR) {
         Ok(Severity::Error)
     } else {
         Err(TaskHalt::new(

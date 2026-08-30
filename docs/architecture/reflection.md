@@ -101,6 +101,23 @@ blocked only when an existing state observation can rewind its checkpoint; it
 does not advance `.alt`. The scheduler receives only the dependency token,
 coarse retry generation, and retained structured evaluation failure.
 
+Each machine step alternates a bounded, callback-free evaluator phase with an
+interpreter phase. Request payloads and evaluator results are rooted before the
+evaluator phase ends; host snapshots, commits, and specialization callbacks run
+only afterward. A specialization may explicitly demand an argument through
+`RequestContext`, which opens and closes another bounded evaluator phase rather
+than exposing evaluator authority to the callback. Poll and evaluator
+authorities are thread-bound and cannot be retained by the `Send` effect
+machine.
+
+The production fast path may fuse a bounded chain of task-local `.seq`, `.r`,
+`.get`, and `.set` operations plus one immediately available Glam
+continuation. The explicit unfused path remains the semantic test oracle.
+Choice and cut, reset/shift/fix, shared-state and task requests, logging,
+reflection, specialization callbacks, and non-Glam delivery stay at explicit
+interpreter boundaries because they publish control, transaction, promise, or
+host obligations.
+
 `reflection/store.rs` owns the persistent shared-volume roots, query lifetime,
 transaction snapshots, ordered edit overlays, rebasing, and commit. Its private
 `reflection/store/conflict.rs` child owns volume-qualified hierarchical conflict

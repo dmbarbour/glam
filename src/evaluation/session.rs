@@ -334,6 +334,21 @@ impl EvaluationSession {
         session
     }
 
+    #[cfg(test)]
+    pub(crate) fn shared_with_values(
+        coordinator: &Arc<EvaluationWorkCoordinator>,
+        values: CoreValueFactory,
+    ) -> Arc<Self> {
+        assert_eq!(
+            coordinator.runtime_id(),
+            values.runtime_id(),
+            "test session values must belong to the coordinator runtime"
+        );
+        let session = Self::with_execution_resources(coordinator.clone(), values);
+        coordinator.register_demand(&session.demand);
+        session
+    }
+
     pub(crate) fn shared_with_default_profile(
         coordinator: &Arc<EvaluationWorkCoordinator>,
         values: CoreValueFactory,

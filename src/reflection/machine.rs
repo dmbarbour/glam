@@ -3364,13 +3364,6 @@ fn evaluate_in(context: &EvaluatorStepContext<'_>, value: Value) -> Result<Value
     Ok(value)
 }
 
-pub(super) fn evaluate(context: &EvalContext, value: Value) -> Result<Value, TaskHalt> {
-    let evaluator = EvaluatorStepContext::for_direct_compatibility(context);
-    let result = evaluate_in(&evaluator, value);
-    evaluator.finish();
-    result
-}
-
 pub(crate) fn task_eval_error(error: EvaluationHalt) -> TaskHalt {
     match error.blocked_on() {
         Some(wait) => TaskHalt::blocked(wait.0),
@@ -3395,17 +3388,6 @@ fn missing_volume_value(context: &EvalContext, volume: VolumeId) -> Value {
 fn value_key_in(context: &EvaluatorStepContext<'_>, value: Value) -> Result<Key, TaskHalt> {
     Key::from_value(&evaluate_in(context, value)?)
         .ok_or_else(|| TaskHalt::new("effect index is not keyable"))
-}
-
-pub(crate) fn get_value_path(
-    context: &EvalContext,
-    value: &Value,
-    path: &[Key],
-) -> Result<Value, TaskHalt> {
-    let evaluator = EvaluatorStepContext::for_direct_compatibility(context);
-    let result = get_value_path_in(&evaluator, value, path);
-    evaluator.finish();
-    result
 }
 
 fn get_value_path_in(

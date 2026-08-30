@@ -113,17 +113,11 @@ const INVENTORY: &[InventoryEntry] = &[
         "I3E.2"
     ),
     entry!(
-        "src/g_syntax/macro_expansion/effects.rs",
-        [1, 0, 0, 1, 0],
-        "I3E.2"
-    ),
-    entry!(
         "src/g_syntax/macro_expansion/runner.rs",
         [1, 0, 0, 0, 0],
         "I3E.2"
     ),
     entry!("src/g_syntax/parser/source.rs", [1, 0, 0, 0, 0], "I3E.2"),
-    entry!("src/reflection/requests.rs", [1, 0, 0, 1, 0], "I3D.2"),
 ];
 
 /// Every evaluator function which already carries scoped access, plus every
@@ -394,6 +388,28 @@ fn direct_evaluator_admission_has_one_internal_compatibility_gate() {
         1,
         "direct evaluation must remain centralized until I3D/I3E remove it"
     );
+}
+
+#[test]
+fn effect_interpreter_sources_have_no_direct_compatibility_entry() {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for relative in [
+        "src/reflection/machine.rs",
+        "src/reflection/protocol.rs",
+        "src/reflection/requests.rs",
+        "src/g_syntax/macro_expansion/effects.rs",
+    ] {
+        let source = fs::read_to_string(manifest.join(relative))
+            .expect("effect interpreter source should be readable");
+        assert!(
+            !source.contains("EvaluatorStepContext::for_direct_compatibility("),
+            "{relative} must re-enter evaluation only through its admitted poll context"
+        );
+        assert!(
+            EntryCounts::in_source(&source).is_empty(),
+            "{relative} must not call the durable-context evaluator compatibility API"
+        );
+    }
 }
 
 #[test]

@@ -142,6 +142,7 @@ impl EvaluatorStepContext<'_> {
 /// effect/search poll and is not exposed to the machine.
 pub(crate) struct EvaluationPollContext {
     demand: Arc<EvaluationDemandState>,
+    _thread_bound: PhantomData<Rc<()>>,
 }
 
 impl EvaluationPollContext {
@@ -149,7 +150,10 @@ impl EvaluationPollContext {
         let demand = claim.demand();
         #[cfg(test)]
         demand.poll_contexts.fetch_add(1, Ordering::Relaxed);
-        Self { demand }
+        Self {
+            demand,
+            _thread_bound: PhantomData,
+        }
     }
 
     /// Opens the same ephemeral orchestration carrier for a caller-driven
@@ -166,6 +170,7 @@ impl EvaluationPollContext {
             .fetch_add(1, Ordering::Relaxed);
         Self {
             demand: context.session.clone(),
+            _thread_bound: PhantomData,
         }
     }
 

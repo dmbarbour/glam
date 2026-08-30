@@ -16,7 +16,7 @@ pub use lifecycle::{
     EffectLifecycle, EffectLifecycleStatus, EffectLifecycleTerminal, EffectRun, ScheduledEffectRun,
     run, run_standard,
 };
-pub(crate) use machine::{get_value_path, task_eval_error, volume_effects};
+pub(crate) use machine::{task_eval_error, volume_effects};
 
 pub use protocol::{
     CommitResult, EffectRequestSpec, HostSnapshot, ReasoningSessionId, ReflectionEffects,

@@ -2,8 +2,8 @@ use crate::api::{Diagnostic, Value};
 use crate::core::{Dict, Key, List, Value as CoreValue};
 use crate::eval;
 use crate::reflection::{
-    EffectRequestSpec, RequestContext, RequestResult, TaskHalt, TaskSpecialization, get_value_path,
-    parse_severity, prepare_message,
+    EffectRequestSpec, RequestContext, RequestResult, TaskHalt, TaskSpecialization, parse_severity,
+    prepare_message,
 };
 use crate::text_pattern::TextPattern;
 
@@ -169,21 +169,16 @@ fn environment(
     let [path]: [Value; 1] = arguments
         .try_into()
         .map_err(|_| TaskHalt::new("macro `.env` received the wrong number of arguments"))?;
-    let path =
-        eval::eval_key_path_list(context.eval_context(), path.as_core()).map_err(TaskHalt::from)?;
-    let environment = context
-        .transaction()
-        .ok_or_else(|| TaskHalt::new("macro `.env` escaped its isolated transaction"))?
-        .parts()
-        .0
-        .environment
-        .as_core()
-        .clone();
-    let value = get_value_path(context.eval_context(), &environment, &path)?;
-    Ok(RequestResult::Return(Value::from_core(
-        context.eval_context().values(),
-        value,
-    )))
+    let path = context.evaluate_key_path(&path)?;
+    let environment = {
+        let mut transaction = context
+            .transaction()
+            .ok_or_else(|| TaskHalt::new("macro `.env` escaped its isolated transaction"))?;
+        transaction.parts().0.environment.clone()
+    };
+    Ok(RequestResult::Return(
+        context.evaluate_path(&environment, &path)?,
+    ))
 }
 
 fn log(
@@ -193,8 +188,8 @@ fn log(
     let [severity, message]: [Value; 2] = arguments
         .try_into()
         .map_err(|_| TaskHalt::new("macro `.log` received the wrong number of arguments"))?;
-    let severity = parse_severity(context.eval_context(), severity)?;
-    let message = prepare_message(context.eval_context(), message)?;
+    let severity = parse_severity(context, severity)?;
+    let message = prepare_message(context, message)?;
     let mut transaction = context
         .transaction()
         .ok_or_else(|| TaskHalt::new("macro `.log` escaped its isolated transaction"))?;
@@ -545,9 +540,8 @@ fn text_value(
     value: Value,
     request: &str,
 ) -> Result<String, TaskHalt> {
-    let CoreValue::Binary(bytes) =
-        eval::eval_value(context.eval_context(), value.as_core()).map_err(TaskHalt::from)?
-    else {
+    let value = context.evaluate(&value)?;
+    let CoreValue::Binary(bytes) = value.as_value().as_core() else {
         return Err(TaskHalt::new(format!("{request} requires text")));
     };
     String::from_utf8(bytes.to_vec())

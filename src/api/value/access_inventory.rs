@@ -150,8 +150,8 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/g_syntax/macro_expansion/effects.rs",
-        [3, 0, 3, 0, 0, 0],
-        "macro protocol evaluation and embedded values",
+        [1, 0, 2, 0, 0, 0],
+        "macro protocol callback values and embedded values",
         "I3E.2 compiler and macro regions; I4F.1 retained roots"
     ),
     entry!(
@@ -186,14 +186,14 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/reflection/protocol.rs",
-        [2, 1, 2, 0, 0, 0],
-        "task-host evaluation, results, and failures",
+        [4, 1, 2, 0, 0, 0],
+        "bounded request evaluation, results, and failures",
         "I3D.2 interpreter boundary; I4F.1 task roots"
     ),
     entry!(
         "src/reflection/requests.rs",
-        [13, 10, 20, 0, 0, 0],
-        "standard reflection request parsing and results",
+        [20, 3, 19, 0, 0, 0],
+        "rooted standard reflection request parsing and results",
         "I3C.2 rooted task joins; I3D.2 interpreter boundary; I4F.1 request roots"
     ),
     entry!(

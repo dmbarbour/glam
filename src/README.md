@@ -56,7 +56,7 @@ not define language semantics or collect subsystem invariants.
 | `interaction_net/model.rs`, `builder.rs` | Generic topology and checked construction |
 | `interaction_net/runtime/` | Mutable graph, active-pair reduction, logical copies |
 | `evaluation.rs`, `evaluation/session.rs`, `evaluation/pump.rs` | Shared demand/profile contracts, session admission, cooperative and runtime pumping |
-| `evaluation/access.rs` | I3 scoped evaluator authority, thread-bound mutator-free evaluator-step context, claim/direct-owner poll admission, scoped wait-completion projection, post-scope reflection activation, one source-latched direct-evaluator compatibility seam, and temporary machine-completion root seam |
+| `evaluation/access.rs` | I3 scoped evaluator authority, thread-bound mutator-free poll and evaluator-step contexts, claim/direct-owner poll admission, scoped wait-completion projection, post-scope reflection activation, remaining non-effect direct-evaluator compatibility, and temporary machine-completion root seam |
 | `evaluation/coordinator.rs`, `evaluation/coordinator/` | Authoritative work registry/queues plus task, completion, client-demand, spark, reflection, deferred, and settlement lifecycles; completed wait observations retain roots, parked demand routing is weak, and detached claims temporarily upgrade the exact registered session/domain |
 | `evaluation/observation.rs`, `evaluation/executor.rs` | Semantic observation epochs and worker lifecycle |
 | `eval/value.rs`, `application.rs`, `operator.rs`, `net.rs` | Value forcing and semantic execution |
@@ -66,9 +66,9 @@ not define language semantics or collect subsystem invariants.
 | `eval/sequence.rs` | Lazy sequence and binary extraction |
 | `list.rs`, `number.rs` | Persistent list ropes and exact numbers |
 | `diagnostic.rs`, `api/diagnostics.rs` | Semantic diagnostic shapes plus embedding buses, ingress, and enrichment |
-| `reflection.rs`, `reflection/protocol.rs` | Reflection facade and specialization/host transaction protocol |
+| `reflection.rs`, `reflection/protocol.rs` | Reflection facade, specialization/host transaction protocol, and bounded callback evaluation service |
 | `reflection/lifecycle.rs` | Effect lifecycle, scheduled runs, and task launchers |
-| `reflection/machine.rs`, `reflection/requests.rs`, `reflection/search.rs` | Persistent effect machine, request interpretation, isolated search |
+| `reflection/machine.rs`, `reflection/requests.rs`, `reflection/search.rs` | Persistent phased effect machine, rooted request interpretation, bounded standard-effect fusion, and isolated search |
 | `reflection/store.rs` | Journaled volume roots, edits, snapshots, commits, and query lifetime |
 | `reflection/store/conflict.rs` | Conflict paths plus exact, fingerprint, coarse, and client-defined observation strategies |
 | `runtime.rs` | Runtime identity, mutation admission, activity accounting |
