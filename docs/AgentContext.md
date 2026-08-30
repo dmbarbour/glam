@@ -65,8 +65,12 @@ verify current bootstrap acceptance against tests and samples.
   chronological transition notes out of current architecture/invariant docs.
 - State one authoritative owner for a lifecycle or invariant and link from
   adjacent documents instead of repeating the full rule.
-- When changing concurrent publication or shutdown, force the disputed event
-  ordering with barriers. A transiently passing stress test is not proof.
+- When changing concurrent publication, activation, cancellation, or shutdown,
+  force every disputed event ordering with barriers, channels, or a model
+  checker. Repetition of an uncontrolled concurrent test is stress/smoke
+  evidence only: it is never proof that a nondeterministic defect is fixed.
+  If the failing ordering cannot be forced, report the verification gap rather
+  than accepting a transient or repeatedly passing test.
 - When removing a check or representation, distinguish redundant work from a
   deliberate boundary projection or zero-cost invariant type.
 

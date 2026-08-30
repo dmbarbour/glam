@@ -321,3 +321,12 @@ control-flow overview.
   record is blocked is a typed deadlock snapshot. Pure deferred-value cycles
   are diagnosed earlier by the strict dependency graph, while cycles through
   promises or reflection tasks remain ordinary deadlock candidates.
+
+## Verification Discipline
+
+- For an order-dependent evaluator, coordinator, promise, reflection, or spark
+  defect, place the participating operations explicitly on both sides of the
+  disputed transition. Repeating an uncontrolled threaded test is only a
+  stress/smoke check and must not be cited as correctness evidence. Prefer
+  natural blocking callbacks first, narrow test-only hooks second, and a model
+  checker for custom multi-atomic or multi-lock protocols.

@@ -1286,9 +1286,9 @@ in force. Production remains `NoAuto`.
 
 Verification: `reflection_gate_reserves_inside_and_activates_outside_scope`
 observes no mutator during launcher construction;
-`concurrent_reflection_gate_observers_activate_once` forces the first-observer
-race; cancellation before and during activation remains covered. Production
-remains `NoAuto`.
+`reflection_gate_observer_and_activation_orderings_are_forced` explicitly
+selects each first observer and each first activator; cancellation before and
+during activation remains covered. Production remains `NoAuto`.
 
 I3D.1 completed 2026-08-29. A `ReflectionComputation` now caches one
 `ReflectionTaskReservation` rather than starting a machine from its
@@ -1314,11 +1314,14 @@ compatibility-access sites until I4F converts the underlying representation.
 
 `reflection_gate_reserves_inside_and_activates_outside_scope` latches both
 zero builds inside the evaluator phase and successful forced collection from
-launcher construction. `concurrent_reflection_gate_observers_activate_once`
-uses a barrier to race two same-runtime observers and proves one task identity
-and one build. A separate forced-order fixture covers cancellation before and
-during activation. Existing gate/result failure identity and metadata
-reflection fixtures remain in force. Production remains `NoAuto`.
+launcher construction.
+`reflection_gate_observer_and_activation_orderings_are_forced` runs the full
+owner/observer reservation-by-owner/observer activation matrix. Each case
+asserts the designated reservation owner, the shared task identity, and one
+build while the winning launcher is blocked and the overlapping activation
+returns. A separate forced-order fixture covers cancellation before and during
+activation. Existing gate/result failure identity and metadata reflection
+fixtures remain in force. Production remains `NoAuto`.
 
 ### Phase I3D.2 — Effect Evaluation and Interpreter Phases
 

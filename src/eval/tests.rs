@@ -4888,19 +4888,28 @@ fn reflection_gate_reserves_inside_and_activates_outside_scope() {
     ));
 }
 
-#[test]
-fn concurrent_reflection_gate_observers_activate_once() {
+#[derive(Clone, Copy, Debug)]
+enum ReflectionParticipant {
+    Owner,
+    Observer,
+}
+
+fn assert_reflection_gate_order(
+    first_observer: ReflectionParticipant,
+    first_activator: ReflectionParticipant,
+) {
     let (owner, observer, _executor) = same_runtime_contexts();
     let builds = Arc::new(AtomicUsize::new(0));
-    let launcher = Arc::new(FixtureTaskLauncher {
-        terminal: FixtureTaskTerminal::Complete(unit_value()),
+    let release = Arc::new(Barrier::new(2));
+    let (entered, entry) = std::sync::mpsc::channel();
+    let launcher = Arc::new(BlockingReflectionLauncher {
+        entered,
+        release: release.clone(),
         builds: builds.clone(),
-        result_policies: Arc::new(Mutex::new(Vec::new())),
     });
     // These focused bare sessions intentionally own separate unsealed default
-    // profiles. Seal both with the same launcher so whichever session wins the
-    // reservation race exercises activation rather than the bare-session
-    // dormant fallback.
+    // profiles. Seal both with the same launcher so this fixture isolates the
+    // first-observer and activation protocols from bare-session fallback.
     owner
         .install_reflection_launcher(launcher.clone())
         .expect("fresh owner session should accept its reflection launcher");
@@ -4908,39 +4917,81 @@ fn concurrent_reflection_gate_observers_activate_once() {
         .install_reflection_launcher(launcher)
         .expect("fresh observer session should accept the same reflection launcher");
     let computation = reflection_computation(&Value::reflection_task_result(owner.values(), n(0)));
-    let start = Arc::new(Barrier::new(3));
 
-    let observers = [(*owner).clone(), (*observer).clone()]
-        .into_iter()
-        .map(|context| {
-            let computation = computation.clone();
-            let start = start.clone();
-            std::thread::spawn(move || {
-                let poll = crate::evaluation::EvaluationPollContext::for_context(&context);
-                poll.evaluate(&context, |evaluator| {
-                    let task = computation
-                        .task(&context)
-                        .expect("concurrent observation should share the reservation")
-                        .clone();
-                    evaluator.defer_reflection_activation(task.clone());
-                    start.wait();
-                    task
-                })
-            })
-        })
-        .collect::<Vec<_>>();
-    start.wait();
-    let tasks = observers
-        .into_iter()
-        .map(|observer| observer.join().expect("reflection observer must not panic"))
-        .collect::<Vec<_>>();
+    let (first, second) = match first_observer {
+        ReflectionParticipant::Owner => (&*owner, &*observer),
+        ReflectionParticipant::Observer => (&*observer, &*owner),
+    };
+    let first_task = computation
+        .task(first)
+        .expect("designated first observer should reserve the reflection task")
+        .clone();
+    assert_eq!(first_task.handle().session_id(), first.session_id());
+    let second_task = computation
+        .task(second)
+        .expect("later observer should share the reflection reservation")
+        .clone();
+    assert_eq!(second_task.handle().id(), first_task.handle().id());
+    assert_eq!(second_task.handle().session_id(), first.session_id());
 
-    assert_eq!(tasks[0].handle().id(), tasks[1].handle().id());
+    let (owner_task, observer_task) = match first_observer {
+        ReflectionParticipant::Owner => (first_task, second_task),
+        ReflectionParticipant::Observer => (second_task, first_task),
+    };
+    let (activation_context, activation_task, overlapping_context, overlapping_task) =
+        match first_activator {
+            ReflectionParticipant::Owner => {
+                ((*owner).clone(), owner_task, &*observer, observer_task)
+            }
+            ReflectionParticipant::Observer => {
+                ((*observer).clone(), observer_task, &*owner, owner_task)
+            }
+        };
+    let activation = std::thread::spawn(move || {
+        let poll = crate::evaluation::EvaluationPollContext::for_context(&activation_context);
+        poll.evaluate(&activation_context, |evaluator| {
+            evaluator.defer_reflection_activation(activation_task);
+        });
+    });
+    entry
+        .recv()
+        .expect("designated activation must enter launcher construction");
+    assert_eq!(builds.load(Ordering::SeqCst), 1);
+
+    let second_poll = crate::evaluation::EvaluationPollContext::for_context(overlapping_context);
+    second_poll.evaluate(overlapping_context, |evaluator| {
+        evaluator.defer_reflection_activation(overlapping_task);
+    });
+    assert_eq!(
+        builds.load(Ordering::SeqCst),
+        1,
+        "the overlapping activation must observe the existing owner"
+    );
+
+    release.wait();
+    activation
+        .join()
+        .expect("designated reflection activation must not panic");
     assert_eq!(builds.load(Ordering::SeqCst), 1);
     assert!(matches!(
-        owner.run_until_quiescent(),
+        first.run_until_quiescent(),
         crate::evaluation::EvaluationSessionRun::Complete(_)
     ));
+}
+
+#[test]
+fn reflection_gate_observer_and_activation_orderings_are_forced() {
+    for first_observer in [
+        ReflectionParticipant::Owner,
+        ReflectionParticipant::Observer,
+    ] {
+        for first_activator in [
+            ReflectionParticipant::Owner,
+            ReflectionParticipant::Observer,
+        ] {
+            assert_reflection_gate_order(first_observer, first_activator);
+        }
+    }
 }
 
 #[test]
