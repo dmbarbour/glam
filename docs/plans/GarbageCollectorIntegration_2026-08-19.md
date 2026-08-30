@@ -1418,10 +1418,20 @@ inside branches remain explicitly assigned to I4F.1; production remains
   reference semantics.
 - Fuse a standard request with adjacent evaluator work only when a pure runner
   could implement it as a deterministic transformation of branch-local state
-  and control. The initial candidates are `.r`, `.seq`, `.alt`, `.fail`,
-  `.cut`, task-local state, and callback-free reset/shift/fix control. Shared
-  heap/volume state, task operations, logging, reflection, and every
-  specialized request remain interpreter boundaries.
+  and control. Fuse bounded `.seq`/`.r` chains, their immediate Glam
+  continuation application, and task-local `.get`/`.set`. A value consumed by
+  that same evaluator phase remains unrooted; root only the applied effect,
+  modified local state, pending continuation, or request argument which must
+  cross the resulting machine boundary.
+- Keep `.alt`, `.fail`, and `.cut` as explicit structural scheduling/control
+  transitions: they have no adjacent evaluator demand to eliminate. Keep
+  reset/shift/fix and non-Glam delivery control unfused because they publish
+  captured control, promises, or delimiters whose replay obligations are more
+  important than one fewer admission. Shared heap/volume state, task
+  operations, logging, reflection, and every specialized request remain
+  interpreter boundaries. Stop immediately after applying a continuation;
+  the newly produced effect is rooted and published before it is demanded, so
+  a later reflection-gate wait cannot replay the application.
 - Fusion must preserve alternative rollback, retry observations, continuation
   order, and exactly the owned values retained by the unfused path.
 
@@ -1429,6 +1439,34 @@ Verification: run each fused standard family against forced-unfused execution
 and compare results, permanent failures, branch order, retry state, task-local
 state, and retained roots. An admission counter may demonstrate reduced scope
 churn but is not a semantic assertion. Production remains `NoAuto`.
+
+I3D.2c completed 2026-08-30. Test builds can force the original explicit
+request/interpreter path per `EffectTask`; production uses a bounded fusion
+budget of 32 requests. The fused path parses raw request values, consumes
+`.seq` operations and `.r`/local-state deliveries inside one callback-free
+evaluator phase, and applies at most the immediately available Glam
+continuation before publishing a rooted effect. Pending continuations and a
+modified local state are rooted only when they survive the phase. Every
+specialized, shared-state, branching, captured-control, fixpoint, exit, and
+non-Glam delivery request is converted to the same rooted request used by the
+unfused reference before interpretation.
+
+The equivalence fixtures compare successful values, permanent failures,
+cut/alternative behavior, reset/shift/fix control, isolated-search branch
+order, retry observations, and task-local state. A cooperative-budget fixture
+crosses the 32-request boundary. The root probe additionally proves that
+ordinary effect and state chains construct strictly fewer compatibility roots
+when fused than under forced-unfused execution. Callback collection coverage
+from I3D.2b remains in force.
+
+The full suite also exposed the known recursive deferred-pump stack margin
+when the new phase preparation changed debug-frame layout. The implementation
+does not raise the test stack or accept repetition as evidence: drive
+preparation and interpretation now have distinct Rust frames, while terminal
+wait-result decoding is outside `await_deferred_task`'s recursive pump frame.
+This changes neither wait policy nor scheduling and the previously failing
+dictionary-pattern fixture passes on the ordinary test stack. Production
+remains `NoAuto`.
 
 #### Phase I3D.2d — Closure and Boundary Audit
 

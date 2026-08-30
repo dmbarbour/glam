@@ -668,6 +668,69 @@ fn run_log_test(
     )?)
 }
 
+fn run_log_test_with_fusion(
+    assembler: &Assembler,
+    effect: &PublicValue,
+    host: Arc<TestHost>,
+    force_unfused: bool,
+) -> (Result<TaskOutcome, TaskHalt>, Arc<EffectPhaseProbe>) {
+    let probe = Arc::new(EffectPhaseProbe::default());
+    let mut task = EffectTask::new_owned_in_context(
+        effect.as_core().clone(),
+        TestEffects,
+        host,
+        EvalContext::isolated(assembler.core_values()),
+    )
+    .expect("fusion fixture should construct")
+    .with_phase_probe(probe.clone());
+    if force_unfused {
+        task = task.forcing_unfused();
+    }
+    (task.run(), probe)
+}
+
+fn fusion_result_bytes(
+    assembler: &Assembler,
+    result: Result<TaskOutcome, TaskHalt>,
+) -> Result<Vec<u8>, String> {
+    match result {
+        Ok(TaskOutcome::Complete(value)) => assembler
+            .to_binary(&value)
+            .map(|bytes| bytes.to_vec())
+            .map_err(|error| error.to_string()),
+        Ok(TaskOutcome::Cancelled) => Err("cancelled".to_owned()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn isolated_fusion_bytes(
+    assembler: &Assembler,
+    effect: &PublicValue,
+    force_unfused: bool,
+) -> Vec<Vec<u8>> {
+    let owned = EvalContext::isolated(assembler.core_values());
+    let (context, owner) = owned.into_parts();
+    let mut task = EffectTask::new_in_context_with_policy(
+        effect.as_core().clone(),
+        TestEffects,
+        Arc::new(TestHost::with_values(assembler.core_values())),
+        context,
+        true,
+    )
+    .expect("isolated fusion fixture should construct");
+    task._demand_owner = Some(owner);
+    if force_unfused {
+        task = task.forcing_unfused();
+    }
+    task.run().expect("isolated fusion fixture should finish");
+    task.completed_search()
+        .expect("isolated fusion fixture should retain its branches")
+        .iter()
+        .filter_map(IsolatedSearchBranch::value)
+        .map(|value| assembler.to_binary(value).unwrap().to_vec())
+        .collect()
+}
+
 fn run_reflection_test(
     assembler: &Assembler,
     effect: &PublicValue,
@@ -909,6 +972,144 @@ fn effect_interpreter_callbacks_do_not_inherit_evaluator_mutators() {
         phase_probe.phase(),
         EffectMachinePhase::ContinuationDelivered as usize,
         "request parsing, mutator-free interpretation, and continuation delivery must occur in order"
+    );
+}
+
+#[test]
+fn fused_standard_chains_match_unfused_results_with_fewer_request_roots() {
+    for (source, expected) in [
+        (
+            ".r \"A\" >>= (\\a -> .r \"B\" >>= (\\b -> .r (a ++ b)))",
+            b"AB".as_slice(),
+        ),
+        (
+            ".set ['value] \"state\" =>> .get ['value] >>= (\\value -> .r value)",
+            b"state".as_slice(),
+        ),
+    ] {
+        let (assembler, effect) = compile_effect(source);
+        let (unfused, unfused_probe) = run_log_test_with_fusion(
+            &assembler,
+            &effect,
+            Arc::new(TestHost::with_values(assembler.core_values())),
+            true,
+        );
+        let (fused, fused_probe) = run_log_test_with_fusion(
+            &assembler,
+            &effect,
+            Arc::new(TestHost::with_values(assembler.core_values())),
+            false,
+        );
+
+        assert_eq!(fusion_result_bytes(&assembler, unfused).unwrap(), expected);
+        assert_eq!(fusion_result_bytes(&assembler, fused).unwrap(), expected);
+        assert!(
+            fused_probe.fused_requests() > 0,
+            "fixture did not fuse: {source}"
+        );
+        assert!(
+            fused_probe.request_roots() < unfused_probe.request_roots(),
+            "fusion should root fewer phase-local values for {source}: fused {}, unfused {}",
+            fused_probe.request_roots(),
+            unfused_probe.request_roots()
+        );
+    }
+}
+
+#[test]
+fn fused_standard_chains_resume_at_the_cooperative_budget() {
+    let mut statements = String::new();
+    for _ in 0..(EFFECT_FUSION_BUDGET + 8) {
+        statements.push_str(".r (); ");
+    }
+    let source = format!("do {{ {statements}.r \"done\" }}");
+    let (assembler, effect) = compile_effect(&source);
+    let (unfused, _) = run_log_test_with_fusion(
+        &assembler,
+        &effect,
+        Arc::new(TestHost::with_values(assembler.core_values())),
+        true,
+    );
+    let (fused, probe) = run_log_test_with_fusion(
+        &assembler,
+        &effect,
+        Arc::new(TestHost::with_values(assembler.core_values())),
+        false,
+    );
+    assert_eq!(
+        fusion_result_bytes(&assembler, fused),
+        fusion_result_bytes(&assembler, unfused)
+    );
+    assert!(probe.fused_requests() >= EFFECT_FUSION_BUDGET);
+}
+
+#[test]
+fn fused_control_boundaries_match_the_unfused_reference() {
+    for source in [
+        ".fail",
+        ".cut (.alt (.fail) (.fail))",
+        ".cut (.alt (.fail) (.r \"fallback\"))",
+        ".reset \"prompt\" (.shift \"prompt\" (\\continuation -> continuation \"resumed\"))",
+        ".fix (\\_loop -> .r \"fixed\")",
+    ] {
+        let (assembler, effect) = compile_effect(source);
+        let (unfused, _) = run_log_test_with_fusion(
+            &assembler,
+            &effect,
+            Arc::new(TestHost::with_values(assembler.core_values())),
+            true,
+        );
+        let (fused, _) = run_log_test_with_fusion(
+            &assembler,
+            &effect,
+            Arc::new(TestHost::with_values(assembler.core_values())),
+            false,
+        );
+        assert_eq!(
+            fusion_result_bytes(&assembler, fused),
+            fusion_result_bytes(&assembler, unfused),
+            "fused control behavior diverged for {source}"
+        );
+    }
+}
+
+#[test]
+fn fused_isolated_search_preserves_unfused_branch_order() {
+    let (assembler, effect) = compile_effect(
+        "(.alt (.r \"A\") (.r \"B\")) >>= (\\value -> .alt (.r (value ++ \"1\")) (.r (value ++ \"2\")))",
+    );
+    let unfused = isolated_fusion_bytes(&assembler, &effect, true);
+    let fused = isolated_fusion_bytes(&assembler, &effect, false);
+    assert_eq!(fused, unfused);
+    assert_eq!(fused, [b"A1", b"A2", b"B1", b"B2"]);
+}
+
+#[test]
+fn fused_retry_observations_match_the_unfused_reference() {
+    let (assembler, effect) =
+        compile_effect(".cut (.heap.get ['handler] >>= (\\handler -> handler ()))");
+    let (_, handler) =
+        compile_effect_with_runtime(&assembler.evaluation_runtime(), "\\_ -> .r \"recovered\"");
+    let heap = public_record(&assembler, [("handler", handler)]);
+
+    let (unfused, _) = run_log_test_with_fusion(
+        &assembler,
+        &effect,
+        Arc::new(TestHost::with_wake_heap(
+            assembler.core_values(),
+            heap.clone(),
+        )),
+        true,
+    );
+    let (fused, _) = run_log_test_with_fusion(
+        &assembler,
+        &effect,
+        Arc::new(TestHost::with_wake_heap(assembler.core_values(), heap)),
+        false,
+    );
+    assert_eq!(
+        fusion_result_bytes(&assembler, fused),
+        fusion_result_bytes(&assembler, unfused)
     );
 }
 

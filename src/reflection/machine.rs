@@ -110,6 +110,8 @@ pub(super) struct EffectTask<S: TaskSpecialization> {
     terminal: Option<TaskTerminal>,
     #[cfg(test)]
     phase_probe: Option<Arc<EffectPhaseProbe>>,
+    #[cfg(test)]
+    force_unfused: bool,
 }
 
 #[cfg(test)]
@@ -124,6 +126,8 @@ enum EffectMachinePhase {
 #[derive(Default)]
 struct EffectPhaseProbe {
     phase: AtomicUsize,
+    request_roots: AtomicUsize,
+    fused_requests: AtomicUsize,
 }
 
 #[cfg(test)]
@@ -146,6 +150,22 @@ impl EffectPhaseProbe {
 
     fn phase(&self) -> usize {
         self.phase.load(Ordering::Acquire)
+    }
+
+    fn record_request_root(&self) {
+        self.request_roots.fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn record_fused_request(&self) {
+        self.fused_requests.fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn request_roots(&self) -> usize {
+        self.request_roots.load(Ordering::Acquire)
+    }
+
+    fn fused_requests(&self) -> usize {
+        self.fused_requests.load(Ordering::Acquire)
     }
 }
 
@@ -266,6 +286,8 @@ impl<S: TaskSpecialization> EffectTask<S> {
             terminal: None,
             #[cfg(test)]
             phase_probe: None,
+            #[cfg(test)]
+            force_unfused: false,
         })
     }
 
@@ -293,9 +315,42 @@ impl<S: TaskSpecialization> EffectTask<S> {
     }
 
     #[cfg(test)]
+    fn forcing_unfused(mut self) -> Self {
+        self.force_unfused = true;
+        self
+    }
+
+    #[cfg(test)]
     fn record_phase(&self, phase: EffectMachinePhase) {
         if let Some(probe) = &self.phase_probe {
             probe.record(phase);
+        }
+    }
+
+    fn fusion_enabled(&self) -> bool {
+        #[cfg(test)]
+        if self.force_unfused {
+            return false;
+        }
+        true
+    }
+
+    fn root_request_value(
+        &self,
+        context: &EvaluatorStepContext<'_>,
+        value: Value,
+    ) -> RuntimeValueRoot {
+        #[cfg(test)]
+        if let Some(probe) = &self.phase_probe {
+            probe.record_request_root();
+        }
+        context.root_value(value)
+    }
+
+    fn record_fused_request(&self) {
+        #[cfg(test)]
+        if let Some(probe) = &self.phase_probe {
+            probe.record_fused_request();
         }
     }
 
@@ -643,19 +698,242 @@ impl<S: TaskSpecialization> EffectTask<S> {
         }
     }
 
+    fn prepare_drive_in(
+        &self,
+        context: &EvaluatorStepContext<'_>,
+        branch: &mut Branch<S>,
+    ) -> Result<PreparedDrive<S::Request>, TaskHalt> {
+        if !self.fusion_enabled() {
+            return self
+                .effect_request_in(context, branch.effect.clone())
+                .map(|request| PreparedDrive::Request {
+                    request,
+                    _phase_roots: Vec::new(),
+                });
+        }
+
+        let mut fusion = FusionState::new(branch.control.sequence.len());
+
+        for _ in 0..EFFECT_FUSION_BUDGET {
+            let request = self.effect_request_values_in(context, branch.effect.clone())?;
+            match self.classify_fused_request(branch, request, &mut fusion) {
+                FusedRequestAction::Continue => continue,
+                FusedRequestAction::Deliver(value) => {
+                    return self.finish_fused_delivery_in(context, branch, value, fusion);
+                }
+                FusedRequestAction::Get(path) => {
+                    let path =
+                        eval::eval_key_path_list_in(context, &path).map_err(task_eval_error)?;
+                    let value = get_value_path_in(context, &branch.state, &path)?;
+                    return self.finish_fused_delivery_in(context, branch, value, fusion);
+                }
+                FusedRequestAction::Set(path, value) => {
+                    branch.state = set_state_path_in(context, branch.state.clone(), &path, value)?;
+                    fusion.state_dirty = true;
+                    return self.finish_fused_delivery_in(
+                        context,
+                        branch,
+                        self.eval_context.values().unit(),
+                        fusion,
+                    );
+                }
+                FusedRequestAction::Boundary(request) => {
+                    return Ok(self.finish_fused_request(
+                        context,
+                        branch,
+                        request,
+                        fusion.pending_sequence_values,
+                        fusion.effect_dirty,
+                        fusion.state_dirty,
+                    ));
+                }
+            }
+        }
+
+        let mut phase_roots = self.root_fused_branch_updates(
+            context,
+            branch,
+            fusion.pending_sequence_values,
+            false,
+            fusion.state_dirty,
+        );
+        let effect = self.root_request_value(context, branch.effect.clone());
+        branch.effect = effect.as_core().clone();
+        phase_roots.push(effect);
+        Ok(PreparedDrive::Continue {
+            _phase_roots: phase_roots,
+        })
+    }
+
+    fn classify_fused_request(
+        &self,
+        branch: &mut Branch<S>,
+        request: Request<S::Request, Value>,
+        fusion: &mut FusionState,
+    ) -> FusedRequestAction<S::Request> {
+        match request {
+            Request::Seq(operation, continuation) => {
+                self.record_fused_request();
+                fusion.pending_sequence_values.push(continuation.clone());
+                branch
+                    .control
+                    .sequence
+                    .push(Continuation::Glam(continuation));
+                branch.effect = operation;
+                fusion.effect_dirty = true;
+                FusedRequestAction::Continue
+            }
+            Request::Return(value) => FusedRequestAction::Deliver(value),
+            Request::Get(path) => FusedRequestAction::Get(path),
+            Request::Set(path, value) => FusedRequestAction::Set(path, value),
+            request => FusedRequestAction::Boundary(request),
+        }
+    }
+
+    fn finish_fused_delivery_in(
+        &self,
+        context: &EvaluatorStepContext<'_>,
+        branch: &mut Branch<S>,
+        value: Value,
+        mut fusion: FusionState,
+    ) -> Result<PreparedDrive<S::Request>, TaskHalt> {
+        if let Some(effect) = fuse_glam_delivery_in(
+            context,
+            branch,
+            value.clone(),
+            fusion.initial_sequence_depth,
+            &mut fusion.pending_sequence_values,
+        )? {
+            self.record_fused_request();
+            return Ok(self.finish_fused_continue(
+                context,
+                branch,
+                effect,
+                fusion.pending_sequence_values,
+                fusion.state_dirty,
+            ));
+        }
+        Ok(self.finish_fused_request(
+            context,
+            branch,
+            Request::Return(value),
+            fusion.pending_sequence_values,
+            fusion.effect_dirty,
+            fusion.state_dirty,
+        ))
+    }
+
+    fn finish_fused_request(
+        &self,
+        context: &EvaluatorStepContext<'_>,
+        branch: &Branch<S>,
+        request: Request<S::Request, Value>,
+        pending_sequence_values: Vec<Value>,
+        effect_dirty: bool,
+        state_dirty: bool,
+    ) -> PreparedDrive<S::Request> {
+        let phase_roots = self.root_fused_branch_updates(
+            context,
+            branch,
+            pending_sequence_values,
+            effect_dirty,
+            state_dirty,
+        );
+        PreparedDrive::Request {
+            request: request.map_values(|value| self.root_request_value(context, value)),
+            _phase_roots: phase_roots,
+        }
+    }
+
+    fn finish_fused_continue(
+        &self,
+        context: &EvaluatorStepContext<'_>,
+        branch: &mut Branch<S>,
+        effect: Value,
+        pending_sequence_values: Vec<Value>,
+        state_dirty: bool,
+    ) -> PreparedDrive<S::Request> {
+        let mut phase_roots = self.root_fused_branch_updates(
+            context,
+            branch,
+            pending_sequence_values,
+            false,
+            state_dirty,
+        );
+        let effect = self.root_request_value(context, effect);
+        branch.effect = effect.as_core().clone();
+        phase_roots.push(effect);
+        PreparedDrive::Continue {
+            _phase_roots: phase_roots,
+        }
+    }
+
+    fn root_fused_branch_updates(
+        &self,
+        context: &EvaluatorStepContext<'_>,
+        branch: &Branch<S>,
+        pending_sequence_values: Vec<Value>,
+        effect_dirty: bool,
+        state_dirty: bool,
+    ) -> Vec<RuntimeValueRoot> {
+        let mut roots = pending_sequence_values
+            .into_iter()
+            .map(|value| self.root_request_value(context, value))
+            .collect::<Vec<_>>();
+        if effect_dirty {
+            roots.push(self.root_request_value(context, branch.effect.clone()));
+        }
+        if state_dirty {
+            roots.push(self.root_request_value(context, branch.state.clone()));
+        }
+        roots
+    }
+
     fn drive_step(
         &mut self,
         context: &EvaluationPollContext,
         mut branch: Branch<S>,
         scope_depth: usize,
     ) -> Result<MachineStep<S>, TaskHalt> {
-        let request = context.evaluate(&self.eval_context, |evaluator| {
-            self.effect_request_in(evaluator, branch.effect.clone())
-        })?;
+        let prepared = self.prepare_drive(context, &mut branch)?;
         #[cfg(test)]
         self.record_phase(EffectMachinePhase::RequestParsed);
+        self.interpret_prepared_drive(context, prepared, branch, scope_depth)
+    }
+
+    fn prepare_drive(
+        &self,
+        context: &EvaluationPollContext,
+        branch: &mut Branch<S>,
+    ) -> Result<PreparedDrive<S::Request>, TaskHalt> {
+        context.evaluate(&self.eval_context, |evaluator| {
+            self.prepare_drive_in(evaluator, branch)
+        })
+    }
+
+    fn interpret_prepared_drive(
+        &mut self,
+        context: &EvaluationPollContext,
+        prepared: PreparedDrive<S::Request>,
+        mut branch: Branch<S>,
+        scope_depth: usize,
+    ) -> Result<MachineStep<S>, TaskHalt> {
         #[cfg(test)]
         self.record_phase(EffectMachinePhase::InterpreterEntered);
+        let (request, _phase_roots) = match prepared {
+            PreparedDrive::Request {
+                request,
+                _phase_roots,
+            } => (request, _phase_roots),
+            PreparedDrive::Continue { _phase_roots: _ } => {
+                #[cfg(test)]
+                self.record_phase(EffectMachinePhase::ContinuationDelivered);
+                return Ok(MachineStep::Continue(MachineWork::Drive {
+                    branch,
+                    scope_depth,
+                }));
+            }
+        };
         let work = match request {
             Request::Return(value) => MachineWork::Deliver {
                 value: value.into_core(),
@@ -1106,7 +1384,10 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 let mut activity = RequestActivity::default();
                 let result = self.specialization.handle_request(
                     request,
-                    arguments,
+                    arguments
+                        .into_iter()
+                        .map(PublicValue::from_runtime_root)
+                        .collect(),
                     &mut RequestContext {
                         eval_context: &self.eval_context,
                         poll_context: context,
@@ -1174,6 +1455,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 }
             }
         };
+        drop(_phase_roots);
         Ok(MachineStep::Continue(work))
     }
 
@@ -1945,6 +2227,15 @@ impl<S: TaskSpecialization> EffectTask<S> {
         context: &EvaluatorStepContext<'_>,
         effect: Value,
     ) -> Result<Request<S::Request>, TaskHalt> {
+        self.effect_request_values_in(context, effect)
+            .map(|request| request.map_values(|value| self.root_request_value(context, value)))
+    }
+
+    fn effect_request_values_in(
+        &self,
+        context: &EvaluatorStepContext<'_>,
+        effect: Value,
+    ) -> Result<Request<S::Request, Value>, TaskHalt> {
         let effect = evaluate_in(context, effect)?;
         let Value::Dict(effect) = effect else {
             return Err(TaskHalt::new(format!(
@@ -1961,7 +2252,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             .map_err(|halt| halt.with_core_context(effect_dispatch_context("application")))?;
         let request = evaluate_in(context, request)
             .map_err(|halt| halt.with_core_context(effect_dispatch_context("request")))?;
-        parse_request_in(context, request, &self.tags, &self.specialized_requests)
+        parse_request_values_in(context, request, &self.tags, &self.specialized_requests)
     }
 }
 
@@ -2261,6 +2552,44 @@ impl<S: TaskSpecialization> CutFrame<S> {
     }
 }
 
+const EFFECT_FUSION_BUDGET: usize = 32;
+
+struct FusionState {
+    initial_sequence_depth: usize,
+    pending_sequence_values: Vec<Value>,
+    effect_dirty: bool,
+    state_dirty: bool,
+}
+
+impl FusionState {
+    fn new(initial_sequence_depth: usize) -> Self {
+        Self {
+            initial_sequence_depth,
+            pending_sequence_values: Vec::new(),
+            effect_dirty: false,
+            state_dirty: false,
+        }
+    }
+}
+
+enum FusedRequestAction<R> {
+    Continue,
+    Deliver(Value),
+    Get(Value),
+    Set(Value, Value),
+    Boundary(Request<R, Value>),
+}
+
+enum PreparedDrive<R> {
+    Request {
+        request: Request<R>,
+        _phase_roots: Vec<RuntimeValueRoot>,
+    },
+    Continue {
+        _phase_roots: Vec<RuntimeValueRoot>,
+    },
+}
+
 // This value is short-lived on the Rust stack. Boxing `Continue` would add an
 // allocation to every cooperative machine transition merely to shrink the two
 // uncommon terminal variants.
@@ -2517,27 +2846,62 @@ impl CapturedLayer {
 }
 
 #[derive(Clone)]
-enum Request<R> {
-    Return(RuntimeValueRoot),
-    Seq(RuntimeValueRoot, RuntimeValueRoot),
-    Alt(RuntimeValueRoot, RuntimeValueRoot),
+enum Request<R, V = RuntimeValueRoot> {
+    Return(V),
+    Seq(V, V),
+    Alt(V, V),
     Fail,
-    Cut(RuntimeValueRoot),
-    Fix(RuntimeValueRoot),
-    Get(RuntimeValueRoot),
-    Set(RuntimeValueRoot, RuntimeValueRoot),
-    HeapGet(RuntimeValueRoot),
-    HeapSet(RuntimeValueRoot, RuntimeValueRoot),
-    HeapRewrite(RuntimeValueRoot, RuntimeValueRoot),
-    VolumeGet(VolumeId, RuntimeValueRoot),
-    VolumeSet(VolumeId, RuntimeValueRoot, RuntimeValueRoot),
-    VolumeRewrite(VolumeId, RuntimeValueRoot, RuntimeValueRoot),
-    Reset(RuntimeValueRoot, RuntimeValueRoot),
-    Shift(RuntimeValueRoot, RuntimeValueRoot),
-    Resume(EvaluationTaskId, u64, RuntimeValueRoot),
+    Cut(V),
+    Fix(V),
+    Get(V),
+    Set(V, V),
+    HeapGet(V),
+    HeapSet(V, V),
+    HeapRewrite(V, V),
+    VolumeGet(VolumeId, V),
+    VolumeSet(VolumeId, V, V),
+    VolumeRewrite(VolumeId, V, V),
+    Reset(V, V),
+    Shift(V, V),
+    Resume(EvaluationTaskId, u64, V),
     ExitSuccess,
-    ExitError(RuntimeValueRoot),
-    Specialized(R, Vec<PublicValue>),
+    ExitError(V),
+    Specialized(R, Vec<V>),
+}
+
+impl<R, V> Request<R, V> {
+    fn map_values<U>(self, mut map: impl FnMut(V) -> U) -> Request<R, U> {
+        match self {
+            Self::Return(value) => Request::Return(map(value)),
+            Self::Seq(operation, continuation) => Request::Seq(map(operation), map(continuation)),
+            Self::Alt(left, right) => Request::Alt(map(left), map(right)),
+            Self::Fail => Request::Fail,
+            Self::Cut(operation) => Request::Cut(map(operation)),
+            Self::Fix(function) => Request::Fix(map(function)),
+            Self::Get(path) => Request::Get(map(path)),
+            Self::Set(path, value) => Request::Set(map(path), map(value)),
+            Self::HeapGet(path) => Request::HeapGet(map(path)),
+            Self::HeapSet(path, value) => Request::HeapSet(map(path), map(value)),
+            Self::HeapRewrite(path, updater) => Request::HeapRewrite(map(path), map(updater)),
+            Self::VolumeGet(volume, path) => Request::VolumeGet(volume, map(path)),
+            Self::VolumeSet(volume, path, value) => {
+                Request::VolumeSet(volume, map(path), map(value))
+            }
+            Self::VolumeRewrite(volume, path, updater) => {
+                Request::VolumeRewrite(volume, map(path), map(updater))
+            }
+            Self::Reset(key, operation) => Request::Reset(map(key), map(operation)),
+            Self::Shift(key, function) => Request::Shift(map(key), map(function)),
+            Self::Resume(task, continuation, value) => {
+                Request::Resume(task, continuation, map(value))
+            }
+            Self::ExitSuccess => Request::ExitSuccess,
+            Self::ExitError(message) => Request::ExitError(map(message)),
+            Self::Specialized(request, arguments) => {
+                Request::Specialized(request, arguments.into_iter().map(map).collect())
+            }
+        }
+    }
 }
 
 struct SpecializedRequest<R> {
@@ -2559,98 +2923,84 @@ struct VolumeRequestIdentity {
     operation: VolumeOperation,
 }
 
-fn parse_request_in<R: Clone>(
+fn parse_request_values_in<R: Clone>(
     context: &EvaluatorStepContext<'_>,
     value: Value,
     tags: &Tags,
     specialized: &[SpecializedRequest<R>],
-) -> Result<Request<R>, TaskHalt> {
+) -> Result<Request<R, Value>, TaskHalt> {
     let Value::Dict(dict) = value else {
         return Err(TaskHalt::new("effect API returned a non-request value"));
     };
-    let parse = |tag: &Key| -> Result<Option<Vec<RuntimeValueRoot>>, TaskHalt> {
+    let parse = |tag: &Key| -> Result<Option<Vec<Value>>, TaskHalt> {
         dict.get(tag)
             .map(|payload| {
                 let Value::List(payload) = evaluate_in(context, payload.clone())? else {
                     return Err(TaskHalt::new("effect request payload must be a list"));
                 };
-                eval::list_to_value_items_in(context, &payload)
-                    .map(|values| {
-                        values
-                            .into_iter()
-                            .map(|value| context.root_value(value))
-                            .collect()
-                    })
-                    .map_err(task_eval_error)
+                eval::list_to_value_items_in(context, &payload).map_err(task_eval_error)
             })
             .transpose()
     };
     macro_rules! args {
         ($tag:expr, $n:literal, $body:expr) => {
             if let Some(arguments) = parse($tag)? {
-                let arguments: [RuntimeValueRoot; $n] = arguments.try_into().map_err(|_| {
+                let arguments: [Value; $n] = arguments.try_into().map_err(|_| {
                     TaskHalt::new("effect request contained the wrong number of arguments")
                 })?;
                 return Ok(($body)(arguments));
             }
         };
     }
-    args!(&tags.r, 1, |[value]: [RuntimeValueRoot; 1]| {
-        Request::Return(value)
-    });
-    args!(&tags.seq, 2, |[operation, continuation]: [RuntimeValueRoot;
-                             2]| {
+    args!(&tags.r, 1, |[value]: [Value; 1]| { Request::Return(value) });
+    args!(&tags.seq, 2, |[operation, continuation]: [Value; 2]| {
         Request::Seq(operation, continuation)
     });
-    args!(&tags.alt, 2, |[left, right]: [RuntimeValueRoot; 2]| {
+    args!(&tags.alt, 2, |[left, right]: [Value; 2]| {
         Request::Alt(left, right)
     });
-    args!(&tags.fail, 0, |[]: [RuntimeValueRoot; 0]| { Request::Fail });
-    args!(&tags.cut, 1, |[operation]: [RuntimeValueRoot; 1]| {
+    args!(&tags.fail, 0, |[]: [Value; 0]| { Request::Fail });
+    args!(&tags.cut, 1, |[operation]: [Value; 1]| {
         Request::Cut(operation)
     });
-    args!(&tags.fix, 1, |[function]: [RuntimeValueRoot; 1]| {
+    args!(&tags.fix, 1, |[function]: [Value; 1]| {
         Request::Fix(function)
     });
-    args!(&tags.get, 1, |[path]: [RuntimeValueRoot; 1]| {
-        Request::Get(path)
-    });
-    args!(&tags.set, 2, |[path, value]: [RuntimeValueRoot; 2]| {
+    args!(&tags.get, 1, |[path]: [Value; 1]| { Request::Get(path) });
+    args!(&tags.set, 2, |[path, value]: [Value; 2]| {
         Request::Set(path, value)
     });
-    args!(&tags.heap_get, 1, |[path]: [RuntimeValueRoot; 1]| {
+    args!(&tags.heap_get, 1, |[path]: [Value; 1]| {
         Request::HeapGet(path)
     });
-    args!(&tags.heap_set, 2, |[path, value]: [RuntimeValueRoot; 2]| {
+    args!(&tags.heap_set, 2, |[path, value]: [Value; 2]| {
         Request::HeapSet(path, value)
     });
-    args!(
-        &tags.heap_rewrite,
-        2,
-        |[path, updater]: [RuntimeValueRoot; 2]| { Request::HeapRewrite(path, updater) }
-    );
-    args!(&tags.reset, 2, |[key, operation]: [RuntimeValueRoot; 2]| {
+    args!(&tags.heap_rewrite, 2, |[path, updater]: [Value; 2]| {
+        Request::HeapRewrite(path, updater)
+    });
+    args!(&tags.reset, 2, |[key, operation]: [Value; 2]| {
         Request::Reset(key, operation)
     });
-    args!(&tags.shift, 2, |[key, function]: [RuntimeValueRoot; 2]| {
+    args!(&tags.shift, 2, |[key, function]: [Value; 2]| {
         Request::Shift(key, function)
     });
-    args!(&tags.exit_success, 0, |[]: [RuntimeValueRoot; 0]| {
+    args!(&tags.exit_success, 0, |[]: [Value; 0]| {
         Request::ExitSuccess
     });
-    args!(&tags.exit_error, 1, |[message]: [RuntimeValueRoot; 1]| {
+    args!(&tags.exit_error, 1, |[message]: [Value; 1]| {
         Request::ExitError(message)
     });
     if let Some(arguments) = parse(&tags.resume)? {
-        let [task_id, continuation_id, value]: [RuntimeValueRoot; 3] = arguments
+        let [task_id, continuation_id, value]: [Value; 3] = arguments
             .try_into()
             .map_err(|_| TaskHalt::new("resume request contained the wrong number of arguments"))?;
-        let task_id = request_id_in(context, task_id.into_core(), "task")?;
+        let task_id = request_id_in(context, task_id, "task")?;
         let task_id = EvaluationTaskId::from_u64(task_id)
             .ok_or_else(|| TaskHalt::new("reflection task ID must be nonzero"))?;
         return Ok(Request::Resume(
             task_id,
-            request_id_in(context, continuation_id.into_core(), "continuation")?,
+            request_id_in(context, continuation_id, "continuation")?,
             value,
         ));
     }
@@ -2661,13 +3011,7 @@ fn parse_request_in<R: Clone>(
                     "effect request contained the wrong number of arguments",
                 ));
             }
-            return Ok(Request::Specialized(
-                specialized.request.clone(),
-                arguments
-                    .into_iter()
-                    .map(PublicValue::from_runtime_root)
-                    .collect(),
-            ));
+            return Ok(Request::Specialized(specialized.request.clone(), arguments));
         }
     }
     for (tag, _) in dict.iter() {
@@ -2971,6 +3315,27 @@ fn alternative_returns(tags: &Tags, values: Vec<Value>) -> Value {
         .map(|value| eval::constant_effect(request_value(&tags.r, vec![value])))
         .reduce(|right, left| eval::constant_effect(request_value(&tags.alt, vec![left, right])))
         .expect("alternative return construction requires at least two values")
+}
+
+fn fuse_glam_delivery_in<S: TaskSpecialization>(
+    context: &EvaluatorStepContext<'_>,
+    branch: &mut Branch<S>,
+    value: Value,
+    initial_sequence_depth: usize,
+    pending_sequence_values: &mut Vec<Value>,
+) -> Result<Option<Value>, TaskHalt> {
+    let Some(Continuation::Glam(function)) = branch.control.sequence.last().cloned() else {
+        return Ok(None);
+    };
+    let function = evaluate_in(context, function)?;
+    let removes_pending = branch.control.sequence.len() > initial_sequence_depth;
+    branch.control.sequence.pop();
+    if removes_pending {
+        pending_sequence_values
+            .pop()
+            .expect("a fused sequence continuation must retain its pending value");
+    }
+    apply_in(context, function, vec![value]).map(Some)
 }
 
 fn apply_in(

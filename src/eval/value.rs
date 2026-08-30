@@ -389,44 +389,15 @@ fn await_deferred_task(
     wait: crate::evaluation::EvaluationWaitToken,
     kind: &str,
 ) -> Result<Option<Value>, EvaluationHalt> {
-    match context.context().poll_wait(&wait) {
-        EvaluationWaitPoll::Complete(value) => return Ok(Some(context.project_root(&value))),
-        EvaluationWaitPoll::Failed(error) => {
-            return Err(deferred_task_failure(context.context(), &wait, error));
-        }
-        EvaluationWaitPoll::Cancelled => {
-            return Err(EvaluationHalt::new(format!(
-                "{kind} evaluation was cancelled"
-            )));
-        }
-        EvaluationWaitPoll::Abandoned => return Ok(None),
-        EvaluationWaitPoll::Exited => {
-            return Err(EvaluationHalt::new(format!(
-                "{kind} producer exited without a result"
-            )));
-        }
-        EvaluationWaitPoll::Killed(error) => return Err(EvaluationHalt::failure(error)),
-        EvaluationWaitPoll::Pending(_) => {}
+    let poll = context.context().poll_wait(&wait);
+    if !matches!(&poll, EvaluationWaitPoll::Pending(_)) {
+        return deferred_wait_result(context, &wait, kind, poll);
     }
     if context.context().runs_scheduled_task() {
         return match context.context().pump_wait(&wait, 256) {
-            EvaluationPumpOutcome::TargetReady => match context.context().poll_wait(&wait) {
-                EvaluationWaitPoll::Complete(value) => Ok(Some(context.project_root(&value))),
-                EvaluationWaitPoll::Failed(error) => {
-                    Err(deferred_task_failure(context.context(), &wait, error))
-                }
-                EvaluationWaitPoll::Pending(wait) => {
-                    Err(EvaluationHalt::blocked(CoreWaitToken(wait)))
-                }
-                EvaluationWaitPoll::Cancelled => Err(EvaluationHalt::new(format!(
-                    "{kind} evaluation was cancelled"
-                ))),
-                EvaluationWaitPoll::Abandoned => Ok(None),
-                EvaluationWaitPoll::Exited => Err(EvaluationHalt::new(format!(
-                    "{kind} producer exited without a result"
-                ))),
-                EvaluationWaitPoll::Killed(error) => Err(EvaluationHalt::failure(error)),
-            },
+            EvaluationPumpOutcome::TargetReady => {
+                deferred_wait_result(context, &wait, kind, context.context().poll_wait(&wait))
+            }
             EvaluationPumpOutcome::Busy
             | EvaluationPumpOutcome::NoProgress
             | EvaluationPumpOutcome::BudgetExhausted => {
@@ -449,10 +420,19 @@ fn await_deferred_task(
             EvaluationPumpOutcome::BudgetExhausted => {}
         }
     }
-    match context.context().poll_wait(&wait) {
+    deferred_wait_result(context, &wait, kind, context.context().poll_wait(&wait))
+}
+
+fn deferred_wait_result(
+    context: &EvaluatorStepContext<'_>,
+    wait: &crate::evaluation::EvaluationWaitToken,
+    kind: &str,
+    poll: EvaluationWaitPoll,
+) -> Result<Option<Value>, EvaluationHalt> {
+    match poll {
         EvaluationWaitPoll::Complete(value) => Ok(Some(context.project_root(&value))),
         EvaluationWaitPoll::Failed(error) => {
-            Err(deferred_task_failure(context.context(), &wait, error))
+            Err(deferred_task_failure(context.context(), wait, error))
         }
         EvaluationWaitPoll::Pending(wait) => Err(EvaluationHalt::blocked(CoreWaitToken(wait))),
         EvaluationWaitPoll::Cancelled => Err(EvaluationHalt::new(format!(
