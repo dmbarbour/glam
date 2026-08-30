@@ -884,9 +884,17 @@ fn effect_interpreter_callbacks_do_not_inherit_evaluator_mutators() {
         ".cut (.evaluate (\"left\" ++ \"right\") >>= (\\value -> (.heap.set ['value] value) =>> .r value))",
     );
     let host = Arc::new(TestHost::with_callback_probe(assembler.core_values()));
+    let phase_probe = Arc::new(EffectPhaseProbe::default());
 
-    let TaskOutcome::Complete(value) = run_log_test(&assembler, &effect, host.clone()).unwrap()
-    else {
+    let task = EffectTask::new_owned_in_context(
+        effect.as_core().clone(),
+        TestEffects,
+        host.clone(),
+        EvalContext::isolated(assembler.core_values()),
+    )
+    .unwrap()
+    .with_phase_probe(phase_probe.clone());
+    let TaskOutcome::Complete(value) = run_composed_effect_task(task).unwrap() else {
         panic!("bounded interpreter evaluation should complete")
     };
 
@@ -897,6 +905,11 @@ fn effect_interpreter_callbacks_do_not_inherit_evaluator_mutators() {
     assert!(host.callback_probe_count(CallbackProbeKind::Snapshot) > 0);
     assert!(host.callback_probe_count(CallbackProbeKind::Commit) > 0);
     assert!(host.callback_probe_count(CallbackProbeKind::Specialization) > 0);
+    assert_eq!(
+        phase_probe.phase(),
+        EffectMachinePhase::ContinuationDelivered as usize,
+        "request parsing, mutator-free interpretation, and continuation delivery must occur in order"
+    );
 }
 
 #[test]
@@ -1131,6 +1144,10 @@ fn isolated_search_reports_and_resumes_lazy_dependencies() {
             IsolatedSearchPoll::Blocked(blocked) => {
                 assert!(blocked.waiting_on_dependency());
                 assert!(blocked.observed_generation().is_none());
+                assembler
+                    .core_values()
+                    .collect_managed_for_test()
+                    .expect("blocked request decoding must retain no evaluator mutator");
                 break;
             }
             IsolatedSearchPoll::Complete(_) => {

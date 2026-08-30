@@ -123,7 +123,6 @@ const INVENTORY: &[InventoryEntry] = &[
         "I3E.2"
     ),
     entry!("src/g_syntax/parser/source.rs", [1, 0, 0, 0, 0], "I3E.2"),
-    entry!("src/reflection/machine.rs", [1, 1, 0, 8, 3], "I3D.2/I3D.4"),
     entry!("src/reflection/requests.rs", [1, 0, 0, 1, 0], "I3D.2"),
 ];
 

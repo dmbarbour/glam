@@ -1366,19 +1366,50 @@ force. Production remains `NoAuto`.
 
 #### Phase I3D.2b — Explicit Effect-Machine Phases
 
-- Refactor `EffectTask` so a monadic step has explicit phases: evaluate and
-  parse the next request in a callback-free evaluator scope; root request data
-  which must leave that scope; interpret it with no inherited mutator; then
-  enter a later evaluator scope to deliver the result or apply its
-  continuation.
-- Replace the remaining direct-compatibility evaluator calls in request
-  decoding, continuation application, and delivery with the admitted bounded
-  service. Durable `MachineWork` and branch state retain only owned/runtime-
-  rooted values; no evaluator carrier or scoped access enters machine state.
+- **I3D.2b.1 — Request boundary.** Refactor `EffectTask` so the beginning of a
+  monadic step is explicit: evaluate and parse the next request in one
+  callback-free evaluator scope, root every request value which leaves that
+  scope, finish the scope, and only then interpret the owned request. Host and
+  specialization callbacks remain wholly outside the evaluator phase.
+- **I3D.2b.2 — Continuation boundary.** Apply continuations and perform every
+  delivery-time demand in later callback-free evaluator scopes admitted by the
+  current poll. Root results before they leave those scopes. Remove the
+  corresponding direct-compatibility evaluator calls from request decoding,
+  continuation application, and delivery.
+- This checkpoint converts the values which cross the new phase boundaries;
+  it does not duplicate I4F.1's source-wide conversion of the recursive
+  `Branch`, `Control`, fixpoint, transaction, and outcome representations.
+  Until I4F.1, those existing durable fields remain compatibility `Value`
+  owners under production `NoAuto`. No evaluator carrier, managed borrow, or
+  scoped access may enter any machine field. I4F.1 later replaces every such
+  durable raw field with a registered root or exact managed edge before the
+  production managed-value switch.
 
 Verification: phase-latched tests observe request parsing, interpreter entry,
 and continuation delivery in order; callbacks continue to collect; blocked
 evaluation resumes without retaining scoped authority. Production remains
+`NoAuto`.
+
+I3D.2b completed 2026-08-30. `EffectTask` now evaluates the effect object,
+applies `eff`, reduces the request, materializes its payload, and parses request
+IDs inside one poll-admitted `EvaluatorStepContext`. Every request argument is
+converted to a compatibility `RuntimeValueRoot` before that context ends;
+specialized arguments retain the same ownership through `PublicValue`.
+Interpretation, including host snapshots, commits, and specialized handlers,
+starts only after the decoding scope has finished. Standard request paths,
+reset/shift/fix control, continuation application, and delivery-time demands
+now re-enter only through bounded poll-context evaluator phases, rooting each
+value result before it crosses back into orchestration.
+
+`effect_interpreter_callbacks_do_not_inherit_evaluator_mutators` uses a strict
+phase probe to require request parsing, interpreter entry, and continuation
+delivery in that order while all three callback families collect successfully.
+`isolated_search_reports_and_resumes_lazy_dependencies` collects after forced
+request blocking and then resumes the exact promise, demonstrating that the
+blocked machine retained neither its evaluator carrier nor active managed
+access. The direct evaluator inventory no longer contains
+`src/reflection/machine.rs`. The compatibility bare values recursively stored
+inside branches remain explicitly assigned to I4F.1; production remains
 `NoAuto`.
 
 #### Phase I3D.2c — Reference Path and Standard-Effect Fusion

@@ -180,8 +180,8 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/reflection/machine.rs",
-        [4, 4, 13, 0, 1, 0],
-        "persistent effect machine, continuations, and store access",
+        [12, 31, 4, 0, 0, 0],
+        "rooted decoded requests plus compatibility branch, continuation, and store access",
         "I3D.2/I3D.4 interpreter phases; I4F.1 machine roots"
     ),
     entry!(

@@ -52,13 +52,13 @@ pub(crate) use value::{
     failure_diagnostic_value_with, halt_diagnostic_value_with, pop_list_front,
 };
 
-use application::*;
+pub(crate) use application::*;
 #[cfg(test)]
 use builtins::apply_builtin;
 use builtins::apply_builtin_in;
 use net::*;
 use operator::*;
-use sequence::*;
+pub(crate) use sequence::*;
 #[cfg(test)]
 use test_support::*;
 use value::*;
