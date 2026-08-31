@@ -224,22 +224,33 @@ permanent error, callable-data interpretation, and `Operator >< Data`
 execution.
 
 - `Data >< Bind` asks `callable` for either a shared net or an operator. A net
-  installs a logical-copy cursor. An operator is placed behind a fresh `Bind`
-  so the ordinary bind-join rule performs application. Failure leaves the
+  installs a logical-copy cursor. Callable-to-operator completion fuses the
+  inevitable unary-function bind join: it removes the application `Bind` and
+  callable `Data`, then connects the operator principal to the former argument
+  neighbor and its auxiliary to the former result neighbor. Failure leaves the
   original pair stuck.
 - `Operator >< Data` executes outside the runtime lock and yields either `Data`
   or another `Operator`. A returned operator is bind-wrapped for the next
-  argument. Failure is permanent; there is no retryable host-blocking state.
+  argument. A retryable evaluation wait is recorded against that exact pair;
+  permanent failure leaves it stuck.
 - Core uses explicit `CoreOperator` enum values rather than opaque Rust
   closures. `Error` is an operator whose activated result is stuck.
 
 Ordinary `Value::Function` application is evaluator-owned semantic staging and
-does not reify a linear bind as a host function. Raw `Value::Net` is opaque
-closed data already in WHNF; ordinary `apply_value` must not reinterpret it as
-a lambda-calculus callable. When a `Data(Value::Net)` node instead meets a
-`Bind` inside an interaction net, `CallableData` installs a logical-copy cursor
-at the raw net's exposed interface. This runtime call reduction is the only
-implicit operation that opens the net.
+does not expose the function's staged net as a host function. When
+`Data(Value::Function)` meets `Bind`, core callable lowering instead installs
+`CoreOperator::Applicable` through the fused splice above. One `Bind` performs
+one ordinary `apply_value` step. If arguments remain, the result is
+`Data(Value::Function)`; another application therefore requires another
+explicit `Bind`.
+
+Raw `Value::Net` is opaque closed data already in WHNF; ordinary `apply_value`
+must not reinterpret it as a lambda-calculus callable. When a
+`Data(Value::Net)` node instead meets a `Bind` inside an interaction net,
+`CallableData` installs a logical-copy cursor at the raw net's exposed
+interface. This runtime call reduction is the only implicit operation that
+opens the net. Opening `FunctionValue::stage()` through this raw-net path would
+break value-level partial application and is forbidden.
 
 `HostFn`, copying, and erasure otherwise treat `Value::Net` like closed data;
 they do not project its exposed agent. A net-backed `Value::Lazy` represents

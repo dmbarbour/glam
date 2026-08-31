@@ -235,6 +235,20 @@ answer_net = interaction_net do
     .r d
 answer = net_arity 0 answer_net    # expect Data immediately
 
+# An ordinary function behind Bind consumes exactly ONE argument. A partial
+# function returns as ordinary Data and can be applied normally or by another
+# explicit Bind.
+add left right = left + right
+partial_net = interaction_net do
+    .bind -> [call, argument, result]
+    .data add -> [function]
+    .data 19 -> [value]
+    .wire call function
+    .wire argument value
+    .r result
+partial = net_arity 0 partial_net
+sum = partial 23
+
 # Node constructors (introduce ports; principal port is head of list):
     .bind -> [ap, arg, result]      # function constructor
     .copy N -> [x0, x1, ..., xN]    # dataflow fan-out, unique instances
@@ -250,13 +264,17 @@ answer = net_arity 0 answer_net    # expect Data immediately
 
 # Interaction occurs when principal ports connect:
 #   bind-bind: join    bind-copy: dup    bind-data: call (else stuck)
+#   bind-data(Function): one ordinary value application; another Bind is
+#                        required for another argument
+#   bind-data(Net): load a logical copy through the raw net's exposed port
 #   copy-data: dup     copy-copy: join if same instance, else dup
 #   data-data: STUCK — a type error; report and debug
 
 # Lambda calculus is a design pattern within inets:
 #   lambda      = .bind copying/wiring arg INTO result
 #   application = .bind providing arg, extracting result
-# A raw net embedded behind Bind is called by lazy cursor-based loading.
+# A raw net embedded behind Bind is called by lazy cursor-based loading; an
+# ordinary Function is never opened as though it were that raw net.
 # Data flows BOTH directions (no inherent arg/result distinction),
 # but ".g" syntax favors lambdas — use inets to accelerate difficult
 # dataflows inside lambda bodies while preserving the lambda interface.

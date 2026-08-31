@@ -1682,10 +1682,25 @@ claim operations from escaping scoped core-net access. Production remains
 - Share machinery with callable claims only where the resulting API remains
   clearer than the two state machines. Do not force cursor claims into the
   same abstraction.
+- Preserve the production function-call client established by
+  [`InteractionNetFunctionCalls_2026-08-31.md`](InteractionNetFunctionCalls_2026-08-31.md).
+  Callable lowering directly splices `CoreOperator::Applicable(Function)`
+  between the original argument and result neighbors; it must not recreate a
+  synthetic `Bind >< Bind` pair merely to make operator claiming convenient.
+  One explicit source `Bind` supplies one ordinary function argument, and a
+  partial `Value::Function` is returned as `Data` rather than as
+  `OperatorYield::Operator`.
 
 Verification: force data and operator yields, retryable and permanent errors,
 exact retry mismatch, and unwind. Preserve the structured operator failure in
-the stuck pair.
+the stuck pair. Keep the direct callable-splice tests and the source-level
+unary, partial, explicitly chained, and captured-function regressions green.
+Use `reflection_gate_blocks_and_resumes_an_exact_net_function_call` as a real
+callable-to-operator client alongside the directly constructed operator
+fixtures, and force its blocked/resumed ordering rather than relying on
+repetition. Verify that the operator claim begins from the directly published
+`Operator >< Data` pair and that no intermediate `BindJoin` becomes part of
+the lifecycle protocol.
 
 #### Phase I3D.3f — Cursor Claim Lifecycles
 

@@ -999,6 +999,15 @@ net is an error. Inside another interaction net, a raw net embedded as data is
 called when it meets a `Bind`; the runtime loads it lazily through its exposed
 port.
 
+An ordinary source function embedded with `.data` follows ordinary value
+application instead. When it meets a `Bind`, that bind supplies exactly one
+argument. If the function remains partial, the result is another ordinary
+function in `Data`; supplying its next argument requires another explicit
+`Bind`. The runtime fuses the intermediate bind-bind application bridge, but
+does not expose or load the function's internal staged net. Thus calling a
+function and loading a raw net remain observably distinct even though both
+begin with `Bind` meeting `Data`.
+
 The provisional `net_arity N Net` builtin presents a raw net to the ordinary
 lambda-calculus layer. At arity zero it is a lazy computation that expects the
 exposed interface to produce data. At positive arity it is an ordinary

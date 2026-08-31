@@ -1,6 +1,6 @@
 # Interaction-Net Function Calls Plan — 2026-08-31
 
-Status: in progress; Phases F0 and F1 are complete. Phase F2 is next.
+Status: complete; Phases F0 through F3 are complete.
 
 This plan restores ordinary Glam function calls through interaction-net
 construction while preserving the distinction between an opaque raw `Net`
@@ -364,6 +364,13 @@ If this plan is deferred until after the current GC integration stretch:
 F2 should not itself add production behavior. It is a verification handoff
 between this repair and the claim-lifecycle migration.
 
+Phase F2 completed 2026-08-31. GC integration phase I3D.3e now names this
+plan's function-call path as a required production client. Its verification
+contract preserves unary, partial, chained, captured, and exact
+reflection-gated calls; requires direct publication of the resulting
+`Operator >< Data` pair; and forbids reintroducing synthetic `BindJoin` work
+for claim-lifecycle convenience.
+
 ## Phase F3 — Documentation Alignment
 
 After the executable behavior is green, update current and target documents:
@@ -380,6 +387,18 @@ After the executable behavior is green, update current and target documents:
 Documentation should describe implemented semantics after F1, not announce
 the proposed behavior while the mismatch still exists. Until then, this plan
 is the only authoritative statement of the intended repair.
+
+Phase F3 completed 2026-08-31. The implementation context, detailed design,
+syntax reference, and syntax cheat sheet now distinguish all three cases:
+
+- raw `Net` data loads one logical copy through its exposed interface;
+- ordinary `Function` data performs one value application per explicit bind
+  and returns partial functions as data; and
+- `OperatorYield::Operator` retains a bind wrapper because it represents a
+  future application rather than an eliminable intermediate pair.
+
+The current implementation notes also record the fused positional splice and
+exact retryable operator waits.
 
 ## Validation
 
@@ -436,5 +455,5 @@ that case, take the explicit F2 deferral path and complete it before I8.
 | F0 | complete | Semantic mismatch and unfused topology latched before repair. |
 | F1.1 | complete | Functions classify as ordinary unary applicable values. |
 | F1.2 | complete | Callable completion directly splices the resulting operator. |
-| F2 | pending | Function cases carried through operator-claim migration. |
-| F3 | pending | Current and target documentation aligned with implementation. |
+| F2 | complete | Function cases bound into the operator-claim migration contract. |
+| F3 | complete | Current and target documentation aligned with implementation. |

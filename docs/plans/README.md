@@ -18,14 +18,13 @@ when their historical value no longer justifies keeping them.
   builds and verifies the standalone collector subcrate.
 - [`GarbageCollectorIntegration_2026-08-19.md`](GarbageCollectorIntegration_2026-08-19.md)
   migrates Glam values, roots, workers, reflection, and interaction nets.
-- [`InteractionNetFunctionCalls_2026-08-31.md`](InteractionNetFunctionCalls_2026-08-31.md)
-  restores ordinary value-level function calls through explicitly constructed
-  interaction nets without exposing function staging or changing raw-net
-  loading.
 
 ## Recent Completed Plans
 
-(deleted)
+- [`InteractionNetFunctionCalls_2026-08-31.md`](InteractionNetFunctionCalls_2026-08-31.md)
+  restored ordinary value-level function calls through explicitly constructed
+  interaction nets, including direct operator splicing and partial-function
+  preservation.
 
 ## Preliminary and Deferred Plans
 

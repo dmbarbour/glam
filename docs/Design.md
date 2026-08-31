@@ -374,34 +374,15 @@ The construction effect produces a closed, opaque net value:
 
     interaction_net :: Eff [NetBuilder, Standard] Port -> Net
 
-`Net` is already in weak-head normal form. It can be stored, copied, erased,
-or embedded as data, but it is not an ordinary lambda-calculus function and
-cannot be applied directly. Within another interaction net, connecting a
-`Bind` to `Data net` loads a logical copy of `net` through its exposed port.
-If that interface eventually presents `Data d`, the loaded net behaves as `d`
-in its caller. Ordinary evaluation does not project `d` from the opaque net.
-
-An explicit, arity-directed bridge gives a net a lambda-style interface. The
-provisional name is `net_arity`:
+A `Net` is an abstract data wrapper in weak-head normal form. The returned `Port` serves as the only semantic boundary for observation. There are two options to observe a `Net`. First, a `Bind >< Data(Net)` active pair logically copies data net to host, serving as a copyable template. Second, a `net_arity n` builtin function returns a function that binds `n` data arguments to a `Net` before extracting a data result.
 
     net_arity        :: Nat -> Net -> Value
-    net_arity 0      :: Net -> a
-    net_arity n      :: Net -> a1 -> ... -> an -> result  -- n > 0
+    net_arity 0      :: Net -> result                           # Net as expression
+    net_arity n      :: Net -> a1 -> ... -> an -> result        # Net as function
 
-Constructing this bridge does not inspect the net. At arity zero, demand
-expects `Data` at the exposed interface and continues into its payload; `Bind`
-or another normal form is an error. At positive arity, the bridge constructs
-an ordinary function that attaches `n` arguments before demanding a result.
-Partial application does not inspect or normalize the staged interface. After
-the last argument, the result must expose `Data`; a remaining `Bind` or another
-normal form is an interface error. If the net produces `Data` early, subsequent
-argument wiring is governed by ordinary interaction rules and may become
-stuck; the bridge does not add a separate early-result check.
+If the net produces data too late, extraction diverges. If the net produces data early, we apply the normal `Bind >< Data` rules. This implicitly requires an early data to represent a `Net` or another applicable of suitable type. A function is applicable: `Bind >< Data(Function)` expects a data argument and returns a curried function or final result based on remaining arity.
 
-A raw net boundary is therefore opened only by interaction-net loading or by
-`net_arity`, never by ordinary evaluation or application.
-
-Effects API: 
+The `NetBuilder` Effects API: 
 
 - Node constructors introduce ports. Principal port is head.
   - `.bind -> [ap, arg, result]` - constructor of functions
@@ -414,14 +395,17 @@ Effects API:
     - `Expr` is copied logically (refct or GC)
 - Wires consume ports. Each port must be wired exactly once.
   - `.wire A B` - commutative (`.wire B A` is equivalent)
-  - return port wired implicitly
+  - the return port wired implicitly
 - *Standard Effects* to support bookkeeping and backtracking
 
 Nodes interact only when principal ports connect.
 - bind-bind: join
 - bind-copy: dup
-- bind-data: call applicable data; a net is loaded by logical copy, other
-  non-callable data is stuck
+- bind-data: call applicable data
+  - an ordinary function consumes exactly one argument and returns its value,
+    including an ordinary partial function when arguments remain
+  - a raw net is loaded by logical copy through its exposed port
+  - other non-callable data is stuck
 - copy-data: dup
 - copy-copy: join paired residuals of one duplication process, dup otherwise
   - pairing follows complete dynamic duplication identity, not equality of one
@@ -441,10 +425,12 @@ Rules:
   - copy node to each auxilliary opposite
   - wire auxilliaries to copies positionally
 - call: 
-  - make the called inet available in the caller inet
+  - for an ordinary function, apply one value argument and expose the result as
+    data; fuse the otherwise inevitable bind-bind join when installing the
+    unary application operator
+  - for a raw net, make the called inet available in the caller inet
     - ideal: retain one shared function graph and push duplication through it
       lazily instead of eagerly relabeling or copying its body
-  - connect the bind-bind principal ports 
 - stuck: a type error! report and debug
 
 Lambda calculus becomes a design pattern within interaction nets:
