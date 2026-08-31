@@ -2229,6 +2229,25 @@ fn equality_errors_when_dictionary_comparison_reaches_functions() {
 }
 
 #[test]
+fn interaction_net_classifies_ordinary_functions_as_applicable_operators() {
+    let function = closed_function_value(2, TestExpr::Local(0));
+    let callable = lower_core_callable(&test_context(), function.clone())
+        .expect("an ordinary function should be callable from an interaction net");
+
+    match callable {
+        CoreCallable::Operator(CoreOperator::Applicable(actual)) => {
+            assert_eq!(actual, function);
+        }
+        CoreCallable::Operator(other) => {
+            panic!("ordinary function lowered to the wrong operator: {other:?}");
+        }
+        CoreCallable::Net(_) => {
+            panic!("ordinary function must not expose its internal stage as a raw net");
+        }
+    }
+}
+
+#[test]
 fn ordinary_observers_do_not_unseal_metadata_carriers() {
     let carrier = initial_metadata();
 

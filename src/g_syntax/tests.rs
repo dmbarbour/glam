@@ -5798,6 +5798,32 @@ fn interaction_net_bind_builds_an_ordinary_identity_function() {
 }
 
 #[test]
+fn interaction_net_bind_calls_an_embedded_source_function() {
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(
+        parse(concat!(
+            "language g0\n",
+            "import 'std\n",
+            "increment value = value + 1\n",
+            "called = interaction_net do\n",
+            "  .bind -> application\n",
+            "  .data increment -> function\n",
+            "  .data 41 -> argument\n",
+            "  .wire (list.head application) (list.head function)\n",
+            "  .wire (list.head (list.tail application)) (list.head argument)\n",
+            "  .r (list.head (list.tail (list.tail application)))\n",
+            "result = net_arity 0 called\n",
+        )),
+        &context,
+    );
+    assert_eq!(lowered.diagnostics, []);
+
+    let definitions = evaluated_module_value(&context, &lowered);
+    let result = resolved_value_at_path(&definitions, &["result"]);
+    assert_eq!(fully_evaluated_value(result), Value::Number(n(42)));
+}
+
+#[test]
 fn interaction_net_construction_is_memoized_and_preserves_initial_active_pairs() {
     let context = CompileContext::default();
     let lowered = lower_parsed_source(

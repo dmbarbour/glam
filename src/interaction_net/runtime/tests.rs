@@ -1586,7 +1586,7 @@ fn nested_cursor_preserves_structured_failure_across_unrelated_source_progress()
 }
 
 #[test]
-fn claimed_callable_data_lowers_to_an_explicit_operator_bind() {
+fn claimed_callable_data_splices_directly_to_its_operator() {
     let mut net = RuntimeNet::<i32>::empty();
     let application = net.add_node(RuntimeNode::Bind);
     let callable = net.add_node(RuntimeNode::Data(0));
@@ -1614,13 +1614,6 @@ fn claimed_callable_data_lowers_to_an_explicit_operator_bind() {
         TestOperator::new("increment", |value| Ok(OperatorYield::Data(value + 1))),
     );
     assert_ne!(net.active.get(&call.pair), Some(&ActivePairState::Claimed));
-    assert!(matches!(
-        net.reduce_next(),
-        Some(Reduction {
-            kind: ReductionKind::BindJoin,
-            ..
-        })
-    ));
     let operator_call = match net.reduce_next() {
         Some(Reduction {
             kind: ReductionKind::OperatorCall { operator, data },
@@ -1635,6 +1628,52 @@ fn claimed_callable_data_lowers_to_an_explicit_operator_bind() {
     let (operator, data) = net.operator_call_parts(operator_call);
     net.complete_operator_call(operator_call, operator.apply(&data).unwrap());
     assert_eq!(net.interface_data(result), Some(&42));
+}
+
+#[test]
+fn claimed_callable_splice_preserves_non_data_neighbors() {
+    let mut net = RuntimeNet::<i32>::empty();
+    let application = net.add_node(RuntimeNode::Bind);
+    let callable = net.add_node(RuntimeNode::Data(0));
+    let argument_interface = net.add_node(RuntimeNode::Interface);
+    let result_interface = net.add_node(RuntimeNode::Interface);
+    let argument = Port::auxiliary(argument_interface, 1);
+    let result = Port::auxiliary(result_interface, 1);
+    net.connect(Port::principal(application), Port::principal(callable));
+    net.connect(Port::auxiliary(application, 1), argument);
+    net.connect(Port::auxiliary(application, 2), result);
+
+    let reduction = net.reduce_next().expect("bind-data must block as a call");
+    let ReductionKind::Call { bind, data } = reduction.kind else {
+        panic!("expected a claimed call");
+    };
+    let call = Call {
+        pair: reduction.pair,
+        bind,
+        data,
+    };
+    assert_eq!(net.claim_call(call), Some(0));
+
+    net.resume_claimed_call_with_operator(
+        call,
+        TestOperator::new("identity", |value| Ok(OperatorYield::Data(*value))),
+    );
+
+    assert!(net.node(application).is_none());
+    assert!(net.node(callable).is_none());
+    let operator_principal = net
+        .interface_neighbor(argument)
+        .expect("argument neighbor should remain connected");
+    assert!(operator_principal.is_principal());
+    assert!(matches!(
+        net.node(operator_principal.node()),
+        Some(RuntimeNode::Operator(_))
+    ));
+    assert_eq!(
+        net.interface_neighbor(result),
+        Some(Port::auxiliary(operator_principal.node(), 1))
+    );
+    assert!(net.reduce_next().is_none());
 }
 
 fn operator_call_net(

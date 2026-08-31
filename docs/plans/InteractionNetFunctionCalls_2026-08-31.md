@@ -1,6 +1,7 @@
 # Interaction-Net Function Calls Plan — 2026-08-31
 
-Status: proposed; not started.
+Status: in progress; Phase F0 is complete and intentionally leaves its target
+regressions red until F1.
 
 This plan restores ordinary Glam function calls through interaction-net
 construction while preserving the distinction between an opaque raw `Net`
@@ -185,6 +186,24 @@ implementation:
 The test should inspect topology or the next exact reduction, not merely count
 nodes. Node allocation identities and revision counts are implementation
 details unless another runtime invariant already promises them.
+
+Phase F0 completed 2026-08-31. Three target surfaces now latch the mismatch
+without changing production behavior:
+
+- `interaction_net_classifies_ordinary_functions_as_applicable_operators`
+  fails because callable lowering reports
+  `application requires a function value, received Function`;
+- `interaction_net_bind_calls_an_embedded_source_function` reaches the same
+  failure through the public `.bind`/`.data`/`.wire` source path, with the
+  surrounding `eval:{op:'net_computation}` context intact; and
+- `claimed_callable_data_splices_directly_to_its_operator` observes the old
+  `BindJoin`, while
+  `claimed_callable_splice_preserves_non_data_neighbors` observes that the
+  original application bind remains installed.
+
+These are deliberate red tests between F0 and F1. They compile cleanly and
+state the target contract directly; F1 must make the same tests green rather
+than replacing them with implementation-specific or expected-failure oracles.
 
 ## Phase F1 — Admit Functions Through the Applicable Operator Path
 
@@ -386,7 +405,7 @@ that case, take the explicit F2 deferral path and complete it before I8.
 
 | Phase | Status | Outcome |
 | --- | --- | --- |
-| F0 | pending | Semantic mismatch and unfused topology latched before repair. |
+| F0 | complete | Semantic mismatch and unfused topology latched before repair. |
 | F1.1 | pending | Functions classify as ordinary unary applicable values. |
 | F1.2 | pending | Callable completion directly splices the resulting operator. |
 | F2 | pending | Function cases carried through operator-claim migration. |
