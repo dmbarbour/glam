@@ -1,6 +1,6 @@
 # Glam GC Integration Plan — 2026-08-19
 
-Status: in progress; Phases I0 through I2 and checkpoints I3A.1-I3D.2d are
+Status: in progress; Phases I0 through I2 and checkpoints I3A.1-I3D.3d are
 complete. Phase I3 is in progress. Collector Gate G1 passed on 2026-08-25.
 The remaining integration work follows the completed owner-matrix,
 stable-ledger, and low-risk checkpoint corrections from the integration
@@ -54,6 +54,10 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I3D.2b | complete | explicit request, interpreter, and continuation phases |
 | I3D.2c | complete | forced-unfused reference path and bounded standard-effect fusion |
 | I3D.2d | complete | effect-machine closure and callback-boundary audit |
+| I3D.3a | complete | exact-domain private core-net facade |
+| I3D.3b | complete | matching-runtime scoped core-net observation and mutation |
+| I3D.3c | complete | closure-scoped same-net normalization batches |
+| I3D.3d | complete | bracketed callable active-pair claims and exact replay fallback |
 | I3 | in progress | bounded evaluator/worker mutator regions |
 | I4 | pending | core trace vocabulary and leaf policy |
 | I4.0 | pending | managed-family destruction admission contract |
@@ -1649,6 +1653,24 @@ inventory prevents raw batch acquisition from returning. Production remains
 Verification: forced schedules cover every disposition, exact blocked-call
 reclamation, and panic/unwind fallback. Compile/privacy coverage prevents a
 call claim from entering machine state or a poll outcome.
+
+I3D.3d completed 2026-08-31. Core callable reduction now issues a private,
+`#[must_use]`, non-`Send`/non-`Sync` `CoreCallClaim` only after an existing
+fresh claim is still current or an exact blocked wait is atomically reclaimed.
+It owns the callable clone and its replay fallback, but no managed-access view.
+Lowering selects an exhaustive copied-net, operator, blocked-wait, permanent-
+failure, or explicit-release disposition; all durable topology updates reopen
+only a bounded matching-runtime access region.
+
+Release and unwind restore fresh claims to `Ready` and retried claims to their
+prior exact wait. Those restorations publish disturbances, whereas stale fresh
+acquisition and mismatched blocked retries use conditional mutation and remain
+quiet. Generic runtime tests cover release/restore rejection and replay.
+Evaluator tests force all dispositions, both release paths, both unwind paths,
+exact retry, mismatch, and stale acquisition. Compile-time negative trait
+checks keep the guard thread-bound, and the durable-facade inventory prevents
+claim operations from escaping scoped core-net access. Production remains
+`NoAuto`.
 
 #### Phase I3D.3e — Operator Active-Pair Claims
 

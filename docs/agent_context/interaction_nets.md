@@ -133,6 +133,16 @@ work across scheduler boundaries; they do not carry that view or a managed
 borrow. Source and target copy steps therefore open separate checked regions,
 never one region spanning both nets.
 
+Core `Bind >< Data` semantic work is owned by a private, thread-bound callable
+claim guard. Initial acquisition succeeds only while the reduction's exact
+pair remains claimed. A blocked retry atomically verifies and reclaims its
+exact wait before issuing the guard. The guard is consumed by one exhaustive
+disposition: copied net, operator, exact wait, permanent structured failure,
+or release. It cannot enter a worklist or poll result. Release and unwind
+publish a replayable state: a fresh claim becomes ready, while a retried claim
+restores the same blocked wait. Stale acquisition and wait mismatch are quiet
+non-acquisitions, not terminal claim outcomes.
+
 ## Logical Copies and Cursors
 
 A logical copy is target-owned `CopyState` containing:

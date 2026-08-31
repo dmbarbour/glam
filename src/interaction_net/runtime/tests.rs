@@ -1360,6 +1360,42 @@ fn blocked_call_requires_its_current_wait_token_to_be_reclaimed() {
     assert!(net.retry_blocked_call(call, &17));
     assert_eq!(net.claim_call(call), Some(()));
     assert!(net.principals_connect(pair));
+
+    assert!(net.restore_blocked_call(call, 17));
+    assert_eq!(net.blocked_call(pair), Some(BlockedCall { pair, wait: 17 }));
+    assert!(net.retry_blocked_call(call, &17));
+    assert!(net.release_claimed_call(call));
+    assert!(matches!(
+        net.reduce_pair(pair),
+        Some(Reduction {
+            kind: ReductionKind::Call { .. },
+            ..
+        })
+    ));
+}
+
+#[test]
+fn call_release_and_restore_reject_non_claimed_pairs_without_mutation() {
+    let mut net = RuntimeNet::<()>::empty();
+    let bind = net.add_node(RuntimeNode::Bind);
+    let data = net.add_node(RuntimeNode::Data(()));
+    net.connect(Port::principal(bind), Port::principal(data));
+    let pair = ActivePairKey::new(bind, data);
+    let call = Call { pair, bind, data };
+
+    assert!(!net.release_claimed_call(call));
+    assert!(!net.restore_blocked_call(call, 17));
+    assert!(matches!(
+        net.reduce_pair(pair),
+        Some(Reduction {
+            kind: ReductionKind::Call { .. },
+            ..
+        })
+    ));
+    net.block_claimed_call(call, 17);
+    assert!(!net.release_claimed_call(call));
+    assert!(!net.restore_blocked_call(call, 18));
+    assert_eq!(net.blocked_call(pair), Some(BlockedCall { pair, wait: 17 }));
 }
 
 #[test]

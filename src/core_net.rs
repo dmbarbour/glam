@@ -6,15 +6,16 @@
 use std::sync::Arc;
 
 use crate::core::{
-    BuiltinCall, CoreValueFactory, FunctionCode, Key, RuntimeValueAccess, RuntimeValueObserver,
-    Value,
+    BuiltinCall, CoreValueFactory, EvaluationHalt, FunctionCode, Key, RuntimeValueAccess,
+    RuntimeValueObserver, Value,
 };
 use crate::evaluation::EvaluationWaitToken;
 use crate::interaction_net::{
     ActivePairKey, ActivePairStep, BlockedCall, BlockedOperatorCall, CursorDependency,
     CursorDependencyDisposition, CursorDependencyResolution, CursorProgress, CursorStep,
     DemandEndpoint, FrontierObservation, InteractionNet, InterfaceDemand, NetContention, NodeId,
-    Port, PreparedCopySource, Reduction, RuntimeNet, RuntimeNetRevisions, SharedRuntimeNet,
+    Port, PreparedCopySource, Reduction, RuntimeNet, RuntimeNetMutation, RuntimeNetRevisions,
+    SharedRuntimeNet,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -409,6 +410,82 @@ impl CoreRuntimeNetAccess<'_, '_> {
         self.runtime
             .inner
             .with_mut(|runtime| runtime.resume_claimed_call_with_copy(call, source));
+    }
+
+    pub(crate) fn claim_call(&self, call: crate::interaction_net::Call) -> Option<Value> {
+        self.runtime.inner.with(|runtime| runtime.claim_call(call))
+    }
+
+    pub(crate) fn reclaim_blocked_call(
+        &self,
+        blocked: &BlockedCall<CoreWaitToken>,
+    ) -> Option<(crate::interaction_net::Call, Value)> {
+        self.runtime.inner.with_conditional_mut(|runtime| {
+            let Some(call) = runtime.call(blocked.pair) else {
+                return RuntimeNetMutation::Unchanged(None);
+            };
+            if !runtime.retry_blocked_call(call, &blocked.wait) {
+                return RuntimeNetMutation::Unchanged(None);
+            }
+            let callable = runtime
+                .claim_call(call)
+                .expect("reclaimed call must expose its callable data");
+            RuntimeNetMutation::Changed(Some((call, callable)))
+        })
+    }
+
+    pub(crate) fn resume_claimed_call_with_operator(
+        &self,
+        call: crate::interaction_net::Call,
+        operator: CoreOperator,
+    ) {
+        self.runtime.inner.with_mut(|runtime| {
+            runtime.resume_claimed_call_with_operator(call, operator);
+        });
+    }
+
+    pub(crate) fn block_claimed_call(
+        &self,
+        call: crate::interaction_net::Call,
+        wait: CoreWaitToken,
+    ) {
+        self.runtime
+            .inner
+            .with_mut(|runtime| runtime.block_claimed_call(call, wait));
+    }
+
+    pub(crate) fn fail_claimed_call(
+        &self,
+        call: crate::interaction_net::Call,
+        error: EvaluationHalt,
+    ) {
+        self.runtime
+            .inner
+            .with_mut(|runtime| runtime.fail_claimed_call(call, error));
+    }
+
+    pub(crate) fn release_claimed_call(&self, call: crate::interaction_net::Call) -> bool {
+        self.runtime.inner.with_conditional_mut(|runtime| {
+            if runtime.release_claimed_call(call) {
+                RuntimeNetMutation::Changed(true)
+            } else {
+                RuntimeNetMutation::Unchanged(false)
+            }
+        })
+    }
+
+    pub(crate) fn restore_blocked_call(
+        &self,
+        call: crate::interaction_net::Call,
+        wait: CoreWaitToken,
+    ) -> bool {
+        self.runtime.inner.with_conditional_mut(|runtime| {
+            if runtime.restore_blocked_call(call, wait) {
+                RuntimeNetMutation::Changed(true)
+            } else {
+                RuntimeNetMutation::Unchanged(false)
+            }
+        })
     }
 }
 
@@ -920,6 +997,13 @@ mod tests {
             "pub(crate) fn advance_claimed_cursor(",
             "pub(crate) fn prepare_copy_source(",
             "pub(crate) fn resume_claimed_call_with_copy(",
+            "pub(crate) fn claim_call(",
+            "pub(crate) fn reclaim_blocked_call(",
+            "pub(crate) fn resume_claimed_call_with_operator(",
+            "pub(crate) fn block_claimed_call(",
+            "pub(crate) fn fail_claimed_call(",
+            "pub(crate) fn release_claimed_call(",
+            "pub(crate) fn restore_blocked_call(",
             "pub(crate) fn try_begin_normalization_batch(",
         ] {
             assert!(

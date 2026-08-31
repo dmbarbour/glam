@@ -1427,6 +1427,33 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         true
     }
 
+    /// Releases a freshly claimed call back to the ready worklist.
+    pub fn release_claimed_call(&mut self, call: Call) -> bool {
+        if !self
+            .active
+            .get(&call.pair)
+            .is_some_and(ActivePairState::is_claimed)
+        {
+            return false;
+        }
+        self.active.insert(call.pair, ActivePairState::Ready);
+        true
+    }
+
+    /// Restores an exact retried call to the wait it held before reclamation.
+    pub fn restore_blocked_call(&mut self, call: Call, wait: S::WaitToken) -> bool {
+        if !self
+            .active
+            .get(&call.pair)
+            .is_some_and(ActivePairState::is_claimed)
+        {
+            return false;
+        }
+        self.active
+            .insert(call.pair, ActivePairState::BlockedCall { wait });
+        true
+    }
+
     /// Clones a pending operator transition so specialization code can run without
     /// holding the shared runtime-net mutex.
     pub fn operator_call_parts(&self, call: OperatorCall) -> (S::Operator, S::Data) {
