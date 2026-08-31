@@ -6,8 +6,8 @@ use crate::core_net::{
     CoreRuntimeNetAccess,
 };
 use crate::interaction_net::{
-    BlockedCall, CursorDependencyDisposition, CursorDependencyResolution, DemandEndpoint,
-    InterfaceDemand,
+    BlockedCall, BlockedOperatorCall, CursorDependencyDisposition, CursorDependencyResolution,
+    DemandEndpoint, InterfaceDemand,
 };
 
 pub(super) fn attach_net_many(function: NetValue, arguments: Vec<Value>) -> NetValue {
@@ -578,20 +578,14 @@ fn drive_active_pair_semantic_step(
                 | crate::evaluation::EvaluationWaitPoll::Exited
                 | crate::evaluation::EvaluationWaitPoll::Killed(_) => {}
             }
-            let call = with_core_net_access(context, &runtime, |runtime| {
-                runtime.with(|net| net.operator_call(pair))
-            })
-            .expect("blocked core operator call must remain an Operator >< Data pair");
-            let reclaimed = with_core_net_access(context, &runtime, |runtime| {
-                runtime.with_mut(|net| net.retry_blocked_operator_call(call, &blocked.wait))
-            });
-            assert!(
-                reclaimed,
-                "matching blocked core operator call must be reclaimable"
-            );
-            if !progress_core_operator_call(context, &runtime, call)? {
+            let Some(claim) = CoreOperatorClaim::retry(context, &runtime, blocked) else {
                 return Err(EvaluationHalt::new(
-                    "interaction-net operator call lost its reclaimed claim",
+                    "interaction-net operator call lost its exact blocked claim",
+                ));
+            };
+            if !progress_core_operator_claim(context, claim)? {
+                return Err(EvaluationHalt::new(
+                    "interaction-net operator call released its retry",
                 ));
             }
             driver.progressed = true;
@@ -812,6 +806,131 @@ impl Drop for CoreCallClaim<'_, '_> {
     }
 }
 
+enum OperatorDisposition {
+    Yield(OperatorYield<CoreSpecialization>),
+    Blocked(crate::core_net::CoreWaitToken),
+    Failed(EvaluationHalt),
+    #[allow(
+        dead_code,
+        reason = "the explicit release disposition is exercised by claim-protocol tests"
+    )]
+    Release,
+}
+
+#[derive(Clone)]
+enum OperatorFallback {
+    Ready,
+    Blocked(crate::core_net::CoreWaitToken),
+}
+
+/// One stack-bound operator claim. It owns the semantic payload clones and
+/// exact replay fallback, but carries no managed-access view.
+#[must_use = "an operator claim must be terminalized or released"]
+struct CoreOperatorClaim<'claim, 'step> {
+    context: &'claim EvaluatorStepContext<'step>,
+    runtime: &'claim CoreRuntimeNet,
+    call: OperatorCall,
+    operator: CoreOperator,
+    data: Value,
+    fallback: Option<OperatorFallback>,
+    _thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl<'claim, 'step> CoreOperatorClaim<'claim, 'step> {
+    fn fresh(
+        context: &'claim EvaluatorStepContext<'step>,
+        runtime: &'claim CoreRuntimeNet,
+        call: OperatorCall,
+    ) -> Option<Self> {
+        let (operator, data) = with_core_net_access(context, runtime, |runtime| {
+            runtime.claim_operator_call(call)
+        })?;
+        Some(Self {
+            context,
+            runtime,
+            call,
+            operator,
+            data,
+            fallback: Some(OperatorFallback::Ready),
+            _thread_bound: std::marker::PhantomData,
+        })
+    }
+
+    fn retry(
+        context: &'claim EvaluatorStepContext<'step>,
+        runtime: &'claim CoreRuntimeNet,
+        blocked: BlockedOperatorCall<crate::core_net::CoreWaitToken>,
+    ) -> Option<Self> {
+        let fallback = OperatorFallback::Blocked(blocked.wait.clone());
+        let (call, operator, data) = with_core_net_access(context, runtime, |runtime| {
+            runtime.reclaim_blocked_operator_call(&blocked)
+        })?;
+        Some(Self {
+            context,
+            runtime,
+            call,
+            operator,
+            data,
+            fallback: Some(fallback),
+            _thread_bound: std::marker::PhantomData,
+        })
+    }
+
+    fn parts(&self) -> (&CoreOperator, &Value) {
+        (&self.operator, &self.data)
+    }
+
+    fn finish(mut self, disposition: OperatorDisposition) -> Result<bool, EvaluationHalt> {
+        let result = match disposition {
+            OperatorDisposition::Yield(result) => {
+                with_core_net_access(self.context, self.runtime, |runtime| {
+                    runtime.complete_claimed_operator_call(self.call, result)
+                });
+                Ok(true)
+            }
+            OperatorDisposition::Blocked(wait) => {
+                with_core_net_access(self.context, self.runtime, |runtime| {
+                    runtime.block_claimed_operator_call(self.call, wait)
+                });
+                Ok(true)
+            }
+            OperatorDisposition::Failed(error) => {
+                with_core_net_access(self.context, self.runtime, |runtime| {
+                    runtime.fail_claimed_operator_call(self.call, error.clone())
+                });
+                Err(error)
+            }
+            OperatorDisposition::Release => {
+                let restored = self.restore_fallback();
+                debug_assert!(restored, "released operator claim must remain current");
+                Ok(false)
+            }
+        };
+        self.fallback = None;
+        result
+    }
+
+    fn restore_fallback(&self) -> bool {
+        let Some(fallback) = self.fallback.clone() else {
+            return true;
+        };
+        with_core_net_access(self.context, self.runtime, |runtime| match fallback {
+            OperatorFallback::Ready => runtime.release_claimed_operator_call(self.call),
+            OperatorFallback::Blocked(wait) => {
+                runtime.restore_blocked_operator_call(self.call, wait)
+            }
+        })
+    }
+}
+
+impl Drop for CoreOperatorClaim<'_, '_> {
+    fn drop(&mut self) {
+        if self.fallback.is_some() {
+            let _ = self.restore_fallback();
+        }
+    }
+}
+
 fn lower_core_callable_in(
     context: &EvaluatorStepContext<'_>,
     value: Value,
@@ -922,38 +1041,43 @@ pub(super) fn progress_core_operator_call(
     runtime: &CoreRuntimeNet,
     call: OperatorCall,
 ) -> Result<bool, EvaluationHalt> {
-    let (operator, data) = with_core_net_access(context, runtime, |runtime| {
-        runtime.with(|net| net.operator_call_parts(call))
-    });
-    match apply_core_operator(context.context(), &operator, &data) {
-        Ok(result) => with_core_net_access(context, runtime, |runtime| {
-            runtime.with_mut(|net| {
-                net.complete_operator_call(call, result);
-            });
-        }),
+    let Some(claim) = CoreOperatorClaim::fresh(context, runtime, call) else {
+        return Ok(false);
+    };
+    progress_core_operator_claim(context, claim)
+}
+
+#[cfg(test)]
+fn progress_exact_core_operator_call(
+    context: &EvalContext,
+    runtime: &CoreRuntimeNet,
+    call: OperatorCall,
+) -> Result<bool, EvaluationHalt> {
+    super::with_direct_evaluator(context, |evaluator| {
+        progress_core_operator_call(evaluator, runtime, call)
+    })
+}
+
+fn progress_core_operator_claim(
+    context: &EvaluatorStepContext<'_>,
+    claim: CoreOperatorClaim<'_, '_>,
+) -> Result<bool, EvaluationHalt> {
+    let (operator, data) = claim.parts();
+    let disposition = match apply_core_operator(context.context(), operator, data) {
+        Ok(result) => OperatorDisposition::Yield(result),
         Err(error) => {
             let error = match retryable_evaluation_wait(context.context(), &error) {
-                Ok(Some(wait)) => {
-                    with_core_net_access(context, runtime, |runtime| {
-                        runtime.with_mut(|net| net.block_claimed_operator_call(call, wait))
-                    });
-                    return Ok(true);
-                }
+                Ok(Some(wait)) => return claim.finish(OperatorDisposition::Blocked(wait)),
                 Ok(None) => error,
                 Err(error) => error,
             };
             // Core operator errors already identify the failed semantic
             // operation. Preserve that structured error while retaining
             // the operator itself in the stuck pair for runtime inspection.
-            with_core_net_access(context, runtime, |runtime| {
-                runtime.with_mut(|net| {
-                    net.fail_operator_call(call, error.clone());
-                });
-            });
-            return Err(error);
+            OperatorDisposition::Failed(error)
         }
-    }
-    Ok(true)
+    };
+    claim.finish(disposition)
 }
 
 fn retryable_evaluation_wait(
@@ -1046,6 +1170,16 @@ mod driver_tests {
         CoreCallClaim<'static, 'static>,
         Sync
     );
+    assert_does_not_implement!(
+        core_operator_claim_is_not_send,
+        CoreOperatorClaim<'static, 'static>,
+        Send
+    );
+    assert_does_not_implement!(
+        core_operator_claim_is_not_sync,
+        CoreOperatorClaim<'static, 'static>,
+        Sync
+    );
 
     fn instantiate(
         template: crate::core_net::CoreInteractionNet,
@@ -1069,6 +1203,32 @@ mod driver_tests {
             panic!("bind-data fixture must produce a call")
         };
         (runtime, Call { pair, bind, data })
+    }
+
+    fn claimed_core_operator_call(
+        operator: CoreOperator,
+        data: Value,
+    ) -> (CoreRuntimeNet, OperatorCall) {
+        let mut net = NetBuilder::<CoreSpecialization>::new();
+        let [input, result] = net.operator(operator);
+        let data = net.data(data);
+        net.wire(input, data);
+        let runtime = instantiate(net.finish(result));
+        let pair = runtime.test_with(|net| net.active_pairs().next().unwrap());
+        let reduction = runtime
+            .test_with_optional_mut(|net| net.reduce_pair(pair))
+            .expect("operator fixture must be claimable");
+        let ReductionKind::OperatorCall { operator, data } = reduction.kind else {
+            panic!("operator-data fixture must produce an operator call")
+        };
+        (
+            runtime,
+            OperatorCall {
+                pair,
+                operator,
+                data,
+            },
+        )
     }
 
     #[test]
@@ -1650,6 +1810,211 @@ mod driver_tests {
 
         let (failed_runtime, failed_call) = claimed_core_call(context.values().unit());
         let failure = progress_exact_core_call(&context, &failed_runtime, failed_call)
+            .expect_err("unit is permanently non-callable");
+        assert!(
+            failure
+                .to_string()
+                .contains("application requires a function value")
+        );
+        assert!(matches!(
+            failed_runtime.test_with(|net| net.stuck_reason(failed_call.pair).cloned()),
+            Some(StuckReason::Specialization(error)) if error == failure
+        ));
+    }
+
+    #[test]
+    fn fresh_operator_claim_release_restores_ready_work() {
+        let context = test_context();
+        let operator = builtin_operator(BuiltinCall::new(Builtin::Add));
+        let (runtime, call) = claimed_core_operator_call(operator, context.values().unit());
+        let before = runtime.test_with_revisions(|_| ()).1;
+
+        crate::eval::with_direct_evaluator(&context, |evaluator| {
+            let claim = CoreOperatorClaim::fresh(evaluator, &runtime, call)
+                .expect("claimed operator call must issue its scoped guard");
+            assert!(!claim.finish(OperatorDisposition::Release).unwrap());
+        });
+
+        let after = runtime.test_with_revisions(|_| ()).1;
+        assert_eq!(after.topology_revision(), before.topology_revision() + 1);
+        assert_eq!(after.disturbance_epoch(), before.disturbance_epoch() + 1);
+        assert!(matches!(
+            runtime.test_with_optional_mut(|net| net.reduce_pair(call.pair)),
+            Some(Reduction {
+                kind: ReductionKind::OperatorCall { .. },
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn fresh_operator_claim_unwind_restores_ready_work() {
+        let context = test_context();
+        let operator = builtin_operator(BuiltinCall::new(Builtin::Add));
+        let (runtime, call) = claimed_core_operator_call(operator, context.values().unit());
+        let before = runtime.test_with_revisions(|_| ()).1;
+
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::eval::with_direct_evaluator(&context, |evaluator| {
+                let _claim = CoreOperatorClaim::fresh(evaluator, &runtime, call)
+                    .expect("claimed operator call must issue its scoped guard");
+                panic!("forced operator-claim unwind");
+            });
+        }));
+
+        assert!(unwind.is_err());
+        let after = runtime.test_with_revisions(|_| ()).1;
+        assert_eq!(after.topology_revision(), before.topology_revision() + 1);
+        assert_eq!(after.disturbance_epoch(), before.disturbance_epoch() + 1);
+        assert!(matches!(
+            runtime.test_with_optional_mut(|net| net.reduce_pair(call.pair)),
+            Some(Reduction {
+                kind: ReductionKind::OperatorCall { .. },
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn stale_fresh_operator_claim_fails_quietly_before_guard_issuance() {
+        let context = test_context();
+        let operator = builtin_operator(BuiltinCall::new(Builtin::Add));
+        let (runtime, call) = claimed_core_operator_call(operator, context.values().unit());
+        runtime.test_with_mut(|net| assert!(net.release_claimed_operator_call(call)));
+        let before = runtime.test_with_revisions(|_| ()).1;
+
+        crate::eval::with_direct_evaluator(&context, |evaluator| {
+            assert!(CoreOperatorClaim::fresh(evaluator, &runtime, call).is_none());
+        });
+
+        assert_eq!(runtime.test_with_revisions(|_| ()).1, before);
+    }
+
+    #[test]
+    fn retried_operator_claim_release_restores_the_exact_wait() {
+        let context = test_context();
+        let promise = PromisedValue::new(context.values(), "operator-claim wait");
+        let operator = applicable_operator(Value::Promised(promise));
+        let (runtime, call) = claimed_core_operator_call(operator, context.values().unit());
+        assert!(progress_exact_core_operator_call(&context, &runtime, call).unwrap());
+        let blocked = runtime
+            .test_with(|net| net.blocked_operator_call(call.pair))
+            .expect("unassigned operator promise must block the call");
+        let before = runtime.test_with_revisions(|_| ()).1;
+
+        crate::eval::with_direct_evaluator(&context, |evaluator| {
+            let claim = CoreOperatorClaim::retry(evaluator, &runtime, blocked.clone())
+                .expect("the exact blocked operator wait must be reclaimable");
+            assert!(!claim.finish(OperatorDisposition::Release).unwrap());
+        });
+
+        let restored = runtime
+            .test_with(|net| net.blocked_operator_call(call.pair))
+            .expect("release must restore the prior blocked operator call");
+        assert_eq!(restored.wait, blocked.wait);
+        let after = runtime.test_with_revisions(|_| ()).1;
+        assert_eq!(after.topology_revision(), before.topology_revision() + 2);
+        assert_eq!(after.disturbance_epoch(), before.disturbance_epoch() + 2);
+    }
+
+    #[test]
+    fn retried_operator_claim_unwind_restores_the_exact_wait() {
+        let context = test_context();
+        let promise = PromisedValue::new(context.values(), "unwound operator-claim wait");
+        let operator = applicable_operator(Value::Promised(promise));
+        let (runtime, call) = claimed_core_operator_call(operator, context.values().unit());
+        assert!(progress_exact_core_operator_call(&context, &runtime, call).unwrap());
+        let blocked = runtime
+            .test_with(|net| net.blocked_operator_call(call.pair))
+            .expect("unassigned operator promise must block the call");
+
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::eval::with_direct_evaluator(&context, |evaluator| {
+                let _claim = CoreOperatorClaim::retry(evaluator, &runtime, blocked.clone())
+                    .expect("the exact blocked operator wait must be reclaimable");
+                panic!("forced retried-operator unwind");
+            });
+        }));
+
+        assert!(unwind.is_err());
+        let restored = runtime
+            .test_with(|net| net.blocked_operator_call(call.pair))
+            .expect("unwind must restore the prior blocked operator call");
+        assert_eq!(restored.wait, blocked.wait);
+    }
+
+    #[test]
+    fn mismatched_blocked_operator_retry_fails_quietly_before_guard_issuance() {
+        let context = test_context();
+        let promise = PromisedValue::new(context.values(), "current operator wait");
+        let operator = applicable_operator(Value::Promised(promise));
+        let (runtime, call) = claimed_core_operator_call(operator, context.values().unit());
+        assert!(progress_exact_core_operator_call(&context, &runtime, call).unwrap());
+        let blocked = runtime
+            .test_with(|net| net.blocked_operator_call(call.pair))
+            .expect("unassigned operator promise must block the call");
+        let other = PromisedValue::new(context.values(), "unrelated operator wait");
+        let wrong_wait = crate::core_net::CoreWaitToken(
+            promise_wait(&context, &other).expect("unrelated wait must allocate"),
+        );
+        assert_ne!(wrong_wait, blocked.wait);
+        let before = runtime.test_with_revisions(|_| ()).1;
+
+        crate::eval::with_direct_evaluator(&context, |evaluator| {
+            let mismatch = BlockedOperatorCall {
+                pair: blocked.pair,
+                wait: wrong_wait,
+            };
+            assert!(CoreOperatorClaim::retry(evaluator, &runtime, mismatch).is_none());
+        });
+
+        assert_eq!(runtime.test_with_revisions(|_| ()).1, before);
+        assert_eq!(
+            runtime
+                .test_with(|net| net.blocked_operator_call(call.pair))
+                .expect("mismatched retry must preserve the current operator wait")
+                .wait,
+            blocked.wait
+        );
+    }
+
+    #[test]
+    fn operator_claim_dispositions_cover_data_operator_block_and_failure() {
+        let context = test_context();
+
+        let function = closed_function_value(1, TestExpr::Local(0));
+        let data = Value::Number(Number::from(42));
+        let (data_runtime, data_call) =
+            claimed_core_operator_call(applicable_operator(function), data);
+        assert!(progress_exact_core_operator_call(&context, &data_runtime, data_call).unwrap());
+        assert!(data_runtime.test_with(|net| net.operator_call(data_call.pair).is_none()));
+
+        let (operator_runtime, operator_call) = claimed_core_operator_call(
+            builtin_operator(BuiltinCall::new(Builtin::Add)),
+            Value::Number(Number::from(19)),
+        );
+        assert!(
+            progress_exact_core_operator_call(&context, &operator_runtime, operator_call).unwrap()
+        );
+        assert!(operator_runtime.test_with(|net| net.operator_call(operator_call.pair).is_none()));
+
+        let promise = PromisedValue::new(context.values(), "blocked operator disposition");
+        let (blocked_runtime, blocked_call) = claimed_core_operator_call(
+            applicable_operator(Value::Promised(promise)),
+            context.values().unit(),
+        );
+        assert!(
+            progress_exact_core_operator_call(&context, &blocked_runtime, blocked_call).unwrap()
+        );
+        assert!(
+            blocked_runtime.test_with(|net| net.blocked_operator_call(blocked_call.pair).is_some())
+        );
+
+        let (failed_runtime, failed_call) = claimed_core_operator_call(
+            applicable_operator(context.values().unit()),
+            context.values().unit(),
+        );
+        let failure = progress_exact_core_operator_call(&context, &failed_runtime, failed_call)
             .expect_err("unit is permanently non-callable");
         assert!(
             failure

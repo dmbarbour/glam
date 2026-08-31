@@ -1454,14 +1454,16 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         true
     }
 
-    /// Clones a pending operator transition so specialization code can run without
-    /// holding the shared runtime-net mutex.
-    pub fn operator_call_parts(&self, call: OperatorCall) -> (S::Operator, S::Data) {
-        assert!(
-            self.active
-                .get(&call.pair)
-                .is_some_and(ActivePairState::is_claimed)
-        );
+    /// Clones a claimed operator transition so specialization code can run
+    /// without holding the shared runtime-net mutex.
+    pub fn claim_operator_call(&self, call: OperatorCall) -> Option<(S::Operator, S::Data)> {
+        if !self
+            .active
+            .get(&call.pair)
+            .is_some_and(ActivePairState::is_claimed)
+        {
+            return None;
+        }
         let operator = match self.node(call.operator) {
             Some(RuntimeNode::Operator(operator)) => operator.clone(),
             _ => panic!("pending operator call agent must exist"),
@@ -1470,7 +1472,15 @@ impl<S: NetSpecialization> RuntimeNet<S> {
             Some(RuntimeNode::Data(data)) => data.clone(),
             _ => panic!("pending operator call data must exist"),
         };
-        (operator, data)
+        Some((operator, data))
+    }
+
+    /// Clones a pending operator transition after asserting that it remains
+    /// claimed. This compatibility helper does not acquire ownership.
+    #[cfg(test)]
+    pub fn operator_call_parts(&self, call: OperatorCall) -> (S::Operator, S::Data) {
+        self.claim_operator_call(call)
+            .expect("pending operator call must remain claimed")
     }
 
     /// Recovers the structural operator call represented by a principal
@@ -1515,6 +1525,37 @@ impl<S: NetSpecialization> RuntimeNet<S> {
             return false;
         }
         self.active.insert(call.pair, ActivePairState::Claimed);
+        true
+    }
+
+    /// Releases a freshly claimed operator call back to the ready worklist.
+    pub fn release_claimed_operator_call(&mut self, call: OperatorCall) -> bool {
+        if !self
+            .active
+            .get(&call.pair)
+            .is_some_and(ActivePairState::is_claimed)
+        {
+            return false;
+        }
+        self.active.insert(call.pair, ActivePairState::Ready);
+        true
+    }
+
+    /// Restores an exact retried operator call to its prior blocked wait.
+    pub fn restore_blocked_operator_call(
+        &mut self,
+        call: OperatorCall,
+        wait: S::WaitToken,
+    ) -> bool {
+        if !self
+            .active
+            .get(&call.pair)
+            .is_some_and(ActivePairState::is_claimed)
+        {
+            return false;
+        }
+        self.active
+            .insert(call.pair, ActivePairState::BlockedOperatorCall { wait });
         true
     }
 

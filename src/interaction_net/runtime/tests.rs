@@ -1728,6 +1728,52 @@ fn blocked_operator_call_requires_its_current_wait_token_to_be_reclaimed() {
     let (operator, data) = net.operator_call_parts(call);
     assert_eq!(operator.apply(&data).unwrap(), OperatorYield::Data(42));
     assert!(net.principals_connect(call.pair));
+
+    assert!(net.restore_blocked_operator_call(call, 17));
+    assert_eq!(
+        net.blocked_operator_call(call.pair),
+        Some(BlockedOperatorCall {
+            pair: call.pair,
+            wait: 17,
+        })
+    );
+    assert!(net.retry_blocked_operator_call(call, &17));
+    assert!(net.release_claimed_operator_call(call));
+    assert!(matches!(
+        net.reduce_pair(call.pair),
+        Some(Reduction {
+            kind: ReductionKind::OperatorCall { .. },
+            ..
+        })
+    ));
+}
+
+#[test]
+fn operator_release_and_restore_reject_non_claimed_pairs_without_mutation() {
+    let (mut net, call, _) = operator_call_net(
+        TestOperator::new("identity", |value| Ok(OperatorYield::Data(*value))),
+        42,
+    );
+    assert!(net.release_claimed_operator_call(call));
+    assert!(!net.release_claimed_operator_call(call));
+    assert!(!net.restore_blocked_operator_call(call, 17));
+    assert!(matches!(
+        net.reduce_pair(call.pair),
+        Some(Reduction {
+            kind: ReductionKind::OperatorCall { .. },
+            ..
+        })
+    ));
+    net.block_claimed_operator_call(call, 17);
+    assert!(!net.release_claimed_operator_call(call));
+    assert!(!net.restore_blocked_operator_call(call, 18));
+    assert_eq!(
+        net.blocked_operator_call(call.pair),
+        Some(BlockedOperatorCall {
+            pair: call.pair,
+            wait: 17,
+        })
+    );
 }
 
 #[test]

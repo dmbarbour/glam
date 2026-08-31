@@ -14,8 +14,8 @@ use crate::interaction_net::{
     ActivePairKey, ActivePairStep, BlockedCall, BlockedOperatorCall, CursorDependency,
     CursorDependencyDisposition, CursorDependencyResolution, CursorProgress, CursorStep,
     DemandEndpoint, FrontierObservation, InteractionNet, InterfaceDemand, NetContention, NodeId,
-    Port, PreparedCopySource, Reduction, RuntimeNet, RuntimeNetMutation, RuntimeNetRevisions,
-    SharedRuntimeNet,
+    OperatorYield, Port, PreparedCopySource, Reduction, RuntimeNet, RuntimeNetMutation,
+    RuntimeNetRevisions, SharedRuntimeNet,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -345,18 +345,19 @@ impl CoreRuntimeNetAccess<'_, '_> {
     }
 
     #[cfg(test)]
-    pub(crate) fn with_revisions<R>(
-        &self,
-        inspect: impl FnOnce(&RuntimeNet<CoreSpecialization>) -> R,
-    ) -> (R, RuntimeNetRevisions) {
-        self.runtime.inner.with_revisions(inspect)
-    }
-
     pub(crate) fn with_mut<R>(
         &self,
         update: impl FnOnce(&mut RuntimeNet<CoreSpecialization>) -> R,
     ) -> R {
         self.runtime.inner.with_mut(update)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_revisions<R>(
+        &self,
+        inspect: impl FnOnce(&RuntimeNet<CoreSpecialization>) -> R,
+    ) -> (R, RuntimeNetRevisions) {
+        self.runtime.inner.with_revisions(inspect)
     }
 
     #[cfg(test)]
@@ -481,6 +482,90 @@ impl CoreRuntimeNetAccess<'_, '_> {
     ) -> bool {
         self.runtime.inner.with_conditional_mut(|runtime| {
             if runtime.restore_blocked_call(call, wait) {
+                RuntimeNetMutation::Changed(true)
+            } else {
+                RuntimeNetMutation::Unchanged(false)
+            }
+        })
+    }
+
+    pub(crate) fn claim_operator_call(
+        &self,
+        call: crate::interaction_net::OperatorCall,
+    ) -> Option<(CoreOperator, Value)> {
+        self.runtime
+            .inner
+            .with(|runtime| runtime.claim_operator_call(call))
+    }
+
+    pub(crate) fn reclaim_blocked_operator_call(
+        &self,
+        blocked: &BlockedOperatorCall<CoreWaitToken>,
+    ) -> Option<(crate::interaction_net::OperatorCall, CoreOperator, Value)> {
+        self.runtime.inner.with_conditional_mut(|runtime| {
+            let Some(call) = runtime.operator_call(blocked.pair) else {
+                return RuntimeNetMutation::Unchanged(None);
+            };
+            if !runtime.retry_blocked_operator_call(call, &blocked.wait) {
+                return RuntimeNetMutation::Unchanged(None);
+            }
+            let (operator, data) = runtime
+                .claim_operator_call(call)
+                .expect("reclaimed operator call must expose its payloads");
+            RuntimeNetMutation::Changed(Some((call, operator, data)))
+        })
+    }
+
+    pub(crate) fn complete_claimed_operator_call(
+        &self,
+        call: crate::interaction_net::OperatorCall,
+        result: OperatorYield<CoreSpecialization>,
+    ) {
+        self.runtime.inner.with_mut(|runtime| {
+            runtime.complete_operator_call(call, result);
+        });
+    }
+
+    pub(crate) fn block_claimed_operator_call(
+        &self,
+        call: crate::interaction_net::OperatorCall,
+        wait: CoreWaitToken,
+    ) {
+        self.runtime
+            .inner
+            .with_mut(|runtime| runtime.block_claimed_operator_call(call, wait));
+    }
+
+    pub(crate) fn fail_claimed_operator_call(
+        &self,
+        call: crate::interaction_net::OperatorCall,
+        error: EvaluationHalt,
+    ) {
+        self.runtime
+            .inner
+            .with_mut(|runtime| runtime.fail_operator_call(call, error));
+    }
+
+    pub(crate) fn release_claimed_operator_call(
+        &self,
+        call: crate::interaction_net::OperatorCall,
+    ) -> bool {
+        self.runtime.inner.with_conditional_mut(|runtime| {
+            if runtime.release_claimed_operator_call(call) {
+                RuntimeNetMutation::Changed(true)
+            } else {
+                RuntimeNetMutation::Unchanged(false)
+            }
+        })
+    }
+
+    pub(crate) fn restore_blocked_operator_call(
+        &self,
+        call: crate::interaction_net::OperatorCall,
+        wait: CoreWaitToken,
+    ) -> bool {
+        self.runtime.inner.with_conditional_mut(|runtime| {
+            if runtime.restore_blocked_operator_call(call, wait) {
                 RuntimeNetMutation::Changed(true)
             } else {
                 RuntimeNetMutation::Unchanged(false)
@@ -1004,6 +1089,13 @@ mod tests {
             "pub(crate) fn fail_claimed_call(",
             "pub(crate) fn release_claimed_call(",
             "pub(crate) fn restore_blocked_call(",
+            "pub(crate) fn claim_operator_call(",
+            "pub(crate) fn reclaim_blocked_operator_call(",
+            "pub(crate) fn complete_claimed_operator_call(",
+            "pub(crate) fn block_claimed_operator_call(",
+            "pub(crate) fn fail_claimed_operator_call(",
+            "pub(crate) fn release_claimed_operator_call(",
+            "pub(crate) fn restore_blocked_operator_call(",
             "pub(crate) fn try_begin_normalization_batch(",
         ] {
             assert!(

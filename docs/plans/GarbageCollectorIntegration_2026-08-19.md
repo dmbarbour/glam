@@ -1,6 +1,6 @@
 # Glam GC Integration Plan — 2026-08-19
 
-Status: in progress; Phases I0 through I2 and checkpoints I3A.1-I3D.3d are
+Status: in progress; Phases I0 through I2 and checkpoints I3A.1-I3D.3e are
 complete. Phase I3 is in progress. Collector Gate G1 passed on 2026-08-25.
 The remaining integration work follows the completed owner-matrix,
 stable-ledger, and low-risk checkpoint corrections from the integration
@@ -58,6 +58,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I3D.3b | complete | matching-runtime scoped core-net observation and mutation |
 | I3D.3c | complete | closure-scoped same-net normalization batches |
 | I3D.3d | complete | bracketed callable active-pair claims and exact replay fallback |
+| I3D.3e | complete | bracketed operator active-pair claims and exact replay fallback |
 | I3 | in progress | bounded evaluator/worker mutator regions |
 | I4 | pending | core trace vocabulary and leaf policy |
 | I4.0 | pending | managed-family destruction admission contract |
@@ -1701,6 +1702,28 @@ fixtures, and force its blocked/resumed ordering rather than relying on
 repetition. Verify that the operator claim begins from the directly published
 `Operator >< Data` pair and that no intermediate `BindJoin` becomes part of
 the lifecycle protocol.
+
+I3D.3e completed 2026-08-31. `Operator >< Data` reduction now issues a
+private, `#[must_use]`, non-`Send`/non-`Sync` `CoreOperatorClaim` only while
+the fresh claim remains current or after atomically reclaiming the exact
+blocked wait. The guard owns cloned operator and data payloads plus a replay
+fallback, but no managed-access view. Operator evaluation selects an
+exhaustive data/operator yield, blocked wait, structured permanent failure,
+or explicit release disposition before reopening bounded matching-runtime
+access for the topology update.
+
+Release and unwind restore a fresh operator call to `Ready` or a retried call
+to its prior exact blocked wait, publishing one disturbance per transition.
+Stale fresh acquisition and mismatched retry remain quiet and issue no guard.
+Generic runtime tests cover release/restore acceptance and rejection;
+evaluator tests force both success shapes, blocking, structured failure,
+fresh and retried release, fresh and retried unwind, stale acquisition, and
+exact-wait mismatch. Compile-time negative trait checks retain the
+thread-bound guard, and the durable-facade inventory keeps all operator-claim
+operations below scoped core-net access. The production function-call client
+still splices directly to `Operator >< Data`; its forced reflection-gate
+blocked/resumed regression remains green without a synthetic `BindJoin`.
+Production remains `NoAuto`.
 
 #### Phase I3D.3f — Cursor Claim Lifecycles
 

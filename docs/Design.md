@@ -441,7 +441,7 @@ the raw net retains its more general interface. Initially, we'll mostly use
 interaction nets as a performance tool for difficult dataflows behind explicit
 lambda-style interfaces.
 
-*Aside:* These aren't necessarily the nodes the assembler uses under-the-hood, just initial constructors for them.
+*Aside:* `NetBuilder` node constructors aren't necessarily one-to-one with what the assembler uses under-the-hood. They determine only what a user can express.
 
 ## Modules
 
