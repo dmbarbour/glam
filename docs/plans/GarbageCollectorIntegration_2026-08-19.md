@@ -644,9 +644,9 @@ provenance over I1's lifetime-bound `CoreValueAllocationScope`, and delegates
 only scoped allocation, rooting, and root borrowing. The private
 `EvaluationValueAccess` pairs that carrier with a borrowed durable
 `EvalContext`, validating domain identity once at construction. Its provenance
-check compares the actual domain allocation rather than relying on runtime ID;
-the regression deliberately gives two distinct heaps the same ID and rejects
-their combination.
+check compares the domain authority already in hand. The regression combines
+two normally allocated, distinct runtimes and rejects their combination;
+`EvaluationRuntimeId` remains globally unique and identifies the value domain.
 
 At this checkpoint, the private `EvaluationPollContext` contained only a
 borrowed durable context. I3A.3 replaced that prototype representation with a
@@ -1523,9 +1523,10 @@ generic topology remains collector-independent throughout. Production remains
 
 - Replace the `CoreRuntimeNet` type alias with a private newtype or equivalent
   facade over `SharedRuntimeNet<CoreSpecialization>`. The facade carries
-  non-retaining provenance for the exact `RuntimeValueDomain` which owns its
-  semantic values; an `EvaluationRuntimeId` alone is not sufficient because
-  independently constructed heaps may deliberately share an ID in tests.
+  a non-retaining route to the `RuntimeValueDomain` which owns its semantic
+  values. `EvaluationRuntimeId` remains the globally unique value-domain
+  identity; the weak route supports future scoped heap access without
+  retaining the runtime or requiring a process-global lookup.
 - Route core-net construction through the matching `CoreValueFactory` or
   scoped runtime authority. Migrate `NetValue`, `FunctionCode`, net lowering,
   reflection-created functions, public assembly reconstruction, and test
@@ -1534,7 +1535,7 @@ generic topology remains collector-independent throughout. Production remains
   inspect managed contents access-free. Do not yet change claim or
   normalization behavior in this checkpoint.
 
-Verification: a same-ID/different-domain fixture rejects construction or use,
+Verification: a foreign-runtime fixture rejects construction or use,
 ordinary core callers cannot recover `SharedRuntimeNet<CoreSpecialization>`,
 and all existing net construction and evaluation tests retain their behavior.
 
@@ -1545,15 +1546,17 @@ the generic shared runtime with a weak observer for its exact
 code, front-end lowering, source net construction, reflection request
 functions, assembly construction, and evaluator fixtures no longer construct
 raw core shared nets. The weak observer neither retains nor revives a dropped
-runtime, and same-ID independent heaps remain distinct.
+runtime; it is a route back to the identified value domain rather than a
+second identity scheme.
 
 Core-specific frontier, cursor-dependency, step, and contention wrappers keep
 generic shared owners from escaping indirectly. Prepared logical-copy sources
 also carry the exact domain and cannot be installed into a target from another
 domain. These wrappers preserve the existing raw claim and normalization
 state machines for their assigned later checkpoints. Provenance tests cover
-same-ID heap distinction and non-retention; a source inventory confines raw
-shared instantiation to the generic implementation and this facade.
+ordinary foreign-runtime rejection and non-retention; a source inventory
+confines raw shared instantiation to the generic implementation and this
+facade.
 Production remains `NoAuto`.
 
 #### Phase I3D.3b — Scoped Core-Net Observation and Mutation

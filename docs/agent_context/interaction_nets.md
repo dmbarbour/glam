@@ -63,8 +63,9 @@ payload without forcing it.
 - Generic `SharedRuntimeNet<S>` ownership remains inside the interaction-net
   implementation. Core values instead carry the private `CoreRuntimeNet`
   facade, which pairs the generic owner with a weak observer for the exact
-  `RuntimeValueDomain`. The observer does not retain the runtime, and a runtime
-  ID alone never authorizes access to a net from another heap.
+  `RuntimeValueDomain`. `EvaluationRuntimeId` remains globally unique and
+  identifies that value domain. The observer is a non-retaining route for
+  future scoped access, not a second identity scheme.
 - Core-net templates are instantiated through a `CoreValueFactory` or from an
   already domain-qualified core net. Returned frontier observations and
   contention records preserve the facade rather than exposing their generic

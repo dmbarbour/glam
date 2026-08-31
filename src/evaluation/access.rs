@@ -387,12 +387,12 @@ mod tests {
 
     #[test]
     fn different_heap_authority_is_rejected() {
-        let runtime = allocate_evaluation_runtime_id();
-        let owner = CoreValueFactory::new(runtime, RuntimeIds::new());
-        let other_heap_with_same_runtime_id = CoreValueFactory::new(runtime, RuntimeIds::new());
+        let owner = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
+        let other_runtime =
+            CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
         let context = EvalContext::isolated(owner);
 
-        other_heap_with_same_runtime_id.with_runtime_value_access(|values| {
+        other_runtime.with_runtime_value_access(|values| {
             assert!(matches!(
                 EvaluationValueAccess::try_new(&context, values),
                 Err(ValueAccessDomainMismatch)

@@ -122,7 +122,12 @@ impl CoreRuntimeNet {
     }
 
     pub(crate) fn ptr_eq(&self, other: &Self) -> bool {
-        self.values.same_domain(&other.values) && self.inner.ptr_eq(&other.inner)
+        let same_net = self.inner.ptr_eq(&other.inner);
+        debug_assert!(
+            !same_net || self.values.same_domain(&other.values),
+            "one core runtime net cannot carry multiple value domains"
+        );
+        same_net
     }
 
     pub(crate) fn with<R>(&self, inspect: impl FnOnce(&RuntimeNet<CoreSpecialization>) -> R) -> R {
@@ -469,10 +474,9 @@ mod tests {
     }
 
     #[test]
-    fn core_net_provenance_uses_the_exact_value_domain() {
-        let runtime = allocate_evaluation_runtime_id();
-        let first = CoreValueFactory::new(runtime, RuntimeIds::new());
-        let second = CoreValueFactory::new(runtime, RuntimeIds::new());
+    fn core_net_provenance_distinguishes_runtimes() {
+        let first = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
+        let second = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
         let template = closed_unit_template(&first);
         let net = first.instantiate_core_net(&template);
 
@@ -482,10 +486,9 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "a core net cannot copy topology from another value domain")]
-    fn core_copy_source_rejects_a_same_id_different_domain() {
-        let runtime = allocate_evaluation_runtime_id();
-        let first = CoreValueFactory::new(runtime, RuntimeIds::new());
-        let second = CoreValueFactory::new(runtime, RuntimeIds::new());
+    fn core_copy_source_rejects_a_foreign_runtime() {
+        let first = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
+        let second = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
         let first_template = closed_unit_template(&first);
         let second_template = closed_unit_template(&second);
         let source = first

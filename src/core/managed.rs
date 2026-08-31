@@ -181,9 +181,10 @@ impl RuntimeValueObserver {
 
     /// Returns whether both observers name the exact same value domain.
     ///
-    /// Runtime IDs are deliberately insufficient here: test fixtures may
-    /// construct independent heaps with one ID, and managed access must not
-    /// treat those heaps as interchangeable.
+    /// Runtime IDs are globally unique and remain the architectural identity.
+    /// Comparing the already-held weak routes directly is merely a cheap
+    /// internal consistency check and does not turn domain pointers into a
+    /// second public identity scheme.
     pub(crate) fn same_domain(&self, other: &Self) -> bool {
         Weak::ptr_eq(&self.domain, &other.domain)
     }
@@ -210,9 +211,9 @@ impl RuntimeValueObserver {
 )]
 impl RuntimeValueAccess<'_> {
     /// Returns whether `values` is another authorized view of this exact value
-    /// domain. Runtime IDs are deliberately insufficient: two independently
-    /// constructed heaps must not become interchangeable even if test code
-    /// gives them the same ID.
+    /// domain. Runtime IDs are globally unique; direct domain comparison keeps
+    /// this private check aligned with the heap authority already in hand and
+    /// avoids treating an integer ID as the capability itself.
     pub(crate) fn belongs_to(&self, values: &CoreValueFactory) -> bool {
         std::ptr::eq(self.domain, values.domain.as_ref())
     }
