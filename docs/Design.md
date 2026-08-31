@@ -425,12 +425,9 @@ Rules:
   - copy node to each auxilliary opposite
   - wire auxilliaries to copies positionally
 - call: 
-  - for an ordinary function, apply one value argument and expose the result as
-    data; fuse the otherwise inevitable bind-bind join when installing the
-    unary application operator
-  - for a raw net, make the called inet available in the caller inet
-    - ideal: retain one shared function graph and push duplication through it
-      lazily instead of eagerly relabeling or copying its body
+  - for a function, apply one value argument and expose the result as data
+  - for a raw net, logically copy the called inet into the caller inet
+  - evaluate lazily and share work where possible
 - stuck: a type error! report and debug
 
 Lambda calculus becomes a design pattern within interaction nets:
