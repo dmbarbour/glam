@@ -122,9 +122,9 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         cursor
     }
 
-    /// Completes applicable lowering by replacing callable data with
-    /// an explicit unary function net. The newly introduced Bind then joins
-    /// the original application Bind through the ordinary interaction rule.
+    /// Completes applicable lowering by fusing the inevitable unary-function
+    /// Bind join. The resulting operator receives the original application's
+    /// argument and result neighbors directly.
     pub fn resume_claimed_call_with_operator(
         &mut self,
         call: Call,
@@ -140,14 +140,15 @@ impl<S: NetSpecialization> RuntimeNet<S> {
             self.disconnect(Port::principal(call.bind)),
             Some(Port::principal(call.data))
         );
+        let [argument, result] =
+            <[Port; 2]>::try_from(self.take_auxiliaries(call.bind, 2)).unwrap();
         assert!(matches!(self.remove_node(call.data), RuntimeNode::Data(_)));
+        assert!(matches!(self.remove_node(call.bind), RuntimeNode::Bind));
 
-        let function = self.add_node(RuntimeNode::Bind);
         let operator = self.add_node(RuntimeNode::Operator(operator));
-        self.connect(Port::principal(call.bind), Port::principal(function));
-        self.connect(Port::auxiliary(function, 1), Port::principal(operator));
-        self.connect(Port::auxiliary(function, 2), Port::auxiliary(operator, 1));
-        function
+        self.connect(Port::principal(operator), argument);
+        self.connect(Port::auxiliary(operator, 1), result);
+        operator
     }
 
     pub(in crate::interaction_net::runtime) fn take_operator_call(

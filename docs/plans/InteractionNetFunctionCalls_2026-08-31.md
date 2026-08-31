@@ -1,7 +1,6 @@
 # Interaction-Net Function Calls Plan — 2026-08-31
 
-Status: in progress; Phase F0 is complete and intentionally leaves its target
-regressions red until F1.
+Status: in progress; Phases F0 and F1 are complete. Phase F2 is next.
 
 This plan restores ordinary Glam function calls through interaction-net
 construction while preserving the distinction between an opaque raw `Net`
@@ -309,6 +308,35 @@ asm.result = partial 2
 Adapt the final fixture to the parser's established port/list helpers rather
 than adding syntax for the test.
 
+Phase F1 completed 2026-08-31.
+
+- `lower_core_callable_in` now classifies `Value::Function` beside
+  `Value::Dict` as `CoreOperator::Applicable`; raw nets, builtins, partial
+  builtins, and permanent mismatches retain their distinct paths.
+- `resume_claimed_call_with_operator` now takes the original application's two
+  auxiliary neighbors, removes the application `Bind` and callable `Data`, and
+  installs only the resulting `Operator`. Its principal receives the argument
+  neighbor and its auxiliary receives the result neighbor in the same order as
+  the eliminated `BindJoin`.
+- The method's `NodeId` result now identifies the installed operator rather
+  than the former temporary bind. Production callers did not observe that
+  internal identity; the signature remains unchanged.
+- Source regressions cover unary application, an extracted value-level partial
+  function, two explicit in-net applications, and a captured function whose
+  callable shell is itself evaluated lazily.
+- Evaluator regressions force a reflection-gated callable to block and resume
+  on its exact call obligation. The callable-disposition fixture continues to
+  cover raw-net copying, builtins, dictionaries, blocking, and permanent
+  mismatch, now including ordinary functions.
+- Generic-runtime regressions prove that ready data reaches `OperatorCall`
+  without `BindJoin` and that non-data argument/result neighbors are preserved
+  without eager classification. The existing returned-operator fixture remains
+  the oracle that `OperatorYield::Operator` still receives its necessary bind
+  wrapper.
+
+All focused tests, formatting, all-target/all-feature clippy, and the complete
+repository test suite pass after the repair.
+
 ## Phase F2 — Operator-Claim Integration Checkpoint
 
 GC integration phase I3D.3e is about replacing manual `Operator >< Data`
@@ -406,7 +434,7 @@ that case, take the explicit F2 deferral path and complete it before I8.
 | Phase | Status | Outcome |
 | --- | --- | --- |
 | F0 | complete | Semantic mismatch and unfused topology latched before repair. |
-| F1.1 | pending | Functions classify as ordinary unary applicable values. |
-| F1.2 | pending | Callable completion directly splices the resulting operator. |
+| F1.1 | complete | Functions classify as ordinary unary applicable values. |
+| F1.2 | complete | Callable completion directly splices the resulting operator. |
 | F2 | pending | Function cases carried through operator-claim migration. |
 | F3 | pending | Current and target documentation aligned with implementation. |

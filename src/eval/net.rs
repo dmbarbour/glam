@@ -827,12 +827,13 @@ fn lower_core_callable_in(
             builtin,
         )))),
         Value::PartialBuiltin(call) => Ok(CoreCallable::Operator(builtin_operator(call))),
-        value @ Value::Dict(_) => Ok(CoreCallable::Operator(applicable_operator(value))),
+        value @ (Value::Function(_) | Value::Dict(_)) => {
+            Ok(CoreCallable::Operator(applicable_operator(value)))
+        }
         value @ (Value::Atom(_)
         | Value::Number(_)
         | Value::Binary(_)
         | Value::List(_)
-        | Value::Function(_)
         | Value::Metadata(_)
         | Value::Opaque(_)) => Err(non_callable_error(&value)),
         Value::Lazy(_) | Value::Promised(_) => {
@@ -1627,6 +1628,16 @@ mod driver_tests {
         let (operator_runtime, operator_call) = claimed_core_call(Value::Builtin(Builtin::Add));
         assert!(progress_exact_core_call(&context, &operator_runtime, operator_call).unwrap());
         assert!(operator_runtime.test_with(|net| net.call(operator_call.pair).is_none()));
+
+        let function = closed_function_value(2, TestExpr::Local(0));
+        let (function_runtime, function_call) = claimed_core_call(function);
+        assert!(progress_exact_core_call(&context, &function_runtime, function_call).unwrap());
+        assert!(function_runtime.test_with(|net| net.call(function_call.pair).is_none()));
+
+        let (dict_runtime, dict_call) =
+            claimed_core_call(Value::Dict(crate::core::Dict::new_sync()));
+        assert!(progress_exact_core_call(&context, &dict_runtime, dict_call).unwrap());
+        assert!(dict_runtime.test_with(|net| net.call(dict_call.pair).is_none()));
 
         let promise = PromisedValue::new(context.values(), "blocked disposition");
         let (blocked_runtime, blocked_call) = claimed_core_call(Value::Promised(promise));

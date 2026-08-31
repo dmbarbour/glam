@@ -5400,6 +5400,44 @@ fn reflection_gate_blocks_and_resumes_the_exact_net_call() {
 }
 
 #[test]
+fn reflection_gate_blocks_and_resumes_an_exact_net_function_call() {
+    let context = test_context();
+    let function = closed_function_value(1, TestExpr::Local(0));
+    let gate = reflection_annotation(&context, n(0), function);
+    let applied = closed_net(|builder| {
+        let [application, argument, result] = builder.bind();
+        let function = builder.data(gate);
+        let value = builder.data(n(42));
+        builder.wire(application, function);
+        builder.wire(argument, value);
+        result
+    });
+    let runtime = applied.runtime().clone();
+    let computation = Value::Lazy(LazyValue::from_net_computation(context.values(), applied));
+
+    let blocked = eval_value(&context, &computation)
+        .expect_err("call should wait while its function remains behind a reflection gate");
+    let wait = blocked
+        .blocked_on()
+        .expect("function call should report the gate's exact task wait");
+    assert_eq!(runtime.test_with(|net| net.blocked_calls().count()), 1);
+    assert_eq!(
+        runtime.active_normalization_batch(),
+        None,
+        "the blocked callable must not retain a net batch lease"
+    );
+
+    context.complete_wait(&wait.0);
+    let resumed = Value::Lazy(LazyValue::from_net_computation(
+        context.values(),
+        NetValue::new(runtime),
+    ));
+    let application = eval_value(&context, &resumed)
+        .expect("completed gate should expose the function application");
+    assert_eq!(eval_value(&context, &application).unwrap(), n(42));
+}
+
+#[test]
 fn reflection_gate_blocks_and_resumes_the_exact_net_operator_call() {
     let context = test_context();
     let key = Key::atom_from_text("answer");
