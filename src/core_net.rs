@@ -605,7 +605,13 @@ impl CorePreparedCopySource {
     }
 }
 
-#[derive(Clone)]
+/// One local synchronization handoff to the evaluator that currently owns a
+/// normalization batch or structurally bracketed claim.
+///
+/// This is deliberately neither a semantic wait token nor cloneable durable
+/// state. It may leave scoped value access only so the caller can wait for the
+/// exact observed disturbance and immediately retry its normalization
+/// request.
 pub(crate) struct CoreNetContention {
     runtime: CoreRuntimeNet,
     revisions: RuntimeNetRevisions,
@@ -620,7 +626,7 @@ impl CoreNetContention {
         }
     }
 
-    pub(crate) fn wait_for_disturbance(&self) {
+    pub(crate) fn wait_for_disturbance(self) {
         self.runtime
             .inner
             .wait_for_disturbance(self.revisions.disturbance_epoch());
@@ -724,7 +730,7 @@ impl CoreCursorDependency {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) enum CoreCursorStep {
     Progressed(CursorProgress),
     Dependency(CoreCursorDependency),
@@ -754,7 +760,7 @@ impl CoreCursorStep {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) enum CoreActivePairStep {
     Reduction(Reduction),
     Cursor(NodeId),
@@ -1089,6 +1095,16 @@ mod tests {
                 assert!(
                     !source.contains("SharedRuntimeNet<CoreSpecialization>"),
                     "{} names the raw core shared-net owner outside its facade",
+                    relative.display()
+                );
+                assert!(
+                    !source.contains("NetContention<CoreSpecialization>"),
+                    "{} names raw core-net contention outside its facade",
+                    relative.display()
+                );
+                assert!(
+                    !source.contains("NormalizationBatchLease<CoreSpecialization>"),
+                    "{} names a raw core normalization lease outside its facade",
                     relative.display()
                 );
             }

@@ -637,6 +637,14 @@ fn drive_net_interface(
     context: &EvaluatorStepContext<'_>,
     request: &NormalizationRequest,
 ) -> Result<NetInterfaceOutcome, EvaluationHalt> {
+    drive_net_interface_with_contention_handoff(context, request, || {})
+}
+
+fn drive_net_interface_with_contention_handoff(
+    context: &EvaluatorStepContext<'_>,
+    request: &NormalizationRequest,
+    mut before_handoff: impl FnMut(),
+) -> Result<NetInterfaceOutcome, EvaluationHalt> {
     debug_assert_eq!(request.mode, NormalizationMode::CursorWhnf);
     loop {
         match drive_net_work_in(context, request)? {
@@ -656,6 +664,10 @@ fn drive_net_interface(
                 unreachable!("root driver must dispatch nonterminal demand")
             }
             NetDriverOutcome::Contended(contention) => {
+                // The normalization scope has closed before this outcome can
+                // escape `drive_net_work_in`. This callback exists so tests
+                // can force the handoff schedule at that exact boundary.
+                before_handoff();
                 contention.wait_for_disturbance();
                 continue;
             }
@@ -1550,6 +1562,105 @@ mod driver_tests {
                 .drive(&test_context())
                 .unwrap(),
             NetInterfaceOutcome::Data
+        );
+    }
+
+    #[test]
+    fn contending_evaluator_hands_off_then_resumes_after_batch_publication() {
+        let mut builder = NetBuilder::<CoreSpecialization>::new();
+        let data = builder.data(crate::core::test_value_factory().unit());
+        let runtime = instantiate(builder.finish(data));
+        let interface = runtime.test_with(|net| net.exposed());
+
+        let leader_runtime = runtime.clone();
+        let (leader_ready_tx, leader_ready_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let leader = std::thread::spawn(move || {
+            leader_runtime.with_test_access(|access| {
+                access
+                    .with_normalization_batch(|_| {
+                        leader_ready_tx.send(()).unwrap();
+                        release_rx
+                            .recv_timeout(std::time::Duration::from_secs(5))
+                            .expect("test must release the normalization owner");
+                    })
+                    .expect("the forced leader must acquire the normalization batch");
+            });
+        });
+        leader_ready_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the normalization owner must publish acquisition");
+
+        let request = NormalizationRequest::cursor_whnf(runtime.clone(), interface);
+        let (registered_tx, registered_rx) = std::sync::mpsc::channel();
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let follower = std::thread::spawn(move || {
+            let context = test_context();
+            let mut registered_tx = Some(registered_tx);
+            let result = crate::eval::with_direct_evaluator(&context, |evaluator| {
+                drive_net_interface_with_contention_handoff(evaluator, &request, || {
+                    registered_tx
+                        .take()
+                        .expect("one evaluator handoff should register once")
+                        .send(())
+                        .unwrap();
+                })
+            });
+            result_tx.send(result).unwrap();
+        });
+
+        registered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the evaluator must reach the contention handoff");
+        assert!(
+            result_rx.try_recv().is_err(),
+            "the evaluator must remain handed off until its owner publishes"
+        );
+        release_tx.send(()).unwrap();
+        leader.join().expect("normalization owner must finish");
+        assert_eq!(
+            result_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("the evaluator must resume after publication")
+                .expect("the resumed evaluator must normalize successfully"),
+            NetInterfaceOutcome::Data
+        );
+        follower.join().expect("contending evaluator must finish");
+        assert_eq!(runtime.active_normalization_batch(), None);
+    }
+
+    #[test]
+    fn semantic_wait_is_published_to_the_net_before_driver_parking() {
+        let context = test_context();
+        let promise = PromisedValue::new(context.values(), "forced semantic net wait");
+        let mut builder = NetBuilder::<CoreSpecialization>::new();
+        let [application, argument, result] = builder.bind();
+        let function = builder.data(Value::Promised(promise));
+        let value = builder.data(context.values().unit());
+        builder.wire(application, function);
+        builder.wire(argument, value);
+        let runtime = instantiate(builder.finish(result));
+        let interface = runtime.test_with(|net| net.exposed());
+
+        let parked = NormalizationRequest::cursor_whnf(runtime.clone(), interface)
+            .drive(&context)
+            .expect_err("an unresolved callable promise must park the driver");
+        let wait = parked
+            .blocked_on()
+            .expect("the parked driver must retain its semantic wait");
+        let blocked = runtime
+            .test_with(|net| net.blocked_calls().next())
+            .expect("the callable claim must publish Blocked before parking");
+
+        assert_eq!(blocked.wait.0, wait.0);
+        assert!(matches!(
+            context.poll_wait(&blocked.wait.0),
+            crate::evaluation::EvaluationWaitPoll::Pending(_)
+        ));
+        assert_eq!(
+            runtime.active_normalization_batch(),
+            None,
+            "the semantic park must retain neither a claim nor a normalization lease"
         );
     }
 

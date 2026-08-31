@@ -1,6 +1,6 @@
 # Glam GC Integration Plan — 2026-08-19
 
-Status: in progress; Phases I0 through I2 and checkpoints I3A.1-I3D.3f are
+Status: in progress; Phases I0 through I2 and checkpoints I3A.1-I3D.3g are
 complete. Phase I3 is in progress. Collector Gate G1 passed on 2026-08-25.
 The remaining integration work follows the completed owner-matrix,
 stable-ledger, and low-risk checkpoint corrections from the integration
@@ -63,6 +63,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I3D.3f.2 | complete | active-pair cursor terminalization before step publication |
 | I3D.3f.3 | complete | manual handoff removal, forced lifecycle tests, and closure audit |
 | I3D.3f | complete | guarded cursor lifecycles for both owner forms |
+| I3D.3g | complete | one-shot contention handoff, blocked-before-park ordering, and local facade closure |
 | I3 | in progress | bounded evaluator/worker mutator regions |
 | I4 | pending | core trace vocabulary and leaf policy |
 | I4.0 | pending | managed-family destruction admission contract |
@@ -1814,6 +1815,25 @@ owner encountering a semantic wait; the latter must publish `Blocked` before
 the machine parks. Privacy and source inventories close the local core-net
 facade and preserve existing contention-order regressions. I3D.4 retains the
 subsequent system-wide reflection and net-region audit.
+
+I3D.3g completed 2026-08-31. Core contention now crosses the scoped net-access
+boundary as a private, non-cloneable, one-shot handoff. Consuming the handoff
+waits only for the disturbance epoch observed when another evaluator owned the
+normalization batch; it is not a scheduler dependency and cannot be retained
+as reusable machine state. The generic interaction-net lease and contention
+types remain available to the generic runtime and its tests, while source
+inventories reject raw core-specialized owners, leases, and contention tokens
+outside `core_net`.
+
+The net driver retains no value-access or normalization scope across this
+handoff. A schedule-controlled evaluator test holds a batch, latches the
+follower exactly after it observes contention, proves it cannot return early,
+then releases the owner and verifies successful resumption. A separate forced
+unresolved-callable test verifies that semantic evaluation first replaces its
+claim with the exact `Blocked` wait, closes the batch, and only then returns
+the blocked driver result which the enclosing machine may park. Existing
+reflection-gate call and operator regressions continue to cover later exact
+resumption. Production remains `NoAuto`.
 
 ### Phase I3D.4 — Reflection and Net Region Audit
 
