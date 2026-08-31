@@ -18,12 +18,14 @@ when their historical value no longer justifies keeping them.
   builds and verifies the standalone collector subcrate.
 - [`GarbageCollectorIntegration_2026-08-19.md`](GarbageCollectorIntegration_2026-08-19.md)
   migrates Glam values, roots, workers, reflection, and interaction nets.
+- [`InteractionNetFunctionCalls_2026-08-31.md`](InteractionNetFunctionCalls_2026-08-31.md)
+  restores ordinary value-level function calls through explicitly constructed
+  interaction nets without exposing function staging or changing raw-net
+  loading.
 
 ## Recent Completed Plans
 
-- [`CompileTimeAssertionPolicy_2026-08-21.md`](CompileTimeAssertionPolicy_2026-08-21.md)
-  moved hard layout and unsupported-representation checks from runtime to
-  compile time without turning performance budgets into build requirements.
+(deleted)
 
 ## Preliminary and Deferred Plans
 
