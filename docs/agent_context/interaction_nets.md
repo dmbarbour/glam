@@ -76,9 +76,10 @@ payload without forcing it.
   Durable net handles retain identity and provenance, but cannot inspect an
   interface, step topology, prepare a copy, or extract a result on their own.
   Evaluator code closes the view before invoking Glam callables or operators.
-  Normalization leases and the bracketed contention wait remain narrow,
-  documented transitional exceptions while their dedicated integration
-  checkpoints are completed.
+  Normalization leases are hidden inside a same-net scoped callback and close
+  before it returns. The bracketed contention wait remains a narrow,
+  documented transitional exception until its dedicated integration
+  checkpoint is completed.
 - `NodeId` is a zero-based logical ID encoded as `NonZeroU64`. Runtime IDs are
   allocated monotonically, stored in a hash table, and never reused.
 - `Port` packs a node ID and two-bit port index into one `NonZeroU64`; a node
@@ -245,13 +246,16 @@ end's `do` notation, which lowers away before net construction runs.
 Every authoritative shared-runtime mutation advances a topology revision.
 Outside a normalization batch it also advances the disturbance epoch and
 wakes followers; inside a batch, disturbance and notification are deferred
-until the batch closes. Reading the immutable payload of an already claimed
-call is quiet, while completing, blocking, or failing that claim is an
-authoritative mutation. If one observer encounters an active pair already
-claimed by another evaluator, it waits for that exact runtime to be disturbed
-and retries; a claimed pair must never be misreported as quiescence. Cursor
-dependencies similarly treat a source pair disappearing between inspection
-and claim as progress and refresh their frontier.
+until the batch closes. Core evaluator batches are closure-scoped to one net
+and one matching managed-access region. Crossing to another net closes the
+current batch first, as does returning a callable or operator action to the
+semantic evaluator. Reading the immutable payload of an already claimed call
+is quiet, while completing, blocking, or failing that claim is an authoritative
+mutation. If one observer encounters an active pair already claimed by another
+evaluator, it waits for that exact runtime to be disturbed and retries; a
+claimed pair must never be misreported as quiescence. Cursor dependencies
+similarly treat a source pair disappearing between inspection and claim as
+progress and refresh their frontier.
 
 ## Deliberate Limits
 

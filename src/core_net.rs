@@ -14,8 +14,7 @@ use crate::interaction_net::{
     ActivePairKey, ActivePairStep, BlockedCall, BlockedOperatorCall, CursorDependency,
     CursorDependencyDisposition, CursorDependencyResolution, CursorProgress, CursorStep,
     DemandEndpoint, FrontierObservation, InteractionNet, InterfaceDemand, NetContention, NodeId,
-    NormalizationBatchLease, Port, PreparedCopySource, Reduction, RuntimeNet, RuntimeNetRevisions,
-    SharedRuntimeNet,
+    Port, PreparedCopySource, Reduction, RuntimeNet, RuntimeNetRevisions, SharedRuntimeNet,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,6 +102,43 @@ pub(crate) struct CoreRuntimeNetAccess<'access, 'scope> {
     _values: &'access RuntimeValueAccess<'scope>,
 }
 
+#[cfg(test)]
+std::thread_local! {
+    static CORE_NORMALIZATION_SCOPE_DEPTH: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+}
+
+#[cfg(test)]
+struct CoreNormalizationScopeForTest;
+
+#[cfg(test)]
+impl CoreNormalizationScopeForTest {
+    fn enter() -> Self {
+        CORE_NORMALIZATION_SCOPE_DEPTH.with(|depth| depth.set(depth.get() + 1));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for CoreNormalizationScopeForTest {
+    fn drop(&mut self) {
+        CORE_NORMALIZATION_SCOPE_DEPTH.with(|depth| {
+            depth.set(
+                depth
+                    .get()
+                    .checked_sub(1)
+                    .expect("normalization scope depth must remain balanced"),
+            );
+        });
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn thread_has_active_core_normalization_scope() -> bool {
+    CORE_NORMALIZATION_SCOPE_DEPTH.with(|depth| depth.get() != 0)
+}
+
 impl CoreValueFactory {
     /// Instantiates a core net in this factory's exact value domain.
     pub(crate) fn instantiate_core_net(&self, template: &CoreInteractionNet) -> CoreRuntimeNet {
@@ -158,16 +194,6 @@ impl CoreRuntimeNet {
             runtime: self,
             _values: values,
         }
-    }
-
-    /// Transitional I3D.3c exception: the returned lease may lock on close or
-    /// drop and therefore cannot yet borrow the access scope.
-    pub(crate) fn try_begin_normalization_batch(
-        &self,
-    ) -> Result<NormalizationBatchLease<CoreSpecialization>, CoreNetContention> {
-        self.inner
-            .try_begin_normalization_batch()
-            .map_err(|contention| CoreNetContention::new(self, contention))
     }
 
     #[cfg(test)]
@@ -292,6 +318,27 @@ impl CoreRuntimeNet {
 }
 
 impl CoreRuntimeNetAccess<'_, '_> {
+    /// Runs one same-net normalization batch inside this managed-access
+    /// region. The generic lease remains private to this call, closes before
+    /// the callback result is returned, and falls back to `Drop` on unwind.
+    pub(crate) fn with_normalization_batch<R>(
+        &self,
+        operation: impl FnOnce(&Self) -> R,
+    ) -> Result<R, CoreNetContention> {
+        let lease = self
+            .runtime
+            .inner
+            .try_begin_normalization_batch()
+            .map_err(|contention| CoreNetContention::new(self.runtime, contention))?;
+        #[cfg(test)]
+        let scope = CoreNormalizationScopeForTest::enter();
+        let result = operation(self);
+        lease.close();
+        #[cfg(test)]
+        drop(scope);
+        Ok(result)
+    }
+
     pub(crate) fn with<R>(&self, inspect: impl FnOnce(&RuntimeNet<CoreSpecialization>) -> R) -> R {
         self.runtime.inner.with(inspect)
     }
@@ -662,6 +709,124 @@ mod tests {
     }
 
     #[test]
+    fn scoped_normalization_batch_closes_and_publishes_once() {
+        let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
+        let template = closed_unit_template(&values);
+        let net = values.instantiate_core_net(&template);
+        let initial = net.test_with_revisions(|_| ()).1;
+
+        values.with_runtime_value_access(|values| {
+            let access = net.access(&values);
+            access
+                .with_normalization_batch(|batch| {
+                    assert!(thread_has_active_core_normalization_scope());
+                    batch.with_mut(|_| ());
+                    let during = batch.with_revisions(|_| ()).1;
+                    assert!(during.topology_revision() > initial.topology_revision());
+                    assert_eq!(
+                        during.disturbance_epoch(),
+                        initial.disturbance_epoch(),
+                        "batch mutation must not publish disturbance before close"
+                    );
+                    assert!(
+                        batch.with_normalization_batch(|_| ()).is_err(),
+                        "a competing batch must observe the scoped lease"
+                    );
+                })
+                .expect("first scoped batch must acquire the net");
+        });
+
+        assert!(!thread_has_active_core_normalization_scope());
+        assert_eq!(net.active_normalization_batch(), None);
+        let released = net.test_with_revisions(|_| ()).1;
+        assert_eq!(
+            released.disturbance_epoch(),
+            initial.disturbance_epoch() + 1,
+            "dirty and contended batch must publish exactly once on close"
+        );
+    }
+
+    #[test]
+    fn scoped_normalization_batch_closes_on_unwind() {
+        let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
+        let template = closed_unit_template(&values);
+        let net = values.instantiate_core_net(&template);
+
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            values.with_runtime_value_access(|values| {
+                let access = net.access(&values);
+                let _: Result<(), CoreNetContention> = access.with_normalization_batch(|_| {
+                    panic!("forced scoped normalization unwind");
+                });
+            });
+        }));
+
+        assert!(unwind.is_err());
+        assert_eq!(net.active_normalization_batch(), None);
+    }
+
+    #[test]
+    fn scoped_normalization_batch_wakes_forced_concurrent_followers() {
+        const FOLLOWERS: usize = 4;
+
+        let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
+        let template = closed_unit_template(&values);
+        let net = values.instantiate_core_net(&template);
+        let (leader_ready_tx, leader_ready_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let leader_values = values.clone();
+        let leader_net = net.clone();
+        let leader = std::thread::spawn(move || {
+            leader_values.with_runtime_value_access(|values| {
+                let access = leader_net.access(&values);
+                access
+                    .with_normalization_batch(|_| {
+                        leader_ready_tx.send(()).unwrap();
+                        release_rx
+                            .recv_timeout(std::time::Duration::from_secs(5))
+                            .expect("test must release the forced batch leader");
+                    })
+                    .expect("forced batch leader must acquire the net");
+            });
+        });
+
+        leader_ready_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("forced batch leader must publish acquisition");
+        let (registered_tx, registered_rx) = std::sync::mpsc::channel();
+        let followers = (0..FOLLOWERS)
+            .map(|_| {
+                let values = values.clone();
+                let net = net.clone();
+                let registered_tx = registered_tx.clone();
+                std::thread::spawn(move || {
+                    let contention = values.with_runtime_value_access(|values| {
+                        let access = net.access(&values);
+                        access
+                            .with_normalization_batch(|_| ())
+                            .expect_err("leader must retain the normalization batch")
+                    });
+                    registered_tx.send(()).unwrap();
+                    contention.wait_for_disturbance();
+                })
+            })
+            .collect::<Vec<_>>();
+        drop(registered_tx);
+        for _ in 0..FOLLOWERS {
+            registered_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("every follower must register before release");
+        }
+
+        release_tx.send(()).unwrap();
+        leader.join().expect("forced batch leader must finish");
+        for follower in followers {
+            follower.join().expect("forced batch follower must wake");
+        }
+        assert_eq!(net.active_normalization_batch(), None);
+    }
+
+    #[test]
     #[should_panic(expected = "a core net cannot copy topology from another value domain")]
     fn core_copy_source_rejects_a_foreign_runtime() {
         let first = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
@@ -755,6 +920,7 @@ mod tests {
             "pub(crate) fn advance_claimed_cursor(",
             "pub(crate) fn prepare_copy_source(",
             "pub(crate) fn resume_claimed_call_with_copy(",
+            "pub(crate) fn try_begin_normalization_batch(",
         ] {
             assert!(
                 !facade.contains(forbidden),

@@ -1586,8 +1586,8 @@ mutation, cursor and active-pair steps, prepared-copy inspection, stuck-pair
 diagnostics, and result extraction now pass through that view. Evaluator net
 work opens these regions through `EvaluatorStepContext` and closes them before
 running Glam callables or operators. Durable `CoreRuntimeNet` values retain
-only construction, identity, provenance, contention-wait, and the explicitly
-transitional normalization surface assigned to I3D.3c.
+only construction, identity, provenance, and the explicitly transitional
+contention-wait surface assigned to I3D.3g.
 
 Source-inventory tests reject an ordinary inspection surface on the durable
 facade, scope tests prove the access view cannot escape to another thread, and
@@ -1611,6 +1611,26 @@ Production remains `NoAuto`.
 Verification: forced normal close, cross-net batch switching, contention, and
 unwind all publish the expected disturbance. A latched callable/operator test
 observes the batch closed before semantic evaluation begins.
+
+I3D.3c completed 2026-08-31. The generic `NormalizationBatchLease` is no
+longer re-exported to core callers. `CoreRuntimeNetAccess` instead exposes a
+closure-scoped `with_normalization_batch`: it acquires and hides the lease,
+closes it before returning the callback result, and retains the generic
+lease's `Drop` fallback for unwind. The evaluator worklist processes all
+immediately available work for one net inside that callback, closes on a
+cross-net transition, and emits a durable semantic action only after the
+scoped callback has returned. Callable, operator, coordinator-wait, and
+contention handling therefore begin outside the current batch and managed
+access region.
+
+Normal close, dirty/contended publication, unwind, forced concurrent
+followers, and cross-net switching have direct coverage. A thread-local test
+witness checks the current evaluator's scope at callable and operator entry;
+it deliberately does not assert that the shared net has no batch, because a
+different evaluator may acquire the next batch immediately after close. The
+forced compiler-helper concurrency fixture covers that handoff. Durable-facade
+inventory prevents raw batch acquisition from returning. Production remains
+`NoAuto`.
 
 #### Phase I3D.3d — Callable Active-Pair Claims
 

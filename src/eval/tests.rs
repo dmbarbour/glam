@@ -5406,6 +5406,11 @@ fn reflection_gate_blocks_and_resumes_the_exact_net_operator_call() {
     let blocked = runtime
         .test_with(|net| net.blocked_operator_call(pair))
         .expect("operator should retain its exact task wait");
+    assert_eq!(
+        runtime.active_normalization_batch(),
+        None,
+        "operator evaluation must begin after normalization closes"
+    );
     assert!(matches!(
         context.poll_wait(&blocked.wait.0),
         EvaluationWaitPoll::Pending(_)

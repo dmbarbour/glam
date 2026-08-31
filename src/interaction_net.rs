@@ -15,8 +15,8 @@ pub(crate) use model::{
 pub(crate) use runtime::{
     ActivePairStep, BlockedCall, BlockedOperatorCall, Call, CursorDependency,
     CursorDependencyDisposition, CursorDependencyResolution, CursorProgress, CursorStep,
-    DemandEndpoint, FrontierObservation, InterfaceDemand, NetContention, NormalizationBatchLease,
-    OperatorCall, PreparedCopySource, Reduction, ReductionKind, RuntimeNet, RuntimeNetRevisions,
+    DemandEndpoint, FrontierObservation, InterfaceDemand, NetContention, OperatorCall,
+    PreparedCopySource, Reduction, ReductionKind, RuntimeNet, RuntimeNetRevisions,
     SharedRuntimeNet, StuckReason,
 };
 
