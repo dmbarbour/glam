@@ -1,20 +1,26 @@
 use super::*;
+use crate::core_net::{
+    CoreActivePairStep as ActivePairStep, CoreCursorDependency as CursorDependency,
+    CoreCursorStep as CursorStep, CoreFrontierObservation as FrontierObservation,
+    CoreNetContention as NetContention,
+};
 use crate::interaction_net::{
-    ActivePairStep, CursorDependencyDisposition, CursorDependencyResolution, CursorStep,
-    DemandEndpoint, FrontierObservation, InterfaceDemand, NetContention, NormalizationBatchLease,
+    CursorDependencyDisposition, CursorDependencyResolution, DemandEndpoint, InterfaceDemand,
+    NormalizationBatchLease,
 };
 
-pub(super) fn attach_net_many(function: Value, arguments: Vec<Value>) -> NetValue {
+pub(super) fn attach_net_many(function: NetValue, arguments: Vec<Value>) -> NetValue {
     assert!(!arguments.is_empty(), "net attachment requires an argument");
+    let owner = function.runtime().clone();
     let mut net = NetBuilder::new();
     let spine = net.bind_spine(arguments.len());
-    let function = net.data(function);
+    let function = net.data(Value::Net(function));
     net.wire(spine.input, function);
     for (argument_port, argument) in spine.arguments.into_iter().zip(arguments) {
         let argument = net.data(argument);
         net.wire(argument_port, argument);
     }
-    NetValue::new(net.finish(spine.result).instantiate_shared())
+    NetValue::new(owner.instantiate_related(&net.finish(spine.result)))
 }
 
 pub(super) fn extract_net_data(
@@ -48,14 +54,14 @@ pub(super) fn evaluate_function_call(
     function: &FunctionValue,
     arguments: &[Value],
 ) -> Result<Value, EvaluationHalt> {
-    let net = attach_net_many(Value::Net(function.stage().clone()), arguments.to_vec());
+    let net = attach_net_many(function.stage().clone(), arguments.to_vec());
     let runtime = net.into_runtime();
     let exposed = runtime.with(|runtime| runtime.exposed());
     extract_net_data(context, runtime, exposed, "function call")
 }
 
 pub(super) fn attach_function_stage(function: NetValue, arguments: Vec<Value>) -> NetValue {
-    attach_net_many(Value::Net(function), arguments)
+    attach_net_many(function, arguments)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,7 +100,7 @@ enum NetDriverWork {
         cursor: crate::interaction_net::NodeId,
     },
     ObservedCursor {
-        observation: FrontierObservation<CoreSpecialization>,
+        observation: FrontierObservation,
         cursor: crate::interaction_net::NodeId,
     },
     ActivePair {
@@ -102,13 +108,13 @@ enum NetDriverWork {
         pair: ActivePairKey,
     },
     ObservedActivePair {
-        observation: FrontierObservation<CoreSpecialization>,
+        observation: FrontierObservation,
         pair: ActivePairKey,
     },
     ResumeCursorDependency {
         runtime: crate::core_net::CoreRuntimeNet,
         cursor: crate::interaction_net::NodeId,
-        expected_dependency: CursorDependency<CoreSpecialization>,
+        expected_dependency: CursorDependency,
         disposition: CursorDependencyDisposition,
     },
 }
@@ -131,7 +137,7 @@ impl NetDriverWorklist {
         &mut self,
         runtime: crate::core_net::CoreRuntimeNet,
         cursor: crate::interaction_net::NodeId,
-        dependency: CursorDependency<CoreSpecialization>,
+        dependency: CursorDependency,
     ) {
         self.push(NetDriverWork::ResumeCursorDependency {
             runtime: runtime.clone(),
@@ -196,7 +202,7 @@ impl NetDriverWork {
 enum NetDriverOutcome {
     Progressed,
     Root(InterfaceDemand),
-    Contended(NetContention<CoreSpecialization>),
+    Contended(NetContention),
 }
 
 struct NetDriver {
@@ -383,8 +389,8 @@ fn drive_active_pair_step(
     driver: &mut NetDriver,
     runtime: crate::core_net::CoreRuntimeNet,
     pair: ActivePairKey,
-    step: ActivePairStep<CoreSpecialization>,
-) -> Result<Option<NetContention<CoreSpecialization>>, EvaluationHalt> {
+    step: ActivePairStep,
+) -> Result<Option<NetContention>, EvaluationHalt> {
     match step {
         ActivePairStep::Reduction(reduction) => {
             driver.progressed = true;
@@ -492,7 +498,7 @@ fn drive_active_pair_step(
                 .worklist
                 .push(NetDriverWork::ActivePair { runtime, pair });
         }
-        ActivePairStep::Stuck(_) => return Err(stuck_pair_error(&runtime, pair)),
+        ActivePairStep::Stuck => return Err(stuck_pair_error(&runtime, pair)),
         ActivePairStep::Contended(contention) => return Ok(Some(contention)),
         ActivePairStep::Disturbed | ActivePairStep::Gone => driver.progressed = true,
     }
@@ -543,9 +549,7 @@ fn drive_net_interface(
                 unreachable!("root driver must dispatch nonterminal demand")
             }
             NetDriverOutcome::Contended(contention) => {
-                contention
-                    .runtime()
-                    .wait_for_disturbance(contention.revisions().disturbance_epoch());
+                contention.wait_for_disturbance();
                 continue;
             }
         }
@@ -559,22 +563,27 @@ impl NetSpecialization for CoreSpecialization {
     type StuckReason = EvaluationHalt;
 }
 
+pub(super) enum CoreCallable {
+    Net(crate::core_net::CoreRuntimeNet),
+    Operator(CoreOperator),
+}
+
 pub(super) fn lower_core_callable(
     context: &EvalContext,
     value: Value,
-) -> Result<Callable<CoreSpecialization>, EvaluationHalt> {
+) -> Result<CoreCallable, EvaluationHalt> {
     let value = if matches!(value, Value::Lazy(_) | Value::Promised(_)) {
         eval_value(context, &value)?
     } else {
         value
     };
     match value {
-        Value::Net(net) => Ok(Callable::Net(net.into_runtime())),
-        Value::Builtin(builtin) => Ok(Callable::Operator(builtin_operator(BuiltinCall::new(
+        Value::Net(net) => Ok(CoreCallable::Net(net.into_runtime())),
+        Value::Builtin(builtin) => Ok(CoreCallable::Operator(builtin_operator(BuiltinCall::new(
             builtin,
         )))),
-        Value::PartialBuiltin(call) => Ok(Callable::Operator(builtin_operator(call))),
-        value @ Value::Dict(_) => Ok(Callable::Operator(applicable_operator(value))),
+        Value::PartialBuiltin(call) => Ok(CoreCallable::Operator(builtin_operator(call))),
+        value @ Value::Dict(_) => Ok(CoreCallable::Operator(applicable_operator(value))),
         value @ (Value::Atom(_)
         | Value::Number(_)
         | Value::Binary(_)
@@ -597,12 +606,12 @@ pub(super) fn progress_exact_core_call(
         return Ok(false);
     };
     match lower_core_callable(context, data) {
-        Ok(Callable::Net(source)) => {
+        Ok(CoreCallable::Net(source)) => {
             let source = source.prepare_copy_source();
-            runtime.with_mut(|runtime| runtime.resume_claimed_call_with_copy(call, source));
+            runtime.resume_claimed_call_with_copy(call, source);
             Ok(true)
         }
-        Ok(Callable::Operator(operator)) => {
+        Ok(CoreCallable::Operator(operator)) => {
             runtime.with_mut(|runtime| {
                 runtime.resume_claimed_call_with_operator(call, operator);
             });
@@ -747,11 +756,17 @@ pub(super) fn resolve_core_access(
 mod driver_tests {
     use super::*;
 
+    fn instantiate(
+        template: crate::core_net::CoreInteractionNet,
+    ) -> crate::core_net::CoreRuntimeNet {
+        crate::core::test_value_factory().instantiate_core_net(&template)
+    }
+
     #[test]
     fn cursor_dependency_work_orders_child_before_parent_retry() {
         let mut builder = NetBuilder::<CoreSpecialization>::new();
         let data = builder.data(crate::core::test_value_factory().unit());
-        let runtime = builder.finish(data).instantiate_shared();
+        let runtime = instantiate(builder.finish(data));
         let cursor = runtime.with(|net| {
             net.interface_neighbor(net.exposed())
                 .expect("closed data net must expose its data node")
@@ -794,11 +809,12 @@ mod driver_tests {
 
     #[test]
     fn stable_cursor_dependencies_propagate_through_pairless_layers() {
-        let (leaf, _) = crate::interaction_net::SharedRuntimeNet::test_stable_auxiliary();
-        let (middle, middle_interface) =
-            crate::interaction_net::SharedRuntimeNet::test_copy_layer(leaf);
+        let (leaf, _) = crate::core_net::CoreRuntimeNet::test_stable_auxiliary(
+            &crate::core::test_value_factory(),
+        );
+        let (middle, middle_interface) = crate::core_net::CoreRuntimeNet::test_copy_layer(leaf);
         let (root, root_interface) =
-            crate::interaction_net::SharedRuntimeNet::test_copy_layer(middle.clone());
+            crate::core_net::CoreRuntimeNet::test_copy_layer(middle.clone());
 
         assert!(matches!(
             drive_net_work(
@@ -820,11 +836,13 @@ mod driver_tests {
 
     #[test]
     fn stable_cursor_dependencies_propagate_through_mixed_owner_layers() {
-        let (leaf, _) = crate::interaction_net::SharedRuntimeNet::test_stable_auxiliary();
+        let (leaf, _) = crate::core_net::CoreRuntimeNet::test_stable_auxiliary(
+            &crate::core::test_value_factory(),
+        );
         let (middle, middle_interface, middle_cursor) =
-            crate::interaction_net::SharedRuntimeNet::test_pair_owned_copy_layer(leaf);
+            crate::core_net::CoreRuntimeNet::test_pair_owned_copy_layer(leaf);
         let (root, root_interface) =
-            crate::interaction_net::SharedRuntimeNet::test_copy_layer(middle.clone());
+            crate::core_net::CoreRuntimeNet::test_copy_layer(middle.clone());
 
         assert!(matches!(
             drive_net_work(
@@ -846,12 +864,13 @@ mod driver_tests {
 
     #[test]
     fn deep_stable_cursor_dependencies_exceed_the_former_recursion_limit() {
-        let (mut source, _) = crate::interaction_net::SharedRuntimeNet::test_stable_auxiliary();
+        let (mut source, _) = crate::core_net::CoreRuntimeNet::test_stable_auxiliary(
+            &crate::core::test_value_factory(),
+        );
         let mut root_interface = source.with(|net| net.exposed());
 
         for _ in 0..1_100 {
-            (source, root_interface) =
-                crate::interaction_net::SharedRuntimeNet::test_copy_layer(source);
+            (source, root_interface) = crate::core_net::CoreRuntimeNet::test_copy_layer(source);
         }
 
         assert!(matches!(
@@ -874,18 +893,15 @@ mod driver_tests {
         let expected = crate::core::test_value_factory().unit();
         let mut leaf = NetBuilder::<CoreSpecialization>::new();
         let data = leaf.data(expected.clone());
-        let mut source = leaf.finish(data).instantiate_shared();
+        let mut source = instantiate(leaf.finish(data));
         let mut root_interface = source.with(|net| net.exposed());
 
         for layer in 0..1_100 {
             if layer % 2 == 0 {
                 (source, root_interface) =
-                    crate::interaction_net::SharedRuntimeNet::test_productive_pair_owned_copy_layer(
-                        source,
-                    );
+                    crate::core_net::CoreRuntimeNet::test_productive_pair_owned_copy_layer(source);
             } else {
-                (source, root_interface) =
-                    crate::interaction_net::SharedRuntimeNet::test_copy_layer(source);
+                (source, root_interface) = crate::core_net::CoreRuntimeNet::test_copy_layer(source);
             }
         }
 
@@ -909,9 +925,7 @@ mod driver_tests {
         let left = disconnected.push(crate::interaction_net::Node::Erase);
         let right = disconnected.push(crate::interaction_net::Node::Erase);
         disconnected.wire(Port::principal(left), Port::principal(right));
-        let disconnected = disconnected
-            .finish(Port::principal(root))
-            .instantiate_shared();
+        let disconnected = instantiate(disconnected.finish(Port::principal(root)));
         let disconnected_interface = disconnected.with(|net| net.exposed());
         let before = disconnected.with(|net| net.active_pairs().collect::<Vec<_>>());
         assert_eq!(
@@ -932,7 +946,7 @@ mod driver_tests {
         branched.wire(Port::auxiliary(root, 1), Port::auxiliary(active, 1));
         branched.wire(Port::auxiliary(root, 2), Port::auxiliary(active, 2));
         branched.wire(Port::principal(active), Port::principal(erase));
-        let branched = branched.finish(Port::principal(root)).instantiate_shared();
+        let branched = instantiate(branched.finish(Port::principal(root)));
         let branched_interface = branched.with(|net| net.exposed());
         let before = branched.with(|net| net.active_pairs().collect::<Vec<_>>());
         assert_eq!(
@@ -960,7 +974,7 @@ mod driver_tests {
         net.wire(Port::auxiliary(left, 2), left_result);
         net.wire(Port::auxiliary(right, 1), exposed_result);
         net.wire(Port::auxiliary(right, 2), right_result);
-        let runtime = net.finish(Port::auxiliary(left, 1)).instantiate_shared();
+        let runtime = instantiate(net.finish(Port::auxiliary(left, 1)));
         let interface = runtime.with(|net| net.exposed());
         let demanded = runtime.with(|net| {
             let pairs = net.active_pairs().collect::<Vec<_>>();
@@ -988,7 +1002,7 @@ mod driver_tests {
         claimed.wire(Port::principal(bind), data);
         claimed.wire(Port::auxiliary(bind, 1), Port::principal(erase_left));
         claimed.wire(Port::auxiliary(bind, 2), Port::principal(erase_right));
-        let claimed = claimed.finish(Port::principal(root)).instantiate_shared();
+        let claimed = instantiate(claimed.finish(Port::principal(root)));
         let interface = claimed.with(|net| net.exposed());
         let pair = claimed.with(|net| net.active_pairs().next().unwrap());
         assert!(matches!(
@@ -1009,9 +1023,9 @@ mod driver_tests {
 
         let mut source = NetBuilder::<CoreSpecialization>::new();
         let data = source.data(crate::core::test_value_factory().unit());
-        let source = source.finish(data).instantiate_shared();
+        let source = instantiate(source.finish(data));
         let (claimed_cursor, cursor_interface, cursor) =
-            crate::interaction_net::SharedRuntimeNet::test_stable_root_with_claimed_cursor(source);
+            crate::core_net::CoreRuntimeNet::test_stable_root_with_claimed_cursor(source);
         assert_eq!(
             NormalizationRequest::cursor_whnf(claimed_cursor.clone(), cursor_interface)
                 .drive(&test_context())
@@ -1028,7 +1042,7 @@ mod driver_tests {
         let left = stuck.data(crate::core::test_value_factory().unit());
         let right = stuck.data(crate::core::test_value_factory().unit());
         stuck.wire(left, right);
-        let stuck = stuck.finish(Port::principal(root)).instantiate_shared();
+        let stuck = instantiate(stuck.finish(Port::principal(root)));
         let interface = stuck.with(|net| net.exposed());
         let pair = stuck.with(|net| net.active_pairs().next().unwrap());
         assert!(matches!(
@@ -1051,8 +1065,8 @@ mod driver_tests {
     fn demanded_claim_completion_before_wait_registration_is_not_lost() {
         let mut source = NetBuilder::<CoreSpecialization>::new();
         let data = source.data(crate::core::test_value_factory().unit());
-        let source = source.finish(data).instantiate_shared();
-        let (target, interface) = crate::interaction_net::SharedRuntimeNet::test_copy_layer(source);
+        let source = instantiate(source.finish(data));
+        let (target, interface) = crate::core_net::CoreRuntimeNet::test_copy_layer(source);
         let cursor = match target.poll_interface_demand(interface) {
             InterfaceDemand::Cursor(cursor) => cursor,
             other => panic!("copy root should expose a cursor, received {other:?}"),
@@ -1067,9 +1081,7 @@ mod driver_tests {
             target.advance_claimed_cursor(cursor),
             Some(crate::interaction_net::CursorProgress::Materialized { .. })
         ));
-        contention
-            .runtime()
-            .wait_for_disturbance(contention.revisions().disturbance_epoch());
+        contention.wait_for_disturbance();
         assert_eq!(
             NormalizationRequest::cursor_whnf(target, interface)
                 .drive(&test_context())
@@ -1087,7 +1099,7 @@ mod driver_tests {
         let erase = net.push(crate::interaction_net::Node::Erase);
         net.wire(Port::principal(bind), data);
         net.wire(Port::auxiliary(bind, 2), Port::principal(erase));
-        let runtime = net.finish(Port::auxiliary(bind, 1)).instantiate_shared();
+        let runtime = instantiate(net.finish(Port::auxiliary(bind, 1)));
         let interface = runtime.with(|net| net.exposed());
         let pair = runtime.with(|net| net.active_pairs().next().unwrap());
         let reduction = runtime
@@ -1105,9 +1117,7 @@ mod driver_tests {
         runtime.with_mut(|net| {
             net.fail_claimed_call(call, EvaluationHalt::new("demanded call failed"))
         });
-        contention
-            .runtime()
-            .wait_for_disturbance(contention.revisions().disturbance_epoch());
+        contention.wait_for_disturbance();
         let failure = match drive_net_work(&test_context(), &request) {
             Err(failure) => failure,
             Ok(_) => panic!("demanded stuck pair must remain a failure"),
@@ -1123,7 +1133,7 @@ mod driver_tests {
         let erase = net.push(crate::interaction_net::Node::Erase);
         net.wire(Port::principal(bind), data);
         net.wire(Port::auxiliary(bind, 2), Port::principal(erase));
-        let runtime = net.finish(Port::auxiliary(bind, 1)).instantiate_shared();
+        let runtime = instantiate(net.finish(Port::auxiliary(bind, 1)));
         let pair = runtime.with(|net| net.active_pairs().next().unwrap());
         let reduction = runtime
             .with_optional_mut(|net| net.reduce_pair(pair))
@@ -1166,9 +1176,7 @@ mod driver_tests {
             source.wire(Port::auxiliary(unrelated_left, auxiliary), left_data);
             source.wire(Port::auxiliary(unrelated_right, auxiliary), right_data);
         }
-        let source = source
-            .finish(Port::auxiliary(failed_bind, 1))
-            .instantiate_shared();
+        let source = instantiate(source.finish(Port::auxiliary(failed_bind, 1)));
         let (failed_pair, unrelated_pair) = source.with(|net| {
             let pairs = net.active_pairs().collect::<Vec<_>>();
             let failed_pair = pairs
@@ -1200,8 +1208,7 @@ mod driver_tests {
             );
         });
 
-        let (target, interface) =
-            crate::interaction_net::SharedRuntimeNet::test_copy_layer(source.clone());
+        let (target, interface) = crate::core_net::CoreRuntimeNet::test_copy_layer(source.clone());
         let cursor = match target.poll_interface_demand(interface) {
             InterfaceDemand::Cursor(cursor) => cursor,
             demand => panic!("copy root should expose a cursor, got {demand:?}"),
@@ -1234,13 +1241,12 @@ mod driver_tests {
         let expected = crate::core::test_value_factory().unit();
         let mut leaf = NetBuilder::<CoreSpecialization>::new();
         let data = leaf.data(expected.clone());
-        let leaf = leaf.finish(data).instantiate_shared();
+        let leaf = instantiate(leaf.finish(data));
         let mut source = leaf;
         let mut root_interface = source.with(|net| net.exposed());
 
         for _ in 0..1_100 {
-            (source, root_interface) =
-                crate::interaction_net::SharedRuntimeNet::test_copy_layer(source);
+            (source, root_interface) = crate::core_net::CoreRuntimeNet::test_copy_layer(source);
         }
 
         let request = NormalizationRequest::cursor_whnf(source.clone(), root_interface);
@@ -1259,12 +1265,11 @@ mod driver_tests {
     fn cursor_driver_releases_each_runtime_before_crossing_to_the_next() {
         let mut leaf = NetBuilder::<CoreSpecialization>::new();
         let data = leaf.data(crate::core::test_value_factory().unit());
-        let mut source = leaf.finish(data).instantiate_shared();
+        let mut source = instantiate(leaf.finish(data));
         let mut root_interface = source.with(|net| net.exposed());
         let mut runtimes = vec![source.clone()];
         for _ in 0..4 {
-            (source, root_interface) =
-                crate::interaction_net::SharedRuntimeNet::test_copy_layer(source);
+            (source, root_interface) = crate::core_net::CoreRuntimeNet::test_copy_layer(source);
             runtimes.push(source.clone());
         }
 

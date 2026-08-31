@@ -48,7 +48,8 @@ impl ResolvedNetLowerer {
         let captures = captures.into_iter().collect::<Vec<_>>();
         let mut inputs = captures.clone();
         inputs.extend(parameters.iter().copied());
-        let runtime = Self::lower_template(values, inputs, body).instantiate_shared();
+        let template = Self::lower_template(values, inputs, body);
+        let runtime = values.instantiate_core_net(&template);
         (
             FunctionCode::new(runtime, parameters.len(), captures.len()),
             captures,

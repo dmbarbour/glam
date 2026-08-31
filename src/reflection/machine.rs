@@ -244,6 +244,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         let eval_context = eval_context.for_effect_task();
         let tags = Tags::new();
         let (api, specialized_requests) = effect_api(
+            eval_context.values(),
             &tags,
             specialization.requests(),
             specialization.exposes_shared_heap(),
@@ -402,6 +403,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             .ok_or_else(|| TaskHalt::new("reflection continuation IDs exhausted"))?;
         self.continuations.insert(id, continuation);
         Ok(request_function(
+            self.eval_context.values(),
             self.tags.resume.clone(),
             3,
             vec![
@@ -1424,7 +1426,11 @@ impl<S: TaskSpecialization> EffectTask<S> {
                                 scope_depth,
                             },
                             _ => MachineWork::Drive {
-                                branch: branch.with_effect(alternative_returns(&self.tags, values)),
+                                branch: branch.with_effect(alternative_returns(
+                                    self.eval_context.values(),
+                                    &self.tags,
+                                    values,
+                                )),
                                 scope_depth,
                             },
                         }
@@ -3090,6 +3096,7 @@ pub(crate) fn volume_effects(values: &CoreValueFactory, volume: VolumeId) -> Pub
         (
             Key::atom_from_text(name),
             request_function(
+                values,
                 volume_request_tag(volume, operation),
                 arity,
                 Vec::new(),
@@ -3129,6 +3136,7 @@ fn request_id_in(
 }
 
 fn effect_api<R: Clone>(
+    values: &CoreValueFactory,
     tags: &Tags,
     specs: Vec<EffectRequestSpec<R>>,
     expose_shared_heap: bool,
@@ -3139,15 +3147,15 @@ fn effect_api<R: Clone>(
         [
             entry(
                 "get",
-                request_function(tags.heap_get.clone(), 1, Vec::new(), false),
+                request_function(values, tags.heap_get.clone(), 1, Vec::new(), false),
             ),
             entry(
                 "set",
-                request_function(tags.heap_set.clone(), 2, Vec::new(), false),
+                request_function(values, tags.heap_set.clone(), 2, Vec::new(), false),
             ),
             entry(
                 "rewrite",
-                request_function(tags.heap_rewrite.clone(), 2, Vec::new(), false),
+                request_function(values, tags.heap_rewrite.clone(), 2, Vec::new(), false),
             ),
         ]
         .into_iter()
@@ -3156,39 +3164,42 @@ fn effect_api<R: Clone>(
         }),
     );
     let mut entries = vec![
-        entry("r", request_function(tags.r.clone(), 1, Vec::new(), false)),
+        entry(
+            "r",
+            request_function(values, tags.r.clone(), 1, Vec::new(), false),
+        ),
         entry(
             "seq",
-            request_function(tags.seq.clone(), 2, Vec::new(), false),
+            request_function(values, tags.seq.clone(), 2, Vec::new(), false),
         ),
         entry(
             "alt",
-            request_function(tags.alt.clone(), 2, Vec::new(), false),
+            request_function(values, tags.alt.clone(), 2, Vec::new(), false),
         ),
         entry("fail", nullary_request(tags.fail.clone())),
         entry(
             "cut",
-            request_function(tags.cut.clone(), 1, Vec::new(), false),
+            request_function(values, tags.cut.clone(), 1, Vec::new(), false),
         ),
         entry(
             "fix",
-            request_function(tags.fix.clone(), 1, Vec::new(), false),
+            request_function(values, tags.fix.clone(), 1, Vec::new(), false),
         ),
         entry(
             "get",
-            request_function(tags.get.clone(), 1, Vec::new(), false),
+            request_function(values, tags.get.clone(), 1, Vec::new(), false),
         ),
         entry(
             "set",
-            request_function(tags.set.clone(), 2, Vec::new(), false),
+            request_function(values, tags.set.clone(), 2, Vec::new(), false),
         ),
         entry(
             "reset",
-            request_function(tags.reset.clone(), 2, Vec::new(), false),
+            request_function(values, tags.reset.clone(), 2, Vec::new(), false),
         ),
         entry(
             "shift",
-            request_function(tags.shift.clone(), 2, Vec::new(), false),
+            request_function(values, tags.shift.clone(), 2, Vec::new(), false),
         ),
     ];
     if expose_shared_heap {
@@ -3202,7 +3213,7 @@ fn effect_api<R: Clone>(
                     entry("success", nullary_request(tags.exit_success.clone())),
                     entry(
                         "error",
-                        request_function(tags.exit_error.clone(), 1, Vec::new(), false),
+                        request_function(values, tags.exit_error.clone(), 1, Vec::new(), false),
                     ),
                 ]
                 .into_iter()
@@ -3237,7 +3248,7 @@ fn effect_api<R: Clone>(
             let value = if spec.arity == 0 {
                 nullary_request(tag.clone())
             } else {
-                request_function(tag.clone(), spec.arity, Vec::new(), false)
+                request_function(values, tag.clone(), spec.arity, Vec::new(), false)
             };
             api = insert_effect_api_path(
                 api,
@@ -3289,7 +3300,13 @@ fn insert_effect_api_path(
     Ok(api.insert(key, Value::Dict(nested)))
 }
 
-fn request_function(tag: Key, arity: usize, supplied: Vec<Value>, wrap_effect: bool) -> Value {
+fn request_function(
+    values: &CoreValueFactory,
+    tag: Key,
+    arity: usize,
+    supplied: Vec<Value>,
+    wrap_effect: bool,
+) -> Value {
     let remaining = arity - supplied.len();
     let mut net = NetBuilder::<CoreSpecialization>::new();
     let exposed = net.unary_operator(eval::request_operator(
@@ -3298,8 +3315,9 @@ fn request_function(tag: Key, arity: usize, supplied: Vec<Value>, wrap_effect: b
         Arc::from(supplied),
         wrap_effect,
     ));
+    let template = net.finish(exposed);
     Value::Function(FunctionValue::new(
-        NetValue::new(net.finish(exposed).instantiate_shared()),
+        NetValue::new(values.instantiate_core_net(&template)),
         remaining,
     ))
 }
@@ -3308,12 +3326,14 @@ fn nullary_request(tag: Key) -> Value {
     Value::Dict(Dict::new_sync().insert(tag, Value::List(List::empty())))
 }
 
-fn alternative_returns(tags: &Tags, values: Vec<Value>) -> Value {
+fn alternative_returns(factory: &CoreValueFactory, tags: &Tags, values: Vec<Value>) -> Value {
     values
         .into_iter()
         .rev()
-        .map(|value| eval::constant_effect(request_value(&tags.r, vec![value])))
-        .reduce(|right, left| eval::constant_effect(request_value(&tags.alt, vec![left, right])))
+        .map(|value| eval::constant_effect(factory, request_value(&tags.r, vec![value])))
+        .reduce(|right, left| {
+            eval::constant_effect(factory, request_value(&tags.alt, vec![left, right]))
+        })
         .expect("alternative return construction requires at least two values")
 }
 

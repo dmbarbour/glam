@@ -14,8 +14,8 @@ use crate::evaluation::{EvalContext, EvaluatorStepContext};
 #[cfg(test)]
 use crate::interaction_net::Reduction;
 use crate::interaction_net::{
-    ActivePairKey, Call, Callable, CursorDependency, NetBuilder, NetSpecialization, OperatorCall,
-    OperatorYield, Port, ReductionKind, StuckReason,
+    ActivePairKey, Call, NetBuilder, NetSpecialization, OperatorCall, OperatorYield, Port,
+    ReductionKind, StuckReason,
 };
 use crate::number::Number;
 #[cfg(test)]

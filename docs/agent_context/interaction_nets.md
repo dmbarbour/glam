@@ -60,6 +60,16 @@ payload without forcing it.
 
 ## Runtime Identity and Graph State
 
+- Generic `SharedRuntimeNet<S>` ownership remains inside the interaction-net
+  implementation. Core values instead carry the private `CoreRuntimeNet`
+  facade, which pairs the generic owner with a weak observer for the exact
+  `RuntimeValueDomain`. The observer does not retain the runtime, and a runtime
+  ID alone never authorizes access to a net from another heap.
+- Core-net templates are instantiated through a `CoreValueFactory` or from an
+  already domain-qualified core net. Returned frontier observations and
+  contention records preserve the facade rather than exposing their generic
+  shared owner. Prepared logical-copy sources likewise retain exact-domain
+  provenance and reject installation into another domain.
 - `NodeId` is a zero-based logical ID encoded as `NonZeroU64`. Runtime IDs are
   allocated monotonically, stored in a hash table, and never reused.
 - `Port` packs a node ID and two-bit port index into one `NonZeroU64`; a node

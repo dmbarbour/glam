@@ -179,6 +179,20 @@ impl RuntimeValueObserver {
         Weak::ptr_eq(&self.domain, &Arc::downgrade(&values.domain))
     }
 
+    /// Returns whether both observers name the exact same value domain.
+    ///
+    /// Runtime IDs are deliberately insufficient here: test fixtures may
+    /// construct independent heaps with one ID, and managed access must not
+    /// treat those heaps as interchangeable.
+    pub(crate) fn same_domain(&self, other: &Self) -> bool {
+        Weak::ptr_eq(&self.domain, &other.domain)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_live(&self) -> bool {
+        self.domain.strong_count() != 0
+    }
+
     /// Temporarily upgrades observation authority without creating a durable
     /// heap owner. The returned factory has no compilation-local extensions;
     /// scalar and structural extraction needs only runtime-owned values.

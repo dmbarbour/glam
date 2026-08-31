@@ -9,6 +9,8 @@ mod cursor;
 mod graph;
 mod rewrite;
 
+pub(crate) use cursor::PreparedCopySource;
+
 #[cfg(test)]
 mod tests;
 

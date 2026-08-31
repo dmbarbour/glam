@@ -67,10 +67,13 @@ fn run(
 }
 
 fn request_effect(path: &[&str], arguments: Vec<Value>) -> Value {
-    eval::constant_effect(Value::Dict(Dict::new_sync().insert(
-        Key::atom_from_key(&Key::abstract_global_path(path.iter().copied())),
-        Value::List(List::from_values(arguments)),
-    )))
+    eval::constant_effect(
+        &crate::core::test_value_factory(),
+        Value::Dict(Dict::new_sync().insert(
+            Key::atom_from_key(&Key::abstract_global_path(path.iter().copied())),
+            Value::List(List::from_values(arguments)),
+        )),
+    )
 }
 
 fn return_effect(value: Value) -> Value {

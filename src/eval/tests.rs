@@ -25,7 +25,8 @@ fn initial_metadata() -> Value {
 fn closed_net(build: impl FnOnce(&mut NetBuilder<CoreSpecialization>) -> Port) -> NetValue {
     let mut builder = NetBuilder::new();
     let exposed = build(&mut builder);
-    NetValue::new(builder.finish(exposed).instantiate_shared())
+    let template = builder.finish(exposed);
+    NetValue::new(crate::core::test_value_factory().instantiate_core_net(&template))
 }
 
 fn fixture_computation(expr: TestExpr) -> Value {

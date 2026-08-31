@@ -52,7 +52,7 @@ not define language semantics or collect subsystem invariants.
 | `core.rs`, `core/` | Syntax-independent values, runtime value-domain ownership, factory-scoped managed allocation/rooting, lazies, promises, functions, keys, builtins |
 | `core/managed.rs` | Factory-qualified collector access, domain-qualified `RuntimeValueAccess`, and Glam's centralized managed-slot policy |
 | `crates/glam-gc/` | Glam-owned typed-run tracing collector; the runtime domain currently owns a no-auto heap while production values remain unmigrated |
-| `core_net.rs` | Core specialization of generic interaction nets |
+| `core_net.rs` | Exact-value-domain facade and core specialization of generic interaction nets; raw shared-net ownership remains private |
 | `interaction_net/model.rs`, `builder.rs` | Generic topology and checked construction |
 | `interaction_net/runtime/` | Mutable graph, active-pair reduction, logical copies |
 | `evaluation.rs`, `evaluation/session.rs`, `evaluation/pump.rs` | Shared demand/profile contracts, session admission, cooperative and runtime pumping |

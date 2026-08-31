@@ -1011,9 +1011,10 @@ impl Assembler {
             .builder
             .try_finish(exposed)
             .map_err(net_build_error)?;
+        let values = self.core_values();
         Ok(Value::from_core(
-            &self.core_values(),
-            CoreValue::Net(NetValue::new(template.instantiate_shared())),
+            &values,
+            CoreValue::Net(NetValue::new(values.instantiate_core_net(&template))),
         ))
     }
 

@@ -512,7 +512,7 @@ fn hidden_effect(context: &RequestContext<'_, MacroEffects>, tag: [&str; 5]) -> 
     ));
     Value::from_core(
         context.eval_context().values(),
-        eval::constant_effect(request),
+        eval::constant_effect(context.eval_context().values(), request),
     )
 }
 

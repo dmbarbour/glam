@@ -259,7 +259,7 @@ impl NetConstructionMachine {
                         .as_core(),
                     &self.brand,
                 )?;
-                replay(branch.journal(), exposed).map(Some)
+                replay(context.values(), branch.journal(), exposed).map(Some)
             }
             IsolatedSearchPoll::Failed(halt) => Err(halt
                 .with_context(PublicValue::from_core(
@@ -429,6 +429,7 @@ fn construction_port(
 }
 
 fn replay(
+    values: &crate::core::CoreValueFactory,
     journal: &ConstructionJournal,
     exposed: ConstructionPortId,
 ) -> Result<Value, EvaluationHalt> {
@@ -468,7 +469,9 @@ fn replay(
     let template = builder
         .try_finish(exposed)
         .map_err(|error| EvaluationHalt::new(error.to_string()))?;
-    Ok(Value::Net(NetValue::new(template.instantiate_shared())))
+    Ok(Value::Net(NetValue::new(
+        values.instantiate_core_net(&template),
+    )))
 }
 
 fn append_ports(

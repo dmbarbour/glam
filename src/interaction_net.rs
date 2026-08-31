@@ -10,16 +10,15 @@ mod runtime;
 
 pub(crate) use builder::{NetBuildError, NetBuilder};
 pub(crate) use model::{
-    ActivePairKey, Callable, InteractionNet, NetSpecialization, NodeId, OperatorYield, Port,
+    ActivePairKey, InteractionNet, NetSpecialization, NodeId, OperatorYield, Port,
 };
 pub(crate) use runtime::{
-    ActivePairStep, Call, CursorDependency, CursorDependencyDisposition,
-    CursorDependencyResolution, CursorProgress, CursorStep, DemandEndpoint, FrontierObservation,
-    InterfaceDemand, NetContention, NormalizationBatchLease, OperatorCall, ReductionKind,
+    ActivePairStep, BlockedCall, BlockedOperatorCall, Call, CursorDependency,
+    CursorDependencyDisposition, CursorDependencyResolution, CursorProgress, CursorStep,
+    DemandEndpoint, FrontierObservation, InterfaceDemand, NetContention, NormalizationBatchLease,
+    OperatorCall, PreparedCopySource, Reduction, ReductionKind, RuntimeNet, RuntimeNetRevisions,
     SharedRuntimeNet, StuckReason,
 };
 
 #[cfg(test)]
 pub(crate) use model::Node;
-#[cfg(test)]
-pub(crate) use runtime::Reduction;

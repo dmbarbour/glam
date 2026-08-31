@@ -89,7 +89,8 @@ pub(super) fn lower_test_function_code(arity: usize, body: TestExpr) -> Function
         }
         binds.input
     };
-    let runtime = lowerer.net.finish(exposed).instantiate_shared();
+    let template = lowerer.net.finish(exposed);
+    let runtime = crate::core::test_value_factory().instantiate_core_net(&template);
     FunctionCode::new(runtime, arity, capture_count)
 }
 

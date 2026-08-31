@@ -107,10 +107,13 @@ impl<R> EffectRequestSpec<R> {
         }
         Ok(PublicValue::from_core(
             values.core(),
-            eval::constant_effect(request_value(
-                &Key::abstract_global_path(self.tag_path.iter().map(Arc::as_ref)),
-                arguments.into_iter().map(PublicValue::into_core).collect(),
-            )),
+            eval::constant_effect(
+                values.core(),
+                request_value(
+                    &Key::abstract_global_path(self.tag_path.iter().map(Arc::as_ref)),
+                    arguments.into_iter().map(PublicValue::into_core).collect(),
+                ),
+            ),
         ))
     }
 }

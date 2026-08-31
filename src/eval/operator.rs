@@ -160,8 +160,7 @@ pub(super) fn apply_core_operator(
                     Arc::from(captures),
                 )));
             }
-            let stage =
-                attach_net_many(Value::Net(NetValue::new(code.runtime().clone())), captures);
+            let stage = attach_net_many(NetValue::new(code.runtime().clone()), captures);
             Ok(OperatorYield::Data(Value::Lazy(
                 LazyValue::from_net_computation(context.values(), stage),
             )))
@@ -265,7 +264,7 @@ pub(super) fn apply_core_operator(
                     .insert(tag.clone(), Value::List(List::from_values(arguments))),
             );
             Ok(OperatorYield::Data(if *wrap_effect {
-                constant_effect(request)
+                constant_effect(context.values(), request)
             } else {
                 request
             }))
@@ -273,15 +272,16 @@ pub(super) fn apply_core_operator(
     }
 }
 
-pub(crate) fn constant_effect(request: Value) -> Value {
+pub(crate) fn constant_effect(values: &CoreValueFactory, request: Value) -> Value {
     let mut net = crate::interaction_net::NetBuilder::<CoreSpecialization>::new();
     let [input, argument, result] = net.bind();
     let erase = net.copy(0).input;
     net.wire(argument, erase);
     let data = net.data(request);
     net.wire(result, data);
+    let template = net.finish(input);
     let function = Value::Function(FunctionValue::new(
-        NetValue::new(net.finish(input).instantiate_shared()),
+        NetValue::new(values.instantiate_core_net(&template)),
         1,
     ));
     Value::Dict(crate::core::Dict::new_sync().insert((*keys::EFF).clone(), function))

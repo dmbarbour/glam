@@ -8,8 +8,6 @@ use std::fmt;
 use std::num::NonZeroU64;
 use std::sync::Arc;
 
-use super::runtime::SharedRuntimeNet;
-
 const PORT_BITS: u32 = 2;
 const PORT_MASK: u64 = (1 << PORT_BITS) - 1;
 
@@ -111,16 +109,6 @@ pub trait NetSpecialization: Clone + fmt::Debug + PartialEq + Eq + Sized + 'stat
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OperatorYield<S: NetSpecialization> {
     Data(S::Data),
-    Operator(S::Operator),
-}
-
-/// The topology that callable data exposes when it meets a [`Node::Bind`].
-///
-/// A shared net is loaded through a lazy logical copy. An operator is
-/// installed behind a fresh bind so the ordinary bind-join rule performs the
-/// application.
-pub enum Callable<S: NetSpecialization> {
-    Net(SharedRuntimeNet<S>),
     Operator(S::Operator),
 }
 
