@@ -165,7 +165,7 @@ impl TaskSpecialization for TestEffects {
                 let [value]: [PublicValue; 1] = arguments
                     .try_into()
                     .map_err(|_| TaskHalt::new("test stderr request received the wrong arity"))?;
-                let bytes = value_bytes(value.as_core())?;
+                let bytes = value_bytes(context.eval_context().values(), value.as_core())?;
                 if let Some(mut transaction) = context.transaction() {
                     transaction.parts().1.stderr.push(bytes);
                 } else {
@@ -644,8 +644,8 @@ impl TaskHost<ReflectionEffects> for TestHost {
     }
 }
 
-fn value_bytes(value: &Value) -> Result<Bytes, TaskHalt> {
-    let context = EvalContext::standalone();
+fn value_bytes(values: &CoreValueFactory, value: &Value) -> Result<Bytes, TaskHalt> {
+    let context = EvalContext::isolated(values.clone());
     let poll = EvaluationPollContext::for_context(&context);
     match poll.evaluate(&context, |evaluator| evaluate_in(evaluator, value.clone()))? {
         Value::Binary(bytes) => Ok(bytes),
@@ -2410,7 +2410,7 @@ fn metadata_inspection_returns_hidden_values_without_forcing_them() {
     let carrier = PublicValue::from_core(
         &assembler.core_values(),
         Value::metadata_carrier(Value::error(
-            &crate::core::test_value_factory(),
+            &assembler.core_values(),
             "latent metadata failure",
         )),
     );
@@ -2540,7 +2540,7 @@ fn reflection_eval_returns_a_tagged_whnf_result() {
         Some(&Value::Number(Number::integer(3)))
     );
 
-    let (_, nested) = compile_effect(".eval { bad:1 / 0 }");
+    let (assembler, nested) = compile_effect(".eval { bad:1 / 0 }");
     let (context, task) = schedule_composed_test_task(
         &assembler,
         &nested,
@@ -2599,7 +2599,8 @@ fn reflection_eval_retries_terminal_lazy_dependencies() {
         b"ready".as_slice()
     );
 
-    let (_, failure) = compile_effect(
+    let (_, failure) = compile_effect_with_runtime(
+        &assembler.evaluation_runtime(),
         ".eval (anno { refl:.fail } \"unreachable\") >>= (\\result -> .r result.err)",
     );
     let (context, task) = schedule_composed_test_task(&assembler, &failure, host);
@@ -2718,7 +2719,8 @@ fn reflection_environment_is_available_as_plain_data() {
         env!("CARGO_PKG_VERSION").as_bytes()
     );
 
-    let (_, environment) = compile_effect(
+    let (_, environment) = compile_effect_with_runtime(
+        &assembler.evaluation_runtime(),
         ".env ['process,'env] >>= (\\environment -> (environment.[\"GLAM_TEST_ENV\"] == \"present\") =>> .r \"environment\")",
     );
     let (context, task) = schedule_composed_test_task(&assembler, &environment, host.clone());
@@ -2728,7 +2730,8 @@ fn reflection_environment_is_available_as_plain_data() {
         "process environment lookup should complete, got {environment_poll:?}"
     );
 
-    let (_, arguments) = compile_effect(".env ['process,'args]");
+    let (_, arguments) =
+        compile_effect_with_runtime(&assembler.evaluation_runtime(), ".env ['process,'args]");
     let (context, task) = schedule_composed_test_task(&assembler, &arguments, host.clone());
     let poll = pump_composed_test_task(&context, &task);
     let EvaluationWaitPoll::Complete(arguments) = poll else {
@@ -2745,8 +2748,10 @@ fn reflection_environment_is_available_as_plain_data() {
         ]
     );
 
-    let (_, child_environment) =
-        compile_effect(".task.new (.env ['process,'args]) >>= (\\task -> .task.join task)");
+    let (_, child_environment) = compile_effect_with_runtime(
+        &assembler.evaluation_runtime(),
+        ".task.new (.env ['process,'args]) >>= (\\task -> .task.join task)",
+    );
     let (context, task) = schedule_composed_test_task(&assembler, &child_environment, host.clone());
     let EvaluationWaitPoll::Complete(arguments) = pump_composed_test_task(&context, &task) else {
         panic!("child reflection task should inherit its parent profile environment")
@@ -2762,7 +2767,8 @@ fn reflection_environment_is_available_as_plain_data() {
         ]
     );
 
-    let (_, missing) = compile_effect(
+    let (_, missing) = compile_effect_with_runtime(
+        &assembler.evaluation_runtime(),
         ".env ['process,'env] >>= (\\environment -> (environment.[\"GLAM_TEST_MISSING\"] == {}) =>> .r \"missing\")",
     );
     let (context, task) = schedule_composed_test_task(&assembler, &missing, host);
@@ -3393,7 +3399,8 @@ fn acknowledged_task_failure_remains_observable_but_is_not_reported() {
     };
     assert!(report.failures.is_empty());
 
-    let (_, join) = compile_effect(
+    let (_, join) = compile_effect_with_runtime(
+        &assembler.evaluation_runtime(),
         ".cut (.task.new (.fail) >>= (\\task -> .task.ack_error task =>> .r task)) >>= (\\task -> .task.join task)",
     );
     let (context, parent) = schedule_composed_test_task(&assembler, &join, host);
@@ -3760,7 +3767,7 @@ fn lazy_suspension_preserves_cut_choice_and_does_not_repeat_prior_commit() {
     let gate = PublicValue::from_core(
         &assembler.core_values(),
         Value::Lazy(LazyValue::from_reflection_gate(
-            &crate::core::test_value_factory(),
+            &assembler.core_values(),
             Value::Number(Number::from_u64(0)),
             Value::binary_from_text("done"),
         )),
@@ -3814,7 +3821,7 @@ fn changed_observation_restarts_a_cut_before_its_lazy_dependency() {
     let gate = PublicValue::from_core(
         &assembler.core_values(),
         Value::Lazy(LazyValue::from_reflection_gate(
-            &crate::core::test_value_factory(),
+            &assembler.core_values(),
             Value::Number(Number::from_u64(0)),
             Value::binary_from_text("unused"),
         )),
@@ -3988,7 +3995,10 @@ fn reusable_reflection_log_emits_raw_diagnostics_transactionally() {
         b"reflection warning".as_slice()
     );
 
-    let (_, invalid) = compile_effect(".log 'verbose { msg:{ text:\"wrong\" } }");
+    let (_, invalid) = compile_effect_with_runtime(
+        &assembler.evaluation_runtime(),
+        ".log 'verbose { msg:{ text:\"wrong\" } }",
+    );
     assert!(
         run_reflection_test(&assembler, &invalid, host)
             .unwrap_err()
@@ -4553,7 +4563,8 @@ fn heap_root_replacement_and_path_errors_remain_lazy() {
             .contains("not a dictionary")
     );
 
-    let (_, caught) = compile_effect(
+    let (_, caught) = compile_effect_with_runtime(
+        &assembler.evaluation_runtime(),
         ".cut ((.heap.set [] 42) =>> .heap.get ['x] >>= (\\value -> .eval value >>= (\\result -> .r result.err)))",
     );
     let TaskOutcome::Complete(error) = run_reflection_test(
@@ -4582,7 +4593,8 @@ fn malformed_nested_heap_updates_do_not_poison_unrelated_reads() {
         TaskOutcome::Complete(_)
     ));
 
-    let (_, safe) = compile_effect(".heap.get ['safe]");
+    let (_, safe) =
+        compile_effect_with_runtime(&assembler.evaluation_runtime(), ".heap.get ['safe]");
     let TaskOutcome::Complete(safe) = run_standard_on(&assembler, &safe, host.clone()).unwrap()
     else {
         panic!("unrelated heap access should complete")

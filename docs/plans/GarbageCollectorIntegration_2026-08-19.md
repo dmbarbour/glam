@@ -1579,6 +1579,24 @@ ordinary `with`/`with_mut`-style inspection and semantic stepping without
 matching access, while identity-only worklist operations remain usable after
 the access scope ends.
 
+I3D.3b completed 2026-08-31. `CoreRuntimeNetAccess` is a private,
+non-`Send`/non-`Sync` view derived only from a matching
+`RuntimeValueAccess`. Ordinary interface inspection, topology reads and
+mutation, cursor and active-pair steps, prepared-copy inspection, stuck-pair
+diagnostics, and result extraction now pass through that view. Evaluator net
+work opens these regions through `EvaluatorStepContext` and closes them before
+running Glam callables or operators. Durable `CoreRuntimeNet` values retain
+only construction, identity, provenance, contention-wait, and the explicitly
+transitional normalization surface assigned to I3D.3c.
+
+Source-inventory tests reject an ordinary inspection surface on the durable
+facade, scope tests prove the access view cannot escape to another thread, and
+exact-domain tests reject an unrelated runtime while preserving identity work
+after a scope closes. The migration also exposed test fixtures which compiled
+or constructed a value in one runtime and evaluated it through another; those
+fixtures now use the owning runtime rather than weakening domain validation.
+Production remains `NoAuto`.
+
 #### Phase I3D.3c — Scoped Normalization Batches
 
 - Bind every core normalization lease which can lock on explicit close or

@@ -210,12 +210,21 @@ impl RuntimeValueObserver {
     reason = "I3A.1 establishes carrier operations before I3B.1 migrates evaluator access"
 )]
 impl RuntimeValueAccess<'_> {
+    pub(crate) fn runtime_id(&self) -> EvaluationRuntimeId {
+        self.domain.runtime
+    }
+
     /// Returns whether `values` is another authorized view of this exact value
     /// domain. Runtime IDs are globally unique; direct domain comparison keeps
     /// this private check aligned with the heap authority already in hand and
     /// avoids treating an integer ID as the capability itself.
     pub(crate) fn belongs_to(&self, values: &CoreValueFactory) -> bool {
         std::ptr::eq(self.domain, values.domain.as_ref())
+    }
+
+    /// Returns whether `observer` routes back to this admitted value domain.
+    pub(crate) fn admits(&self, observer: &RuntimeValueObserver) -> bool {
+        std::ptr::eq(self.domain, observer.domain.as_ptr())
     }
 
     /// Discovers or reuses one heap-local allocation class for this region.

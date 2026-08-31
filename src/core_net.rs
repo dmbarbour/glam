@@ -5,7 +5,10 @@
 
 use std::sync::Arc;
 
-use crate::core::{BuiltinCall, CoreValueFactory, FunctionCode, Key, RuntimeValueObserver, Value};
+use crate::core::{
+    BuiltinCall, CoreValueFactory, FunctionCode, Key, RuntimeValueAccess, RuntimeValueObserver,
+    Value,
+};
 use crate::evaluation::EvaluationWaitToken;
 use crate::interaction_net::{
     ActivePairKey, ActivePairStep, BlockedCall, BlockedOperatorCall, CursorDependency,
@@ -90,6 +93,16 @@ pub(crate) struct CoreRuntimeNet {
     values: RuntimeValueObserver,
 }
 
+/// One bounded, thread-local authority to inspect or mutate a core net.
+///
+/// The view borrows both the durable net and the matching managed-value access
+/// carrier. It cannot enter a work descriptor, survive the mutator region, or
+/// cross a thread. The generic shared owner remains hidden behind this view.
+pub(crate) struct CoreRuntimeNetAccess<'access, 'scope> {
+    runtime: &'access CoreRuntimeNet,
+    _values: &'access RuntimeValueAccess<'scope>,
+}
+
 impl CoreValueFactory {
     /// Instantiates a core net in this factory's exact value domain.
     pub(crate) fn instantiate_core_net(&self, template: &CoreInteractionNet) -> CoreRuntimeNet {
@@ -130,68 +143,25 @@ impl CoreRuntimeNet {
         same_net
     }
 
-    pub(crate) fn with<R>(&self, inspect: impl FnOnce(&RuntimeNet<CoreSpecialization>) -> R) -> R {
-        self.inner.with(inspect)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_revisions<R>(
-        &self,
-        inspect: impl FnOnce(&RuntimeNet<CoreSpecialization>) -> R,
-    ) -> (R, RuntimeNetRevisions) {
-        self.inner.with_revisions(inspect)
-    }
-
-    pub(crate) fn with_mut<R>(
-        &self,
-        update: impl FnOnce(&mut RuntimeNet<CoreSpecialization>) -> R,
-    ) -> R {
-        self.inner.with_mut(update)
-    }
-
-    pub(crate) fn poll_interface_demand(&self, interface: Port) -> InterfaceDemand {
-        self.inner.poll_interface_demand(interface)
-    }
-
-    pub(crate) fn resolve_cursor_dependency(
-        &self,
-        cursor: NodeId,
-        expected: &CoreCursorDependency,
-        disposition: CursorDependencyDisposition,
-    ) -> CursorDependencyResolution {
-        self.inner
-            .resolve_cursor_dependency(cursor, &expected.to_generic(), disposition)
-    }
-
-    pub(crate) fn step_cursor(&self, cursor: NodeId) -> CoreCursorStep {
-        CoreCursorStep::from_generic(self, self.inner.step_cursor(cursor))
-    }
-
-    pub(crate) fn step_active_pair(&self, pair: ActivePairKey) -> CoreActivePairStep {
-        CoreActivePairStep::from_generic(self, self.inner.step_active_pair(pair))
-    }
-
-    pub(crate) fn advance_claimed_cursor(&self, cursor: NodeId) -> Option<CursorProgress> {
-        self.inner.advance_claimed_cursor(cursor)
-    }
-
-    pub(crate) fn prepare_copy_source(&self) -> CorePreparedCopySource {
-        CorePreparedCopySource {
-            inner: self.inner.prepare_copy_source(),
-            values: self.values.clone(),
+    /// Derives bounded net access from matching value-domain authority.
+    pub(crate) fn access<'access, 'scope>(
+        &'access self,
+        values: &'access RuntimeValueAccess<'scope>,
+    ) -> CoreRuntimeNetAccess<'access, 'scope> {
+        assert!(
+            values.admits(&self.values),
+            "core net belongs to evaluation runtime {}, but access came from evaluation runtime {}",
+            self.values.runtime_id().get(),
+            values.runtime_id().get()
+        );
+        CoreRuntimeNetAccess {
+            runtime: self,
+            _values: values,
         }
     }
 
-    pub(crate) fn resume_claimed_call_with_copy(
-        &self,
-        call: crate::interaction_net::Call,
-        source: CorePreparedCopySource,
-    ) {
-        let source = source.into_inner_for(&self.values);
-        self.inner
-            .with_mut(|runtime| runtime.resume_claimed_call_with_copy(call, source));
-    }
-
+    /// Transitional I3D.3c exception: the returned lease may lock on close or
+    /// drop and therefore cannot yet borrow the access scope.
     pub(crate) fn try_begin_normalization_batch(
         &self,
     ) -> Result<NormalizationBatchLease<CoreSpecialization>, CoreNetContention> {
@@ -211,11 +181,67 @@ impl CoreRuntimeNet {
     }
 
     #[cfg(test)]
-    pub(crate) fn with_optional_mut<R>(
+    pub(crate) fn with_test_access<R>(
+        &self,
+        operation: impl FnOnce(CoreRuntimeNetAccess<'_, '_>) -> R,
+    ) -> R {
+        let values = self
+            .values
+            .upgrade()
+            .expect("a test cannot inspect a core net after its value domain is dropped");
+        values.with_runtime_value_access(|access| operation(self.access(&access)))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_with<R>(
+        &self,
+        inspect: impl FnOnce(&RuntimeNet<CoreSpecialization>) -> R,
+    ) -> R {
+        self.with_test_access(|access| access.with(inspect))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_with_revisions<R>(
+        &self,
+        inspect: impl FnOnce(&RuntimeNet<CoreSpecialization>) -> R,
+    ) -> (R, RuntimeNetRevisions) {
+        self.with_test_access(|access| access.with_revisions(inspect))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_with_mut<R>(
+        &self,
+        update: impl FnOnce(&mut RuntimeNet<CoreSpecialization>) -> R,
+    ) -> R {
+        self.with_test_access(|access| access.with_mut(update))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_with_optional_mut<R>(
         &self,
         update: impl FnOnce(&mut RuntimeNet<CoreSpecialization>) -> Option<R>,
     ) -> Option<R> {
-        self.inner.with_optional_mut(update)
+        self.with_test_access(|access| access.with_optional_mut(update))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_poll_interface_demand(&self, interface: Port) -> InterfaceDemand {
+        self.with_test_access(|access| access.poll_interface_demand(interface))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_step_cursor(&self, cursor: NodeId) -> CoreCursorStep {
+        self.with_test_access(|access| access.step_cursor(cursor))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_advance_claimed_cursor(&self, cursor: NodeId) -> Option<CursorProgress> {
+        self.with_test_access(|access| access.advance_claimed_cursor(cursor))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_prepare_copy_source(&self) -> CorePreparedCopySource {
+        self.with_test_access(|access| access.prepare_copy_source())
     }
 
     #[cfg(test)]
@@ -262,6 +288,80 @@ impl CoreRuntimeNet {
     #[cfg(test)]
     pub(crate) fn test_claim_pairless_cursor_obligation(&self, cursor: NodeId) -> bool {
         self.inner.test_claim_pairless_cursor_obligation(cursor)
+    }
+}
+
+impl CoreRuntimeNetAccess<'_, '_> {
+    pub(crate) fn with<R>(&self, inspect: impl FnOnce(&RuntimeNet<CoreSpecialization>) -> R) -> R {
+        self.runtime.inner.with(inspect)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_revisions<R>(
+        &self,
+        inspect: impl FnOnce(&RuntimeNet<CoreSpecialization>) -> R,
+    ) -> (R, RuntimeNetRevisions) {
+        self.runtime.inner.with_revisions(inspect)
+    }
+
+    pub(crate) fn with_mut<R>(
+        &self,
+        update: impl FnOnce(&mut RuntimeNet<CoreSpecialization>) -> R,
+    ) -> R {
+        self.runtime.inner.with_mut(update)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_optional_mut<R>(
+        &self,
+        update: impl FnOnce(&mut RuntimeNet<CoreSpecialization>) -> Option<R>,
+    ) -> Option<R> {
+        self.runtime.inner.with_optional_mut(update)
+    }
+
+    pub(crate) fn poll_interface_demand(&self, interface: Port) -> InterfaceDemand {
+        self.runtime.inner.poll_interface_demand(interface)
+    }
+
+    pub(crate) fn resolve_cursor_dependency(
+        &self,
+        cursor: NodeId,
+        expected: &CoreCursorDependency,
+        disposition: CursorDependencyDisposition,
+    ) -> CursorDependencyResolution {
+        self.runtime
+            .inner
+            .resolve_cursor_dependency(cursor, &expected.to_generic(), disposition)
+    }
+
+    pub(crate) fn step_cursor(&self, cursor: NodeId) -> CoreCursorStep {
+        CoreCursorStep::from_generic(self.runtime, self.runtime.inner.step_cursor(cursor))
+    }
+
+    pub(crate) fn step_active_pair(&self, pair: ActivePairKey) -> CoreActivePairStep {
+        CoreActivePairStep::from_generic(self.runtime, self.runtime.inner.step_active_pair(pair))
+    }
+
+    pub(crate) fn advance_claimed_cursor(&self, cursor: NodeId) -> Option<CursorProgress> {
+        self.runtime.inner.advance_claimed_cursor(cursor)
+    }
+
+    pub(crate) fn prepare_copy_source(&self) -> CorePreparedCopySource {
+        CorePreparedCopySource {
+            inner: self.runtime.inner.prepare_copy_source(),
+            values: self.runtime.values.clone(),
+        }
+    }
+
+    pub(crate) fn resume_claimed_call_with_copy(
+        &self,
+        call: crate::interaction_net::Call,
+        source: CorePreparedCopySource,
+    ) {
+        let source = source.into_inner_for(&self.runtime.values);
+        self.runtime
+            .inner
+            .with_mut(|runtime| runtime.resume_claimed_call_with_copy(call, source));
     }
 }
 
@@ -358,11 +458,27 @@ impl CoreFrontierObservation {
         self.inner.endpoint()
     }
 
-    pub(crate) fn step_active_pair(&self, pair: ActivePairKey) -> CoreActivePairStep {
+    pub(crate) fn step_active_pair(
+        &self,
+        access: &CoreRuntimeNetAccess<'_, '_>,
+        pair: ActivePairKey,
+    ) -> CoreActivePairStep {
+        assert!(
+            self.source.ptr_eq(access.runtime),
+            "frontier observation requires access to its source net"
+        );
         CoreActivePairStep::from_generic(&self.source, self.inner.step_active_pair(pair))
     }
 
-    pub(crate) fn step_cursor(&self, cursor: NodeId) -> CoreCursorStep {
+    pub(crate) fn step_cursor(
+        &self,
+        access: &CoreRuntimeNetAccess<'_, '_>,
+        cursor: NodeId,
+    ) -> CoreCursorStep {
+        assert!(
+            self.source.ptr_eq(access.runtime),
+            "frontier observation requires access to its source net"
+        );
         CoreCursorStep::from_generic(&self.source, self.inner.step_cursor(cursor))
     }
 }
@@ -467,6 +583,38 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
+    macro_rules! assert_does_not_implement {
+        ($module:ident, $type:ty, $trait:path) => {
+            mod $module {
+                use super::*;
+
+                trait AmbiguousIfImplemented<Discriminator> {
+                    fn verify() {}
+                }
+
+                struct Implemented;
+
+                impl<T: ?Sized> AmbiguousIfImplemented<()> for T {}
+                impl<T: ?Sized + $trait> AmbiguousIfImplemented<Implemented> for T {}
+
+                const _: fn() = || {
+                    <$type as AmbiguousIfImplemented<_>>::verify();
+                };
+            }
+        };
+    }
+
+    assert_does_not_implement!(
+        core_runtime_net_access_is_not_send,
+        CoreRuntimeNetAccess<'static, 'static>,
+        Send
+    );
+    assert_does_not_implement!(
+        core_runtime_net_access_is_not_sync,
+        CoreRuntimeNetAccess<'static, 'static>,
+        Sync
+    );
+
     fn closed_unit_template(values: &CoreValueFactory) -> CoreInteractionNet {
         let mut builder = crate::interaction_net::NetBuilder::<CoreSpecialization>::new();
         let data = builder.data(values.unit());
@@ -485,6 +633,35 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "but access came from evaluation runtime")]
+    fn core_net_access_rejects_a_foreign_runtime() {
+        let owner = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
+        let foreign = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
+        let template = closed_unit_template(&owner);
+        let net = owner.instantiate_core_net(&template);
+
+        foreign.with_runtime_value_access(|access| {
+            let _ = net.access(&access);
+        });
+    }
+
+    #[test]
+    fn identity_only_net_work_outlives_scoped_access() {
+        let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
+        let template = closed_unit_template(&values);
+        let net = values.instantiate_core_net(&template);
+        let alias = net.clone();
+
+        values.with_runtime_value_access(|values| {
+            let access = net.access(&values);
+            let exposed = access.with(RuntimeNet::exposed);
+            assert!(access.with(|runtime| runtime.interface_data(exposed).is_some()));
+        });
+
+        assert!(net.ptr_eq(&alias));
+    }
+
+    #[test]
     #[should_panic(expected = "a core net cannot copy topology from another value domain")]
     fn core_copy_source_rejects_a_foreign_runtime() {
         let first = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
@@ -493,7 +670,7 @@ mod tests {
         let second_template = closed_unit_template(&second);
         let source = first
             .instantiate_core_net(&first_template)
-            .prepare_copy_source();
+            .test_prepare_copy_source();
         let target = second.instantiate_core_net(&second_template);
 
         let _ = source.into_inner_for(&target.values);
@@ -550,5 +727,39 @@ mod tests {
 
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
         visit(&root, root.clone());
+    }
+
+    #[test]
+    fn durable_core_net_facade_has_no_ordinary_inspection_surface() {
+        let source = fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("src")
+                .join("core_net.rs"),
+        )
+        .expect("core-net source must be readable");
+        let facade = source
+            .split_once("impl CoreRuntimeNet {")
+            .expect("core-net facade implementation must remain present")
+            .1
+            .split_once("impl CoreRuntimeNetAccess<'_, '_> {")
+            .expect("scoped core-net access implementation must remain present")
+            .0;
+
+        for forbidden in [
+            "pub(crate) fn with<",
+            "pub(crate) fn with_mut<",
+            "pub(crate) fn poll_interface_demand(",
+            "pub(crate) fn resolve_cursor_dependency(",
+            "pub(crate) fn step_cursor(",
+            "pub(crate) fn step_active_pair(",
+            "pub(crate) fn advance_claimed_cursor(",
+            "pub(crate) fn prepare_copy_source(",
+            "pub(crate) fn resume_claimed_call_with_copy(",
+        ] {
+            assert!(
+                !facade.contains(forbidden),
+                "durable core-net facade regained authority-free operation {forbidden}"
+            );
+        }
     }
 }

@@ -9,6 +9,7 @@
 
 use crate::core::RuntimeValueAccess;
 use crate::core::Value;
+use crate::core_net::{CoreRuntimeNet, CoreRuntimeNetAccess};
 use crate::runtime::RuntimeValueRoot;
 use std::cell::RefCell;
 use std::marker::PhantomData;
@@ -65,6 +66,14 @@ impl<'scope> EvaluationValueAccess<'scope> {
 
     pub(crate) fn values(&self) -> &RuntimeValueAccess<'scope> {
         &self.values
+    }
+
+    /// Derives bounded access to one net owned by this value domain.
+    pub(crate) fn net<'access>(
+        &'access self,
+        runtime: &'access CoreRuntimeNet,
+    ) -> CoreRuntimeNetAccess<'access, 'scope> {
+        runtime.access(&self.values)
     }
 }
 

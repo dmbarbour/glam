@@ -491,14 +491,15 @@ fn produce_lazy_source_in(
         }
         LazySource::NetComputation(net) => {
             let runtime = net.runtime().clone();
-            let exposed = runtime.with(|runtime| runtime.exposed());
-            extract_net_data(context.context(), runtime, exposed, "lazy net computation")
+            let exposed = context
+                .with_value_access(|access| access.net(&runtime).with(|runtime| runtime.exposed()));
+            extract_net_data(context, runtime, exposed, "lazy net computation")
                 .map_err(|error| error.with_context(evaluation_context_frame("net_computation")))
         }
         LazySource::FunctionCall {
             function,
             arguments,
-        } => evaluate_function_call(context.context(), function, arguments),
+        } => evaluate_function_call(context, function, arguments),
     }
 }
 

@@ -4,7 +4,7 @@ use crate::api::{
     Assembler, CompilationExecution, Diagnostic, DiagnosticEvent, DiagnosticSubscriber,
     TestValueFacade, Value as PublicValue,
 };
-use crate::core::{Dict, Key, List, Value, keys};
+use crate::core::{CoreValueFactory, Dict, Key, List, Value, keys};
 use crate::diagnostic::Severity;
 use crate::eval;
 
@@ -66,9 +66,9 @@ fn run(
     )
 }
 
-fn request_effect(path: &[&str], arguments: Vec<Value>) -> Value {
+fn request_effect(values: &CoreValueFactory, path: &[&str], arguments: Vec<Value>) -> Value {
     eval::constant_effect(
-        &crate::core::test_value_factory(),
+        values,
         Value::Dict(Dict::new_sync().insert(
             Key::atom_from_key(&Key::abstract_global_path(path.iter().copied())),
             Value::List(List::from_values(arguments)),
@@ -76,8 +76,12 @@ fn request_effect(path: &[&str], arguments: Vec<Value>) -> Value {
     )
 }
 
-fn return_effect(value: Value) -> Value {
-    request_effect(&["reflection_runtime", "v0", "request", "r"], vec![value])
+fn return_effect(values: &CoreValueFactory, value: Value) -> Value {
+    request_effect(
+        values,
+        &["reflection_runtime", "v0", "request", "r"],
+        vec![value],
+    )
 }
 
 #[test]
@@ -201,9 +205,12 @@ fn macro_api_omits_heap_tasks_and_full_reflection_requests() {
 fn unstarted_reflection_gate_runs_inside_the_macro_session() {
     let assembler = Assembler::default();
     let execution = assembler.test_compilation_execution();
-    let reflection = return_effect(keys::unit_value());
+    let reflection = return_effect(&assembler.core_values(), keys::unit_value());
     let gate = Value::reflection_gate(&assembler.core_values(), reflection, keys::unit_value());
-    let macro_effect = PublicValue::from_core(&assembler.core_values(), return_effect(gate));
+    let macro_effect = PublicValue::from_core(
+        &assembler.core_values(),
+        return_effect(&assembler.core_values(), gate),
+    );
 
     run(&execution, &macro_effect, Value::Dict(Dict::new_sync()))
         .expect("macro session should launch and complete its reflection gate");
@@ -221,7 +228,10 @@ fn assembler_claimed_reflection_gate_is_unavailable_to_macro_session() {
     let error = eval::eval_value(&assembler.eval_context(), &gate)
         .expect_err("assembler observation should start and block the gate");
     assert!(error.blocked_on().is_some());
-    let macro_effect = PublicValue::from_core(&assembler.core_values(), return_effect(gate));
+    let macro_effect = PublicValue::from_core(
+        &assembler.core_values(),
+        return_effect(&assembler.core_values(), gate),
+    );
 
     let error = run(&execution, &macro_effect, Value::Dict(Dict::new_sync()))
         .expect_err("macro execution must not migrate a gate claimed by another demand session");

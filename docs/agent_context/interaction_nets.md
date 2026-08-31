@@ -71,6 +71,14 @@ payload without forcing it.
   contention records preserve the facade rather than exposing their generic
   shared owner. Prepared logical-copy sources likewise retain exact-domain
   provenance and reject installation into another domain.
+- Ordinary core-net inspection and mutation is available only through a
+  private scoped view derived from the matching runtime value-access region.
+  Durable net handles retain identity and provenance, but cannot inspect an
+  interface, step topology, prepare a copy, or extract a result on their own.
+  Evaluator code closes the view before invoking Glam callables or operators.
+  Normalization leases and the bracketed contention wait remain narrow,
+  documented transitional exceptions while their dedicated integration
+  checkpoints are completed.
 - `NodeId` is a zero-based logical ID encoded as `NonZeroU64`. Runtime IDs are
   allocated monotonically, stored in a hash table, and never reused.
 - `Port` packs a node ID and two-bit port index into one `NonZeroU64`; a node
@@ -117,6 +125,12 @@ Do not rediscover work by scanning active-pair collections, remove elements
 from the middle of queues, or hold source and target runtime mutexes together.
 An `Erase >< RemoteCursor` pair has no shortcut: it demands normal cursor
 materialization, after which the ordinary erasure rule applies.
+
+Core specialization performs each inspection or mutation through its
+same-runtime scoped net view. Durable frontier and dependency records identify
+work across scheduler boundaries; they do not carry that view or a managed
+borrow. Source and target copy steps therefore open separate checked regions,
+never one region spanning both nets.
 
 ## Logical Copies and Cursors
 

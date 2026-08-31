@@ -260,8 +260,8 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/net.rs",
-        [0, 11],
-        "I3D.3/I3D.4 net claim and driver boundary"
+        [12, 6],
+        "I3D.3b scoped net operations; test and non-net durable helpers"
     ),
     context_entry!(
         "src/eval/operator.rs",

@@ -5818,7 +5818,9 @@ fn interaction_net_construction_is_memoized_and_preserves_initial_active_pairs()
     };
     assert!(first.runtime().ptr_eq(second.runtime()));
     assert_eq!(
-        first.runtime().with(|runtime| runtime.active_pairs().len()),
+        first
+            .runtime()
+            .test_with(|runtime| runtime.active_pairs().len()),
         1
     );
 }
