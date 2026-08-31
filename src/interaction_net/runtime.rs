@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
+use std::marker::PhantomData;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
@@ -67,8 +69,13 @@ pub enum ReductionKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CursorProgress {
+    /// A raw `RuntimeNet::reduce_pair` has reserved the transition but has not
+    /// inspected its source frontier. Shared runtime steps consume this state
+    /// behind a private guard and never publish it to the core evaluator.
     Claimed,
-    Materialized { node: NodeId },
+    Materialized {
+        node: NodeId,
+    },
     Joined,
     Blocked,
 }
@@ -591,6 +598,18 @@ impl<S: NetSpecialization> SharedRuntimeNet<S> {
         self.with_mut(|runtime| runtime.claim_pairless_cursor_obligation(cursor))
     }
 
+    #[cfg(test)]
+    fn test_cursor_claim_guard(&self, cursor: NodeId) -> Option<CursorClaimGuard<'_, S>> {
+        let claim = self.with(|runtime| runtime.cursor_claim(cursor))?;
+        Some(CursorClaimGuard::new(self, claim))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_advance_claimed_cursor(&self, cursor: NodeId) -> Option<CursorProgress> {
+        self.test_cursor_claim_guard(cursor)
+            .map(CursorClaimGuard::advance)
+    }
+
     pub fn ptr_eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.inner, &other.inner)
     }
@@ -764,55 +783,88 @@ impl<S: NetSpecialization> SharedRuntimeNet<S> {
         pair: ActivePairKey,
         expected_topology_revision: Option<u64>,
     ) -> ActivePairStep<S> {
-        let mut state = self
-            .inner
-            .runtime
-            .lock()
-            .expect("shared runtime net was poisoned");
-        let revisions = self.inner.revisions();
-        if expected_topology_revision
-            .is_some_and(|expected| expected != revisions.topology_revision())
-        {
-            return match state.runtime.active.get(&pair) {
-                Some(ActivePairState::Stuck(reason)) => ActivePairStep::Stuck(StuckPair {
-                    pair,
-                    reason: reason.clone(),
-                }),
-                _ => ActivePairStep::Disturbed,
-            };
-        }
-        let pair_state = state.runtime.active.get(&pair).cloned();
-        let (outcome, changed) = match pair_state {
-            Some(ActivePairState::Ready) => (
-                ActivePairStep::Reduction(
-                    state
+        let (mut outcome, cursor_claim) = {
+            let mut state = self
+                .inner
+                .runtime
+                .lock()
+                .expect("shared runtime net was poisoned");
+            let revisions = self.inner.revisions();
+            if expected_topology_revision
+                .is_some_and(|expected| expected != revisions.topology_revision())
+            {
+                return match state.runtime.active.get(&pair) {
+                    Some(ActivePairState::Stuck(reason)) => ActivePairStep::Stuck(StuckPair {
+                        pair,
+                        reason: reason.clone(),
+                    }),
+                    _ => ActivePairStep::Disturbed,
+                };
+            }
+            let pair_state = state.runtime.active.get(&pair).cloned();
+            let mut cursor_claim = None;
+            let (outcome, changed) = match pair_state {
+                Some(ActivePairState::Ready) => {
+                    let reduction = state
                         .runtime
                         .reduce_pair(pair)
-                        .expect("ready pair must produce one reduction"),
+                        .expect("ready pair must produce one reduction");
+                    if let ReductionKind::RemoteCursor {
+                        cursor,
+                        progress: CursorProgress::Claimed,
+                    } = &reduction.kind
+                    {
+                        cursor_claim = Some(
+                            state
+                                .runtime
+                                .cursor_claim(*cursor)
+                                .expect("cursor reduction must retain its claimed transition"),
+                        );
+                    }
+                    (ActivePairStep::Reduction(reduction), true)
+                }
+                Some(ActivePairState::Claimed) => {
+                    (ActivePairStep::Contended(self.contention(revisions)), false)
+                }
+                Some(ActivePairState::BlockedCursor { cursor, .. }) => {
+                    (ActivePairStep::Cursor(cursor), false)
+                }
+                Some(ActivePairState::BlockedCall { wait }) => (
+                    ActivePairStep::BlockedCall(BlockedCall { pair, wait }),
+                    false,
                 ),
-                true,
-            ),
-            Some(ActivePairState::Claimed) => {
-                (ActivePairStep::Contended(self.contention(revisions)), false)
+                Some(ActivePairState::BlockedOperatorCall { wait }) => (
+                    ActivePairStep::BlockedOperatorCall(BlockedOperatorCall { pair, wait }),
+                    false,
+                ),
+                Some(ActivePairState::Stuck(reason)) => {
+                    (ActivePairStep::Stuck(StuckPair { pair, reason }), false)
+                }
+                None => (ActivePairStep::Gone, false),
+            };
+            if changed {
+                self.inner.publish_mutation(&mut state.batches);
             }
-            Some(ActivePairState::BlockedCursor { cursor, .. }) => {
-                (ActivePairStep::Cursor(cursor), false)
-            }
-            Some(ActivePairState::BlockedCall { wait }) => (
-                ActivePairStep::BlockedCall(BlockedCall { pair, wait }),
-                false,
-            ),
-            Some(ActivePairState::BlockedOperatorCall { wait }) => (
-                ActivePairStep::BlockedOperatorCall(BlockedOperatorCall { pair, wait }),
-                false,
-            ),
-            Some(ActivePairState::Stuck(reason)) => {
-                (ActivePairStep::Stuck(StuckPair { pair, reason }), false)
-            }
-            None => (ActivePairStep::Gone, false),
+            (
+                outcome,
+                cursor_claim.map(|claim| CursorClaimGuard::new(self, claim)),
+            )
         };
-        if changed {
-            self.inner.publish_mutation(&mut state.batches);
+
+        if let Some(claim) = cursor_claim {
+            let progress = claim.advance();
+            let ActivePairStep::Reduction(Reduction {
+                kind:
+                    ReductionKind::RemoteCursor {
+                        progress: published,
+                        ..
+                    },
+                ..
+            }) = &mut outcome
+            else {
+                unreachable!("a cursor claim must accompany its cursor reduction")
+            };
+            *published = progress;
         }
         outcome
     }
@@ -826,7 +878,7 @@ impl<S: NetSpecialization> SharedRuntimeNet<S> {
         cursor: NodeId,
         expected_topology_revision: Option<u64>,
     ) -> CursorStep<S> {
-        let claimed = {
+        let claim = {
             let mut state = self
                 .inner
                 .runtime
@@ -844,8 +896,13 @@ impl<S: NetSpecialization> SharedRuntimeNet<S> {
                         .runtime
                         .begin_cursor_claim(cursor, expected_pair)
                         .expect("claimable cursor must accept its owning transition");
+                    assert_eq!(progress, CursorProgress::Claimed);
+                    let claim = state
+                        .runtime
+                        .cursor_claim(cursor)
+                        .expect("claimed cursor step must retain its transition");
                     self.inner.publish_mutation(&mut state.batches);
-                    progress
+                    CursorClaimGuard::new(self, claim)
                 }
                 CursorStepInspection::Dependency(dependency) => {
                     return CursorStep::Dependency(dependency);
@@ -857,10 +914,7 @@ impl<S: NetSpecialization> SharedRuntimeNet<S> {
                 CursorStepInspection::Gone => return CursorStep::Gone,
             }
         };
-        assert_eq!(claimed, CursorProgress::Claimed);
-        let progress = self
-            .advance_claimed_cursor(cursor)
-            .expect("cursor claimed by a step must remain advanceable");
+        let progress = claim.advance();
         if progress != CursorProgress::Blocked {
             return CursorStep::Progressed(progress);
         }
@@ -873,17 +927,6 @@ impl<S: NetSpecialization> SharedRuntimeNet<S> {
             CursorStepInspection::Claimed => CursorStep::Contended(self.contention(revisions)),
             CursorStepInspection::Gone => CursorStep::Gone,
         }
-    }
-}
-
-impl<S: NetSpecialization> SharedRuntimeNet<S> {
-    /// Inspects and advances a previously claimed cursor without holding target
-    /// and source runtime locks at the same time.
-    pub fn advance_claimed_cursor(&self, cursor: NodeId) -> Option<CursorProgress> {
-        let claim = self.with(|target| target.cursor_claim(cursor))?;
-        let source = claim.source.clone();
-        let frontier = source.inspect_source_frontier(claim.remote);
-        Some(self.with_mut(|target| target.finish_cursor_claim(claim, frontier)))
     }
 }
 
@@ -925,6 +968,89 @@ struct CursorClaim<S: NetSpecialization> {
     copy: CopyId,
     remote: Port,
     source: SharedRuntimeNet<S>,
+}
+
+enum CursorDisposition<S: NetSpecialization> {
+    Advance(SourceFrontier<S>),
+    #[allow(
+        dead_code,
+        reason = "the explicit release disposition is exercised by claim-protocol tests"
+    )]
+    Release,
+}
+
+/// One stack-bound cursor transition. It carries no target or source mutex
+/// guard, so source-frontier inspection and target publication remain
+/// disjoint. Dropping an unfinished guard restores ready owner state.
+#[must_use = "a cursor claim must be advanced or released"]
+struct CursorClaimGuard<'claim, S: NetSpecialization> {
+    target: &'claim SharedRuntimeNet<S>,
+    claim: Option<CursorClaim<S>>,
+    _thread_bound: PhantomData<Rc<()>>,
+}
+
+impl<'claim, S: NetSpecialization> CursorClaimGuard<'claim, S> {
+    fn new(target: &'claim SharedRuntimeNet<S>, claim: CursorClaim<S>) -> Self {
+        Self {
+            target,
+            claim: Some(claim),
+            _thread_bound: PhantomData,
+        }
+    }
+
+    fn advance(self) -> CursorProgress {
+        let claim = self
+            .claim
+            .as_ref()
+            .expect("an unfinished cursor guard must retain its claim");
+        let frontier = claim.source.inspect_source_frontier(claim.remote);
+        self.finish(CursorDisposition::Advance(frontier))
+            .expect("advancing a cursor claim must produce progress")
+    }
+
+    fn finish(mut self, disposition: CursorDisposition<S>) -> Option<CursorProgress> {
+        let result = match disposition {
+            CursorDisposition::Advance(frontier) => {
+                let claim = self
+                    .claim
+                    .as_ref()
+                    .expect("an unfinished cursor guard must retain its claim")
+                    .clone();
+                Some(
+                    self.target
+                        .with_mut(|target| target.finish_cursor_claim(claim, frontier)),
+                )
+            }
+            CursorDisposition::Release => {
+                let restored = self.restore_fallback();
+                debug_assert!(restored, "released cursor claim must remain current");
+                None
+            }
+        };
+        self.claim = None;
+        result
+    }
+
+    fn restore_fallback(&self) -> bool {
+        let Some(claim) = self.claim.as_ref() else {
+            return true;
+        };
+        self.target.with_conditional_mut(|target| {
+            if target.release_cursor_claim(claim) {
+                RuntimeNetMutation::Changed(true)
+            } else {
+                RuntimeNetMutation::Unchanged(false)
+            }
+        })
+    }
+}
+
+impl<S: NetSpecialization> Drop for CursorClaimGuard<'_, S> {
+    fn drop(&mut self) {
+        if self.claim.is_some() {
+            let _ = self.restore_fallback();
+        }
+    }
 }
 
 struct SourceFrontier<S: NetSpecialization> {

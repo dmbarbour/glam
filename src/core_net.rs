@@ -263,7 +263,7 @@ impl CoreRuntimeNet {
 
     #[cfg(test)]
     pub(crate) fn test_advance_claimed_cursor(&self, cursor: NodeId) -> Option<CursorProgress> {
-        self.with_test_access(|access| access.advance_claimed_cursor(cursor))
+        self.inner.test_advance_claimed_cursor(cursor)
     }
 
     #[cfg(test)]
@@ -389,10 +389,6 @@ impl CoreRuntimeNetAccess<'_, '_> {
 
     pub(crate) fn step_active_pair(&self, pair: ActivePairKey) -> CoreActivePairStep {
         CoreActivePairStep::from_generic(self.runtime, self.runtime.inner.step_active_pair(pair))
-    }
-
-    pub(crate) fn advance_claimed_cursor(&self, cursor: NodeId) -> Option<CursorProgress> {
-        self.runtime.inner.advance_claimed_cursor(cursor)
     }
 
     pub(crate) fn prepare_copy_source(&self) -> CorePreparedCopySource {
@@ -741,6 +737,9 @@ pub(crate) enum CoreCursorStep {
 impl CoreCursorStep {
     fn from_generic(owner: &CoreRuntimeNet, step: CursorStep<CoreSpecialization>) -> Self {
         match step {
+            CursorStep::Progressed(CursorProgress::Claimed) => {
+                panic!("a live cursor claim cannot cross the core-net facade")
+            }
             CursorStep::Progressed(progress) => Self::Progressed(progress),
             CursorStep::Dependency(dependency) => {
                 Self::Dependency(CoreCursorDependency::from_generic(owner, dependency))
@@ -770,6 +769,14 @@ pub(crate) enum CoreActivePairStep {
 impl CoreActivePairStep {
     fn from_generic(owner: &CoreRuntimeNet, step: ActivePairStep<CoreSpecialization>) -> Self {
         match step {
+            ActivePairStep::Reduction(Reduction {
+                kind:
+                    crate::interaction_net::ReductionKind::RemoteCursor {
+                        progress: CursorProgress::Claimed,
+                        ..
+                    },
+                ..
+            }) => panic!("a live cursor claim cannot cross the core-net facade"),
             ActivePairStep::Reduction(reduction) => Self::Reduction(reduction),
             ActivePairStep::Cursor(cursor) => Self::Cursor(cursor),
             ActivePairStep::BlockedCall(blocked) => Self::BlockedCall(blocked),
@@ -828,6 +835,41 @@ mod tests {
         let mut builder = crate::interaction_net::NetBuilder::<CoreSpecialization>::new();
         let data = builder.data(values.unit());
         builder.finish(data)
+    }
+
+    #[test]
+    #[should_panic(expected = "a live cursor claim cannot cross the core-net facade")]
+    fn core_cursor_step_rejects_a_live_claim() {
+        let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
+        let template = closed_unit_template(&values);
+        let owner = values.instantiate_core_net(&template);
+
+        let _ = CoreCursorStep::from_generic(
+            &owner,
+            CursorStep::<CoreSpecialization>::Progressed(CursorProgress::Claimed),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "a live cursor claim cannot cross the core-net facade")]
+    fn core_active_pair_step_rejects_a_live_cursor_claim() {
+        let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
+        let template = closed_unit_template(&values);
+        let source = values.instantiate_core_net(&template);
+        let (target, _, _) = CoreRuntimeNet::test_pair_owned_copy_layer(source);
+        let pair = target.test_with(|runtime| runtime.active_pairs().next().unwrap());
+        let reduction = target
+            .test_with_optional_mut(|runtime| runtime.reduce_pair(pair))
+            .expect("ready cursor pair must be reducible");
+        assert!(matches!(
+            reduction.kind,
+            crate::interaction_net::ReductionKind::RemoteCursor {
+                progress: CursorProgress::Claimed,
+                ..
+            }
+        ));
+
+        let _ = CoreActivePairStep::from_generic(&target, ActivePairStep::Reduction(reduction));
     }
 
     #[test]

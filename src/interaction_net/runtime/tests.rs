@@ -6,6 +6,38 @@ use std::time::Duration;
 use super::*;
 use crate::interaction_net::builder::{NetBuildError, NetBuilder};
 
+macro_rules! assert_does_not_implement {
+    ($module:ident, $type:ty, $trait:path) => {
+        mod $module {
+            use super::*;
+
+            trait AmbiguousIfImplemented<Discriminator> {
+                fn verify() {}
+            }
+
+            struct Implemented;
+
+            impl<T: ?Sized> AmbiguousIfImplemented<()> for T {}
+            impl<T: ?Sized + $trait> AmbiguousIfImplemented<Implemented> for T {}
+
+            const _: fn() = || {
+                <$type as AmbiguousIfImplemented<_>>::verify();
+            };
+        }
+    };
+}
+
+assert_does_not_implement!(
+    cursor_claim_guard_is_not_send,
+    CursorClaimGuard<'static, ()>,
+    Send
+);
+assert_does_not_implement!(
+    cursor_claim_guard_is_not_sync,
+    CursorClaimGuard<'static, ()>,
+    Sync
+);
+
 pub trait TestData: Clone + fmt::Debug + PartialEq + Eq + 'static {}
 
 impl TestData for () {}
@@ -141,6 +173,49 @@ fn claim_test_interface_cursor<S: NetSpecialization>(
         ))
     .then(|| target.begin_cursor_claim(neighbor.node(), None))
     .flatten()
+}
+
+fn claimed_pairless_cursor_fixture() -> (SharedRuntimeNet<()>, NodeId) {
+    let mut source = NetBuilder::<()>::new();
+    let data = source.data(());
+    let source = source.finish(data).instantiate_shared();
+    let mut target = RuntimeNet::empty();
+    let cursor = target.begin_copy(source.prepare_copy_source());
+    let interface = target.add_interface(Port::principal(cursor));
+    let target = SharedRuntimeNet::new(target);
+    assert_eq!(
+        target.poll_interface_demand(interface),
+        InterfaceDemand::Cursor(cursor)
+    );
+    assert!(target.with_mut(|runtime| runtime.claim_pairless_cursor_obligation(cursor)));
+    (target, cursor)
+}
+
+fn claimed_pair_owned_cursor_fixture() -> (SharedRuntimeNet<&'static str>, NodeId, ActivePairKey) {
+    let mut source = NetBuilder::<&'static str>::new();
+    let data = source.data("value");
+    let source = source.finish(data).instantiate_shared();
+    let target = target_waiting_on(source);
+    let pair = target.active_pairs().next().unwrap();
+    let target = SharedRuntimeNet::new(target);
+    assert!(matches!(
+        target.with_optional_mut(|runtime| runtime.reduce_pair(pair)),
+        Some(Reduction {
+            kind: ReductionKind::RemoteCursor {
+                progress: CursorProgress::Claimed,
+                ..
+            },
+            ..
+        })
+    ));
+    let cursor = target.with(|runtime| {
+        let (left, right) = runtime.active_pair_nodes(pair).unwrap();
+        [left, right]
+            .into_iter()
+            .find(|node| matches!(runtime.node(*node), Some(RuntimeNode::RemoteCursor { .. })))
+            .unwrap()
+    });
+    (target, cursor, pair)
 }
 
 fn remove_unwired_test_copy<S: NetSpecialization>(target: &SharedRuntimeNet<S>, cursor: NodeId) {
@@ -939,7 +1014,7 @@ fn cursor_steps_report_pairless_pair_owned_stable_and_contended_states() {
         claimed_target.with_revisions(|_| ()).1
     );
     assert!(matches!(
-        claimed_target.advance_claimed_cursor(claimed_cursor),
+        claimed_target.test_advance_claimed_cursor(claimed_cursor),
         Some(CursorProgress::Materialized { .. })
     ));
     assert!(matches!(
@@ -1044,16 +1119,12 @@ fn active_pair_steps_report_reduction_contention_blockage_stuck_and_gone() {
             kind:
                 ReductionKind::RemoteCursor {
                     cursor,
-                    progress: CursorProgress::Claimed,
+                    progress: CursorProgress::Blocked,
                 },
             ..
         }) => cursor,
-        other => panic!("ready cursor pair should produce a claim, received {other:?}"),
+        other => panic!("ready cursor pair should publish terminal progress, received {other:?}"),
     };
-    assert_eq!(
-        cursor_net.advance_claimed_cursor(cursor),
-        Some(CursorProgress::Blocked)
-    );
     assert!(matches!(
         cursor_net.step_active_pair(cursor_pair),
         ActivePairStep::Cursor(blocked) if blocked == cursor
@@ -1206,6 +1277,98 @@ fn pairless_cursor_obligation_transitions_have_one_owner() {
         PairlessCursorState::Stable
     ));
     target.assert_cursor_obligation_invariants();
+}
+
+#[test]
+fn cursor_claim_release_restores_both_owner_forms_to_ready() {
+    let (pairless, pairless_cursor) = claimed_pairless_cursor_fixture();
+    let before_pairless = pairless.with_revisions(|_| ()).1;
+    let guard = pairless
+        .test_cursor_claim_guard(pairless_cursor)
+        .expect("claimed pairless cursor must issue its scoped guard");
+    assert_eq!(guard.finish(CursorDisposition::Release), None);
+    let after_pairless = pairless.with_revisions(|_| ()).1;
+    assert_eq!(
+        after_pairless.topology_revision(),
+        before_pairless.topology_revision() + 1
+    );
+    assert_eq!(
+        after_pairless.disturbance_epoch(),
+        before_pairless.disturbance_epoch() + 1
+    );
+    assert!(pairless.with(|runtime| matches!(
+        runtime.inspect_cursor_step(pairless_cursor),
+        CursorStepInspection::Claimable(None)
+    )));
+
+    let (pair_owned, pair_owned_cursor, pair) = claimed_pair_owned_cursor_fixture();
+    let before_pair_owned = pair_owned.with_revisions(|_| ()).1;
+    let guard = pair_owned
+        .test_cursor_claim_guard(pair_owned_cursor)
+        .expect("claimed pair-owned cursor must issue its scoped guard");
+    assert_eq!(guard.finish(CursorDisposition::Release), None);
+    let after_pair_owned = pair_owned.with_revisions(|_| ()).1;
+    assert_eq!(
+        after_pair_owned.topology_revision(),
+        before_pair_owned.topology_revision() + 1
+    );
+    assert_eq!(
+        after_pair_owned.disturbance_epoch(),
+        before_pair_owned.disturbance_epoch() + 1
+    );
+    assert!(pair_owned.with(|runtime| matches!(
+        runtime.inspect_cursor_step(pair_owned_cursor),
+        CursorStepInspection::Claimable(Some(actual)) if actual == pair
+    )));
+}
+
+#[test]
+fn cursor_claim_unwind_restores_both_owner_forms_to_ready() {
+    let (pairless, pairless_cursor) = claimed_pairless_cursor_fixture();
+    let before_pairless = pairless.with_revisions(|_| ()).1;
+    let pairless_unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = pairless
+            .test_cursor_claim_guard(pairless_cursor)
+            .expect("claimed pairless cursor must issue its scoped guard");
+        panic!("forced pairless cursor-claim unwind");
+    }));
+    assert!(pairless_unwind.is_err());
+    let after_pairless = pairless.with_revisions(|_| ()).1;
+    assert_eq!(
+        after_pairless.topology_revision(),
+        before_pairless.topology_revision() + 1
+    );
+    assert_eq!(
+        after_pairless.disturbance_epoch(),
+        before_pairless.disturbance_epoch() + 1
+    );
+    assert!(pairless.with(|runtime| matches!(
+        runtime.inspect_cursor_step(pairless_cursor),
+        CursorStepInspection::Claimable(None)
+    )));
+
+    let (pair_owned, pair_owned_cursor, pair) = claimed_pair_owned_cursor_fixture();
+    let before_pair_owned = pair_owned.with_revisions(|_| ()).1;
+    let pair_owned_unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = pair_owned
+            .test_cursor_claim_guard(pair_owned_cursor)
+            .expect("claimed pair-owned cursor must issue its scoped guard");
+        panic!("forced pair-owned cursor-claim unwind");
+    }));
+    assert!(pair_owned_unwind.is_err());
+    let after_pair_owned = pair_owned.with_revisions(|_| ()).1;
+    assert_eq!(
+        after_pair_owned.topology_revision(),
+        before_pair_owned.topology_revision() + 1
+    );
+    assert_eq!(
+        after_pair_owned.disturbance_epoch(),
+        before_pair_owned.disturbance_epoch() + 1
+    );
+    assert!(pair_owned.with(|runtime| matches!(
+        runtime.inspect_cursor_step(pair_owned_cursor),
+        CursorStepInspection::Claimable(Some(actual)) if actual == pair
+    )));
 }
 
 #[test]
@@ -2212,7 +2375,7 @@ fn nested_cursor_demand_reuses_a_claimed_source_obligation() {
     ));
 
     assert!(matches!(
-        middle.advance_claimed_cursor(middle_cursor),
+        middle.test_advance_claimed_cursor(middle_cursor),
         Some(CursorProgress::Materialized { .. })
     ));
     assert!(matches!(
@@ -2361,7 +2524,7 @@ fn concurrent_interface_demands_share_one_pairless_cursor_claim() {
         worker_claimed.wait();
         worker_release.wait();
         assert!(matches!(
-            worker_target.advance_claimed_cursor(root_cursor),
+            worker_target.test_advance_claimed_cursor(root_cursor),
             Some(CursorProgress::Materialized { .. })
         ));
     });
@@ -2620,7 +2783,7 @@ fn auxiliary_cursor_reinspects_after_a_principal_remote_cursor_materializes() {
         Some(CursorProgress::Claimed)
     );
     assert!(matches!(
-        source.advance_claimed_cursor(source_cursor),
+        source.test_advance_claimed_cursor(source_cursor),
         Some(CursorProgress::Materialized { .. })
     ));
 

@@ -235,6 +235,41 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         })
     }
 
+    pub(in crate::interaction_net::runtime) fn release_cursor_claim(
+        &mut self,
+        claim: &CursorClaim<S>,
+    ) -> bool {
+        if !matches!(
+            self.node(claim.cursor),
+            Some(RuntimeNode::RemoteCursor { copy, remote })
+                if *copy == claim.copy && *remote == claim.remote
+        ) {
+            return false;
+        }
+        match claim.owner {
+            CursorClaimOwner::ActivePair(pair) => {
+                if !self
+                    .active
+                    .get(&pair)
+                    .is_some_and(ActivePairState::is_claimed)
+                {
+                    return false;
+                }
+                self.active.insert(pair, ActivePairState::Ready);
+            }
+            CursorClaimOwner::Obligation => {
+                let Some(obligation) = self.cursor_obligations.get_mut(&claim.cursor) else {
+                    return false;
+                };
+                if !obligation.state.is_claimed() {
+                    return false;
+                }
+                obligation.state = PairlessCursorState::Ready;
+            }
+        }
+        true
+    }
+
     pub(in crate::interaction_net::runtime) fn inspect_source_frontier_shape(
         &self,
         remote: Port,

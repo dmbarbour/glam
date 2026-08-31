@@ -1,6 +1,6 @@
 # Glam GC Integration Plan — 2026-08-19
 
-Status: in progress; Phases I0 through I2 and checkpoints I3A.1-I3D.3e are
+Status: in progress; Phases I0 through I2 and checkpoints I3A.1-I3D.3f are
 complete. Phase I3 is in progress. Collector Gate G1 passed on 2026-08-25.
 The remaining integration work follows the completed owner-matrix,
 stable-ledger, and low-risk checkpoint corrections from the integration
@@ -59,6 +59,10 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I3D.3c | complete | closure-scoped same-net normalization batches |
 | I3D.3d | complete | bracketed callable active-pair claims and exact replay fallback |
 | I3D.3e | complete | bracketed operator active-pair claims and exact replay fallback |
+| I3D.3f.1 | complete | private cursor-claim guard and pairless-step migration |
+| I3D.3f.2 | complete | active-pair cursor terminalization before step publication |
+| I3D.3f.3 | complete | manual handoff removal, forced lifecycle tests, and closure audit |
+| I3D.3f | complete | guarded cursor lifecycles for both owner forms |
 | I3 | in progress | bounded evaluator/worker mutator regions |
 | I4 | pending | core trace vocabulary and leaf policy |
 | I4.0 | pending | managed-family destruction admission contract |
@@ -1741,6 +1745,56 @@ source-frontier, ownership-transfer, and cursor-WHNF regressions. Add forced
 unwind and each terminal disposition, and prevent cursor claims from entering
 the driver worklist.
 
+Implement this phase through three bounded checkpoints:
+
+- **I3D.3f.1 — Pairless guarded steps.** Introduce one private, `#[must_use]`,
+  non-`Send`/non-`Sync` cursor-claim guard in the generic shared runtime. It
+  retains the exact target owner and source-frontier coordinates, but no net
+  mutex guard. Its consuming `Advance` disposition inspects the source before
+  reopening the target; explicit release and `Drop` restore the target claim
+  to ready work and publish the transition. Route pairless `step_cursor`
+  acquisition and advancement through this guard.
+- **I3D.3f.2 — Active-pair guarded steps.** When an exact ready active pair
+  discovers a remote cursor, construct the same private guard before the
+  locked step ends, inspect and finish it outside the target lock, and publish
+  only the terminal `CursorProgress` in `ActivePairStep`. The generic
+  low-level reducer may retain its explicit claimed result as a test utility,
+  but no core/evaluator production step may receive it.
+- **I3D.3f.3 — Closure and verification.** Remove the manual
+  `advance_claimed_cursor` core/evaluator surface and the corresponding
+  production branch. Force fresh pairless and pair-owned release and unwind,
+  prove each restores exactly ready owner state with one transition, and keep
+  the existing dependency, stable, disturbed, gone, materialized, joined,
+  contention, and lock-separation matrix green. Source and privacy inventories
+  must prevent a cursor guard or manual advancement operation from entering
+  durable evaluator state.
+
+I3D.3f completed 2026-08-31. Both pairless obligations and active-pair-owned
+remote cursors now issue the same private, `#[must_use]`, non-`Send`/non-`Sync`
+`CursorClaimGuard` while the target net is locked. The guard retains the
+claimed owner and immutable source coordinates but no mutex guard. It inspects
+the source frontier first, then reopens only the target net to publish
+materialized, joined, dependency-blocked, or stable progress. Explicit release
+and `Drop` restore fresh claims to ready owner state and publish exactly one
+transition.
+
+`SharedRuntimeNet::step_cursor` and cursor-producing
+`SharedRuntimeNet::step_active_pair` now terminalize that guard before
+returning. The latter rewrites its `RemoteCursor` reduction with terminal
+progress, so the core evaluator no longer performs a separate manual advance.
+The low-level mutable `RuntimeNet::reduce_pair` retains `Claimed` only as an
+explicit generic test utility. Both core step conversion boundaries reject a
+live claim, and the durable core-net facade no longer exposes
+`advance_claimed_cursor`.
+
+Forced tests cover explicit release and unwind for both owner forms, verify
+one topology/disturbance publication and exact ready restoration, and retain
+compile-time thread-bound checks. Existing materialized, joined, local/source
+dependency, stable, disturbed, gone, contention, converging-frontier,
+ownership-transfer, source/target lock-separation, deep-chain, and cursor-WHNF
+tests remain green. The complete repository suite passes with 1,218 library
+tests plus all auxiliary targets. Production remains `NoAuto`.
+
 #### Phase I3D.3g — Contention Handoff and Local Closure Audit
 
 - Treat `NetContention::wait_for_disturbance` as a narrow synchronization
@@ -2068,8 +2122,7 @@ the incomplete production graph.
   using whichever call direction that checkpoint found clearest;
   keep `EvaluatedValue` as an opaque WHNF witness and return only owned host
   data from extraction.
-- Update each affected stable family/roo
-t record in the same checkpoint.
+- Update each affected stable family/root record in the same checkpoint.
 
 Verification: promote every `prototype_*` I2 fixture to its production
 `public_value_*` counterpart, including the compile-time no-equality/no-hash

@@ -456,13 +456,7 @@ fn prepare_active_pair_step(
             match reduction.kind {
                 ReductionKind::Stuck => return Err(stuck_pair_error_in(access, pair)),
                 ReductionKind::RemoteCursor { cursor, progress } => {
-                    let progress = if progress == crate::interaction_net::CursorProgress::Claimed {
-                        access
-                            .advance_claimed_cursor(cursor)
-                            .expect("claimed cursor must advance")
-                    } else {
-                        progress
-                    };
+                    debug_assert_ne!(progress, crate::interaction_net::CursorProgress::Claimed);
                     if progress == crate::interaction_net::CursorProgress::Blocked {
                         driver
                             .worklist
