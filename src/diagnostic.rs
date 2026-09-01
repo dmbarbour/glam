@@ -2,7 +2,6 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::core::{Builtin, CoreValueFactory, Dict, List, OpaqueValue, Value, keys};
-use crate::eval;
 use crate::number::Number;
 use crate::source::{ContentDigest, SourceArtifact, SourceIdentity};
 
@@ -218,13 +217,8 @@ pub(crate) fn apply_updates(
     updates: Value,
 ) -> Result<Value, crate::core::EvaluationHalt> {
     let context = crate::evaluation::EvalContext::isolated(values.clone());
-    let extension_defs = Value::builtin_call(values, Builtin::ObjectOverrideDefs, vec![updates]);
-    let value = eval::apply_values(
-        &context,
-        Value::Builtin(Builtin::ObjectWithDefs),
-        vec![message, extension_defs],
-    )?;
-    eval::eval_value(&context, &value)
+    let extension_defs = context.compose_builtin(Builtin::ObjectOverrideDefs, vec![updates]);
+    context.evaluate_builtin_whnf(Builtin::ObjectWithDefs, vec![message, extension_defs])
 }
 
 /// Turns a diagnostic emission into an object when needed, then applies an
@@ -279,7 +273,7 @@ pub(crate) fn prepend_contexts_with(
     let context = crate::evaluation::EvalContext::isolated(values.clone());
     let existing = match &message {
         Value::Dict(message) => match message.get(&*keys::MSG) {
-            Some(interface) => match eval::eval_value(&context, interface)? {
+            Some(interface) => match context.evaluate_whnf(interface)? {
                 Value::Dict(interface) => match interface.get(&*keys::CONTEXT) {
                     Some(Value::List(contexts)) => contexts.clone(),
                     Some(context) => List::from_values(vec![context.clone()]),
@@ -320,11 +314,11 @@ fn diagnostic_object(
     message: Value,
 ) -> Result<Value, crate::core::EvaluationHalt> {
     let context = crate::evaluation::EvalContext::isolated(values.clone());
-    let message = eval::eval_value(&context, &message)?;
+    let message = context.evaluate_whnf(&message)?;
     let has_defined_spec = match &message {
         Value::Dict(message) => match message.get(&*keys::SPEC) {
             Some(spec) => {
-                let spec = eval::eval_value(&context, spec)?;
+                let spec = context.evaluate_whnf(spec)?;
                 !matches!(spec, Value::Dict(spec) if spec.is_empty())
             }
             None => false,
@@ -334,12 +328,7 @@ fn diagnostic_object(
     let message = if has_defined_spec {
         message
     } else {
-        let message = eval::apply_values(
-            &context,
-            Value::Builtin(Builtin::ObjectFromDict),
-            vec![message],
-        )?;
-        eval::eval_value(&context, &message)?
+        context.evaluate_builtin_whnf(Builtin::ObjectFromDict, vec![message])?
     };
     Ok(message)
 }
@@ -374,29 +363,29 @@ pub(crate) fn conventional_summary_with(
     message: &Value,
 ) -> (Option<usize>, Option<Arc<str>>) {
     let context = crate::evaluation::EvalContext::isolated(values.clone());
-    let Ok(Value::Dict(message)) = eval::eval_value(&context, message) else {
+    let Ok(Value::Dict(message)) = context.evaluate_whnf(message) else {
         return (None, None);
     };
     let Some(interface) = message.get(&*keys::MSG) else {
         return (None, None);
     };
-    let Ok(Value::Dict(interface)) = eval::eval_value(&context, interface) else {
+    let Ok(Value::Dict(interface)) = context.evaluate_whnf(interface) else {
         return (None, None);
     };
     let text = interface.get(&*keys::TEXT).and_then(|value| {
-        let Value::Binary(bytes) = eval::eval_value(&context, value).ok()? else {
+        let Value::Binary(bytes) = context.evaluate_whnf(value).ok()? else {
             return None;
         };
         Some(Arc::from(String::from_utf8_lossy(&bytes).as_ref()))
     });
     let line = interface
         .get(&*keys::LOCATION)
-        .and_then(|value| eval::eval_value(&context, value).ok())
+        .and_then(|value| context.evaluate_whnf(value).ok())
         .and_then(|value| match value {
             Value::Dict(location) => location.get(&*keys::LINE).cloned(),
             _ => None,
         })
-        .and_then(|value| eval::eval_value(&context, &value).ok())
+        .and_then(|value| context.evaluate_whnf(&value).ok())
         .and_then(|value| match value {
             Value::Number(number) => number.to_i64_if_integer(),
             _ => None,

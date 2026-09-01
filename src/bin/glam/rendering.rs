@@ -25,14 +25,18 @@ impl DefaultLogger {
     }
 
     pub(super) fn emit(&self, diagnostic: &Diagnostic) {
+        let mut stderr = io::stderr().lock();
+        let _ = self.emit_to(diagnostic, &mut stderr);
+    }
+
+    fn emit_to(&self, diagnostic: &Diagnostic, writer: &mut impl Write) -> io::Result<()> {
         let terminal = TerminalContext::snapshot();
         let rendered = self
             .format_diagnostic(diagnostic, &terminal)
             .unwrap_or_else(|_| {
                 Bytes::from(self.render(diagnostic, diagnostic.message(), &terminal))
             });
-
-        let _ = io::stderr().lock().write_all(&rendered);
+        writer.write_all(&rendered)
     }
 
     fn format_diagnostic(
@@ -619,6 +623,23 @@ impl TerminalColor {
 mod tests {
     use super::*;
 
+    struct CollectingWriter {
+        heap: glam_gc::Heap,
+        bytes: Vec<u8>,
+    }
+
+    impl Write for CollectingWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.heap.collect_full().map_err(io::Error::other)?;
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
     trait TestValueFacade {
         fn get(&self, root: &Value, path: &str) -> Result<Value, Error>;
         fn get_evaluated(&self, root: &Value, path: &str) -> Result<glam::EvaluatedValue, Error>;
@@ -673,6 +694,28 @@ mod tests {
             rendered,
             Bytes::from_static(b"src/test.g:4: warning: first\n    second\n    \n    fourth\n")
         );
+    }
+
+    #[test]
+    fn diagnostic_rendering_invokes_writer_without_mutator() {
+        let evaluator = Assembler::default();
+        let values = evaluator.values();
+        let logger = DefaultLogger {
+            formatter: evaluator.default_diagnostic_formatter(),
+            evaluator,
+            working_directory: PathBuf::from("/work"),
+        };
+        let diagnostic = Diagnostic::new(&values, Severity::Info, "rendered");
+        let mut writer = CollectingWriter {
+            heap: glam_gc::Heap::new_with_policy(glam_gc::CollectionPolicy::NoAuto),
+            bytes: Vec::new(),
+        };
+
+        logger
+            .emit_to(&diagnostic, &mut writer)
+            .expect("terminal writing should run without any inherited mutator");
+
+        assert_eq!(writer.bytes, b"info: rendered\n");
     }
 
     #[test]

@@ -61,9 +61,13 @@ impl LoggerSupervisor {
     where
         F: Fn(Diagnostic) -> Result<(), Error> + Send + Sync + 'static,
     {
+        let decode_values = input.runtime.values();
         let endpoint = input
             .runtime
-            .output_endpoint(|value| Diagnostic::from_transport_value(&value), fallback)
+            .output_endpoint(
+                move |value| Diagnostic::from_transport_value(&decode_values, &value),
+                fallback,
+            )
             .expect("default logger output endpoint should be constructible");
         let (writer, fallback_delivery) = endpoint.into_parts();
         input
@@ -447,7 +451,7 @@ impl LogHost {
                 {
                     glam::reflection::StoreCommitResult::Committed => {
                         return Some(
-                            Diagnostic::from_transport_value(&value)
+                            Diagnostic::from_transport_value(&self.runtime.values(), &value)
                                 .expect("diagnostic ingress stores transport envelopes"),
                         );
                     }

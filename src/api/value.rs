@@ -106,7 +106,7 @@ pub struct Values {
 /// This carrier is private and lifetime-bound: public constructors may batch
 /// nested semantic helpers through it, but callbacks and durable public state
 /// retain only [`Values`] or rooted [`Value`] handles.
-struct ScopedValues<'scope> {
+pub(super) struct ScopedValues<'scope> {
     owner: &'scope Values,
     access: RuntimeValueAccess<'scope>,
 }
@@ -232,7 +232,10 @@ impl Values {
         &self.core
     }
 
-    fn with_access<R>(&self, operation: impl for<'scope> FnOnce(ScopedValues<'scope>) -> R) -> R {
+    pub(super) fn with_access<R>(
+        &self,
+        operation: impl for<'scope> FnOnce(ScopedValues<'scope>) -> R,
+    ) -> R {
         self.core.with_runtime_value_access(|access| {
             debug_assert!(access.belongs_to(&self.core));
             operation(ScopedValues {
@@ -574,7 +577,7 @@ impl ScopedValues<'_> {
         self.owner.core()
     }
 
-    fn wrap(&self, value: CoreValue) -> Value {
+    pub(super) fn wrap(&self, value: CoreValue) -> Value {
         debug_assert_eq!(self.owner.runtime, self.core().runtime_id());
         debug_assert!(self.access.belongs_to(self.core()));
         Value(RuntimeValueRoot::new(self.core(), value))
@@ -584,7 +587,7 @@ impl ScopedValues<'_> {
         self.owner.require(value)
     }
 
-    fn core_value<'access>(
+    pub(super) fn core_value<'access>(
         &'access self,
         value: &'access Value,
     ) -> Result<&'access CoreValue, Error> {
@@ -662,6 +665,22 @@ impl Value {
         matches!(self.0.as_core(), CoreValue::Dict(dict) if dict.is_empty())
     }
 
+    #[cfg(test)]
+    pub(crate) fn as_binary(&self) -> Option<&[u8]> {
+        match self.0.as_core() {
+            CoreValue::Binary(bytes) => Some(bytes.as_ref()),
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn as_i64(&self) -> Option<i64> {
+        match self.0.as_core() {
+            CoreValue::Number(number) => number.to_i64_if_integer(),
+            _ => None,
+        }
+    }
+
     pub(crate) fn kind(&self) -> ValueKind {
         match self.0.as_core() {
             CoreValue::Atom(_) => ValueKind::Atom,
@@ -676,20 +695,6 @@ impl Value {
             CoreValue::Lazy(_) | CoreValue::Promised(_) => ValueKind::Lazy,
             CoreValue::Metadata(_) => ValueKind::Sealed,
             CoreValue::Opaque(_) => ValueKind::Opaque,
-        }
-    }
-
-    pub(crate) fn as_binary(&self) -> Option<&[u8]> {
-        match self.0.as_core() {
-            CoreValue::Binary(bytes) => Some(bytes.as_ref()),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn as_i64(&self) -> Option<i64> {
-        match self.0.as_core() {
-            CoreValue::Number(number) => number.to_i64_if_integer(),
-            _ => None,
         }
     }
 

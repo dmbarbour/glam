@@ -126,6 +126,11 @@ fn runtime_input_conversion_precedes_admission_and_stores_only_roots() {
     let endpoint = runtime
         .input_endpoint(move |payload: HostPayload| {
             assert!(converter_runtime.exclusive_admission_available());
+            converter_runtime
+                .values()
+                .core()
+                .collect_managed_for_test()
+                .expect("input conversion must not inherit a managed-access region");
             let HostPayload(lease) = payload;
             drop(lease);
             Ok(values.text("rooted"))
@@ -160,6 +165,60 @@ fn runtime_input_conversion_precedes_admission_and_stores_only_roots() {
     assert_eq!(
         record.payload.value(runtime.id()).as_binary(),
         Some(b"rooted".as_slice())
+    );
+}
+
+#[test]
+fn event_delivery_invokes_callback_without_mutator() {
+    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+    let decode_values = runtime.values().core().clone();
+    let adapter_values = decode_values.clone();
+    let callback_order = Arc::new(Mutex::new(Vec::new()));
+    let decode_order = callback_order.clone();
+    let adapter_order = callback_order.clone();
+    let endpoint = runtime
+        .output_endpoint(
+            move |value| {
+                decode_values
+                    .collect_managed_for_test()
+                    .expect("output decode must not inherit a managed-access region");
+                decode_order
+                    .lock()
+                    .expect("callback-order mutex should not be poisoned")
+                    .push("decode");
+                decode_test_integer(value)
+            },
+            move |value| {
+                adapter_values
+                    .collect_managed_for_test()
+                    .expect("output adapter must not inherit a managed-access region");
+                adapter_order
+                    .lock()
+                    .expect("callback-order mutex should not be poisoned")
+                    .push("adapter");
+                assert_eq!(value, 42);
+                Ok(())
+            },
+        )
+        .expect("output endpoint should register");
+    let (store, mut events) = input_transaction(&runtime);
+    events
+        .write(&endpoint.writer(), runtime.values().integer(42))
+        .expect("output should journal");
+    assert_eq!(
+        runtime.try_commit_transaction(&store, &events),
+        crate::reflection::StoreCommitResult::Committed
+    );
+
+    assert!(matches!(
+        endpoint.delivery().deliver_next().unwrap(),
+        Some(RuntimeDeliveryOutcome::Delivered(_))
+    ));
+    assert_eq!(
+        *callback_order
+            .lock()
+            .expect("callback-order mutex should not be poisoned"),
+        ["decode", "adapter"]
     );
 }
 

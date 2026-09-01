@@ -11,7 +11,7 @@ use std::sync::{Arc, OnceLock};
 
 use rpds::RedBlackTreeMapSync;
 
-use crate::core::{CoreValueFactory, EvaluationFailure, LazyValue, PromisedValue, Value};
+use crate::core::{Builtin, CoreValueFactory, EvaluationFailure, LazyValue, PromisedValue, Value};
 use crate::core_net::CoreWaitToken;
 use crate::runtime::RuntimeValueRoot;
 
@@ -651,6 +651,26 @@ impl EvalContext {
                 unreachable!("client failures are returned by drive_client_demand")
             }
         }
+    }
+
+    /// Constructs one semantic builtin call inside a callback-free value
+    /// access region. The returned value is durable, but the access carrier
+    /// and its mutator cannot escape the higher-ranked callback.
+    pub(crate) fn compose_builtin(&self, builtin: Builtin, arguments: Vec<Value>) -> Value {
+        self.values().with_runtime_value_access(|_access| {
+            Value::builtin_call(self.values(), builtin, arguments)
+        })
+    }
+
+    /// Composes and demands a builtin call without carrying managed access
+    /// through scheduler pumping, waits, reflection, or host callbacks.
+    pub(crate) fn evaluate_builtin_whnf(
+        &self,
+        builtin: Builtin,
+        arguments: Vec<Value>,
+    ) -> Result<Value, crate::core::EvaluationHalt> {
+        let value = self.compose_builtin(builtin, arguments);
+        self.evaluate_whnf(&value)
     }
 
     fn drive_client_demand(

@@ -10,7 +10,7 @@ use super::runtime::{
     route_runtime_diagnostic_guarded, set_runtime_diagnostic_route,
     set_runtime_diagnostic_route_guarded,
 };
-use super::{Error, EvaluationRuntime, Value, ValueKind, Values};
+use super::{Error, EvaluationRuntime, Value, Values};
 use crate::core::{CoreValueFactory, Dict, Key, Value as CoreValue};
 use crate::diagnostic::{CompilationTrace, Severity};
 use crate::evaluation::{TaskStatusPublisher, TaskStatusWake};
@@ -162,82 +162,86 @@ impl Diagnostic {
         if let Some(origin) = &self.origin {
             origin.require_runtime(values.runtime)?;
         }
-        let mut fields = Dict::new_sync()
-            .insert(
-                Key::atom_from_text("emission"),
-                self.emission.as_core().clone(),
-            )
-            .insert(
-                Key::atom_from_text("severity"),
-                self.severity.value(values.core()),
-            );
-        if let Some(origin) = &self.origin {
-            fields = fields.insert(Key::atom_from_text("origin"), origin.as_core().clone());
-        }
-        if let Some(source) = &self.source {
-            fields = fields.insert(
-                Key::atom_from_text("source"),
-                CoreValue::binary_from_text(source.as_ref()),
-            );
-        }
-        if let Some(line) = self.line {
-            fields = fields.insert(
-                Key::atom_from_text("line"),
-                CoreValue::Number(Number::integer(line as i64)),
-            );
-        }
-        Ok(values.wrap(CoreValue::Dict(fields)))
+        values.with_access(|access| {
+            let mut fields = Dict::new_sync()
+                .insert(
+                    Key::atom_from_text("emission"),
+                    access.core_value(&self.emission)?.clone(),
+                )
+                .insert(
+                    Key::atom_from_text("severity"),
+                    self.severity.value(values.core()),
+                );
+            if let Some(origin) = &self.origin {
+                fields = fields.insert(
+                    Key::atom_from_text("origin"),
+                    access.core_value(origin)?.clone(),
+                );
+            }
+            if let Some(source) = &self.source {
+                fields = fields.insert(
+                    Key::atom_from_text("source"),
+                    CoreValue::binary_from_text(source.as_ref()),
+                );
+            }
+            if let Some(line) = self.line {
+                fields = fields.insert(
+                    Key::atom_from_text("line"),
+                    CoreValue::Number(Number::integer(line as i64)),
+                );
+            }
+            Ok(access.wrap(CoreValue::Dict(fields)))
+        })
     }
 
     #[doc(hidden)]
-    pub fn from_transport_value(value: &Value) -> Result<Self, Error> {
-        let runtime = value.runtime_id();
-        let ValueKind::Dict = value.kind() else {
-            return Err(Error::new("diagnostic transport requires a dictionary"));
-        };
-        let field = |name: &str| {
-            let CoreValue::Dict(fields) = value.as_core() else {
-                unreachable!()
+    pub fn from_transport_value(values: &Values, value: &Value) -> Result<Self, Error> {
+        value.require_runtime(values.runtime)?;
+        values.with_access(|access| {
+            let CoreValue::Dict(fields) = access.core_value(value)? else {
+                return Err(Error::new("diagnostic transport requires a dictionary"));
             };
-            fields
-                .get(&Key::atom_from_text(name))
+            let field = |name: &str| fields.get(&Key::atom_from_text(name));
+            let emission = field("emission")
                 .cloned()
-                .map(|field| Value::from_runtime(runtime, field))
-        };
-        let emission = field("emission")
-            .ok_or_else(|| Error::new("diagnostic transport is missing `emission`"))?;
-        let severity = match field("severity").and_then(|value| Key::from_value(value.as_core())) {
-            Some(value) if value == *crate::core::keys::INFO => Severity::Info,
-            Some(value) if value == *crate::core::keys::WARN => Severity::Warning,
-            Some(value) if value == *crate::core::keys::ERROR => Severity::Error,
-            _ => return Err(Error::new("diagnostic transport has an invalid severity")),
-        };
-        let source = field("source")
-            .map(|source| {
-                source
-                    .as_binary()
-                    .and_then(|source| std::str::from_utf8(source).ok())
-                    .map(Arc::<str>::from)
-                    .ok_or_else(|| Error::new("diagnostic transport source must be text"))
+                .ok_or_else(|| Error::new("diagnostic transport is missing `emission`"))?;
+            let severity = match field("severity").and_then(Key::from_value) {
+                Some(value) if value == *crate::core::keys::INFO => Severity::Info,
+                Some(value) if value == *crate::core::keys::WARN => Severity::Warning,
+                Some(value) if value == *crate::core::keys::ERROR => Severity::Error,
+                _ => return Err(Error::new("diagnostic transport has an invalid severity")),
+            };
+            let source = field("source")
+                .map(|source| {
+                    let CoreValue::Binary(source) = source else {
+                        return Err(Error::new("diagnostic transport source must be text"));
+                    };
+                    std::str::from_utf8(source)
+                        .map(Arc::<str>::from)
+                        .map_err(|_| Error::new("diagnostic transport source must be text"))
+                })
+                .transpose()?;
+            let line = field("line")
+                .map(|line| {
+                    let CoreValue::Number(line) = line else {
+                        return Err(Error::new("diagnostic transport line must be nonnegative"));
+                    };
+                    line.to_i64_if_integer()
+                        .and_then(|line| usize::try_from(line).ok())
+                        .ok_or_else(|| Error::new("diagnostic transport line must be nonnegative"))
+                })
+                .transpose()?;
+            let origin = field("origin").cloned().map(|origin| access.wrap(origin));
+            let (projected_line, message) = crate::diagnostic::conventional_summary(&emission);
+            Ok(Self {
+                emission: access.wrap(emission),
+                origin,
+                source,
+                severity,
+                line: line.or(projected_line),
+                message: message
+                    .unwrap_or_else(|| Arc::from("<diagnostic has no immediate text view>")),
             })
-            .transpose()?;
-        let line = field("line")
-            .map(|line| {
-                line.as_i64()
-                    .and_then(|line| usize::try_from(line).ok())
-                    .ok_or_else(|| Error::new("diagnostic transport line must be nonnegative"))
-            })
-            .transpose()?;
-        let origin = field("origin");
-        let (projected_line, message) = crate::diagnostic::conventional_summary(emission.as_core());
-        Ok(Self {
-            emission,
-            origin,
-            source,
-            severity,
-            line: line.or(projected_line),
-            message: message
-                .unwrap_or_else(|| Arc::from("<diagnostic has no immediate text view>")),
         })
     }
 

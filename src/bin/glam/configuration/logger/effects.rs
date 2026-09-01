@@ -148,7 +148,7 @@ fn read_log(
             .read(&diagnostic_reader)
             .map_err(glam::reflection::TaskHalt::from)?
         {
-            return Diagnostic::from_transport_value(&value)
+            return Diagnostic::from_transport_value(&context.host().resources.values(), &value)
                 .and_then(|diagnostic| diagnostic.enrich(&context.host().resources.values()))
                 .map(RequestResult::Return)
                 .map_err(glam::reflection::TaskHalt::from);
@@ -168,7 +168,7 @@ fn read_log(
         else {
             return Ok(RequestResult::Fail);
         };
-        let value = Diagnostic::from_transport_value(&value)
+        let value = Diagnostic::from_transport_value(&context.host().resources.values(), &value)
             .and_then(|diagnostic| diagnostic.enrich(&context.host().resources.values()))
             .map_err(glam::reflection::TaskHalt::from)?;
         let commit = TaskCommit::new(
@@ -220,10 +220,11 @@ impl LoggerTaskHost {
             .expect("logger output bus must belong to the logger runtime");
         let diagnostic_bus = diagnostics.clone();
         let runtime_id = input.runtime.id();
+        let decode_values = input.runtime.values();
         let diagnostic_output = input
             .runtime
             .output_endpoint(
-                |value| Diagnostic::from_transport_value(&value),
+                move |value| Diagnostic::from_transport_value(&decode_values, &value),
                 move |diagnostic| {
                     diagnostic_bus.publish_from_runtime(runtime_id, diagnostic)?;
                     Ok(())

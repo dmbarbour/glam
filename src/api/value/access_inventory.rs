@@ -84,7 +84,7 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/api/diagnostics.rs",
-        [10, 5, 3, 3, 0, 0],
+        [5, 5, 3, 2, 0, 0],
         "diagnostic construction, enrichment, projection, and transport",
         "I3E.3 callback regions; I4F.1 diagnostic roots"
     ),

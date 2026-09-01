@@ -47,12 +47,6 @@ impl EntryCounts {
     }
 }
 
-struct InventoryEntry {
-    path: &'static str,
-    counts: EntryCounts,
-    owner: &'static str,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ContextCounts {
     scoped: usize,
@@ -117,18 +111,6 @@ macro_rules! context_entry {
         }
     };
 }
-
-macro_rules! entry {
-    ($path:literal, $counts:expr, $owner:literal) => {
-        InventoryEntry {
-            path: $path,
-            counts: EntryCounts::new($counts),
-            owner: $owner,
-        }
-    };
-}
-
-const INVENTORY: &[InventoryEntry] = &[entry!("src/diagnostic.rs", [10, 2, 0, 0, 0], "I3E.3")];
 
 /// Every evaluator function which already carries scoped access, plus every
 /// deliberate durable-context seam which later checkpoints must split.
@@ -383,16 +365,7 @@ fn direct_evaluator_compatibility_entries_are_complete() {
             (!counts.is_empty()).then(|| (relative.to_path_buf(), counts))
         })
         .collect::<BTreeMap<_, _>>();
-    let expected = INVENTORY
-        .iter()
-        .map(|entry| {
-            assert!(
-                !entry.owner.is_empty(),
-                "every entry needs a migration owner"
-            );
-            (PathBuf::from(entry.path), entry.counts)
-        })
-        .collect::<BTreeMap<_, _>>();
+    let expected = BTreeMap::<PathBuf, EntryCounts>::new();
 
     assert_eq!(actual, expected);
 }

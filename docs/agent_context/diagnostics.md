@@ -66,6 +66,8 @@ client-owned rendering. Current flow lives in
 - Runtime ingress prepares its transport root before mutation admission. A
   valid bus publication remains counted if ingress preparation fails; that
   transport failure remains separately reportable.
+- Diagnostic transport encode/decode requires the matching runtime `Values`
+  service. Do not inspect a transport `Value` without bounded runtime access.
 
 ## Logger and Rendering Boundaries
 
@@ -76,6 +78,10 @@ client-owned rendering. Current flow lives in
 - Logger input claims, heap edits, and output intents commit atomically. Host
   decoding and callbacks happen after all runtime locks and mutation admission
   are released.
+- Input conversion finishes before mutation admission. Output decode,
+  adaptation, diagnostic subscribers, and terminal writers must also run
+  without inherited managed-mutator authority; retain roots or owned bytes
+  across those boundaries.
 - Diagnostic consumer route activation and logger-root activation occur under
   one exclusive settlement guard. Never expose a live route without its root.
 - Nested context frames with a `msg` interface are enriched and rendered as

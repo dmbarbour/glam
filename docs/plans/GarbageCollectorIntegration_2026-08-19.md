@@ -2052,19 +2052,44 @@ entries; only I3E.3 diagnostic helpers remain on the latter list.
 
 ### Phase I3E.3 — Event, Diagnostic, and Executable Callback Regions
 
-- Enclose runtime input/output value conversion, diagnostic enrichment,
-  contextual composition, and rendering evaluation in explicit bounded
-  scopes. Retain the existing ordering in which input conversion precedes
-  mutation admission and output decode/adapter callbacks follow guarded
-  delivery detachment.
-- Release authority before delivery endpoints, diagnostic bus callbacks,
-  terminal writers, source systems, and executable policy callbacks. Parked
-  host records retain roots, never scoped borrows, poll contexts, or mutators.
+- **I3E.3a — Diagnostic semantic demand.** Replace the remaining diagnostic
+  helper calls through the direct evaluator compatibility API with ordinary
+  client demand. Construct each semantic application in a bounded,
+  callback-free value-access region, retain its runtime root across demand,
+  and project only after completion. Diagnostic enrichment and contextual
+  composition may share an evaluation session, but never a scoped mutator.
+- **I3E.3b — Transactional event conversion and delivery.** Enclose runtime
+  input/output value conversion in explicit bounded scopes. Retain the
+  existing ordering in which input conversion and rooting finish before
+  mutation admission, while output payloads are detached into a retained
+  delivery ticket before decode and adapter callbacks run. Delivery
+  terminalization reacquires guarded runtime state only after the callbacks.
+- **I3E.3c — Rendering and executable callbacks.** Keep rendering evaluation
+  and value extraction separate from terminal writers, diagnostic bus
+  subscribers, source systems, and executable policy callbacks. Parked host
+  records retain roots or owned host data, never scoped borrows, poll
+  contexts, or mutators. Close the source-backed direct-evaluator inventory
+  once the diagnostic remainder is gone.
 
 Verification: `event_delivery_invokes_callback_without_mutator`,
 `diagnostic_rendering_invokes_writer_without_mutator`, and input/output
 forced-order tests prove retained values survive while no managed authority
 crosses a host boundary. Production remains `NoAuto`.
+
+I3E.3 completed on 2026-09-01. Diagnostic object construction now composes
+builtin calls in bounded value-access regions and demands them through the
+runtime's client-demand service; the source-tree latch records no remaining
+external direct-evaluator entries. Diagnostic transport encoding and decoding
+require the matching `Values` service and perform their complete structural
+projection under scoped access.
+
+Input conversion is forced before mutation admission, while output payloads
+remain rooted through guarded claim and are decoded and delivered only after
+the claim guard is released. Forced collections in input conversion, output
+decode, output adaptation, diagnostic subscribers, and an injected terminal
+writer verify that none inherits a mutator. The terminal writer receives
+owned rendered bytes, and diagnostic/output callbacks reacquire guarded state
+only after returning. Production remains `NoAuto`.
 
 ### Phase I3F — Multi-Runtime and Exit Audit
 

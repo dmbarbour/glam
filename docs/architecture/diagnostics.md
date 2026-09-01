@@ -84,6 +84,9 @@ each structured diagnostic to a runtime-rooted transport value before entering
 runtime mutation admission. Valid bus publication remains counted even if
 transport preparation fails; the ingress retains that terminal transport
 failure and ordinary bus subscribers still receive the event.
+Encoding and decoding both require the matching runtime's `Values` service;
+the transport envelope is projected only inside its bounded value-access
+region and cannot be decoded as a freestanding opaque `Value`.
 
 The active ingress route initially points to a generic runtime input endpoint.
 Its authoritative FIFO contains runtime roots, not a typed Rust diagnostic
@@ -109,6 +112,12 @@ identified outbox records in per-endpoint order. Delivery later claims one
 record, releases every runtime lock, decodes the retained root, and invokes the
 host callback. Independent endpoints may deliver concurrently; one endpoint
 preserves commit order.
+
+Input converters run and finish rooting before mutation admission. Output
+decoders and adapters run after a delivery ticket has detached the retained
+root from guarded state, and delivery terminalization reacquires runtime state
+only after both callbacks return. None of these host callbacks inherits a
+managed mutator.
 
 The event layer transports unrestricted values and neither forces them nor
 uses outer WHNF as an admission policy. `.log` places its possibly lazy message
@@ -148,6 +157,9 @@ not republished and does not affect bus counts.
 Formatting failure uses a minimal Rust renderer. That fallback is a last-mile
 presentation path; it does not replace or acknowledge the authoritative task,
 delivery, exit, or killed-work failure which caused the message.
+Both Glam formatting and fallback rendering finish into owned bytes before the
+terminal writer is invoked, so a writer is another mutator-free host callback
+rather than an extension of evaluation.
 
 ## Logger Completion and Fallback
 

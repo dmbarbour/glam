@@ -234,7 +234,7 @@ fn diagnostic_consumer_activation_hides_route_root_intermediate_state() {
         .expect("diagnostic input should be readable")
         .expect("post-activation diagnostic should enter the input FIFO");
     assert_eq!(
-        Diagnostic::from_transport_value(&admitted)
+        Diagnostic::from_transport_value(&runtime.values(), &admitted)
             .expect("input should retain a diagnostic envelope")
             .message(),
         "after atomic activation"
@@ -298,7 +298,7 @@ fn diagnostic_ingress_admits_in_bus_sequence_order() {
     let mut received = Vec::new();
     while let Some(value) = journal.read(&reader).expect("ingress should be readable") {
         received.push(
-            Diagnostic::from_transport_value(&value)
+            Diagnostic::from_transport_value(&runtime.values(), &value)
                 .expect("ingress should retain diagnostic envelopes")
                 .message()
                 .to_owned(),
@@ -325,9 +325,10 @@ fn diagnostic_ingress_transfers_buffered_and_later_values_to_fallback() {
     let received = Arc::new(Mutex::new(Vec::new()));
     let callback_values = received.clone();
     let callback_runtime = runtime.clone();
+    let decode_values = runtime.values();
     let fallback = runtime
         .output_endpoint(
-            |value| Diagnostic::from_transport_value(&value),
+            move |value| Diagnostic::from_transport_value(&decode_values, &value),
             move |diagnostic| {
                 assert!(
                     callback_runtime.exclusive_admission_available(),
@@ -410,7 +411,7 @@ fn diagnostic_ingress_transfers_buffered_and_later_values_to_fallback() {
         .expect("rearmed input should be readable")
         .expect("rearmed publication should enter the logger FIFO");
     assert_eq!(
-        Diagnostic::from_transport_value(&value)
+        Diagnostic::from_transport_value(&runtime.values(), &value)
             .expect("rearmed input should remain a diagnostic")
             .message(),
         "rearmed"
@@ -424,9 +425,10 @@ fn diagnostic_fallback_drain_invalidates_a_stale_fifo_claim() {
     let (ingress, reader) = bus
         .diagnostic_ingress(&runtime)
         .expect("ingress should attach");
+    let decode_values = runtime.values();
     let fallback = runtime
         .output_endpoint(
-            |value| Diagnostic::from_transport_value(&value),
+            move |value| Diagnostic::from_transport_value(&decode_values, &value),
             |_: Diagnostic| Ok(()),
         )
         .expect("fallback output should register");
@@ -465,9 +467,10 @@ fn diagnostic_publication_racing_fallback_is_delivered_once_in_sequence_order() 
         .expect("ingress should attach");
     let received = Arc::new(Mutex::new(Vec::new()));
     let callback_values = received.clone();
+    let decode_values = runtime.values();
     let fallback = runtime
         .output_endpoint(
-            |value| Diagnostic::from_transport_value(&value),
+            move |value| Diagnostic::from_transport_value(&decode_values, &value),
             move |diagnostic| {
                 callback_values
                     .lock()
@@ -545,7 +548,7 @@ fn runtime_retains_the_installed_diagnostic_ingress() {
         .expect("retained ingress should remain readable")
         .expect("publication should reach the stable ingress");
     assert_eq!(
-        Diagnostic::from_transport_value(&value)
+        Diagnostic::from_transport_value(&runtime.values(), &value)
             .expect("ingress should retain a diagnostic envelope")
             .message(),
         "still routed"
@@ -561,6 +564,11 @@ fn diagnostic_subscribers_run_after_runtime_admission_is_released() {
         .expect("ingress should attach");
     let callback_runtime = runtime.clone();
     let _subscription = bus.subscribe(DiagnosticCallback(move |_| {
+        callback_runtime
+            .values()
+            .core()
+            .collect_managed_for_test()
+            .expect("diagnostic subscribers must not inherit managed access");
         assert!(
             callback_runtime.exclusive_admission_available(),
             "ordinary callbacks must run outside runtime mutation admission"
