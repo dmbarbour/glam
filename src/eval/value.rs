@@ -133,6 +133,7 @@ pub(crate) fn eval_value_in(
 enum LazyTaskWork {
     Produce,
     Follow(Value),
+    HostCall(Arc<crate::core::HostCallProducer>),
     NetConstruction(Box<NetConstructionMachine>),
 }
 
@@ -186,6 +187,29 @@ impl EvaluationTaskMachine for LazyTaskMachine {
         step_budget: usize,
     ) -> EvaluationMachinePoll {
         let durable_context = self.context.clone();
+        if let LazyTaskWork::HostCall(producer) = &self.work {
+            let producer = Arc::clone(producer);
+            let result = producer();
+            return poll_context.evaluate(&durable_context, |context| match result {
+                Ok(value)
+                    if value.runtime_id() != durable_context.values().runtime_id() =>
+                {
+                    self.fail(
+                        context,
+                        EvaluationHalt::new(format!(
+                            "host call returned a value from evaluation runtime {}, expected evaluation runtime {}",
+                            value.runtime_id().get(),
+                            durable_context.values().runtime_id().get()
+                        )),
+                    )
+                }
+                Ok(value) => {
+                    let value = context.project_root(&value);
+                    self.finish_poll(context, Ok(value))
+                }
+                Err(failure) => self.fail(context, EvaluationHalt::failure(failure)),
+            });
+        }
         poll_context.evaluate(&durable_context, |context| {
             if let Some(result) = self.lazy.cached() {
                 return match result {
@@ -209,6 +233,10 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                         Err(error) => return self.fail(context, error),
                     };
                     self.work = LazyTaskWork::NetConstruction(Box::new(machine));
+                    return EvaluationMachinePoll::Yielded;
+                }
+                if let LazySource::HostCall(producer) = source {
+                    self.work = LazyTaskWork::HostCall(producer);
                     return EvaluationMachinePoll::Yielded;
                 }
                 let result = produce_lazy_source_in(context, &self.lazy, &source);
@@ -469,7 +497,10 @@ fn produce_lazy_source_in(
         LazySource::ComputedFixpoint(fixpoint) => {
             eval_computed_fixpoint_in(context, lazy, fixpoint)
         }
-        LazySource::Deferred(thunk) => thunk(context.context()),
+        LazySource::SemanticThunk(thunk) => thunk(context),
+        LazySource::HostCall(_) => {
+            unreachable!("a host call must execute outside the evaluator step")
+        }
         LazySource::ReflectionTask(task) => eval_reflection_task_source(context, task),
         LazySource::Access { path, arguments } => resolve_core_access_in(context, arguments, path),
         LazySource::Application(application) => apply_values_in(
@@ -676,6 +707,7 @@ pub(super) fn force_list_thunk_in(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn pop_list_front(
     context: &EvalContext,
     list: &List,

@@ -82,6 +82,32 @@ struct ContextInventoryEntry {
     owner: &'static str,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LazyProducerCounts {
+    semantic_thunk: usize,
+    host_call: usize,
+}
+
+impl LazyProducerCounts {
+    const fn new(semantic_thunk: usize, host_call: usize) -> Self {
+        Self {
+            semantic_thunk,
+            host_call,
+        }
+    }
+
+    fn in_source(source: &str) -> Self {
+        Self {
+            semantic_thunk: source.matches("::semantic_thunk(").count(),
+            host_call: source.matches("::host_call(").count(),
+        }
+    }
+
+    fn is_empty(self) -> bool {
+        self == Self::new(0, 0)
+    }
+}
+
 macro_rules! context_entry {
     ($path:literal, [$scoped:literal, $durable:literal], $owner:literal) => {
         ContextInventoryEntry {
@@ -210,8 +236,8 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/builtins/list_effect/implementation.rs",
-        [5, 1],
-        "I3B.1 list-effect construction; I3E.1 semantic thunk"
+        [6, 0],
+        "I3B.1 list-effect construction; I3E.1 scoped semantic thunk"
     ),
     context_entry!(
         "src/eval/builtins/net.rs",
@@ -308,6 +334,16 @@ fn is_evaluator_surface_source(relative: &Path) -> bool {
         )
 }
 
+fn is_lazy_producer_inventory_source(relative: &Path) -> bool {
+    relative.starts_with("src")
+        && relative != Path::new("src/core.rs")
+        && relative != Path::new("src/eval/access_inventory.rs")
+        && !relative
+            .components()
+            .any(|component| component.as_os_str() == "tests")
+        && relative.file_name().is_none_or(|name| name != "tests.rs")
+}
+
 #[test]
 fn evaluator_context_surfaces_are_complete() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -372,6 +408,50 @@ fn direct_evaluator_compatibility_entries_are_complete() {
             (PathBuf::from(entry.path), entry.counts)
         })
         .collect::<BTreeMap<_, _>>();
+
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn lazy_producer_roles_are_explicit_and_complete() {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut sources = Vec::new();
+    collect_rust_sources(&manifest.join("src"), &mut sources);
+
+    let actual = sources
+        .into_iter()
+        .filter_map(|path| {
+            let relative = path
+                .strip_prefix(manifest)
+                .expect("source path should be below the manifest");
+            if !is_lazy_producer_inventory_source(relative) {
+                return None;
+            }
+            let source = fs::read_to_string(&path).expect("Rust source should be readable");
+            assert!(
+                !source.contains("::deferred("),
+                "{relative:?} must classify lazy producers as semantic thunks or host calls"
+            );
+            let counts = LazyProducerCounts::in_source(&source);
+            (!counts.is_empty()).then(|| (relative.to_path_buf(), counts))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let expected = [
+        (
+            PathBuf::from("src/compiler.rs"),
+            LazyProducerCounts::new(1, 2),
+        ),
+        (
+            PathBuf::from("src/eval/builtins/conditional.rs"),
+            LazyProducerCounts::new(1, 0),
+        ),
+        (
+            PathBuf::from("src/eval/builtins/list_effect/implementation.rs"),
+            LazyProducerCounts::new(1, 0),
+        ),
+    ]
+    .into_iter()
+    .collect::<BTreeMap<_, _>>();
 
     assert_eq!(actual, expected);
 }

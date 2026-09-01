@@ -330,9 +330,9 @@ fn client_demand_can_follow_a_lazy_producer_owned_by_another_session() {
     let observer = fixture.context();
     let coordinator = owner.coordinator().expect("coordinator should be live");
     let promise = PromisedValue::new(owner.values(), "cross-session lazy input");
-    let lazy = LazyValue::deferred(owner.values(), "cross-session client lazy", {
+    let lazy = LazyValue::semantic_thunk(owner.values(), "cross-session client lazy", {
         let promise = promise.clone();
-        move |context| crate::eval::eval_value(context, &Value::Promised(promise.clone()))
+        move |context| crate::eval::eval_value_in(context, &Value::Promised(promise.clone()))
     });
     let root = RuntimeValueRoot::new(owner.values(), Value::Lazy(lazy.clone()));
     let owner_demand = owner
@@ -1320,7 +1320,7 @@ fn inert_lazy(label: &'static str) -> LazyValue {
 }
 
 fn inert_lazy_for(values: &CoreValueFactory, label: &'static str) -> LazyValue {
-    LazyValue::deferred(values, label, |_| {
+    LazyValue::semantic_thunk(values, label, |_| {
         panic!("scheduler cycle fixtures must use their installed test machine")
     })
 }
@@ -2268,7 +2268,7 @@ fn scheduled_nested_dependency_runs_without_mutator() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();
     let nested_had_no_mutator = Arc::new(AtomicBool::new(false));
-    let nested = LazyValue::deferred(context.values(), "nested scheduled dependency", {
+    let nested = LazyValue::semantic_thunk(context.values(), "nested scheduled dependency", {
         let values = context.values().clone();
         let nested_had_no_mutator = nested_had_no_mutator.clone();
         move |_| {
@@ -2279,9 +2279,10 @@ fn scheduled_nested_dependency_runs_without_mutator() {
     });
 
     let nested_for_outer = nested.clone();
-    let outer = LazyValue::deferred(context.values(), "outer scheduled dependency", move |ctx| {
-        crate::eval::eval_value(ctx, &Value::Lazy(nested_for_outer.clone()))
-    });
+    let outer =
+        LazyValue::semantic_thunk(context.values(), "outer scheduled dependency", move |ctx| {
+            crate::eval::eval_value_in(ctx, &Value::Lazy(nested_for_outer.clone()))
+        });
 
     assert_eq!(
         crate::eval::eval_value(&context, &Value::Lazy(outer)),
@@ -2519,7 +2520,7 @@ fn terminal_wait_tokens_outlive_their_owner_session() {
     };
     let deferred_wait = {
         let owner = fixture.context();
-        let lazy = LazyValue::deferred(owner.values(), "owner lifetime", |_| {
+        let lazy = LazyValue::semantic_thunk(owner.values(), "owner lifetime", |_| {
             panic!("the terminal wait fixture supplies its own task machine")
         });
         let wait = owner
@@ -2672,7 +2673,7 @@ fn abandoned_lazy_claim_can_be_reclaimed_without_poisoning_the_lazy() {
     let (lazy, abandoned_wait, expected) = {
         let owner = fixture.context();
         let expected = owner.values().unit();
-        let lazy = LazyValue::deferred(owner.values(), "reclaimable lazy", {
+        let lazy = LazyValue::semantic_thunk(owner.values(), "reclaimable lazy", {
             let forced = forced.clone();
             let expected = expected.clone();
             move |_| {
@@ -2974,7 +2975,7 @@ fn long_lived_session_retains_only_unacknowledged_terminal_failures() {
         assert_eq!(cancellation.cancel(), EvaluationTaskCancellation::Requested);
         cancelled.push(cancellation);
 
-        let lazy = LazyValue::deferred(
+        let lazy = LazyValue::semantic_thunk(
             &crate::core::test_value_factory(),
             format!("successful lazy {index}"),
             |_| Ok(crate::core::keys::unit_value()),
@@ -2985,7 +2986,7 @@ fn long_lived_session_retains_only_unacknowledged_terminal_failures() {
             crate::core::keys::unit_value()
         );
 
-        let lazy = LazyValue::deferred(
+        let lazy = LazyValue::semantic_thunk(
             &crate::core::test_value_factory(),
             format!("failed lazy {index}"),
             |_| Err(crate::core::EvaluationHalt::new("long-lived lazy failure")),
@@ -4250,7 +4251,7 @@ fn zero_worker_executor_drops_sparks_without_forcing_them() {
     let (coordinator, _executor) = test_execution_resources(0).unwrap();
     let session = EvaluationSession::shared(&coordinator);
     let context = EvalContext::new(&session);
-    let lazy = crate::core::LazyValue::deferred(
+    let lazy = crate::core::LazyValue::semantic_thunk(
         &crate::core::test_value_factory(),
         "unforced spark",
         |_| panic!("zero-worker spark must never be evaluated"),
@@ -4638,7 +4639,7 @@ fn forced_kill_abandons_a_deferred_lazy_claim_without_poisoning_the_lazy() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();
     let expected = context.values().unit();
-    let lazy = LazyValue::deferred(context.values(), "reclaim after forced kill", {
+    let lazy = LazyValue::semantic_thunk(context.values(), "reclaim after forced kill", {
         let expected = expected.clone();
         move |_| Ok(expected.clone())
     });
@@ -5163,7 +5164,7 @@ fn spark_abandonment_wakes_useful_work_for_another_pump_pass() {
     coordinator.executor_started(1);
     let promise = PromisedValue::new(context.values(), "spark-owned deferred wait");
     let followed = promise.clone();
-    let lazy = LazyValue::deferred(context.values(), "spark-owned lazy claim", move |_| {
+    let lazy = LazyValue::semantic_thunk(context.values(), "spark-owned lazy claim", move |_| {
         Ok(Value::Promised(followed.clone()))
     });
     let wait = context
@@ -5413,7 +5414,7 @@ fn wait_completion_wakes_only_its_exact_spark_after_unrelated_task_progress() {
     };
     coordinator.requeue_unpolled_task(claimed);
     for wait in [wait_a.wait(), wait_b.wait()] {
-        context.spark(Value::Lazy(LazyValue::deferred(
+        context.spark(Value::Lazy(LazyValue::semantic_thunk(
             context.values(),
             "manually parked wait spark",
             |_| panic!("the coordinator test parks this demand before evaluation"),
@@ -5486,9 +5487,10 @@ fn closing_a_session_abandons_a_blocked_spark_and_releases_its_lazy_claim() {
     let context = EvalContext::new(&session);
     let promise = PromisedValue::new(context.values(), "blocked spark assignment");
     let followed_promise = promise.clone();
-    let lazy = LazyValue::deferred(context.values(), "reusable spark claim", move |context| {
-        crate::eval::eval_value(context, &Value::Promised(followed_promise.clone()))
-    });
+    let lazy =
+        LazyValue::semantic_thunk(context.values(), "reusable spark claim", move |context| {
+            crate::eval::eval_value_in(context, &Value::Promised(followed_promise.clone()))
+        });
     context.spark(Value::Lazy(lazy.clone()));
     wait_for_spark_work_counts(
         &coordinator,
@@ -5649,12 +5651,13 @@ fn workers_force_sparks_and_poll_ready_reflection_tasks() {
     let context = EvalContext::new(&session);
     let spark_before = context.poll_context_count();
     let (spark_sender, spark_receiver) = mpsc::channel();
-    let lazy = crate::core::LazyValue::deferred(context.values(), "worker spark", move |_| {
-        spark_sender
-            .send(())
-            .expect("spark receiver should remain open");
-        Ok(crate::core::keys::unit_value())
-    });
+    let lazy =
+        crate::core::LazyValue::semantic_thunk(context.values(), "worker spark", move |_| {
+            spark_sender
+                .send(())
+                .expect("spark receiver should remain open");
+            Ok(crate::core::keys::unit_value())
+        });
     context.spark(Value::Lazy(lazy));
     spark_receiver
         .recv_timeout(Duration::from_secs(2))

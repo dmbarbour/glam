@@ -1,6 +1,6 @@
 # Glam GC Integration Plan — 2026-08-19
 
-Status: in progress; Phases I0 through I2 and checkpoints I3A.1-I3D.4 are
+Status: in progress; Phases I0 through I2 and checkpoints I3A.1-I3E.1 are
 complete. Phase I3 is in progress. Collector Gate G1 passed on 2026-08-25.
 The remaining integration work follows the completed owner-matrix,
 stable-ledger, and low-risk checkpoint corrections from the integration
@@ -68,6 +68,11 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I3D.4b | complete | bounded construction-callback demand and scoped result replay |
 | I3D.4c | complete | reflection/net region inventory and lock/wait closure audit |
 | I3D.4 | complete | reflection and net region audit |
+| I3E.1a | complete | scoped semantic-thunk contract and list-effect migration |
+| I3E.1b | complete | rooted host-call phase outside evaluator authority |
+| I3E.1c | complete | module/binary loader migration and stable-content contract preservation |
+| I3E.1d | complete | exhaustive lazy-producer and compatibility-access inventories |
+| I3E.1 | complete | semantic thunks separated from deterministic deferred host calls |
 | I3 | in progress | bounded evaluator/worker mutator regions |
 | I4 | pending | core trace vocabulary and leaf policy |
 | I4.0 | pending | managed-family destruction admission contract |
@@ -1908,12 +1913,12 @@ unclassified dispatcher downgrades, raw core-specialized net ownership
 outside `core_net`, and ordinary durable facade inspection. Production
 remains `NoAuto`; subsystem-local closed fixtures may collect.
 
-### Phase I3E.1 — Semantic Thunks and Deterministic External Demands
+### Phase I3E.1 — Semantic Thunks and Deterministic Deferred Host Calls
 
 - Split the current generic `DeferredComputation` family by operational role.
   Internal semantic thunks remain evaluator-pure and callback-free, receive
   only scoped evaluation access, and may execute within an evaluator region.
-  Module and binary loaders become deterministic external-demand producers:
+  Module and binary loaders become deterministic deferred host calls:
   forcing one reserves or discovers its demand, exits scoped access, invokes
   the host loader, validates the declared content identity or stable secure
   hash, publishes a rooted result, and resumes evaluation through the demand
@@ -1923,15 +1928,60 @@ remains `NoAuto`; subsystem-local closed fixtures may collect.
   reflection remains outside reproducibility. Their producer capabilities,
   cache keys, environments, and error contexts stay distinct.
 - Inventory any remaining `Fn(&EvalContext)` lazy producer. Classify it as a
-  callback-free semantic thunk, an explicit external demand, or a later
+  callback-free semantic thunk, an explicit host call, or a later
   traceable opaque boundary; no arbitrary host callback remains hidden in a
   pure lazy-machine evaluator scope.
 
-Verification: `import_loader_callback_runs_without_mutator`,
-`concurrent_import_demands_share_one_verified_result`, and forced local-file
-replacement/hash mismatch tests cover deterministic demand. A source-backed
-inventory classifies every deferred producer; existing list/conditional lazy
-tests establish the semantic-thunk path. Production remains `NoAuto`.
+Implementation is partitioned after the entry audit:
+
+- **I3E.1a — Scoped semantic-thunk contract.** Rename the undifferentiated
+  deferred source/type to a semantic thunk and give it only
+  `EvaluatorStepContext`. Migrate the internal list-effect thunk and semantic
+  fixtures to scoped evaluator helpers. No semantic thunk accepts a durable
+  `EvalContext` or arbitrary host capability.
+- **I3E.1b — Rooted host-call machine phase.** Add a distinct host-call source
+  whose callback takes no evaluator context and returns a
+  runtime root. The lazy machine first recognizes the source under its normal
+  evaluator phase, yields, invokes the callback in a later mutator-free poll
+  phase, then re-enters a bounded evaluator step to validate/project/cache the
+  rooted result. Same-lazy concurrent observers continue to share the
+  coordinator's one producer and wait token.
+- **I3E.1c — Import-loader migration and content contract.** Make module and
+  binary loaders publish roots from the compilation runtime and construct
+  them as deferred host calls. Preserve `SourceArtifact` digest identity,
+  `FileSourceSystem`'s stable repeated-read check, and final unchanged-file
+  verification; no loader callback runs inside evaluator authority.
+- **I3E.1d — Producer closure audit.** Add a source-backed inventory for every
+  semantic-thunk and host-call constructor. Prohibit the removed generic
+  deferred constructor and durable evaluator signatures, and reconcile tests,
+  docs, and the compatibility-access inventories.
+
+Verification: an import-loader collection probe in
+`binary_import_forwards_hidden_source_provenance`,
+`concurrent_host_calls_share_one_rooted_producer_without_parking`,
+`host_call_rejects_a_foreign_runtime_root`, and
+`file_system_detects_changes_after_a_read` cover the callback, sharing,
+provenance, and stable-content contracts. A source-backed inventory classifies
+every lazy producer; existing list/conditional lazy tests establish the
+semantic-thunk path. Production remains `NoAuto`.
+
+I3E.1 completed on 2026-09-01. `LazySource` now distinguishes a
+callback-free `SemanticThunk`, which accepts only an `EvaluatorStepContext`,
+from a `HostCall`, whose producer accepts no evaluator context and
+returns a runtime root. The lazy machine recognizes a host-call source in one
+bounded evaluator step, yields, runs the producer in a later mutator-free poll,
+and re-enters bounded access only to validate, project, and cache the rooted
+result. The existing lazy-work coordinator remains the sole producer election
+and wait-token authority, so concurrent observers execute the callback once.
+
+Module and binary import loaders now publish roots from the compilation
+runtime. `SourceArtifact` digest identity, stable repeated local reads, and
+final unchanged-file verification remain the content contract; custom source
+systems remain trusted host capabilities that must return immutable source
+artifacts. The internal list-effect thunk now uses scoped evaluator helpers.
+Source inventories reject the old undifferentiated constructor, enumerate all
+production semantic/host-call producers, and account for the new import-root
+boundary.
 
 ### Phase I3E.2 — Compiler, Macro, and Closed-Value Regions
 

@@ -672,7 +672,7 @@ fn static_producer_obligations_are_taken_once() {
     assert_eq!(publisher.wait, wait);
     assert!(reflection.take_producer().is_none());
 
-    let lazy = LazyValue::deferred(&session.demand.values, "static obligation", |_| {
+    let lazy = LazyValue::semantic_thunk(&session.demand.values, "static obligation", |_| {
         panic!("static obligation test never evaluates its synthetic lazy")
     });
     let producer = DeferredProducer::Lazy(lazy);
@@ -1795,7 +1795,7 @@ fn deferred_insertion_is_immediately_dormant_and_promotable() {
         .expect("deferred task identity should allocate");
     let wait = super::super::allocate_wait_token(&session.demand, task)
         .expect("deferred wait identity should allocate");
-    let lazy = LazyValue::deferred(
+    let lazy = LazyValue::semantic_thunk(
         &session.demand.values,
         "coordinator deferred lifecycle",
         |_| panic!("coordinator lifecycle test never evaluates its synthetic lazy"),
@@ -1887,7 +1887,7 @@ fn closing_owner_immediately_after_deferred_insertion_abandons_the_dormant_recor
         .expect("deferred task identity should allocate");
     let wait = super::super::allocate_wait_token(&session.demand, task)
         .expect("deferred wait identity should allocate");
-    let lazy = LazyValue::deferred(
+    let lazy = LazyValue::semantic_thunk(
         &session.demand.values,
         "close after deferred insertion",
         |_| panic!("session-close test must not poll its deferred machine"),
@@ -1920,9 +1920,10 @@ fn racing_deferred_candidates_install_one_dormant_machine_and_drop_the_loser_unl
     let (coordinator, _executor) =
         super::super::test_execution_resources(0).expect("test execution resources should build");
     let session = TestDemand::new(&coordinator);
-    let lazy = LazyValue::deferred(&session.demand.values, "racing deferred candidates", |_| {
-        panic!("candidate race test drives its machine explicitly")
-    });
+    let lazy =
+        LazyValue::semantic_thunk(&session.demand.values, "racing deferred candidates", |_| {
+            panic!("candidate race test drives its machine explicitly")
+        });
     let barrier = Arc::new(Barrier::new(3));
     let drops = Arc::new(AtomicUsize::new(0));
     let all_drops_unlocked = Arc::new(AtomicBool::new(true));
@@ -1999,7 +2000,7 @@ fn deferred_claim_excludes_competitors_and_releases_its_machine_outside_runtime_
         .expect("deferred task identity should allocate");
     let wait = super::super::allocate_wait_token(&session.demand, task)
         .expect("deferred wait identity should allocate");
-    let lazy = LazyValue::deferred(
+    let lazy = LazyValue::semantic_thunk(
         &session.demand.values,
         "coordinator machine ownership",
         |_| panic!("coordinator ownership test never evaluates its synthetic lazy"),
@@ -2063,7 +2064,7 @@ fn outer_block_promotes_one_canonical_deferred_producer() {
         .expect("producer task identity should allocate");
     let producer_wait = super::super::allocate_wait_token(&producer_session.demand, producer_task)
         .expect("producer wait identity should allocate");
-    let lazy = LazyValue::deferred(
+    let lazy = LazyValue::semantic_thunk(
         &producer_session.demand.values,
         "cross-session canonical producer",
         |_| panic!("coordinator promotion test does not evaluate its lazy"),

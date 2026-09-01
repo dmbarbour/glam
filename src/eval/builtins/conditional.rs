@@ -65,7 +65,7 @@ mod tests {
     fn selection_does_not_force_the_branch_result() {
         let forced = Arc::new(AtomicBool::new(false));
         let forced_by_thunk = forced.clone();
-        let selected = Value::deferred(
+        let selected = Value::semantic_thunk(
             &crate::core::test_value_factory(),
             "selected conditional result",
             move |_| {

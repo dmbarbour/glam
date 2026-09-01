@@ -6,12 +6,13 @@ use crate::core::{
     keys,
 };
 use crate::diagnostic::{CompilationTrace, Severity};
+use crate::runtime::RuntimeValueRoot;
 use crate::source::{RelativeSourcePath, SourceArtifact};
 
 pub(crate) type ModuleLoader =
-    Arc<dyn Fn(ModuleLoadArgs) -> Result<Value, Arc<EvaluationFailure>> + Send + Sync>;
+    Arc<dyn Fn(ModuleLoadArgs) -> Result<RuntimeValueRoot, Arc<EvaluationFailure>> + Send + Sync>;
 pub(crate) type BinaryFileLoader =
-    Arc<dyn Fn(BinaryLoadArgs) -> Result<Value, Arc<EvaluationFailure>> + Send + Sync>;
+    Arc<dyn Fn(BinaryLoadArgs) -> Result<RuntimeValueRoot, Arc<EvaluationFailure>> + Send + Sync>;
 pub(crate) type CompileDiagnosticEmitter = Arc<dyn Fn(Severity, Value) + Send + Sync>;
 
 /// Validates a location-independent local source request. This is deliberately
@@ -248,9 +249,9 @@ impl CompileContext {
         let label: Arc<str> = Arc::from(format!("import {}", args.request.as_str()));
         let loader = self.local_module_loader.clone();
 
-        Value::deferred(&self.values, label, move |_| {
+        Value::host_call(&self.values, label, move || {
             let Some(loader) = &loader else {
-                return Err(EvaluationHalt::failure(import_failure(
+                return Err(import_failure(
                     format!(
                         "local import `{}` cannot be loaded without a module loader",
                         args.request.as_str()
@@ -258,9 +259,9 @@ impl CompileContext {
                     args.request.as_str(),
                     args.importer_trace.as_deref(),
                     args.importer_source.as_deref(),
-                )));
+                ));
             };
-            loader(args.clone()).map_err(EvaluationHalt::failure)
+            loader(args.clone())
         })
     }
 
@@ -285,9 +286,9 @@ impl CompileContext {
         let label: Arc<str> = Arc::from(format!("import binary {}", args.request.as_str()));
         let loader = self.local_binary_loader.clone();
 
-        Value::deferred(&self.values, label, move |_| {
+        Value::host_call(&self.values, label, move || {
             let Some(loader) = &loader else {
-                return Err(EvaluationHalt::failure(import_failure(
+                return Err(import_failure(
                     format!(
                         "binary import `{}` cannot be loaded without a binary loader",
                         args.request.as_str()
@@ -295,9 +296,9 @@ impl CompileContext {
                     args.request.as_str(),
                     args.importer_trace.as_deref(),
                     args.importer_source.as_deref(),
-                )));
+                ));
             };
-            loader(args.clone()).map_err(EvaluationHalt::failure)
+            loader(args.clone())
         })
     }
 
@@ -345,7 +346,7 @@ fn invalid_import_request(
     importer_source: Option<&SourceArtifact>,
 ) -> Value {
     let failure = import_failure(message, request, trace, importer_source);
-    Value::deferred(
+    Value::semantic_thunk(
         values,
         Arc::from(format!("invalid import request {request}")),
         move |_| Err(EvaluationHalt::failure(failure.clone())),
@@ -386,8 +387,9 @@ mod tests {
         let context = CompileContext::default().with_local_module_loader(Arc::new(|args| {
             panic!("invalid request reached loader: {}", args.request.as_str())
         }));
+        let eval_context = crate::evaluation::EvalContext::isolated(context.values().clone());
         let error = crate::eval::eval_value(
-            &crate::evaluation::EvalContext::standalone(),
+            &eval_context,
             &context.import_module(
                 "../outside.g",
                 None,
@@ -430,21 +432,26 @@ mod tests {
             &source,
             Arc::from(["test".to_owned()]),
         ));
+        let loader_values = test_value_factory();
         let context = CompileContext::default()
             .with_importer_source(source)
             .with_compilation_trace(trace.clone())
             .with_local_binary_loader(Arc::new(move |args| {
+                loader_values
+                    .collect_managed_for_test()
+                    .expect("an import loader callback must inherit no evaluator mutator");
                 *captured
                     .lock()
                     .expect("loader mutex should not be poisoned") = Some(args);
-                Ok(Value::binary_from_text("loaded"))
+                Ok(RuntimeValueRoot::new(
+                    &loader_values,
+                    Value::binary_from_text("loaded"),
+                ))
             }));
 
-        crate::eval::eval_value(
-            &crate::evaluation::EvalContext::standalone(),
-            &context.import_binary("message.txt"),
-        )
-        .expect("binary import should load");
+        let eval_context = crate::evaluation::EvalContext::isolated(context.values().clone());
+        crate::eval::eval_value(&eval_context, &context.import_binary("message.txt"))
+            .expect("binary import should load");
 
         let received = received
             .lock()
@@ -482,11 +489,15 @@ mod tests {
                 *captured
                     .lock()
                     .expect("loader mutex should not be poisoned") = Some(args);
-                Ok(Value::Dict(Dict::new_sync()))
+                Ok(RuntimeValueRoot::new(
+                    &test_value_factory(),
+                    Value::Dict(Dict::new_sync()),
+                ))
             }));
 
+        let eval_context = crate::evaluation::EvalContext::isolated(context.values().clone());
         crate::eval::eval_value(
-            &crate::evaluation::EvalContext::standalone(),
+            &eval_context,
             &context.import_module(
                 "child.g",
                 Some("nested.child"),

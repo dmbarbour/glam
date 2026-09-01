@@ -78,8 +78,8 @@ macro_rules! entry {
 const INVENTORY: &[InventoryEntry] = &[
     entry!(
         "src/api/assembly.rs",
-        [2, 2, 5, 2, 0, 0],
-        "assembly setup, imports, modules, and reflection environment",
+        [2, 2, 5, 2, 2, 0],
+        "assembly setup, rooted import results, modules, and reflection environment",
         "I3E.1/I3E.2 scoped demands and compiler regions; I4F.1 durable roots"
     ),
     entry!(
@@ -111,6 +111,12 @@ const INVENTORY: &[InventoryEntry] = &[
         [8, 3, 0, 1, 1, 1],
         "constructors, composite validation, observers, extraction, and net data",
         "I3B.1 scoped construction/extraction; I4F.2 public facade switch"
+    ),
+    entry!(
+        "src/compiler.rs",
+        [0, 0, 0, 0, 2, 0],
+        "test import loaders exercising the rooted host-call contract",
+        "I3E.1 deferred host calls; I4F.1 durable roots"
     ),
     entry!(
         "src/core.rs",

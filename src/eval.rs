@@ -49,7 +49,7 @@ pub(crate) use value::eval_value_in;
 pub(crate) use value::halt_diagnostic_value;
 pub(crate) use value::{
     evaluation_context_frame, evaluation_context_frame_with_args, failure_diagnostic_value,
-    failure_diagnostic_value_with, halt_diagnostic_value_with, pop_list_front,
+    failure_diagnostic_value_with, halt_diagnostic_value_with,
 };
 
 pub(crate) use application::*;

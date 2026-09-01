@@ -64,8 +64,11 @@ fn lazy_run_list_effect(values: &CoreValueFactory, effect: Value) -> List {
     })
 }
 
-fn run_list_effect_to_list(context: &EvalContext, effect: Value) -> Result<List, EvaluationHalt> {
-    let effect = eval_value(context, &effect)?;
+fn run_list_effect_to_list(
+    context: &EvaluatorStepContext<'_>,
+    effect: Value,
+) -> Result<List, EvaluationHalt> {
+    let effect = eval_value_in(context, &effect)?;
     let Value::Dict(dict) = effect else {
         return Err(EvaluationHalt::new(format!(
             "list effect handler requires an effect dictionary, got {effect:?}"
@@ -81,8 +84,12 @@ fn run_list_effect_to_list(context: &EvalContext, effect: Value) -> Result<List,
         ));
     };
 
-    let handled = apply_value(context, eval_value(context, &function)?, list_effect_api())?;
-    let handled = eval_value(context, &handled)?;
+    let handled = apply_value_in(
+        context,
+        eval_value_in(context, &function)?,
+        list_effect_api(),
+    )?;
+    let handled = eval_value_in(context, &handled)?;
     let Value::List(results) = handled else {
         return Err(EvaluationHalt::new(format!(
             "list effect handler expected a standard effect result list, got {handled:?}"
@@ -97,22 +104,22 @@ fn flat_map_list_effect_results(
     continuation: Value,
 ) -> List {
     deferred_list(values, "list effect seq", move |context| {
-        let Some((head, tail)) = pop_list_front(context, &results)? else {
+        let Some((head, tail)) = pop_list_front_in(context, &results)? else {
             return Ok(List::empty());
         };
-        let continuation = eval_value(context, &continuation)?;
-        let next = apply_value(context, continuation.clone(), head)?;
+        let continuation = eval_value_in(context, &continuation)?;
+        let next = apply_value_in(context, continuation.clone(), head)?;
         Ok(List::concat(
-            lazy_run_list_effect(context.values(), next),
-            flat_map_list_effect_results(context.values(), tail, continuation),
+            lazy_run_list_effect(context.context().values(), next),
+            flat_map_list_effect_results(context.context().values(), tail, continuation),
         ))
     })
 }
 
 fn cut_list_effect_results(values: &CoreValueFactory, operation: Value) -> List {
     deferred_list(values, "list effect cut", move |context| {
-        let results = lazy_run_list_effect(context.values(), operation.clone());
-        let Some((head, _)) = pop_list_front(context, &results)? else {
+        let results = lazy_run_list_effect(context.context().values(), operation.clone());
+        let Some((head, _)) = pop_list_front_in(context, &results)? else {
             return Ok(List::empty());
         };
         Ok(List::from_values(vec![head]))
@@ -125,8 +132,8 @@ fn fix_list_effect_results(
     handle: PromisedValue,
 ) -> List {
     deferred_list(values, "list effect fix", move |context| {
-        let results = lazy_run_list_effect(context.values(), operation.clone());
-        let Some((head, tail)) = pop_list_front(context, &results)? else {
+        let results = lazy_run_list_effect(context.context().values(), operation.clone());
+        let Some((head, tail)) = pop_list_front_in(context, &results)? else {
             handle
                 .set(Value::List(List::empty()))
                 .map_err(|_| EvaluationHalt::new("list effect fix initialized twice"))?;
@@ -142,10 +149,10 @@ fn fix_list_effect_results(
 fn deferred_list(
     values: &CoreValueFactory,
     label: &'static str,
-    thunk: impl Fn(&EvalContext) -> Result<List, EvaluationHalt> + Send + Sync + 'static,
+    thunk: impl Fn(&EvaluatorStepContext<'_>) -> Result<List, EvaluationHalt> + Send + Sync + 'static,
 ) -> List {
     List::from_thunk(
-        LazyValue::deferred(values, label, move |context| {
+        LazyValue::semantic_thunk(values, label, move |context| {
             thunk(context).map(Value::List)
         })
         .into(),

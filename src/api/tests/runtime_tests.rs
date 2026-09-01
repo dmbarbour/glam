@@ -899,7 +899,7 @@ fn output_journaling_preserves_lazy_payload_until_decoder_demand() {
     let producer_evaluations = evaluations.clone();
     let lazy = Value::from_core(
         &assembler.core_values(),
-        CoreValue::Lazy(LazyValue::deferred(
+        CoreValue::Lazy(LazyValue::semantic_thunk(
             &assembler.core_values(),
             "lazy output payload",
             move |_| {

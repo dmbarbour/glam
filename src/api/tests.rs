@@ -160,12 +160,12 @@ fn runtimes_own_independent_local_identity_domains_and_value_factories() {
 
     let first_values = first.values().core;
     let first_unit = first_values.unit();
-    let first_lazy = LazyValue::deferred(&first_values, "first runtime", move |_| {
+    let first_lazy = LazyValue::semantic_thunk(&first_values, "first runtime", move |_| {
         Ok(first_unit.clone())
     });
     let second_values = second.values().core;
     let second_unit = second_values.unit();
-    let second_lazy = LazyValue::deferred(&second_values, "second runtime", move |_| {
+    let second_lazy = LazyValue::semantic_thunk(&second_values, "second runtime", move |_| {
         Ok(second_unit.clone())
     });
     assert_eq!(first_lazy.id().get(), second_lazy.id().get());
@@ -361,7 +361,7 @@ fn access_and_annotation_construction_do_not_demand_inputs() {
     let unit = core_values.unit();
     let lazy = Value::from_core(
         &core_values,
-        CoreValue::Lazy(LazyValue::deferred(
+        CoreValue::Lazy(LazyValue::semantic_thunk(
             &core_values,
             "no-demand facade fixture",
             move |_| {
@@ -539,7 +539,7 @@ fn array_and_deque_annotations_preserve_lazy_elements() {
     let core_values = assembler.core_values();
     let element = Value::from_core(
         &core_values,
-        CoreValue::Lazy(LazyValue::deferred(
+        CoreValue::Lazy(LazyValue::semantic_thunk(
             &core_values,
             "lazy list element",
             |_| Ok(CoreValue::Number(Number::integer(7))),
@@ -900,7 +900,7 @@ fn evaluated_array_items_accept_only_one_strict_value_leaf() {
     let core_values = assembler.core_values();
     let lazy_element = Value::from_core(
         &core_values,
-        CoreValue::Lazy(LazyValue::deferred(
+        CoreValue::Lazy(LazyValue::semantic_thunk(
             &core_values,
             "unevaluated array member",
             |_| Ok(CoreValue::Number(Number::integer(1))),
@@ -1075,7 +1075,7 @@ fn value_evaluator_caches_lazy_success_and_preserves_structured_failure() {
     let evaluations_by_thunk = evaluations.clone();
     let lazy = Value::from_core(
         &core_values,
-        CoreValue::Lazy(LazyValue::deferred(
+        CoreValue::Lazy(LazyValue::semantic_thunk(
             &core_values,
             "one evaluation",
             move |_| {
@@ -1123,7 +1123,7 @@ fn semantic_binary_slice_does_not_force_an_unused_poisoned_tail() {
     let assembler = Assembler::new();
     let values = assembler.values();
     let core_values = assembler.core_values();
-    let poison = LazyValue::deferred(&core_values, "unused binary tail", |_| {
+    let poison = LazyValue::semantic_thunk(&core_values, "unused binary tail", |_| {
         Err(EvaluationHalt::new("unused binary tail was forced"))
     });
     let source = Value::from_core(
@@ -1763,7 +1763,7 @@ fn synchronous_assembler_evaluation_waits_for_a_worker_claim() {
     let release = Arc::new((Mutex::new(false), Condvar::new()));
     let producer_release = release.clone();
     let (started_sender, started_receiver) = std::sync::mpsc::channel();
-    let lazy = crate::core::LazyValue::deferred(
+    let lazy = crate::core::LazyValue::semantic_thunk(
         &assembler.core_values(),
         "worker-claimed public value",
         move |_| {

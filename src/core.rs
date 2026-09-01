@@ -16,8 +16,8 @@ use rpds::RedBlackTreeMapSync;
 use crate::core_net::{CoreDataKey, CoreRuntimeNet};
 use crate::evaluation::{
     CompletionSubscriptionOutcome, CompletionSubscriptions, EvalContext, EvaluationWorkCoordinator,
-    PromiseProducerObligation, PromiseProducerPublication, ReflectionTaskReservation,
-    ReflectionTaskResultPolicy, WakeRegistration,
+    EvaluatorStepContext, PromiseProducerObligation, PromiseProducerPublication,
+    ReflectionTaskReservation, ReflectionTaskResultPolicy, WakeRegistration,
 };
 use crate::number::Number;
 use crate::runtime::{EvaluationRuntimeId, RuntimeIds, RuntimeMutationAuthority, RuntimeValueRoot};
@@ -591,12 +591,23 @@ impl LazyValue {
         )
     }
 
-    pub(crate) fn deferred(
+    pub(crate) fn semantic_thunk(
         values: &CoreValueFactory,
         label: impl Into<Arc<str>>,
-        thunk: impl Fn(&EvalContext) -> Result<Value, EvaluationHalt> + Send + Sync + 'static,
+        thunk: impl Fn(&EvaluatorStepContext<'_>) -> Result<Value, EvaluationHalt>
+        + Send
+        + Sync
+        + 'static,
     ) -> Self {
-        Self::with_source(values, label, LazySource::Deferred(Arc::new(thunk)))
+        Self::with_source(values, label, LazySource::SemanticThunk(Arc::new(thunk)))
+    }
+
+    pub(crate) fn host_call(
+        values: &CoreValueFactory,
+        label: impl Into<Arc<str>>,
+        producer: impl Fn() -> Result<RuntimeValueRoot, Arc<EvaluationFailure>> + Send + Sync + 'static,
+    ) -> Self {
+        Self::with_source(values, label, LazySource::HostCall(Arc::new(producer)))
     }
 
     pub(crate) fn error(values: &CoreValueFactory, message: impl Into<Arc<str>>) -> Self {
@@ -1211,7 +1222,8 @@ impl BuiltinCall {
 pub(crate) enum LazySource {
     Error,
     ComputedFixpoint(Arc<FixpointComputation>),
-    Deferred(Arc<DeferredComputation>),
+    SemanticThunk(Arc<SemanticThunk>),
+    HostCall(Arc<HostCallProducer>),
     ReflectionTask(Arc<ReflectionComputation>),
     Access {
         path: Arc<[CoreDataKey]>,
@@ -1250,8 +1262,10 @@ pub(crate) enum FixpointComputation {
     ObjectInstance(Value),
 }
 
-pub(crate) type DeferredComputation =
-    dyn Fn(&EvalContext) -> Result<Value, EvaluationHalt> + Send + Sync;
+pub(crate) type SemanticThunk =
+    dyn Fn(&EvaluatorStepContext<'_>) -> Result<Value, EvaluationHalt> + Send + Sync;
+pub(crate) type HostCallProducer =
+    dyn Fn() -> Result<RuntimeValueRoot, Arc<EvaluationFailure>> + Send + Sync;
 
 /// A lazy reflection task which either gates a target or returns its result.
 ///
@@ -1599,12 +1613,23 @@ impl Value {
         Self::Binary(Bytes::copy_from_slice(text.as_bytes()))
     }
 
-    pub(crate) fn deferred(
+    pub(crate) fn semantic_thunk(
         values: &CoreValueFactory,
         label: impl Into<Arc<str>>,
-        thunk: impl Fn(&EvalContext) -> Result<Value, EvaluationHalt> + Send + Sync + 'static,
+        thunk: impl Fn(&EvaluatorStepContext<'_>) -> Result<Value, EvaluationHalt>
+        + Send
+        + Sync
+        + 'static,
     ) -> Self {
-        Self::Lazy(LazyValue::deferred(values, label, thunk))
+        Self::Lazy(LazyValue::semantic_thunk(values, label, thunk))
+    }
+
+    pub(crate) fn host_call(
+        values: &CoreValueFactory,
+        label: impl Into<Arc<str>>,
+        producer: impl Fn() -> Result<RuntimeValueRoot, Arc<EvaluationFailure>> + Send + Sync + 'static,
+    ) -> Self {
+        Self::Lazy(LazyValue::host_call(values, label, producer))
     }
 
     pub(crate) fn error(values: &CoreValueFactory, message: impl Into<Arc<str>>) -> Self {
@@ -1908,7 +1933,7 @@ mod tests {
     fn terminal_lazy_cache_releases_its_shared_source_after_active_snapshots() {
         let dropped = Arc::new(AtomicBool::new(false));
         let signal = DropSignal(dropped.clone());
-        let lazy = LazyValue::deferred(&values(), "source release", move |_| {
+        let lazy = LazyValue::semantic_thunk(&values(), "source release", move |_| {
             let _keep_signal_captured = &signal;
             Ok(values().unit())
         });
@@ -1941,7 +1966,8 @@ mod tests {
         enum LazySourceWithoutReflection {
             Error,
             ComputedFixpoint(Arc<FixpointComputation>),
-            Deferred(Arc<DeferredComputation>),
+            SemanticThunk(Arc<SemanticThunk>),
+            HostCall(Arc<HostCallProducer>),
             Access {
                 path: Arc<[CoreDataKey]>,
                 arguments: Arc<[Value]>,
@@ -2093,7 +2119,7 @@ mod tests {
 
     #[test]
     fn evaluated_values_reject_deferred_outer_shells_only() {
-        let field = Value::deferred(&values(), "lazy field", |_| Ok(Value::Number(1.into())));
+        let field = Value::semantic_thunk(&values(), "lazy field", |_| Ok(Value::Number(1.into())));
         let promise = PromisedValue::new(&values(), "promised field");
         let container =
             Value::Dict(Dict::new_sync().insert(Key::atom_from_text("field"), field.clone()));
@@ -2207,7 +2233,7 @@ mod tests {
     #[test]
     fn keys_reject_deferred_values() {
         assert_eq!(
-            Key::from_value(&Value::deferred(&values(), "number", |_| {
+            Key::from_value(&Value::semantic_thunk(&values(), "number", |_| {
                 Ok(Value::Number(1.into()))
             })),
             None

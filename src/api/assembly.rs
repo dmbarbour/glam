@@ -1204,7 +1204,7 @@ impl Assembler {
         args: ModuleLoadArgs,
         session: Arc<Mutex<Vec<Diagnostic>>>,
         execution: Arc<CompilationExecution>,
-    ) -> Result<CoreValue, Arc<EvaluationFailure>> {
+    ) -> Result<RuntimeValueRoot, Arc<EvaluationFailure>> {
         let importer = args.importer_source.as_ref().ok_or_else(|| {
             import_failure(
                 format!(
@@ -1274,11 +1274,14 @@ impl Assembler {
                 Some(&source),
             ))
         } else {
-            Ok(definitions)
+            Ok(RuntimeValueRoot::new(&self.core_values(), definitions))
         }
     }
 
-    fn load_local_binary(&self, args: BinaryLoadArgs) -> Result<CoreValue, Arc<EvaluationFailure>> {
+    fn load_local_binary(
+        &self,
+        args: BinaryLoadArgs,
+    ) -> Result<RuntimeValueRoot, Arc<EvaluationFailure>> {
         let importer = args.importer_source.as_ref().ok_or_else(|| {
             import_failure(
                 format!(
@@ -1292,7 +1295,12 @@ impl Assembler {
         })?;
         importer
             .load_relative(&args.request)
-            .map(|artifact| CoreValue::Binary(artifact.bytes().clone()))
+            .map(|artifact| {
+                RuntimeValueRoot::new(
+                    &self.core_values(),
+                    CoreValue::Binary(artifact.bytes().clone()),
+                )
+            })
             .map_err(|error| {
                 import_failure(
                     format!(
