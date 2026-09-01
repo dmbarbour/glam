@@ -23,7 +23,6 @@ use crate::core::{
     PromisedValue, Value as CoreValue,
 };
 use crate::diagnostic::{CompilationInvocationId, CompilationTrace, Severity};
-use crate::eval;
 use crate::evaluation::{
     EvalContext, EvaluationSession, EvaluationSessionRun, ReflectionTaskProfile,
 };
@@ -386,8 +385,8 @@ struct PreparedSource {
 
 struct CompileSetup {
     module_path: Arc<[String]>,
-    prior_defs: CoreValue,
-    final_defs: CoreValue,
+    prior_defs: RuntimeValueRoot,
+    final_defs: RuntimeValueRoot,
     module_loader: ModuleLoader,
     binary_loader: BinaryFileLoader,
     session: Arc<Mutex<Vec<Diagnostic>>>,
@@ -1033,7 +1032,7 @@ impl Assembler {
         let result = self.build_module_inner(
             module_path,
             inputs,
-            initial_definitions.into_core(),
+            initial_definitions.into_runtime_root(),
             session.clone(),
             execution.clone(),
         );
@@ -1048,7 +1047,7 @@ impl Assembler {
                 Err(Error::new("module macro reasoning failed").with_diagnostics(diagnostics))
             }
             (Ok(value), false) => Ok(BuiltModule {
-                value: Value::from_core(self.reasoning.runtime.values().core(), value),
+                value: Value::from_runtime_root(value),
                 diagnostics,
             }),
             (Err(error), _) => Err(error.with_diagnostics(diagnostics)),
@@ -1059,10 +1058,10 @@ impl Assembler {
         &self,
         module_path: Arc<[String]>,
         inputs: Vec<ModuleInput>,
-        mut definitions: CoreValue,
+        mut definitions: RuntimeValueRoot,
         session: Arc<Mutex<Vec<Diagnostic>>>,
         execution: Arc<CompilationExecution>,
-    ) -> Result<CoreValue, Error> {
+    ) -> Result<RuntimeValueRoot, Error> {
         let module_loader = self.module_loader(session.clone(), execution.clone());
         let binary_loader = self.binary_loader();
         let module_context = CompileContext::from_module_path_with_values(
@@ -1071,7 +1070,7 @@ impl Assembler {
         )
         .with_local_module_loader(module_loader.clone())
         .with_local_binary_loader(binary_loader.clone());
-        let final_defs = module_context.final_defs().clone();
+        let final_defs = module_context.final_defs_root().clone();
         let mut had_errors = false;
 
         for input in inputs.iter().rev() {
@@ -1087,7 +1086,10 @@ impl Assembler {
                     execution: execution.clone(),
                 },
             )?;
-            definitions = compile_source(prepared.source.bytes(), &prepared.context);
+            definitions = RuntimeValueRoot::new(
+                &self.core_values(),
+                compile_source(prepared.source.bytes(), &prepared.context),
+            );
             had_errors |= prepared.had_errors.load(Ordering::Relaxed);
         }
 
@@ -1095,9 +1097,7 @@ impl Assembler {
             return Err(Error::new("module failed to compile"));
         }
 
-        let module_value = self.seal_module(&module_context, &definitions);
-        eval::eval_value(&self.eval_context(), &module_value)
-            .map_err(|error| self.evaluation_error(error))
+        self.seal_module(&module_context, &definitions)
     }
 
     fn prepare_input(
@@ -1133,8 +1133,8 @@ impl Assembler {
                 )
                 .with_importer_source(source.clone())
                 .with_compilation_trace(trace.clone())
-                .with_prior_defs(prior_defs)
-                .with_final_defs(final_defs)
+                .with_prior_defs_root(prior_defs)
+                .with_final_defs_root(final_defs)
                 .with_local_module_loader(module_loader)
                 .with_local_binary_loader(binary_loader)
                 .with_compilation_execution(execution)
@@ -1166,8 +1166,8 @@ impl Assembler {
                     module_path.iter().cloned(),
                 )
                 .with_compilation_trace(trace.clone())
-                .with_prior_defs(prior_defs)
-                .with_final_defs(final_defs)
+                .with_prior_defs_root(prior_defs)
+                .with_final_defs_root(final_defs)
                 .with_local_module_loader(module_loader)
                 .with_local_binary_loader(binary_loader)
                 .with_compilation_execution(execution)
@@ -1251,8 +1251,8 @@ impl Assembler {
         )
         .with_importer_source(source.clone())
         .with_compilation_trace(trace.clone())
-        .with_prior_defs(args.prior_defs)
-        .with_final_defs(args.final_defs)
+        .with_prior_defs_root(args.prior_defs)
+        .with_final_defs_root(args.final_defs)
         .with_local_module_loader(module_loader)
         .with_local_binary_loader(binary_loader)
         .with_compilation_execution(execution)
@@ -1314,14 +1314,24 @@ impl Assembler {
             })
     }
 
-    fn seal_module(&self, context: &CompileContext, definitions: &CoreValue) -> CoreValue {
-        let CoreValue::Promised(final_defs) = context.final_defs() else {
-            panic!("CompileContext.final_defs must be a promised value");
-        };
-        final_defs
-            .set(definitions.clone())
-            .expect("CompileContext.final_defs future must be unassigned");
-        definitions.clone()
+    fn seal_module(
+        &self,
+        context: &CompileContext,
+        definitions: &RuntimeValueRoot,
+    ) -> Result<RuntimeValueRoot, Error> {
+        let module_value = self.core_values().with_runtime_value_access(|_| {
+            let CoreValue::Promised(final_defs) = context.final_defs() else {
+                panic!("CompileContext.final_defs must be a promised value");
+            };
+            final_defs
+                .set(definitions.as_core().clone())
+                .expect("CompileContext.final_defs future must be unassigned");
+            definitions.as_core().clone()
+        });
+        self.eval_context()
+            .evaluate_whnf(&module_value)
+            .map(|value| RuntimeValueRoot::new(&self.core_values(), value))
+            .map_err(|error| self.evaluation_error(error))
     }
 
     fn compile_diagnostic_emitter(

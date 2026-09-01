@@ -38,8 +38,8 @@ pub(crate) struct ModuleLoadArgs {
     pub(crate) importer_trace: Option<Arc<CompilationTrace>>,
     pub(crate) extends: Arc<[String]>,
     pub(crate) module_path: Arc<[String]>,
-    pub(crate) prior_defs: Value,
-    pub(crate) final_defs: Value,
+    pub(crate) prior_defs: RuntimeValueRoot,
+    pub(crate) final_defs: RuntimeValueRoot,
 }
 
 #[derive(Clone)]
@@ -49,10 +49,10 @@ pub(crate) struct CompileContext {
     values: CoreValueFactory,
     importer_source: Option<Arc<SourceArtifact>>,
     compilation_trace: Option<Arc<CompilationTrace>>,
-    opaque_origin: Option<Value>,
+    opaque_origin: Option<RuntimeValueRoot>,
     module_path: Arc<[String]>,
-    prior_defs: Value, // definitions visible before compiling this source
-    final_defs: Value, // promised final definitions for recursive access
+    prior_defs: RuntimeValueRoot, // definitions visible before compiling this source
+    final_defs: RuntimeValueRoot, // promised final definitions for recursive access
     local_module_loader: Option<ModuleLoader>,
     local_binary_loader: Option<BinaryFileLoader>,
     diagnostic_emitter: Option<CompileDiagnosticEmitter>,
@@ -79,14 +79,19 @@ pub(crate) fn test_value_factory() -> CoreValueFactory {
 
 impl CompileContext {
     pub(crate) fn new(values: CoreValueFactory) -> Self {
+        let prior_defs = RuntimeValueRoot::new(&values, Value::Dict(Dict::new_sync()));
+        let final_defs = RuntimeValueRoot::new(
+            &values,
+            Value::Promised(PromisedValue::new(&values, "final definitions")),
+        );
         Self {
             values: values.scoped(),
             importer_source: None,
             compilation_trace: None,
             opaque_origin: None,
             module_path: Arc::from([]),
-            prior_defs: Value::Dict(Dict::new_sync()), // empty prior dictionary
-            final_defs: Value::Promised(PromisedValue::new(&values, "final definitions")),
+            prior_defs,
+            final_defs,
             local_module_loader: None,
             local_binary_loader: None,
             diagnostic_emitter: None,
@@ -121,7 +126,10 @@ impl CompileContext {
     }
 
     pub(crate) fn with_compilation_trace(mut self, trace: Arc<CompilationTrace>) -> Self {
-        self.opaque_origin = Some(crate::diagnostic::opaque_compilation_origin(&trace));
+        self.opaque_origin = Some(RuntimeValueRoot::new(
+            &self.values,
+            crate::diagnostic::opaque_compilation_origin(&trace),
+        ));
         self.compilation_trace = Some(trace);
         self
     }
@@ -141,12 +149,20 @@ impl CompileContext {
         self
     }
 
+    #[cfg(test)]
     pub(crate) fn with_prior_defs(mut self, prior: Value) -> Self {
+        self.prior_defs = RuntimeValueRoot::new(&self.values, prior);
+        self
+    }
+
+    pub(crate) fn with_prior_defs_root(mut self, prior: RuntimeValueRoot) -> Self {
+        assert_eq!(prior.runtime_id(), self.values.runtime_id());
         self.prior_defs = prior;
         self
     }
 
-    pub(crate) fn with_final_defs(mut self, final_defs: Value) -> Self {
+    pub(crate) fn with_final_defs_root(mut self, final_defs: RuntimeValueRoot) -> Self {
+        assert_eq!(final_defs.runtime_id(), self.values.runtime_id());
         self.final_defs = final_defs;
         self
     }
@@ -174,11 +190,20 @@ impl CompileContext {
         self
     }
 
+    #[cfg(test)]
     pub(crate) fn prior_defs(&self) -> &Value {
-        &self.prior_defs
+        self.prior_defs.as_core()
     }
 
     pub(crate) fn final_defs(&self) -> &Value {
+        self.final_defs.as_core()
+    }
+
+    pub(crate) fn prior_defs_root(&self) -> &RuntimeValueRoot {
+        &self.prior_defs
+    }
+
+    pub(crate) fn final_defs_root(&self) -> &RuntimeValueRoot {
         &self.final_defs
     }
 
@@ -191,7 +216,10 @@ impl CompileContext {
     /// The same opaque value is cloned for every annotation emitted from this
     /// source context. The front end owns any surrounding span representation.
     pub(crate) fn opaque_origin(&self) -> Option<Value> {
-        self.opaque_origin.clone()
+        self.opaque_origin.as_ref().map(|origin| {
+            self.values
+                .with_runtime_value_access(|_| origin.as_core().clone())
+        })
     }
 
     /// Returns the abstract global-path value for a path relative to the
@@ -243,8 +271,8 @@ impl CompileContext {
             importer_trace: self.compilation_trace.clone(),
             extends,
             module_path,
-            prior_defs,
-            final_defs,
+            prior_defs: RuntimeValueRoot::new(&self.values, prior_defs),
+            final_defs: RuntimeValueRoot::new(&self.values, final_defs),
         };
         let label: Arc<str> = Arc::from(format!("import {}", args.request.as_str()));
         let loader = self.local_module_loader.clone();
@@ -388,16 +416,14 @@ mod tests {
             panic!("invalid request reached loader: {}", args.request.as_str())
         }));
         let eval_context = crate::evaluation::EvalContext::isolated(context.values().clone());
-        let error = crate::eval::eval_value(
-            &eval_context,
-            &context.import_module(
+        let error = eval_context
+            .evaluate_whnf(&context.import_module(
                 "../outside.g",
                 None,
                 Value::Dict(Dict::new_sync()),
                 Value::Dict(Dict::new_sync()),
-            ),
-        )
-        .expect_err("parent-relative request should be a stuck error");
+            ))
+            .expect_err("parent-relative request should be a stuck error");
         assert!(error.to_string().contains("must not traverse to a parent"));
         let failure = error.into_permanent_failure();
         let request = failure
@@ -450,7 +476,8 @@ mod tests {
             }));
 
         let eval_context = crate::evaluation::EvalContext::isolated(context.values().clone());
-        crate::eval::eval_value(&eval_context, &context.import_binary("message.txt"))
+        eval_context
+            .evaluate_whnf(&context.import_binary("message.txt"))
             .expect("binary import should load");
 
         let received = received
@@ -496,16 +523,14 @@ mod tests {
             }));
 
         let eval_context = crate::evaluation::EvalContext::isolated(context.values().clone());
-        crate::eval::eval_value(
-            &eval_context,
-            &context.import_module(
+        eval_context
+            .evaluate_whnf(&context.import_module(
                 "child.g",
                 Some("nested.child"),
                 Value::Number(1.into()),
                 Value::Number(2.into()),
-            ),
-        )
-        .expect("module import should load");
+            ))
+            .expect("module import should load");
 
         let received = received
             .lock()
@@ -519,6 +544,33 @@ mod tests {
         );
         assert_eq!(args.extends.as_ref(), &["nested", "child"]);
         assert_eq!(args.importer_trace.as_deref(), Some(trace.as_ref()));
+    }
+
+    #[test]
+    fn compiler_suspension_parks_only_roots() {
+        let values = test_value_factory();
+        let callback_values = values.clone();
+        let context = CompileContext::from_module_path_with_values(values.clone(), ["root"])
+            .with_local_module_loader(Arc::new(move |args| {
+                assert_eq!(args.prior_defs.runtime_id(), callback_values.runtime_id());
+                assert_eq!(args.final_defs.runtime_id(), callback_values.runtime_id());
+                callback_values
+                    .collect_managed_for_test()
+                    .expect("a suspended compiler loader must inherit no managed access");
+                Ok(args.prior_defs)
+            }));
+        let eval_context = crate::evaluation::EvalContext::isolated(values);
+
+        let loaded = eval_context
+            .evaluate_whnf(&context.import_module(
+                "child.g",
+                None,
+                Value::Number(1.into()),
+                Value::Number(2.into()),
+            ))
+            .expect("the rooted compiler suspension should resume");
+
+        assert_eq!(loaded, Value::Number(1.into()));
     }
 
     #[test]

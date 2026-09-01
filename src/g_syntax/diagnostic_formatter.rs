@@ -6,16 +6,20 @@
 
 use std::sync::Arc;
 
+use crate::runtime::RuntimeValueRoot;
+
 use super::*;
 
-struct CachedDiagnosticFormatter(Value);
+struct CachedDiagnosticFormatter(RuntimeValueRoot);
 
 pub(super) fn value(values: &CoreValueFactory) -> Value {
-    cached(values).0.clone()
+    let root = &cached(values).0;
+    assert_eq!(root.runtime_id(), values.runtime_id());
+    values.with_runtime_value_access(|_| root.as_core().clone())
 }
 
 fn cached(values: &CoreValueFactory) -> Arc<CachedDiagnosticFormatter> {
-    values.cached(|| CachedDiagnosticFormatter(build(values)))
+    values.cached(|| CachedDiagnosticFormatter(RuntimeValueRoot::new(values, build(values))))
 }
 
 fn build(values: &CoreValueFactory) -> Value {
@@ -97,16 +101,10 @@ fn build(values: &CoreValueFactory) -> Value {
             [field(diagnostic, &["msg", "text"])],
         )],
     );
-    evaluate_closed(values, ResolvedExpr::lambda(vec![diagnostic], with_lines))
-}
-
-fn evaluate_closed(values: &CoreValueFactory, expression: ResolvedExpr<Value>) -> Value {
-    let value = lower_resolved_expr(values, expression);
-    crate::eval::eval_value(
-        &crate::evaluation::EvalContext::private_closed(values.clone()),
-        &value,
+    super::compiler_values::evaluate_closed(
+        values,
+        ResolvedExpr::lambda(vec![diagnostic], with_lines),
     )
-    .expect("default diagnostic formatter must be a closed function")
 }
 
 fn apply_builtin(

@@ -171,8 +171,9 @@ orchestration. Only its `with_value_access` operation enters a callback-free
 managed region, so the recursive evaluator can be migrated without making a
 whole `eval_value` call one mutator lifetime. One direct-compatibility gate
 temporarily serves the remaining builtin seams plus source-inventoried
-reflection/compiler entries; I3D and I3E own its eventual removal after I3B.2
-separates direct wait driving. A closure inventory accounts for every
+diagnostic entries; I3D and compiler checkpoint I3E.2 have removed their
+external entries, while I3E.3 owns the diagnostic remainder. A closure
+inventory accounts for every
 context-bearing function below `src/eval`: scoped functions retain
 `EvaluatorStepContext`, while every remaining durable `EvalContext` surface
 names its I3B.2/I3C/I3D/I3E or I10 owner. Separate latches cover all external
@@ -181,9 +182,11 @@ downgrade set.
 
 The core value/application/sequence spine now consumes this step context.
 Client demand and deferred lazy/promise machines derive it from their checked
-poll claim; result rooting also occurs through that same carrier. Legacy
-compiler, reflection, and diagnostic callers enter the identical spine through
-one source-latched direct-compatibility gate. That gate opens no ambient access
+poll claim; result rooting also occurs through that same carrier. Remaining
+diagnostic callers and explicit durable builtin seams enter the identical spine
+through one source-latched direct-compatibility gate. Compiler and reflection
+clients instead use their scheduler-owned demand/interpreter services. The
+compatibility gate opens no ambient access
 region: explicit deferred callbacks, reflection, net, and builtin seams receive
 only their durable evaluator context, and no `EvaluationValueAccess` crosses a
 pump, wait, callback, or machine poll.
@@ -268,6 +271,9 @@ without copying the bundle. The built-in `.g` compiler can consequently share
 all lowered helpers, effect values, builtin modules, and its diagnostic
 formatter across modules in one runtime while consulting the runtime
 attachment map once per compilation.
+The compiler bundle itself stores runtime roots rather than bare semantic
+values. Candidate bundles are complete before publication, and lazily added
+effect-path candidates are built outside their small publication mutex.
 
 The core factory also carries one replaceable weak binding to the runtime's
 work coordinator. At most one coordinator may be live for a runtime. An

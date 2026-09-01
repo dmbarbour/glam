@@ -238,7 +238,9 @@ fn assembler_claimed_reflection_gate_is_unavailable_to_macro_session() {
     assert!(
         error
             .message()
-            .contains("unavailable to the macro demand session")
+            .contains("unavailable to the macro demand session"),
+        "unexpected macro failure: {}",
+        error.message()
     );
 }
 

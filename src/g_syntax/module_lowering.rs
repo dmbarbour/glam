@@ -1,4 +1,5 @@
 use super::*;
+use crate::runtime::RuntimeValueRoot;
 
 mod definitions;
 mod imports;
@@ -28,24 +29,23 @@ pub(in crate::g_syntax) fn lower_source(source: &[u8], context: &CompileContext)
 
 pub(in crate::g_syntax) struct ModuleLowerer<'context> {
     context: &'context CompileContext,
-    definitions: Value,
-    module_reflection: ReflectionBoundary<Value>,
+    definitions: RuntimeValueRoot,
+    module_reflection: RuntimeValueRoot,
     diagnostics: Vec<Diagnostic>,
     parsed_declarations: Vec<Declaration>,
 }
 
 impl<'context> ModuleLowerer<'context> {
     pub(in crate::g_syntax) fn new(context: &'context CompileContext) -> Self {
+        let module_reflection = compiler_values::reflection_annotator_value(
+            context.values(),
+            context.abstract_global_path("refl"),
+            context.final_defs().clone(),
+        );
         Self {
             context,
-            definitions: context.prior_defs().clone(),
-            module_reflection: ReflectionBoundary {
-                annotator: compiler_values::reflection_annotator_value(
-                    context.values(),
-                    context.abstract_global_path("refl"),
-                    context.final_defs().clone(),
-                ),
-            },
+            definitions: context.prior_defs_root().clone(),
+            module_reflection: RuntimeValueRoot::new(context.values(), module_reflection),
             diagnostics: Vec::new(),
             parsed_declarations: Vec::new(),
         }
@@ -53,47 +53,49 @@ impl<'context> ModuleLowerer<'context> {
 
     pub(in crate::g_syntax) fn lower_declaration(&mut self, declaration: Declaration) {
         let line = declaration.line;
-        let result = match &declaration.kind {
-            DeclarationKind::Import(import) => {
-                lower_import(import, line, self.context, &mut self.definitions)
-            }
-            DeclarationKind::Unique(names) => {
-                lower_unique(names, line, self.context, &mut self.definitions)
-            }
-            DeclarationKind::Definition(definition) => {
-                let scope = NameScope::module_with_reflection(
-                    self.context,
-                    self.definitions.clone(),
-                    self.module_reflection.clone(),
-                );
-                lower_definition(
-                    definition,
-                    line,
-                    self.context,
-                    &mut self.definitions,
-                    &scope,
-                )
-            }
-            DeclarationKind::Object(object) => {
-                let scope = NameScope::module_with_reflection(
-                    self.context,
-                    self.definitions.clone(),
-                    self.module_reflection.clone(),
-                );
-                lower_object(object, line, self.context, &mut self.definitions, &scope)
-            }
-            DeclarationKind::Extend(extend) => {
-                let scope = NameScope::module_with_reflection(
-                    self.context,
-                    self.definitions.clone(),
-                    self.module_reflection.clone(),
-                );
-                lower_extend(extend, line, self.context, &mut self.definitions, &scope)
-            }
-            DeclarationKind::Language(_)
-            | DeclarationKind::Abstract(_)
-            | DeclarationKind::Unknown => Ok(()),
-        };
+        let (result, definitions) = self.context.values().with_runtime_value_access(|_| {
+            let mut definitions = self.definitions.as_core().clone();
+            let module_reflection = ReflectionBoundary {
+                annotator: self.module_reflection.as_core().clone(),
+            };
+            let result = match &declaration.kind {
+                DeclarationKind::Import(import) => {
+                    lower_import(import, line, self.context, &mut definitions)
+                }
+                DeclarationKind::Unique(names) => {
+                    lower_unique(names, line, self.context, &mut definitions)
+                }
+                DeclarationKind::Definition(definition) => {
+                    let scope = NameScope::module_with_reflection(
+                        self.context,
+                        definitions.clone(),
+                        module_reflection.clone(),
+                    );
+                    lower_definition(definition, line, self.context, &mut definitions, &scope)
+                }
+                DeclarationKind::Object(object) => {
+                    let scope = NameScope::module_with_reflection(
+                        self.context,
+                        definitions.clone(),
+                        module_reflection.clone(),
+                    );
+                    lower_object(object, line, self.context, &mut definitions, &scope)
+                }
+                DeclarationKind::Extend(extend) => {
+                    let scope = NameScope::module_with_reflection(
+                        self.context,
+                        definitions.clone(),
+                        module_reflection,
+                    );
+                    lower_extend(extend, line, self.context, &mut definitions, &scope)
+                }
+                DeclarationKind::Language(_)
+                | DeclarationKind::Abstract(_)
+                | DeclarationKind::Unknown => Ok(()),
+            };
+            (result, definitions)
+        });
+        self.definitions = RuntimeValueRoot::new(self.context.values(), definitions);
         if let Err(diagnostic) = result {
             self.diagnostics.push(diagnostic);
         }
@@ -105,7 +107,7 @@ impl<'context> ModuleLowerer<'context> {
     }
 
     pub(in crate::g_syntax) fn definitions(&self) -> &Value {
-        &self.definitions
+        self.definitions.as_core()
     }
 
     pub(in crate::g_syntax) fn finish(
@@ -115,7 +117,7 @@ impl<'context> ModuleLowerer<'context> {
         source_diagnostics.extend(check_file_global_local_shadowing(&self.parsed_declarations));
         source_diagnostics.extend(self.diagnostics);
         LoweredSource {
-            definitions: self.definitions,
+            definitions: self.definitions.into_core(),
             diagnostics: source_diagnostics,
         }
     }

@@ -21,6 +21,14 @@ one opaque source-origin token. It does not expose assembler provenance fields
 or act as a general value-construction DSL. The compiler decides whether and
 where to place the opaque origin in its own context frames.
 
+Compiler state which can cross a source load, macro/evaluator wait, recursive
+import, diagnostic callback, or compilation drain is runtime-rooted. This
+includes prior and promised final definitions, opaque origins, import requests,
+declaration-to-declaration definitions, macro embedded data, and the completed
+module result. Raw semantic values are projected only for one bounded,
+callback-free parser, resolver, or lowering operation; the completed state is
+republished before that operation yields control.
+
 One top-level module build allocates one `CompilationExecution`. Every ordered
 input and recursive import in that build shares its import lookup context and
 macro demand session. Macro tasks have their own demand ownership and
@@ -57,7 +65,9 @@ discovers original invocations, constructs normalized macro input and layout
 views, validates generated output with the authoritative lexer, preserves
 embedded values while rendering, and replays the completed declaration into
 ordinary parsing. It does not retain a second token or group representation of
-the source or generated output.
+the source or generated output. Embedded data stays in public runtime roots
+through rewrites and is projected only while constructing and consuming the
+temporary lexical replay.
 
 `StagedSourceParser` and `ModuleLowerer` alternate parsing and lowering in
 source order. This staging lets a declaration's macro resolve against the
@@ -78,6 +88,8 @@ all-results effect search. Branch journals backtrack normally; demanded
 obtain better diagnostics. Failed searches retain the furthest cursor and its
 active `.case` values. Successful expansion is parsed as an ordinary logical
 declaration before direct macro diagnostics are published in source order.
+Macro lookup and terminal-result forcing enter evaluation through that demand
+session; neither reopens the direct evaluator compatibility path.
 
 Macro cursors reuse the parser's `LayoutView`. Abstract anchors are
 materialized relative to the invocation floor, including hanging layout and

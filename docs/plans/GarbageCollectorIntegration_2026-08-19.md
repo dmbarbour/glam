@@ -1,6 +1,6 @@
 # Glam GC Integration Plan — 2026-08-19
 
-Status: in progress; Phases I0 through I2 and checkpoints I3A.1-I3E.1 are
+Status: in progress; Phases I0 through I2 and checkpoints I3A.1-I3E.2 are
 complete. Phase I3 is in progress. Collector Gate G1 passed on 2026-08-25.
 The remaining integration work follows the completed owner-matrix,
 stable-ledger, and low-risk checkpoint corrections from the integration
@@ -73,6 +73,11 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I3E.1c | complete | module/binary loader migration and stable-content contract preservation |
 | I3E.1d | complete | exhaustive lazy-producer and compatibility-access inventories |
 | I3E.1 | complete | semantic thunks separated from deterministic deferred host calls |
+| I3E.2a | complete | rooted closed-helper bundles and atomic cache publication |
+| I3E.2b | complete | rooted macro rewrite state and client-demand lookup/result forcing |
+| I3E.2c | complete | rooted recursive module setup, declaration state, import handoff, and result drain |
+| I3E.2d | complete | compiler root/projection inventories and architecture reconciliation |
+| I3E.2 | complete | bounded compiler, macro, and closed-value regions |
 | I3 | in progress | bounded evaluator/worker mutator regions |
 | I4 | pending | core trace vocabulary and leaf policy |
 | I4.0 | pending | managed-family destruction admission contract |
@@ -326,7 +331,7 @@ The authoritative strong-owner matrix is:
 | public `Values` and crate-private `CoreValueFactory` | strong | they are explicit construction capabilities and remain usable after the facade is dropped |
 | active `EvaluationDemandState` / `EvalContext` | strong, through the factory | an admitted evaluation context must retain its value cache and construction authority |
 | `ReflectionStore` and `StoreSnapshot` | strong, through the factory | transactions and snapshots still construct path/query values after capture |
-| active compiler contexts and scoped compiler factories | strong, through the factory | compilation-local construction and cache access must remain usable |
+| active compiler contexts and scoped compiler factories | strong, through the factory; semantic state separately runtime-rooted | compilation-local construction and cache access must remain usable while prior/final definitions, origins, and imports survive waits only through roots |
 | a sealed reflection profile's runtime host | conditionally strong through its retained `RuntimeSharedResources` | a retained service profile may continue using its host, but the domain itself never retains the profile |
 | public `Value` / `RuntimeValueRoot` and future collector `Root` | non-owning | values may outlive the domain and become inaccessible rather than preserving the heap |
 | managed nodes, closures, opaque payloads, and cache entries | non-owning | a strong backedge would form `domain -> heap/cache -> payload -> domain` |
@@ -1994,9 +1999,56 @@ boundary.
   component may explicitly call the evaluator service, obtaining another
   bounded scope.
 
+Implementation is partitioned after the entry audit:
+
+- **I3E.2a — Closed helpers and rooted cache publication.** Consolidate the
+  built-in compiler and diagnostic-formatter closed evaluator, route it through
+  the private client-demand service, and store every completed cached helper
+  and lazily memoized effect path as a `RuntimeValueRoot`. Build candidates
+  remain private until complete; cache locks never enclose evaluation or
+  managed access. I4F.1 later changes the compatibility root representation,
+  not this publication boundary.
+- **I3E.2b — Macro driver and suspended expansion roots.** Route macro-result
+  and macro-lookup WHNF demand through their existing runtime services rather
+  than direct evaluator compatibility calls. Keep macro input, journal,
+  output, and declaration-rewrite embedded data rooted across search polls,
+  host request dispatch, waits, and diagnostics. Project embedded data only
+  within the callback-free lexical/parser operation which consumes it.
+- **I3E.2c — Recursive module-result handoff.** Keep prior/final definitions,
+  opaque origins, per-input setup, declaration-to-declaration definitions, and
+  completed module results in runtime roots whenever source loading, recursive
+  import, macro execution, diagnostic publication, or compilation-execution
+  drain may intervene. Each declaration's callback-free resolution/lowering
+  receives a bounded value-access region and republishes its complete result
+  before leaving it.
+- **I3E.2d — Closure audit and documentation.** Remove the I3E.2 direct
+  evaluator inventory entries, add source-backed inventories for durable
+  compiler roots and root projection sites, and reconcile the architecture,
+  ownership ledger, and public compatibility inventory. Raw semantic values
+  may still exist within one bounded compiler operation; I4F.1/I4F.2 own the
+  managed-root representation switch.
+
 Verification: `compiler_suspension_parks_only_roots`,
 `compiler_cache_publishes_complete_rooted_bundle`, and macro/import forced
 schedules prove callback and wait separation. Production remains `NoAuto`.
+
+I3E.2 completed on 2026-09-01. The built-in compiler and diagnostic formatter
+publish complete per-runtime cache bundles whose members are
+`RuntimeValueRoot`s; a cache lock never encloses evaluation or value access.
+Macro lookup and result forcing now use the compilation execution's
+client-demand services. Embedded macro data remains in public runtime roots
+from output journaling through declaration replay and is projected only in a
+bounded lexer/parser operation.
+
+`CompileContext`, module-loader arguments, input setup, declaration lowering,
+compiler diagnostics, and completed module results now retain roots whenever
+source loading, macro execution, recursive import, diagnostic publication, or
+compilation drain may intervene. Each declaration projects its prior rooted
+state inside one callback-free lowering region and republishes the completed
+state before the next declaration. Module sealing uses client demand rather
+than the direct evaluator compatibility entry. Source-backed inventories now
+account for both compiler roots/projections and all remaining direct evaluator
+entries; only I3E.3 diagnostic helpers remain on the latter list.
 
 ### Phase I3E.3 — Event, Diagnostic, and Executable Callback Regions
 

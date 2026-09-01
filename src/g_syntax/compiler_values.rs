@@ -8,6 +8,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use crate::runtime::RuntimeValueRoot;
+
 use super::*;
 
 #[derive(Clone)]
@@ -16,35 +18,40 @@ pub(in crate::g_syntax) struct BuiltinModule {
     pub(in crate::g_syntax) definitions: Value,
 }
 
+struct RootedBuiltinModule {
+    value: RuntimeValueRoot,
+    definitions: RuntimeValueRoot,
+}
+
 struct GCompilerValues {
-    math: BuiltinModule,
-    list: BuiltinModule,
-    std: BuiltinModule,
-    empty_object_defs: Value,
-    constant_object_defs: Value,
-    reflection_annotator: Value,
-    pure_if_runner: Value,
-    pure_match_runner: Value,
-    defined_or: Value,
-    require_defined: Value,
-    macro_environment: Value,
-    effects: Mutex<HashMap<Key, Value>>,
+    math: RootedBuiltinModule,
+    list: RootedBuiltinModule,
+    std: RootedBuiltinModule,
+    empty_object_defs: RuntimeValueRoot,
+    constant_object_defs: RuntimeValueRoot,
+    reflection_annotator: RuntimeValueRoot,
+    pure_if_runner: RuntimeValueRoot,
+    pure_match_runner: RuntimeValueRoot,
+    defined_or: RuntimeValueRoot,
+    require_defined: RuntimeValueRoot,
+    macro_environment: RuntimeValueRoot,
+    effects: Mutex<HashMap<Key, RuntimeValueRoot>>,
 }
 
 trait EffectValueCache {
-    fn effects(&self) -> &Mutex<HashMap<Key, Value>>;
+    fn effects(&self) -> &Mutex<HashMap<Key, RuntimeValueRoot>>;
 }
 
 impl EffectValueCache for GCompilerValues {
-    fn effects(&self) -> &Mutex<HashMap<Key, Value>> {
+    fn effects(&self) -> &Mutex<HashMap<Key, RuntimeValueRoot>> {
         &self.effects
     }
 }
 
-struct BuildingEffectValues<'a>(&'a Mutex<HashMap<Key, Value>>);
+struct BuildingEffectValues<'a>(&'a Mutex<HashMap<Key, RuntimeValueRoot>>);
 
 impl EffectValueCache for BuildingEffectValues<'_> {
-    fn effects(&self) -> &Mutex<HashMap<Key, Value>> {
+    fn effects(&self) -> &Mutex<HashMap<Key, RuntimeValueRoot>> {
         self.0
     }
 }
@@ -55,6 +62,26 @@ fn cache(values: &CoreValueFactory) -> Arc<GCompilerValues> {
 
 fn with_values<R>(values: &CoreValueFactory, use_values: impl FnOnce(&GCompilerValues) -> R) -> R {
     use_values(&cache(values))
+}
+
+fn root_value(values: &CoreValueFactory, value: Value) -> RuntimeValueRoot {
+    RuntimeValueRoot::new(values, value)
+}
+
+fn project_value(values: &CoreValueFactory, root: &RuntimeValueRoot) -> Value {
+    assert_eq!(
+        root.runtime_id(),
+        values.runtime_id(),
+        "cached compiler value and requesting compiler must share one runtime"
+    );
+    values.with_runtime_value_access(|_| root.as_core().clone())
+}
+
+fn project_module(values: &CoreValueFactory, module: &RootedBuiltinModule) -> BuiltinModule {
+    BuiltinModule {
+        value: project_value(values, &module.value),
+        definitions: project_value(values, &module.definitions),
+    }
 }
 
 impl GCompilerValues {
@@ -113,9 +140,12 @@ impl GCompilerValues {
                 ),
         );
 
-        let make_module = |value: Value| BuiltinModule {
-            definitions: apply_closed(values, constant_object_defs.clone(), [value.clone()]),
-            value,
+        let make_module = |value: Value| RootedBuiltinModule {
+            definitions: root_value(
+                values,
+                apply_closed(values, constant_object_defs.clone(), [value.clone()]),
+            ),
+            value: root_value(values, value),
         };
 
         let pure_if_runner = build_pure_conditional_runner(values, Builtin::IfResult);
@@ -124,19 +154,25 @@ impl GCompilerValues {
             math: make_module(math_value),
             list: make_module(list_value),
             std: make_module(std_value),
-            empty_object_defs: build_empty_object_defs(values),
-            constant_object_defs,
-            reflection_annotator: build_reflection_annotator(values, &build_cache),
-            require_defined: build_require_defined(values, defined_or.clone()),
-            defined_or,
-            pure_if_runner,
-            pure_match_runner: build_pure_conditional_runner(values, Builtin::MatchResult),
-            macro_environment: build_macro_environment(values),
+            empty_object_defs: root_value(values, build_empty_object_defs(values)),
+            constant_object_defs: root_value(values, constant_object_defs),
+            reflection_annotator: root_value(
+                values,
+                build_reflection_annotator(values, &build_cache),
+            ),
+            require_defined: root_value(values, build_require_defined(values, defined_or.clone())),
+            defined_or: root_value(values, defined_or),
+            pure_if_runner: root_value(values, pure_if_runner),
+            pure_match_runner: root_value(
+                values,
+                build_pure_conditional_runner(values, Builtin::MatchResult),
+            ),
+            macro_environment: root_value(values, build_macro_environment(values)),
             effects,
         }
     }
 
-    fn pure_conditional_runner(&self, selector: Builtin) -> &Value {
+    fn pure_conditional_runner(&self, selector: Builtin) -> &RuntimeValueRoot {
         match selector {
             Builtin::IfResult => &self.pure_if_runner,
             Builtin::MatchResult => &self.pure_match_runner,
@@ -150,33 +186,43 @@ pub(in crate::g_syntax) fn builtin_module(
     name: &str,
 ) -> Option<BuiltinModule> {
     with_values(values, |compiler| match name {
-        "math" => Some(compiler.math.clone()),
-        "list" => Some(compiler.list.clone()),
-        "std" | "prelude" => Some(compiler.std.clone()),
+        "math" => Some(project_module(values, &compiler.math)),
+        "list" => Some(project_module(values, &compiler.list)),
+        "std" | "prelude" => Some(project_module(values, &compiler.std)),
         _ => None,
     })
 }
 
 #[cfg(test)]
 pub(in crate::g_syntax) fn builtin_list_module(values: &CoreValueFactory) -> Dict {
-    with_values(values, |compiler| value_dict(&compiler.list.value))
+    with_values(values, |compiler| {
+        value_dict(&project_value(values, &compiler.list.value))
+    })
 }
 
 pub(in crate::g_syntax) fn empty_object_defs(values: &CoreValueFactory) -> Value {
-    with_values(values, |compiler| compiler.empty_object_defs.clone())
+    with_values(values, |compiler| {
+        project_value(values, &compiler.empty_object_defs)
+    })
 }
 
 pub(in crate::g_syntax) fn constant_object_defs(values: &CoreValueFactory, value: Value) -> Value {
-    let function = with_values(values, |compiler| compiler.constant_object_defs.clone());
+    let function = with_values(values, |compiler| {
+        project_value(values, &compiler.constant_object_defs)
+    });
     apply_closed(values, function, [value])
 }
 
 pub(in crate::g_syntax) fn defined_or(values: &CoreValueFactory) -> Value {
-    with_values(values, |compiler| compiler.defined_or.clone())
+    with_values(values, |compiler| {
+        project_value(values, &compiler.defined_or)
+    })
 }
 
 pub(in crate::g_syntax) fn require_defined(values: &CoreValueFactory) -> Value {
-    with_values(values, |compiler| compiler.require_defined.clone())
+    with_values(values, |compiler| {
+        project_value(values, &compiler.require_defined)
+    })
 }
 
 pub(in crate::g_syntax) fn reflection_annotator_resolved(
@@ -186,7 +232,7 @@ pub(in crate::g_syntax) fn reflection_annotator_resolved(
 ) -> ResolvedExpr<Value> {
     ResolvedExpr::apply(
         ResolvedExpr::Embedded(with_values(values, |compiler| {
-            compiler.reflection_annotator.clone()
+            project_value(values, &compiler.reflection_annotator)
         })),
         [guard, final_defs],
     )
@@ -213,7 +259,7 @@ pub(in crate::g_syntax) fn run_pure_conditional_resolved(
 ) -> ResolvedExpr<Value> {
     ResolvedExpr::apply(
         ResolvedExpr::Embedded(with_values(values, |compiler| {
-            compiler.pure_conditional_runner(Builtin::IfResult).clone()
+            project_value(values, compiler.pure_conditional_runner(Builtin::IfResult))
         })),
         [operation],
     )
@@ -247,9 +293,10 @@ pub(in crate::g_syntax) fn run_pure_match_resolved(
     );
     ResolvedExpr::apply(
         ResolvedExpr::Embedded(with_values(values, |compiler| {
-            compiler
-                .pure_conditional_runner(Builtin::MatchResult)
-                .clone()
+            project_value(
+                values,
+                compiler.pure_conditional_runner(Builtin::MatchResult),
+            )
         })),
         [operation],
     )
@@ -268,7 +315,9 @@ pub(in crate::g_syntax) fn macro_environment(
     base: Value,
     language: Value,
 ) -> Value {
-    let function = with_values(values, |compiler| compiler.macro_environment.clone());
+    let function = with_values(values, |compiler| {
+        project_value(values, &compiler.macro_environment)
+    });
     apply_closed(values, function, [base, language])
 }
 
@@ -288,14 +337,28 @@ fn effect_path_value_with_cache(
 ) -> Value {
     let path: Arc<[Key]> = path.iter().map(Key::atom_from_text).collect();
     let cache_key = Key::List(path.clone());
-    let mut effects = cache
+    if let Some(root) = cache
         .effects()
         .lock()
-        .expect("g compiler effect-value cache must not be poisoned");
-    effects
+        .expect("g compiler effect-value cache must not be poisoned")
+        .get(&cache_key)
+        .cloned()
+    {
+        return project_value(values, &root);
+    }
+
+    // Construction may allocate and, after the managed representation switch,
+    // may require scoped value access. Races may build an equivalent closed
+    // candidate twice; only publication is serialized.
+    let candidate = root_value(values, build_effect_path_value(values, path));
+    let root = cache
+        .effects()
+        .lock()
+        .expect("g compiler effect-value cache must not be poisoned")
         .entry(cache_key)
-        .or_insert_with(|| build_effect_path_value(values, path))
-        .clone()
+        .or_insert(candidate)
+        .clone();
+    project_value(values, &root)
 }
 
 #[cfg(test)]
@@ -320,13 +383,14 @@ fn apply_closed(
     )
 }
 
-fn evaluate_closed(values: &CoreValueFactory, expression: ResolvedExpr<Value>) -> Value {
+pub(in crate::g_syntax) fn evaluate_closed(
+    values: &CoreValueFactory,
+    expression: ResolvedExpr<Value>,
+) -> Value {
     let value = lower_resolved_expr(values, expression);
-    crate::eval::eval_value(
-        &crate::evaluation::EvalContext::private_closed(values.clone()),
-        &value,
-    )
-    .expect("closed g compiler helper must evaluate without session capabilities")
+    crate::evaluation::EvalContext::private_closed(values.clone())
+        .evaluate_whnf(&value)
+        .expect("closed g compiler helper must evaluate without session capabilities")
 }
 
 fn apply_builtin(
@@ -826,11 +890,61 @@ mod tests {
         assert_eq!(first_std.definitions, second_std.definitions);
         assert!(matches!(first_std.definitions, Value::Function(_)));
         with_values(&values, |compiler| {
-            assert!(matches!(compiler.reflection_annotator, Value::Function(_)));
-            assert!(matches!(compiler.pure_if_runner, Value::Function(_)));
-            assert!(matches!(compiler.pure_match_runner, Value::Function(_)));
-            assert!(matches!(compiler.macro_environment, Value::Function(_)));
+            assert!(matches!(
+                project_value(&values, &compiler.reflection_annotator),
+                Value::Function(_)
+            ));
+            assert!(matches!(
+                project_value(&values, &compiler.pure_if_runner),
+                Value::Function(_)
+            ));
+            assert!(matches!(
+                project_value(&values, &compiler.pure_match_runner),
+                Value::Function(_)
+            ));
+            assert!(matches!(
+                project_value(&values, &compiler.macro_environment),
+                Value::Function(_)
+            ));
         });
+    }
+
+    #[test]
+    fn compiler_cache_publishes_complete_rooted_bundle() {
+        let values = fresh_test_values();
+        let compiler = cache(&values);
+        let roots = [
+            &compiler.math.value,
+            &compiler.math.definitions,
+            &compiler.list.value,
+            &compiler.list.definitions,
+            &compiler.std.value,
+            &compiler.std.definitions,
+            &compiler.empty_object_defs,
+            &compiler.constant_object_defs,
+            &compiler.reflection_annotator,
+            &compiler.pure_if_runner,
+            &compiler.pure_match_runner,
+            &compiler.defined_or,
+            &compiler.require_defined,
+            &compiler.macro_environment,
+        ];
+        assert!(
+            roots
+                .into_iter()
+                .all(|root| root.runtime_id() == values.runtime_id())
+        );
+        assert!(
+            compiler
+                .effects
+                .lock()
+                .expect("compiler effect cache should not be poisoned")
+                .values()
+                .all(|root| root.runtime_id() == values.runtime_id())
+        );
+        values
+            .collect_managed_for_test()
+            .expect("closed cache construction must release managed access");
     }
 
     #[test]
@@ -896,7 +1010,7 @@ mod tests {
         const THREADS: usize = 8;
 
         let values = fresh_test_values();
-        let function = cache(&values).macro_environment.clone();
+        let function = project_value(&values, &cache(&values).macro_environment);
         let barrier = Arc::new(Barrier::new(THREADS));
         let evaluators = (0..THREADS)
             .map(|index| {

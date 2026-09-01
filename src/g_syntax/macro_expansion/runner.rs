@@ -4,7 +4,6 @@ use crate::api::{CompilationExecution, Diagnostic, Value as PublicValue};
 use crate::core::CoreValueFactory;
 use crate::core::Value;
 use crate::diagnostic::Severity;
-use crate::eval;
 use crate::evaluation::EvaluationPumpOutcome;
 use crate::reflection::{IsolatedEffectSearch, IsolatedSearchPoll};
 
@@ -217,33 +216,20 @@ pub(in crate::g_syntax) fn run_macro_effect(
 
 fn force_result(
     execution: &CompilationExecution,
-    mut value: Value,
+    value: Value,
 ) -> Result<Value, Box<MacroFailure>> {
-    loop {
-        match eval::eval_value(execution.macro_context(), &value) {
-            Ok(next @ (Value::Lazy(_) | Value::Promised(_))) => value = next,
-            Ok(value) => return Ok(value),
-            Err(error) => {
-                let Some(wait) = error.blocked_on() else {
-                    return Err(macro_error(
-                        execution.macro_context().values(),
-                        format!("macro result evaluation failed: {error}"),
-                    ));
-                };
-                match execution.macro_context().pump_wait(&wait.0, STEP_BUDGET) {
-                    EvaluationPumpOutcome::TargetReady
-                    | EvaluationPumpOutcome::Busy
-                    | EvaluationPumpOutcome::BudgetExhausted => {}
-                    EvaluationPumpOutcome::NoProgress => {
-                        return Err(macro_error(
-                            execution.macro_context().values(),
-                            "macro result is waiting on a lazy producer unavailable to the macro demand session",
-                        ));
-                    }
-                }
-            }
-        }
-    }
+    execution
+        .macro_context()
+        .evaluate_whnf(&value)
+        .map_err(|error| {
+            let detail = if error.blocked_on().is_some() {
+                "macro result is waiting on a lazy producer unavailable to the macro demand session"
+                    .to_owned()
+            } else {
+                format!("macro result evaluation failed: {error}")
+            };
+            macro_error(execution.macro_context().values(), detail)
+        })
 }
 
 pub(in crate::g_syntax) fn render_macro_case(

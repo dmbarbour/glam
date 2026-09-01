@@ -43,7 +43,7 @@ not define language semantics or collect subsystem invariants.
 | `g_syntax/parser/declaration.rs`, `declaration/` | Top-level and recursive declarations |
 | `g_syntax/keywords.rs` | Language-version keyword ownership |
 | `g_syntax/resolve/`, `resolved.rs`, `analysis.rs`, `name_analysis.rs` | Resolution, affine IR, and source analysis |
-| `g_syntax/compiler_values.rs` | Runtime-cached closed compiler helpers and modules |
+| `g_syntax/compiler_values.rs` | Atomically published, runtime-rooted closed compiler helpers and modules |
 | `g_syntax/macro_expansion/` | Macro effect API, journals, and isolated search |
 | `g_syntax/module_lowering/` | Imports, definitions, objects, module fixpoint |
 | `g_syntax/net_lowering.rs` | Resolved functions and applications to closed nets |

@@ -128,23 +128,7 @@ macro_rules! entry {
     };
 }
 
-const INVENTORY: &[InventoryEntry] = &[
-    entry!("src/api/assembly.rs", [1, 0, 0, 0, 0], "I3E.1"),
-    entry!("src/compiler.rs", [3, 0, 0, 0, 0], "I3E.1"),
-    entry!("src/diagnostic.rs", [10, 2, 0, 0, 0], "I3E.3"),
-    entry!("src/g_syntax/compiler_values.rs", [1, 0, 0, 0, 0], "I3E.2"),
-    entry!(
-        "src/g_syntax/diagnostic_formatter.rs",
-        [1, 0, 0, 0, 0],
-        "I3E.2"
-    ),
-    entry!(
-        "src/g_syntax/macro_expansion/runner.rs",
-        [1, 0, 0, 0, 0],
-        "I3E.2"
-    ),
-    entry!("src/g_syntax/parser/source.rs", [1, 0, 0, 0, 0], "I3E.2"),
-];
+const INVENTORY: &[InventoryEntry] = &[entry!("src/diagnostic.rs", [10, 2, 0, 0, 0], "I3E.3")];
 
 /// Every evaluator function which already carries scoped access, plus every
 /// deliberate durable-context seam which later checkpoints must split.
@@ -320,6 +304,7 @@ fn collect_rust_sources(directory: &Path, sources: &mut Vec<PathBuf>) {
 fn is_external_production_source(relative: &Path) -> bool {
     !relative.starts_with("src/eval")
         && !relative.starts_with("src/bin")
+        && relative != Path::new("src/g_syntax/access_inventory.rs")
         && !relative
             .components()
             .any(|component| component.as_os_str() == "tests")

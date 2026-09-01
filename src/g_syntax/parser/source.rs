@@ -12,14 +12,11 @@ use super::input::{ParseSession, TokenView};
 use super::layout::validate_delimited_layouts;
 use super::lexical::{DeclarationSection, LexedSource, TokenKind, lex_source};
 use super::logical::{DeclarationMacroWork, EMBEDDED_MARKER, OriginalMacroInvocation};
+use crate::api::CompilationExecution;
 use crate::api::Value as PublicValue;
 use crate::compiler::CompileContext;
 use crate::core::{Atom, Dict, Key, List, Value};
-use crate::evaluation::EvaluationPumpOutcome;
 use crate::number::Number;
-use crate::{api::CompilationExecution, eval};
-
-const MACRO_LOOKUP_STEP_BUDGET: usize = 256;
 
 pub(crate) fn inspect_source(source: &[u8]) -> InspectedSource {
     let mut parser = StagedSourceParser::new(source);
@@ -317,7 +314,12 @@ impl<'source> StagedSourceParser<'source> {
         }
         let (rewritten, embedded) = work.materialize();
         let diagnostics_before = self.diagnostics.len();
-        let declarations = parse_expanded_declaration(&rewritten, embedded, &mut self.diagnostics);
+        let declarations = parse_expanded_declaration(
+            context.values(),
+            &rewritten,
+            embedded,
+            &mut self.diagnostics,
+        );
         let accepted = !self.diagnostics[diagnostics_before..]
             .iter()
             .any(|diagnostic| diagnostic.severity == crate::diagnostic::Severity::Error);
@@ -325,9 +327,9 @@ impl<'source> StagedSourceParser<'source> {
             macro_diagnostics.sort_by_key(|(start, _, _)| *start);
             for (_, original, diagnostics) in macro_diagnostics {
                 for diagnostic in diagnostics {
-                    let emission = apply_macro_context(
+                    let emission = apply_public_macro_context(
                         context.values(),
-                        diagnostic.emission().as_core().clone(),
+                        diagnostic.emission(),
                         None,
                         &[],
                         std::slice::from_ref(&original),
@@ -428,10 +430,34 @@ fn macro_compiler_diagnostic(
 ) -> Diagnostic {
     let emission = crate::diagnostic::text_message(Some(invocation.line), &message);
     let emission = apply_macro_context(values, emission, frontier, cases, frames);
-    Diagnostic::error(invocation.line, message).with_emission(emission)
+    Diagnostic::error(invocation.line, message).with_emission(values, emission)
+}
+
+fn apply_public_macro_context(
+    values: &crate::core::CoreValueFactory,
+    message: &PublicValue,
+    frontier: Option<(usize, usize, usize)>,
+    cases: &[PublicValue],
+    frames: &[OriginalMacroInvocation],
+) -> Value {
+    values.with_runtime_value_access(|_| {
+        apply_macro_context_scoped(values, message.as_core().clone(), frontier, cases, frames)
+    })
 }
 
 fn apply_macro_context(
+    values: &crate::core::CoreValueFactory,
+    message: Value,
+    frontier: Option<(usize, usize, usize)>,
+    cases: &[PublicValue],
+    frames: &[OriginalMacroInvocation],
+) -> Value {
+    values.with_runtime_value_access(|_| {
+        apply_macro_context_scoped(values, message, frontier, cases, frames)
+    })
+}
+
+fn apply_macro_context_scoped(
     values: &crate::core::CoreValueFactory,
     message: Value,
     frontier: Option<(usize, usize, usize)>,
@@ -527,59 +553,45 @@ fn macro_lookup(
 
 fn force_macro_lookup_value(
     execution: &CompilationExecution,
-    mut value: Value,
+    value: Value,
 ) -> Result<Value, String> {
-    loop {
-        match eval::eval_value(execution.lookup_context(), &value) {
-            Ok(next @ (Value::Lazy(_) | Value::Promised(_))) => value = next,
-            Ok(value) => return Ok(value),
-            Err(error) => {
-                let Some(wait) = error.blocked_on() else {
-                    return Err(error.to_string());
-                };
-                match execution
-                    .lookup_context()
-                    .pump_wait(&wait.0, MACRO_LOOKUP_STEP_BUDGET)
-                {
-                    EvaluationPumpOutcome::TargetReady
-                    | EvaluationPumpOutcome::Busy
-                    | EvaluationPumpOutcome::BudgetExhausted => {}
-                    EvaluationPumpOutcome::NoProgress => {
-                        return Err(
-                            "macro lookup is waiting on a lazy producer unavailable to the macro demand session"
-                                .to_owned(),
-                        );
-                    }
-                }
-            }
-        }
-    }
+    execution
+        .lookup_context()
+        .evaluate_whnf(&value)
+        .map_err(|error| error.to_string())
 }
 
 fn parse_expanded_declaration(
+    values: &crate::core::CoreValueFactory,
     rewritten: &str,
-    embedded: Vec<Value>,
+    embedded: Vec<PublicValue>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Vec<Declaration> {
-    let lexical =
-        match lex_source(rewritten).replace_unknowns_with_embedded(EMBEDDED_MARKER, embedded) {
-            Ok(lexical) => lexical,
-            Err(error) => {
-                diagnostics.push(Diagnostic::error(1, error));
-                return Vec::new();
-            }
-        };
-    diagnostics.extend(lexical.diagnostics().iter().cloned());
-    if lexical.has_errors() {
-        return Vec::new();
-    }
-    report_orphan_continuations(&lexical, diagnostics);
-    diagnostics.extend(validate_delimited_layouts(&lexical));
-    lexical
-        .declarations()
-        .iter()
-        .map(|declaration| parse_lexical_declaration(&lexical, declaration, diagnostics))
-        .collect()
+    values.with_runtime_value_access(|_| {
+        let embedded = embedded
+            .iter()
+            .map(|value| value.as_core().clone())
+            .collect();
+        let lexical =
+            match lex_source(rewritten).replace_unknowns_with_embedded(EMBEDDED_MARKER, embedded) {
+                Ok(lexical) => lexical,
+                Err(error) => {
+                    diagnostics.push(Diagnostic::error(1, error));
+                    return Vec::new();
+                }
+            };
+        diagnostics.extend(lexical.diagnostics().iter().cloned());
+        if lexical.has_errors() {
+            return Vec::new();
+        }
+        report_orphan_continuations(&lexical, diagnostics);
+        diagnostics.extend(validate_delimited_layouts(&lexical));
+        lexical
+            .declarations()
+            .iter()
+            .map(|declaration| parse_lexical_declaration(&lexical, declaration, diagnostics))
+            .collect()
+    })
 }
 
 fn declared_language_value(language: &super::super::LanguageDecl) -> Value {

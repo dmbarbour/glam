@@ -78,9 +78,9 @@ macro_rules! entry {
 const INVENTORY: &[InventoryEntry] = &[
     entry!(
         "src/api/assembly.rs",
-        [2, 2, 5, 2, 2, 0],
-        "assembly setup, rooted import results, modules, and reflection environment",
-        "I3E.1/I3E.2 scoped demands and compiler regions; I4F.1 durable roots"
+        [4, 1, 4, 2, 4, 0],
+        "assembly setup, rooted compiler handoff, import results, modules, and reflection environment",
+        "I3E.2 bounded compiler regions; I4F.1 durable roots"
     ),
     entry!(
         "src/api/diagnostics.rs",
@@ -114,9 +114,9 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/compiler.rs",
-        [0, 0, 0, 0, 2, 0],
-        "test import loaders exercising the rooted host-call contract",
-        "I3E.1 deferred host calls; I4F.1 durable roots"
+        [3, 0, 0, 0, 8, 0],
+        "rooted source context, origins, definition promises, and import handoff",
+        "I3E.2 bounded compiler regions; I4F.1 durable roots"
     ),
     entry!(
         "src/core.rs",
@@ -155,6 +155,24 @@ const INVENTORY: &[InventoryEntry] = &[
         "I3A.3/I3B.2/I3C.1-I3D.1 scoped polling and activation; I4F.1 outcomes"
     ),
     entry!(
+        "src/g_syntax.rs",
+        [0, 1, 0, 0, 2, 0],
+        "rooted lowered definitions and compiler diagnostics across publication",
+        "I3E.2 bounded compiler regions; I4F.1 durable roots"
+    ),
+    entry!(
+        "src/g_syntax/compiler_values.rs",
+        [1, 0, 0, 0, 1, 0],
+        "complete runtime-cached compiler helper bundles",
+        "I3E.2 rooted cache publication; I4F.1 durable roots"
+    ),
+    entry!(
+        "src/g_syntax/diagnostic_formatter.rs",
+        [1, 0, 0, 0, 1, 0],
+        "runtime-cached closed diagnostic formatter",
+        "I3E.2 rooted cache publication; I4F.1 durable roots"
+    ),
+    entry!(
         "src/g_syntax/macro_expansion/effects.rs",
         [1, 0, 2, 0, 0, 0],
         "macro protocol callback values and embedded values",
@@ -167,6 +185,12 @@ const INVENTORY: &[InventoryEntry] = &[
         "I3E.2 compiler and macro regions; I4F.1 retained roots"
     ),
     entry!(
+        "src/g_syntax/module_lowering.rs",
+        [3, 1, 0, 0, 2, 0],
+        "declaration-to-declaration definitions and reflection annotator",
+        "I3E.2 bounded lowering regions; I4F.1 durable roots"
+    ),
+    entry!(
         "src/g_syntax/parser/logical.rs",
         [1, 0, 3, 0, 0, 0],
         "embedded source values and macro replay",
@@ -174,8 +198,8 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/g_syntax/parser/source.rs",
-        [2, 0, 0, 0, 0, 0],
-        "source diagnostics and conditional definitions",
+        [3, 0, 0, 0, 0, 0],
+        "rooted macro data projection, source diagnostics, and conditional definitions",
         "I3E.2 compiler regions; I4F.1 retained roots"
     ),
     entry!(
@@ -242,7 +266,11 @@ fn is_inventoried_source(relative: &Path) -> bool {
     }
     !matches!(
         relative.to_str(),
-        Some("src/api/value/prototype.rs" | "src/api/value/access_inventory.rs")
+        Some(
+            "src/api/value/prototype.rs"
+                | "src/api/value/access_inventory.rs"
+                | "src/g_syntax/access_inventory.rs"
+        )
     )
 }
 

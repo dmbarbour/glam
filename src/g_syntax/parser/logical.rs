@@ -7,6 +7,7 @@
 use std::ops::Range;
 use std::sync::Arc;
 
+use crate::api::Value as PublicValue;
 use crate::core::Value;
 
 use super::super::Diagnostic;
@@ -49,7 +50,7 @@ pub(super) struct DeclarationMacroWork {
     line: usize,
     invocations: Vec<OriginalMacroInvocation>,
     text: String,
-    embedded_values: Vec<Value>,
+    embedded_values: Vec<PublicValue>,
 }
 
 fn collect_macro_invocations(
@@ -142,38 +143,40 @@ impl DeclarationMacroWork {
         values: &crate::core::CoreValueFactory,
         original: &OriginalMacroInvocation,
     ) -> Result<MacroInvocation, Vec<Diagnostic>> {
-        let lexical = self.lexical()?;
-        let Some(declaration) = lexical.declarations().first() else {
-            return Err(vec![Diagnostic::error(
-                original.line,
-                format!(
-                    "macro invocation {} disappeared before it could expand",
-                    original.id
-                ),
-            )]);
-        };
-        let invocation = macro_invocation_at(&lexical, declaration, original.start, values)
-            .map_err(|diagnostic| {
-                vec![Diagnostic::error(
+        values.with_runtime_value_access(|_| {
+            let lexical = self.lexical()?;
+            let Some(declaration) = lexical.declarations().first() else {
+                return Err(vec![Diagnostic::error(
                     original.line,
                     format!(
-                        "macro invocation {} became invalid: {}",
-                        original.id, diagnostic.message
+                        "macro invocation {} disappeared before it could expand",
+                        original.id
                     ),
-                )]
-            })?;
-        if invocation.path != original.path {
-            return Err(vec![Diagnostic::error(
-                original.line,
-                format!(
-                    "macro invocation {} changed from `{}` to `{}` before expansion",
-                    original.id,
-                    original.path.join("."),
-                    invocation.path.join(".")
-                ),
-            )]);
-        }
-        Ok(invocation)
+                )]);
+            };
+            let invocation = macro_invocation_at(&lexical, declaration, original.start, values)
+                .map_err(|diagnostic| {
+                    vec![Diagnostic::error(
+                        original.line,
+                        format!(
+                            "macro invocation {} became invalid: {}",
+                            original.id, diagnostic.message
+                        ),
+                    )]
+                })?;
+            if invocation.path != original.path {
+                return Err(vec![Diagnostic::error(
+                    original.line,
+                    format!(
+                        "macro invocation {} changed from `{}` to `{}` before expansion",
+                        original.id,
+                        original.path.join("."),
+                        invocation.path.join(".")
+                    ),
+                )]);
+            }
+            Ok(invocation)
+        })
     }
 
     pub(super) fn splice(
@@ -215,7 +218,7 @@ impl DeclarationMacroWork {
         Ok(())
     }
 
-    pub(super) fn materialize(&self) -> (String, Vec<Value>) {
+    pub(super) fn materialize(&self) -> (String, Vec<PublicValue>) {
         let mut source = "\n".repeat(self.line.saturating_sub(1));
         source.push_str(&self.text);
         (source, self.embedded_values.clone())
@@ -243,7 +246,13 @@ impl DeclarationMacroWork {
 
     fn lexical(&self) -> Result<LexedSource<'_>, Vec<Diagnostic>> {
         let lexical = lex_source(&self.text)
-            .replace_unknowns_with_embedded(EMBEDDED_MARKER, self.embedded_values.clone())
+            .replace_unknowns_with_embedded(
+                EMBEDDED_MARKER,
+                self.embedded_values
+                    .iter()
+                    .map(|value| value.as_core().clone())
+                    .collect(),
+            )
             .map_err(|error| vec![Diagnostic::error(self.line, error)])?;
         if lexical.has_errors() {
             let mut diagnostics = lexical.diagnostics().to_vec();
@@ -428,7 +437,7 @@ fn generated_output(
     output: &[MacroOutput],
     line: usize,
     root_indentation: usize,
-) -> Result<(String, Vec<Value>), Vec<Diagnostic>> {
+) -> Result<(String, Vec<PublicValue>), Vec<Diagnostic>> {
     let mut generated = String::new();
     let mut embedded = Vec::new();
     let mut indentation = vec![root_indentation];
@@ -443,7 +452,7 @@ fn generated_output(
             MacroOutput::Data(value) => {
                 resume_output_parent(&mut generated, &indentation, &mut resume_parent);
                 generated.push(EMBEDDED_MARKER);
-                embedded.push(value.as_core().clone());
+                embedded.push(value.clone());
             }
             MacroOutput::Separator => {
                 resume_output_parent(&mut generated, &indentation, &mut resume_parent);

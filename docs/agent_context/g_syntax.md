@@ -91,9 +91,12 @@ disagree.
   only when ordinary lexical resolution selects the module namespace. Locals,
   object scope, aliases, and `using` scope must reject it or require explicit
   `module.`. Do not lower its operand as a runtime expression.
-- Built-in closed helpers and modules are cached per runtime. Paths,
-  environments, promises, and reflection tasks remain per compilation or
-  module.
+- Built-in closed helpers and modules are published as one complete rooted
+  cache bundle per runtime. Paths, environments, promises, and reflection
+  tasks remain per compilation or module. Compiler state crossing source
+  loading, macro/evaluator waits, imports, diagnostics, or execution drain must
+  be runtime-rooted and projected only within one callback-free compiler
+  operation.
 
 ## Names and Scope
 

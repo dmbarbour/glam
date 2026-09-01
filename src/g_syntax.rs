@@ -2,7 +2,10 @@ use crate::compiler::CompileContext;
 use crate::core::{Atom, CoreValueFactory, Dict, Key, Value};
 use crate::core::{Builtin, keys};
 use crate::diagnostic::Severity;
+use crate::runtime::RuntimeValueRoot;
 
+#[cfg(test)]
+mod access_inventory;
 mod analysis;
 mod ast;
 mod compiler_values;
@@ -42,7 +45,7 @@ pub struct Diagnostic {
     pub severity: Severity,
     pub line: usize,
     pub message: String,
-    emission: Option<Value>,
+    emission: Option<RuntimeValueRoot>,
 }
 
 pub(crate) fn compile_source(source: &[u8], context: &CompileContext) -> Value {
@@ -50,11 +53,12 @@ pub(crate) fn compile_source(source: &[u8], context: &CompileContext) -> Value {
         definitions,
         diagnostics,
     } = lower_source(source, context);
+    let definitions = RuntimeValueRoot::new(context.values(), definitions);
     for diagnostic in diagnostics {
         let severity = diagnostic.severity;
         context.emit_diagnostic(severity, diagnostic.into_emission());
     }
-    definitions
+    definitions.into_core()
 }
 
 pub(crate) fn default_diagnostic_formatter(values: &CoreValueFactory) -> Value {
@@ -98,13 +102,14 @@ impl Diagnostic {
         }
     }
 
-    fn with_emission(mut self, emission: Value) -> Self {
-        self.emission = Some(emission);
+    fn with_emission(mut self, values: &CoreValueFactory, emission: Value) -> Self {
+        self.emission = Some(RuntimeValueRoot::new(values, emission));
         self
     }
 
     fn into_emission(self) -> Value {
         self.emission
+            .map(RuntimeValueRoot::into_core)
             .unwrap_or_else(|| crate::diagnostic::text_message(Some(self.line), &self.message))
     }
 }
