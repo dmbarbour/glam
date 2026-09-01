@@ -111,9 +111,7 @@ pub(super) fn apply_builtin_in(
         | Builtin::EffectMapRun
         | Builtin::EffectMapContinue => effect::apply(context.context(), builtin, arguments),
         Builtin::Seq | Builtin::Spark => strategy::apply(context.context(), builtin, arguments),
-        Builtin::InteractionNet | Builtin::NetArity => {
-            net::apply(context.context(), builtin, arguments)
-        }
+        Builtin::InteractionNet | Builtin::NetArity => net::apply(context, builtin, arguments),
         Builtin::InspectOrigin => provenance::apply(context.context(), arguments),
         Builtin::AssertUnit => assertion::apply(context, arguments),
         Builtin::Anno => annotation::apply(context, arguments),

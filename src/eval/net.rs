@@ -1069,7 +1069,7 @@ fn progress_core_operator_claim(
     claim: CoreOperatorClaim<'_, '_>,
 ) -> Result<bool, EvaluationHalt> {
     let (operator, data) = claim.parts();
-    let disposition = match apply_core_operator(context.context(), operator, data) {
+    let disposition = match apply_core_operator(context, operator, data) {
         Ok(result) => OperatorDisposition::Yield(result),
         Err(error) => {
             let error = match retryable_evaluation_wait(context.context(), &error) {
@@ -1107,6 +1107,16 @@ pub(super) fn resolve_core_access(
     arguments: &[Value],
     path: &[CoreDataKey],
 ) -> Result<Value, EvaluationHalt> {
+    super::with_direct_evaluator(context, |evaluator| {
+        resolve_core_access_in(evaluator, arguments, path)
+    })
+}
+
+pub(super) fn resolve_core_access_in(
+    context: &EvaluatorStepContext<'_>,
+    arguments: &[Value],
+    path: &[CoreDataKey],
+) -> Result<Value, EvaluationHalt> {
     let mut current = arguments
         .first()
         .cloned()
@@ -1117,10 +1127,10 @@ pub(super) fn resolve_core_access(
             CoreDataKey::Key(key) => vec![key.clone()],
             CoreDataKey::Index => {
                 let value = dynamic.next().expect("lowered access index must exist");
-                let value = eval_value(context, value)?;
-                vec![value_to_key(context, &value)?]
+                let value = eval_value_in(context, value)?;
+                vec![value_to_key_in(context, &value)?]
             }
-            CoreDataKey::PathIndex => eval_key_path_list(
+            CoreDataKey::PathIndex => eval_key_path_list_in(
                 context,
                 dynamic
                     .next()
@@ -1128,7 +1138,7 @@ pub(super) fn resolve_core_access(
             )?,
         };
         for key in keys {
-            let value = eval_value(context, &current)?;
+            let value = eval_value_in(context, &current)?;
             let Value::Dict(dict) = value else {
                 return Err(EvaluationHalt::new("value access base is not a dictionary"));
             };
@@ -1138,7 +1148,7 @@ pub(super) fn resolve_core_access(
                 .unwrap_or_else(|| Value::Dict(crate::core::Dict::new_sync()));
         }
     }
-    eval_value(context, &current)
+    eval_value_in(context, &current)
 }
 
 #[cfg(test)]

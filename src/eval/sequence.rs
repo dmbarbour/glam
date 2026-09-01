@@ -1,12 +1,5 @@
 use super::*;
 
-pub(crate) fn eval_key_path_list(
-    context: &EvalContext,
-    value: &Value,
-) -> Result<Vec<Key>, EvaluationHalt> {
-    with_direct_evaluator(context, |evaluator| eval_key_path_list_in(evaluator, value))
-}
-
 pub(crate) fn eval_key_path_list_in(
     context: &EvaluatorStepContext<'_>,
     value: &Value,

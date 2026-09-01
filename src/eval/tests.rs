@@ -608,9 +608,13 @@ fn saturated_function_calls_reject_a_remaining_bind() {
 fn zero_arity_apply_operator_is_data_identity() {
     let operator = apply_arity_operator(0, Arc::from([]));
     let data = n(42);
+    let context = test_context();
 
     assert_eq!(
-        apply_core_operator(&test_context(), &operator, &data).unwrap(),
+        with_direct_evaluator(&context, |evaluator| {
+            apply_core_operator(evaluator, &operator, &data)
+        })
+        .unwrap(),
         OperatorYield::Data(data)
     );
 }

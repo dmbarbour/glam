@@ -9,7 +9,7 @@ pub(crate) fn apply_arity_operator(arity: usize, supplied: Arc<[Value]>) -> Core
 /// saturated call. Net construction may place that call in a lazy aggregate;
 /// evaluating it here would make enclosing construction accidentally strict.
 pub(super) fn apply_builtin_values_lazily(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     builtin: Builtin,
     mut supplied: Vec<Value>,
     arguments: Vec<Value>,
@@ -30,7 +30,7 @@ pub(super) fn apply_builtin_values_lazily(
     let rest = saturating.split_off(remaining);
     supplied.extend(saturating);
     let result = Value::Lazy(LazyValue::from_builtin(
-        context.values(),
+        context.context().values(),
         BuiltinCall {
             builtin,
             arguments: Arc::from(supplied),
@@ -39,7 +39,7 @@ pub(super) fn apply_builtin_values_lazily(
     if rest.is_empty() {
         Ok(result)
     } else {
-        apply_values(context, result, rest)
+        apply_values_in(context, result, rest)
     }
 }
 
@@ -107,7 +107,7 @@ pub(crate) fn request_operator(
 }
 
 pub(super) fn apply_core_operator(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     operator: &CoreOperator,
     data: &Value,
 ) -> Result<OperatorYield<CoreSpecialization>, EvaluationHalt> {
@@ -136,7 +136,7 @@ pub(super) fn apply_core_operator(
                     call.arguments.iter().cloned().collect(),
                     operands,
                 ),
-                function => apply_values(context, function, operands),
+                function => apply_values_in(context, function, operands),
             }?;
             Ok(OperatorYield::Data(result))
         }
@@ -162,7 +162,7 @@ pub(super) fn apply_core_operator(
             }
             let stage = attach_net_many(NetValue::new(code.runtime().clone()), captures);
             Ok(OperatorYield::Data(Value::Lazy(
-                LazyValue::from_net_computation(context.values(), stage),
+                LazyValue::from_net_computation(context.context().values(), stage),
             )))
         }
         CoreOperator::Dict { keys, supplied } => {
@@ -198,14 +198,14 @@ pub(super) fn apply_core_operator(
                 ));
             }
             Ok(OperatorYield::Data(Value::Lazy(LazyValue::from_builtin(
-                context.values(),
+                context.context().values(),
                 BuiltinCall {
                     builtin: call.builtin,
                     arguments: Arc::from(arguments),
                 },
             ))))
         }
-        CoreOperator::Applicable(function) => Ok(OperatorYield::Data(apply_value(
+        CoreOperator::Applicable(function) => Ok(OperatorYield::Data(apply_value_in(
             context,
             function.clone(),
             operand,
@@ -238,7 +238,7 @@ pub(super) fn apply_core_operator(
                 )));
             }
             Ok(OperatorYield::Data(Value::Lazy(LazyValue::from_access(
-                context.values(),
+                context.context().values(),
                 path.clone(),
                 Arc::from(arguments),
             ))))
@@ -264,7 +264,7 @@ pub(super) fn apply_core_operator(
                     .insert(tag.clone(), Value::List(List::from_values(arguments))),
             );
             Ok(OperatorYield::Data(if *wrap_effect {
-                constant_effect(context.values(), request)
+                constant_effect(context.context().values(), request)
             } else {
                 request
             }))

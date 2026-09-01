@@ -6,14 +6,14 @@ use std::sync::Arc;
 use crate::api::Value as PublicValue;
 use crate::core::{CoreValueFactory, Dict, List, NetValue, OpaqueValue, Value};
 use crate::core_net::{CoreSpecialization, CoreWaitToken};
-use crate::evaluation::EvalContext;
+use crate::evaluation::{EvalContext, EvaluatorStepContext};
 use crate::interaction_net::{NetBuilder, Port};
 use crate::reflection::{
     EffectRequestSpec, IsolatedEffectSearch, IsolatedSearchPoll, IsolatedTaskHost, RequestContext,
     RequestResult, TaskHalt, TaskSpecialization, task_eval_error,
 };
 
-use super::super::super::{EvaluationHalt, eval_index_number, eval_value};
+use super::super::super::{EvaluationHalt, eval_value_in};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct ConstructionPortId(NonZeroU64);
@@ -172,6 +172,12 @@ impl TaskSpecialization for InteractionNetEffects {
         arguments: Vec<PublicValue>,
         context: &mut RequestContext<'_, Self>,
     ) -> Result<RequestResult, TaskHalt> {
+        #[cfg(test)]
+        context
+            .eval_context()
+            .values()
+            .collect_managed_for_test()
+            .expect("interaction-net effect callbacks must not inherit an evaluator mutator");
         match request {
             InteractionNetRequest::Bind => construct_bind(arguments, context, &self.brand),
             InteractionNetRequest::Copy => construct_copy(arguments, context, &self.brand),
@@ -217,7 +223,7 @@ impl NetConstructionMachine {
     /// `EvaluationHalt::Blocked` and recorded by the owning lazy task.
     pub(in crate::eval) fn poll(
         &mut self,
-        context: &EvalContext,
+        context: &EvaluatorStepContext<'_>,
         step_budget: usize,
     ) -> Result<Option<Value>, EvaluationHalt> {
         match self.search.poll(step_budget.max(1)) {
@@ -230,7 +236,7 @@ impl NetConstructionMachine {
                     Some(halt) => Err(halt
                         .clone()
                         .with_context(PublicValue::from_core(
-                            context.values(),
+                            context.context().values(),
                             net_construction_context(),
                         ))
                         .into_evaluation_halt()),
@@ -251,7 +257,7 @@ impl NetConstructionMachine {
                         "interaction-net construction produced multiple results; use `.cut` to select one",
                     ));
                 }
-                let exposed = construction_port(
+                let exposed = construction_port_in(
                     context,
                     branch
                         .value()
@@ -259,11 +265,11 @@ impl NetConstructionMachine {
                         .as_core(),
                     &self.brand,
                 )?;
-                replay(context.values(), branch.journal(), exposed).map(Some)
+                replay(context.context().values(), branch.journal(), exposed).map(Some)
             }
             IsolatedSearchPoll::Failed(halt) => Err(halt
                 .with_context(PublicValue::from_core(
-                    context.values(),
+                    context.context().values(),
                     net_construction_context(),
                 ))
                 .into_evaluation_halt()),
@@ -304,13 +310,7 @@ fn construct_copy(
     brand: &Arc<ConstructionBrand>,
 ) -> Result<RequestResult, TaskHalt> {
     let [outputs] = exact(arguments, "`.copy`")?;
-    let outputs = eval_index_number(
-        context.eval_context(),
-        outputs.as_core(),
-        "`.copy`",
-        "copy_count",
-    )
-    .map_err(task_eval_error)?;
+    let outputs = construction_copy_count(context, &outputs)?;
     let port_count = outputs
         .checked_add(1)
         .ok_or_else(|| TaskHalt::new("`.copy` output count is too large"))?;
@@ -356,10 +356,8 @@ fn construct_wire(
     brand: &Arc<ConstructionBrand>,
 ) -> Result<RequestResult, TaskHalt> {
     let [left, right] = exact(arguments, "`.wire`")?;
-    let left = construction_port(context.eval_context(), left.as_core(), brand)
-        .map_err(task_eval_error)?;
-    let right = construction_port(context.eval_context(), right.as_core(), brand)
-        .map_err(task_eval_error)?;
+    let left = construction_port_request(context, &left, brand)?;
+    let right = construction_port_request(context, &right, brand)?;
     let mut transaction = construction_transaction(context)?;
     let (_, journal) = transaction.parts();
     journal.append(ConstructionOp::Wire { left, right });
@@ -406,12 +404,46 @@ fn port_list(
     )
 }
 
-fn construction_port(
-    context: &EvalContext,
+fn construction_copy_count(
+    context: &RequestContext<'_, InteractionNetEffects>,
+    value: &PublicValue,
+) -> Result<usize, TaskHalt> {
+    let value = context.evaluate(value).map_err(|halt| {
+        halt.with_context(PublicValue::from_core(
+            context.eval_context().values(),
+            crate::eval::evaluation_context_frame("copy_count"),
+        ))
+    })?;
+    let Value::Number(number) = value.as_value().as_core() else {
+        return Err(TaskHalt::new("`.copy` builtin requires number values"));
+    };
+    number
+        .to_usize_if_integer()
+        .ok_or_else(|| TaskHalt::new("`.copy` builtin requires non-negative integer indices"))
+}
+
+fn construction_port_request(
+    context: &RequestContext<'_, InteractionNetEffects>,
+    value: &PublicValue,
+    brand: &Arc<ConstructionBrand>,
+) -> Result<ConstructionPortId, TaskHalt> {
+    let value = context.evaluate(value)?;
+    construction_port_value(value.as_value().as_core(), brand).map_err(task_eval_error)
+}
+
+fn construction_port_in(
+    context: &EvaluatorStepContext<'_>,
     value: &Value,
     brand: &Arc<ConstructionBrand>,
 ) -> Result<ConstructionPortId, EvaluationHalt> {
-    let value = eval_value(context, value)?;
+    let value = eval_value_in(context, value)?;
+    construction_port_value(&value, brand)
+}
+
+fn construction_port_value(
+    value: &Value,
+    brand: &Arc<ConstructionBrand>,
+) -> Result<ConstructionPortId, EvaluationHalt> {
     let Value::Opaque(port) = value else {
         return Err(EvaluationHalt::new(
             "interaction-net operation requires a construction port",
@@ -520,8 +552,7 @@ mod tests {
             id: ConstructionPortId(NonZeroU64::new(1).unwrap()),
         })));
 
-        let context = crate::eval::test_support::test_context();
-        let error = construction_port(&context, &value, &local).unwrap_err();
+        let error = construction_port_value(&value, &local).unwrap_err();
         assert_eq!(
             error.to_string(),
             "interaction-net construction port belongs to another invocation"

@@ -1,6 +1,6 @@
 # Glam GC Integration Plan — 2026-08-19
 
-Status: in progress; Phases I0 through I2 and checkpoints I3A.1-I3D.3g are
+Status: in progress; Phases I0 through I2 and checkpoints I3A.1-I3D.4 are
 complete. Phase I3 is in progress. Collector Gate G1 passed on 2026-08-25.
 The remaining integration work follows the completed owner-matrix,
 stable-ledger, and low-risk checkpoint corrections from the integration
@@ -64,6 +64,10 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I3D.3f.3 | complete | manual handoff removal, forced lifecycle tests, and closure audit |
 | I3D.3f | complete | guarded cursor lifecycles for both owner forms |
 | I3D.3g | complete | one-shot contention handoff, blocked-before-park ordering, and local facade closure |
+| I3D.4a | complete | scoped net builtin, access, and active-pair semantic helpers |
+| I3D.4b | complete | bounded construction-callback demand and scoped result replay |
+| I3D.4c | complete | reflection/net region inventory and lock/wait closure audit |
+| I3D.4 | complete | reflection and net region audit |
 | I3 | in progress | bounded evaluator/worker mutator regions |
 | I4 | pending | core trace vocabulary and leaf policy |
 | I4.0 | pending | managed-family destruction admission contract |
@@ -1847,11 +1851,62 @@ resumption. Production remains `NoAuto`.
   access. I8 still owns the collector-side lock operation and exact trace, but
   may rely on exclusive collection excluding every ordinary lock holder.
 
-Verification: `reflection_poll_releases_mutator_on_every_callback`,
-`net_claim_is_resolved_before_semantic_block`, and
-`net_quantum_releases_mutator_on_terminal` cover scheduled reflection,
-isolated search, active-pair, cursor, and stuck-net paths. Production remains
-`NoAuto`; subsystem-local closed fixtures may collect.
+Implementation is partitioned after the entry audit:
+
+- **I3D.4a — Scoped net semantic helpers.** Preserve the admitted
+  `EvaluatorStepContext` through interaction-net builtin dispatch, active-pair
+  operator application, and lazy access resolution. Keep durable wrappers only
+  where a separately assigned effect/deferred boundary still requires one;
+  ordinary net work must not discard scoped authority and re-enter through the
+  compatibility gate.
+- **I3D.4b — Net-construction callback boundary.** Route construction request
+  argument demand through `RequestContext`'s bounded evaluator service and
+  evaluate the final exposed construction port through the already-admitted
+  owning evaluator step. Net-construction specialization callbacks must be
+  able to force collection, proving that the enclosing lazy/effect-machine
+  composition retains only mutator-free orchestration carriers.
+- **I3D.4c — Reflection/net closure audit.** Reconcile scheduled reflection,
+  isolated search, net construction, active-pair, cursor, contention, and
+  stuck-net exits. Extend inventories to reject direct compatibility entry in
+  net-construction callbacks and raw core-specialized net locking outside the
+  facade. Preserve the one documented contention handoff as the only
+  mutator-bearing wait.
+
+I3D.4 completed 2026-08-31. Interaction-net builtin dispatch, active-pair
+operator application, and lazy access resolution now retain their already
+admitted `EvaluatorStepContext`; they no longer discard that authority and
+immediately reopen the direct-compatibility gate. The now-unused durable
+index-number and key-path wrappers were removed, while the durable access
+wrapper remains solely for the separately assigned effect boundary.
+
+Construction request callbacks demand `.copy` counts and `.wire` ports
+through `RequestContext::evaluate`, and the owning lazy evaluator decodes the
+completed branch's exposed port through its existing scoped evaluator step.
+The isolated search still owns an `EvalContext` across polls, but neither that
+context nor its poll/evaluator carriers retain a mutator. A callback-side
+collection probe makes that distinction executable rather than relying on
+type commentary alone.
+
+The closure audit found no additional lock escape. Generic topology work runs
+inside `CoreRuntimeNetAccess::with_normalization_batch`; callable/operator
+semantics, reflection callbacks, isolated-search waits, and terminal
+publication occur after the batch and transient managed access have closed.
+Stuck-pair inspection stays entirely within scoped core-net access and invokes
+no host policy. `CoreNetContention` remains the sole deliberate wait carrying
+net/value-domain provenance: it is private, non-cloneable, one-shot, and owns
+no live mutator or normalization lease while blocked.
+
+Verification is latched by
+`effect_interpreter_callbacks_do_not_inherit_evaluator_mutators`,
+`isolated_search_reports_and_resumes_lazy_dependencies`,
+`interaction_net_bind_calls_an_embedded_source_function`,
+`semantic_wait_is_published_to_the_net_before_driver_parking`,
+`contending_evaluator_hands_off_then_resumes_after_batch_publication`, and
+`every_poll_outcome_releases_managed_access_before_publication`. Source
+inventories reject direct evaluator compatibility in construction callbacks,
+unclassified dispatcher downgrades, raw core-specialized net ownership
+outside `core_net`, and ordinary durable facade inspection. Production
+remains `NoAuto`; subsystem-local closed fixtures may collect.
 
 ### Phase I3E.1 — Semantic Thunks and Deterministic External Demands
 

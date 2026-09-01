@@ -120,8 +120,8 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/eval/builtins/net/construction.rs",
-        [4, 1, 5, 0, 0, 0],
-        "effect-facing interaction-net construction",
+        [3, 1, 6, 0, 0, 0],
+        "bounded request-evaluated interaction-net construction",
         "I3D.3/I3D.4 scoped net access; I4F.1 outcomes; I8 managed net"
     ),
     entry!(

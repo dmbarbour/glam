@@ -216,7 +216,7 @@ impl EvaluationTaskMachine for LazyTaskMachine {
             }
 
             if let LazyTaskWork::NetConstruction(machine) = &mut self.work {
-                return match machine.poll(context.context(), step_budget) {
+                return match machine.poll(context, step_budget) {
                     Ok(Some(value)) => self.complete(context, value),
                     Ok(None) => EvaluationMachinePoll::Yielded,
                     Err(error) => self.fail(context, error),
@@ -471,9 +471,7 @@ fn produce_lazy_source_in(
         }
         LazySource::Deferred(thunk) => thunk(context.context()),
         LazySource::ReflectionTask(task) => eval_reflection_task_source(context, task),
-        LazySource::Access { path, arguments } => {
-            resolve_core_access(context.context(), arguments, path)
-        }
+        LazySource::Access { path, arguments } => resolve_core_access_in(context, arguments, path),
         LazySource::Application(application) => apply_values_in(
             context,
             application.function().clone(),
@@ -720,17 +718,6 @@ pub(super) fn eval_number_in(
         )));
     };
     Ok(number)
-}
-
-pub(super) fn eval_index_number(
-    context: &EvalContext,
-    value: &Value,
-    builtin_name: &str,
-    evaluation_label: &str,
-) -> Result<usize, EvaluationHalt> {
-    super::with_direct_evaluator(context, |evaluator| {
-        eval_index_number_in(evaluator, value, builtin_name, evaluation_label)
-    })
 }
 
 pub(super) fn eval_index_number_in(

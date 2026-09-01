@@ -215,13 +215,13 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/builtins/net.rs",
-        [0, 2],
-        "I3D.3 interaction-net boundary"
+        [2, 0],
+        "I3D.4 scoped interaction-net builtin dispatch"
     ),
     context_entry!(
         "src/eval/builtins/net/construction.rs",
-        [0, 2],
-        "I3D.2/I3D.3 effect search and net construction"
+        [2, 0],
+        "I3D.4 scoped result decoding; isolated-search construction takes owned durable context"
     ),
     context_entry!(
         "src/eval/builtins/numeric.rs",
@@ -260,22 +260,22 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/net.rs",
-        [13, 7],
-        "I3D.3d-I3D.3g scoped batches, claims, and one-shot contention handoff; test and non-net durable helpers"
+        [14, 7],
+        "I3D.3d-I3D.4 scoped batches, claims, access, and one-shot contention handoff; test and non-net durable helpers"
     ),
     context_entry!(
         "src/eval/operator.rs",
-        [0, 2],
-        "I3D.3 core-net operator boundary"
+        [2, 0],
+        "I3D.4 scoped core-net operator application"
     ),
     context_entry!(
         "src/eval/sequence.rs",
-        [4, 4],
+        [4, 3],
         "I3B.2 and I3D/I3E direct sequence callers"
     ),
     context_entry!(
         "src/eval/value.rs",
-        [19, 11],
+        [19, 10],
         "I3B.2/I3C.2 scoped wait projection; I3D reflection/net; I3E.1 deferred producers"
     ),
 ];
@@ -413,6 +413,33 @@ fn effect_interpreter_sources_have_no_direct_compatibility_entry() {
 }
 
 #[test]
+fn net_construction_callbacks_have_no_direct_compatibility_entry() {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let relative = "src/eval/builtins/net/construction.rs";
+    let source = fs::read_to_string(manifest.join(relative))
+        .expect("net-construction source should be readable");
+
+    for forbidden in [
+        "eval_value(",
+        "eval_index_number(",
+        "with_direct_evaluator(",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "{relative} must demand callback arguments through RequestContext, not `{forbidden}`"
+        );
+    }
+    assert!(
+        source.contains("context.evaluate(value)"),
+        "construction callbacks must use RequestContext's bounded evaluator service"
+    );
+    assert!(
+        source.contains("fn construction_port_in(\n    context: &EvaluatorStepContext"),
+        "the completed construction result must retain its owning evaluator-step authority"
+    );
+}
+
+#[test]
 fn builtin_durable_context_downgrades_are_explicit_and_complete() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let dispatcher = fs::read_to_string(manifest.join("src/eval/builtins.rs"))
@@ -420,13 +447,12 @@ fn builtin_durable_context_downgrades_are_explicit_and_complete() {
 
     assert_eq!(
         dispatcher.matches("context.context()").count(),
-        4,
-        "only effects, strategies, nets, and provenance may downgrade in the dispatcher"
+        3,
+        "only effects, strategies, and provenance may downgrade in the dispatcher"
     );
     for durable_call in [
         "effect::apply(context.context(), builtin, arguments)",
         "strategy::apply(context.context(), builtin, arguments)",
-        "net::apply(context.context(), builtin, arguments)",
         "provenance::apply(context.context(), arguments)",
     ] {
         assert!(
@@ -437,6 +463,12 @@ fn builtin_durable_context_downgrades_are_explicit_and_complete() {
     assert!(
         dispatcher.contains("Builtin::Anno => annotation::apply(context, arguments)"),
         "annotation dispatch must retain evaluator-step authority"
+    );
+    assert!(
+        dispatcher.contains(
+            "Builtin::InteractionNet | Builtin::NetArity => net::apply(context, builtin, arguments)"
+        ),
+        "interaction-net dispatch must retain evaluator-step authority"
     );
 
     let annotation =

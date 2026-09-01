@@ -7,7 +7,7 @@ mod construction;
 pub(in crate::eval) use construction::NetConstructionMachine;
 
 pub(super) fn apply(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     builtin: Builtin,
     arguments: Vec<Value>,
 ) -> Result<Value, EvaluationHalt> {
@@ -15,7 +15,7 @@ pub(super) fn apply(
         Builtin::InteractionNet => {
             let [effect] = super::exact(arguments, "interaction_net")?;
             Ok(Value::Lazy(LazyValue::from_net_construction(
-                context.values(),
+                context.context().values(),
                 effect,
             )))
         }
@@ -24,10 +24,13 @@ pub(super) fn apply(
     }
 }
 
-fn apply_net_arity(context: &EvalContext, arguments: Vec<Value>) -> Result<Value, EvaluationHalt> {
+fn apply_net_arity(
+    context: &EvaluatorStepContext<'_>,
+    arguments: Vec<Value>,
+) -> Result<Value, EvaluationHalt> {
     let [arity, net] = super::exact(arguments, "net_arity")?;
-    let arity = eval_index_number(context, &arity, "net_arity", "net_arity")?;
-    let net = eval_value(context, &net)?;
+    let arity = eval_index_number_in(context, &arity, "net_arity", "net_arity")?;
+    let net = eval_value_in(context, &net)?;
     let Value::Net(net) = net else {
         return Err(EvaluationHalt::new(
             "net_arity builtin requires an interaction-net value",
@@ -35,7 +38,10 @@ fn apply_net_arity(context: &EvalContext, arguments: Vec<Value>) -> Result<Value
     };
 
     Ok(if arity == 0 {
-        Value::Lazy(LazyValue::from_net_computation(context.values(), net))
+        Value::Lazy(LazyValue::from_net_computation(
+            context.context().values(),
+            net,
+        ))
     } else {
         Value::Function(FunctionValue::new(net, arity))
     })
