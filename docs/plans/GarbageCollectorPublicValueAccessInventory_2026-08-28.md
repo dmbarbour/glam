@@ -1,8 +1,9 @@
 # GC Public-Value Compatibility Access Inventory — 2026-08-28
 
 Status: Phase I2C baseline and I3 scoped-access migration complete. I4F.1a now
-provides the complementary durable-owner baseline; storage conversion and the
-production root switch remain pending in I4F.1b-I4F.2.
+provides the complementary durable-owner baseline and I4F.1b.1 has converted
+the canonical bundle; attachment/storage conversion and the production root
+switch remain pending in I4F.1b.2-I4F.2.
 
 ## Purpose
 

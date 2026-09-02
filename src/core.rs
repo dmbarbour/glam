@@ -302,29 +302,32 @@ type SharedExtensionMap = Arc<Mutex<ExtensionMap>>;
 
 /// Small canonical value set owned directly by one runtime.
 struct CoreValues {
-    unit: Value,
-    object_reflection_guard: Value,
-    tuple: Value,
-    info: Value,
-    warn: Value,
-    error: Value,
-    initial_metadata: Value,
+    unit: RuntimeValueRoot,
+    object_reflection_guard: RuntimeValueRoot,
+    tuple: RuntimeValueRoot,
+    info: RuntimeValueRoot,
+    warn: RuntimeValueRoot,
+    error: RuntimeValueRoot,
+    initial_metadata: RuntimeValueRoot,
 }
 
 impl CoreValues {
-    fn new() -> Self {
+    fn new(runtime: EvaluationRuntimeId) -> Self {
         let atom = |key: &Key| match key {
             Key::Atom(atom) => Value::Atom(*atom),
             _ => Value::Atom(Atom::from_key(key)),
         };
+        let root = |value| RuntimeValueRoot::from_runtime(runtime, value);
         Self {
-            unit: atom(&keys::UNIT),
-            object_reflection_guard: atom(&keys::OBJECT_REFLECTION_GUARD),
-            tuple: atom(&keys::TUPLE),
-            info: atom(&keys::INFO),
-            warn: atom(&keys::WARN),
-            error: atom(&keys::ERROR),
-            initial_metadata: Value::Metadata(MetadataCarrier::new(Value::Dict(Dict::new_sync()))),
+            unit: root(atom(&keys::UNIT)),
+            object_reflection_guard: root(atom(&keys::OBJECT_REFLECTION_GUARD)),
+            tuple: root(atom(&keys::TUPLE)),
+            info: root(atom(&keys::INFO)),
+            warn: root(atom(&keys::WARN)),
+            error: root(atom(&keys::ERROR)),
+            initial_metadata: root(Value::Metadata(MetadataCarrier::new(Value::Dict(
+                Dict::new_sync(),
+            )))),
         }
     }
 }
@@ -347,7 +350,7 @@ impl CoreValueFactory {
             ids,
             heap: Heap::new_with_policy(CollectionPolicy::NoAuto),
             cache: RuntimeValueCache {
-                core: CoreValues::new(),
+                core: CoreValues::new(runtime),
                 extensions: Mutex::new(HashMap::new()),
                 #[cfg(test)]
                 extension_lookups: AtomicUsize::new(0),
@@ -430,31 +433,36 @@ impl CoreValueFactory {
     }
 
     pub(crate) fn unit(&self) -> Value {
-        self.domain.cache.core.unit.clone()
+        self.domain.cache.core.unit.as_core().clone()
     }
 
     pub(crate) fn object_reflection_guard(&self) -> Value {
-        self.domain.cache.core.object_reflection_guard.clone()
+        self.domain
+            .cache
+            .core
+            .object_reflection_guard
+            .as_core()
+            .clone()
     }
 
     pub(crate) fn tuple(&self) -> Value {
-        self.domain.cache.core.tuple.clone()
+        self.domain.cache.core.tuple.as_core().clone()
     }
 
     pub(crate) fn info(&self) -> Value {
-        self.domain.cache.core.info.clone()
+        self.domain.cache.core.info.as_core().clone()
     }
 
     pub(crate) fn warn(&self) -> Value {
-        self.domain.cache.core.warn.clone()
+        self.domain.cache.core.warn.as_core().clone()
     }
 
     pub(crate) fn error(&self) -> Value {
-        self.domain.cache.core.error.clone()
+        self.domain.cache.core.error.as_core().clone()
     }
 
     pub(crate) fn initial_metadata(&self) -> Value {
-        self.domain.cache.core.initial_metadata.clone()
+        self.domain.cache.core.initial_metadata.as_core().clone()
     }
 
     fn atom(&self, atom: Atom) -> Value {
@@ -1971,6 +1979,65 @@ mod tests {
             factory.value_domain().heap.collection_policy(),
             CollectionPolicy::NoAuto
         );
+    }
+
+    #[test]
+    fn canonical_cache_publishes_one_complete_root_bundle() {
+        let runtime = crate::runtime::allocate_evaluation_runtime_id();
+        let factory = CoreValueFactory::new(runtime, RuntimeIds::new());
+        let core = &factory.domain.cache.core;
+        let roots = [
+            &core.unit,
+            &core.object_reflection_guard,
+            &core.tuple,
+            &core.info,
+            &core.warn,
+            &core.error,
+            &core.initial_metadata,
+        ];
+
+        assert!(roots.iter().all(|root| root.runtime_id() == runtime));
+        assert_eq!(factory.unit(), core.unit.as_core().clone());
+        assert_eq!(
+            factory.object_reflection_guard(),
+            core.object_reflection_guard.as_core().clone()
+        );
+        assert_eq!(factory.tuple(), core.tuple.as_core().clone());
+        assert_eq!(factory.info(), core.info.as_core().clone());
+        assert_eq!(factory.warn(), core.warn.as_core().clone());
+        assert_eq!(factory.error(), core.error.as_core().clone());
+        assert_eq!(
+            factory.initial_metadata(),
+            core.initial_metadata.as_core().clone()
+        );
+
+        let scoped = factory.scoped();
+        assert_eq!(scoped.initial_metadata(), factory.initial_metadata());
+        assert_eq!(scoped.unit(), factory.unit());
+    }
+
+    #[test]
+    fn canonical_cache_releases_with_the_last_value_domain_owner() {
+        let factory = CoreValueFactory::new(
+            crate::runtime::allocate_evaluation_runtime_id(),
+            RuntimeIds::new(),
+        );
+        let scoped = factory.scoped();
+        let domain = Arc::downgrade(factory.value_domain());
+        let Value::Metadata(initial_metadata) =
+            factory.domain.cache.core.initial_metadata.as_core()
+        else {
+            panic!("the complete canonical bundle should contain its metadata carrier");
+        };
+        let metadata = Arc::downgrade(&initial_metadata.metadata);
+
+        drop(factory);
+        assert!(domain.upgrade().is_some());
+        assert!(metadata.upgrade().is_some());
+
+        drop(scoped);
+        assert!(domain.upgrade().is_none());
+        assert!(metadata.upgrade().is_none());
     }
 
     #[test]

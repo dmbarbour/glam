@@ -186,16 +186,15 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         RootSurface,
         "I4F.2d.1"
     ),
-    open_durable!(
+    closed_durable!(
         "src/core.rs",
         "CoreValues",
         "unit, object_reflection_guard, tuple, info, warn, error, initial_metadata",
         "runtime value-domain cache",
         "complete canonical bundle publication",
         "last RuntimeValueDomain owner",
-        BareValue,
+        CompatibilityRoot,
         RootSurface,
-        "I4F.1b.1",
         "I4F.2d.1"
     ),
     open_durable!(
@@ -764,8 +763,8 @@ fn is_production_source(relative: &Path) -> bool {
 // `owner_for_declaration` is the reviewed semantic assignment for every entry.
 const DECLARATION_BASELINE_COUNT: usize = 135;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([122, 48, 1, 27, 15, 0, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 7_398_275_867_418_188_851;
+    DeclarationSignals::new([115, 55, 1, 27, 15, 0, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 6_849_672_871_496_643_603;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,

@@ -1,10 +1,10 @@
 # Glam GC Integration Plan — 2026-08-19
 
 Status: in progress; Phases I0 through I3 and their mandatory reviews plus I4.0
-through I4E and I4F.1a are complete. Phase I4F.1b.1 is pending. Collector Gate G1 passed on
-2026-08-25. The remaining integration work follows the completed owner-matrix,
-stable-ledger, and low-risk checkpoint corrections from the integration
-review.
+through I4E, I4F.1a, and I4F.1b.1 are complete. Phase I4F.1b.2 is pending.
+Collector Gate G1 passed on 2026-08-25. The remaining integration work follows
+the completed owner-matrix, stable-ledger, and low-risk checkpoint corrections
+from the integration review.
 
 This plan integrates the collector defined by
 [`GarbageCollectorImplementation_2026-08-19.md`](GarbageCollectorImplementation_2026-08-19.md)
@@ -100,7 +100,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4E.2 | complete | exhaustive no-reduction/materialization and closed-cycle verification |
 | I4E | complete | non-reducing net value adapter |
 | I4F.1a | complete | durable-owner inventory schema and executable baseline |
-| I4F.1b.1 | pending | canonical root bundle and initialization seam |
+| I4F.1b.1 | complete | canonical root bundle and initialization seam |
 | I4F.1b.2 | pending | admitted type-erased runtime attachments and compiler caches |
 | I4F.1b | pending | canonical cache and type-erased attachment root surfaces |
 | I4F.1c | pending | evaluation, coordinator, and readiness root surfaces |
@@ -2659,6 +2659,24 @@ Implement this owner family in two checkpoints:
 
 Neither checkpoint places a strong value-domain capability inside a cached
 payload or performs collection.
+
+I4F.1b.1 completed 2026-09-02. All seven `CoreValues` fields now use the
+compatibility `RuntimeValueRoot` surface. Construction receives only the
+already allocated runtime ID, builds every semantic value and root in a local
+complete `CoreValues` value, and installs that value inline while constructing
+`RuntimeValueDomain`; there is no partially initialized cache, `OnceLock`,
+factory capture, or heap/domain backedge. Existing accessors temporarily clone
+the bare core projection while the I4F.2 compatibility bridge remains active.
+
+`canonical_cache_publishes_one_complete_root_bundle` verifies all fields have
+the exact runtime provenance, preserve canonical accessor behavior, and are
+shared by scoped factories. `canonical_cache_releases_with_the_last_value_domain_owner`
+proves the complete bundle remains live through a second factory owner and its
+metadata payload is released with the final domain owner, without collection.
+The executable durable-owner inventory rejected the seven-field
+`Value`-to-`RuntimeValueRoot` change before its source baseline and `CoreValues`
+row were updated from open to closed. Production remains `NoAuto`; extension
+cache admission remains the separate I4F.1b.2 checkpoint.
 
 #### Phase I4F.1c — Evaluation, Coordinator, and Readiness Roots
 
