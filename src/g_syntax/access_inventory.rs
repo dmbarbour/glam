@@ -74,13 +74,13 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/g_syntax/compiler_values.rs",
-        [20, 0, 1, 1],
-        "complete rooted compiler-helper and effect caches"
+        [22, 0, 1, 1],
+        "admitted complete rooted compiler-helper and effect caches"
     ),
     entry!(
         "src/g_syntax/diagnostic_formatter.rs",
-        [3, 0, 1, 1],
-        "rooted closed diagnostic formatter cache"
+        [4, 0, 1, 1],
+        "admitted rooted closed diagnostic formatter cache"
     ),
     entry!(
         "src/g_syntax/macro_expansion/runner.rs",

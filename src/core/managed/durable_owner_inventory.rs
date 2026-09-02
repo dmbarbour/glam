@@ -197,16 +197,15 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         RootSurface,
         "I4F.2d.1"
     ),
-    open_durable!(
-        "src/core.rs",
+    closed_durable!(
+        "src/core.rs; src/core/runtime_cache.rs",
         "RuntimeValueCache.extensions / CoreValueFactory.local_extensions",
-        "TypeId -> Box<dyn Any + Send + Sync>",
+        "TypeId -> admitted RuntimeCacheEntry -> Arc<T>",
         "runtime or compilation-local extension cache",
-        "complete extension bundle insertion",
+        "same-runtime family validation then complete extension bundle insertion",
         "cache/domain or scoped factory drop",
         TypeErased,
         RootSurface,
-        "I4F.1b.2",
         "I4F.2d.1"
     ),
     closed_durable!(
@@ -764,7 +763,7 @@ fn is_production_source(relative: &Path) -> bool {
 const DECLARATION_BASELINE_COUNT: usize = 135;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
     DeclarationSignals::new([115, 55, 1, 27, 15, 0, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 6_849_672_871_496_643_603;
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 6_500_468_121_391_624_540;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,
@@ -842,10 +841,9 @@ fn owner_for_declaration(declaration: &str) -> Option<&'static str> {
         "CompileContext / ModuleLoadArgs and loader/emitter callbacks"
     } else if declaration == "src/core.rs::CoreValues" {
         "CoreValues"
-    } else if matches!(
-        declaration,
-        "src/core.rs::RuntimeValueCache" | "src/core.rs::ExtensionMap"
-    ) {
+    } else if declaration == "src/core.rs::RuntimeValueCache"
+        || declaration == "src/core/runtime_cache.rs::RuntimeCacheEntry"
+    {
         "RuntimeValueCache.extensions / CoreValueFactory.local_extensions"
     } else if declaration == "src/core.rs::OpaqueValue" {
         "admitted opaque token families"

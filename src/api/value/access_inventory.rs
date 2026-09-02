@@ -120,9 +120,9 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/core.rs",
-        [0, 1, 0, 0, 0, 1],
-        "compatibility root projection in core promise/deferred machinery",
-        "I4A-I4E exact value shell; I4F.2 public facade switch"
+        [15, 1, 0, 0, 1, 3],
+        "canonical/cache root construction, validation fixtures, and compatibility projection in core promise/deferred machinery",
+        "I4F.1b cache roots; I4A-I4E exact value shell; I4F.2 public facade switch"
     ),
     entry!(
         "src/core/managed/payload_edges.rs",

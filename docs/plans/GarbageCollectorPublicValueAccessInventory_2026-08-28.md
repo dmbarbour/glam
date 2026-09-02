@@ -2,8 +2,9 @@
 
 Status: Phase I2C baseline and I3 scoped-access migration complete. I4F.1a now
 provides the complementary durable-owner baseline and I4F.1b.1 has converted
-the canonical bundle; attachment/storage conversion and the production root
-switch remain pending in I4F.1b.2-I4F.2.
+the canonical bundle. I4F.1b.2 has closed type-erased cache admission and
+compiler-cache storage; the remaining durable-owner conversion and production
+root switch remain pending in I4F.1c-I4F.2.
 
 ## Purpose
 

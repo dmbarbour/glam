@@ -6,11 +6,24 @@
 
 use std::sync::Arc;
 
+use crate::core::{RuntimeCacheFamily, RuntimeCacheFamilyRecord};
 use crate::runtime::RuntimeValueRoot;
 
 use super::*;
 
 struct CachedDiagnosticFormatter(RuntimeValueRoot);
+
+// SAFETY: the tuple field is the formatter's only retained Glam value and is
+// reported directly as a runtime root. The completed payload is immutable.
+unsafe impl RuntimeCacheFamily for CachedDiagnosticFormatter {
+    const CACHE_RECORD: RuntimeCacheFamilyRecord =
+        RuntimeCacheFamilyRecord::same_runtime_roots("default diagnostic formatter", file!());
+
+    fn visit_runtime_roots(&self, visit: &mut dyn FnMut(&RuntimeValueRoot)) {
+        let Self(root) = self;
+        visit(root);
+    }
+}
 
 pub(super) fn value(values: &CoreValueFactory) -> Value {
     let root = &cached(values).0;

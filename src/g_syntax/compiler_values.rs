@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use crate::core::{RuntimeCacheFamily, RuntimeCacheFamilyRecord};
 use crate::runtime::RuntimeValueRoot;
 
 use super::*;
@@ -23,7 +24,16 @@ struct RootedBuiltinModule {
     definitions: RuntimeValueRoot,
 }
 
+impl RootedBuiltinModule {
+    fn visit_runtime_roots(&self, visit: &mut dyn FnMut(&RuntimeValueRoot)) {
+        let Self { value, definitions } = self;
+        visit(value);
+        visit(definitions);
+    }
+}
+
 struct GCompilerValues {
+    runtime: crate::runtime::EvaluationRuntimeId,
     math: RootedBuiltinModule,
     list: RootedBuiltinModule,
     std: RootedBuiltinModule,
@@ -38,21 +48,83 @@ struct GCompilerValues {
     effects: Mutex<HashMap<Key, RuntimeValueRoot>>,
 }
 
+// SAFETY: every retained Glam value has a compile-exhaustive visit below.
+// The only mutable family member is `effects`; its insertion gateway builds
+// and checks roots against the requesting compiler runtime before publication.
+unsafe impl RuntimeCacheFamily for GCompilerValues {
+    const CACHE_RECORD: RuntimeCacheFamilyRecord =
+        RuntimeCacheFamilyRecord::same_runtime_roots("g compiler values", file!());
+
+    fn visit_runtime_roots(&self, visit: &mut dyn FnMut(&RuntimeValueRoot)) {
+        let Self {
+            runtime: _,
+            math,
+            list,
+            std,
+            empty_object_defs,
+            constant_object_defs,
+            reflection_annotator,
+            pure_if_runner,
+            pure_match_runner,
+            defined_or,
+            require_defined,
+            macro_environment,
+            effects,
+        } = self;
+        math.visit_runtime_roots(visit);
+        list.visit_runtime_roots(visit);
+        std.visit_runtime_roots(visit);
+        for root in [
+            empty_object_defs,
+            constant_object_defs,
+            reflection_annotator,
+            pure_if_runner,
+            pure_match_runner,
+            defined_or,
+            require_defined,
+            macro_environment,
+        ] {
+            visit(root);
+        }
+        let effect_roots = effects
+            .lock()
+            .expect("g compiler effect-value cache must not be poisoned")
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for root in &effect_roots {
+            visit(root);
+        }
+    }
+}
+
 trait EffectValueCache {
+    fn runtime_id(&self) -> crate::runtime::EvaluationRuntimeId;
     fn effects(&self) -> &Mutex<HashMap<Key, RuntimeValueRoot>>;
 }
 
 impl EffectValueCache for GCompilerValues {
+    fn runtime_id(&self) -> crate::runtime::EvaluationRuntimeId {
+        self.runtime
+    }
+
     fn effects(&self) -> &Mutex<HashMap<Key, RuntimeValueRoot>> {
         &self.effects
     }
 }
 
-struct BuildingEffectValues<'a>(&'a Mutex<HashMap<Key, RuntimeValueRoot>>);
+struct BuildingEffectValues<'a> {
+    runtime: crate::runtime::EvaluationRuntimeId,
+    effects: &'a Mutex<HashMap<Key, RuntimeValueRoot>>,
+}
 
 impl EffectValueCache for BuildingEffectValues<'_> {
+    fn runtime_id(&self) -> crate::runtime::EvaluationRuntimeId {
+        self.runtime
+    }
+
     fn effects(&self) -> &Mutex<HashMap<Key, RuntimeValueRoot>> {
-        self.0
+        self.effects
     }
 }
 
@@ -87,7 +159,10 @@ fn project_module(values: &CoreValueFactory, module: &RootedBuiltinModule) -> Bu
 impl GCompilerValues {
     fn build(values: &CoreValueFactory) -> Self {
         let effects = Mutex::new(HashMap::new());
-        let build_cache = BuildingEffectValues(&effects);
+        let build_cache = BuildingEffectValues {
+            runtime: values.runtime_id(),
+            effects: &effects,
+        };
         let not = build_not(values, &build_cache);
         let could = build_could(values, not.clone());
         let constant_object_defs = build_constant_object_defs(values);
@@ -151,6 +226,7 @@ impl GCompilerValues {
         let pure_if_runner = build_pure_conditional_runner(values, Builtin::IfResult);
         let defined_or = build_defined_or(values, &build_cache, pure_if_runner.clone());
         Self {
+            runtime: values.runtime_id(),
             math: make_module(math_value),
             list: make_module(list_value),
             std: make_module(std_value),
@@ -335,6 +411,11 @@ fn effect_path_value_with_cache(
     cache: &dyn EffectValueCache,
     path: &[&str],
 ) -> Value {
+    assert_eq!(
+        cache.runtime_id(),
+        values.runtime_id(),
+        "a compiler effect cache cannot be accessed from another runtime"
+    );
     let path: Arc<[Key]> = path.iter().map(Key::atom_from_text).collect();
     let cache_key = Key::List(path.clone());
     if let Some(root) = cache
@@ -351,6 +432,11 @@ fn effect_path_value_with_cache(
     // may require scoped value access. Races may build an equivalent closed
     // candidate twice; only publication is serialized.
     let candidate = root_value(values, build_effect_path_value(values, path));
+    assert_eq!(
+        candidate.runtime_id(),
+        values.runtime_id(),
+        "a cached compiler effect must belong to the requesting runtime"
+    );
     let root = cache
         .effects()
         .lock()

@@ -1,7 +1,7 @@
 # Glam GC Integration Plan — 2026-08-19
 
 Status: in progress; Phases I0 through I3 and their mandatory reviews plus I4.0
-through I4E, I4F.1a, and I4F.1b.1 are complete. Phase I4F.1b.2 is pending.
+through I4E, I4F.1a, and I4F.1b are complete. Phase I4F.1c is pending.
 Collector Gate G1 passed on 2026-08-25. The remaining integration work follows
 the completed owner-matrix, stable-ledger, and low-risk checkpoint corrections
 from the integration review.
@@ -101,8 +101,8 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4E | complete | non-reducing net value adapter |
 | I4F.1a | complete | durable-owner inventory schema and executable baseline |
 | I4F.1b.1 | complete | canonical root bundle and initialization seam |
-| I4F.1b.2 | pending | admitted type-erased runtime attachments and compiler caches |
-| I4F.1b | pending | canonical cache and type-erased attachment root surfaces |
+| I4F.1b.2 | complete | admitted type-erased runtime attachments and compiler caches |
+| I4F.1b | complete | canonical cache and type-erased attachment root surfaces |
 | I4F.1c | pending | evaluation, coordinator, and readiness root surfaces |
 | I4F.1d.1 | pending | reflection store, snapshot, journal, and query roots |
 | I4F.1d.2 | pending | reflection lifecycle, protocol, and search roots |
@@ -2677,6 +2677,30 @@ The executable durable-owner inventory rejected the seven-field
 `Value`-to-`RuntimeValueRoot` change before its source baseline and `CoreValues`
 row were updated from open to closed. Production remains `NoAuto`; extension
 cache admission remains the separate I4F.1b.2 checkpoint.
+
+I4F.1b.2 completed 2026-09-02. `RuntimeValueCache` and compilation-local
+cache tiers now retain `Arc<RuntimeCacheEntry>` rather than accepting arbitrary
+`Box<dyn Any + Send + Sync>`. The private unsafe `RuntimeCacheFamily` boundary
+requires a stable family/source record and a complete visitor over every
+retained `RuntimeValueRoot`. Admission runs after candidate construction but
+before publication, rejects a root whose runtime differs from the cache
+domain, and stores the reviewed record beside the type-erased payload. Cache
+lookup rechecks the `TypeId` and family record. Construction, root validation,
+and losing-candidate destruction remain outside the cache mutex, preserving
+harmless duplicate construction and one complete installed winner.
+
+`GCompilerValues` and `CachedDiagnosticFormatter` are the only production
+families. Their compile-exhaustive visitors report all fixed roots; the
+compiler effect-value map reports its synchronized roots and records the owning
+runtime so its mutation/access gateway rejects a mismatched compiler factory.
+Value-free and rooted fixtures exercise both admission policies. Focused tests
+prove forced racing construction, pre-publication cross-runtime rejection,
+and retirement with the final value-domain owner. A syntax-backed source latch
+names every `RuntimeCacheFamily` implementation by file and concrete type, so
+a new type-indexed attachment cannot silently inherit admission. The durable
+owner and compiler/public compatibility inventories were intentionally tripped
+before accepting the new boundary and counts. Production remains `NoAuto`; the
+compatibility roots become registered collector roots only at I4F.2c.
 
 #### Phase I4F.1c — Evaluation, Coordinator, and Readiness Roots
 

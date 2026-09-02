@@ -1,5 +1,4 @@
 use std::any::{Any, TypeId};
-use std::collections::HashMap;
 use std::fmt;
 use std::num::NonZeroU64;
 #[cfg(test)]
@@ -26,6 +25,7 @@ mod evaluation_halt;
 pub(crate) mod keys;
 pub(crate) use evaluation_halt::{EvaluationHalt, EvaluationHaltPayload};
 mod managed;
+mod runtime_cache;
 #[cfg(test)]
 pub(crate) use managed::{CoreValueAllocationScope, CoreValueDomainWitness};
 #[cfg(test)]
@@ -33,6 +33,8 @@ pub(crate) use managed::{ManagedDropRecord, ManagedFamily};
 pub(crate) use managed::{
     OpaquePayloadFamily, OpaquePayloadRecord, RuntimeValueAccess, RuntimeValueObserver,
 };
+use runtime_cache::{RuntimeCacheEntry, RuntimeCacheMap, SharedRuntimeCacheMap};
+pub(crate) use runtime_cache::{RuntimeCacheFamily, RuntimeCacheFamilyRecord};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct LazyId(NonZeroU64);
@@ -279,7 +281,7 @@ pub(crate) struct PromiseCell {
 #[derive(Clone)]
 pub(crate) struct CoreValueFactory {
     domain: Arc<RuntimeValueDomain>,
-    local_extensions: Option<SharedExtensionMap>,
+    local_extensions: Option<SharedRuntimeCacheMap>,
 }
 
 /// Strong ownership boundary for one runtime's values.
@@ -296,9 +298,6 @@ pub(crate) struct RuntimeValueDomain {
     cache: RuntimeValueCache,
     work_coordinator: Arc<Mutex<Weak<EvaluationWorkCoordinator>>>,
 }
-
-type ExtensionMap = HashMap<TypeId, Box<dyn Any + Send + Sync>>;
-type SharedExtensionMap = Arc<Mutex<ExtensionMap>>;
 
 /// Small canonical value set owned directly by one runtime.
 struct CoreValues {
@@ -338,7 +337,7 @@ impl CoreValues {
 /// concrete cached type.
 struct RuntimeValueCache {
     core: CoreValues,
-    extensions: Mutex<ExtensionMap>,
+    extensions: Mutex<RuntimeCacheMap>,
     #[cfg(test)]
     extension_lookups: AtomicUsize,
 }
@@ -351,7 +350,7 @@ impl CoreValueFactory {
             heap: Heap::new_with_policy(CollectionPolicy::NoAuto),
             cache: RuntimeValueCache {
                 core: CoreValues::new(runtime),
-                extensions: Mutex::new(HashMap::new()),
+                extensions: Mutex::new(RuntimeCacheMap::default()),
                 #[cfg(test)]
                 extension_lookups: AtomicUsize::new(0),
             },
@@ -369,7 +368,7 @@ impl CoreValueFactory {
     pub(crate) fn scoped(&self) -> Self {
         Self {
             domain: self.domain.clone(),
-            local_extensions: Some(Arc::new(Mutex::new(HashMap::new()))),
+            local_extensions: Some(Arc::new(Mutex::new(RuntimeCacheMap::default()))),
         }
     }
 
@@ -491,67 +490,60 @@ impl CoreValueFactory {
     /// construction when callers race. Only the completed value is installed.
     pub(crate) fn cached<T>(&self, build: impl FnOnce() -> T) -> Arc<T>
     where
-        T: Any + Send + Sync,
+        T: RuntimeCacheFamily,
     {
         let type_id = TypeId::of::<T>();
-        if let Some(value) = self.local_extensions.as_ref().and_then(|extensions| {
+        if let Some(entry) = self.local_extensions.as_ref().and_then(|extensions| {
             extensions
                 .lock()
                 .expect("local value-cache mutex should not be poisoned")
                 .get(&type_id)
-                .and_then(|value| value.downcast_ref::<Arc<T>>())
                 .cloned()
         }) {
-            return value;
+            return entry.get::<T>();
         }
         #[cfg(test)]
         self.domain
             .cache
             .extension_lookups
             .fetch_add(1, Ordering::Relaxed);
-        if let Some(value) = self
+        if let Some(entry) = self
             .domain
             .cache
             .extensions
             .lock()
             .expect("runtime value-cache mutex should not be poisoned")
             .get(&type_id)
-            .and_then(|value| value.downcast_ref::<Arc<T>>())
             .cloned()
         {
-            self.remember_local(type_id, value.clone());
+            let value = entry.get::<T>();
+            self.remember_local(type_id, entry);
             return value;
         }
 
         let candidate = Arc::new(build());
-        let value = {
+        let candidate = Arc::new(RuntimeCacheEntry::admit(self.runtime_id(), candidate));
+        let entry = {
             let mut values = self
                 .domain
                 .cache
                 .extensions
                 .lock()
                 .expect("runtime value-cache mutex should not be poisoned");
-            values
-                .entry(type_id)
-                .or_insert_with(|| Box::new(candidate.clone()))
-                .downcast_ref::<Arc<T>>()
-                .expect("a runtime value-cache type ID has one concrete type")
-                .clone()
+            values.entry(type_id).or_insert(candidate).clone()
         };
-        self.remember_local(type_id, value.clone());
+        let value = entry.get::<T>();
+        self.remember_local(type_id, entry);
         value
     }
 
-    fn remember_local<T>(&self, type_id: TypeId, value: Arc<T>)
-    where
-        T: Any + Send + Sync,
-    {
+    fn remember_local(&self, type_id: TypeId, entry: Arc<RuntimeCacheEntry>) {
         if let Some(extensions) = &self.local_extensions {
             extensions
                 .lock()
                 .expect("local value-cache mutex should not be poisoned")
                 .entry(type_id)
-                .or_insert_with(|| Box::new(value));
+                .or_insert(entry);
         }
     }
 
@@ -1917,6 +1909,31 @@ mod tests {
 
     struct CachedProbe;
 
+    struct RootedCachedProbe {
+        root: RuntimeValueRoot,
+        _dropped: DropSignal,
+    }
+
+    // SAFETY: this cache fixture has no Glam value or runtime capability.
+    unsafe impl RuntimeCacheFamily for CachedProbe {
+        const CACHE_RECORD: RuntimeCacheFamilyRecord =
+            RuntimeCacheFamilyRecord::value_free("value-free cache probe", file!());
+
+        fn visit_runtime_roots(&self, _visit: &mut dyn FnMut(&RuntimeValueRoot)) {}
+    }
+
+    // SAFETY: the fixture reports its only retained Glam value. `DropSignal`
+    // is an ordinary Rust test resource and retains no runtime capability.
+    unsafe impl RuntimeCacheFamily for RootedCachedProbe {
+        const CACHE_RECORD: RuntimeCacheFamilyRecord =
+            RuntimeCacheFamilyRecord::same_runtime_roots("rooted cache probe", file!());
+
+        fn visit_runtime_roots(&self, visit: &mut dyn FnMut(&RuntimeValueRoot)) {
+            let Self { root, _dropped } = self;
+            visit(root);
+        }
+    }
+
     struct ManagedFamilyLayoutProbe([u8; 1]);
 
     /// Compile-exhaustive latch for the failure interiors deliberately left to
@@ -2163,6 +2180,65 @@ mod tests {
         )
         .cached(|| CachedProbe);
         assert!(!Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn runtime_cache_rejects_a_root_from_another_runtime_before_publication() {
+        let target = CoreValueFactory::new(
+            crate::runtime::allocate_evaluation_runtime_id(),
+            RuntimeIds::new(),
+        );
+        let other = CoreValueFactory::new(
+            crate::runtime::allocate_evaluation_runtime_id(),
+            RuntimeIds::new(),
+        );
+        let dropped = Arc::new(AtomicBool::new(false));
+
+        let rejected = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            target.cached(|| RootedCachedProbe {
+                root: RuntimeValueRoot::new(&other, other.unit()),
+                _dropped: DropSignal(dropped.clone()),
+            })
+        }));
+
+        assert!(rejected.is_err());
+        assert!(
+            dropped.load(Ordering::Acquire),
+            "a rejected candidate must retire without entering either cache tier"
+        );
+        assert!(target.domain.cache.extensions.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn runtime_cache_retires_an_admitted_owner_with_the_value_domain() {
+        let factory = CoreValueFactory::new(
+            crate::runtime::allocate_evaluation_runtime_id(),
+            RuntimeIds::new(),
+        );
+        let runtime = factory.runtime_id();
+        let domain = Arc::downgrade(factory.value_domain());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let owner = factory.cached(|| RootedCachedProbe {
+            root: RuntimeValueRoot::from_runtime(runtime, Value::Number(Number::integer(31))),
+            _dropped: DropSignal(dropped.clone()),
+        });
+        let owner_weak = Arc::downgrade(&owner);
+
+        assert_eq!(
+            RootedCachedProbe::CACHE_RECORD.fields(),
+            (
+                "rooted cache probe",
+                "src/core.rs",
+                runtime_cache::RuntimeCacheRootPolicy::SameRuntimeRoots
+            )
+        );
+        assert!(!dropped.load(Ordering::Acquire));
+        drop(owner);
+        drop(factory);
+
+        assert!(domain.upgrade().is_none());
+        assert!(owner_weak.upgrade().is_none());
+        assert!(dropped.load(Ordering::Acquire));
     }
 
     #[test]
