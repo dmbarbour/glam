@@ -1,9 +1,10 @@
 # Glam GC Integration Plan — 2026-08-19
 
-Status: in progress; Phases I0 through I3 and their mandatory reviews are
-complete. Phase I4 is pending. Collector Gate G1 passed on 2026-08-25. The
-remaining integration work follows the completed owner-matrix, stable-ledger,
-and low-risk checkpoint corrections from the integration review.
+Status: in progress; Phases I0 through I3 and their mandatory reviews plus the
+I4.0 managed-destruction admission gate are complete. Phase I4A is pending.
+Collector Gate G1 passed on 2026-08-25. The remaining integration work follows
+the completed owner-matrix, stable-ledger, and low-risk checkpoint corrections
+from the integration review.
 
 This plan integrates the collector defined by
 [`GarbageCollectorImplementation_2026-08-19.md`](GarbageCollectorImplementation_2026-08-19.md)
@@ -81,7 +82,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I3F | complete | multi-runtime admission, poll authority, worker-exit cache retirement, and managed-entry audit |
 | I3 | complete | bounded evaluator/worker mutator regions; post-I3 review passed |
 | I4 | pending | core trace vocabulary and leaf policy |
-| I4.0 | pending | managed-family destruction admission contract |
+| I4.0 | complete | private managed-family admission, mandatory drop records, passive destruction fixture, and external-retirement separation |
 | I4B | pending | closure and opaque managed-edge containment |
 | I4F.1 | pending | durable root-surface conversion gate |
 | I4F.2 | pending | public managed-root production switch |
@@ -2192,6 +2193,23 @@ proves ordinary Rust resource release without runtime work; the external
 fixture proves idempotent explicit retirement and a semantically equivalent
 `Drop` fallback. No later isolated family fixture may collect unless this gate
 and that family's drop record pass.
+
+I4.0 completed on 2026-09-02. Glam's private runtime-value allocator now
+requires `ManagedFamily` in addition to the collector's mechanical `Trace`
+contract. Each unsafe family admission supplies a mandatory, non-empty
+`ManagedDropRecord` naming the stable family/source and its reviewed direct and
+transitive destruction. A merely traceable type and the known heap, value
+factory, value-domain, and observer capabilities are compile-time-latched as
+unadmitted; the fixture's compile-exhaustive field inventory contains only a
+traced `Gc` edge and passive Rust resources.
+
+The collection fixture proves direct and transitive passive destruction with
+no runtime or heap capability. A separate external owner holds the value-domain
+capability and registered root outside the managed graph, proves idempotent
+explicit retirement, and proves the equivalent `Drop` fallback. Existing I1/I2
+scalar, layout, and public-root prototype fixtures received explicit records.
+This gate authorizes I4A family work, not a production managed value or
+production collection.
 
 ### Phase I4A — Value Shell and Leaf Families
 

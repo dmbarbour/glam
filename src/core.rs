@@ -28,6 +28,8 @@ pub(crate) use evaluation_halt::EvaluationHalt;
 mod managed;
 #[cfg(test)]
 pub(crate) use managed::{CoreValueAllocationScope, CoreValueDomainWitness};
+#[cfg(test)]
+pub(crate) use managed::{ManagedDropRecord, ManagedFamily};
 pub(crate) use managed::{RuntimeValueAccess, RuntimeValueObserver};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -1781,6 +1783,13 @@ mod tests {
         const REQUESTED_SLOT_SIZE: Option<usize> = Some(managed::managed_slot_extent::<Self>());
 
         fn trace(&self, _visitor: &mut glam_gc::Visitor<'_>) {}
+    }
+
+    // SAFETY: this layout-only probe has no drop glue, managed edge, or active
+    // capability. Its stable record admits only the existing I1D fixture.
+    unsafe impl ManagedFamily for ManagedFamilyLayoutProbe {
+        const DROP_RECORD: ManagedDropRecord =
+            ManagedDropRecord::no_drop("managed slot layout probe", "src/core.rs");
     }
 
     impl Drop for DropSignal {

@@ -31,6 +31,113 @@ pub(crate) const fn managed_slot_extent<T>() -> usize {
 
 const _: () = assert!(managed_slot_extent::<usize>() == MANAGED_SLOT_SIZE_FLOOR);
 
+/// The reviewed destruction policy for one Glam-managed representation.
+///
+/// This record is deliberately smaller than the durable ownership ledger. It
+/// is the compile-time admission token proving that the ledger's direct and
+/// transitive destruction fields were completed before a type reached Glam's
+/// collector gateway.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(
+    dead_code,
+    reason = "managed drop records are compile-time admission evidence, inspected by family audits"
+)]
+pub(crate) struct ManagedDropRecord {
+    family: &'static str,
+    source: &'static str,
+    direct_review: &'static str,
+    transitive_review: &'static str,
+}
+
+impl ManagedDropRecord {
+    /// Records a representation with no Rust drop glue.
+    pub(crate) const fn no_drop(family: &'static str, source: &'static str) -> Self {
+        Self::reviewed(family, source, "no drop glue", "no transitive drop glue")
+    }
+
+    /// Records reviewed passive direct and transitive destruction.
+    #[allow(
+        dead_code,
+        reason = "I4.0 establishes the constructor before production drop-bearing families migrate"
+    )]
+    pub(crate) const fn passive(
+        family: &'static str,
+        source: &'static str,
+        direct_review: &'static str,
+        transitive_review: &'static str,
+    ) -> Self {
+        Self::reviewed(family, source, direct_review, transitive_review)
+    }
+
+    const fn reviewed(
+        family: &'static str,
+        source: &'static str,
+        direct_review: &'static str,
+        transitive_review: &'static str,
+    ) -> Self {
+        assert!(!family.is_empty(), "managed family name must be recorded");
+        assert!(!source.is_empty(), "managed family source must be recorded");
+        assert!(
+            !direct_review.is_empty(),
+            "managed direct destruction must be reviewed"
+        );
+        assert!(
+            !transitive_review.is_empty(),
+            "managed transitive destruction must be reviewed"
+        );
+        Self {
+            family,
+            source,
+            direct_review,
+            transitive_review,
+        }
+    }
+
+    #[cfg(test)]
+    const fn fields(self) -> (&'static str, &'static str, &'static str, &'static str) {
+        (
+            self.family,
+            self.source,
+            self.direct_review,
+            self.transitive_review,
+        )
+    }
+}
+
+/// Admits one reviewed representation family to Glam's managed heap.
+///
+/// `Trace` alone describes edges to the generic collector. This additional
+/// private boundary proves that Glam has also completed the family's stable
+/// destruction record. All allocation through a runtime value domain requires
+/// this trait, so a mechanically traceable type cannot accidentally become a
+/// Glam-managed family before its lifecycle review.
+///
+/// # Safety
+///
+/// The associated record must identify the stable family and source owning
+/// the representation. Direct `Drop` and every transitive field destructor
+/// must be passive: they may release ordinary Rust resources, but must not
+/// obtain or invoke a Glam runtime, value domain, heap, evaluator, scheduler,
+/// diagnostic/event service, host callback, or equivalent active semantic
+/// capability. Destruction must not observe or preserve a `Gc` edge held by
+/// the dying representation.
+///
+/// Any external owner which performs active retirement must remain outside
+/// the managed graph and hold its runtime capability and registered roots
+/// independently. Adding such an owner, or any exception to passive managed
+/// destruction, requires a separate design review.
+pub(crate) unsafe trait ManagedFamily: Trace {
+    const DROP_RECORD: ManagedDropRecord;
+}
+
+// SAFETY: this is the existing scalar collector-access probe. It has no
+// managed edge, no drop glue, and no active capability. Production value
+// families receive their own explicit admissions in their migration phases.
+unsafe impl ManagedFamily for u64 {
+    const DROP_RECORD: ManagedDropRecord =
+        ManagedDropRecord::no_drop("collector access scalar probe", "src/core/managed.rs");
+}
+
 /// Factory-qualified access to one admitted managed-allocation region.
 ///
 /// The scope deliberately exposes neither the runtime heap nor the collector
@@ -74,7 +181,7 @@ pub(crate) struct RuntimeValueObserver {
 /// Callers may reuse this value for a batch of allocations without repeating
 /// class discovery. Its lifetime prevents retaining an allocator after the
 /// current mutator region closes.
-pub(crate) struct CoreValueAllocator<'scope, T: Trace> {
+pub(crate) struct CoreValueAllocator<'scope, T: ManagedFamily> {
     allocator: Allocator<'scope, T>,
 }
 
@@ -148,7 +255,7 @@ impl CoreValueFactory {
     }
 
     #[cfg(test)]
-    pub(crate) fn owns_managed_root<T: Trace>(&self, root: &Root<T>) -> bool {
+    pub(crate) fn owns_managed_root<T: ManagedFamily>(&self, root: &Root<T>) -> bool {
         self.domain.heap.owns(root)
     }
 
@@ -224,7 +331,7 @@ impl RuntimeValueAccess<'_> {
         dead_code,
         reason = "I4 introduces production managed allocation through runtime-qualified access"
     )]
-    pub(crate) fn allocator<T: Trace>(
+    pub(crate) fn allocator<T: ManagedFamily>(
         &self,
     ) -> Result<CoreValueAllocator<'_, T>, UnsupportedLayout> {
         self.scope.allocator()
@@ -235,7 +342,7 @@ impl RuntimeValueAccess<'_> {
         dead_code,
         reason = "I4F introduces production managed roots through runtime-qualified access"
     )]
-    pub(crate) fn root<T: Trace>(&self, value: Gc<T>) -> Root<T> {
+    pub(crate) fn root<T: ManagedFamily>(&self, value: Gc<T>) -> Root<T> {
         self.scope.root(value)
     }
 
@@ -244,7 +351,7 @@ impl RuntimeValueAccess<'_> {
         dead_code,
         reason = "I4F introduces production managed-root observation through runtime-qualified access"
     )]
-    pub(crate) fn get<'access, T: Trace>(&'access self, root: &Root<T>) -> &'access T {
+    pub(crate) fn get<'access, T: ManagedFamily>(&'access self, root: &Root<T>) -> &'access T {
         self.scope.get(root)
     }
 }
@@ -255,9 +362,12 @@ impl CoreValueAllocationScope<'_> {
         dead_code,
         reason = "Phase I1C installs the allocation seam before production managed values"
     )]
-    pub(crate) fn allocator<T: Trace>(
+    pub(crate) fn allocator<T: ManagedFamily>(
         &self,
     ) -> Result<CoreValueAllocator<'_, T>, UnsupportedLayout> {
+        // Naming the mandatory associated record keeps admission tied to
+        // class discovery without adding runtime work after optimization.
+        let _ = T::DROP_RECORD;
         self.mutator
             .allocator()
             .map(|allocator| CoreValueAllocator { allocator })
@@ -268,7 +378,7 @@ impl CoreValueAllocationScope<'_> {
         dead_code,
         reason = "Phase I1C installs the rooting seam before durable and public roots migrate in I4F"
     )]
-    pub(crate) fn root<T: Trace>(&self, value: Gc<T>) -> Root<T> {
+    pub(crate) fn root<T: ManagedFamily>(&self, value: Gc<T>) -> Root<T> {
         self.mutator.root(value)
     }
 
@@ -278,7 +388,7 @@ impl CoreValueAllocationScope<'_> {
         dead_code,
         reason = "Phase I1C installs the root-access seam before the public-root switch in I4F.2"
     )]
-    pub(crate) fn get<'access, T: Trace>(&'access self, root: &Root<T>) -> &'access T {
+    pub(crate) fn get<'access, T: ManagedFamily>(&'access self, root: &Root<T>) -> &'access T {
         root.get(self.mutator)
     }
 
@@ -292,14 +402,14 @@ impl CoreValueAllocationScope<'_> {
     /// `Gc<T>` does not carry independently checkable release-build
     /// provenance.
     #[cfg(test)]
-    pub(crate) unsafe fn get_traced_edge<T: Trace>(&self, value: Gc<T>) -> &T {
+    pub(crate) unsafe fn get_traced_edge<T: ManagedFamily>(&self, value: Gc<T>) -> &T {
         // SAFETY: the caller supplies the exact same-heap traced-edge proof;
         // this scope's mutator excludes collection for the returned borrow.
         unsafe { value.get_unchecked(self.mutator) }
     }
 }
 
-impl<T: Trace> CoreValueAllocator<'_, T> {
+impl<T: ManagedFamily> CoreValueAllocator<'_, T> {
     /// Allocates through the class already selected for this region.
     #[allow(
         dead_code,
@@ -307,5 +417,255 @@ impl<T: Trace> CoreValueAllocator<'_, T> {
     )]
     pub(crate) fn alloc(&self, value: T) -> Gc<T> {
         self.allocator.alloc(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Weak};
+
+    use glam_gc::{Gc, Root, Trace, Visitor};
+
+    use super::{ManagedDropRecord, ManagedFamily};
+    use crate::core::{CoreValueFactory, RuntimeValueDomain, RuntimeValueObserver};
+    use crate::runtime::{RuntimeIds, allocate_evaluation_runtime_id};
+
+    // Trait selection becomes ambiguous if one of these known active
+    // capabilities is ever admitted as a managed family. This is compile-time
+    // evidence that Glam's private allocator cannot accept the capability
+    // itself or a merely mechanical, unreviewed `Trace` implementation.
+    macro_rules! assert_not_managed_family {
+        ($module:ident, $type:ty) => {
+            mod $module {
+                trait AmbiguousIfManaged<Discriminator> {
+                    fn verify() {}
+                }
+
+                struct Managed;
+
+                impl<T: ?Sized> AmbiguousIfManaged<()> for T {}
+                impl<T: ?Sized + super::ManagedFamily> AmbiguousIfManaged<Managed> for T {}
+
+                const _: fn() = || {
+                    <$type as AmbiguousIfManaged<_>>::verify();
+                };
+            }
+        };
+    }
+
+    struct UnreviewedTrace;
+
+    // SAFETY: this negative fixture contains no managed edge. It deliberately
+    // lacks `ManagedFamily`, proving that `Trace` is not sufficient admission.
+    unsafe impl Trace for UnreviewedTrace {
+        fn trace(&self, _visitor: &mut Visitor<'_>) {}
+    }
+
+    assert_not_managed_family!(unreviewed_trace_is_not_admitted, super::UnreviewedTrace);
+    assert_not_managed_family!(heap_is_not_admitted, glam_gc::Heap);
+    assert_not_managed_family!(factory_is_not_admitted, super::CoreValueFactory);
+    assert_not_managed_family!(domain_is_not_admitted, super::RuntimeValueDomain);
+    assert_not_managed_family!(observer_is_not_admitted, super::RuntimeValueObserver);
+
+    struct PassiveResource(Arc<AtomicUsize>);
+
+    impl Drop for PassiveResource {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    struct PassiveManagedFixture {
+        child: Option<Gc<Self>>,
+        direct_drops: Arc<AtomicUsize>,
+        resource: PassiveResource,
+    }
+
+    // SAFETY: `child` is the only managed edge. The counters are passive Rust
+    // resources used solely to observe destruction after collection.
+    unsafe impl Trace for PassiveManagedFixture {
+        fn trace(&self, visitor: &mut Visitor<'_>) {
+            self.child.trace(visitor);
+        }
+    }
+
+    impl Drop for PassiveManagedFixture {
+        fn drop(&mut self) {
+            self.direct_drops.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    // SAFETY: direct destruction updates one atomic counter. Transitive
+    // destruction releases an ordinary Arc and `PassiveResource`; neither can
+    // invoke Glam, enter the heap, or preserve the spoiled `child` edge.
+    unsafe impl ManagedFamily for PassiveManagedFixture {
+        const DROP_RECORD: ManagedDropRecord = ManagedDropRecord::passive(
+            "I4.0 passive managed destruction fixture",
+            "src/core/managed.rs",
+            "direct Drop updates only an external atomic counter",
+            "Gc is inert on drop; Arc and PassiveResource release ordinary Rust resources",
+        );
+    }
+
+    /// Compile-exhaustive field inventory for the passive fixture.
+    ///
+    /// Adding a field requires classifying its destruction here as well as in
+    /// `DROP_RECORD`; no runtime, heap, or evaluator capability is present.
+    fn assert_passive_managed_fixture_fields(value: &PassiveManagedFixture) {
+        let PassiveManagedFixture {
+            child,
+            direct_drops,
+            resource,
+        } = value;
+        let _: &Option<Gc<PassiveManagedFixture>> = child;
+        let _: &Arc<AtomicUsize> = direct_drops;
+        let _: &PassiveResource = resource;
+    }
+
+    struct ExternalRetirementOwner {
+        values: CoreValueFactory,
+        root: Option<Root<PassiveManagedFixture>>,
+        retirements: Arc<AtomicUsize>,
+        liveness: Arc<()>,
+    }
+
+    impl ExternalRetirementOwner {
+        fn retire(&mut self) {
+            if self.root.take().is_some() {
+                self.retirements.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    impl Drop for ExternalRetirementOwner {
+        fn drop(&mut self) {
+            self.retire();
+        }
+    }
+
+    fn values() -> CoreValueFactory {
+        CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new())
+    }
+
+    fn allocate_fixture(
+        values: &CoreValueFactory,
+        direct_drops: &Arc<AtomicUsize>,
+        resource_drops: &Arc<AtomicUsize>,
+    ) -> Root<PassiveManagedFixture> {
+        values.with_managed_values(|scope| {
+            let allocator = scope
+                .allocator::<PassiveManagedFixture>()
+                .expect("the I4.0 fixture should fit one collector slot");
+            scope.root(allocator.alloc(PassiveManagedFixture {
+                child: None,
+                direct_drops: Arc::clone(direct_drops),
+                resource: PassiveResource(Arc::clone(resource_drops)),
+            }))
+        })
+    }
+
+    #[test]
+    fn managed_family_collection_requires_completed_drop_record() {
+        fn requires_admission<T: ManagedFamily>() -> ManagedDropRecord {
+            T::DROP_RECORD
+        }
+
+        assert_eq!(
+            requires_admission::<u64>().fields(),
+            (
+                "collector access scalar probe",
+                "src/core/managed.rs",
+                "no drop glue",
+                "no transitive drop glue",
+            )
+        );
+        assert_eq!(
+            requires_admission::<PassiveManagedFixture>().fields(),
+            (
+                "I4.0 passive managed destruction fixture",
+                "src/core/managed.rs",
+                "direct Drop updates only an external atomic counter",
+                "Gc is inert on drop; Arc and PassiveResource release ordinary Rust resources",
+            )
+        );
+
+        // The compile-time negative assertions above establish that the same
+        // generic bound rejects `UnreviewedTrace` and active capabilities.
+        let _ = std::any::TypeId::of::<UnreviewedTrace>();
+    }
+
+    #[test]
+    fn managed_drop_has_no_runtime_or_heap_capability() {
+        let values = values();
+        let direct_drops = Arc::new(AtomicUsize::new(0));
+        let resource_drops = Arc::new(AtomicUsize::new(0));
+        let root = allocate_fixture(&values, &direct_drops, &resource_drops);
+
+        values.with_managed_values(|scope| {
+            assert_passive_managed_fixture_fields(scope.get(&root));
+        });
+        let live = values
+            .collect_managed_for_test()
+            .expect("the rooted fixture should survive collection");
+        assert_eq!(live.marked_slots(), 1);
+        assert_eq!(direct_drops.load(Ordering::Relaxed), 0);
+        assert_eq!(resource_drops.load(Ordering::Relaxed), 0);
+
+        drop(root);
+        let dead = values
+            .collect_managed_for_test()
+            .expect("passive managed destruction should complete");
+        assert_eq!(dead.finalized_slots(), 1);
+        assert_eq!(direct_drops.load(Ordering::Relaxed), 1);
+        assert_eq!(resource_drops.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn external_raii_owner_is_not_reachable_from_managed_graph() {
+        let values = values();
+        let domain = Arc::downgrade(values.value_domain());
+        let direct_drops = Arc::new(AtomicUsize::new(0));
+        let resource_drops = Arc::new(AtomicUsize::new(0));
+        let retirements = Arc::new(AtomicUsize::new(0));
+
+        let explicit_liveness = Arc::new(());
+        let explicit_liveness_weak: Weak<()> = Arc::downgrade(&explicit_liveness);
+        let mut explicit = ExternalRetirementOwner {
+            values: values.clone(),
+            root: Some(allocate_fixture(&values, &direct_drops, &resource_drops)),
+            retirements: Arc::clone(&retirements),
+            liveness: explicit_liveness,
+        };
+        explicit.retire();
+        explicit.retire();
+        assert_eq!(retirements.load(Ordering::Relaxed), 1);
+        drop(explicit);
+        assert!(explicit_liveness_weak.upgrade().is_none());
+        assert_eq!(retirements.load(Ordering::Relaxed), 1);
+
+        let fallback_liveness = Arc::new(());
+        let fallback_liveness_weak: Weak<()> = Arc::downgrade(&fallback_liveness);
+        let fallback = ExternalRetirementOwner {
+            values: values.clone(),
+            root: Some(allocate_fixture(&values, &direct_drops, &resource_drops)),
+            retirements: Arc::clone(&retirements),
+            liveness: fallback_liveness,
+        };
+        assert_eq!(fallback.values.runtime_id(), values.runtime_id());
+        assert_eq!(Arc::strong_count(&fallback.liveness), 1);
+        drop(fallback);
+        assert!(fallback_liveness_weak.upgrade().is_none());
+        assert_eq!(retirements.load(Ordering::Relaxed), 2);
+
+        let report = values
+            .collect_managed_for_test()
+            .expect("retired external roots should permit collection");
+        assert_eq!(report.finalized_slots(), 2);
+        assert_eq!(direct_drops.load(Ordering::Relaxed), 2);
+        assert_eq!(resource_drops.load(Ordering::Relaxed), 2);
+
+        drop(values);
+        assert!(domain.upgrade().is_none());
     }
 }

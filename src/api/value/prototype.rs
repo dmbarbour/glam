@@ -10,7 +10,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use glam_gc::{Gc, Root, Trace, Visitor};
 
-use crate::core::{CoreValueAllocationScope, CoreValueDomainWitness, CoreValueFactory};
+use crate::core::{
+    CoreValueAllocationScope, CoreValueDomainWitness, CoreValueFactory, ManagedDropRecord,
+    ManagedFamily,
+};
 use crate::runtime::{RuntimeIds, allocate_evaluation_runtime_id};
 
 #[derive(Clone)]
@@ -75,6 +78,18 @@ unsafe impl Trace for PrototypeNode {
             visitor.visit(child);
         }
     }
+}
+
+// SAFETY: direct destruction updates only an atomic test observer. The traced
+// child handle is inert during destruction, and the remaining Arc releases an
+// ordinary Rust resource without runtime or heap authority.
+unsafe impl ManagedFamily for PrototypeNode {
+    const DROP_RECORD: ManagedDropRecord = ManagedDropRecord::passive(
+        "I2 managed public-root prototype node",
+        "src/api/value/prototype.rs",
+        "direct Drop updates only an external atomic counter",
+        "Gc is inert on drop; Arc releases an ordinary Rust resource",
+    );
 }
 
 impl Drop for PrototypeNode {

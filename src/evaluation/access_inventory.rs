@@ -81,6 +81,10 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         ("src/api/value.rs", GatewayCounts::new(1, 0)),
         ("src/api/value/prototype.rs", GatewayCounts::new(0, 4)),
         ("src/compiler.rs", GatewayCounts::new(1, 0)),
+        // I4.0's owner-local destruction fixtures exercise the admitted
+        // construction gateway; production allocation still enters through
+        // the same higher-ranked scope.
+        ("src/core/managed.rs", GatewayCounts::new(0, 2)),
         ("src/core.rs", GatewayCounts::new(0, 5)),
         ("src/core_net.rs", GatewayCounts::new(7, 0)),
         ("src/evaluation/access.rs", GatewayCounts::new(5, 0)),

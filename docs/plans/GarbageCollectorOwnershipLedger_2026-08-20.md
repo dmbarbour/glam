@@ -1,12 +1,13 @@
 # Glam GC Ownership and Mutation Ledger — 2026-08-20
 
-Status: Phase I0's pre-GC inventory, Phase I2's public-root contract, and Phase
-I3's bounded evaluator, worker, callback, compiler, net, and multi-runtime
-authority regions are complete and reviewed. Stable integration facts are
-reconciled when each representation family receives its concrete managed
-wrapper and trace implementation. Collector-private class topology is verified
-inside `glam-gc` and is not part of this ledger. Every applicable family record
-must be complete before Gate G2 permits production collection.
+Status: Phase I0's pre-GC inventory, Phase I2's public-root contract, Phase I3's
+bounded evaluator, worker, callback, compiler, net, and multi-runtime authority
+regions, and I4.0's managed-destruction admission gate are complete and
+reviewed. Stable integration facts are reconciled when each representation
+family receives its concrete managed wrapper and trace implementation.
+Collector-private class topology is verified inside `glam-gc` and is not part
+of this ledger. Every applicable family record must be complete before Gate G2
+permits production collection.
 
 This is the graph inventory required by
 [`GarbageCollectorIntegration_2026-08-19.md`](GarbageCollectorIntegration_2026-08-19.md).
@@ -303,6 +304,7 @@ kept with the subsystem whose contract they exercise.
 | Pre-migration public clone/equality baseline and WHNF witness, retained as the compatibility oracle until I4F.2 | `api::tests::evaluated_values_preserve_whnf_identity_and_scalar_views`; `value_evaluator_returns_a_runtime_rooted_whnf_witness`. |
 | I2 selected opaque inline-or-managed handle, weak provenance, transport-only traits, runtime-authorized observation, owned extraction, nested scoped access, and complete compatibility-access accounting | the `api::value::prototype::prototype_*` suite; `public_value_compatibility_access_inventory_is_complete`. |
 | I3 bounded evaluator authority, root-shaped poll outcomes, callback/wait separation, exact net claims, classified lazy producers, compiler/event regions, and multi-runtime admission | `all_managed_entries_have_bounded_mutator_regions`; `direct_evaluator_admission_has_one_internal_compatibility_gate`; `evaluation_machine_poll_boundary_inventory_is_complete`; `effect_interpreter_callbacks_do_not_inherit_evaluator_mutators`; `reflection_gate_reserves_inside_and_activates_outside_scope`; `compiler_root_and_projection_inventory_is_complete`; `event_delivery_invokes_callback_without_mutator`; `diagnostic_rendering_invokes_writer_without_mutator`; `runtime_tls_caches_remain_heap_qualified`; `worker_termination_releases_inactive_collector_caches`. |
+| I4.0 private managed-family destruction admission, mandatory direct/transitive records, passive managed destruction, and external active-retirement separation | compile-time negative admission latches in `core::managed::tests`; `managed_family_collection_requires_completed_drop_record`; `managed_drop_has_no_runtime_or_heap_capability`; `external_raii_owner_is_not_reachable_from_managed_graph`. |
 | Cross-runtime rejection | `public_value_factories_reject_foreign_composite_members`; `assembler_boundaries_reject_foreign_values_before_evaluation_or_storage`; `runtime_input_endpoints_are_local_monotonic_capabilities`. |
 | Fulfilled/unfulfilled lazy and resolver promise | `value_evaluator_caches_lazy_success_and_preserves_structured_failure`; `value_evaluator_resumes_a_retained_resolver_promise_subscription`; `promised_assignments_retain_deferred_aliases`. |
 | Pure lazy cycle | `a_lazy_task_that_waits_on_itself_is_poisoned_as_a_cycle`; `concurrently_demanded_lazy_tasks_share_one_two_node_cycle_failure`; `two_sessions_share_and_retire_one_pure_lazy_cycle_failure`. |
