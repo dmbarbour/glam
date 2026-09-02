@@ -3,10 +3,11 @@
 Status: Phase I0's pre-GC inventory, Phase I2's public-root contract, Phase I3's
 bounded evaluator, worker, callback, compiler, net, and multi-runtime authority
 regions, I4.0's managed-destruction admission gate, I4A's closed managed
-shell/leaf policy, I4B's closure/opaque containment gate, and I4C's recursive
-compatibility edge vocabulary are complete and reviewed. Stable integration
-facts are reconciled when each representation family receives its concrete
-managed wrapper and trace implementation.
+shell/leaf policy, I4B's closure/opaque containment gate, I4C's recursive
+compatibility edge vocabulary, and I4D's persistent collection adapters are
+complete and reviewed. Stable integration facts are reconciled when each
+representation family receives its concrete managed wrapper and trace
+implementation.
 Collector-private class topology is verified inside `glam-gc` and is not part
 of this ledger. Every applicable family record must be complete before Gate G2
 permits production collection.
@@ -143,8 +144,8 @@ G2 opaque blockers.
 | `Atom` | Interned `Key`; no `Value` edge. | Immutable, `Send + Sync`, long-lived. | Leaf; no mutation gateway; I4. |
 | `Number` | Number-owned integer/rational storage; no `Value` edge. | Immutable, thread-safe, long-lived. | Leaf initially; I4. |
 | `Binary` | `bytes::Bytes`; no managed edge. | Immutable shared leaf. | Leaf/external allocation; I4. |
-| `List` | Persistent list nodes; value chunks and lazy/promise thunks are outgoing edges. | Immutable/persistent and thread-safe; may escape all evaluator calls. | Logical item/thunk visitor, including shared spines; no post-publication mutation; I7. |
-| `Dict` | `RedBlackTreeMapSync<Key, Value>`; every mapped value is an edge. Keys contain no live `Value` after conversion. | Immutable/persistent and thread-safe; may be runtime-global. | Logical entry visitor; no post-publication mutation; I7. |
+| `List` | Persistent list nodes; value chunks and lazy/promise thunks are outgoing edges. | Immutable/persistent and thread-safe; may escape all evaluator calls. | I4D compatibility adapter reports strict values and thunks through a non-forcing logical walk, including repeated shared-spine occurrences; bytes are leaves. No post-publication mutation; I7 replaces and audits it. |
+| `Dict` | `RedBlackTreeMapSync<Key, Value>`; every mapped value is an edge. Keys contain no live `Value` after conversion. | Immutable/persistent and thread-safe; may be runtime-global. | I4D compatibility adapter reports mapped values in key order and exhaustively classifies recursive keys as leaves. No post-publication mutation; I7 replaces and audits it. |
 | `Builtin` | Static enum only. | Immutable leaf. | Leaf; I4. |
 | `PartialBuiltin` | `BuiltinCall.arguments: Arc<[Value]>`. | Immutable, shared across threads. | I4C compatibility visitor reports every supplied argument in order; I6 replaces it with the managed visitor. |
 | `Function` | `FunctionValue -> NetValue -> CoreRuntimeNet`; the net carries data/operator values. | Immutable shell over a managed synchronized core-net cell; long-lived. | Visit the managed net identity; I6/I8. |
@@ -174,15 +175,21 @@ G2 opaque blockers.
 
 `List`, `ListNode`, `ListChunk`, `SharedSlice`, `FingerList`, and
 `RedBlackTreeMapSync<Key, Value>` are immutable persistent structures. Their
-shared spines are ordinary Rust `Arc` ownership today. The initial collector
-will trace RPDS and FingerTree contents through their public iterators, which
-already use explicit heap-backed traversal state, even if this revisits a
-shared spine more than once. Glam's unbalanced `ListNode::Concat` shell uses a
-small explicit trace worklist; lazy thunks are reported as edges and are never
-forced by tracing. No element insertion occurs after a node is published, so
-no post-construction mutation gateway is required unless I7 later chooses
-managed mutable spines. `ListThunk::{Lazy, Promised}` visits its one deferred
-cell. Bytes chunks and empty nodes are leaves.
+shared spines are ordinary Rust `Arc` ownership today. I4D's implemented
+compatibility adapters trace RPDS and FingerTree contents through their public
+iterators, even if this revisits a shared spine more than once. Glam's
+unbalanced `ListNode::Concat` shell uses a small explicit trace worklist; lazy
+and promise thunks are reported as edges and are never forced by tracing.
+Bytes chunks and empty nodes are leaves. Recursive `Key` structures are walked
+iteratively for exact policy and work accounting, but contain no semantic
+edge. Logical counters record list nodes, finger chunks, segments, values,
+thunks, map entries, and key nodes without deduplicating shared storage.
+
+No element insertion occurs after a persistent node is published, so no
+post-construction mutation gateway is required unless I7 later chooses managed
+mutable spines. I7 replaces these compatibility adapters while retaining the
+same logical edge policy and measures whether duplicate shared-spine visits
+justify a physical collector-aware representation.
 
 Collection constructors in `Values`, `CoreValueFactory`, evaluator builtins,
 the syntax compiler, macro expansion, reflection stores, and net operators
@@ -326,6 +333,7 @@ kept with the subsystem whose contract they exercise.
 | I4.0 private managed-family destruction admission, mandatory direct/transitive records, passive managed destruction, and external active-retirement separation | compile-time negative admission latches in `core::managed::tests`; `managed_family_collection_requires_completed_drop_record`; `managed_drop_has_no_runtime_or_heap_capability`; `external_raii_owner_is_not_reachable_from_managed_graph`. |
 | I4A initial managed shell granularity, exhaustive current-variant dispatch, embedded leaf policy, and closed cyclic tracing | `managed_leaf_families_trace_zero_edges`; `managed_value_shell_dispatches_every_variant`; `managed_value_shell_cycle_marks_once`. |
 | I4C recursive compatibility edge vocabulary, ordered payload/failure visitation, lifecycle-edge exclusions, and no semantic work during visitation | `argument_and_application_visitors_enumerate_exact_edges`; `compatibility_recursive_payload_visitors_enumerate_exact_edges`; `shared_cyclic_failure_context_traces_exactly`; `failure_trace_invokes_no_semantic_service`; `recursive_edge_mutations_use_representation_gateways`. |
+| I4D non-forcing persistent collection adapters, logical work accounting, shared-spine behavior, and closed collection proof | `persistent_adapter_traces_empty_singleton_and_shared_spines`; `persistent_adapter_cycle_reclaims_in_isolated_heap`. |
 | Cross-runtime rejection | `public_value_factories_reject_foreign_composite_members`; `assembler_boundaries_reject_foreign_values_before_evaluation_or_storage`; `runtime_input_endpoints_are_local_monotonic_capabilities`. |
 | Fulfilled/unfulfilled lazy and resolver promise | `value_evaluator_caches_lazy_success_and_preserves_structured_failure`; `value_evaluator_resumes_a_retained_resolver_promise_subscription`; `promised_assignments_retain_deferred_aliases`. |
 | Pure lazy cycle | `a_lazy_task_that_waits_on_itself_is_poisoned_as_a_cycle`; `concurrently_demanded_lazy_tasks_share_one_two_node_cycle_failure`; `two_sessions_share_and_retire_one_pure_lazy_cycle_failure`. |
@@ -362,11 +370,10 @@ collection rather than receiving a guessing/conservative classification:
    drain. I4F.1/I4F.2 must still convert those compatibility roots and bounded
    raw values before the production managed-value switch; the completed I3
    authority proof is not itself a root representation.
-4. RPDS and FingerTree/list nodes need reviewed exact logical visitors.
-5. I8 must replace the production core `SharedRuntimeNet` `Arc` owner with one
+4. I8 must replace the production core `SharedRuntimeNet` `Arc` owner with one
    managed outer cell, then close its exact synchronized trace, durable-handle,
    and value-installing mutation-gateway inventories.
-6. Public opaque construction needs the I10B.0 representation decision and a
+5. Public opaque construction needs the I10B.0 representation decision and a
    closed leaf/root registration boundary. If that review selects a managed
    arm, every admitted concrete family also needs its own exact stable ledger
    record, scoped-access proof, and I4.0 destruction admission before Gate G2.

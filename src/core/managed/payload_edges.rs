@@ -26,6 +26,8 @@ pub(crate) trait CompatibilityValueEdges {
     fn visit_compatibility_value_edges(&self, visit: &mut dyn FnMut(&Value));
 }
 
+mod persistent;
+
 fn visit_values(values: &[Value], visit: &mut dyn FnMut(&Value)) {
     for value in values {
         visit(value);

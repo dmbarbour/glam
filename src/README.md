@@ -66,7 +66,7 @@ not define language semantics or collect subsystem invariants.
 | `eval/builtins/` | Builtin implementations by semantic family; I3B's scoped dispatcher keeps ordinary pure work on `EvaluatorStepContext` and source-latches durable effect, strategy, net, provenance, and reflection handoffs |
 | `eval/builtins/net/construction.rs` | Source interaction-net construction search |
 | `eval/sequence.rs` | Lazy sequence and binary extraction |
-| `list.rs`, `number.rs` | Persistent list ropes and exact numbers |
+| `list.rs`, `number.rs` | Persistent list ropes, non-forcing logical list-part traversal and trace-work counters, and exact numbers |
 | `diagnostic.rs`, `api/diagnostics.rs` | Semantic diagnostic shapes plus embedding buses, ingress, and enrichment |
 | `reflection.rs`, `reflection/protocol.rs` | Reflection facade, specialization/host transaction protocol, and bounded callback evaluation service |
 | `reflection/lifecycle.rs` | Effect lifecycle, scheduled runs, and task launchers |

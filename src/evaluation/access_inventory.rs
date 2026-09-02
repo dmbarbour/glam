@@ -85,6 +85,10 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // construction gateway; production allocation still enters through
         // the same higher-ranked scope.
         ("src/core/managed.rs", GatewayCounts::new(0, 2)),
+        (
+            "src/core/managed/payload_edges/persistent.rs",
+            GatewayCounts::new(0, 1),
+        ),
         ("src/core/managed/value_shell.rs", GatewayCounts::new(0, 3)),
         ("src/core.rs", GatewayCounts::new(0, 5)),
         ("src/core_net.rs", GatewayCounts::new(7, 0)),

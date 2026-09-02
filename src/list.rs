@@ -51,6 +51,28 @@ struct SharedSlice<T> {
     len: usize,
 }
 
+/// Logical work performed while enumerating a list without forcing thunks.
+///
+/// Counts describe visits, not unique physical `Arc` nodes. Reusing one shared
+/// spine twice therefore contributes twice, matching the initial mark
+/// collector's deliberately simple tracing policy.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct LogicalListVisitStats {
+    pub(crate) node_visits: usize,
+    pub(crate) chunk_visits: usize,
+    pub(crate) byte_segments: usize,
+    pub(crate) shared_value_slices: usize,
+    pub(crate) value_items: usize,
+    pub(crate) thunk_items: usize,
+}
+
+/// One non-structural part discovered by [`List::visit_logical_parts`].
+pub(crate) enum LogicalListPart<'part, V, T> {
+    Bytes,
+    Values(&'part [V]),
+    Thunk(&'part T),
+}
+
 impl<T> SharedSlice<T> {
     fn from_vec(values: Vec<T>) -> Self {
         let len = values.len();
@@ -475,6 +497,65 @@ impl<V: Clone, T: Clone> List<V, T> {
                 panic!("list segment traversal requires all lazy list chunks to be forced")
             }
         }
+    }
+
+    /// Visits byte slices, strict value slices, and deferred thunks without
+    /// forcing any deferred part.
+    ///
+    /// `Concat` traversal uses an explicit local worklist so an unbalanced
+    /// syntax-built list cannot consume the Rust call stack. Finger trees keep
+    /// their library iterator; byte segments are edge-free but remain visible
+    /// in the returned work counters.
+    pub(crate) fn visit_logical_parts(
+        &self,
+        visit: &mut impl FnMut(LogicalListPart<'_, V, T>),
+    ) -> LogicalListVisitStats {
+        let mut stats = LogicalListVisitStats::default();
+        let mut worklist = vec![self];
+
+        while let Some(list) = worklist.pop() {
+            stats.node_visits += 1;
+            match list.0.as_ref() {
+                ListNode::Empty => {}
+                ListNode::Bytes(_) => {
+                    stats.byte_segments += 1;
+                    visit(LogicalListPart::Bytes);
+                }
+                ListNode::Values(values) => {
+                    stats.shared_value_slices += 1;
+                    stats.value_items += values.len();
+                    visit(LogicalListPart::Values(values.as_slice()));
+                }
+                ListNode::Concat(left, right) => {
+                    // LIFO insertion preserves ordinary left-to-right logical
+                    // order while bounding traversal by heap storage.
+                    worklist.push(right);
+                    worklist.push(left);
+                }
+                ListNode::Finger(finger) => {
+                    for chunk in finger.iter() {
+                        stats.chunk_visits += 1;
+                        match chunk {
+                            ListChunk::Bytes(_) => {
+                                stats.byte_segments += 1;
+                                visit(LogicalListPart::Bytes);
+                            }
+                            ListChunk::Values(values) => {
+                                stats.shared_value_slices += 1;
+                                stats.value_items += values.len();
+                                visit(LogicalListPart::Values(values.as_slice()));
+                            }
+                        }
+                    }
+                }
+                ListNode::Thunk(thunk) => {
+                    stats.thunk_items += 1;
+                    visit(LogicalListPart::Thunk(thunk));
+                }
+            }
+        }
+
+        stats
     }
 
     pub fn try_for_each_segment<E>(

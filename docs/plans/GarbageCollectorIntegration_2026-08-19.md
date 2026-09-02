@@ -1,7 +1,7 @@
 # Glam GC Integration Plan — 2026-08-19
 
 Status: in progress; Phases I0 through I3 and their mandatory reviews plus I4.0
-through I4C are complete. Phase I4D is pending. Collector Gate G1 passed on
+through I4D are complete. Phase I4E is pending. Collector Gate G1 passed on
 2026-08-25. The remaining integration work follows the completed owner-matrix,
 stable-ledger, and low-risk checkpoint corrections from the integration
 review.
@@ -93,7 +93,9 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4C.2 | complete | deferred source/cell compatibility adapters and mutation-gateway latches |
 | I4C.3 | complete | cross-family exactness, no-forcing verification, and documentation closure |
 | I4C | complete | recursive payload and failure structures |
-| I4D | pending | persistent collection adapters |
+| I4D.1 | complete | non-forcing list/map logical adapters and trace-work counters |
+| I4D.2 | complete | shared-spine exactness, closed cycle reclamation, and documentation closure |
+| I4D | complete | persistent collection adapters |
 | I4E | pending | non-reducing net value adapter |
 | I4F.1 | pending | durable root-surface conversion gate |
 | I4F.2 | pending | public managed-root production switch |
@@ -2423,6 +2425,41 @@ and `persistent_adapter_cycle_reclaims_in_isolated_heap`. Production remains
 `NoAuto`; I7 later reconciles these adapters against the final concrete
 persistent representations.
 
+Implement this phase in two bounded checkpoints:
+
+1. **I4D.1 — Logical adapters and instrumentation.** Give the generic list
+   representation one non-forcing logical-part walk. Traverse unbalanced
+   `Concat` nodes with an explicit local worklist, use the FingerTree iterator
+   for finger chunks, report strict value slices and deferred thunks without
+   forcing either, and count node/chunk/segment/edge visits. Visit RPDS map
+   entries through its iterator in key order; exhaustively inspect Glam's
+   recursively structured `Key` leaves while reporting only mapped values as
+   semantic edges. Counters measure logical trace work and do not deduplicate
+   shared physical spines.
+2. **I4D.2 — Closed verification and reconciliation.** Cover empty, singleton,
+   byte, strict-value, thunk, concat, finger, nested-key, and shared-spine
+   shapes. A closed managed fixture must use the same logical adapters to prove
+   rooted survival and unrooted reclamation of a list/dictionary cycle. Update
+   the ownership ledger and retain production `NoAuto`.
+
+I4D completed on 2026-09-02. The generic list representation now exposes one
+crate-private `visit_logical_parts` walk. It uses an explicit LIFO worklist for
+arbitrarily shaped `Concat` shells, preserves left-to-right order, delegates
+FingerTree structure to its iterator, and reports byte segments, strict shared
+value slices, and deferred thunks without forcing them. Its counters record
+logical node, chunk, segment, value, and thunk visits; shared physical spines
+are deliberately counted once per logical occurrence.
+
+The compatibility adapters report every strict list value and lazy/promise
+thunk, every RPDS mapped value in key order, and no byte or key edge. An
+exhaustive iterative `Key` walk records recursively nested key work and makes
+the current value-free key policy explicit. Persistent nodes and immutable
+arrays acquire no mutation gateway. Focused fixtures cover every current list
+shape, nested keys, persistent map versions, duplicated shared list spines,
+non-forcing lazy sentinels, and rooted survival followed by reclamation of a
+closed list-to-dictionary cycle. Production remains `NoAuto`; I7 replaces and
+re-audits these compatibility adapters with the final managed value form.
+
 ### Phase I4E — Net Value Adapter
 
 - Define the exact non-reducing visitor boundary for `NetValue`, function-stage
@@ -2746,12 +2783,18 @@ remains `NoAuto`.
 - Give the managed outer cell the reviewed internal finalization needed to drop
   its mutex and ordinary Rust containers. It must fit one typed-run slot; this
   phase introduces no large-object or multi-run exception.
+- Close the pre-managed edge vocabulary after installing the final net
+  visitor: delete `CompatibilityValueEdges` and its `payload_edges.rs` module,
+  and migrate every remaining compatibility-edge fixture to the managed family
+  test which replaces it. A source-backed latch must prove that no
+  compatibility implementation or call site survives I8B.
 
 Verification: source inventory accounts for every old production
 `Arc`/`Weak<SharedRuntimeNetInner<CoreSpecialization>>` owner and every durable
 core-net handle. Exact-visitor tests cover every runtime-node and pending-state
 variant. Mutation tests cover each value-installing rewrite. Compile-time or
-privacy fixtures reject unscoped dereference and parked bare handles.
+privacy fixtures reject unscoped dereference and parked bare handles. Add
+`managed_edge_vocabulary_has_no_compatibility_adapter` to latch final removal.
 Production remains `NoAuto`; only closed subsystem fixtures may collect.
 
 ### Phase I8C — Cycle Reclamation and Final Net Audit
