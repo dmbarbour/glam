@@ -1,7 +1,7 @@
 # Glam GC Integration Plan — 2026-08-19
 
 Status: in progress; Phases I0 through I3 and their mandatory reviews plus I4.0
-through I4B are complete. Phase I4C is pending. Collector Gate G1 passed on
+through I4C are complete. Phase I4D is pending. Collector Gate G1 passed on
 2026-08-25. The remaining integration work follows the completed owner-matrix,
 stable-ledger, and low-risk checkpoint corrections from the integration
 review.
@@ -89,6 +89,12 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4B.3 | complete | explicit semantic computation captures and host-callback classification |
 | I4B.4 | complete | containment inventory closure and verification |
 | I4B | complete | closure and opaque managed-edge containment |
+| I4C.1 | complete | immutable argument, application, and failure edge adapters |
+| I4C.2 | complete | deferred source/cell compatibility adapters and mutation-gateway latches |
+| I4C.3 | complete | cross-family exactness, no-forcing verification, and documentation closure |
+| I4C | complete | recursive payload and failure structures |
+| I4D | pending | persistent collection adapters |
+| I4E | pending | non-reducing net value adapter |
 | I4F.1 | pending | durable root-surface conversion gate |
 | I4F.2 | pending | public managed-root production switch |
 | I5 | pending | managed lazy/promise cells, external lifecycle, and cycle reclamation |
@@ -2351,6 +2357,50 @@ Verification: `argument_and_application_visitors_enumerate_exact_edges`,
 `shared_cyclic_failure_context_traces_exactly`, and
 `failure_trace_invokes_no_semantic_service`. Only isolated closed fixtures may
 force collection; production remains `NoAuto`.
+
+Implement this phase in three bounded checkpoints:
+
+1. **I4C.1 — Immutable and failure adapters.** Establish one semantic-value
+   edge visitor over the compatibility representation. Cover builtin argument
+   arrays, lazy application/access/function-call payloads, semantic captures,
+   fixpoint payloads, failure emissions, and ordered context frames. The
+   visitor reports direct edges only and never recursively evaluates them.
+2. **I4C.2 — Deferred compatibility adapters.** Cover `LazySource`, the
+   source-or-terminal-result state of `LazyCell`, `PromiseCell` assignment,
+   metadata, and reflection computation. Treat successful reflection
+   reservation state and promise producer/notification companions as external
+   lifecycle state rather than duplicate semantic edges. Latch the existing
+   `LazyValue::cache`, `PromiseCell::{publish,publish_guarded}`, and reflection
+   task initialization sites as the sole replaceable/one-write gateways.
+3. **I4C.3 — Verification and closure.** Exercise every recursive payload
+   family, exact ordered arguments/contexts, dependency-cycle failure data,
+   and lazy sentinels proving visitation performs no semantic work. Reconcile
+   the ledger and phase status without enabling production collection.
+
+I4C completed on 2026-09-02. The private
+`CompatibilityValueEdges` vocabulary reports direct semantic `Value` edges
+for immutable argument/application payloads, explicit semantic captures,
+fixpoints, failures and ordered contexts, metadata, reflection computations,
+lazy source-or-result state, and promise assignments. It neither recurses into
+reported values nor evaluates, formats, or compares them. Net identities stay
+outside this adapter for I4E/I8.
+
+For one-write state, a successful reflection reservation and promise
+producer/notification records remain external lifecycle state rather than
+duplicate semantic edges; failed reservation/assignment values are reported
+through their structured failure. A terminal lazy result supersedes its
+source edge, matching publication-before-source-removal. The visitor takes a
+stable source snapshot without invoking its callback while holding the source
+mutex. Source-backed latches identify `LazyValue::cache`,
+`PromiseCell::{publish,publish_guarded}`, and reflection task initialization as
+the representation-local gateways that I5/I6 must preserve when the storage
+becomes managed.
+
+Focused fixtures cover exact argument and context order, every compatibility
+family, shared failure context identity, dependency-cycle leaf data, and a
+panic sentinel proving visitation performs no semantic work. Collection is
+still disabled for production; these adapters are replaced atomically by each
+family's managed visitor in I5-I8.
 
 ### Phase I4D — Persistent Collection Adapters
 

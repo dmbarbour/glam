@@ -125,6 +125,12 @@ const INVENTORY: &[InventoryEntry] = &[
         "I4A-I4E exact value shell; I4F.2 public facade switch"
     ),
     entry!(
+        "src/core/managed/payload_edges.rs",
+        [1, 0, 0, 0, 0, 0],
+        "I4C exact compatibility projection of an assigned promise root",
+        "I5 managed promise assignment visitor; I4F.2 public facade switch"
+    ),
+    entry!(
         "src/eval/builtins/net/construction.rs",
         [3, 1, 6, 0, 0, 0],
         "bounded request-evaluated interaction-net construction",

@@ -501,6 +501,8 @@ mod value_shell;
 #[cfg(test)]
 mod containment_inventory;
 
+mod payload_edges;
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
