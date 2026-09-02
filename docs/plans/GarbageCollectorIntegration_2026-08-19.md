@@ -1,10 +1,10 @@
 # Glam GC Integration Plan — 2026-08-19
 
-Status: in progress; Phases I0 through I3 and their mandatory reviews plus the
-I4.0 managed-destruction admission gate are complete. Phase I4A is pending.
-Collector Gate G1 passed on 2026-08-25. The remaining integration work follows
-the completed owner-matrix, stable-ledger, and low-risk checkpoint corrections
-from the integration review.
+Status: in progress; Phases I0 through I3 and their mandatory reviews plus I4.0
+and I4A are complete. Phase I4B is pending. Collector Gate G1 passed on
+2026-08-25. The remaining integration work follows the completed owner-matrix,
+stable-ledger, and low-risk checkpoint corrections from the integration
+review.
 
 This plan integrates the collector defined by
 [`GarbageCollectorImplementation_2026-08-19.md`](GarbageCollectorImplementation_2026-08-19.md)
@@ -83,6 +83,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I3 | complete | bounded evaluator/worker mutator regions; post-I3 review passed |
 | I4 | pending | core trace vocabulary and leaf policy |
 | I4.0 | complete | private managed-family admission, mandatory drop records, passive destruction fixture, and external-retirement separation |
+| I4A | complete | initial monolithic shell selection, exhaustive variant dispatch, embedded leaf policy, and closed cycle fixture |
 | I4B | pending | closure and opaque managed-edge containment |
 | I4F.1 | pending | durable root-surface conversion gate |
 | I4F.2 | pending | public managed-root production switch |
@@ -2226,6 +2227,25 @@ Verification: `managed_leaf_families_trace_zero_edges`,
 `managed_value_shell_cycle_marks_once`. Invalid layout remains covered by the
 I1D collector fixture. Production remains `NoAuto` and retains its
 compatibility public root.
+
+I4A completed on 2026-09-02. The initial bootstrap integration uses one
+monolithic managed allocation shell corresponding exhaustively to the current
+`Value` variants. Atom, number, binary, and static-builtin payloads are embedded
+edge-free leaves. Recursive variants delegate through semantic edge visitation
+rather than exposing field offsets. The opaque dispatch arm deliberately has
+no payload: I4B and I10B.0 still own containment and representation of actual
+opaque values.
+
+The implemented shell remains a closed test fixture until I4B-I4F supply every
+concrete recursive payload and root surface. Its exhaustive compatibility
+mapping makes any new `Value` variant a compile error; its x86-64 Rust layout is
+72 bytes with 8-byte alignment, and its requested 72-byte slot is accepted.
+The I4.0 drop record classifies direct counter observation and transitive
+Atom/Number/Bytes, mutex, `Gc`, and `Arc` destruction as passive. Rooted leaf
+shells trace zero edges, all thirteen variants dispatch explicitly, and a
+rooted self-cycle marks once before becoming reclaimable. This initial
+monolithic choice does not constrain the later compact, split representation
+owned by the value-representation refinement plan.
 
 ### Phase I4B — Closure and Opaque Managed-Edge Containment
 

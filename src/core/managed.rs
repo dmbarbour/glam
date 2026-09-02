@@ -421,6 +421,9 @@ impl<T: ManagedFamily> CoreValueAllocator<'_, T> {
 }
 
 #[cfg(test)]
+mod value_shell;
+
+#[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Weak};
