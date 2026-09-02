@@ -2093,27 +2093,55 @@ only after returning. Production remains `NoAuto`.
 
 ### Phase I3F — Multi-Runtime and Exit Audit
 
-- A thread entering another runtime activates a separate heap-qualified TLS
-  entry; recursive same-runtime entry reuses depth, epoch, and cache.
-- Prove opposite A-then-B and B-then-A nesting cannot deadlock when both heaps
-  have pending requests. An uncommitted request does not block entry; an active
-  exclusive collector does.
-- A poll context without an active evaluator scope may orchestrate nested work
-  in another runtime. It confers no heap access by itself. Opposite-runtime
-  evaluator scopes remain separate and may nest only according to the
-  collector's reviewed multi-heap admission protocol.
-- Drop every active evaluator scope before a worker sleeps. On worker
-  termination, release that thread's inactive collector caches; ordinary
-  quantum exit need not discard reusable cursors. TLS eviction forgets cursors
-  only; full collection recovers ranges.
+- **I3F.1 — Reference-collector multi-runtime admission.** A thread entering
+  another runtime activates a separate heap-qualified TLS entry; recursive
+  same-runtime entry reuses depth, epoch, and cache. Reuse the collector's
+  forced reciprocal A-then-B/B-then-A test as the authoritative proof that two
+  *uncommitted* stop-the-world collection requests do not make heap order a
+  lock order. Add a Glam-domain test proving the evaluator consumes those
+  independent TLS entries without inventing runtime-ID-based authority.
+- **I3F.2 — Poll, wait, and worker exit boundaries.** A poll context without an
+  active evaluator scope may orchestrate nested work in another runtime and
+  confers no heap access by itself. Drop every active evaluator scope before a
+  worker sleeps. On worker termination, explicitly release that thread's
+  inactive collector caches; ordinary quantum exit need not discard reusable
+  cursors. TLS eviction forgets cursors only; full collection recovers ranges.
+- **I3F.3 — Admission closure audit.** Source-latch every production managed
+  entry through the runtime-domain gateway and reject direct `Heap::with_mutator`
+  use outside that owner. Reconcile existing patient-wait, blocked-machine,
+  callback, worker-sleep, and nested-runtime tests with the final inventory.
 
-Verification: `opposite_runtime_nesting_with_pending_collection_does_not_deadlock`,
+I3F proves the current reference collector's bounded-authority and nested-heap
+baseline; it does **not** prove starvation freedom. The successor concurrent
+collector replaces idle-entry election with heap-local participant epochs.
+Its CG0/CG1 checkpoints must preserve these tests, reinterpret worker exit as
+participant retirement, and add continuously overlapping mutator schedules.
+
+Verification: `reciprocal_nested_entries_pass_two_uncommitted_collection_requests`,
 `runtime_tls_caches_remain_heap_qualified`,
 `poll_context_without_scope_carries_no_heap_authority`, and
 `all_managed_entries_have_bounded_mutator_regions`. Glam-level schedules also
-cover patient waits, worker termination, and two runtime services nested on
-one host thread. Production remains `NoAuto`; passing I3 authorizes managed
-access, not production collection.
+cover `scheduled_nested_dependency_runs_without_mutator`,
+`patient_claimed_task_wait_releases_mutator`,
+`worker_releases_mutator_before_sleep`, and
+`worker_termination_releases_inactive_collector_caches`. Production remains
+`NoAuto`; passing I3 authorizes managed access, not production collection.
+
+I3F completed on 2026-09-01. Nested runtime access creates independent
+heap-qualified TLS cache records and preserves the matching value-domain
+authority without treating `EvaluationRuntimeId` as heap identity. A bare poll
+context was forced through full collection before and after its bounded access
+region, proving that only the callback constitutes mutator admission. Worker
+threads now retire every inactive per-heap cursor through an exit guard, while
+ordinary quantums retain caches for reuse.
+
+A source-backed inventory accounts for every managed construction/access
+gateway and confines direct `Heap::with_mutator` calls to the core value-domain
+owner. Existing forced schedules continue to cover worker sleep, patient
+waiting, blocked machines, terminal destruction, and nested dependency work.
+The concurrent collector plan records these as CG0/CG1 entry and retirement
+baselines; continuously overlapping mutators remain its separate progress
+proof.
 
 ## Phase I4 — Core Trace Vocabulary and Leaf Policy
 

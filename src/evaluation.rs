@@ -22,6 +22,8 @@ use crate::core::{CoreValueFactory, EvaluationFailure, Value};
     reason = "I3A establishes scoped authority before I3B migrates production evaluator substeps"
 )]
 mod access;
+#[cfg(test)]
+mod access_inventory;
 mod coordinator;
 mod executor;
 mod observation;

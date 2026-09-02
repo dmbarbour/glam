@@ -300,6 +300,12 @@ control-flow overview.
   its chosen session by coordinator demand ID. It must not upgrade the external
   owner lease: worker and task contexts may need to finish exact dependencies
   after the client has released that lease.
+- Preserve inactive per-heap allocation cursors across ordinary worker
+  quantums, but explicitly release all such thread-local cache records when a
+  worker terminates. This exit boundary must run only after scoped mutators
+  unwind; the collector release operation intentionally panics if any mutator
+  depth remains active. A future concurrent collector reinterprets this as
+  participant retirement without turning a poll context into participation.
 - Zero workers discard sparks without queueing. Sparks are nontransactional
   hints: rollback does not retract them, their errors are not independently
   reported, and queued work does not keep a session alive.

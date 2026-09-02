@@ -408,4 +408,48 @@ mod tests {
             ));
         });
     }
+
+    #[test]
+    fn runtime_tls_caches_remain_heap_qualified() {
+        let _ = glam_gc::Heap::release_current_thread_caches();
+        let first = value_factory();
+        let second = value_factory();
+
+        first.with_runtime_value_access(|first_access| {
+            assert!(first_access.belongs_to(&first));
+            assert!(!first_access.belongs_to(&second));
+            second.with_runtime_value_access(|second_access| {
+                assert!(second_access.belongs_to(&second));
+                assert!(!second_access.belongs_to(&first));
+                assert!(first_access.belongs_to(&first));
+            });
+        });
+
+        assert_eq!(
+            glam_gc::Heap::release_current_thread_caches(),
+            2,
+            "nested runtime access should create one independent TLS cache per heap"
+        );
+    }
+
+    #[test]
+    fn poll_context_without_scope_carries_no_heap_authority() {
+        let values = value_factory();
+        let context = EvalContext::isolated(values.clone());
+        let poll = EvaluationPollContext::for_context(&context);
+
+        values
+            .collect_managed_for_test()
+            .expect("constructing a poll context must not enter the managed heap");
+        poll.with_value_access(&context, |access| {
+            assert!(access.values().belongs_to(&values));
+            assert!(matches!(
+                values.collect_managed_for_test(),
+                Err(CollectionError::ActiveMutator)
+            ));
+        });
+        values
+            .collect_managed_for_test()
+            .expect("managed authority must end with the bounded access callback");
+    }
 }

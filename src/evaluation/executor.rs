@@ -129,6 +129,7 @@ impl Drop for EvaluationExecutor {
 }
 
 fn evaluation_worker(inner: Arc<EvaluationExecutorInner>) {
+    let _thread_cache_retirement = WorkerThreadCacheRetirement;
     loop {
         if inner.stopping.load(Ordering::Acquire) {
             return;
@@ -171,9 +172,44 @@ fn evaluation_worker(inner: Arc<EvaluationExecutorInner>) {
     }
 }
 
+/// Retires inactive per-heap allocation cursors when one worker thread ends.
+///
+/// Ordinary evaluation quantum boundaries deliberately preserve these
+/// reusable cursors. Worker termination is the stronger lifecycle boundary:
+/// no later quantum can reuse the calling thread's collector state, and the
+/// collector recovers any forgotten leases during a full collection.
+struct WorkerThreadCacheRetirement;
+
+impl Drop for WorkerThreadCacheRetirement {
+    fn drop(&mut self) {
+        let _released = glam_gc::Heap::release_current_thread_caches();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worker_termination_releases_inactive_collector_caches() {
+        let _ = glam_gc::Heap::release_current_thread_caches();
+        let values = crate::core::CoreValueFactory::new(
+            crate::runtime::allocate_evaluation_runtime_id(),
+            crate::runtime::RuntimeIds::new(),
+        );
+        values.with_runtime_value_access(|_| {});
+
+        let (_coordinator, executor) =
+            super::super::test_execution_resources(0).expect("test executor should build");
+        executor.inner.stopping.store(true, Ordering::Release);
+        evaluation_worker(executor.inner.clone());
+
+        assert_eq!(
+            glam_gc::Heap::release_current_thread_caches(),
+            0,
+            "worker termination should have retired every inactive collector cache"
+        );
+    }
 
     #[test]
     fn executor_shutdown_wakes_idle_workers_without_owning_the_coordinator() {

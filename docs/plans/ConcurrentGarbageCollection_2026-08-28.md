@@ -57,6 +57,16 @@ The existing non-moving full collector remains the reference implementation
 and reachability oracle throughout this plan. This plan does not rewrite its
 historical C phases or weaken Gate G1-G4 claims.
 
+Phase I3F of the integration plan supplies the immediate multi-runtime
+baseline: heap-qualified TLS, recursive same-heap depth, reciprocal cross-heap
+entry with uncommitted reference-collector requests, mutator-free poll/wait
+contexts, and explicit worker-thread cache release. Those are entry tests for
+CG0/CG1, not proofs of concurrent-collector progress. In particular, the
+reference collector may still starve under continuously overlapping mutators;
+CG0 adds that failing schedule, and CG1 must preserve arbitrary heap nesting
+while replacing inactive TLS records with independently acknowledged
+heap-participant state.
+
 ## Initial Scope
 
 The first concurrent collector provides:
@@ -275,6 +285,11 @@ or accidental under the same policy as the integration plan.
 
 - Re-run the final ownership, trace, mutation, and destruction inventories
   against the post-G4 code.
+- Re-run I3F's heap-qualified TLS, mutator-free wait, bounded-entry, and worker
+  exit fixtures, including the source-backed
+  `all_managed_entries_have_bounded_mutator_regions` inventory. Classify each
+  inactive cache record which becomes a CG1 participant record; a poll context
+  still must not constitute participation until it opens managed access.
 - Add deterministic starvation fixtures with continuously overlapping
   mutators, including an outer heap which is always entered before an
   allocation-heavy inner heap and the opposite order on another thread.
@@ -301,6 +316,10 @@ and access-epoch rule.
 - Prove that initiation never blocks new hierarchical heap entry and never
   waits while holding another heap's lock.
 - Integrate the CG0 transient-root protocol.
+- Make worker termination retire every inactive participant/cache record for
+  that thread without scanning another thread's state. Ordinary quantum exit
+  releases active pins and acknowledgement obligations but may preserve inert
+  reusable cursor metadata.
 
 Verification forces every two-heap acquisition ordering, recursive same-heap
 entry, participant exit during initiation, thread exit, panic, and a participant
@@ -465,4 +484,3 @@ review of effects on later phases before its implementation begins.
   panic protocol, and exactly once on success.
 - The implementation has dated reviews after every major `CG` phase and a
   final unsafe/concurrency audit with no unresolved soundness finding.
-

@@ -124,6 +124,14 @@ queued and blocked work immediately while a worker safely finishes one
 already-claimed quantum. The immutable reflection environment belongs to the
 active task host rather than either scheduling component.
 
+Ordinary worker quantums preserve their thread's inactive per-heap allocation
+cursors for reuse. Worker-thread termination is the stronger collector
+lifecycle boundary: an exit guard releases every inactive cache record after
+the final scoped access has unwound. The release operation rejects an active
+mutator, so termination also checks that no managed-access region escaped its
+higher-ranked callback. Full collection, rather than TLS eviction, recovers
+the forgotten allocation ranges.
+
 After a claim is detached from coordinator locks, `evaluation/pump.rs` derives
 one `EvaluationPollContext` from that checked session and supplies it to every
 type-erased task poll. Caller-driven effect runs and isolated searches derive
