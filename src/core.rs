@@ -30,7 +30,9 @@ mod managed;
 pub(crate) use managed::{CoreValueAllocationScope, CoreValueDomainWitness};
 #[cfg(test)]
 pub(crate) use managed::{ManagedDropRecord, ManagedFamily};
-pub(crate) use managed::{RuntimeValueAccess, RuntimeValueObserver};
+pub(crate) use managed::{
+    OpaquePayloadFamily, OpaquePayloadRecord, RuntimeValueAccess, RuntimeValueObserver,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct LazyId(NonZeroU64);
@@ -593,6 +595,7 @@ impl LazyValue {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn semantic_thunk(
         values: &CoreValueFactory,
         label: impl Into<Arc<str>>,
@@ -604,17 +607,76 @@ impl LazyValue {
         Self::with_source(values, label, LazySource::SemanticThunk(Arc::new(thunk)))
     }
 
+    /// Defers callback-free evaluator work with every recursive value capture
+    /// represented explicitly in source order.
+    ///
+    /// The operation is a function pointer rather than a closure, so the
+    /// managed lazy representation can trace `captures` exactly after I5.
+    pub(crate) fn semantic_computation(
+        values: &CoreValueFactory,
+        label: impl Into<Arc<str>>,
+        captures: impl Into<Arc<[Value]>>,
+        operation: SemanticOperation,
+    ) -> Self {
+        Self::with_source(
+            values,
+            label,
+            LazySource::SemanticComputation(Arc::new(SemanticComputation {
+                operation,
+                captures: captures.into(),
+            })),
+        )
+    }
+
+    pub(crate) fn external_host_call(
+        values: &CoreValueFactory,
+        label: impl Into<Arc<str>>,
+        record: HostCallRecord,
+        producer: impl Fn() -> Result<RuntimeValueRoot, Arc<EvaluationFailure>> + Send + Sync + 'static,
+    ) -> Self {
+        Self::with_source(
+            values,
+            label,
+            LazySource::HostCall(Arc::new(HostCallProducer {
+                operation: Arc::new(producer),
+                record,
+            })),
+        )
+    }
+
+    #[cfg(test)]
     pub(crate) fn host_call(
         values: &CoreValueFactory,
         label: impl Into<Arc<str>>,
         producer: impl Fn() -> Result<RuntimeValueRoot, Arc<EvaluationFailure>> + Send + Sync + 'static,
     ) -> Self {
-        Self::with_source(values, label, LazySource::HostCall(Arc::new(producer)))
+        Self::external_host_call(
+            values,
+            label,
+            HostCallRecord::external(
+                "host-call test fixture",
+                "test source",
+                "test-owned captures",
+            ),
+            producer,
+        )
     }
 
     pub(crate) fn error(values: &CoreValueFactory, message: impl Into<Arc<str>>) -> Self {
-        let value = Self::with_source(values, "error", LazySource::Error);
-        let result = value.cache(Err(Arc::new(EvaluationFailure::message(message.into()))));
+        Self::failure(
+            values,
+            "error",
+            Arc::new(EvaluationFailure::message(message.into())),
+        )
+    }
+
+    pub(crate) fn failure(
+        values: &CoreValueFactory,
+        label: impl Into<Arc<str>>,
+        failure: Arc<EvaluationFailure>,
+    ) -> Self {
+        let value = Self::with_source(values, label, LazySource::Error);
+        let result = value.cache(Err(failure));
         debug_assert!(result.is_err(), "new lazy errors must cache a failure");
         value
     }
@@ -1107,7 +1169,10 @@ pub struct OpaqueValue {
 }
 
 impl OpaqueValue {
-    pub(crate) fn new<T: Any + Send + Sync>(payload: Arc<T>) -> Self {
+    pub(crate) fn new<T: OpaquePayloadFamily>(payload: Arc<T>) -> Self {
+        // Naming the mandatory record closes unrestricted `Any` construction
+        // without adding release-build work.
+        let _ = T::PAYLOAD_RECORD;
         Self { payload }
     }
 
@@ -1224,6 +1289,8 @@ impl BuiltinCall {
 pub(crate) enum LazySource {
     Error,
     ComputedFixpoint(Arc<FixpointComputation>),
+    SemanticComputation(Arc<SemanticComputation>),
+    #[cfg(test)]
     SemanticThunk(Arc<SemanticThunk>),
     HostCall(Arc<HostCallProducer>),
     ReflectionTask(Arc<ReflectionComputation>),
@@ -1264,10 +1331,91 @@ pub(crate) enum FixpointComputation {
     ObjectInstance(Value),
 }
 
+pub(crate) type SemanticOperation =
+    fn(&EvaluatorStepContext<'_>, &[Value]) -> Result<Value, EvaluationHalt>;
+
+/// Explicit, exactly traceable state for callback-free deferred evaluation.
+pub(crate) struct SemanticComputation {
+    operation: SemanticOperation,
+    captures: Arc<[Value]>,
+}
+
+impl SemanticComputation {
+    pub(crate) fn evaluate(
+        &self,
+        context: &EvaluatorStepContext<'_>,
+    ) -> Result<Value, EvaluationHalt> {
+        (self.operation)(context, &self.captures)
+    }
+}
+
+#[cfg(test)]
 pub(crate) type SemanticThunk =
     dyn Fn(&EvaluatorStepContext<'_>) -> Result<Value, EvaluationHalt> + Send + Sync;
-pub(crate) type HostCallProducer =
-    dyn Fn() -> Result<RuntimeValueRoot, Arc<EvaluationFailure>> + Send + Sync;
+type HostCallOperation = dyn Fn() -> Result<RuntimeValueRoot, Arc<EvaluationFailure>> + Send + Sync;
+
+/// Source-backed ownership classification for one deferred external call.
+///
+/// The record deliberately does not claim that a Rust closure environment is
+/// traceable. It makes every production constructor name the external owner
+/// and its declared rooted capture policy so I10A can reconcile or replace it
+/// before production collection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct HostCallRecord {
+    family: &'static str,
+    source: &'static str,
+    captures: &'static str,
+}
+
+impl HostCallRecord {
+    pub(crate) const fn external(
+        family: &'static str,
+        source: &'static str,
+        captures: &'static str,
+    ) -> Self {
+        assert!(
+            !family.is_empty(),
+            "external host-call family must be recorded"
+        );
+        assert!(
+            !source.is_empty(),
+            "external host-call source must be recorded"
+        );
+        assert!(
+            !captures.is_empty(),
+            "external host-call capture policy must be recorded"
+        );
+        Self {
+            family,
+            source,
+            captures,
+        }
+    }
+
+    #[cfg(test)]
+    const fn fields(self) -> (&'static str, &'static str, &'static str) {
+        (self.family, self.source, self.captures)
+    }
+}
+
+pub(crate) struct HostCallProducer {
+    operation: Arc<HostCallOperation>,
+    record: HostCallRecord,
+}
+
+impl HostCallProducer {
+    pub(crate) fn invoke(&self) -> Result<RuntimeValueRoot, Arc<EvaluationFailure>> {
+        // The record is compile-time/source-backed classification evidence;
+        // touching it keeps that evidence tied to the invoked producer.
+        let _ = self.record;
+        (self.operation)()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record(&self) -> HostCallRecord {
+        self.record
+    }
+}
 
 /// A lazy reflection task which either gates a target or returns its result.
 ///
@@ -1615,6 +1763,7 @@ impl Value {
         Self::Binary(Bytes::copy_from_slice(text.as_bytes()))
     }
 
+    #[cfg(test)]
     pub(crate) fn semantic_thunk(
         values: &CoreValueFactory,
         label: impl Into<Arc<str>>,
@@ -1626,12 +1775,23 @@ impl Value {
         Self::Lazy(LazyValue::semantic_thunk(values, label, thunk))
     }
 
-    pub(crate) fn host_call(
+    pub(crate) fn failure(
         values: &CoreValueFactory,
         label: impl Into<Arc<str>>,
+        failure: Arc<EvaluationFailure>,
+    ) -> Self {
+        Self::Lazy(LazyValue::failure(values, label, failure))
+    }
+
+    pub(crate) fn external_host_call(
+        values: &CoreValueFactory,
+        label: impl Into<Arc<str>>,
+        record: HostCallRecord,
         producer: impl Fn() -> Result<RuntimeValueRoot, Arc<EvaluationFailure>> + Send + Sync + 'static,
     ) -> Self {
-        Self::Lazy(LazyValue::host_call(values, label, producer))
+        Self::Lazy(LazyValue::external_host_call(
+            values, label, record, producer,
+        ))
     }
 
     pub(crate) fn error(values: &CoreValueFactory, message: impl Into<Arc<str>>) -> Self {
@@ -1975,6 +2135,7 @@ mod tests {
         enum LazySourceWithoutReflection {
             Error,
             ComputedFixpoint(Arc<FixpointComputation>),
+            SemanticComputation(Arc<SemanticComputation>),
             SemanticThunk(Arc<SemanticThunk>),
             HostCall(Arc<HostCallProducer>),
             Access {

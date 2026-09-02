@@ -607,6 +607,18 @@ struct TaskHandleCell {
     status: Arc<EvaluationQueryHandle>,
 }
 
+// SAFETY: the handle contains no bare core value, runtime value root, or
+// managed pointer. It is an external lifecycle capability over coordinator
+// and query state, so I9/I10 must retain its active-retirement classification
+// rather than treating it as a managed leaf.
+unsafe impl crate::core::OpaquePayloadFamily for TaskHandleCell {
+    const PAYLOAD_RECORD: crate::core::OpaquePayloadRecord =
+        crate::core::OpaquePayloadRecord::external(
+            "reflection task handle",
+            "src/reflection/requests.rs",
+        );
+}
+
 fn task_handle_value(context: &EvalContext, handle: Arc<TaskHandleCell>) -> Value {
     debug_assert_eq!(handle.runtime, context.values().runtime_id());
     debug_assert_eq!(handle.runtime, handle.task.runtime_id());

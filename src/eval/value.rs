@@ -189,7 +189,7 @@ impl EvaluationTaskMachine for LazyTaskMachine {
         let durable_context = self.context.clone();
         if let LazyTaskWork::HostCall(producer) = &self.work {
             let producer = Arc::clone(producer);
-            let result = producer();
+            let result = producer.invoke();
             return poll_context.evaluate(&durable_context, |context| match result {
                 Ok(value)
                     if value.runtime_id() != durable_context.values().runtime_id() =>
@@ -497,6 +497,8 @@ fn produce_lazy_source_in(
         LazySource::ComputedFixpoint(fixpoint) => {
             eval_computed_fixpoint_in(context, lazy, fixpoint)
         }
+        LazySource::SemanticComputation(computation) => computation.evaluate(context),
+        #[cfg(test)]
         LazySource::SemanticThunk(thunk) => thunk(context),
         LazySource::HostCall(_) => {
             unreachable!("a host call must execute outside the evaluator step")

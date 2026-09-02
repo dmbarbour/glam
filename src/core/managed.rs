@@ -1,4 +1,5 @@
 use glam_gc::{Allocator, Gc, Mutator, Root, Trace, UnsupportedLayout};
+use std::any::Any;
 use std::sync::{Arc, Weak};
 
 use super::{CoreValueFactory, RuntimeValueDomain};
@@ -130,12 +131,86 @@ pub(crate) unsafe trait ManagedFamily: Trace {
     const DROP_RECORD: ManagedDropRecord;
 }
 
+/// The reviewed containment policy for one type-erased opaque payload.
+///
+/// Unlike [`ManagedDropRecord`], this is not collector admission. It prevents
+/// `OpaqueValue`'s `Any` boundary from accepting a new family merely because
+/// the Rust type is `Send + Sync`. I10 decides whether any admitted external
+/// family remains outside the managed graph or receives a separate exact
+/// managed representation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(
+    dead_code,
+    reason = "opaque records are compile-time admission evidence, inspected by containment audits"
+)]
+pub(crate) struct OpaquePayloadRecord {
+    family: &'static str,
+    source: &'static str,
+    ownership: &'static str,
+}
+
+impl OpaquePayloadRecord {
+    /// Records a payload containing identity/data only, with no Glam value or
+    /// runtime capability reachable through its fields.
+    pub(crate) const fn edge_free(family: &'static str, source: &'static str) -> Self {
+        Self::reviewed(family, source, "edge-free token")
+    }
+
+    /// Records an external capability whose lifecycle remains outside the
+    /// collector and therefore requires the later I9/I10 ownership audit.
+    pub(crate) const fn external(family: &'static str, source: &'static str) -> Self {
+        Self::reviewed(family, source, "external capability")
+    }
+
+    const fn reviewed(family: &'static str, source: &'static str, ownership: &'static str) -> Self {
+        assert!(!family.is_empty(), "opaque payload family must be recorded");
+        assert!(!source.is_empty(), "opaque payload source must be recorded");
+        assert!(
+            !ownership.is_empty(),
+            "opaque payload ownership must be recorded"
+        );
+        Self {
+            family,
+            source,
+            ownership,
+        }
+    }
+
+    #[cfg(test)]
+    const fn fields(self) -> (&'static str, &'static str, &'static str) {
+        (self.family, self.source, self.ownership)
+    }
+}
+
+/// Admits one reviewed family to `OpaqueValue`'s type-erased storage.
+///
+/// # Safety
+///
+/// The payload must contain no bare `Gc`, unrooted recursive `core::Value`,
+/// `RuntimeValueRoot`, or other unreported managed edge. `edge_free` families
+/// contain no Glam value/runtime capability at all. `external` families may
+/// carry an audited host lifecycle capability, but must not be treated as a
+/// collector-managed leaf; I9/I10 must reconcile their ownership before the
+/// production managed value switch.
+pub(crate) unsafe trait OpaquePayloadFamily: Any + Send + Sync {
+    const PAYLOAD_RECORD: OpaquePayloadRecord;
+}
+
 // SAFETY: this is the existing scalar collector-access probe. It has no
 // managed edge, no drop glue, and no active capability. Production value
 // families receive their own explicit admissions in their migration phases.
 unsafe impl ManagedFamily for u64 {
     const DROP_RECORD: ManagedDropRecord =
         ManagedDropRecord::no_drop("collector access scalar probe", "src/core/managed.rs");
+}
+
+#[cfg(test)]
+// SAFETY: scalar opaque fixtures contain no managed edge or runtime
+// capability. Production opaque families have explicit implementations at
+// their owning modules.
+unsafe impl OpaquePayloadFamily for u64 {
+    const PAYLOAD_RECORD: OpaquePayloadRecord =
+        OpaquePayloadRecord::edge_free("opaque scalar test fixture", "src/core/managed.rs");
 }
 
 /// Factory-qualified access to one admitted managed-allocation region.
@@ -424,15 +499,18 @@ impl<T: ManagedFamily> CoreValueAllocator<'_, T> {
 mod value_shell;
 
 #[cfg(test)]
+mod containment_inventory;
+
+#[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Weak};
 
     use glam_gc::{Gc, Root, Trace, Visitor};
 
-    use super::{ManagedDropRecord, ManagedFamily};
-    use crate::core::{CoreValueFactory, RuntimeValueDomain, RuntimeValueObserver};
-    use crate::runtime::{RuntimeIds, allocate_evaluation_runtime_id};
+    use super::{ManagedDropRecord, ManagedFamily, OpaquePayloadFamily, OpaquePayloadRecord};
+    use crate::core::{CoreValueFactory, RuntimeValueDomain, RuntimeValueObserver, Value};
+    use crate::runtime::{RuntimeIds, RuntimeValueRoot, allocate_evaluation_runtime_id};
 
     // Trait selection becomes ambiguous if one of these known active
     // capabilities is ever admitted as a managed family. This is compile-time
@@ -457,6 +535,30 @@ mod tests {
         };
     }
 
+    // The same compile-time ambiguity latch closes OpaqueValue's private Any
+    // boundary. The named tests below make each required negative proof
+    // visible in ordinary verification output.
+    macro_rules! assert_not_opaque_payload {
+        ($module:ident, $type:ty) => {
+            mod $module {
+                trait AmbiguousIfOpaque<Discriminator> {
+                    fn verify() {}
+                }
+
+                struct Opaque;
+
+                impl<T: ?Sized> AmbiguousIfOpaque<()> for T {}
+                impl<T: ?Sized + super::OpaquePayloadFamily> AmbiguousIfOpaque<Opaque> for T {}
+
+                const _: fn() = || {
+                    <$type as AmbiguousIfOpaque<_>>::verify();
+                };
+
+                pub(super) fn verified() {}
+            }
+        };
+    }
+
     struct UnreviewedTrace;
 
     // SAFETY: this negative fixture contains no managed edge. It deliberately
@@ -470,6 +572,42 @@ mod tests {
     assert_not_managed_family!(factory_is_not_admitted, super::CoreValueFactory);
     assert_not_managed_family!(domain_is_not_admitted, super::RuntimeValueDomain);
     assert_not_managed_family!(observer_is_not_admitted, super::RuntimeValueObserver);
+    assert_not_opaque_payload!(bare_managed_pointer_is_not_admitted, glam_gc::Gc<u64>);
+    assert_not_opaque_payload!(raw_core_value_is_not_admitted, super::Value);
+    assert_not_opaque_payload!(runtime_root_is_not_admitted, super::RuntimeValueRoot);
+
+    #[test]
+    fn opaque_payload_rejects_bare_managed_pointer() {
+        bare_managed_pointer_is_not_admitted::verified();
+    }
+
+    #[test]
+    fn opaque_payload_rejects_unrooted_core_value() {
+        raw_core_value_is_not_admitted::verified();
+    }
+
+    #[test]
+    fn opaque_payload_rejects_foreign_root() {
+        runtime_root_is_not_admitted::verified();
+    }
+
+    #[test]
+    fn opaque_payload_requires_a_reviewed_family_record() {
+        fn requires_admission<T: OpaquePayloadFamily>() -> OpaquePayloadRecord {
+            T::PAYLOAD_RECORD
+        }
+
+        assert_eq!(
+            requires_admission::<u64>().fields(),
+            (
+                "opaque scalar test fixture",
+                "src/core/managed.rs",
+                "edge-free token",
+            )
+        );
+        let _ = std::any::TypeId::of::<Value>();
+        let _ = std::any::TypeId::of::<RuntimeValueRoot>();
+    }
 
     struct PassiveResource(Arc<AtomicUsize>);
 

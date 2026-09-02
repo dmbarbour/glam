@@ -59,9 +59,17 @@ pub(super) fn eval_list_effect_fix_builtin(
 }
 
 fn lazy_run_list_effect(values: &CoreValueFactory, effect: Value) -> List {
-    deferred_list(values, "list effect", move |context| {
-        run_list_effect_to_list(context, effect.clone())
-    })
+    deferred_list(values, "list effect", [effect], run_deferred_list_effect)
+}
+
+fn run_deferred_list_effect(
+    context: &EvaluatorStepContext<'_>,
+    captures: &[Value],
+) -> Result<Value, EvaluationHalt> {
+    let [effect] = captures else {
+        unreachable!("list effect computation has one explicit capture")
+    };
+    run_list_effect_to_list(context, effect.clone()).map(Value::List)
 }
 
 fn run_list_effect_to_list(
@@ -103,27 +111,53 @@ fn flat_map_list_effect_results(
     results: List,
     continuation: Value,
 ) -> List {
-    deferred_list(values, "list effect seq", move |context| {
-        let Some((head, tail)) = pop_list_front_in(context, &results)? else {
-            return Ok(List::empty());
-        };
-        let continuation = eval_value_in(context, &continuation)?;
-        let next = apply_value_in(context, continuation.clone(), head)?;
-        Ok(List::concat(
-            lazy_run_list_effect(context.context().values(), next),
-            flat_map_list_effect_results(context.context().values(), tail, continuation),
-        ))
-    })
+    deferred_list(
+        values,
+        "list effect seq",
+        [Value::List(results), continuation],
+        flat_map_deferred_list_effect_results,
+    )
+}
+
+fn flat_map_deferred_list_effect_results(
+    context: &EvaluatorStepContext<'_>,
+    captures: &[Value],
+) -> Result<Value, EvaluationHalt> {
+    let [Value::List(results), continuation] = captures else {
+        unreachable!("list effect seq computation has its exact explicit captures")
+    };
+    let Some((head, tail)) = pop_list_front_in(context, results)? else {
+        return Ok(Value::List(List::empty()));
+    };
+    let continuation = eval_value_in(context, continuation)?;
+    let next = apply_value_in(context, continuation.clone(), head)?;
+    Ok(Value::List(List::concat(
+        lazy_run_list_effect(context.context().values(), next),
+        flat_map_list_effect_results(context.context().values(), tail, continuation),
+    )))
 }
 
 fn cut_list_effect_results(values: &CoreValueFactory, operation: Value) -> List {
-    deferred_list(values, "list effect cut", move |context| {
-        let results = lazy_run_list_effect(context.context().values(), operation.clone());
-        let Some((head, _)) = pop_list_front_in(context, &results)? else {
-            return Ok(List::empty());
-        };
-        Ok(List::from_values(vec![head]))
-    })
+    deferred_list(
+        values,
+        "list effect cut",
+        [operation],
+        cut_deferred_list_effect_results,
+    )
+}
+
+fn cut_deferred_list_effect_results(
+    context: &EvaluatorStepContext<'_>,
+    captures: &[Value],
+) -> Result<Value, EvaluationHalt> {
+    let [operation] = captures else {
+        unreachable!("list effect cut computation has one explicit capture")
+    };
+    let results = lazy_run_list_effect(context.context().values(), operation.clone());
+    let Some((head, _)) = pop_list_front_in(context, &results)? else {
+        return Ok(Value::List(List::empty()));
+    };
+    Ok(Value::List(List::from_values(vec![head])))
 }
 
 fn fix_list_effect_results(
@@ -131,32 +165,44 @@ fn fix_list_effect_results(
     operation: Value,
     handle: PromisedValue,
 ) -> List {
-    deferred_list(values, "list effect fix", move |context| {
-        let results = lazy_run_list_effect(context.context().values(), operation.clone());
-        let Some((head, tail)) = pop_list_front_in(context, &results)? else {
-            handle
-                .set(Value::List(List::empty()))
-                .map_err(|_| EvaluationHalt::new("list effect fix initialized twice"))?;
-            return Ok(List::empty());
-        };
+    deferred_list(
+        values,
+        "list effect fix",
+        [operation, Value::Promised(handle)],
+        fix_deferred_list_effect_results,
+    )
+}
+
+fn fix_deferred_list_effect_results(
+    context: &EvaluatorStepContext<'_>,
+    captures: &[Value],
+) -> Result<Value, EvaluationHalt> {
+    let [operation, Value::Promised(handle)] = captures else {
+        unreachable!("list effect fix computation has its exact explicit captures")
+    };
+    let results = lazy_run_list_effect(context.context().values(), operation.clone());
+    let Some((head, tail)) = pop_list_front_in(context, &results)? else {
         handle
-            .set(head.clone())
+            .set(Value::List(List::empty()))
             .map_err(|_| EvaluationHalt::new("list effect fix initialized twice"))?;
-        Ok(List::concat(List::from_values(vec![head]), tail))
-    })
+        return Ok(Value::List(List::empty()));
+    };
+    handle
+        .set(head.clone())
+        .map_err(|_| EvaluationHalt::new("list effect fix initialized twice"))?;
+    Ok(Value::List(List::concat(
+        List::from_values(vec![head]),
+        tail,
+    )))
 }
 
 fn deferred_list(
     values: &CoreValueFactory,
     label: &'static str,
-    thunk: impl Fn(&EvaluatorStepContext<'_>) -> Result<List, EvaluationHalt> + Send + Sync + 'static,
+    captures: impl Into<Arc<[Value]>>,
+    operation: crate::core::SemanticOperation,
 ) -> List {
-    List::from_thunk(
-        LazyValue::semantic_thunk(values, label, move |context| {
-            thunk(context).map(Value::List)
-        })
-        .into(),
-    )
+    List::from_thunk(LazyValue::semantic_computation(values, label, captures, operation).into())
 }
 
 fn list_effect_api() -> Value {

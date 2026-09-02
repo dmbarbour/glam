@@ -79,26 +79,33 @@ struct ContextInventoryEntry {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct LazyProducerCounts {
     semantic_thunk: usize,
-    host_call: usize,
+    semantic_computation: usize,
+    external_host_call: usize,
 }
 
 impl LazyProducerCounts {
-    const fn new(semantic_thunk: usize, host_call: usize) -> Self {
+    const fn new(
+        semantic_thunk: usize,
+        semantic_computation: usize,
+        external_host_call: usize,
+    ) -> Self {
         Self {
             semantic_thunk,
-            host_call,
+            semantic_computation,
+            external_host_call,
         }
     }
 
     fn in_source(source: &str) -> Self {
         Self {
             semantic_thunk: source.matches("::semantic_thunk(").count(),
-            host_call: source.matches("::host_call(").count(),
+            semantic_computation: source.matches("::semantic_computation(").count(),
+            external_host_call: source.matches("::external_host_call(").count(),
         }
     }
 
     fn is_empty(self) -> bool {
-        self == Self::new(0, 0)
+        self == Self::new(0, 0, 0)
     }
 }
 
@@ -202,8 +209,8 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/builtins/list_effect/implementation.rs",
-        [6, 0],
-        "I3B.1 list-effect construction; I3E.1 scoped semantic thunk"
+        [10, 0],
+        "I3B.1 list-effect construction; I4B explicit semantic computation"
     ),
     context_entry!(
         "src/eval/builtins/net.rs",
@@ -304,11 +311,18 @@ fn is_evaluator_surface_source(relative: &Path) -> bool {
 fn is_lazy_producer_inventory_source(relative: &Path) -> bool {
     relative.starts_with("src")
         && relative != Path::new("src/core.rs")
+        && relative != Path::new("src/core/managed/containment_inventory.rs")
         && relative != Path::new("src/eval/access_inventory.rs")
         && !relative
             .components()
             .any(|component| component.as_os_str() == "tests")
         && relative.file_name().is_none_or(|name| name != "tests.rs")
+}
+
+fn production_prefix(source: &str) -> &str {
+    source
+        .split_once("\n#[cfg(test)]\nmod tests")
+        .map_or(source, |(production, _)| production)
 }
 
 #[test]
@@ -390,22 +404,18 @@ fn lazy_producer_roles_are_explicit_and_complete() {
                 !source.contains("::deferred("),
                 "{relative:?} must classify lazy producers as semantic thunks or host calls"
             );
-            let counts = LazyProducerCounts::in_source(&source);
+            let counts = LazyProducerCounts::in_source(production_prefix(&source));
             (!counts.is_empty()).then(|| (relative.to_path_buf(), counts))
         })
         .collect::<BTreeMap<_, _>>();
     let expected = [
         (
             PathBuf::from("src/compiler.rs"),
-            LazyProducerCounts::new(1, 2),
-        ),
-        (
-            PathBuf::from("src/eval/builtins/conditional.rs"),
-            LazyProducerCounts::new(1, 0),
+            LazyProducerCounts::new(0, 0, 2),
         ),
         (
             PathBuf::from("src/eval/builtins/list_effect/implementation.rs"),
-            LazyProducerCounts::new(1, 0),
+            LazyProducerCounts::new(0, 1, 0),
         ),
     ]
     .into_iter()

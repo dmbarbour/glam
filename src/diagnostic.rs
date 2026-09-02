@@ -1,7 +1,10 @@
 use std::fmt;
 use std::sync::Arc;
 
-use crate::core::{Builtin, CoreValueFactory, Dict, List, OpaqueValue, Value, keys};
+use crate::core::{
+    Builtin, CoreValueFactory, Dict, List, OpaquePayloadFamily, OpaquePayloadRecord, OpaqueValue,
+    Value, keys,
+};
 use crate::number::Number;
 use crate::source::{ContentDigest, SourceArtifact, SourceIdentity};
 
@@ -46,19 +49,27 @@ pub(crate) struct CompilationTrace {
 }
 
 struct CompilationOrigin {
-    value: Value,
+    trace: CompilationTrace,
+}
+
+// SAFETY: the compilation trace contains source identities, digests, static
+// namespace labels, and parent trace provenance only. It contains no Glam
+// value, runtime root, managed pointer, or active runtime capability.
+unsafe impl OpaquePayloadFamily for CompilationOrigin {
+    const PAYLOAD_RECORD: OpaquePayloadRecord =
+        OpaquePayloadRecord::edge_free("compilation origin provenance", "src/diagnostic.rs");
 }
 
 pub(crate) fn opaque_compilation_origin(trace: &CompilationTrace) -> Value {
     Value::Opaque(OpaqueValue::new(Arc::new(CompilationOrigin {
-        value: trace.origin_value(),
+        trace: trace.clone(),
     })))
 }
 
 pub(crate) fn inspect_compilation_origin(origin: &OpaqueValue) -> Option<Value> {
     origin
         .downcast::<CompilationOrigin>()
-        .map(|origin| origin.value.clone())
+        .map(|origin| origin.trace.origin_value())
 }
 
 impl CompilationTrace {

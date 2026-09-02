@@ -4,7 +4,10 @@ use std::num::NonZeroU64;
 use std::sync::Arc;
 
 use crate::api::Value as PublicValue;
-use crate::core::{CoreValueFactory, Dict, List, NetValue, OpaqueValue, Value};
+use crate::core::{
+    CoreValueFactory, Dict, List, NetValue, OpaquePayloadFamily, OpaquePayloadRecord, OpaqueValue,
+    Value,
+};
 use crate::core_net::{CoreSpecialization, CoreWaitToken};
 use crate::evaluation::{EvalContext, EvaluatorStepContext};
 use crate::interaction_net::{NetBuilder, Port};
@@ -30,6 +33,16 @@ struct ConstructionBrand;
 struct ConstructionPort {
     brand: Arc<ConstructionBrand>,
     id: ConstructionPortId,
+}
+
+// SAFETY: a construction port contains only one construction-local brand and
+// a scalar port ID. Neither field can contain or reach a Glam value, runtime
+// root, managed pointer, or active runtime capability.
+unsafe impl OpaquePayloadFamily for ConstructionPort {
+    const PAYLOAD_RECORD: OpaquePayloadRecord = OpaquePayloadRecord::edge_free(
+        "interaction-net construction port",
+        "src/eval/builtins/net/construction.rs",
+    );
 }
 
 enum ConstructionOp {

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::api::CompilationExecution;
 use crate::core::{
-    Atom, CoreValueFactory, Dict, EvaluationFailure, EvaluationHalt, Key, PromisedValue, Value,
+    Atom, CoreValueFactory, Dict, EvaluationFailure, HostCallRecord, Key, PromisedValue, Value,
     keys,
 };
 use crate::diagnostic::{CompilationTrace, Severity};
@@ -277,20 +277,29 @@ impl CompileContext {
         let label: Arc<str> = Arc::from(format!("import {}", args.request.as_str()));
         let loader = self.local_module_loader.clone();
 
-        Value::host_call(&self.values, label, move || {
-            let Some(loader) = &loader else {
-                return Err(import_failure(
-                    format!(
-                        "local import `{}` cannot be loaded without a module loader",
-                        args.request.as_str()
-                    ),
-                    args.request.as_str(),
-                    args.importer_trace.as_deref(),
-                    args.importer_source.as_deref(),
-                ));
-            };
-            loader(args.clone())
-        })
+        Value::external_host_call(
+            &self.values,
+            label,
+            HostCallRecord::external(
+                "deferred module import",
+                "src/compiler.rs",
+                "module loader plus same-runtime prior/final definition roots",
+            ),
+            move || {
+                let Some(loader) = &loader else {
+                    return Err(import_failure(
+                        format!(
+                            "local import `{}` cannot be loaded without a module loader",
+                            args.request.as_str()
+                        ),
+                        args.request.as_str(),
+                        args.importer_trace.as_deref(),
+                        args.importer_source.as_deref(),
+                    ));
+                };
+                loader(args.clone())
+            },
+        )
     }
 
     pub(crate) fn import_binary(&self, request: &str) -> Value {
@@ -314,20 +323,29 @@ impl CompileContext {
         let label: Arc<str> = Arc::from(format!("import binary {}", args.request.as_str()));
         let loader = self.local_binary_loader.clone();
 
-        Value::host_call(&self.values, label, move || {
-            let Some(loader) = &loader else {
-                return Err(import_failure(
-                    format!(
-                        "binary import `{}` cannot be loaded without a binary loader",
-                        args.request.as_str()
-                    ),
-                    args.request.as_str(),
-                    args.importer_trace.as_deref(),
-                    args.importer_source.as_deref(),
-                ));
-            };
-            loader(args.clone())
-        })
+        Value::external_host_call(
+            &self.values,
+            label,
+            HostCallRecord::external(
+                "deferred binary import",
+                "src/compiler.rs",
+                "binary loader and edge-free source provenance",
+            ),
+            move || {
+                let Some(loader) = &loader else {
+                    return Err(import_failure(
+                        format!(
+                            "binary import `{}` cannot be loaded without a binary loader",
+                            args.request.as_str()
+                        ),
+                        args.request.as_str(),
+                        args.importer_trace.as_deref(),
+                        args.importer_source.as_deref(),
+                    ));
+                };
+                loader(args.clone())
+            },
+        )
     }
 
     fn qualify_module_path(
@@ -374,10 +392,10 @@ fn invalid_import_request(
     importer_source: Option<&SourceArtifact>,
 ) -> Value {
     let failure = import_failure(message, request, trace, importer_source);
-    Value::semantic_thunk(
+    Value::failure(
         values,
         Arc::from(format!("invalid import request {request}")),
-        move |_| Err(EvaluationHalt::failure(failure.clone())),
+        failure,
     )
 }
 

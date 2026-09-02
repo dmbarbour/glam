@@ -2,8 +2,9 @@
 
 Status: Phase I0's pre-GC inventory, Phase I2's public-root contract, Phase I3's
 bounded evaluator, worker, callback, compiler, net, and multi-runtime authority
-regions, I4.0's managed-destruction admission gate, and I4A's closed managed
-shell/leaf policy are complete and reviewed. Stable integration facts are
+regions, I4.0's managed-destruction admission gate, I4A's closed managed
+shell/leaf policy, and I4B's closure/opaque containment gate are complete and
+reviewed. Stable integration facts are
 reconciled when each representation family receives its concrete managed
 wrapper and trace implementation.
 Collector-private class topology is verified inside `glam-gc` and is not part
@@ -158,13 +159,13 @@ G2 opaque blockers.
 | Type and source | Outgoing edges | Mutation and synchronization | Drop / trace / mutation gateway / phase |
 | --- | --- | --- | --- |
 | `EvaluationFailure` (`core.rs`) | Emission `Value` or cycle IDs; `Arc<[Value]>` contexts. | Immutable, thread-safe, retained in task/report ledgers. | Visit emission and contexts; ordinary Rust drop initially; I6. |
-| `LazyCell` / `LazySource` (`core.rs`) | Sources include fixpoint, semantic thunk, rooted host call, reflection computation, access arguments, application, builtin call, net construction/computation, and function call. Terminal `LazyResult` contains evaluated value or failure. | `source` is replaceable only under its mutex; `result` is one-write and published before source removal. Lock order is result check, source mutex, result recheck; destruction occurs after unlock. | Exact source/result visitor. Initial construction needs no gateway; result publication uses one. Semantic-thunk/opaque captures block I5 until I4B. Managed drop required because source/result own Rust resources. |
+| `LazyCell` / `LazySource` (`core.rs`) | Sources include fixpoint, explicit semantic computation, test-only semantic thunk, classified external host call, reflection computation, access arguments, application, builtin call, net construction/computation, and function call. Terminal `LazyResult` contains evaluated value or failure. | `source` is replaceable only under its mutex; `result` is one-write and published before source removal. Lock order is result check, source mutex, result recheck; destruction occurs after unlock. | Exact source/result visitor. Initial construction needs no gateway; result publication uses one. I4B made production semantic captures explicit and classified host callbacks; I10A still owns the latter's final external-backedge reconciliation. Managed drop required because source/result own Rust resources. |
 | `PromiseCell` (`core.rs`) | One successful `RuntimeValueRoot`; failure; weak/coordinator producer state and subscriptions. | Assignment and producer are one-write. Coordinator mutation admission encloses task-owned publication; resolver publication uses its local path. Notifications occur after guarded publication. | Move the assignment into a traced managed edge rather than preserving its current registered-root representation. Any separated producer/subscription companion is **C** and edge-free. Active abandonment/notification belongs to an external explicitly retired owner; managed `Drop` is passive. Assignment gateway; I5. |
 | `MetadataCarrier` (`core.rs`) | One `Value`. | Immutable after construction. | Visit one edge; no post-construction gateway; I6. |
 | `BuiltinCall`, `Access`, `FunctionCall`, `LazyApplication` (`core.rs`) | Supplied function, arguments, and/or path leaf data. | Immutable `Arc` payloads; thread-safe. | Exact ordered visitors; I6. |
 | `FixpointComputation` (`core.rs`) | Function or object-instance `Value`. | Immutable. | Visit one value; I6. |
 | `ReflectionComputation` and gate target (`core.rs`) | Effect and gate target values; installed task result may carry a failure. | Effect/target immutable; reservation/activation/task result are one-write lifecycle transitions. Cross-thread and may outlive original demand. | Visit values and failure; I3D.1 reserves under pure evaluation and activates the launcher after leaving scoped access; task-result gateway if the node is managed; I6. |
-| `SemanticThunk` / `HostCallProducer` (`core.rs`) | A semantic thunk is a type-erased scoped-evaluator closure and may capture raw core values; a host-call producer accepts no evaluator context and returns a runtime root but may capture external host state or roots. | Immutable closures callable across workers. Host calls run in a distinct mutator-free lazy-machine poll phase. | **D:** closure environments cannot be traced or admitted uniformly. I3E.1 separated the operational roles; I4B/I10 must contain or replace every captured-value closure. |
+| `SemanticComputation` / test-only `SemanticThunk` / `HostCallProducer` (`core.rs`) | Production semantic computation stores a function pointer plus an explicit ordered `Arc<[Value]>`. Capture-bearing semantic closures exist only in test builds. A host-call producer accepts no evaluator context, returns a runtime root, and carries a mandatory source/capture record, but its genuinely external callback may retain host state or roots. | Immutable computation state/callbacks callable across workers. Host calls run in a distinct mutator-free lazy-machine poll phase. | I4B resolves production semantic captures as exact future trace edges. Host closure environments are deliberately not claimed traceable; I10A must reconcile their external rooted ownership/backedges before production collection. |
 | `FunctionCode`, `FunctionValue`, `NetValue` (`core.rs`) | Shared net plus scalar arity/capture state. | Immutable shells, synchronized net interior. | Net visitor in I8; I6. |
 | `CoreOperator` variants (`core_net.rs`) | Supplied values, function code, builtin call, applicable value; keys/path elements are leaves. | Immutable operator payloads stored in mutable nets. | Variant visitor; insertion/replacement gateways at net mutation sites; I8. |
 | `CoreValues`, `RuntimeValueCache`, extension map (`core.rs`) | Cached singleton values and type-erased `Arc<T>` compiler caches such as `GCompilerValues`. | Runtime-long-lived; core set initialized once, extension map replaceable under mutex, harmless duplicate construction permitted. | I4F.1 converts every durable cached value to an exact registered root or exact managed cache edge and closes the type-erased registration boundary before the managed-root switch. I9 audits lifecycle/backedges; I10 rechecks opaque containment. |
@@ -227,7 +228,7 @@ inventory.
 | Reflection machine | `EffectTask`, `ContextualValueEffectTask`, `Branch`, `Deliver`, `Apply`, `CutFrame`, `TaskBlock`, `FixRoot`, `ActiveFix`, `Restore`, `ResetFrame` | T transitioning to exact machine-owned roots. One claimed machine is exclusively mutable outside coordinator locks and may move between workers. I3A.4 makes successful machine completion root-shaped and preserves an effect result's existing runtime root; parked interior fields become exact roots in I4F.1. I3D.2 alternates callback-free evaluator scopes and callback-bearing interpreter phases; only roots cross that boundary. I9 audits storage. |
 | Evaluation coordinator | `EvaluationDemandState`, `ClaimedDemandSession`, `SettlementObligations`, `TaskOwnedPromiseObligation`, `DeferredLazyCycleMember`, `DeferredWorkRelease`, `RuntimeSettlementRelease`, `SparkDemand`, `ClientDemandWork`, `EvaluationTaskBlock`, `PromiseProducerObligation`, `LocalPromiseObligation`, `LocalPromiseOwner`, `PendingReflectionTaskInner` | R/T. `EvaluationDemandState` retains an authorized factory/domain lease; the coordinator registry and parked spark/client-demand routing are weak. I3A.2 upgrades the indexed route into one temporary `ClaimedDemandSession` before detaching reflection, deferred, client-demand, or spark work, rejects session/runtime mismatch before polling, and releases the route with the claim. I3A.3 derives the poll context only after detachment and centralizes task, client-demand, and spark polling in `evaluation/pump.rs`; executor workers own no second admission path. I3A.4 requires a `RuntimeValueRoot` at machine completion and publishes it without late reconstruction. An opaque parked machine may still deliberately own an authorized `EvalContext`; the coordinator envelope adds no second domain lease. Coordinator state owns parked work and registered roots; weak promise cells are non-owning. State changes use mutation admission plus one component mutex; callbacks/drop happen after unlock. I3 establishes the scope boundary, I4F.1 roots durable values, I5 migrates managed interiors, and I9 audits lifecycle. |
 | Evaluator machines | `EvaluationPollContext`, `EvaluatorStepContext`, `EvaluationValueAccess`, `LazyTaskMachine`, `LazyTaskWork`, `PromiseFollower`, `PromiseFollowerState`, annotation builtin state (`AssertUnit`, `MetadataPure`, `MetadataReflection`, `Reflection`, `Seq`, `Spark`, `Context`, `Valid`), net-construction `Data`/`NetConstructionMachine`, pattern `Found` | T. I3A.1 fixes the authority shape: a poll context carries no active mutator, while its derived value-access view is lifetime-bound, neither `Send` nor `Sync`, and cannot enter durable state. I3A.3 passes one claim-derived, non-extractable shared poll context through every type-erased machine poll. I3B.1a adds the intervening thread-bound evaluator-step context: it may span orchestration because it contains no mutator, but opens `EvaluationValueAccess` only for callback-free closures. Its claimed strong demand route exists only on the scheduler stack; I3B.1b adds one centralized direct-compatibility admission for inventoried I3D/I3E callers. The value/application/sequence spine, client demand, lazy/promise follower machines, and ordinary builtin families use the step carrier. I3B.1c closes the builtin partition: only effects, strategies, nets, and provenance downgrade at dispatch, while reflection and metadata-reflection annotations cross named durable handoffs after scoped recognition/validation. A machine poll is orchestration, not one mutator lifetime, and no active value access crosses those seams. I3A.4 makes `Complete` root-shaped at the type boundary and inventories promise/failure interiors for I5/I6. I3B moves the current bare-result constructor to the evaluator-step publication boundary; I4F.2 later introduces managed results there. Managed interior edges arrive in I5/I6/I8 and update their exact visitors in the same checkpoint. |
-| Compiler API | `ModuleLoadArgs`, `CompileContext`, `CompileDiagnosticEmitter`, `ModuleLoader`, `BinaryFileLoader` | T/D. Compile calls are bounded. Loader callbacks run outside inherited mutator access and return roots through deterministic deferred host calls; captured raw values still require containment in I4B/I10. |
+| Compiler API | `ModuleLoadArgs`, `CompileContext`, `CompileDiagnosticEmitter`, `ModuleLoader`, `BinaryFileLoader` | T/D. Compile calls are bounded. Loader callbacks run outside inherited mutator access; deferred calls name their capture policy and carry prior/final definitions as roots. I10A still reconciles external callback backedges. |
 | `.g` compiler cache | `BuiltinModule`, `GCompilerValues` | R/D before I4F.1. The runtime extension cache is long-lived and cross-thread; I4F.1 closes the `Any` registration boundary and converts every retained value to an exact runtime root/cache edge before the production switch. I9 audits lifecycle; I10 rechecks erasure/opaque containment. |
 | `.g` lowering/resolution | `LoweredSource`, `g_syntax::Diagnostic`, `MacroSnapshot`, `MacroJournal`, `MacroRun`, `MacroFailure`, `ModuleLowerer`, `ResolvedNetLowerer`, `ResolvedDoBlock`, `EffectBind`, `ValueBind`, `Then`, `ResolvedBindings` | T. Compilation/macro-run scoped values; mutator scope in I3 and no parking unrooted across evaluation. |
 | `.g` lexical/parser | `LexedSource`, `Lexer`, `DeclarationMacroWork`, `StagedSourceParser`, `ParsedSource`, `InspectedSource`, `ParseSession` | T. Embedded source data and diagnostics are bounded by source compilation, but macro evaluation can suspend; I3. |
@@ -238,8 +239,8 @@ inventory.
 
 | Family | Can capture values? | Boundary decision |
 | --- | --- | --- |
-| `SemanticThunk` | Yes, raw `core::Value` today. | D. I3E.1 restricts invocation to scoped evaluator access; replace/contain captures in I4B/I10 and never conservatively trace a closure environment. |
-| `HostCallProducer` | Host state and same-runtime roots, but no inherited evaluator context. | The deferred host call runs in its own mutator-free poll phase and must publish a runtime root. Audit concrete captures in I4B/I10. |
+| `SemanticComputation` / test-only `SemanticThunk` | Production captures are an explicit ordered `Arc<[Value]>`; only test scaffolding can close over raw values. | Exact semantic capture state selected by I4B. I5 traces it without inspecting a closure environment; I10 confirms no production test escape. |
+| `HostCallProducer` | Host state and same-runtime roots, but no inherited evaluator context. | The deferred host call runs in its own mutator-free poll phase, carries a mandatory source/capture record, and must publish a runtime root. I10A owns final external-backedge reconciliation. |
 | `ModuleLoader`, `BinaryFileLoader`, `CompileDiagnosticEmitter` | Yes; supplied by compiler setup and may capture core/public values. | External-demand/interpreter callbacks run without inherited mutator access. Any suspension/caching/capture requires exact same-runtime roots; audit concrete constructors in I4B. |
 | `TaskStatusPublisher` and reflection launch/host closures | Indirectly; status, query, factory, or host state can retain roots. | Keep externally owned captures as registered roots by I4F.1. A host companion associated only with a managed task is instead **C** and may capture no value. I9/I10 audit the boundary. |
 | Runtime input converter and output decoder/callback | Yes, arbitrary host state and public values. | External adapter. Authoritative runtime buffers contain `RuntimeValueRoot` by I4F.1; callbacks run after locks and receive retained public roots. I9 audits retirement. |
@@ -253,8 +254,8 @@ inventory.
 | `EffectToken<T>` (`api/value.rs`) | Token contains ID and weak domain only; no core/managed edge. Generic domain payload remains outside the opaque token and may own public roots. | Approved leaf token. A value-bearing domain is an **R** external owner; an edge-free notification/identity domain may be **C**. |
 | `ConstructionPort` (`eval/builtins/net/construction.rs`) | Brand and port ID only. | Approved leaf token. |
 | `TaskHandleCell` (`reflection/requests.rs`) | Runtime ID, task handle, query handle; no raw core value. Handles reach coordinator/store obligations, not a managed pointer. | Approved external capability; re-audit in I9. |
-| `CompilationOrigin` (`diagnostic.rs`) | **Contains raw `core::Value`.** | **D:** replace with exact same-runtime public root or non-value provenance before I4B/G2. |
-| Arbitrary host `OpaqueValue::new<T>` | Unknown by type erasure. | Public construction remains restricted to edge-free data or audited same-runtime external roots. I10B.0 decides whether the bootstrap also adds a distinct sealed managed arm; it never permits a bare managed edge inside this `Any` payload. A family with active cleanup remains an external rooted owner with idempotent retirement/RAII under I9F. |
+| `CompilationOrigin` (`diagnostic.rs`) | Stores non-value `CompilationTrace`; constructs its diagnostic value on inspected access. | Approved edge-free provenance payload under I4B. |
+| `OpaqueValue::new<T: OpaquePayloadFamily>` | Only the four source-latched production families can cross type erasure. Current payloads contain no direct `Gc`, raw `Value`, or `RuntimeValueRoot`. | I4B private unsafe admission plus mandatory family record. Root-bearing payloads are currently rejected. I10B.0 decides whether the bootstrap remains external-only or adds a distinct sealed managed arm; active external families retain idempotent retirement/RAII review under I9F/I10. |
 
 An opaque value may not contain `Gc<T>`, an unrooted recursive core value, or a
 root belonging to another runtime. The collector will not inspect `Any` or a
@@ -343,28 +344,28 @@ plan. It does not substitute for the I11 whole-graph forced-collection suite.
 
 ## Gate G2 Blockers and Reconciliation
 
-The following findings intentionally block collection rather than receiving a
-guessing/conservative classification:
+I4B resolved the original raw `CompilationOrigin`, production semantic-thunk,
+and unrestricted opaque-constructor blockers. The remaining findings block
+collection rather than receiving a guessing/conservative classification:
 
-1. `CompilationOrigin` hides a raw core value in `OpaqueValue`.
-2. `SemanticThunk` and several type-erased compiler/host closures can capture
-   raw recursive values. I3E.1 separated callback-free semantic thunks from
-   deterministic rooted host calls; I4B/I10 must still reconcile their
-   concrete closure captures.
-3. Before I4F.1, `RuntimeValueCache.extensions` hides `GCompilerValues` and
+1. External compiler/host callback environments remain opaque Rust owners.
+   Each deferred import now carries an explicit source/capture record and
+   rooted Glam arguments/results; I10A must still prove that external roots do
+   not hide an internally owned backedge.
+2. Before I4F.1, `RuntimeValueCache.extensions` hides `GCompilerValues` and
    future arbitrary attachments behind `Any`. I4F.1 must close this registration
    boundary before any production value contains a managed edge; I10 only
    re-audits the already-constrained boundary.
-4. I3E established bounded compiler/parser/macro regions and rooted every
+3. I3E established bounded compiler/parser/macro regions and rooted every
    value parked across macro evaluation, imports, diagnostics, or compilation
    drain. I4F.1/I4F.2 must still convert those compatibility roots and bounded
    raw values before the production managed-value switch; the completed I3
    authority proof is not itself a root representation.
-5. RPDS and FingerTree/list nodes need reviewed exact logical visitors.
-6. I8 must replace the production core `SharedRuntimeNet` `Arc` owner with one
+4. RPDS and FingerTree/list nodes need reviewed exact logical visitors.
+5. I8 must replace the production core `SharedRuntimeNet` `Arc` owner with one
    managed outer cell, then close its exact synchronized trace, durable-handle,
    and value-installing mutation-gateway inventories.
-7. Public opaque construction needs the I10B.0 representation decision and a
+6. Public opaque construction needs the I10B.0 representation decision and a
    closed leaf/root registration boundary. If that review selects a managed
    arm, every admitted concrete family also needs its own exact stable ledger
    record, scoped-access proof, and I4.0 destruction admission before Gate G2.

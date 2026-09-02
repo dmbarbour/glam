@@ -1500,6 +1500,16 @@ fn output_payload_is_retained_through_callback_and_dropped_after_locks() {
         dropped: Arc<AtomicBool>,
     }
 
+    // SAFETY: this test-only external lifecycle probe carries weak runtime
+    // coordination state but no core value, runtime root, or managed pointer.
+    unsafe impl crate::core::OpaquePayloadFamily for DeliveryLease {
+        const PAYLOAD_RECORD: crate::core::OpaquePayloadRecord =
+            crate::core::OpaquePayloadRecord::external(
+                "output delivery lease fixture",
+                "src/api/tests/runtime_tests.rs",
+            );
+    }
+
     impl Drop for DeliveryLease {
         fn drop(&mut self) {
             if let Some(resources) = self.resources.upgrade() {

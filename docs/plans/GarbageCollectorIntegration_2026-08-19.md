@@ -1,7 +1,7 @@
 # Glam GC Integration Plan — 2026-08-19
 
 Status: in progress; Phases I0 through I3 and their mandatory reviews plus I4.0
-and I4A are complete. Phase I4B is pending. Collector Gate G1 passed on
+through I4B are complete. Phase I4C is pending. Collector Gate G1 passed on
 2026-08-25. The remaining integration work follows the completed owner-matrix,
 stable-ledger, and low-risk checkpoint corrections from the integration
 review.
@@ -84,7 +84,11 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4 | pending | core trace vocabulary and leaf policy |
 | I4.0 | complete | private managed-family admission, mandatory drop records, passive destruction fixture, and external-retirement separation |
 | I4A | complete | initial monolithic shell selection, exhaustive variant dispatch, embedded leaf policy, and closed cycle fixture |
-| I4B | pending | closure and opaque managed-edge containment |
+| I4B.1 | complete | constructor inventory and private admission boundaries |
+| I4B.2 | complete | opaque payload sealing and provenance migration |
+| I4B.3 | complete | explicit semantic computation captures and host-callback classification |
+| I4B.4 | complete | containment inventory closure and verification |
+| I4B | complete | closure and opaque managed-edge containment |
 | I4F.1 | pending | durable root-surface conversion gate |
 | I4F.2 | pending | public managed-root production switch |
 | I5 | pending | managed lazy/promise cells, external lifecycle, and cycle reclamation |
@@ -2279,6 +2283,57 @@ Verification: `closure_and_opaque_constructor_inventory_is_classified`,
 `opaque_payload_rejects_foreign_root`. Production remains `NoAuto`; no opaque
 finalization is enabled here.
 
+This phase is implemented in four bounded checkpoints:
+
+1. **I4B.1 — Inventory and admission shape.** Re-run the constructor/capture
+   inventory, assign every production site to semantic computation, external
+   host callback, or one named opaque family, and install the source-backed
+   closure latch before changing representations.
+2. **I4B.2 — Opaque containment.** Make opaque construction require a private
+   unsafe family admission with an explicit edge/ownership record. Replace
+   `CompilationOrigin`'s stored recursive value with non-value compilation
+   provenance. Current production opaque tokens then contain no bare value,
+   managed pointer, or public root; root-bearing opaque families remain
+   forbidden until a later reviewed need supplies same-runtime validation.
+3. **I4B.3 — Semantic computation containment.** Replace production
+   capture-bearing `SemanticThunk` closures with a function pointer plus an
+   explicit ordered value-capture array. Retain the closure constructor only
+   as test scaffolding. Classify `HostCallProducer` separately as a
+   mutator-free external callback whose Glam arguments and results are
+   explicit runtime roots; I10A owns its final external-root/backedge
+   reconciliation.
+4. **I4B.4 — Closure.** Latch every constructor and family, run the four named
+   negative/admission fixtures, update the ownership ledger, and verify that
+   no production semantic thunk or unrestricted opaque constructor remains.
+
+I4B completed on 2026-09-02. `OpaqueValue::new` now requires the private unsafe
+`OpaquePayloadFamily` admission and a non-empty ownership record. The four
+production families are source-latched: compilation provenance and
+construction ports are edge-free; effect tokens and reflection task handles
+are explicitly external lifecycle capabilities for I9/I10. Bare `Gc`, raw
+`core::Value`, and `RuntimeValueRoot` do not satisfy the admission bound. This
+currently forbids all root-bearing opaque payloads rather than relying on a
+same-runtime exception that no production family needs.
+
+`CompilationOrigin` now stores `CompilationTrace`, not a preconstructed core
+value, and derives the public diagnostic frame only when the reflection
+inspector asks for it. Production callback-free deferred evaluation uses
+`SemanticComputation`, whose operation is a non-capturing function pointer and
+whose ordered value captures are explicit. The list-effect implementation is
+the sole production constructor; capture-bearing `SemanticThunk` remains
+test-only scaffolding. Deferred imports use separately named
+`external_host_call` constructors with mandatory source/capture records and
+runtime-rooted Glam arguments/results. Their genuinely external closure
+environments remain an explicit I10A backedge/lifecycle audit rather than
+being misclassified as traceable here.
+
+The source-backed containment inventory rejects new/unclassified semantic
+closures, host calls, opaque constructors, and opaque admissions. Focused
+tests exercise the exact capture order, mandatory host-call record, opaque
+family record, all three negative opaque cases, unchanged origin inspection,
+and list-effect behavior. Production collection remains `NoAuto`; I4B closes
+constructor admission and does not enable a managed opaque representation.
+
 ### Phase I4C — Recursive Payload and Failure Structures
 
 - Implement exact visitors for builtin argument arrays, access/application and
@@ -3213,6 +3268,12 @@ boundary under `NoAuto`.
 - Remove duplicated runtime provenance fields when heap identity is
   authoritative and the boundary check remains equally cheap.
 - Remove temporary collection-disable gates and migration-only adapters.
+- Revisit I4.0's `ManagedDropRecord` after Gate G3 and the production
+  integration have made the stable ownership ledger mechanically auditable.
+  Keep the private `ManagedFamily` admission boundary; decide then whether its
+  textual per-family record still prevents real mistakes or should contract to
+  a simpler reviewed-admission token. Do not remove it merely as incidental
+  cleanup before that audit.
 - Update `docs/architecture/evaluation.md`, `docs/AgentContext.md`, focused
   agent notes, and `src/README.md` with current ownership and safepoint rules.
 - Document that the baseline idle-entry collector may starve under
