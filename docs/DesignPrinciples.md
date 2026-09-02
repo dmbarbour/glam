@@ -4,15 +4,13 @@
 
 The core principle or vibe of an assembly language is absolute control. That feeling of "I am the orchestrator of my own reality.". 
 
-In part, control is achieved by low-level machine-code mnemonics and ability to manage layout. In context of a filesystem, the output of an assembly is a file binary, or perhaps a folder of binaries. And users should control every bit.
+In part, control is achieved by low-level machine-code mnemonics and ability to manage layout. In context of a filesystem, the output of an assembly is a file binary or folder thereof, users controlling every bit. But control should not mean programmers are forced to painstakingly write low-level code. Ideally, programmers should also control the level of abstraction at which they express intended behavior and interpretation of that expression. This can be supported via metaprogramming, internal and external DSLs, a tower of languages.
 
-Control doesn't mean programmers are forced to painstakingly write low-level code. Ideally, programmers should control the level of abstraction at which they express themselves, and the interpretation of that expression. This can be supported via metaprogramming, internal and external DSLs, a tower of languages. 
+At larger scales, in context of modularity, users inevitably build upon systems developed by others. This easily conflicts with vibe of local user control: it is annoying to be constrained by the designs and decisions of other users. To mitigate this, we'll use an extensible namespace so users can override any definition, content-addressed remote modules so users can precisely control dependencies. Users may also override front-end compilers to control what a module exposes. Conventional access control is inverted: a module developer cannot hide anything from the client, but clients control a module's observations.
 
-Of course, in context of modularity, we'll inevitably borrow languages and interpreters developed by others. The module system requires careful attention: Stability, so dependencies never shift underfoot outside one's control. Extensibility, so users aren't stuck with another's decisions on pain of a rewrite. Conventional access control should be inverted: the client can fully access a module (no export control), yet robustly control what the module observes and how outputs are handled.
+I imagine users will rarely exercise those opportunities. The control vibe mostly requires that the necessary levers exist and are readily accessible "if I only wanted to".
 
-Control means the levers exist and are readily accessible "if I only wanted to".
-
-In conventional languages, users abandon control for convenience. But it isn't the case that convenience requires giving up control. The only thing that fundamentally requires giving up control is a dependency on external systems. With careful design, we can control compilers and modules. It is feasible to extend this further: assemble unikernels (VM or bare metal) instead of executables beholden to an operating system; assemble network overlays or kubernetes systems to extend control beyond one device.
+The only feature that fundamentally requires reducing control is dependency on external systems or services. There are essential system boundaries for anything we define. To extend control further requires expanding the scope and scale of assembly definition beyond OS executables. For example, by assembling 'unikernels', we can gain control of physical devices. By assembling 'network overlays' or kubernetes systems, we can extend control to a network. We can feasibly assemble hardware descriptions.
 
 ## Control Adjacent
 

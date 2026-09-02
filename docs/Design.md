@@ -729,32 +729,18 @@ Aside from primary outputs, we might want the assembler to automatically set per
 
 ## User-Defined Syntax
 
-When loading a module, we'll first search the provided environment for a compiler: `_env.lang.[FileExt].compile`. If defined, we'll use this compiler, falling back to an assembler built-in or reporting an error. The assembler shall provide a built-in at least for file extension ".g", albeit not necessarily the oldest or newest versions. 
+When loading a module, we'll first search the provided environment for a compiler: `_env.lang.[FileExt].compile`. If defined, we'll use this compiler, falling back to an assembler built-in or reporting an error. To bootstrap this process, the assembler provides a built-in compiler for FileExt ".g".
 
-The 'compile' method shall be expressed effectfully. Effects include:
+User-defined compilers shall be expressed effectfully, e.g. `eff:(\api -> ...)`. Instead of inputs or return values, access to the source binary is expressed via 'read' effects and definitions are manipulated statefully. For reasons of reproducibility and location-independence, the API abstracts location in filesystem or namespace. A few more effects may support diagnostic contexts or debug outputs.
 
-- parser combinators to read source binary
-  - designed for tracing, isolation, laziness
-  - i.e. multi-phase and scoped parsing
-- import integration, files as modules or binaries
-  - modules are always pathed in toplevel namespace
-  - this simplifies override of modules
-- uniqueness - abstract global paths
-- access to the past and future namespace
-- *Standard Effects* for convenience
-
-The assembler should not privilege the built-in ".g" compiler or others. It is best to build upon the same API that will be provided for user-defined syntax.
-
-For reasons of reproducibility and location-independence, the front-end compiler cannot see what file it's compiling or where a module is loaded within the global namespace. But such data implicitly annotates parse results and is visible through the reflection API.
-
-*Note:* File extensions are normalized as lower-cased for A-Z, e.g. `"foo.Tar.Gz"` is processed by `env.lang.["tar.gz"].compile`.
+*Note:* FileExt is minimally normalized: lower-case A-Z, strip initial ".". For example, file `"foo.Tar.Gz"` is processed by `_env.lang.["tar.gz"].compile`. 
 
 ### Compiler Bootstrapping
 
 The assembler shall check whether the final `env.lang.[FileExt].compile` is different from the initial compiler. If so, the assembler will perform a bootstrap process: recompile using the returned compiler, repeat until the compiler stabilizes. Pseudocode:
 
         bootstrap fileExt binary base compile =
-            let result = runCompiler (Yield (Fix (compile binary base)) Return)
+            let result = runCompiler binary base compile
             let compile' = result.env.lang.(fileExt).compile if defined
                            otherwise builtin for fileExt
             if(compile is compile') then result else
@@ -774,7 +760,9 @@ But effective support for editable projections will benefit from careful design 
 
 ### Macros
 
-Compilers may support macros. Macros enable metaprogramming at the syntax layer in terms of rewriting text, tokens, ASTs, etc.. It is convenient to express macros effectfully, i.e. with 'read' and 'write' effects at flexible levels of abstraction. To simplify local reasoning, the compiler may restrict the scope of macros, e.g. ensuring balanced reads and writes of parentheses.
+Macros are essentially user-defined compilation steps. 
+
+Macros enable metaprogramming at the syntax layer in terms of rewriting text, tokens, ASTs, etc.. It is convenient to express macros effectfully, i.e. with 'read' and 'write' effects at flexible levels of abstraction. To simplify local reasoning, the compiler may restrict the scope of macros, e.g. ensuring balanced reads and writes of parentheses.
 
 ## Reasoning
 
