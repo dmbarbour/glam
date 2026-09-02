@@ -1,10 +1,9 @@
 # Glam GC Integration Plan — 2026-08-19
 
-Status: in progress; Phases I0 through I2 and checkpoints I3A.1-I3E.2 are
-complete. Phase I3 is in progress. Collector Gate G1 passed on 2026-08-25.
-The remaining integration work follows the completed owner-matrix,
-stable-ledger, and low-risk checkpoint corrections from the integration
-review.
+Status: in progress; Phases I0 through I3 and their mandatory reviews are
+complete. Phase I4 is pending. Collector Gate G1 passed on 2026-08-25. The
+remaining integration work follows the completed owner-matrix, stable-ledger,
+and low-risk checkpoint corrections from the integration review.
 
 This plan integrates the collector defined by
 [`GarbageCollectorImplementation_2026-08-19.md`](GarbageCollectorImplementation_2026-08-19.md)
@@ -78,7 +77,9 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I3E.2c | complete | rooted recursive module setup, declaration state, import handoff, and result drain |
 | I3E.2d | complete | compiler root/projection inventories and architecture reconciliation |
 | I3E.2 | complete | bounded compiler, macro, and closed-value regions |
-| I3 | in progress | bounded evaluator/worker mutator regions |
+| I3E.3 | complete | bounded event, diagnostic, rendering, and executable callback regions |
+| I3F | complete | multi-runtime admission, poll authority, worker-exit cache retirement, and managed-entry audit |
+| I3 | complete | bounded evaluator/worker mutator regions; post-I3 review passed |
 | I4 | pending | core trace vocabulary and leaf policy |
 | I4.0 | pending | managed-family destruction admission contract |
 | I4B | pending | closure and opaque managed-edge containment |
@@ -2141,7 +2142,10 @@ owner. Existing forced schedules continue to cover worker sleep, patient
 waiting, blocked machines, terminal destruction, and nested dependency work.
 The concurrent collector plan records these as CG0/CG1 entry and retirement
 baselines; continuously overlapping mutators remain its separate progress
-proof.
+proof. The mandatory post-I3 audit is recorded in
+[`GarbageCollectorIntegrationI3_2026-09-02.md`](../reviews/GarbageCollectorIntegrationI3_2026-09-02.md).
+It resolved the direct-admission latch, transitional lint, and durable-status
+findings, so Phase I3 is complete and I4.0 may begin.
 
 ## Phase I4 — Core Trace Vocabulary and Leaf Policy
 

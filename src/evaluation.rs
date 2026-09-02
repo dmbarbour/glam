@@ -17,10 +17,6 @@ use std::sync::{Arc, OnceLock, Weak};
 
 use crate::core::{CoreValueFactory, EvaluationFailure, Value};
 
-#[allow(
-    dead_code,
-    reason = "I3A establishes scoped authority before I3B migrates production evaluator substeps"
-)]
 mod access;
 #[cfg(test)]
 mod access_inventory;

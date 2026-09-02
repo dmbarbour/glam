@@ -27,7 +27,7 @@ use super::coordinator::{
 use super::pump::test_reflection_dependency;
 use super::pump::{EvaluationPumpOutcome, prioritized_task_for, pump_demand};
 use super::{
-    EvaluationDemandState, EvaluatorStepContext, ReflectionTaskProfile, RuntimeObservationEpoch,
+    EvaluationDemandState, EvaluationPollContext, ReflectionTaskProfile, RuntimeObservationEpoch,
     RuntimeObservationState, allocate_task_id, allocate_wait_token, evaluation_failure,
 };
 #[cfg(test)]
@@ -641,8 +641,8 @@ impl EvalContext {
             .map_err(|error| crate::core::EvaluationHalt::new(error.as_ref()))?;
         match self.drive_client_demand(handle)? {
             ClientDemandResult::Complete(value) => {
-                let evaluator = EvaluatorStepContext::for_direct_compatibility(self);
-                Ok(evaluator.project_root(&value))
+                let poll = EvaluationPollContext::for_context(self);
+                Ok(poll.evaluate(self, |evaluator| evaluator.project_root(&value)))
             }
             ClientDemandResult::Abandoned => unreachable!(
                 "WHNF client demand must return a value or a propagated evaluation failure"

@@ -64,6 +64,7 @@ impl<'scope> EvaluationValueAccess<'scope> {
         Ok(Self { values })
     }
 
+    #[cfg(test)]
     pub(crate) fn values(&self) -> &RuntimeValueAccess<'scope> {
         &self.values
     }
@@ -230,13 +231,9 @@ impl EvaluationPollContext {
         result
     }
 
-    /// Wrap one currently bare evaluator result before it leaves the machine
-    /// poll boundary.
-    ///
-    /// This is the I3A.4 compatibility seam. `RuntimeValueRoot` still stores a
-    /// bare `Value`, so no managed pointer is being rooted here yet. I3B moves
-    /// this operation into the bounded evaluator scope before I4F.2 changes
-    /// the root's representation.
+    /// Test-fixture convenience for publishing a compatibility result without
+    /// pretending the poll context carries managed access.
+    #[cfg(test)]
     pub(crate) fn root_value(&self, value: Value) -> RuntimeValueRoot {
         RuntimeValueRoot::new(&self.demand.values, value)
     }
@@ -326,7 +323,7 @@ mod tests {
         let evaluator = poll.evaluator(&context);
 
         let first = evaluator.with_value_access(|access| {
-            assert!(access.values().belongs_to(context.values()));
+            assert!(access.values.belongs_to(context.values()));
             assert!(matches!(
                 values.collect_managed_for_test(),
                 Err(CollectionError::ActiveMutator)
@@ -353,14 +350,14 @@ mod tests {
                 Err(CollectionError::ActiveMutator)
             ));
             let allocator = access
-                .values()
+                .values
                 .allocator::<u64>()
                 .expect("the scoped u64 allocation should fit");
-            access.values().root(allocator.alloc(29))
+            access.values.root(allocator.alloc(29))
         });
 
         evaluator.with_value_access(|access| {
-            assert_eq!(*access.values().get(&second), 29);
+            assert_eq!(*access.values.get(&second), 29);
         });
     }
 
@@ -376,8 +373,8 @@ mod tests {
                 Err(CollectionError::ActiveMutator)
             ));
             poll.with_value_access(&context, |inner| {
-                assert!(outer.values().belongs_to(context.values()));
-                assert!(inner.values().belongs_to(context.values()));
+                assert!(outer.values.belongs_to(context.values()));
+                assert!(inner.values.belongs_to(context.values()));
                 assert!(matches!(
                     values.collect_managed_for_test(),
                     Err(CollectionError::ActiveMutator)
@@ -442,7 +439,7 @@ mod tests {
             .collect_managed_for_test()
             .expect("constructing a poll context must not enter the managed heap");
         poll.with_value_access(&context, |access| {
-            assert!(access.values().belongs_to(&values));
+            assert!(access.values.belongs_to(&values));
             assert!(matches!(
                 values.collect_managed_for_test(),
                 Err(CollectionError::ActiveMutator)

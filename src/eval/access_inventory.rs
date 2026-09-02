@@ -417,14 +417,28 @@ fn lazy_producer_roles_are_explicit_and_complete() {
 #[test]
 fn direct_evaluator_admission_has_one_internal_compatibility_gate() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let source = fs::read_to_string(manifest.join("src/eval.rs"))
-        .expect("evaluator module source should be readable");
+    let mut sources = Vec::new();
+    collect_rust_sources(&manifest.join("src"), &mut sources);
+    let actual = sources
+        .into_iter()
+        .filter_map(|path| {
+            let relative = path
+                .strip_prefix(manifest)
+                .expect("source path should be below the manifest");
+            if relative == Path::new("src/eval/access_inventory.rs") {
+                return None;
+            }
+            let source = fs::read_to_string(&path).expect("Rust source should be readable");
+            let count = source
+                .matches("EvaluatorStepContext::for_direct_compatibility(")
+                .count();
+            (count != 0).then(|| (relative.to_path_buf(), count))
+        })
+        .collect::<BTreeMap<_, _>>();
     assert_eq!(
-        source
-            .matches("EvaluatorStepContext::for_direct_compatibility(")
-            .count(),
-        1,
-        "direct evaluation must remain centralized until I3D/I3E remove it"
+        actual,
+        [(PathBuf::from("src/eval.rs"), 1)].into_iter().collect(),
+        "direct evaluation must retain one centralized internal admission"
     );
 }
 

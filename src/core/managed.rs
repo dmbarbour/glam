@@ -48,12 +48,12 @@ pub(crate) struct CoreValueAllocationScope<'scope> {
 /// scope with the exact value domain which admitted its mutator. Subsystems
 /// derive shorter-lived views from this carrier rather than entering the heap
 /// independently.
-#[allow(
-    dead_code,
-    reason = "I3A.1 establishes the carrier before I3B.1 migrates evaluator access"
-)]
 pub(crate) struct RuntimeValueAccess<'scope> {
     domain: &'scope RuntimeValueDomain,
+    #[allow(
+        dead_code,
+        reason = "I4 introduces production managed allocation, rooting, and borrowing through this scope"
+    )]
     scope: CoreValueAllocationScope<'scope>,
 }
 
@@ -116,10 +116,6 @@ impl CoreValueFactory {
     /// The higher-ranked callback prevents the access carrier, its mutator,
     /// allocators, and managed borrows from escaping. I3 scheduler poll
     /// contexts use this entry to derive evaluator-specific authority.
-    #[allow(
-        dead_code,
-        reason = "I3A establishes scoped authority before I3B migrates production evaluator substeps"
-    )]
     pub(crate) fn with_runtime_value_access<R>(
         &self,
         operation: impl for<'scope> FnOnce(RuntimeValueAccess<'scope>) -> R,
@@ -205,10 +201,6 @@ impl RuntimeValueObserver {
     }
 }
 
-#[allow(
-    dead_code,
-    reason = "I3A.1 establishes carrier operations before I3B.1 migrates evaluator access"
-)]
 impl RuntimeValueAccess<'_> {
     pub(crate) fn runtime_id(&self) -> EvaluationRuntimeId {
         self.domain.runtime
@@ -228,6 +220,10 @@ impl RuntimeValueAccess<'_> {
     }
 
     /// Discovers or reuses one heap-local allocation class for this region.
+    #[allow(
+        dead_code,
+        reason = "I4 introduces production managed allocation through runtime-qualified access"
+    )]
     pub(crate) fn allocator<T: Trace>(
         &self,
     ) -> Result<CoreValueAllocator<'_, T>, UnsupportedLayout> {
@@ -235,11 +231,19 @@ impl RuntimeValueAccess<'_> {
     }
 
     /// Publishes a root before a managed pointer leaves this region.
+    #[allow(
+        dead_code,
+        reason = "I4F introduces production managed roots through runtime-qualified access"
+    )]
     pub(crate) fn root<T: Trace>(&self, value: Gc<T>) -> Root<T> {
         self.scope.root(value)
     }
 
     /// Borrows one same-domain root under this region's mutator authority.
+    #[allow(
+        dead_code,
+        reason = "I4F introduces production managed-root observation through runtime-qualified access"
+    )]
     pub(crate) fn get<'access, T: Trace>(&'access self, root: &Root<T>) -> &'access T {
         self.scope.get(root)
     }
