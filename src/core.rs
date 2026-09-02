@@ -178,6 +178,21 @@ impl EvaluationFailure {
         &self.contexts
     }
 
+    /// Reports every direct semantic value retained by this failure without
+    /// evaluating, formatting, comparing, or recursively visiting it.
+    ///
+    /// Runtime failure roots use this as their complete compatibility edge
+    /// boundary until I6C replaces the failure representation itself.
+    pub(crate) fn visit_direct_values(&self, visit: &mut dyn FnMut(&Value)) {
+        match &self.kind {
+            EvaluationFailureKind::Emission(emission) => visit(emission),
+            EvaluationFailureKind::DependencyCycle(_) => {}
+        }
+        for context in self.contexts.iter() {
+            visit(context);
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn dependency_cycle_value(&self) -> Option<&Arc<LazyCycle>> {
         match &self.kind {

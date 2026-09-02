@@ -103,6 +103,10 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.1b.1 | complete | canonical root bundle and initialization seam |
 | I4F.1b.2 | complete | admitted type-erased runtime attachments and compiler caches |
 | I4F.1b | complete | canonical cache and type-erased attachment root surfaces |
+| I4F.1c.1 | complete | non-forcing runtime failure-root compatibility boundary |
+| I4F.1c.2 | pending | machine-poll, task, wait, terminal, and failure-ledger roots |
+| I4F.1c.3 | pending | client-demand and session report roots |
+| I4F.1c.4 | pending | settlement, readiness, and evaluation-owner closure |
 | I4F.1c | pending | evaluation, coordinator, and readiness root surfaces |
 | I4F.1d.1 | pending | reflection store, snapshot, journal, and query roots |
 | I4F.1d.2 | pending | reflection lifecycle, protocol, and search roots |
@@ -2704,18 +2708,53 @@ compatibility roots become registered collector roots only at I4F.2c.
 
 #### Phase I4F.1c — Evaluation, Coordinator, and Readiness Roots
 
-- Reconcile parked evaluation/effect work, task/coordinator records, waits,
-  sparks, client demands, deferred producers, failures, settlement state, and
-  host-visible readiness/deadlock/report snapshots.
-- Store every semantic value which crosses a poll, wait, queue, ledger, or
-  report boundary as an existing root. Keep IDs, subscriptions, work tokens,
-  and edge-free coordination companions unrooted.
-- Destructure every parked/terminal enum in the inventory so a new state cannot
-  acquire an unclassified value field.
+Migrate the evaluation family through four bounded checkpoints. Shared failure
+identity remains an implementation property throughout this compatibility
+stage; I6C later replaces the failure shell and its recursive interiors.
 
-Verification: extend the I3 poll-boundary and producer-role latches, then cover
-park, resume, terminal publication, report retention, acknowledgement, and
-owner retirement. No test relies on repeated scheduling as race evidence.
+1. **I4F.1c.1 — Failure-root boundary.** Introduce one runtime-provenanced,
+   non-forcing `RuntimeFailureRoot` compatibility wrapper. It retains the
+   existing shared `Arc<EvaluationFailure>` identity plus a
+   `RuntimeValueRoot` for every direct emission/context value reported by the
+   compile-exhaustive compatibility visitor. Construction must neither inspect
+   nor recursively walk those values. Prove exact edge coverage, duplicate
+   occurrence preservation, shared failure identity, and same-runtime roots.
+2. **I4F.1c.2 — Poll, task, wait, and coordinator records.** Reconcile machine
+   poll failures, parked task blocks, wait terminals/polls, task statuses,
+   promise-terminal publication, and the per-session failure ledgers. A bare
+   failure may exist only inside a bounded evaluator operation; it becomes a
+   failure root before poll return or coordinator publication. Destructure
+   every affected enum so new terminal states cannot acquire an unclassified
+   value field.
+3. **I4F.1c.3 — Client demand and session reports.** Reconcile client-demand
+   operations/results/work, pending activations, session failure reports, and
+   unfinished-task records. Preserve existing failure identity while testing
+   forced park/resume, terminal publication, acknowledgement, handle
+   abandonment, and owner-session retirement. `SparkDemand` is already
+   root-shaped and receives an explicit audit rather than another wrapper.
+4. **I4F.1c.4 — Settlement and readiness closure.** Reconcile exit/kill
+   settlement state and host-visible quiescence, deadlock, and unfinished-work
+   snapshots. Close the evaluation-family durable-owner rows and source
+   baseline only after retained reports survive the originating work/session
+   retirement without collecting their values.
+
+At every checkpoint, IDs, subscriptions, work tokens, and proven edge-free
+coordination companions remain unrooted. Verification extends the I3
+poll-boundary and producer-role latches and uses forced event order rather than
+repeated scheduling as race evidence.
+
+I4F.1c.1 completed 2026-09-02. `RuntimeFailureRoot` now preserves the existing
+shared `Arc<EvaluationFailure>` identity while retaining one shallow
+`RuntimeValueRoot` per direct emission/context occurrence. Its one edge walk is
+owned by `EvaluationFailure::visit_direct_values`; the pre-managed trace
+adapter delegates to that same compile-exhaustive match, so failure-root and
+future managed tracing cannot silently disagree. Construction from a factory
+or an already-proven runtime publication seam does not evaluate, format,
+compare, or recursively traverse any value. Focused tests preserve duplicate
+occurrences, prove same-runtime root provenance and `Arc` identity, and use a
+panic-on-force lazy value to latch the non-forcing contract. The durable-owner
+source baseline now classifies the new compatibility root explicitly. Durable
+poll/coordinator owners remain unchanged until I4F.1c.2.
 
 #### Phase I4F.1d — Reflection Store, Protocol, and Machine Roots
 

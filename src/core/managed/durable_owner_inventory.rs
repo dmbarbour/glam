@@ -177,8 +177,8 @@ macro_rules! edge_free {
 const OWNER_INVENTORY: &[OwnerEntry] = &[
     closed_durable!(
         "src/api/value.rs; src/runtime.rs",
-        "public Value / EvaluatedValue / RuntimeValueRoot facade",
-        "opaque public handles and the compatibility runtime root",
+        "public Value / EvaluatedValue / RuntimeValueRoot / RuntimeFailureRoot facade",
+        "opaque public handles and the compatibility value/failure roots",
         "public or runtime-owned value lifetime",
         "matching-runtime construction or evaluation",
         "last public/runtime root drop",
@@ -760,10 +760,10 @@ fn is_production_source(relative: &Path) -> bool {
 // aggregate makes category drift legible, while the deterministic fingerprint
 // detects a declaration being exchanged for another with the same counts.
 // `owner_for_declaration` is the reviewed semantic assignment for every entry.
-const DECLARATION_BASELINE_COUNT: usize = 135;
+const DECLARATION_BASELINE_COUNT: usize = 136;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([115, 55, 1, 27, 15, 0, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 6_500_468_121_391_624_540;
+    DeclarationSignals::new([115, 56, 1, 28, 15, 0, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 5_389_509_757_859_609_457;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,
@@ -826,9 +826,12 @@ fn owner_for_declaration(declaration: &str) -> Option<&'static str> {
     {
         "quiescence, deadlock, and unfinished-task snapshots"
     } else if declaration.starts_with("src/api/value.rs::")
-        || declaration == "src/runtime.rs::RuntimeValueRoot"
+        || matches!(
+            declaration,
+            "src/runtime.rs::RuntimeValueRoot" | "src/runtime.rs::RuntimeFailureRoot"
+        )
     {
-        "public Value / EvaluatedValue / RuntimeValueRoot facade"
+        "public Value / EvaluatedValue / RuntimeValueRoot / RuntimeFailureRoot facade"
     } else if declaration.starts_with("src/bin/glam/command_line/") {
         "CLI command-line search and token state"
     } else if declaration.starts_with("src/bin/glam/configuration/logger/")

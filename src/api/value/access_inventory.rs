@@ -244,6 +244,12 @@ const INVENTORY: &[InventoryEntry] = &[
         "persistent store, query roots, and transactional updates",
         "I3D.4 store regions; I4F.1 persistent roots"
     ),
+    entry!(
+        "src/runtime.rs",
+        [0, 0, 0, 0, 0, 1],
+        "shallow direct-value rooting for one runtime failure root",
+        "I4F.1c.1 failure-root boundary; I6C managed failure shell"
+    ),
 ];
 
 fn collect_rust_sources(directory: &Path, sources: &mut Vec<PathBuf>) {

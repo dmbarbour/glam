@@ -8,7 +8,7 @@ use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use crate::core::{CoreValueFactory, Value};
+use crate::core::{CoreValueFactory, EvaluationFailure, Value};
 
 static NEXT_EVALUATION_RUNTIME_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -228,6 +228,79 @@ impl RuntimeValueRoot {
     }
 }
 
+/// One runtime-owned failure whose direct semantic values remain rooted while
+/// the compatibility failure representation is retained.
+///
+/// The existing `Arc<EvaluationFailure>` remains the canonical shared failure
+/// identity. The parallel roots are deliberately shallow: recursive edges are
+/// owned by the root for each direct emission or context value. I6C replaces
+/// this compatibility shell after the core failure family becomes managed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(
+    dead_code,
+    reason = "I4F.1c.1 establishes the boundary migrated into durable owners by I4F.1c.2"
+)]
+pub(crate) struct RuntimeFailureRoot {
+    runtime: EvaluationRuntimeId,
+    failure: Arc<EvaluationFailure>,
+    value_roots: Arc<[RuntimeValueRoot]>,
+}
+
+#[allow(
+    dead_code,
+    reason = "I4F.1c.1 establishes the boundary migrated into durable owners by I4F.1c.2"
+)]
+impl RuntimeFailureRoot {
+    pub(crate) fn new(values: &CoreValueFactory, failure: Arc<EvaluationFailure>) -> Self {
+        let value_roots = Self::root_direct_values(values.runtime_id(), &failure);
+        Self {
+            runtime: values.runtime_id(),
+            failure,
+            value_roots,
+        }
+    }
+
+    pub(crate) fn from_runtime(
+        runtime: EvaluationRuntimeId,
+        failure: Arc<EvaluationFailure>,
+    ) -> Self {
+        let value_roots = Self::root_direct_values(runtime, &failure);
+        Self {
+            runtime,
+            failure,
+            value_roots,
+        }
+    }
+
+    fn root_direct_values(
+        runtime: EvaluationRuntimeId,
+        failure: &EvaluationFailure,
+    ) -> Arc<[RuntimeValueRoot]> {
+        let mut value_roots = Vec::new();
+        failure.visit_direct_values(&mut |value| {
+            value_roots.push(RuntimeValueRoot::from_runtime(runtime, value.clone()));
+        });
+        value_roots.into()
+    }
+
+    pub(crate) fn runtime_id(&self) -> EvaluationRuntimeId {
+        self.runtime
+    }
+
+    pub(crate) fn as_failure(&self) -> &Arc<EvaluationFailure> {
+        &self.failure
+    }
+
+    pub(crate) fn into_failure(self) -> Arc<EvaluationFailure> {
+        self.failure
+    }
+
+    #[cfg(test)]
+    pub(crate) fn direct_value_roots(&self) -> &[RuntimeValueRoot] {
+        &self.value_roots
+    }
+}
+
 pub(crate) struct RuntimeIds {
     next_evaluation_session: AtomicU64,
     next_evaluation_work: AtomicU64,
@@ -351,5 +424,78 @@ impl RuntimeIds {
 
     fn allocate_or_panic(&self, source: &AtomicU64, exhausted: &'static str) -> NonZeroU64 {
         self.allocate(source, exhausted).expect(exhausted)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::{LazyValue, test_value_factory};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn runtime_failure_root_preserves_identity_and_direct_value_occurrences() {
+        let values = test_value_factory();
+        let repeated = Value::binary_from_text("failure root sentinel");
+        let failure = Arc::new(
+            EvaluationFailure::emission(repeated.clone())
+                .with_context(repeated.clone())
+                .with_context(repeated.clone()),
+        );
+
+        let root = RuntimeFailureRoot::new(&values, failure.clone());
+
+        assert_eq!(root.runtime_id(), values.runtime_id());
+        assert!(Arc::ptr_eq(root.as_failure(), &failure));
+        assert_eq!(root.direct_value_roots().len(), 3);
+        assert!(
+            root.direct_value_roots()
+                .iter()
+                .all(|value| value.runtime_id() == values.runtime_id())
+        );
+        assert!(
+            root.direct_value_roots()
+                .iter()
+                .all(|value| value.value == repeated)
+        );
+        assert!(Arc::ptr_eq(&root.clone().into_failure(), &failure));
+    }
+
+    #[test]
+    fn runtime_failure_root_can_be_published_from_known_runtime_provenance() {
+        let values = test_value_factory();
+        let failure = Arc::new(EvaluationFailure::message("known runtime failure"));
+
+        let root = RuntimeFailureRoot::from_runtime(values.runtime_id(), failure.clone());
+
+        assert_eq!(root.runtime_id(), values.runtime_id());
+        assert!(Arc::ptr_eq(root.as_failure(), &failure));
+        assert_eq!(root.direct_value_roots().len(), 1);
+        assert_eq!(
+            root.direct_value_roots()[0].runtime_id(),
+            values.runtime_id()
+        );
+    }
+
+    #[test]
+    fn runtime_failure_root_does_not_force_or_recursively_visit_values() {
+        let values = test_value_factory();
+        let forced = Arc::new(AtomicBool::new(false));
+        let forced_by_thunk = forced.clone();
+        let lazy = Value::Lazy(LazyValue::semantic_thunk(
+            &values,
+            "runtime failure root sentinel",
+            move |_| {
+                forced_by_thunk.store(true, Ordering::Release);
+                panic!("failure-root construction must not evaluate a direct value")
+            },
+        ));
+        let failure = Arc::new(EvaluationFailure::emission(lazy.clone()));
+
+        let root = RuntimeFailureRoot::new(&values, failure);
+
+        assert_eq!(root.direct_value_roots().len(), 1);
+        assert_eq!(root.direct_value_roots()[0].value, lazy);
+        assert!(!forced.load(Ordering::Acquire));
     }
 }

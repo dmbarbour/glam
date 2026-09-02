@@ -6,9 +6,9 @@
 //! owning `Arc<Value>` is already a `Gc` edge.
 
 use super::super::{
-    BuiltinCall, EvaluatedValue, EvaluationFailure, EvaluationFailureKind, FixpointComputation,
-    LazyApplication, LazyResult, LazySource, LazyValue, MetadataCarrier, PromiseAssignment,
-    PromisedValue, ReflectionCompletion, ReflectionComputation, SemanticComputation, Value,
+    BuiltinCall, EvaluatedValue, EvaluationFailure, FixpointComputation, LazyApplication,
+    LazyResult, LazySource, LazyValue, MetadataCarrier, PromiseAssignment, PromisedValue,
+    ReflectionCompletion, ReflectionComputation, SemanticComputation, Value,
 };
 
 /// Reports every direct semantic `Value` edge held by one compatibility
@@ -57,11 +57,7 @@ impl CompatibilityValueEdges for EvaluatedValue {
 
 impl CompatibilityValueEdges for EvaluationFailure {
     fn visit_compatibility_value_edges(&self, visit: &mut dyn FnMut(&Value)) {
-        match &self.kind {
-            EvaluationFailureKind::Emission(emission) => visit(emission),
-            EvaluationFailureKind::DependencyCycle(_) => {}
-        }
-        visit_values(&self.contexts, visit);
+        self.visit_direct_values(visit);
     }
 }
 
