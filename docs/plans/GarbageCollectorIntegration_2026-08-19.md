@@ -1,7 +1,7 @@
 # Glam GC Integration Plan — 2026-08-19
 
 Status: in progress; Phases I0 through I3 and their mandatory reviews plus I4.0
-through I4E are complete. Phase I4F.1a is pending. Collector Gate G1 passed on
+through I4E and I4F.1a are complete. Phase I4F.1b.1 is pending. Collector Gate G1 passed on
 2026-08-25. The remaining integration work follows the completed owner-matrix,
 stable-ledger, and low-risk checkpoint corrections from the integration
 review.
@@ -99,7 +99,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4E.1 | complete | generic runtime-net payload walk and core compatibility adapters |
 | I4E.2 | complete | exhaustive no-reduction/materialization and closed-cycle verification |
 | I4E | complete | non-reducing net value adapter |
-| I4F.1a | pending | durable-owner inventory schema and executable baseline |
+| I4F.1a | complete | durable-owner inventory schema and executable baseline |
 | I4F.1b.1 | pending | canonical root bundle and initialization seam |
 | I4F.1b.2 | pending | admitted type-erased runtime attachments and compiler caches |
 | I4F.1b | pending | canonical cache and type-erased attachment root surfaces |
@@ -2614,6 +2614,27 @@ checkpoint, an unknown type-erased family, or a bounded-local claim without
 its enforcing scope. Rows which still require conversion are explicitly
 `open(checkpoint)`; I4F.1g, not I4F.1a, requires zero open rows and zero durable
 bare values/managed pointers. Production remains unchanged and `NoAuto`.
+
+I4F.1a completed 2026-09-02. The executable inventory now separates reviewed
+owner semantics from mechanical source drift. Its owner rows record current
+storage, target disposition, construction/publication and retirement
+boundaries, the responsible I4F.1 checkpoint, and either the common durable
+fixture contract, an existing bounded-scope proof, an exact managed-edge
+proof, or an edge-free proof. Open conversion rows remain explicit; this
+checkpoint does not claim that the compatibility `RuntimeValueRoot` is already
+a collector root.
+
+The source side parses production Rust declarations with `syn` rather than
+counting substrings. It currently latches 135 declarations whose stored types
+mention core/public values, runtime roots, evaluated values, failure graphs,
+synchronized nets, managed pointers, type erasure, or callbacks. The aggregate
+signal counts plus a deterministic declaration fingerprint detect balanced as
+well as simple additions/removals, and every discovered declaration maps to a
+named semantic owner row. Test-only support and the inventory/closed-fixture
+modules are excluded. The baseline was first run empty and produced the
+intended mismatch before the reviewed count, fingerprint, and assignments were
+installed. Production representation, behavior, and `NoAuto` policy are
+unchanged.
 
 #### Phase I4F.1b — Canonical Cache and Attachment Roots
 

@@ -5,7 +5,8 @@ bounded evaluator, worker, callback, compiler, net, and multi-runtime authority
 regions, I4.0's managed-destruction admission gate, I4A's closed managed
 shell/leaf policy, I4B's closure/opaque containment gate, I4C's recursive
 compatibility edge vocabulary, I4D's persistent collection adapters, and
-I4E's non-reducing runtime-net adapters are complete and reviewed. Stable
+I4E's non-reducing runtime-net adapters, and I4F.1a's executable durable-owner
+baseline are complete and reviewed. Stable
 integration facts are reconciled when each representation family receives its
 concrete managed wrapper and trace implementation.
 Collector-private class topology is verified inside `glam-gc` and is not part
@@ -336,6 +337,7 @@ kept with the subsystem whose contract they exercise.
 | I4C recursive compatibility edge vocabulary, ordered payload/failure visitation, lifecycle-edge exclusions, and no semantic work during visitation | `argument_and_application_visitors_enumerate_exact_edges`; `compatibility_recursive_payload_visitors_enumerate_exact_edges`; `shared_cyclic_failure_context_traces_exactly`; `failure_trace_invokes_no_semantic_service`; `recursive_edge_mutations_use_representation_gateways`. |
 | I4D non-forcing persistent collection adapters, logical work accounting, shared-spine behavior, and closed collection proof | `persistent_adapter_traces_empty_singleton_and_shared_spines`; `persistent_adapter_cycle_reclaims_in_isolated_heap`. |
 | I4E non-reducing net/function identity adapters, exact runtime payload classification, revision/materialization preservation, and closed collection proof | `core_operator_adapter_enumerates_every_value_and_net_payload`; `net_value_adapter_traces_without_reduction_or_materialization`; `net_value_adapter_cycle_marks_exactly`. |
+| I4F.1a durable-owner schema, production declaration drift latch, semantic owner assignment, and explicit open conversion rows | `durable_value_owner_inventory_is_complete`. |
 | Cross-runtime rejection | `public_value_factories_reject_foreign_composite_members`; `assembler_boundaries_reject_foreign_values_before_evaluation_or_storage`; `runtime_input_endpoints_are_local_monotonic_capabilities`. |
 | Fulfilled/unfulfilled lazy and resolver promise | `value_evaluator_caches_lazy_success_and_preserves_structured_failure`; `value_evaluator_resumes_a_retained_resolver_promise_subscription`; `promised_assignments_retain_deferred_aliases`. |
 | Pure lazy cycle | `a_lazy_task_that_waits_on_itself_is_poisoned_as_a_cycle`; `concurrently_demanded_lazy_tasks_share_one_two_node_cycle_failure`; `two_sessions_share_and_retire_one_pure_lazy_cycle_failure`. |

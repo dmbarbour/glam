@@ -21,6 +21,9 @@ regex-lite = "0.1.9"
 rpds = "1.2.1"
 sha2 = "0.10.9"
 
+[dev-dependencies]
+syn = { version = "2.0.106", features = ["full", "visit"] }
+
 [profile.release]
 opt-level = 3
 

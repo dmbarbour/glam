@@ -501,6 +501,9 @@ mod value_shell;
 #[cfg(test)]
 mod containment_inventory;
 
+#[cfg(test)]
+mod durable_owner_inventory;
+
 mod payload_edges;
 
 #[cfg(test)]

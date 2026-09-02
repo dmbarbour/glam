@@ -1,7 +1,8 @@
 # GC Public-Value Compatibility Access Inventory — 2026-08-28
 
-Status: Phase I2C baseline complete; production migration pending in I3,
-I4F.1, and I4F.2.
+Status: Phase I2C baseline and I3 scoped-access migration complete. I4F.1a now
+provides the complementary durable-owner baseline; storage conversion and the
+production root switch remain pending in I4F.1b-I4F.2.
 
 ## Purpose
 
@@ -52,6 +53,13 @@ public evaluated-value extraction behind matching runtime authority:
 
 The executable table supplies the exact per-module counts, role descriptions,
 and checkpoint assignments behind this grouped summary.
+
+This remains an operation inventory. I4F.1a's separate
+`durable_value_owner_inventory_is_complete` source latch parses declaration
+types across both the library and binary crate and assigns every retained or
+potentially hidden value family to a semantic owner row. Neither inventory is
+a substitute for the other: this one closes compatibility operations, while
+the durable-owner inventory closes storage and lifetime classifications.
 
 ## Boundary Decisions
 
