@@ -265,6 +265,21 @@ impl<S: NetSpecialization> fmt::Debug for CursorDependency<S> {
     }
 }
 
+impl<S: NetSpecialization> CursorDependency<S> {
+    #[allow(
+        dead_code,
+        reason = "I4E installs exact runtime-net source visitation before I8 uses it in production tracing"
+    )]
+    fn source_runtime(&self) -> Option<&SharedRuntimeNet<S>> {
+        match self {
+            Self::LocalCursor(_) => None,
+            Self::SourceCursor(observation) | Self::SourceFrontier(observation) => {
+                Some(&observation.source)
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 enum PairlessCursorState<S: NetSpecialization> {
     Ready,
@@ -1080,6 +1095,37 @@ struct RuntimeEntry<S: NetSpecialization> {
     links: [Option<Port>; 3],
 }
 
+/// One semantic payload held directly by an instantiated runtime net.
+///
+/// This is a read-only representation walk, not an evaluator operation. In
+/// particular, visiting a remote source reports its existing shared identity;
+/// it never follows or materializes the cursor.
+#[allow(
+    dead_code,
+    reason = "I4E installs exact runtime-net payload visitation before I8 uses it in production tracing"
+)]
+pub(crate) enum RuntimeNetPayload<'payload, S: NetSpecialization> {
+    Data(&'payload S::Data),
+    Operator(&'payload S::Operator),
+    Source(&'payload SharedRuntimeNet<S>),
+    StuckReason(&'payload S::StuckReason),
+}
+
+/// Logical work performed while enumerating one runtime net's direct semantic
+/// payloads.
+///
+/// Counts describe owning representation occurrences. The same source net may
+/// therefore be reported more than once when multiple copy/dependency records
+/// retain it.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct RuntimeNetPayloadVisitStats {
+    pub(crate) node_entries: usize,
+    pub(crate) data_nodes: usize,
+    pub(crate) operator_nodes: usize,
+    pub(crate) source_nets: usize,
+    pub(crate) stuck_reasons: usize,
+}
+
 impl<S: NetSpecialization> RuntimeEntry<S> {
     fn new(node: RuntimeNode<S>) -> Self {
         Self {
@@ -1157,6 +1203,88 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         let exposed = runtime.add_interface(net.exposed);
         runtime.exposed = Some(exposed);
         runtime
+    }
+
+    /// Enumerates direct semantic payloads without reducing, claiming,
+    /// materializing, or otherwise mutating the net.
+    ///
+    /// The caller owns whatever synchronization makes this shared borrow
+    /// stable. The callback is synchronous and must not re-enter that owner.
+    /// Structural nodes, ports, fan identities, wait tokens, and no-rule stuck
+    /// states contain no specialization payload and are intentionally omitted.
+    #[allow(
+        dead_code,
+        reason = "I4E installs exact runtime-net payload visitation before I8 uses it in production tracing"
+    )]
+    pub(crate) fn visit_logical_payloads(
+        &self,
+        visit: &mut impl FnMut(RuntimeNetPayload<'_, S>),
+    ) -> RuntimeNetPayloadVisitStats {
+        let mut stats = RuntimeNetPayloadVisitStats {
+            node_entries: self.nodes.len(),
+            ..RuntimeNetPayloadVisitStats::default()
+        };
+
+        for entry in self.nodes.values() {
+            match &entry.node {
+                RuntimeNode::Data(data) => {
+                    stats.data_nodes += 1;
+                    visit(RuntimeNetPayload::Data(data));
+                }
+                RuntimeNode::Operator(operator) => {
+                    stats.operator_nodes += 1;
+                    visit(RuntimeNetPayload::Operator(operator));
+                }
+                RuntimeNode::Bind
+                | RuntimeNode::Fan { .. }
+                | RuntimeNode::Erase
+                | RuntimeNode::Interface
+                | RuntimeNode::RemoteCursor { .. } => {}
+            }
+        }
+
+        for copy in self.copies.values() {
+            stats.source_nets += 1;
+            visit(RuntimeNetPayload::Source(&copy.source));
+        }
+
+        for obligation in self.cursor_obligations.values() {
+            if let PairlessCursorState::Blocked(dependency) = &obligation.state
+                && let Some(source) = dependency.source_runtime()
+            {
+                stats.source_nets += 1;
+                visit(RuntimeNetPayload::Source(source));
+            }
+        }
+
+        for state in self.active.values() {
+            match state {
+                ActivePairState::BlockedCursor {
+                    blockage: CursorBlockage::Dependency(dependency),
+                    ..
+                } => {
+                    if let Some(source) = dependency.source_runtime() {
+                        stats.source_nets += 1;
+                        visit(RuntimeNetPayload::Source(source));
+                    }
+                }
+                ActivePairState::Stuck(StuckReason::Specialization(reason)) => {
+                    stats.stuck_reasons += 1;
+                    visit(RuntimeNetPayload::StuckReason(reason));
+                }
+                ActivePairState::Ready
+                | ActivePairState::Claimed
+                | ActivePairState::BlockedCall { .. }
+                | ActivePairState::BlockedOperatorCall { .. }
+                | ActivePairState::BlockedCursor {
+                    blockage: CursorBlockage::Stable,
+                    ..
+                }
+                | ActivePairState::Stuck(StuckReason::NoRule) => {}
+            }
+        }
+
+        stats
     }
 
     #[cfg(test)]

@@ -15,7 +15,7 @@ use crate::interaction_net::{
     CursorDependencyDisposition, CursorDependencyResolution, CursorProgress, CursorStep,
     DemandEndpoint, FrontierObservation, InteractionNet, InterfaceDemand, NetContention, NodeId,
     OperatorYield, Port, PreparedCopySource, Reduction, RuntimeNet, RuntimeNetMutation,
-    RuntimeNetRevisions, SharedRuntimeNet,
+    RuntimeNetPayload, RuntimeNetPayloadVisitStats, RuntimeNetRevisions, SharedRuntimeNet,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,6 +101,21 @@ pub(crate) struct CoreRuntimeNet {
 pub(crate) struct CoreRuntimeNetAccess<'access, 'scope> {
     runtime: &'access CoreRuntimeNet,
     _values: &'access RuntimeValueAccess<'scope>,
+}
+
+/// One direct semantic payload observed through a bounded core-net access.
+///
+/// Source identities are re-qualified with the same value-domain observer as
+/// their owner. Reporting one never inspects or materializes the source net.
+#[allow(
+    dead_code,
+    reason = "I4E installs the compatibility payload boundary before I8 migrates core net ownership"
+)]
+pub(crate) enum CoreRuntimeNetPayload<'payload> {
+    Value(&'payload Value),
+    Operator(&'payload CoreOperator),
+    Source(CoreRuntimeNet),
+    StuckReason(&'payload EvaluationHalt),
 }
 
 #[cfg(test)]
@@ -342,6 +357,39 @@ impl CoreRuntimeNetAccess<'_, '_> {
 
     pub(crate) fn with<R>(&self, inspect: impl FnOnce(&RuntimeNet<CoreSpecialization>) -> R) -> R {
         self.runtime.inner.with(inspect)
+    }
+
+    /// Enumerates the net's direct semantic payloads under its existing
+    /// read-only synchronization boundary.
+    ///
+    /// The callback is synchronous and must not re-enter this net. It may
+    /// inspect source identity, but must not reduce, wait on, or materialize
+    /// any reported source.
+    #[allow(
+        dead_code,
+        reason = "I4E installs the compatibility payload boundary before I8 migrates core net ownership"
+    )]
+    pub(crate) fn visit_logical_payloads(
+        &self,
+        visit: &mut impl FnMut(CoreRuntimeNetPayload<'_>),
+    ) -> RuntimeNetPayloadVisitStats {
+        self.with(|runtime| {
+            runtime.visit_logical_payloads(&mut |payload| match payload {
+                RuntimeNetPayload::Data(value) => visit(CoreRuntimeNetPayload::Value(value)),
+                RuntimeNetPayload::Operator(operator) => {
+                    visit(CoreRuntimeNetPayload::Operator(operator));
+                }
+                RuntimeNetPayload::Source(source) => {
+                    visit(CoreRuntimeNetPayload::Source(CoreRuntimeNet {
+                        inner: source.clone(),
+                        values: self.runtime.values.clone(),
+                    }));
+                }
+                RuntimeNetPayload::StuckReason(reason) => {
+                    visit(CoreRuntimeNetPayload::StuckReason(reason));
+                }
+            })
+        })
     }
 
     #[cfg(test)]

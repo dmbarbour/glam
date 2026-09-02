@@ -24,7 +24,7 @@ use crate::runtime::{EvaluationRuntimeId, RuntimeIds, RuntimeMutationAuthority, 
 
 mod evaluation_halt;
 pub(crate) mod keys;
-pub(crate) use evaluation_halt::EvaluationHalt;
+pub(crate) use evaluation_halt::{EvaluationHalt, EvaluationHaltPayload};
 mod managed;
 #[cfg(test)]
 pub(crate) use managed::{CoreValueAllocationScope, CoreValueDomainWitness};

@@ -54,9 +54,9 @@ not define language semantics or collect subsystem invariants.
 | `core/managed.rs` | Factory-qualified collector access, domain-qualified `RuntimeValueAccess`, Glam's centralized managed-slot policy, and private managed-family destruction admission records |
 | `core/managed/value_shell.rs` | Test-only I4A exhaustive managed-shell, leaf-policy, layout, and cyclic tracing fixtures; production values remain unmigrated |
 | `crates/glam-gc/` | Glam-owned typed-run tracing collector; the runtime domain currently owns a no-auto heap while production values remain unmigrated |
-| `core_net.rs` | Exact-value-domain facade plus scoped observation/mutation view for core interaction nets; raw shared-net ownership remains private |
+| `core_net.rs` | Exact-value-domain facade plus scoped observation/mutation and non-reducing semantic-payload views for core interaction nets; raw shared-net ownership remains private |
 | `interaction_net/model.rs`, `builder.rs` | Generic topology and checked construction |
-| `interaction_net/runtime/` | Mutable graph, active-pair reduction, logical copies |
+| `interaction_net/runtime/` | Mutable graph, active-pair reduction, logical copies, and a read-only logical payload walk which never reduces or materializes cursors |
 | `evaluation.rs`, `evaluation/session.rs`, `evaluation/pump.rs` | Shared demand/profile contracts, session admission, cooperative and runtime pumping |
 | `evaluation/access.rs` | I3 scoped evaluator authority, thread-bound mutator-free poll and evaluator-step contexts, claim/direct-owner poll admission, scoped wait-completion projection, post-scope reflection activation, remaining non-effect direct-evaluator compatibility, and temporary machine-completion root seam |
 | `evaluation/coordinator.rs`, `evaluation/coordinator/` | Authoritative work registry/queues plus task, completion, client-demand, spark, reflection, deferred, and settlement lifecycles; completed wait observations retain roots, parked demand routing is weak, and detached claims temporarily upgrade the exact registered session/domain |

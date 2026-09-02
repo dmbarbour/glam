@@ -1,7 +1,7 @@
 # Glam GC Integration Plan — 2026-08-19
 
 Status: in progress; Phases I0 through I3 and their mandatory reviews plus I4.0
-through I4D are complete. Phase I4E is pending. Collector Gate G1 passed on
+through I4E are complete. Phase I4F.1 is pending. Collector Gate G1 passed on
 2026-08-25. The remaining integration work follows the completed owner-matrix,
 stable-ledger, and low-risk checkpoint corrections from the integration
 review.
@@ -96,7 +96,9 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4D.1 | complete | non-forcing list/map logical adapters and trace-work counters |
 | I4D.2 | complete | shared-spine exactness, closed cycle reclamation, and documentation closure |
 | I4D | complete | persistent collection adapters |
-| I4E | pending | non-reducing net value adapter |
+| I4E.1 | complete | generic runtime-net payload walk and core compatibility adapters |
+| I4E.2 | complete | exhaustive no-reduction/materialization and closed-cycle verification |
+| I4E | complete | non-reducing net value adapter |
 | I4F.1 | pending | durable root-surface conversion gate |
 | I4F.2 | pending | public managed-root production switch |
 | I5 | pending | managed lazy/promise cells, external lifecycle, and cycle reclamation |
@@ -2469,6 +2471,51 @@ re-audits these compatibility adapters with the final managed value form.
 
 Verification: `net_value_adapter_traces_without_reduction_or_materialization`
 and `net_value_adapter_cycle_marks_exactly`. Production remains `NoAuto`.
+
+Implement this phase in two bounded checkpoints:
+
+1. **I4E.1 — Logical payload and identity adapters.** Add one generic,
+   read-only `RuntimeNet` payload walk which reports data, operators, retained
+   source-net identities, and specialization-owned stuck reasons. It must not
+   claim work, reduce an active pair, follow a source frontier, materialize a
+   cursor, publish a topology revision, or register/perform a semantic wait.
+   Translate that walk through bounded `CoreRuntimeNetAccess`; report the
+   direct values held by every
+   `CoreOperator` variant and the external net identities held by `NetValue`,
+   `FunctionCode`, `FunctionValue`, unresolved net/function-call lazies,
+   function-capture operators, copy state, and cursor dependencies. Classify
+   retained `EvaluationHalt` payloads exhaustively while treating wait tokens
+   as leaves.
+2. **I4E.2 — Closed verification and reconciliation.** Cover every current
+   core-operator variant, direct function/net value arms, function stages,
+   unresolved net/function-call sources, a retained specialization failure,
+   and an untouched remote-copy layer. Latch unchanged topology/disturbance
+   revisions and a no-forcing sentinel. A closed managed fixture parameterizes
+   the same generic runtime-net walk over managed data and proves rooted
+   survival followed by reclamation of an unrooted net self-cycle. Update the
+   ownership ledger and retain production `NoAuto`.
+
+I4E completed on 2026-09-02. `RuntimeNet::visit_logical_payloads` now walks
+only authoritative representation state under its caller-provided read
+boundary. It reports every data/operator node, every source identity retained
+by copy or blocked cursor state, and every specialization stuck reason; ports,
+fan identities, wait tokens, structural nodes, and generic no-rule failures
+remain leaves. Counts describe owning occurrences, so duplicated source
+handles are not deduplicated.
+
+The core adapter qualifies source handles with their owner's value domain and
+then reports exact direct `Value` and `CoreRuntimeNet` edges. Operator matching
+is compile-exhaustive, function-code operators expose their stage net, and
+halt matching distinguishes structured failure, blocked wait, and unassigned
+promise without forcing any payload. Focused tests preserve net revisions,
+retain a stuck pair, leave a remote cursor unmaterialized, and prove that a
+semantic thunk is not invoked. A separate closed specialization stores a
+managed self-edge as runtime-net data and demonstrates exact survival and
+reclamation. This phase does not migrate the synchronized owner or authorize
+production collection; I8 still owns the managed outer cell, lock protocol,
+and value-installing mutation gateways. I5's lazy-cell migration must combine
+value and net categories from one stable source/result snapshot rather than
+calling the two compatibility adapters across a publication race.
 
 ### Phase I4F.1 — Durable Root-Surface Conversion Gate
 

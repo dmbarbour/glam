@@ -17,7 +17,8 @@ pub(crate) use runtime::{
     CursorDependencyDisposition, CursorDependencyResolution, CursorProgress, CursorStep,
     DemandEndpoint, FrontierObservation, InterfaceDemand, NetContention, OperatorCall,
     PreparedCopySource, Reduction, ReductionKind, RuntimeNet, RuntimeNetMutation,
-    RuntimeNetRevisions, SharedRuntimeNet, StuckReason,
+    RuntimeNetPayload, RuntimeNetPayloadVisitStats, RuntimeNetRevisions, SharedRuntimeNet,
+    StuckReason,
 };
 
 #[cfg(test)]

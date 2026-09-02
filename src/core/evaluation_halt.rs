@@ -21,6 +21,20 @@ enum EvaluationHaltKind {
     UnassignedPromise(PromisedValue),
 }
 
+/// Direct semantic payload retained by one halted evaluation.
+///
+/// This crate-private classification keeps collector adapters exhaustive
+/// without exposing scheduler wait identities as semantic values.
+#[allow(
+    dead_code,
+    reason = "I4E installs exact halt payload classification before managed net migration"
+)]
+pub(crate) enum EvaluationHaltPayload<'payload> {
+    Failure(&'payload EvaluationFailure),
+    Blocked,
+    UnassignedPromise(&'payload PromisedValue),
+}
+
 impl EvaluationHalt {
     pub(crate) fn new(message: impl Into<String>) -> Self {
         Self::failure(Arc::new(EvaluationFailure::message(message.into())))
@@ -87,6 +101,22 @@ impl EvaluationHalt {
     pub(crate) fn unassigned(promise: PromisedValue) -> Self {
         Self {
             kind: EvaluationHaltKind::UnassignedPromise(promise),
+        }
+    }
+
+    #[allow(
+        dead_code,
+        reason = "I4E installs exact halt payload classification before managed net migration"
+    )]
+    pub(crate) fn payload(&self) -> EvaluationHaltPayload<'_> {
+        match &self.kind {
+            EvaluationHaltKind::Failure(failure) => {
+                EvaluationHaltPayload::Failure(failure.as_ref())
+            }
+            EvaluationHaltKind::Blocked(_) => EvaluationHaltPayload::Blocked,
+            EvaluationHaltKind::UnassignedPromise(promise) => {
+                EvaluationHaltPayload::UnassignedPromise(promise)
+            }
         }
     }
 }
