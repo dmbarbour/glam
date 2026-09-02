@@ -298,10 +298,17 @@ I4 remains correctly ordered after I3:
 - I4F.2 must switch the managed value shell and public/runtime root atomically,
   close compatibility projections, and retain matching-runtime authority.
 
-No repartitioning is required before I4.0. I4F remains deliberately large but
-already has the F.1 durable-owner gate before the F.2 atomic representation
-switch; it should be reviewed again after I4A-I4E reveal the concrete managed
-shell and family taxonomy.
+No repartitioning was required before I4.0. The requested post-I4E review was
+performed on 2026-09-02 after the concrete shell, payload adapters, persistent
+collection walk, and runtime-net walk were available. I4F.1 is now partitioned
+into an inventory baseline followed by cache, evaluation, reflection,
+transport, compiler/binary, and net/hidden-owner checkpoints. I4F.2 separates
+private production-shape preparation and compatibility-access retirement from
+its one intentionally atomic root/shell cutover, then runs the real-owner
+collection matrix in four bounded groups and deletes transitional scaffolding.
+The review also moved collection-survival proof out of I4F.1: its compatibility
+root is non-registering, so it can only latch publish/retain/retire behavior;
+I4F.2d owns the post-switch collection proof.
 
 ## Decision
 

@@ -915,12 +915,15 @@ I4F is split into I4F.1, a source-backed durable-owner conversion gate, and
 I4F.2, the atomic managed-root/value-shell production switch. I4F.1 enumerates
 the cache, coordinator/machine, reflection, diagnostic/event, compiler/CLI,
 net/work, and type-erased owner classes; requires every result to be a
-registered root, exact managed edge, or proven bounded local; and latches
-survival/release fixtures immediately outside construction scope. I3A.4 now
-forbids disabled collection from extending pointer lifetime. I9 has become a
-lifecycle and retirement audit and explicitly sends any newly found bare owner
-back to its earliest managed-edge checkpoint rather than converting it late.
-The ownership ledger records the same chronology.
+root-shaped surface, exact managed edge, or proven bounded local; and registers
+real-owner publish/retain/retire fixtures immediately outside construction
+scope. The 2026-09-02 post-I4E partitioning pass clarified that the
+compatibility `RuntimeValueRoot` cannot yet prove collector survival: I4F.2c
+registers the roots atomically and I4F.2d then runs the closed collection
+matrix. I3A.4 now forbids disabled collection from extending pointer lifetime.
+I9 has become a lifecycle and retirement audit and explicitly sends any newly
+found bare owner back to its earliest managed-edge checkpoint rather than
+converting it late. The ownership ledger records the same chronology.
 
 ### GCI-013 — Passive managed destruction was overextended to external RAII
 
