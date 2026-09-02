@@ -760,9 +760,11 @@ But effective support for editable projections will benefit from careful design 
 
 ### Macros
 
-Macros are essentially user-defined compilation steps. 
+A front-end compiler may recognize macro calls. The primary use case for macros is metaprogramming in terms of rewriting text, tokens, ASTs, etc.. Although lazy evaluation and staging mitigate need for macros, they remain useful for embedding DSLs. 
 
-Macros enable metaprogramming at the syntax layer in terms of rewriting text, tokens, ASTs, etc.. It is convenient to express macros effectfully, i.e. with 'read' and 'write' effects at flexible levels of abstraction. To simplify local reasoning, the compiler may restrict the scope of macros, e.g. ensuring balanced reads and writes of parentheses.
+Macros should be defined and distributed through the normal namespace. Macros must evaluate at point of use, thus overriding a macro definition influences only subsequent macro calls. For many reasons - composing macro definitions without calling them, lazy loading of modules, scoping, etc.. - it is useful to syntactically distinguish macro calls. For the ".g" syntax we use `@macro_name`.
+
+It is convenient to express macros effectfully, i.e. with compiler-provided 'read' and 'write' effects at flexible levels of abstraction. The front-end compiler can provide an implicit scope and ensure reads and writes respect boundaries such as balanced brackets, braces, and parentheses.
 
 ## Reasoning
 
