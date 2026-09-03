@@ -133,7 +133,10 @@ mod tests {
 
     #[test]
     fn formatter_is_cached_after_exposing_its_function() {
-        let values = crate::compiler::test_value_factory();
+        let values = CoreValueFactory::new(
+            crate::runtime::allocate_evaluation_runtime_id(),
+            crate::runtime::RuntimeIds::new(),
+        );
         let baseline = values
             .collect_managed_for_test()
             .expect("canonical roots should collect before the formatter fixture");
