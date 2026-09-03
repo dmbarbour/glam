@@ -28,11 +28,12 @@ mod managed;
 mod runtime_cache;
 #[cfg(test)]
 pub(crate) use managed::{CoreValueAllocationScope, CoreValueDomainWitness};
+pub(crate) use managed::{
+    ExternalOwnerHandle, ExternalOwnerRegistry, OpaquePayloadFamily, OpaquePayloadRecord,
+    RuntimeValueAccess, RuntimeValueObserver,
+};
 #[cfg(test)]
 pub(crate) use managed::{ManagedDropRecord, ManagedFamily};
-pub(crate) use managed::{
-    OpaquePayloadFamily, OpaquePayloadRecord, RuntimeValueAccess, RuntimeValueObserver,
-};
 use runtime_cache::{RuntimeCacheEntry, RuntimeCacheMap, SharedRuntimeCacheMap};
 pub(crate) use runtime_cache::{RuntimeCacheFamily, RuntimeCacheFamilyRecord};
 
@@ -312,6 +313,7 @@ pub(crate) struct RuntimeValueDomain {
     heap: Heap,
     cache: RuntimeValueCache,
     work_coordinator: Arc<Mutex<Weak<EvaluationWorkCoordinator>>>,
+    external_owners: ExternalOwnerRegistry,
 }
 
 /// Small canonical value set owned directly by one runtime.
@@ -370,6 +372,7 @@ impl CoreValueFactory {
                 extension_lookups: AtomicUsize::new(0),
             },
             work_coordinator: Arc::new(Mutex::new(Weak::new())),
+            external_owners: ExternalOwnerRegistry::new(),
         });
         debug_assert_eq!(domain.heap.collection_policy(), CollectionPolicy::NoAuto);
         Self {
@@ -650,13 +653,16 @@ impl LazyValue {
         record: HostCallRecord,
         producer: impl Fn() -> Result<RuntimeValueRoot, Arc<EvaluationFailure>> + Send + Sync + 'static,
     ) -> Self {
+        let handle = values
+            .domain
+            .external_owners
+            .insert(Arc::new(HostCallOwner {
+                operation: Arc::new(producer),
+            }));
         Self::with_source(
             values,
             label,
-            LazySource::HostCall(Arc::new(HostCallProducer {
-                operation: Arc::new(producer),
-                record,
-            })),
+            LazySource::HostCall(Arc::new(HostCallProducer { handle, record })),
         )
     }
 
@@ -1370,6 +1376,10 @@ pub(crate) type SemanticThunk =
     dyn Fn(&EvaluatorStepContext<'_>) -> Result<Value, EvaluationHalt> + Send + Sync;
 type HostCallOperation = dyn Fn() -> Result<RuntimeValueRoot, Arc<EvaluationFailure>> + Send + Sync;
 
+struct HostCallOwner {
+    operation: Arc<HostCallOperation>,
+}
+
 /// Source-backed ownership classification for one deferred external call.
 ///
 /// The record deliberately does not claim that a Rust closure environment is
@@ -1415,21 +1425,39 @@ impl HostCallRecord {
 }
 
 pub(crate) struct HostCallProducer {
-    operation: Arc<HostCallOperation>,
+    handle: ExternalOwnerHandle,
     record: HostCallRecord,
 }
 
 impl HostCallProducer {
-    pub(crate) fn invoke(&self) -> Result<RuntimeValueRoot, Arc<EvaluationFailure>> {
+    pub(crate) fn invoke(
+        &self,
+        values: &CoreValueFactory,
+    ) -> Result<RuntimeValueRoot, Arc<EvaluationFailure>> {
         // The record is compile-time/source-backed classification evidence;
         // touching it keeps that evidence tied to the invoked producer.
         let _ = self.record;
-        (self.operation)()
+        let owner = values
+            .domain
+            .external_owners
+            .get::<HostCallOwner>(&self.handle);
+        (owner.operation)()
     }
 
     #[cfg(test)]
     pub(crate) fn record(&self) -> HostCallRecord {
         self.record
+    }
+}
+
+#[cfg(test)]
+impl CoreValueFactory {
+    pub(crate) fn drain_external_owners_for_test(&self) -> usize {
+        self.domain.external_owners.drain_retired()
+    }
+
+    pub(crate) fn external_owner_count_for_test(&self) -> usize {
+        self.domain.external_owners.len()
     }
 }
 

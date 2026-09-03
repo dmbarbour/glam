@@ -174,6 +174,17 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "I4F.2e.1"
     ),
     closed_durable!(
+        "src/core/managed/external_owners.rs",
+        "runtime external active-owner registry",
+        "weak lease tokens plus type-erased callback or retirement owners",
+        "runtime value-domain or outstanding managed lease lifetime",
+        "typed owner insertion before publishing its passive lease",
+        "ordinary registry drain or runtime-domain teardown outside collector finalization",
+        TypeErased,
+        RootSurface,
+        "I4F.2e.1"
+    ),
+    closed_durable!(
         "src/g_syntax/compiler_values.rs",
         "GCompilerValues / BuiltinModule / BuildingEffectValues",
         "cached RuntimeValueRoot fields and effect maps",
@@ -717,10 +728,10 @@ fn is_production_source(relative: &Path) -> bool {
 // aggregate makes category drift legible, while the deterministic fingerprint
 // detects a declaration being exchanged for another with the same counts.
 // `owner_for_declaration` is the reviewed semantic assignment for every entry.
-const DECLARATION_BASELINE_COUNT: usize = 126;
+const DECLARATION_BASELINE_COUNT: usize = 127;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([98, 70, 1, 10, 15, 0, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 6_490_561_854_931_115_055;
+    DeclarationSignals::new([98, 70, 1, 10, 15, 0, 3, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 10_773_130_779_085_242_839;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,
@@ -807,6 +818,8 @@ fn owner_for_declaration(declaration: &str) -> Option<&'static str> {
         || declaration == "src/core/runtime_cache.rs::RuntimeCacheEntry"
     {
         "RuntimeValueCache.extensions / CoreValueFactory.local_extensions"
+    } else if declaration.starts_with("src/core/managed/external_owners.rs::") {
+        "runtime external active-owner registry"
     } else if declaration == "src/core.rs::OpaqueValue" {
         "admitted opaque token families"
     } else if declaration.starts_with("src/core/evaluation_halt.rs::")

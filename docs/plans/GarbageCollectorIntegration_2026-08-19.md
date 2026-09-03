@@ -3779,6 +3779,17 @@ semantic-edge work for I5-I8 but have passive destruction once these three
 frontiers are extracted. Compatibility `core::Value` is now negatively
 latched against `ManagedFamily` admission until I4F.2b.4 closes the inventory.
 
+I4F.2b.1 completed 2026-09-03. Each deferred host call now registers its
+callback owner in the matching runtime value domain and retains only a scalar
+registry identity plus an ordinary lease token beneath `LazySource`. Cloning a
+lazy source shares that lease. Registry access first detaches owners whose last
+lease has disappeared, then releases the lock before destroying callbacks;
+lookup likewise clones the owner before invocation, so neither destruction nor
+execution occurs under the registry lock or collector finalization. Existing
+host-call result/failure publication is unchanged. A callback may be retained
+until the next registry operation or runtime-domain teardown, as permitted by
+the gate's conservative-retention rule.
+
 Conservative retention until the next ordinary registry drain is permitted;
 retention until runtime-domain teardown is the fallback if no later operation
 occurs. This can delay Rust resource destruction but must not change Glam

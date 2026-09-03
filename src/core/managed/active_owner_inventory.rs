@@ -33,9 +33,9 @@ struct ActiveDestructionFrontier {
 const ACTIVE_DESTRUCTION_FRONTIERS: &[ActiveDestructionFrontier] = &[
     ActiveDestructionFrontier {
         kind: ActiveDestructionKind::HostCallback,
-        path: "Value::Lazy -> LazyCell::source -> LazySource::HostCall -> HostCallProducer::operation",
-        owner: "Arc<HostCallOperation> closure environment",
-        active_action: "arbitrary host-capture destruction",
+        path: "Value::Lazy -> LazyCell::source -> LazySource::HostCall -> HostCallProducer::handle -> runtime external-owner registry",
+        owner: "runtime-owned HostCallOwner closure environment",
+        active_action: "arbitrary host-capture destruction is externally drained",
         extraction: "I4F.2b.1 external host-call registry",
     },
     ActiveDestructionFrontier {
@@ -75,7 +75,13 @@ const SOURCE_LATCHES: &[SourceLatch] = &[
     },
     SourceLatch {
         path: "src/core.rs",
-        needle: "operation: Arc<HostCallOperation>",
+        needle: "handle: ExternalOwnerHandle",
+        expected: 1,
+        frontier: ActiveDestructionKind::HostCallback,
+    },
+    SourceLatch {
+        path: "src/core/managed/external_owners.rs",
+        needle: "owner: Box<dyn Any + Send + Sync>",
         expected: 1,
         frontier: ActiveDestructionKind::HostCallback,
     },
@@ -187,8 +193,8 @@ fn assert_lazy_source_active_destruction_paths(source: &LazySource) {
 }
 
 fn assert_host_call_fields(producer: &HostCallProducer) {
-    let HostCallProducer { operation, record } = producer;
-    let _ = (operation, record);
+    let HostCallProducer { handle, record } = producer;
+    let _ = (handle, record);
 }
 
 fn assert_reflection_fields(computation: &ReflectionComputation) {

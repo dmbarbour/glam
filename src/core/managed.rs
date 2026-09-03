@@ -196,6 +196,9 @@ pub(crate) unsafe trait OpaquePayloadFamily: Any + Send + Sync {
     const PAYLOAD_RECORD: OpaquePayloadRecord;
 }
 
+mod external_owners;
+pub(crate) use external_owners::{ExternalOwnerHandle, ExternalOwnerRegistry};
+
 // SAFETY: this is the existing scalar collector-access probe. It has no
 // managed edge, no drop glue, and no active capability. Production value
 // families receive their own explicit admissions in their migration phases.

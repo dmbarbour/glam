@@ -189,7 +189,7 @@ impl EvaluationTaskMachine for LazyTaskMachine {
         let durable_context = self.context.clone();
         if let LazyTaskWork::HostCall(producer) = &self.work {
             let producer = Arc::clone(producer);
-            let result = producer.invoke();
+            let result = producer.invoke(durable_context.values());
             return poll_context.evaluate(&durable_context, |context| match result {
                 Ok(value)
                     if value.runtime_id() != durable_context.values().runtime_id() =>

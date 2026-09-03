@@ -3,6 +3,8 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::core::{
     EvaluationFailure, EvaluationHalt, HostCallRecord, LazySource, LazyValue, Value,
@@ -209,4 +211,46 @@ fn external_host_call_requires_a_source_backed_record() {
             "no value captures",
         )
     );
+}
+
+struct HostCaptureDrop(Arc<AtomicUsize>);
+
+impl Drop for HostCaptureDrop {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[test]
+fn host_call_capture_retires_only_during_external_registry_drain() {
+    let values = crate::core::CoreValueFactory::new(
+        crate::runtime::allocate_evaluation_runtime_id(),
+        crate::runtime::RuntimeIds::new(),
+    );
+    let drops = Arc::new(AtomicUsize::new(0));
+    let capture = HostCaptureDrop(Arc::clone(&drops));
+    let lazy = LazyValue::external_host_call(
+        &values,
+        "external owner fixture",
+        HostCallRecord::external(
+            "external owner fixture",
+            "src/core/managed/containment_inventory.rs",
+            "passive drop observer",
+        ),
+        move || {
+            let _ = &capture;
+            Err(Arc::new(EvaluationFailure::message("not invoked")))
+        },
+    );
+    assert_eq!(values.external_owner_count_for_test(), 1);
+
+    drop(lazy);
+    assert_eq!(
+        drops.load(Ordering::Relaxed),
+        0,
+        "dropping the lazy lease must not destroy its host capture"
+    );
+    assert_eq!(values.drain_external_owners_for_test(), 1);
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
+    assert_eq!(values.external_owner_count_for_test(), 0);
 }
