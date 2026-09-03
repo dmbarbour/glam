@@ -168,7 +168,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.2b.3 | complete | opaque-payload ownership extraction |
 | I4F.2b.4 | complete | passive-destruction closure gate |
 | I4F.2b | complete | active-owner extraction before managed value ownership |
-| I4F.2c.1 | pending | private production managed-node and family contract |
+| I4F.2c.1 | complete | private production managed-node and family contract |
 | I4F.2c.2 | pending | exact production-shell visitor composition |
 | I4F.2c.3 | pending | private inline-or-root representation and provenance |
 | I4F.2c | pending | private production-root and managed-shell preparation |
@@ -3864,6 +3864,17 @@ Prepare the cutover without publishing a managed production value:
 
 Production representation and behavior remain unchanged through all three
 checkpoints.
+
+I4F.2c.1 completed 2026-09-03. The private production-shaped
+`ManagedValueNode` now contains one compatibility `Value`, requests the shared
+Glam managed-slot layout, and carries the stable passive drop record admitted
+by I4F.2b. Its `RuntimeValueAccess` gateway allocates and roots atomically from
+the caller's perspective, so no bare pointer can escape its bounded mutator
+region. The gateway remains absent from every production factory call site;
+only the node-local closed fixture reaches it before I4F.2d. That fixture
+proves matching-domain observation, rooted survival, unrooted reclamation, and
+the expected family/layout contract. The durable-owner and managed-entry
+inventories now name this prepared root surface explicitly.
 
 #### Phase I4F.2d — Atomic Production Switch
 

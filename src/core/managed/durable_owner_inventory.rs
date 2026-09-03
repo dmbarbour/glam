@@ -141,6 +141,17 @@ macro_rules! edge_free {
 // becomes a registered collector root.
 const OWNER_INVENTORY: &[OwnerEntry] = &[
     closed_durable!(
+        "src/core/managed/value_node.rs",
+        "production managed core value node",
+        "one passive compatibility Value payload",
+        "collector allocation and its registered roots",
+        "private allocate-and-root gateway; production activation waits for I4F.2d",
+        "collector finalization after the last root and managed edge retire",
+        BareValue,
+        RootSurface,
+        "I4F.2e.1"
+    ),
+    closed_durable!(
         "src/api/value.rs; src/runtime.rs",
         "public Value / EvaluatedValue / RuntimeValueRoot / RuntimeFailureRoot facade",
         "opaque public handles and the compatibility value/failure roots",
@@ -728,10 +739,10 @@ fn is_production_source(relative: &Path) -> bool {
 // aggregate makes category drift legible, while the deterministic fingerprint
 // detects a declaration being exchanged for another with the same counts.
 // `owner_for_declaration` is the reviewed semantic assignment for every entry.
-const DECLARATION_BASELINE_COUNT: usize = 125;
+const DECLARATION_BASELINE_COUNT: usize = 126;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([96, 72, 1, 10, 15, 0, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 15_360_354_827_165_617_698;
+    DeclarationSignals::new([97, 72, 1, 10, 15, 0, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 12_096_279_601_586_326_064;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,
@@ -820,6 +831,8 @@ fn owner_for_declaration(declaration: &str) -> Option<&'static str> {
         "RuntimeValueCache.extensions / CoreValueFactory.local_extensions"
     } else if declaration.starts_with("src/core/managed/external_owners.rs::") {
         "runtime external active-owner registry"
+    } else if declaration == "src/core/managed/value_node.rs::ManagedValueNode" {
+        "production managed core value node"
     } else if declaration == "src/core.rs::OpaqueValue" {
         "admitted opaque token families"
     } else if declaration.starts_with("src/core/evaluation_halt.rs::")
