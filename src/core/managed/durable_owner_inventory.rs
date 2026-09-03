@@ -34,12 +34,6 @@ enum TargetDisposition {
     EdgeFree,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum MigrationState {
-    Closed,
-    Open(&'static str),
-}
-
 #[derive(Clone, Copy, Debug)]
 struct DurableFixtureContract {
     collection_checkpoint: &'static str,
@@ -67,31 +61,7 @@ struct OwnerEntry {
     retirement: &'static str,
     current: CurrentStorage,
     target: TargetDisposition,
-    migration: MigrationState,
     verification: OwnerVerification,
-}
-
-macro_rules! open_durable {
-    ($source:literal, $owner:literal, $fields:literal, $lifetime:literal, $publication:literal, $retirement:literal, $current:ident, $target:ident, $migration:literal, $fixture:literal) => {
-        OwnerEntry {
-            source: $source,
-            owner: $owner,
-            fields: $fields,
-            lifetime: $lifetime,
-            publication: $publication,
-            retirement: $retirement,
-            current: CurrentStorage::$current,
-            target: TargetDisposition::$target,
-            migration: MigrationState::Open($migration),
-            verification: OwnerVerification::Durable(DurableFixtureContract {
-                collection_checkpoint: $fixture,
-                constructor: concat!($owner, " construction"),
-                publication: $publication,
-                observation: concat!($owner, " retained-value observation"),
-                retirement: $retirement,
-            }),
-        }
-    };
 }
 
 macro_rules! closed_durable {
@@ -105,7 +75,6 @@ macro_rules! closed_durable {
             retirement: $retirement,
             current: CurrentStorage::$current,
             target: TargetDisposition::$target,
-            migration: MigrationState::Closed,
             verification: OwnerVerification::Durable(DurableFixtureContract {
                 collection_checkpoint: $fixture,
                 constructor: concat!($owner, " construction"),
@@ -128,7 +97,6 @@ macro_rules! bounded {
             retirement: "scope exit",
             current: CurrentStorage::BoundedLocal,
             target: TargetDisposition::BoundedLocal,
-            migration: MigrationState::Closed,
             verification: OwnerVerification::Bounded {
                 scope_proof: $proof,
             },
@@ -147,7 +115,6 @@ macro_rules! exact_managed {
             retirement: "owning managed graph retirement",
             current: CurrentStorage::$current,
             target: TargetDisposition::ExactManagedEdge,
-            migration: MigrationState::Closed,
             verification: OwnerVerification::ExactManaged { proof: $proof },
         }
     };
@@ -164,15 +131,14 @@ macro_rules! edge_free {
             retirement: "ordinary Rust drop",
             current: CurrentStorage::$current,
             target: TargetDisposition::EdgeFree,
-            migration: MigrationState::Closed,
             verification: OwnerVerification::EdgeFree { proof: $proof },
         }
     };
 }
 
-// I4F.1a records open work; the named owner checkpoint closes each row. The
-// collection checkpoint names the I4F.2d slice which will exercise the real
-// owner after RuntimeValueRoot becomes a registered collector root.
+// I4F.1g closed every inventoried owner. The collection checkpoint names the
+// I4F.2d slice which will exercise the real owner after RuntimeValueRoot
+// becomes a registered collector root.
 const OWNER_INVENTORY: &[OwnerEntry] = &[
     closed_durable!(
         "src/api/value.rs; src/runtime.rs",
@@ -328,16 +294,15 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         RootSurface,
         "I4F.2d.2"
     ),
-    open_durable!(
+    closed_durable!(
         "src/reflection/machine.rs",
         "EffectTask frames, requests, continuations, fixpoints, branches, and task blocks",
         "raw Value/default RuntimeValueRoot fields plus Arc<EvaluationFailure>",
         "parked or worker-transferred effect machine",
         "frame push, request decode, branch/fix capture, or task park",
         "frame consumption, terminal publication, cancellation, or abandonment",
-        BareValue,
+        CompatibilityRoot,
         RootSurface,
-        "I4F.1d.3",
         "I4F.2d.2"
     ),
     closed_durable!(
@@ -351,7 +316,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         RootSurface,
         "I4F.2d.2"
     ),
-    open_durable!(
+    closed_durable!(
         "src/api/diagnostics.rs",
         "Diagnostic / DiagnosticEvent / bus, ingress, and subscription state",
         "public Value emission/origin/context and callback captures",
@@ -360,10 +325,9 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "delivery, subscription retirement, or bus drop",
         PublicRoot,
         RootSurface,
-        "I4F.1e",
         "I4F.2d.3"
     ),
-    open_durable!(
+    closed_durable!(
         "src/api/runtime/events.rs",
         "RuntimeInputRecord / RuntimeOutputIntent / RuntimeDeliveryRecord and snapshots",
         "RuntimeValueRoot payloads plus converter/decoder callbacks",
@@ -372,7 +336,6 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "consumption, delivery terminalization, or runtime event-state drop",
         CallbackCapture,
         RootSurface,
-        "I4F.1e",
         "I4F.2d.3"
     ),
     closed_durable!(
@@ -471,16 +434,15 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         RootSurface,
         "I4F.2d.4"
     ),
-    open_durable!(
+    closed_durable!(
         "src/core.rs; src/core_net.rs; src/eval/net.rs",
-        "FunctionCode / FunctionValue / NetValue / CoreOperator / parked net work",
+        "FunctionCode / FunctionValue / NetValue / CoreOperator / synchronized net state",
         "CoreRuntimeNet identities and direct Value/operator payloads",
-        "shared function/net value or parked normalization/cursor work",
-        "net/function construction or driver park",
-        "value/work retirement or net owner drop",
+        "shared function/net value or authoritative blocked net state",
+        "net/function construction or blocked-state publication",
+        "value/net retirement or net owner drop",
         SynchronizedNet,
         RootSurface,
-        "I4F.1g",
         "I4F.2d.4"
     ),
     edge_free!(
@@ -862,7 +824,7 @@ fn owner_for_declaration(declaration: &str) -> Option<&'static str> {
             "src/core.rs::FunctionCode" | "src/core.rs::NetValue"
         )
     {
-        "FunctionCode / FunctionValue / NetValue / CoreOperator / parked net work"
+        "FunctionCode / FunctionValue / NetValue / CoreOperator / synchronized net state"
     } else if declaration.starts_with("src/eval/builtins/")
         || declaration.starts_with("src/eval/value.rs::")
     {
@@ -972,23 +934,14 @@ fn durable_value_owner_inventory_is_complete() {
                 ] {
                     assert!(!value.is_empty(), "{} has no {label}", entry.owner);
                 }
-                if let MigrationState::Open(checkpoint) = entry.migration {
-                    assert!(
-                        checkpoint.starts_with("I4F.1"),
-                        "{} has invalid open checkpoint {checkpoint}",
-                        entry.owner
-                    );
-                }
             }
             OwnerVerification::ExactManaged { proof } => {
                 assert_eq!(entry.target, TargetDisposition::ExactManagedEdge);
-                assert_eq!(entry.migration, MigrationState::Closed);
                 assert!(!proof.is_empty(), "{} has no exact-edge proof", entry.owner);
             }
             OwnerVerification::Bounded { scope_proof } => {
                 assert_eq!(entry.current, CurrentStorage::BoundedLocal);
                 assert_eq!(entry.target, TargetDisposition::BoundedLocal);
-                assert_eq!(entry.migration, MigrationState::Closed);
                 assert!(
                     !scope_proof.is_empty(),
                     "{} has no scope proof",
@@ -997,7 +950,6 @@ fn durable_value_owner_inventory_is_complete() {
             }
             OwnerVerification::EdgeFree { proof } => {
                 assert_eq!(entry.target, TargetDisposition::EdgeFree);
-                assert_eq!(entry.migration, MigrationState::Closed);
                 assert!(!proof.is_empty(), "{} has no edge-free proof", entry.owner);
             }
         }
@@ -1031,11 +983,4 @@ fn durable_value_owner_inventory_is_complete() {
             );
         }
     }
-
-    assert!(
-        OWNER_INVENTORY
-            .iter()
-            .any(|entry| matches!(entry.migration, MigrationState::Open(_))),
-        "I4F.1a should retain explicitly assigned open conversion rows"
-    );
 }

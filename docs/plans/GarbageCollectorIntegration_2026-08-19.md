@@ -134,6 +134,9 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.1f.3 | complete | binary configuration and logger roots |
 | I4F.1f | complete | assembly, compiler, macro, configuration, and logger root surfaces |
 | I4F.1g.1 | complete | synchronized-net owners and bounded driver work |
+| I4F.1g.2 | complete | hidden-owner audit and closed inventory gate |
+| I4F.1g | complete | net, hidden-owner, and gate closure |
+| I4F.1 | complete | exhaustive durable root-surface conversion |
 | I4F.1g | pending | synchronized-net, hidden-owner, and final inventory closure |
 | I4F.1 | pending | durable root-surface conversion gate |
 | I4F.2a.1 | pending | private production managed-node and family contract |
@@ -3369,6 +3372,21 @@ function/operator payload after construction scope and releases it with the
 last net owner. Existing forced park, retry, unwind, contention, and
 normalization-close fixtures remain the behavioral verification. No
 production representation or semantics changed.
+
+I4F.1g.2 completed 2026-09-03, closing I4F.1. The final source-backed audit
+reverified the complete declaration baseline together with the dedicated
+closure/opaque-constructor, opaque-family, runtime-cache-family, managed-family,
+and bounded-access inventories. These gates reject an unassigned durable
+declaration, an unreviewed `Any` or cache family, an unrestricted closure
+capture, a hidden managed pointer, or an authority-bearing net escape. The
+four rows whose implementation checkpoints had completed but whose migration
+labels remained stale (reflection machine, diagnostics, events, and core net)
+are now closed. The migration-state variant and open-row macro were removed,
+making a newly open owner an explicit inventory design change rather than a
+string annotation. Existing subsystem-specific construction, publication,
+retention, and retirement fixtures remain the non-collecting owner matrix;
+I4F.2d will promote those same real owners to isolated collection fixtures
+after the production root switch. Production remains `NoAuto`.
 
 ### Phase I4F.2 — Public-Root Production Switch
 
