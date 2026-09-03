@@ -119,6 +119,8 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.1d.3c.1 | complete | reflection branch effect/state roots and fused handoff |
 | I4F.1d.3c.2 | complete | reflection work, outcome, cut, and retry root closure |
 | I4F.1d.3c | complete | reflection branch, work, cut, and retry roots |
+| I4F.1d.3d.1 | complete | reflection continuation, delimiter, and reset roots |
+| I4F.1d.3d.2 | pending | reflection fixpoint roots and captured-control closure |
 | I4F.1d.3d | pending | reflection continuation, reset, and fixpoint roots |
 | I4F.1d.3e | pending | reflection decoded-request handoff and machine closure |
 | I4F.1d.3 | pending | reflection machine frame and request roots |
@@ -2898,10 +2900,14 @@ three checkpoints:
        work, cut operations/alternatives, and retry work to root-shaped
        storage, then close the branch/execution inventory. Raw values may
        exist only within one bounded evaluator/interpreter step.
-   - **I4F.1d.3d — Captured control and fixpoints.** Convert continuations,
-     delimiter/reset payloads, captured continuations, fix roots/restarts, and
-     active fixpoint payloads. Promise handles retain their separately
-     inventoried lifecycle contract through I5.
+   - **I4F.1d.3d — Captured control and fixpoints.** Complete this graph in two
+     checkpoints:
+     - **I4F.1d.3d.1 — Captured control.** Convert continuation values,
+       delimiter reset stacks, reset frames, and captured-continuation
+       containers to root-shaped storage.
+     - **I4F.1d.3d.2 — Fixpoints and closure.** Convert fix roots/restarts and
+       close the captured-control graph. Promise handles retain their
+       separately inventoried lifecycle contract through I5.
    - **I4F.1d.3e — Decoded-request handoff and closure.** Reconcile the rooted
      `Request` form, specialization request state, and phase-root bundle;
      classify `Request<_, Value>`, fusion records, parser temporaries, and
@@ -3069,6 +3075,23 @@ fields became five runtime roots, while the compatibility-access row records
 only their bounded projections and construction gateways. Captured-control
 and fixpoint payloads remain assigned to I4F.1d.3d. Production remains
 `NoAuto`.
+
+I4F.1d.3d.1 completed 2026-09-03. Glam, assertion, scoped-close, and
+scoped-result continuations now retain exact runtime roots. Restore delimiters
+root their encoded reset stacks, reset frames root captured continuation
+functions, and `CapturedContinuation` therefore composes an entirely
+root-shaped control graph. Parsing an encoded reset stack roots each decoded
+continuation before the bounded evaluator scope ends; serialization projects
+it only while constructing the replacement semantic value.
+
+A compile-exhaustive latch covers `Control`, every continuation and delimiter
+variant, captured continuations, reset frames, and the temporary captured-layer
+ordering enum. A deterministic effect-token fixture verifies that every
+value-bearing control variant retains its payload exactly until the complete
+captured graph is retired. Both source inventories were deliberately tripped
+and relatched: six durable raw fields became six runtime roots. Fix roots and
+the redundant fused phase-root bundle remain assigned to I4F.1d.3d.2 and
+I4F.1d.3e respectively. Production remains `NoAuto`.
 
 #### Phase I4F.1e — Diagnostic, Event, and Delivery Roots
 

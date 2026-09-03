@@ -372,15 +372,16 @@ impl<S: TaskSpecialization> EffectTask<S> {
     }
 
     pub(super) fn asserting_unit_result(mut self, diagnostic_context: Arc<str>) -> Self {
-        self.execution
+        let branch = self
+            .execution
             .work
             .branch_mut()
-            .expect("a fresh effect task must contain its initial branch")
+            .expect("a fresh effect task must contain its initial branch");
+        let diagnostic_context = branch.root_value(Value::binary_from_text(&diagnostic_context));
+        branch
             .control
             .sequence
-            .push(Continuation::AssertUnit(Value::binary_from_text(
-                &diagnostic_context,
-            )));
+            .push(Continuation::AssertUnit(diagnostic_context));
         self
     }
 
@@ -437,7 +438,6 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 )?),
             ))
         })?;
-        let reset_stack = reset_stack.into_core();
         let order = self.allocate_control_order()?;
         let handle = PromisedValue::fixpoint(&self.eval_context, "reflection effect fixpoint")
             .map_err(|error| TaskHalt::new(error.as_ref()))?;
@@ -779,7 +779,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 branch
                     .control
                     .sequence
-                    .push(Continuation::Glam(continuation));
+                    .push(Continuation::Glam(branch.root_value(continuation)));
                 branch.set_effect(operation);
                 FusedRequestAction::Continue
             }
@@ -908,7 +908,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 branch
                     .control
                     .sequence
-                    .push(Continuation::Glam(continuation.into_core()));
+                    .push(Continuation::Glam(continuation));
                 branch.set_effect(operation.into_core());
                 MachineWork::Drive {
                     branch,
@@ -1206,7 +1206,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 })?;
                 frames.push(ResetFrame {
                     key,
-                    continuation,
+                    continuation: branch.root_value(continuation),
                     scope_depth,
                     order,
                 });
@@ -1361,7 +1361,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         branch
                             .control
                             .sequence
-                            .push(Continuation::CloseScope(close.into_core()));
+                            .push(Continuation::CloseScope(close.into_runtime_root()));
                         MachineWork::Drive {
                             branch: branch.with_effect(operation.into_core()),
                             scope_depth,
@@ -1397,7 +1397,8 @@ impl<S: TaskSpecialization> EffectTask<S> {
             return match continuation {
                 Continuation::Glam(function) => {
                     let function =
-                        evaluate_owned(context, &self.eval_context, function)?.into_core();
+                        evaluate_owned(context, &self.eval_context, function.into_core())?
+                            .into_core();
                     branch.control.sequence.pop();
                     Ok(MachineStep::Continue(MachineWork::apply(
                         function,
@@ -1425,7 +1426,11 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     let assertion = Value::builtin_call(
                         self.eval_context.values(),
                         Builtin::AssertUnit,
-                        vec![diagnostic_context, value, self.eval_context.values().unit()],
+                        vec![
+                            diagnostic_context.into_core(),
+                            value,
+                            self.eval_context.values().unit(),
+                        ],
                     );
                     let value = evaluate_owned(context, &self.eval_context, assertion)?.into_core();
                     branch.control.sequence.pop();
@@ -1460,11 +1465,12 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 }
                 Continuation::CloseScope(close) => {
                     branch.control.sequence.pop();
+                    let scoped_value = branch.root_value(value);
                     branch
                         .control
                         .sequence
-                        .push(Continuation::RestoreScopedValue(value));
-                    branch.set_effect(close);
+                        .push(Continuation::RestoreScopedValue(scoped_value));
+                    branch.set_effect(close.into_core());
                     Ok(MachineStep::Continue(MachineWork::Drive {
                         branch,
                         scope_depth,
@@ -1478,7 +1484,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         )));
                     }
                     branch.control.sequence.pop();
-                    Ok(MachineStep::Continue(MachineWork::deliver(
+                    Ok(MachineStep::Continue(MachineWork::deliver_root(
                         scoped_value,
                         branch,
                         scope_depth,
@@ -1514,7 +1520,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             );
             branch.set_state(state);
             return Ok(MachineStep::Continue(MachineWork::apply(
-                frame.continuation,
+                frame.continuation.into_core(),
                 vec![value],
                 branch,
                 scope_depth,
@@ -1545,7 +1551,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         evaluator,
                         branch.state(),
                         &self.tags.continuation_state,
-                        reset_stack,
+                        reset_stack.into_core(),
                     )
                     .map(|state| evaluator.root_value(state))
                 })?;
@@ -2775,12 +2781,12 @@ struct Control {
 
 #[derive(Clone)]
 enum Continuation {
-    Glam(Value),
+    Glam(RuntimeValueRoot),
     RequireUnit,
-    AssertUnit(Value),
+    AssertUnit(RuntimeValueRoot),
     Fix(PromisedValue),
-    CloseScope(Value),
-    RestoreScopedValue(Value),
+    CloseScope(RuntimeValueRoot),
+    RestoreScopedValue(RuntimeValueRoot),
 }
 
 #[derive(Clone)]
@@ -2792,7 +2798,7 @@ enum Delimiter {
     },
     Restore {
         outer: Box<Control>,
-        reset_stack: Value,
+        reset_stack: RuntimeValueRoot,
         scope_depth: usize,
         order: usize,
     },
@@ -2843,7 +2849,7 @@ struct ResetFrame {
     // scope_depth and order preserve nesting with the handler's temporary
     // cut/resume/fix control without creating a second authoritative stack.
     key: Key,
-    continuation: Value,
+    continuation: RuntimeValueRoot,
     scope_depth: usize,
     order: usize,
 }
@@ -3358,7 +3364,7 @@ fn fuse_glam_delivery_in<S: TaskSpecialization>(
     let Some(Continuation::Glam(function)) = branch.control.sequence.last().cloned() else {
         return Ok(None);
     };
-    let function = evaluate_in(context, function)?;
+    let function = evaluate_in(context, function.as_core().clone())?;
     let removes_pending = branch.control.sequence.len() > initial_sequence_depth;
     branch.control.sequence.pop();
     if removes_pending {
@@ -3554,7 +3560,7 @@ fn reset_frames_from_value_in(
             };
             Ok(ResetFrame {
                 key: value_key_in(context, key)?,
-                continuation,
+                continuation: context.root_value(continuation),
                 scope_depth: scope_depth.to_usize_if_integer().ok_or_else(|| {
                     TaskHalt::new("reflection continuation frame has an invalid scope")
                 })?,
@@ -3573,7 +3579,7 @@ fn reset_frames_value(values: &CoreValueFactory, frames: &[ResetFrame]) -> Value
             .map(|frame| {
                 Value::List(List::from_values(vec![
                     frame.key.to_value_with(values),
-                    frame.continuation.clone(),
+                    frame.continuation.as_core().clone(),
                     Value::Number(Number::from_usize(frame.scope_depth)),
                     Value::Number(Number::from_usize(frame.order)),
                 ]))

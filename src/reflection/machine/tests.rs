@@ -1034,6 +1034,86 @@ type ExecutionRootInventoryFn = fn(
     &WakeAction<TestEffects>,
 );
 
+fn assert_control_root_inventory(
+    control: &Control,
+    continuation: &Continuation,
+    delimiter: &Delimiter,
+    captured: &CapturedContinuation,
+    reset_frame: &ResetFrame,
+    captured_layer: &CapturedLayer,
+) {
+    let Control {
+        sequence,
+        delimiters,
+    } = control;
+    let _: &Vec<Continuation> = sequence;
+    let _: &Vec<Delimiter> = delimiters;
+
+    match continuation {
+        Continuation::Glam(value)
+        | Continuation::AssertUnit(value)
+        | Continuation::CloseScope(value)
+        | Continuation::RestoreScopedValue(value) => {
+            let _: &RuntimeValueRoot = value;
+        }
+        Continuation::RequireUnit => {}
+        Continuation::Fix(handle) => {
+            let _: &PromisedValue = handle;
+        }
+    }
+
+    match delimiter {
+        Delimiter::Resume {
+            outer_sequence,
+            scope_depth,
+            order,
+        } => {
+            let _: &Vec<Continuation> = outer_sequence;
+            let _ = (scope_depth, order);
+        }
+        Delimiter::Restore {
+            outer,
+            reset_stack,
+            scope_depth,
+            order,
+        } => {
+            let _: &Control = outer;
+            let _: &RuntimeValueRoot = reset_stack;
+            let _ = (scope_depth, order);
+        }
+    }
+
+    let CapturedContinuation {
+        sequence,
+        delimiters,
+        reset_frames,
+    } = captured;
+    let _: &Vec<Continuation> = sequence;
+    let _: &Vec<Delimiter> = delimiters;
+    let _: &Vec<ResetFrame> = reset_frames;
+
+    let ResetFrame {
+        key,
+        continuation,
+        scope_depth,
+        order,
+    } = reset_frame;
+    let _: &RuntimeValueRoot = continuation;
+    let _ = (key, scope_depth, order);
+
+    match captured_layer {
+        CapturedLayer::Reset(frame) => {
+            let _: &ResetFrame = frame;
+        }
+        CapturedLayer::Delimiter(delimiter) => {
+            let _: &Delimiter = delimiter;
+        }
+    }
+}
+
+type ControlRootInventoryFn =
+    fn(&Control, &Continuation, &Delimiter, &CapturedContinuation, &ResetFrame, &CapturedLayer);
+
 fn assert_task_block_inventory(blocked: &BlockedExecution<TestEffects>, poll: &TaskBlock) {
     let BlockedExecution { reason, retry } = blocked;
     match reason {
@@ -1116,6 +1196,7 @@ fn outer_machine_root_inventory_is_complete() {
     let _: fn(&EffectTaskPoll, &TaskTerminal) = assert_task_terminal_inventory;
     let _: fn(&Branch<TestEffects>, &RetryCheckpoint<TestEffects>) = assert_branch_root_inventory;
     let _: ExecutionRootInventoryFn = assert_execution_root_inventory;
+    let _: ControlRootInventoryFn = assert_control_root_inventory;
 }
 
 #[test]
@@ -1179,6 +1260,43 @@ fn execution_work_and_cut_payloads_retain_roots_until_retirement() {
     assert!(retained.upgrade().is_some());
     drop(cut);
     assert!(retained.upgrade().is_none());
+}
+
+#[test]
+fn captured_control_payloads_retain_roots_until_retirement() {
+    let core = crate::core::test_value_factory();
+    let values = Values::from_core_factory(core.clone());
+    let domain = EffectTokenDomain::new(&values);
+    let mut retained = Vec::new();
+    let mut rooted_value = || {
+        let (value, weak) = retained_machine_value(&domain);
+        retained.push(weak);
+        RuntimeValueRoot::new(&core, value)
+    };
+
+    let captured = CapturedContinuation {
+        sequence: vec![
+            Continuation::Glam(rooted_value()),
+            Continuation::AssertUnit(rooted_value()),
+            Continuation::CloseScope(rooted_value()),
+            Continuation::RestoreScopedValue(rooted_value()),
+        ],
+        delimiters: vec![Delimiter::Restore {
+            outer: Box::new(Control::default()),
+            reset_stack: rooted_value(),
+            scope_depth: 1,
+            order: 2,
+        }],
+        reset_frames: vec![ResetFrame {
+            key: Key::atom_from_text("reset"),
+            continuation: rooted_value(),
+            scope_depth: 1,
+            order: 2,
+        }],
+    };
+    assert!(retained.iter().all(|weak| weak.upgrade().is_some()));
+    drop(captured);
+    assert!(retained.iter().all(|weak| weak.upgrade().is_none()));
 }
 
 #[test]
