@@ -29,17 +29,41 @@ impl ManagedValueNode {
     pub(crate) fn value(&self) -> &Value {
         &self.value
     }
+
+    /// Reports the exact managed edges of the current production shell.
+    ///
+    /// All arms are deliberately zero-edge while their payload families use
+    /// compatibility Rust ownership. I5-I8 replace the affected arm in the
+    /// same checkpoint that its payload first stores `Gc` pointers.
+    fn trace_managed_edges(&self, _visitor: &mut Visitor<'_>) {
+        match &self.value {
+            Value::Atom(_) => {}
+            Value::Number(_) => {}
+            Value::Binary(_) => {}
+            Value::List(_) => {}
+            Value::Dict(_) => {}
+            Value::Builtin(_) => {}
+            Value::PartialBuiltin(_) => {}
+            Value::Function(_) => {}
+            Value::Net(_) => {}
+            Value::Lazy(_) => {}
+            Value::Promised(_) => {}
+            Value::Metadata(_) => {}
+            Value::Opaque(_) => {}
+        }
+    }
 }
 
-// SAFETY: before the I4F.2d production switch, compatibility `Value` owns no
-// `Gc` pointer. I4F.2b proved that its complete transitive Rust destruction is
-// passive. I4F.2c.2 replaces this closed zero-edge implementation with
-// compile-exhaustive per-variant dispatch before any recursive managed edge is
-// introduced by I5-I8.
+// SAFETY: the wildcard-free dispatch above classifies every current `Value`
+// variant. Before the I4F.2d production switch, compatibility payloads own no
+// `Gc` pointer, so every arm reports zero edges. I5-I8 must replace an arm in
+// the same checkpoint that its payload first stores a managed pointer.
 unsafe impl Trace for ManagedValueNode {
     const REQUESTED_SLOT_SIZE: Option<usize> = Some(managed_slot_extent::<Self>());
 
-    fn trace(&self, _visitor: &mut Visitor<'_>) {}
+    fn trace(&self, visitor: &mut Visitor<'_>) {
+        self.trace_managed_edges(visitor);
+    }
 }
 
 // SAFETY: the node has no direct Drop implementation. Its sole compatibility
@@ -83,6 +107,9 @@ mod tests {
 
     use super::*;
     use crate::core::CoreValueFactory;
+    use crate::core::managed::active_owner_inventory::{
+        closed_compatibility_variants, compatibility_variant_name,
+    };
     use crate::runtime::{RuntimeIds, allocate_evaluation_runtime_id};
 
     fn values() -> CoreValueFactory {
@@ -162,5 +189,64 @@ mod tests {
             call_sites.is_empty(),
             "production managed-value gateway activated before I4F.2d: {call_sites:?}"
         );
+    }
+
+    #[test]
+    fn managed_value_node_dispatches_every_real_variant_as_zero_edge() {
+        let values = values();
+        let active_drops = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let variants = closed_compatibility_variants(&values, &active_drops);
+        let roots = values.with_runtime_value_access(|access| {
+            variants
+                .into_iter()
+                .map(|value| {
+                    access
+                        .root_managed_value(value)
+                        .expect("every compatibility shell should fit the production node")
+                })
+                .collect::<Vec<_>>()
+        });
+
+        values.with_runtime_value_access(|access| {
+            assert_eq!(
+                roots
+                    .iter()
+                    .map(|root| compatibility_variant_name(access.get(root).value()))
+                    .collect::<Vec<_>>(),
+                [
+                    "atom",
+                    "number",
+                    "binary",
+                    "list",
+                    "dict",
+                    "builtin",
+                    "partial builtin",
+                    "function",
+                    "net",
+                    "lazy",
+                    "promised",
+                    "metadata",
+                    "opaque",
+                ]
+            );
+        });
+
+        let live = values
+            .collect_managed_for_test()
+            .expect("rooted production nodes should trace without hidden edges");
+        assert_eq!(live.root_entries(), roots.len());
+        assert_eq!(live.marked_slots(), roots.len());
+
+        drop(roots);
+        let dead = values
+            .collect_managed_for_test()
+            .expect("unrooted production nodes should reclaim every shell");
+        assert_eq!(dead.finalized_slots(), 13);
+        assert_eq!(
+            active_drops.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "exact shell dispatch must not retire external owners"
+        );
+        assert_eq!(values.drain_external_owners_for_test(), 2);
     }
 }

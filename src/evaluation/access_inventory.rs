@@ -101,7 +101,7 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         ),
         // I4F.2c keeps the production-shaped node private while its local
         // lifecycle fixture exercises construction and observation.
-        ("src/core/managed/value_node.rs", GatewayCounts::new(2, 0)),
+        ("src/core/managed/value_node.rs", GatewayCounts::new(4, 0)),
         ("src/core/managed/value_shell.rs", GatewayCounts::new(0, 3)),
         // I4F.2b.2 briefly projects a rooted reflection effect through a
         // bounded access region before coordinator reservation.

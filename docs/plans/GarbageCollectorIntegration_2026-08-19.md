@@ -169,7 +169,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.2b.4 | complete | passive-destruction closure gate |
 | I4F.2b | complete | active-owner extraction before managed value ownership |
 | I4F.2c.1 | complete | private production managed-node and family contract |
-| I4F.2c.2 | pending | exact production-shell visitor composition |
+| I4F.2c.2 | complete | exact production-shell visitor composition |
 | I4F.2c.3 | pending | private inline-or-root representation and provenance |
 | I4F.2c | pending | private production-root and managed-shell preparation |
 | I4F.2d | pending | atomic production managed-root switch |
@@ -3875,6 +3875,18 @@ only the node-local closed fixture reaches it before I4F.2d. That fixture
 proves matching-domain observation, rooted survival, unrooted reclamation, and
 the expected family/layout contract. The durable-owner and managed-entry
 inventories now name this prepared root surface explicitly.
+
+I4F.2c.2 completed 2026-09-03. `ManagedValueNode::trace` now delegates to a
+wildcard-free match over every real `Value` variant rather than inheriting the
+representative `ShellEdge` fixture policy. Each current compatibility payload
+owns only ordinary Rust edges, so every arm correctly reports zero collector
+edges; I5-I8 must replace the affected arm at the exact checkpoint where a
+payload first stores `Gc`. A shared thirteen-variant fixture allocates the
+private production node for every shell, verifies matching-domain projection,
+and proves collection marks exactly the registered roots with no hidden edge
+or active external retirement. The older representative shell remains only as
+I4A historical scaffolding and is deleted with the other compatibility
+fixtures in I4F.2f.
 
 #### Phase I4F.2d — Atomic Production Switch
 

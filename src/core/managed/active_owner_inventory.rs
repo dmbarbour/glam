@@ -227,7 +227,7 @@ fn assert_closed_compatibility_fields(value: &ClosedCompatibilityValue) {
     let _: &Arc<AtomicUsize> = drops;
 }
 
-fn compatibility_variant_name(value: &Value) -> &'static str {
+pub(super) fn compatibility_variant_name(value: &Value) -> &'static str {
     match value {
         Value::Atom(_) => "atom",
         Value::Number(_) => "number",
@@ -269,7 +269,7 @@ fn closed_net(values: &crate::core::CoreValueFactory) -> crate::core_net::CoreRu
     values.instantiate_core_net(&builder.finish(exposed))
 }
 
-fn closed_compatibility_variants(
+pub(super) fn closed_compatibility_variants(
     values: &crate::core::CoreValueFactory,
     active_drops: &Arc<AtomicUsize>,
 ) -> Vec<Value> {
