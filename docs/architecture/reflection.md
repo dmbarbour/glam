@@ -46,6 +46,13 @@ assembler, macro, logger, or other demand session happened to claim the lazy
 annotation first. Children launched by an annotation inherit that default
 profile from the annotation task.
 
+Reusable reflection request journals retain diagnostics as public roots and
+defer only inventoried pending-task, cancellation, and acknowledgement
+capabilities. Decoded task states and query reads retain public values. Opaque
+task handles contain scalar runtime provenance plus already inventoried task
+and query handles; they contain no hidden semantic value. The mutation token
+used by query writers is borrowed for one guarded callback and cannot escape.
+
 Demanding one of those annotations first reserves a stable task and wait
 inside pure evaluation. The evaluator-step boundary then ends before a
 one-time activation invokes the type-erased launcher. Concurrent observers

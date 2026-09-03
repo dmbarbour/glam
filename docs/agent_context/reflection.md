@@ -42,6 +42,11 @@ and control flow.
 - `.dict_items` is the narrow privileged dictionary-iteration boundary. It
   returns immediate entries in key order. The compiler's `eff.map` sequences
   effects left-to-right and preserves list order.
+- Reusable reflection journals store diagnostics as public roots. Decoded task
+  states and query reads store public values, while deferred launch/cancel/
+  acknowledgement records delegate to the inventoried task lifecycle. An
+  opaque task handle stores only scalar runtime provenance and task/query
+  handles; query mutation authority is borrowed for one guarded callback.
 
 ## State, Choice, and Control
 

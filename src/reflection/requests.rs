@@ -871,8 +871,9 @@ fn severity_matches(value: &CoreValue, name: &str, canonical: &Key) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use std::sync::{Mutex, Weak};
 
+    use crate::api::{EffectTokenDomain, Values};
     use crate::evaluation::{EvaluationMachinePoll, EvaluationTaskMachine};
 
     struct TestQueryWriter {
@@ -885,6 +886,129 @@ mod tests {
     }
 
     struct CompleteTask(CoreValue);
+
+    fn assert_reflection_request_inventory(request: &ReflectionRequest) {
+        match request {
+            ReflectionRequest::Environment
+            | ReflectionRequest::DictItems
+            | ReflectionRequest::Eval
+            | ReflectionRequest::MetadataInspect
+            | ReflectionRequest::Log
+            | ReflectionRequest::TaskNew
+            | ReflectionRequest::TaskJoin
+            | ReflectionRequest::TaskStatus
+            | ReflectionRequest::TaskValue
+            | ReflectionRequest::TaskHalt
+            | ReflectionRequest::TaskAcknowledgeError
+            | ReflectionRequest::TaskCancel => {}
+        }
+    }
+
+    fn assert_reflection_journal_inventory(update: &ReflectionUpdate, journal: &ReflectionJournal) {
+        match update {
+            ReflectionUpdate::Launch { task, publisher } => {
+                let _: &PendingReflectionTask = task;
+                let _: &TaskStatusPublisher = publisher;
+            }
+            ReflectionUpdate::Cancel(task) | ReflectionUpdate::AcknowledgeError(task) => {
+                let _: &EvaluationTaskHandle = task;
+            }
+        }
+        let ReflectionJournal {
+            diagnostics,
+            updates,
+        } = journal;
+        let _: &Vec<Diagnostic> = diagnostics;
+        let _: &Vec<ReflectionUpdate> = updates;
+    }
+
+    fn assert_task_handle_inventory(handle: &TaskHandleCell) {
+        let TaskHandleCell {
+            runtime,
+            task,
+            status,
+        } = handle;
+        let _: &crate::runtime::EvaluationRuntimeId = runtime;
+        let _: &EvaluationTaskHandle = task;
+        let _: &Arc<EvaluationQueryHandle> = status;
+    }
+
+    fn assert_tagged_task_state_inventory(state: &TaggedTaskState) {
+        match state {
+            TaggedTaskState::Complete(value) | TaggedTaskState::Failed(value) => {
+                let _: &Value = value;
+            }
+            TaggedTaskState::Launched
+            | TaggedTaskState::Blocked
+            | TaggedTaskState::Cancelled
+            | TaggedTaskState::Abandoned
+            | TaggedTaskState::Exited
+            | TaggedTaskState::Killed => {}
+        }
+    }
+
+    fn assert_query_read_inventory(read: &QueryRead) {
+        let QueryRead { value, generation } = read;
+        let _: &Option<Value> = value;
+        let _: &u64 = generation;
+    }
+
+    fn assert_query_mutation_inventory(mutation: &ReflectionQueryMutation<'_>) {
+        let ReflectionQueryMutation { mutation } = mutation;
+        let _: &&dyn crate::runtime::RuntimeMutationAuthority = mutation;
+    }
+
+    #[test]
+    fn reflection_request_root_inventory_is_complete() {
+        let _: fn(&ReflectionRequest) = assert_reflection_request_inventory;
+        let _: fn(&ReflectionUpdate, &ReflectionJournal) = assert_reflection_journal_inventory;
+        let _: fn(&TaskHandleCell) = assert_task_handle_inventory;
+        let _: fn(&TaggedTaskState) = assert_tagged_task_state_inventory;
+        let _: fn(&QueryRead) = assert_query_read_inventory;
+        let _: fn(&ReflectionQueryMutation<'_>) = assert_query_mutation_inventory;
+    }
+
+    fn retained_request_value(domain: &EffectTokenDomain<Arc<()>>) -> (Value, Weak<()>) {
+        let payload = Arc::new(());
+        let retained = Arc::downgrade(&payload);
+        (domain.issue(payload), retained)
+    }
+
+    #[test]
+    fn request_journal_and_decoded_results_retain_public_roots_until_retirement() {
+        let core = crate::core::test_value_factory();
+        let values = Values::from_core_factory(core);
+        let domain = EffectTokenDomain::new(&values);
+
+        let (emission, retained) = retained_request_value(&domain);
+        let journal = ReflectionJournal {
+            diagnostics: vec![Diagnostic::from_emission(Severity::Error, emission)],
+            updates: Vec::new(),
+        };
+        assert!(retained.upgrade().is_some());
+        drop(journal);
+        assert!(retained.upgrade().is_none());
+
+        for build in [
+            TaggedTaskState::Complete as fn(Value) -> TaggedTaskState,
+            TaggedTaskState::Failed,
+        ] {
+            let (value, retained) = retained_request_value(&domain);
+            let state = build(value);
+            assert!(retained.upgrade().is_some());
+            drop(state);
+            assert!(retained.upgrade().is_none());
+        }
+
+        let (value, retained) = retained_request_value(&domain);
+        let read = QueryRead {
+            value: Some(value),
+            generation: 1,
+        };
+        assert!(retained.upgrade().is_some());
+        drop(read);
+        assert!(retained.upgrade().is_none());
+    }
 
     impl EvaluationTaskMachine for CompleteTask {
         fn poll(

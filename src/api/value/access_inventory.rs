@@ -230,7 +230,7 @@ const INVENTORY: &[InventoryEntry] = &[
         "src/reflection/requests.rs",
         [20, 3, 19, 0, 0, 0],
         "rooted standard reflection request parsing and results",
-        "I3C.2 rooted task joins; I3D.2 interpreter boundary; I4F.1 request roots"
+        "I3C.2 rooted task joins; I3D.2 interpreter boundary; I4F.1d.3a rooted request owners; I4F.2b compatibility-access retirement"
     ),
     entry!(
         "src/reflection/search.rs",

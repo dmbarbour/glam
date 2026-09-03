@@ -114,6 +114,11 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.1d.2b | complete | reflection protocol and host-snapshot roots |
 | I4F.1d.2c | complete | isolated-search branch, block, and result roots |
 | I4F.1d.2 | complete | reflection lifecycle, protocol, and search roots |
+| I4F.1d.3a | complete | reflection request, journal, query, and task-handle roots |
+| I4F.1d.3b | pending | reflection machine shell, terminal, and blocked-error roots |
+| I4F.1d.3c | pending | reflection branch, work, cut, and retry roots |
+| I4F.1d.3d | pending | reflection continuation, reset, and fixpoint roots |
+| I4F.1d.3e | pending | reflection decoded-request handoff and machine closure |
 | I4F.1d.3 | pending | reflection machine frame and request roots |
 | I4F.1d | pending | reflection store, protocol, and machine root surfaces |
 | I4F.1e | pending | diagnostics, runtime-event, and delivery root surfaces |
@@ -2868,14 +2873,39 @@ three checkpoints:
    All three preserve the existing evaluator/interpreter phase boundary. Use
    compile-exhaustive ownership latches for concrete records and deterministic
    lifetime tests; no checkpoint may rely on repeated scheduling as evidence.
-3. **I4F.1d.3 — Machine frames and requests.** Reconcile every parked
-   effect-machine frame, continuation, decoded request, delivery/apply/cut/fix
-   state, and task block. A claimed machine may move raw values only within one
-   bounded poll; anything placed back into a coordinator, store, query, or
-   continuation is root-shaped first. Treat task handles, wait tokens, and
-   reflection capabilities as edge-free only when their concrete fields prove
-   it. Use compile-exhaustive frame/request inventories and park/resume plus
-   terminal-retirement fixtures.
+3. **I4F.1d.3 — Machine frames and requests.** Complete this larger graph in
+   five ordered checkpoints:
+   - **I4F.1d.3a — Reusable request state.** Reconcile `ReflectionRequest`,
+     `ReflectionJournal`, deferred updates, `QueryRead`, tagged task states,
+     query-writer handoff, and opaque task handles. Public values and
+     diagnostics are roots; pending tasks and query handles delegate to their
+     already inventoried lifecycle owners; borrowed mutation/query contexts
+     remain bounded.
+   - **I4F.1d.3b — Outer machine shell and failures.** Reconcile the effect API,
+     contextual wrapper, task terminal, blocked evaluation error, exit state,
+     and public poll projection. Root errors when they enter parked blocked or
+     terminal state rather than relying on every eventual poll consumer.
+   - **I4F.1d.3c — Branch and execution state.** Convert branch effect/state,
+     drive/deliver/apply/outcome work, cut alternatives, and retry checkpoints
+     to root-shaped storage. Raw values may exist only within one bounded
+     evaluator/interpreter step.
+   - **I4F.1d.3d — Captured control and fixpoints.** Convert continuations,
+     delimiter/reset payloads, captured continuations, fix roots/restarts, and
+     active fixpoint payloads. Promise handles retain their separately
+     inventoried lifecycle contract through I5.
+   - **I4F.1d.3e — Decoded-request handoff and closure.** Reconcile the rooted
+     `Request` form, specialization request state, and phase-root bundle;
+     classify `Request<_, Value>`, fusion records, parser temporaries, and
+     `MachineStep` as bounded. Add a compile-exhaustive inventory over the
+     complete machine graph, close both owner rows, and rerun park/resume plus
+     terminal-retirement fixtures.
+
+   A claimed machine may move raw values only within one bounded poll;
+   anything placed back into a coordinator, store, query, or continuation is
+   root-shaped first. Treat task handles, wait tokens, and reflection
+   capabilities as edge-free only when their concrete fields prove it. Every
+   checkpoint uses compile-exhaustive field/variant latches and deterministic
+   lifetime or park/resume fixtures; repetition is not concurrency evidence.
 
 Each checkpoint decreases the reflection compatibility-access inventory or
 records an explicit bounded projection disposition; an occurrence may not
@@ -2960,6 +2990,23 @@ search restart, and cancellation; the blocked and terminal evaluation-error
 fixtures now also require an explicit runtime failure root. The isolated-
 search owner row is closed as a compatibility root. Production remains
 `NoAuto`.
+
+I4F.1d.3a completed 2026-09-03 as another closure audit. Reusable request
+journals already store `Diagnostic` public roots, and decoded task states plus
+query reads store public `Value` roots. Deferred launch, cancel, and
+acknowledgement updates delegate to the already inventoried pending-task and
+task-handle lifecycle; opaque task handles contain scalar runtime provenance
+plus task/query capabilities and no hidden semantic value. Query mutation
+authority remains borrowed for one guarded writer callback.
+
+Compile-exhaustive latches cover the reusable request enum, journal updates,
+journal fields, task-handle cell, decoded task-state variants, query read, and
+borrowed mutation token. Deterministic lifetime fixtures verify that journal
+diagnostics, decoded complete/failed task states, and query results retain
+their public roots exactly until retirement. Existing fixtures cover pending
+task policy ordering, task-handle query retirement, host non-retention, and
+foreign-runtime rejection. The request owner row is closed as `PublicRoot`;
+machine interiors remain assigned to I4F.1d.3b-e. Production remains `NoAuto`.
 
 #### Phase I4F.1e — Diagnostic, Event, and Delivery Roots
 

@@ -340,16 +340,15 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "I4F.1d.3",
         "I4F.2d.2"
     ),
-    open_durable!(
+    closed_durable!(
         "src/reflection/requests.rs",
         "ReflectionJournal / QueryRead / decoded standard requests",
-        "raw Value request/result and Arc<EvaluationFailure> fields",
+        "public Value and Diagnostic roots plus delegated pending-task, task-handle, and query-handle lifecycle owners",
         "transaction journal, query, or parked request",
         "request decoding or journal update",
         "commit, response delivery, or request retirement",
-        BareValue,
+        PublicRoot,
         RootSurface,
-        "I4F.1d.3",
         "I4F.2d.2"
     ),
     open_durable!(
