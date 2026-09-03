@@ -5587,6 +5587,120 @@ fn runtime_pump_abandons_queued_and_blocked_sparks() {
 }
 
 #[test]
+fn spark_root_survives_queued_claimed_and_blocked_ownership() {
+    let fixture = SameRuntimeFixture::new();
+    let context = fixture.context();
+    let coordinator = context.coordinator().expect("coordinator should be live");
+    coordinator.executor_started(1);
+    let initial = context
+        .values()
+        .collect_managed_for_test()
+        .expect("the isolated spark fixture should collect before its support task");
+    let blocker = context
+        .schedule_task(|_| Ok(Box::new(AlwaysBlocked)))
+        .expect("the spark dependency should schedule");
+    assert_eq!(
+        context.pump_wait(blocker.wait(), 256),
+        EvaluationPumpOutcome::NoProgress
+    );
+    let support_baseline = context
+        .values()
+        .collect_managed_for_test()
+        .expect("the isolated spark fixture should collect before admission");
+
+    context.spark(context.values().initial_metadata());
+    let queued = context
+        .values()
+        .collect_managed_for_test()
+        .expect("the queued spark should retain its managed demand root");
+    assert_eq!(queued.root_entries(), support_baseline.root_entries() + 1);
+
+    let claimed = claim_next_spark(&coordinator);
+    let claimed_live = context
+        .values()
+        .collect_managed_for_test()
+        .expect("the detached spark claim should retain its managed demand root");
+    assert_eq!(
+        claimed_live.root_entries(),
+        support_baseline.root_entries() + 1
+    );
+    coordinator.release_spark(
+        claimed,
+        coordinator::SparkWorkPoll::Blocked(coordinator::WorkDependency::Wait(
+            blocker.wait().clone(),
+        )),
+    );
+    let blocked = context
+        .values()
+        .collect_managed_for_test()
+        .expect("the blocked spark record should retain its managed demand root");
+    assert_eq!(blocked.root_entries(), support_baseline.root_entries() + 1);
+
+    assert_eq!(coordinator.abandon_quiescent_sparks(), 1);
+    let spark_reclaimed = context
+        .values()
+        .collect_managed_for_test()
+        .expect("spark abandonment should release its managed demand root");
+    assert_eq!(
+        spark_reclaimed.root_entries(),
+        support_baseline.root_entries()
+    );
+    assert_eq!(spark_reclaimed.finalized_slots(), 1);
+
+    assert_eq!(blocker.cancel(), EvaluationTaskCancellation::Requested);
+    let cleaned = context
+        .values()
+        .collect_managed_for_test()
+        .expect("the spark fixture's support task should retire cleanly");
+    assert_eq!(cleaned.root_entries(), initial.root_entries());
+}
+
+#[test]
+fn pending_session_activation_roots_retire_with_their_reservations() {
+    let fixture = SameRuntimeFixture::new();
+    let context = fixture.context();
+    let baseline = context
+        .values()
+        .collect_managed_for_test()
+        .expect("the isolated activation fixture should collect before reservation");
+
+    let pending = context
+        .reserve_reflection_task(Value::binary_from_text("pending task effect"))
+        .expect("a sealed session profile should permit task reservation");
+    let pending_live = context
+        .values()
+        .collect_managed_for_test()
+        .expect("the pending task should retain its effect root");
+    assert_eq!(pending_live.root_entries(), baseline.root_entries() + 1);
+    drop(pending);
+    let pending_reclaimed = context
+        .values()
+        .collect_managed_for_test()
+        .expect("dropping the pending task should cancel and release its effect root");
+    assert_eq!(pending_reclaimed.root_entries(), baseline.root_entries());
+    assert_eq!(pending_reclaimed.finalized_slots(), 1);
+
+    let activation = context
+        .reserve_reflection_activation(
+            Value::binary_from_text("pending annotation effect"),
+            ReflectionTaskResultPolicy::ReturnValue,
+        )
+        .expect("a sealed session profile should permit activation reservation");
+    let activation_live = context
+        .values()
+        .collect_managed_for_test()
+        .expect("the pending activation should retain its effect root");
+    assert_eq!(activation_live.root_entries(), baseline.root_entries() + 1);
+    drop(activation);
+    let activation_reclaimed = context
+        .values()
+        .collect_managed_for_test()
+        .expect("dropping the activation should cancel and release its effect root");
+    assert_eq!(activation_reclaimed.root_entries(), baseline.root_entries());
+    assert_eq!(activation_reclaimed.finalized_slots(), 1);
+}
+
+#[test]
 fn runtime_pump_snapshot_is_observational() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();

@@ -179,8 +179,8 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.2e.1a | complete | runtime value-domain anchors and cache owners |
 | I4F.2e.1b.1 | complete | coordinator task, wait, and blocked-record owners |
 | I4F.2e.1b.2 | complete | client-demand operation and result owners |
-| I4F.2e.1b.3 | pending | spark and pending session-activation owners |
-| I4F.2e.1b | pending | coordinator, demand, spark, and session owners |
+| I4F.2e.1b.3 | complete | spark and pending session-activation owners |
+| I4F.2e.1b | complete | coordinator, demand, spark, and session owners |
 | I4F.2e.1c | pending | readiness, ledger, and report owners |
 | I4F.2e.1 | pending | cache, evaluation, coordinator, and readiness collection fixtures |
 | I4F.2e.2 | pending | reflection owner collection fixtures |
@@ -4082,6 +4082,20 @@ The terminal result stays projectable and owns the same single managed root
 until the handle is dropped, after which collection reclaims it. The fixture
 therefore distinguishes the operation and result-cell lifetimes instead of
 allowing one to mask a missing root in the other.
+
+I4F.2e.1b.3 completed 2026-09-03. A production spark carries one existing
+metadata value through queued, detached-claim, and blocked coordinator states;
+collection at every state observes the same single additional root, and
+quiescent abandonment releases it. The blocked-state fixture uses a separate
+value-free task wait so the dependency cannot accidentally provide another
+root. Pending `.task.new` and annotation-reflection reservations are exercised
+separately with managed binary effects: each survives collection before
+activation and is reclaimed when dropping the reservation cancels the real
+coordinator work. `EvaluationSession`, `EvaluationDemandState`, IDs, and weak
+notification routes carry no additional semantic value of their own; their
+factory/domain ownership was already covered by I4F.2e.1a. This completes the
+runtime-transient I4F.2e.1b matrix without activating reflection work assigned
+to I4F.2e.2.
 
 Keep every fixture in a fresh isolated collector-ready runtime/heap. Do not
 collect a shared production graph containing I5-I10 unclassified families.
