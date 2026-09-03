@@ -578,25 +578,26 @@ fn eval_reflection_task_source(
     computation: &crate::core::ReflectionComputation,
 ) -> Result<Value, EvaluationHalt> {
     let (context_name, cancellation_message) = match computation.completion() {
-        crate::core::ReflectionCompletion::Gate { .. } => (
+        crate::core::ReflectionCompletionKind::Gate => (
             "reflection_annotation",
             "reflection annotation task was cancelled",
         ),
-        crate::core::ReflectionCompletion::ReturnValue => {
+        crate::core::ReflectionCompletionKind::ReturnValue => {
             ("reflection_task", "reflection result task was cancelled")
         }
     };
     let task = computation.task(context.context()).map_err(|error| {
-        EvaluationHalt::failure(Arc::clone(error))
-            .with_context(evaluation_context_frame(context_name))
+        EvaluationHalt::failure(error).with_context(evaluation_context_frame(context_name))
     })?;
     context.defer_reflection_activation(task.clone());
     let handle = task.handle();
     match context.context().poll_reflection_task(handle) {
         EvaluationWaitPoll::Pending(wait) => Err(EvaluationHalt::blocked(CoreWaitToken(wait))),
         EvaluationWaitPoll::Complete(value) => match computation.completion() {
-            crate::core::ReflectionCompletion::Gate { target } => Ok(target.clone()),
-            crate::core::ReflectionCompletion::ReturnValue => Ok(context.project_root(&value)),
+            crate::core::ReflectionCompletionKind::Gate => Ok(computation
+                .target(context)
+                .expect("a reflection gate must retain its rooted target")),
+            crate::core::ReflectionCompletionKind::ReturnValue => Ok(context.project_root(&value)),
         },
         EvaluationWaitPoll::Failed(error) => {
             handle.acknowledge_propagated_failure();

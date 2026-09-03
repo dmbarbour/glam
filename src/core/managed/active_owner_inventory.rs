@@ -40,9 +40,9 @@ const ACTIVE_DESTRUCTION_FRONTIERS: &[ActiveDestructionFrontier] = &[
     },
     ActiveDestructionFrontier {
         kind: ActiveDestructionKind::ReflectionReservation,
-        path: "Value::Lazy -> LazyCell::source -> LazySource::ReflectionTask -> ReflectionComputation::task -> ReflectionTaskReservationInner",
-        owner: "lazy reflection reservation and its rooted activation",
-        active_action: "unactivated reservation drop cancels coordinator work",
+        path: "Value::Lazy -> LazyCell::source -> LazySource::ReflectionTask -> ReflectionComputation::handle -> runtime external-owner registry",
+        owner: "runtime-owned reflection reservation and rooted activation",
+        active_action: "unactivated reservation cancellation is externally drained",
         extraction: "I4F.2b.2 reflection-reservation registry",
     },
     ActiveDestructionFrontier {
@@ -75,7 +75,7 @@ const SOURCE_LATCHES: &[SourceLatch] = &[
     },
     SourceLatch {
         path: "src/core.rs",
-        needle: "handle: ExternalOwnerHandle",
+        needle: "pub(crate) struct HostCallProducer {",
         expected: 1,
         frontier: ActiveDestructionKind::HostCallback,
     },
@@ -84,6 +84,12 @@ const SOURCE_LATCHES: &[SourceLatch] = &[
         needle: "owner: Box<dyn Any + Send + Sync>",
         expected: 1,
         frontier: ActiveDestructionKind::HostCallback,
+    },
+    SourceLatch {
+        path: "src/core.rs",
+        needle: "pub(crate) struct ReflectionComputation {",
+        expected: 1,
+        frontier: ActiveDestructionKind::ReflectionReservation,
     },
     SourceLatch {
         path: "src/core.rs",
@@ -198,12 +204,8 @@ fn assert_host_call_fields(producer: &HostCallProducer) {
 }
 
 fn assert_reflection_fields(computation: &ReflectionComputation) {
-    let ReflectionComputation {
-        effect,
-        completion,
-        task,
-    } = computation;
-    let _ = (effect, completion, task);
+    let ReflectionComputation { handle, completion } = computation;
+    let _ = (handle, completion);
 }
 
 fn assert_opaque_fields(opaque: &OpaqueValue) {

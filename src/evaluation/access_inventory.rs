@@ -94,7 +94,9 @@ fn all_managed_entries_have_bounded_mutator_regions() {
             GatewayCounts::new(3, 1),
         ),
         ("src/core/managed/value_shell.rs", GatewayCounts::new(0, 3)),
-        ("src/core.rs", GatewayCounts::new(1, 5)),
+        // I4F.2b.2 briefly projects a rooted reflection effect through a
+        // bounded access region before coordinator reservation.
+        ("src/core.rs", GatewayCounts::new(2, 5)),
         ("src/core_net.rs", GatewayCounts::new(7, 0)),
         ("src/evaluation/access.rs", GatewayCounts::new(5, 0)),
         ("src/evaluation/executor.rs", GatewayCounts::new(1, 0)),

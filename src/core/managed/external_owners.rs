@@ -44,7 +44,6 @@ impl ExternalOwnerRegistry {
     where
         T: Any + Send + Sync,
     {
-        self.drain_retired();
         let id = NonZeroU64::new(self.next_id.fetch_add(1, Ordering::Relaxed))
             .expect("external owner IDs exhausted for one value domain");
         let lease = Arc::new(());
@@ -68,7 +67,6 @@ impl ExternalOwnerRegistry {
     where
         T: Any + Send + Sync,
     {
-        self.drain_retired();
         let owners = self
             .owners
             .lock()

@@ -1437,6 +1437,7 @@ impl HostCallProducer {
         // The record is compile-time/source-backed classification evidence;
         // touching it keeps that evidence tied to the invoked producer.
         let _ = self.record;
+        values.domain.external_owners.drain_retired();
         let owner = values
             .domain
             .external_owners
@@ -1467,38 +1468,89 @@ impl CoreValueFactory {
 /// `LazySource`. Task execution state belongs to the runtime work coordinator;
 /// this cell only remembers which task the first observer started.
 pub(crate) struct ReflectionComputation {
-    effect: Value,
-    completion: ReflectionCompletion,
+    handle: ExternalOwnerHandle,
+    completion: ReflectionCompletionKind,
+}
+
+struct ReflectionComputationOwner {
+    effect: RuntimeValueRoot,
+    target: Option<RuntimeValueRoot>,
     task: OnceLock<Result<ReflectionTaskReservation, Arc<EvaluationFailure>>>,
 }
 
-pub(crate) enum ReflectionCompletion {
-    Gate { target: Value },
+#[derive(Clone, Copy)]
+pub(crate) enum ReflectionCompletionKind {
+    Gate,
     ReturnValue,
 }
 
 impl ReflectionComputation {
+    fn gate(values: &CoreValueFactory, effect: Value, target: Value) -> Self {
+        Self::new(values, effect, Some(target), ReflectionCompletionKind::Gate)
+    }
+
+    fn return_value(values: &CoreValueFactory, effect: Value) -> Self {
+        Self::new(values, effect, None, ReflectionCompletionKind::ReturnValue)
+    }
+
+    fn new(
+        values: &CoreValueFactory,
+        effect: Value,
+        target: Option<Value>,
+        completion: ReflectionCompletionKind,
+    ) -> Self {
+        let owner = Arc::new(ReflectionComputationOwner {
+            effect: RuntimeValueRoot::new(values, effect),
+            target: target.map(|target| RuntimeValueRoot::new(values, target)),
+            task: OnceLock::new(),
+        });
+        Self {
+            handle: values.domain.external_owners.insert(owner),
+            completion,
+        }
+    }
+
+    fn owner(&self, values: &CoreValueFactory) -> Arc<ReflectionComputationOwner> {
+        values
+            .domain
+            .external_owners
+            .get::<ReflectionComputationOwner>(&self.handle)
+    }
+
     pub(crate) fn task(
         &self,
         context: &EvalContext,
-    ) -> Result<&ReflectionTaskReservation, &Arc<EvaluationFailure>> {
-        self.task
+    ) -> Result<ReflectionTaskReservation, Arc<EvaluationFailure>> {
+        let owner = self.owner(context.values());
+        owner
+            .task
             .get_or_init(|| {
+                let effect = context
+                    .values()
+                    .with_runtime_value_access(|access| owner.effect.clone_core_with(&access));
                 context
-                    .reserve_reflection_activation(self.effect.clone(), self.result_policy())
+                    .reserve_reflection_activation(effect, self.result_policy())
                     .map_err(|error| Arc::new(EvaluationFailure::message(error)))
             })
-            .as_ref()
+            .clone()
     }
 
-    pub(crate) fn completion(&self) -> &ReflectionCompletion {
-        &self.completion
+    pub(crate) fn completion(&self) -> ReflectionCompletionKind {
+        self.completion
+    }
+
+    pub(crate) fn target(&self, context: &EvaluatorStepContext<'_>) -> Option<Value> {
+        let owner = self.owner(context.context().values());
+        owner
+            .target
+            .as_ref()
+            .map(|target| context.project_root(target))
     }
 
     fn result_policy(&self) -> ReflectionTaskResultPolicy {
         match self.completion {
-            ReflectionCompletion::Gate { .. } => ReflectionTaskResultPolicy::RequireUnit,
-            ReflectionCompletion::ReturnValue => ReflectionTaskResultPolicy::ReturnValue,
+            ReflectionCompletionKind::Gate => ReflectionTaskResultPolicy::RequireUnit,
+            ReflectionCompletionKind::ReturnValue => ReflectionTaskResultPolicy::ReturnValue,
         }
     }
 }
@@ -1570,11 +1622,9 @@ impl LazyValue {
         Self::with_source(
             values,
             "reflection annotation",
-            LazySource::ReflectionTask(Arc::new(ReflectionComputation {
-                effect,
-                completion: ReflectionCompletion::Gate { target },
-                task: OnceLock::new(),
-            })),
+            LazySource::ReflectionTask(Arc::new(ReflectionComputation::gate(
+                values, effect, target,
+            ))),
         )
     }
 }
@@ -1850,11 +1900,9 @@ impl Value {
         Self::Lazy(LazyValue::with_source(
             values,
             "reflection task result",
-            LazySource::ReflectionTask(Arc::new(ReflectionComputation {
-                effect,
-                completion: ReflectionCompletion::ReturnValue,
-                task: OnceLock::new(),
-            })),
+            LazySource::ReflectionTask(Arc::new(ReflectionComputation::return_value(
+                values, effect,
+            ))),
         ))
     }
 

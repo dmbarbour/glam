@@ -4943,6 +4943,42 @@ fn reflection_gate_reserves_inside_and_activates_outside_scope() {
     ));
 }
 
+#[test]
+fn unactivated_reflection_reservation_cancels_only_during_external_owner_drain() {
+    let context = EvalContext::isolated(crate::core::CoreValueFactory::new(
+        crate::runtime::allocate_evaluation_runtime_id(),
+        crate::runtime::RuntimeIds::new(),
+    ));
+    context
+        .install_reflection_launcher(Arc::new(FixtureTaskLauncher {
+            terminal: FixtureTaskTerminal::Cancelled,
+            builds: Arc::new(AtomicUsize::new(0)),
+            result_policies: Arc::new(Mutex::new(Vec::new())),
+        }))
+        .expect("fresh test session should accept its reflection launcher");
+    let value = Value::reflection_task_result(context.values(), n(0));
+    let computation = reflection_computation(&value);
+    let reservation = computation
+        .task(&context)
+        .expect("reflection observation should reserve its task");
+    let handle = reservation.handle().clone();
+    assert!(matches!(
+        context.poll_reflection_task(&handle),
+        EvaluationWaitPoll::Pending(_)
+    ));
+
+    drop(reservation);
+    drop(computation);
+    drop(value);
+    assert!(matches!(
+        context.poll_reflection_task(&handle),
+        EvaluationWaitPoll::Pending(_)
+    ));
+
+    assert_eq!(context.values().drain_external_owners_for_test(), 1);
+    assert_eq!(context.task_registry_counts().reflection_active, 0);
+}
+
 #[derive(Clone, Copy, Debug)]
 enum ReflectionParticipant {
     Owner,

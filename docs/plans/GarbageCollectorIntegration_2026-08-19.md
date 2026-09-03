@@ -3782,13 +3782,27 @@ latched against `ManagedFamily` admission until I4F.2b.4 closes the inventory.
 I4F.2b.1 completed 2026-09-03. Each deferred host call now registers its
 callback owner in the matching runtime value domain and retains only a scalar
 registry identity plus an ordinary lease token beneath `LazySource`. Cloning a
-lazy source shares that lease. Registry access first detaches owners whose last
-lease has disappeared, then releases the lock before destroying callbacks;
-lookup likewise clones the owner before invocation, so neither destruction nor
-execution occurs under the registry lock or collector finalization. Existing
-host-call result/failure publication is unchanged. A callback may be retained
-until the next registry operation or runtime-domain teardown, as permitted by
-the gate's conservative-retention rule.
+lazy source shares that lease. A known-safe host-call orchestration point first
+detaches owners whose last lease has disappeared, then releases the lock before
+destroying callbacks; lookup clones the current owner before invocation, so
+neither destruction nor execution occurs under the registry lock or collector
+finalization. Generic insertion and lookup deliberately do not retire unrelated
+owners because they may later be called from a bounded evaluator scope.
+Existing host-call result/failure publication is unchanged. A callback may be
+retained until a safe registry drain or runtime-domain teardown, as permitted
+by the gate's conservative-retention rule.
+
+I4F.2b.2 completed 2026-09-03. A reflection lazy now retains only its external
+owner handle and a passive completion discriminator. Its effect, optional gate
+target, once-only reservation cell, task handle, and cancellation fallback are
+held together in the runtime registry; effect and target are explicit
+same-runtime roots. Reservation observes that owner through the matching value
+domain, briefly projects the effect under managed access, then releases access
+before coordinator reservation. Completion projects the rooted target through
+the active evaluator step. Dropping the lazy lease alone cannot cancel work;
+the latched ordering test proves that an unactivated reservation remains
+registered until a known-safe external-owner drain and is discarded there,
+preserving the prior uncommitted-reservation semantics.
 
 Conservative retention until the next ordinary registry drain is permitted;
 retention until runtime-domain teardown is the fallback if no later operation

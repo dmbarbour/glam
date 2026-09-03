@@ -8,7 +8,7 @@
 use super::super::{
     BuiltinCall, EvaluatedValue, EvaluationFailure, FixpointComputation, LazyApplication,
     LazyResult, LazySource, LazyValue, MetadataCarrier, PromiseAssignment, PromisedValue,
-    ReflectionCompletion, ReflectionComputation, SemanticComputation, Value,
+    ReflectionComputation, SemanticComputation, Value,
 };
 
 /// Reports every direct semantic `Value` edge held by one compatibility
@@ -89,14 +89,10 @@ impl CompatibilityValueEdges for SemanticComputation {
 }
 
 impl CompatibilityValueEdges for ReflectionComputation {
-    fn visit_compatibility_value_edges(&self, visit: &mut dyn FnMut(&Value)) {
-        visit(&self.effect);
-        if let ReflectionCompletion::Gate { target } = &self.completion {
-            visit(target);
-        }
-        if let Some(Err(failure)) = self.task.get() {
-            failure.visit_compatibility_value_edges(visit);
-        }
+    fn visit_compatibility_value_edges(&self, _visit: &mut dyn FnMut(&Value)) {
+        // I4F.2b.2 keeps effect, target, and reservation failure values rooted
+        // in the runtime external-owner registry. The managed-reachable
+        // computation is an edge-free lease.
     }
 }
 
@@ -278,31 +274,16 @@ mod tests {
             vec![second.clone()]
         );
 
-        let reflection = ReflectionComputation {
-            effect: first.clone(),
-            completion: ReflectionCompletion::Gate {
-                target: second.clone(),
-            },
-            task: std::sync::OnceLock::new(),
+        let reflection_value = Value::reflection_gate(&values, first.clone(), second.clone());
+        let Value::Lazy(reflection_lazy) = reflection_value else {
+            unreachable!("the reflection fixture must be lazy")
+        };
+        let Some(LazySource::ReflectionTask(reflection)) = reflection_lazy.source_snapshot() else {
+            unreachable!("the reflection fixture must retain its source")
         };
         assert!(
-            reflection
-                .task
-                .set(Err(Arc::new(
-                    EvaluationFailure::emission(failure_emission.clone())
-                        .with_context(failure_context.clone()),
-                )))
-                .is_ok(),
-            "the fresh reflection computation should accept one failure"
-        );
-        assert_eq!(
-            edges(&reflection),
-            [
-                first.clone(),
-                second.clone(),
-                failure_emission.clone(),
-                failure_context.clone()
-            ]
+            edges(reflection.as_ref()).is_empty(),
+            "reflection semantic values must remain in the external owner"
         );
 
         let promise = PromisedValue::new(&values, "compatibility visitor promise");
