@@ -104,7 +104,7 @@ fn all_managed_entries_have_bounded_mutator_regions() {
             "src/g_syntax/diagnostic_formatter.rs",
             GatewayCounts::new(1, 0),
         ),
-        ("src/g_syntax/module_lowering.rs", GatewayCounts::new(1, 0)),
+        ("src/g_syntax/module_lowering.rs", GatewayCounts::new(3, 0)),
         ("src/g_syntax/parser/logical.rs", GatewayCounts::new(1, 0)),
         ("src/g_syntax/parser/source.rs", GatewayCounts::new(3, 0)),
     ]

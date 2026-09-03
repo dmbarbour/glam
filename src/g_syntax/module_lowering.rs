@@ -14,7 +14,7 @@ pub(in crate::g_syntax) fn lower_source(source: &[u8], context: &CompileContext)
     let mut lowerer = ModuleLowerer::new(context);
     let mut language = None;
     while let Some(declarations) =
-        parser.next_expanded_declarations(context, lowerer.definitions(), language.as_ref())
+        parser.next_expanded_declarations(context, &lowerer.definitions(), language.as_ref())
     {
         for declaration in declarations {
             if let DeclarationKind::Language(declared) = &declaration.kind {
@@ -40,7 +40,7 @@ impl<'context> ModuleLowerer<'context> {
         let module_reflection = compiler_values::reflection_annotator_value(
             context.values(),
             context.abstract_global_path("refl"),
-            context.final_defs().clone(),
+            context.final_defs(),
         );
         Self {
             context,
@@ -53,10 +53,10 @@ impl<'context> ModuleLowerer<'context> {
 
     pub(in crate::g_syntax) fn lower_declaration(&mut self, declaration: Declaration) {
         let line = declaration.line;
-        let (result, definitions) = self.context.values().with_runtime_value_access(|_| {
-            let mut definitions = self.definitions.as_core().clone();
+        let (result, definitions) = self.context.values().with_runtime_value_access(|access| {
+            let mut definitions = self.definitions.clone_core_with(&access);
             let module_reflection = ReflectionBoundary {
-                annotator: self.module_reflection.as_core().clone(),
+                annotator: self.module_reflection.clone_core_with(&access),
             };
             let result = match &declaration.kind {
                 DeclarationKind::Import(import) => {
@@ -106,8 +106,10 @@ impl<'context> ModuleLowerer<'context> {
         &self.parsed_declarations
     }
 
-    pub(in crate::g_syntax) fn definitions(&self) -> &Value {
-        self.definitions.as_core()
+    pub(in crate::g_syntax) fn definitions(&self) -> Value {
+        self.context
+            .values()
+            .with_runtime_value_access(|access| self.definitions.clone_core_with(&access))
     }
 
     pub(in crate::g_syntax) fn finish(
@@ -116,8 +118,12 @@ impl<'context> ModuleLowerer<'context> {
     ) -> LoweredSource {
         source_diagnostics.extend(check_file_global_local_shadowing(&self.parsed_declarations));
         source_diagnostics.extend(self.diagnostics);
+        let definitions = self
+            .context
+            .values()
+            .with_runtime_value_access(|access| self.definitions.clone_core_with(&access));
         LoweredSource {
-            definitions: self.definitions.into_core(),
+            definitions,
             diagnostics: source_diagnostics,
         }
     }

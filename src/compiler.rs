@@ -191,12 +191,12 @@ impl CompileContext {
     }
 
     #[cfg(test)]
-    pub(crate) fn prior_defs(&self) -> &Value {
-        self.prior_defs.as_core()
+    pub(crate) fn prior_defs(&self) -> Value {
+        self.clone_root(&self.prior_defs)
     }
 
-    pub(crate) fn final_defs(&self) -> &Value {
-        self.final_defs.as_core()
+    pub(crate) fn final_defs(&self) -> Value {
+        self.clone_root(&self.final_defs)
     }
 
     pub(crate) fn prior_defs_root(&self) -> &RuntimeValueRoot {
@@ -216,10 +216,9 @@ impl CompileContext {
     /// The same opaque value is cloned for every annotation emitted from this
     /// source context. The front end owns any surrounding span representation.
     pub(crate) fn opaque_origin(&self) -> Option<Value> {
-        self.opaque_origin.as_ref().map(|origin| {
-            self.values
-                .with_runtime_value_access(|_| origin.as_core().clone())
-        })
+        self.opaque_origin
+            .as_ref()
+            .map(|origin| self.clone_root(origin))
     }
 
     /// Returns the abstract global-path value for a path relative to the
@@ -362,6 +361,11 @@ impl CompileContext {
             Arc::from(extends.into_boxed_slice()),
         )
     }
+
+    fn clone_root(&self, root: &RuntimeValueRoot) -> Value {
+        self.values
+            .with_runtime_value_access(|access| root.clone_core_with(&access))
+    }
 }
 
 pub(crate) fn import_failure(
@@ -458,8 +462,14 @@ mod tests {
         let prior_retained = Arc::downgrade(&prior_payload);
         let final_payload = Arc::new(());
         let final_retained = Arc::downgrade(&final_payload);
-        let prior_defs = RuntimeValueRoot::new(&values, domain.issue(prior_payload).into_core());
-        let final_defs = RuntimeValueRoot::new(&values, domain.issue(final_payload).into_core());
+        let prior_value = domain.issue(prior_payload);
+        let final_value = domain.issue(final_payload);
+        let prior_defs =
+            RuntimeValueRoot::new(&values, public_values.clone_core(&prior_value).unwrap());
+        let final_defs =
+            RuntimeValueRoot::new(&values, public_values.clone_core(&final_value).unwrap());
+        drop(prior_value);
+        drop(final_value);
         let args = ModuleLoadArgs {
             request: RelativeSourcePath::new("child.g").expect("request should be relative"),
             importer_source: None,
@@ -681,7 +691,7 @@ mod tests {
     fn compile_context_defaults_prior_to_empty_dict() {
         let context = CompileContext::default();
 
-        assert_eq!(context.prior_defs(), &Value::Dict(Dict::new_sync()));
+        assert_eq!(context.prior_defs(), Value::Dict(Dict::new_sync()));
     }
 
     #[test]

@@ -152,7 +152,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.2a.3c.2 | complete | reflection transition and terminal access retirement |
 | I4F.2a.3c.3 | complete | reflection wrapper, helper, and fixture access closure |
 | I4F.2a.3c | complete | reflection machine access retirement |
-| I4F.2a.3d | pending | compiler and module-lowering access retirement |
+| I4F.2a.3d | complete | compiler and module-lowering access retirement |
 | I4F.2a.3e | pending | compiler-cache access retirement |
 | I4F.2a.3f | pending | macro effect and runner access retirement |
 | I4F.2a.3g | pending | parser replay and source access retirement |
@@ -3557,6 +3557,15 @@ inventory is now zero for direct borrowed projection, ownership transfer,
 public construction, and provenance-only root construction; its seven explicit
 `RuntimeValueRoot::new` sites are the intended private root-publication
 gateway for this transitional representation.
+
+I4F.2a.3d completed 2026-09-03. `CompileContext` no longer lends borrowed core
+references from its prior/final-definition or origin roots; it returns an
+owned clone made inside matching runtime access. Module lowering clones its
+definition and reflection roots through the access region it already opens
+for each declaration, and roots the completed definition set only after that
+region closes. Import handoff continues to move durable roots unchanged.
+Compiler and module-lowering compatibility projections and ownership
+transfers are now both zero in the source inventory.
 
 I4F.2a.1a completed 2026-09-03. Production `Value` and `EvaluatedValue` no
 longer implement semantic equality, and `Value::runtime_id` is no longer a
