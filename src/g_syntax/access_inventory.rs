@@ -4,8 +4,8 @@
 //! but any state retained across source loading, macro/evaluator waits,
 //! diagnostics, imports, or compilation drain must use a runtime-qualified
 //! root. Exact per-owner counts make moving or adding either a durable root or
-//! a compatibility projection an explicit migration decision before I4F
-//! changes the root's representation.
+//! a bare-core projection an explicit migration decision while I5-I8 replace
+//! the managed outer shell's compatibility payload families.
 
 use std::collections::BTreeMap;
 use std::fs;

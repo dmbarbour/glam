@@ -1,74 +1,40 @@
-//! Inventory of the remaining production value-root construction boundary.
+//! Production managed-root publication and forbidden-escape inventories.
 //!
-//! I4F.2d removed borrowed and consuming bare-core projections. This latch
-//! keeps those counts at zero and records every remaining root-construction
-//! site until I4F.2f converts it into the final forbidden-escape inventory.
+//! Registered root creation is a legitimate publication boundary and remains
+//! source-counted by owner. Authority-free bare-core conversions are not a
+//! migration allowance: the second latch rejects them anywhere in production.
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct AccessCounts {
-    as_core: usize,
-    into_core: usize,
-    from_core: usize,
-    from_runtime: usize,
+struct RootPublicationCounts {
     root_new: usize,
-    root_from_runtime: usize,
 }
 
-impl AccessCounts {
-    const fn new(
-        as_core: usize,
-        into_core: usize,
-        from_core: usize,
-        from_runtime: usize,
-        root_new: usize,
-        root_from_runtime: usize,
-    ) -> Self {
-        Self {
-            as_core,
-            into_core,
-            from_core,
-            from_runtime,
-            root_new,
-            root_from_runtime,
-        }
+impl RootPublicationCounts {
+    const fn new(root_new: usize) -> Self {
+        Self { root_new }
     }
 
     fn in_source(source: &str) -> Self {
-        Self::new(
-            source.matches(".as_core()").count(),
-            source.matches(".into_core()").count(),
-            source.matches("Value::from_core(").count(),
-            source.matches("Value::from_runtime(").count()
-                + source.matches("Self::from_runtime(").count(),
-            source.matches("RuntimeValueRoot::new(").count(),
-            source.matches("RuntimeValueRoot::from_runtime(").count(),
-        )
+        Self::new(source.matches("RuntimeValueRoot::new(").count())
     }
 }
 
 struct InventoryEntry {
     path: &'static str,
-    counts: AccessCounts,
+    counts: RootPublicationCounts,
     role: &'static str,
     migration: &'static str,
 }
 
 macro_rules! entry {
-    ($path:literal, [$as_core:literal, $into_core:literal, $from_core:literal, $from_runtime:literal, $root_new:literal, $root_from_runtime:literal], $role:literal, $migration:literal) => {
+    ($path:literal, $root_new:literal, $role:literal, $migration:literal) => {
         InventoryEntry {
             path: $path,
-            counts: AccessCounts::new(
-                $as_core,
-                $into_core,
-                $from_core,
-                $from_runtime,
-                $root_new,
-                $root_from_runtime,
-            ),
+            counts: RootPublicationCounts::new($root_new),
             role: $role,
             migration: $migration,
         }
@@ -78,85 +44,85 @@ macro_rules! entry {
 const INVENTORY: &[InventoryEntry] = &[
     entry!(
         "src/api/assembly.rs",
-        [0, 0, 0, 0, 2, 0],
+        2,
         "assembly setup, rooted compiler handoff, import results, modules, and reflection environment",
         "I3E.2 bounded compiler regions; I4F.1 durable roots"
     ),
     entry!(
         "src/api/value.rs",
-        [0, 0, 0, 0, 1, 0],
+        1,
         "constructors, composite validation, observers, extraction, and net data",
         "I3B.1 scoped construction/extraction; I4F.2 public facade switch"
     ),
     entry!(
         "src/compiler.rs",
-        [0, 0, 0, 0, 10, 0],
+        10,
         "rooted source context, origins, definition promises, and import handoff",
         "I3E.2 bounded compiler regions; I4F.1 durable roots"
     ),
     entry!(
         "src/core.rs",
-        [0, 0, 0, 0, 6, 0],
+        6,
         "post-domain canonical-root initialization, promise publication, and externalized reflection effect/target roots",
         "I4F.2d.0 canonical initialization; I4F.2a.1c fixture closure; I4F.2b.2 reflection ownership; I5 managed promise assignment"
     ),
     entry!(
         "src/evaluation/access.rs",
-        [0, 0, 0, 0, 2, 0],
+        2,
         "poll/evaluator-step completion rooting and scoped projection",
         "I3A.4/I3C.2 outcome typing and projection; I4F.2 managed root switch"
     ),
     entry!(
         "src/evaluation/coordinator/spark.rs",
-        [0, 0, 0, 0, 1, 0],
+        1,
         "durable spark demand",
         "I3A.4/I3C.2 poll outcomes; I4F.1 coordinator roots"
     ),
     entry!(
         "src/evaluation/pump.rs",
-        [0, 0, 0, 0, 1, 0],
+        1,
         "centralized client/spark evaluation and exceptional lazy-cycle publication",
         "I3A.3/I3B.1b/I3B.2/I3C.2 scoped polling; I4F.1 outcomes"
     ),
     entry!(
         "src/evaluation/session.rs",
-        [0, 0, 0, 0, 4, 0],
+        4,
         "session demand, reserved reflection activation, effect entry, and patient completion",
         "I3A.3/I3B.2/I3C.1-I3D.1 scoped polling and activation; I4F.1 outcomes"
     ),
     entry!(
         "src/g_syntax.rs",
-        [0, 0, 0, 0, 2, 0],
+        2,
         "rooted lowered definitions and compiler diagnostics across publication",
         "I3E.2 bounded compiler regions; I4F.1 durable roots"
     ),
     entry!(
         "src/g_syntax/compiler_values.rs",
-        [0, 0, 0, 0, 1, 0],
+        1,
         "complete runtime-cached compiler helper bundles",
         "I3E.2 rooted cache publication; I4F.1 durable roots"
     ),
     entry!(
         "src/g_syntax/diagnostic_formatter.rs",
-        [0, 0, 0, 0, 1, 0],
+        1,
         "runtime-cached closed diagnostic formatter",
         "I3E.2 rooted cache publication; I4F.1 durable roots"
     ),
     entry!(
         "src/g_syntax/module_lowering.rs",
-        [0, 0, 0, 0, 2, 0],
+        2,
         "declaration-to-declaration definitions and reflection annotator",
         "I3E.2 bounded lowering regions; I4F.1 durable roots"
     ),
     entry!(
         "src/reflection/machine.rs",
-        [0, 0, 0, 0, 7, 0],
+        7,
         "rooted reflection machine and decoded-request handoff plus bounded evaluator, parser, and store access",
         "I3D.2/I3D.4 interpreter phases; I4F.1d.3 complete machine roots and bounded raw values; I4F.2a compatibility-access retirement"
     ),
     entry!(
         "src/runtime.rs",
-        [0, 0, 0, 0, 1, 0],
+        1,
         "shallow direct-value rooting for one runtime failure root",
         "I4F.1c.1 failure-root boundary; I6C managed failure shell"
     ),
@@ -183,17 +149,17 @@ fn is_inventoried_source(relative: &Path) -> bool {
     {
         return false;
     }
-    if relative.file_name().is_some_and(|name| name == "tests.rs") {
+    if relative
+        .file_name()
+        .is_some_and(|name| name == "tests.rs" || name == "access_inventory.rs")
+    {
         return false;
     }
-    !matches!(
-        relative.to_str(),
-        Some("src/api/value/access_inventory.rs" | "src/g_syntax/access_inventory.rs")
-    )
+    true
 }
 
 #[test]
-fn public_value_compatibility_access_inventory_is_complete() {
+fn registered_runtime_root_publication_inventory_is_complete() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut sources = Vec::new();
     collect_rust_sources(&manifest.join("src"), &mut sources);
@@ -208,8 +174,8 @@ fn public_value_compatibility_access_inventory_is_complete() {
                 return None;
             }
             let source = fs::read_to_string(&path).expect("an inventoried source should be UTF-8");
-            let counts = AccessCounts::in_source(&source);
-            (counts != AccessCounts::new(0, 0, 0, 0, 0, 0)).then(|| {
+            let counts = RootPublicationCounts::in_source(&source);
+            (counts != RootPublicationCounts::new(0)).then(|| {
                 (
                     relative
                         .to_str()
@@ -233,12 +199,48 @@ fn public_value_compatibility_access_inventory_is_complete() {
             expected
                 .insert(entry.path.to_owned(), entry.counts)
                 .is_none(),
-            "{} appears twice in the compatibility inventory",
+            "{} appears twice in the root-publication inventory",
             entry.path
         );
     }
 
     assert_eq!(actual, expected);
+}
+
+#[test]
+fn public_value_switch_inventory_has_no_compatibility_escape() {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut sources = Vec::new();
+    collect_rust_sources(&manifest.join("src"), &mut sources);
+
+    let forbidden = [
+        ".as_core()",
+        ".into_core()",
+        "Value::from_core(",
+        "Value::from_runtime(",
+        "Self::from_runtime(",
+        "RuntimeValueRoot::from_runtime(",
+    ];
+    let mut escapes = Vec::new();
+    for path in sources {
+        let relative = path
+            .strip_prefix(manifest)
+            .expect("a discovered source should belong to this package");
+        if !is_inventoried_source(relative) {
+            continue;
+        }
+        let source = fs::read_to_string(&path).expect("production source should be UTF-8");
+        for forbidden in forbidden {
+            if source.contains(forbidden) {
+                escapes.push((relative.to_path_buf(), forbidden));
+            }
+        }
+    }
+
+    assert!(
+        escapes.is_empty(),
+        "the managed public-value switch regained authority-free core escapes: {escapes:?}"
+    );
 }
 
 fn braced_item_after<'a>(source: &'a str, marker: &str) -> &'a str {

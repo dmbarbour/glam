@@ -16,8 +16,8 @@ use syn::{Attribute, Fields, GenericParam, Generics, Item};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CurrentStorage {
-    BareValue,
-    CompatibilityRoot,
+    CompatibilityPayload,
+    ManagedRootSurface,
     PublicRoot,
     SynchronizedNet,
     TypeErased,
@@ -137,8 +137,8 @@ macro_rules! edge_free {
 }
 
 // I4F.1g closed every inventoried owner. The collection checkpoint names the
-// I4F.2e slice which will exercise the real owner after RuntimeValueRoot
-// becomes a registered collector root.
+// I4F.2e slice which exercised each real owner after RuntimeValueRoot became a
+// registered collector root.
 const OWNER_INVENTORY: &[OwnerEntry] = &[
     closed_durable!(
         "src/core/managed/value_node.rs",
@@ -147,18 +147,18 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "collector allocation and its registered roots",
         "private production allocate-and-root gateway",
         "collector finalization after the last root and managed edge retire",
-        BareValue,
+        ManagedRootSurface,
         RootSurface,
         "I4F.2e.1"
     ),
     closed_durable!(
         "src/api/value.rs; src/runtime.rs",
         "public Value / EvaluatedValue / RuntimeValueRoot / RuntimeFailureRoot facade",
-        "opaque public handles and the compatibility value/failure roots",
+        "opaque public handles and managed value/failure root surfaces",
         "public or runtime-owned value lifetime",
         "matching-runtime construction or evaluation",
         "last public/runtime root drop",
-        CompatibilityRoot,
+        ManagedRootSurface,
         RootSurface,
         "I4F.2e.1"
     ),
@@ -169,7 +169,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "runtime value-domain cache",
         "complete canonical bundle publication",
         "last RuntimeValueDomain owner",
-        CompatibilityRoot,
+        ManagedRootSurface,
         RootSurface,
         "I4F.2e.1"
     ),
@@ -202,7 +202,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "runtime compiler extension cache",
         "complete compiler bundle or effect insertion",
         "runtime value-domain cache drop",
-        CompatibilityRoot,
+        ManagedRootSurface,
         RootSurface,
         "I4F.2e.1"
     ),
@@ -213,7 +213,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "runtime compiler extension cache",
         "complete formatter insertion",
         "runtime value-domain cache drop",
-        CompatibilityRoot,
+        ManagedRootSurface,
         RootSurface,
         "I4F.2e.1"
     ),
@@ -224,7 +224,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "parked or terminal coordinator state",
         "guarded task/wait terminal publication",
         "acknowledgement, settlement, cancellation, or session retirement",
-        CompatibilityRoot,
+        ManagedRootSurface,
         RootSurface,
         "I4F.2e.1"
     ),
@@ -235,7 +235,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "cross-poll client demand",
         "demand registration and terminal publication",
         "handle abandonment or terminal retirement",
-        CompatibilityRoot,
+        ManagedRootSurface,
         RootSurface,
         "I4F.2e.1"
     ),
@@ -246,7 +246,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "queued or claimed spark",
         "spark registration",
         "spark completion or abandonment",
-        CompatibilityRoot,
+        ManagedRootSurface,
         RootSurface,
         "I4F.2e.1"
     ),
@@ -257,7 +257,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "session and parked reflection/effect lifecycle",
         "session demand or activation reservation",
         "session close, cancellation, or terminal settlement",
-        CompatibilityRoot,
+        ManagedRootSurface,
         RootSurface,
         "I4F.2e.1"
     ),
@@ -268,7 +268,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "host-visible readiness report",
         "stable readiness snapshot",
         "report drop",
-        CompatibilityRoot,
+        ManagedRootSurface,
         RootSurface,
         "I4F.2e.1"
     ),
@@ -290,7 +290,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "active reflection effect run",
         "effect reservation/activation",
         "completion, cancellation, or abandonment",
-        CompatibilityRoot,
+        ManagedRootSurface,
         RootSurface,
         "I4F.2e.2"
     ),
@@ -301,7 +301,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "cross-phase reflection protocol state",
         "decoded request/result publication",
         "protocol completion or transaction retirement",
-        CompatibilityRoot,
+        ManagedRootSurface,
         RootSurface,
         "I4F.2e.2"
     ),
@@ -312,7 +312,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "pollable isolated search and returned result collection",
         "isolated-search construction and branch publication",
         "restart, cancellation, or search/result retirement",
-        CompatibilityRoot,
+        ManagedRootSurface,
         RootSurface,
         "I4F.2e.2"
     ),
@@ -323,7 +323,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "parked or worker-transferred effect machine",
         "frame push, request decode, branch/fix capture, or task park",
         "frame consumption, terminal publication, cancellation, or abandonment",
-        CompatibilityRoot,
+        ManagedRootSurface,
         RootSurface,
         "I4F.2e.2"
     ),
@@ -367,7 +367,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "assembly, module, compiler, or reasoning-session lifecycle",
         "assembly setup, import handoff, module publication, or diagnostic attachment",
         "assembly/session/module/diagnostic retirement",
-        CompatibilityRoot,
+        ManagedRootSurface,
         RootSurface,
         "I4F.2e.4"
     ),
@@ -398,7 +398,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "recursive core value and failure payloads",
         "Value variants, lazy/fix/reflection payloads, failure emissions, and contexts",
         "reachable only beneath an inventoried root surface after the production switch",
-        BareValue,
+        CompatibilityPayload,
         "I4B-I4E compile-exhaustive compatibility visitors establish every logical edge"
     ),
     closed_durable!(
@@ -408,7 +408,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "declaration-to-declaration lowering",
         "lowerer construction or definition replacement",
         "lowering completion",
-        CompatibilityRoot,
+        ManagedRootSurface,
         RootSurface,
         "I4F.2e.4"
     ),

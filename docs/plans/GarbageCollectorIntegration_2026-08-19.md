@@ -202,7 +202,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.2e | complete | closed durable-owner collection matrix |
 | I4F.2f.1 | complete | superseded I2 root and I4A shell prototype deletion |
 | I4F.2f.2 | complete | intentional compatibility bridge reconciliation |
-| I4F.2f.3 | pending | forbidden-escape latch and I4 ledger reconciliation |
+| I4F.2f.3 | complete | forbidden-escape latch and I4 ledger reconciliation |
 | I4F.2f.4 | pending | mandatory post-I4 review and closeout |
 | I4F.2f | pending | compatibility deletion and I4 reconciliation |
 | I4F.2 | pending | public managed-root production switch |
@@ -4350,6 +4350,21 @@ adapters now would discard the compile-exhaustive edge ledger which those
 phases must translate, not remove a live escape. Source comments and the
 implementation architecture now assign their removal to those phases instead
 of incorrectly promising wholesale deletion in I4F.2f.
+
+I4F.2f.3 completed 2026-09-03. The former six-field compatibility-access
+counter had combined two opposing policies: registered `RuntimeValueRoot`
+publication is required, while authority-free bare-core projection is
+forbidden. It is now an exact per-owner registered-root publication inventory
+plus `public_value_switch_inventory_has_no_compatibility_escape`, a
+repository-wide production latch rejecting the old borrowed, consuming, and
+non-registering conversion spellings. The durable-owner ledger now names the
+implemented `ManagedRootSurface` and the still-transitional
+`CompatibilityPayload` separately rather than calling registered roots
+compatibility roots or managed nodes bare values. The compiler inventory and
+implementation overview likewise describe the current managed outer shell and
+the I5-I8 payload migration boundary. Historical checkpoint narratives remain
+historical evidence rather than being rewritten as if their intermediate
+states never existed.
 
 Production remains `NoAuto`; the switch and closed owner fixtures do not
 authorize whole-graph collection while I5-I10 families remain unclassified.
