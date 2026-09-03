@@ -1971,6 +1971,26 @@ fn compiler_cache_does_not_form_a_value_domain_cycle() {
 }
 
 #[test]
+fn built_module_retains_its_published_value_after_construction_scope_exits() {
+    let assembler = Assembler::new();
+    let domain = EffectTokenDomain::new(&assembler.values());
+    let payload = Arc::new(());
+    let retained = Arc::downgrade(&payload);
+    let module = assembler
+        .module(["published_root"])
+        .initial_definitions(domain.issue(payload))
+        .build()
+        .expect("an already-closed value should publish as a module result");
+
+    assert!(retained.upgrade().is_some());
+    drop(module);
+    assert!(
+        retained.upgrade().is_none(),
+        "the published module value must retire with its last public root"
+    );
+}
+
+#[test]
 fn closed_runtime_cache_builders_do_not_register_scheduler_demand() {
     let runtime = EvaluationRuntime::new(0).expect("runtime should build");
     let before = runtime.state.work.cache_builder_scheduler_snapshot();

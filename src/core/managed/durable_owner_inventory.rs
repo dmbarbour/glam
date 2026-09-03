@@ -375,7 +375,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "I4F.1e",
         "I4F.2d.3"
     ),
-    open_durable!(
+    closed_durable!(
         "src/api/assembly.rs",
         "AssemblerReflectionHost / CompilationExecution / CompileSetup / BuiltModule / Assembler",
         "RuntimeValueRoot definitions/environment and diagnostic/failure state",
@@ -384,7 +384,6 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "assembly/session/module/diagnostic retirement",
         CompatibilityRoot,
         RootSurface,
-        "I4F.1f.1",
         "I4F.2d.4"
     ),
     open_durable!(
@@ -399,7 +398,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "I4F.1f.3",
         "I4F.2d.4"
     ),
-    open_durable!(
+    closed_durable!(
         "src/compiler.rs",
         "CompileContext / ModuleLoadArgs and loader/emitter callbacks",
         "RuntimeValueRoot definitions/origin plus callback captures and failures",
@@ -408,7 +407,6 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "compilation drain, loader completion, or context drop",
         CallbackCapture,
         RootSurface,
-        "I4F.1f.1",
         "I4F.2d.4"
     ),
     exact_managed!(

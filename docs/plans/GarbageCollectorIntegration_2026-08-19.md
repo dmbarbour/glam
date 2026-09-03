@@ -126,7 +126,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.1d.3 | complete | reflection machine frame and request roots |
 | I4F.1d | complete | reflection store, protocol, and machine root surfaces |
 | I4F.1e | complete | diagnostics, runtime-event, and delivery root surfaces |
-| I4F.1f.1 | pending | assembly, compiler, module, and import roots |
+| I4F.1f.1 | complete | assembly, compiler, module, and import roots |
 | I4F.1f.2 | pending | macro, parser, and source-rewrite roots |
 | I4F.1f.3 | pending | binary configuration and logger roots |
 | I4F.1f | pending | assembly, compiler, macro, configuration, and logger root surfaces |
@@ -3198,6 +3198,29 @@ values parked across an import, macro demand, diagnostic callback, module
 publication, or logging lifecycle. Only the latter become durable roots, and
 none retains a factory/value-domain capability merely to reconstruct a root
 later.
+
+I4F.1f.1 completed 2026-09-03 as a closure audit. Assembly reflection
+environments, compile setup, prior/final recursive definitions, opaque source
+origins, deferred module-import arguments, loader results, declaration
+lowering state, and completed module results were already retained through
+`RuntimeValueRoot` or the public `Value` root facade. Source provenance is
+edge-free. Diagnostic-emitter arguments remain bounded raw values during one
+callback, and module/binary loader callbacks continue to execute without an
+inherited evaluator mutator before returning a same-runtime root.
+
+A compile-exhaustive compiler-owner latch covers every `BinaryLoadArgs`,
+`ModuleLoadArgs`, and `CompileContext` field, including the exact three rooted
+context surfaces. Deterministic effect-token fixtures verify that recursive
+definition roots survive a deferred loader handoff exactly until its argument
+record retires, and that a normally built module retains its published value
+after all construction scopes exit exactly until the `BuiltModule` is
+dropped. Existing import provenance, content-stability, callback-boundary,
+normal module build/import, and recursive publication suites remain the
+behavioral coverage. The durable-owner rows close without changing production
+storage. Both lexical access inventories were deliberately tripped and
+relatched for the test-only root constructors and projections used by the new
+retirement fixture; their production surface is unchanged. Production remains
+`NoAuto`.
 
 #### Phase I4F.1g — Net, Hidden-Owner, and Gate Closure
 

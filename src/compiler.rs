@@ -403,6 +403,80 @@ fn invalid_import_request(
 mod tests {
     use super::*;
 
+    fn assert_compiler_owner_inventory(
+        binary: &BinaryLoadArgs,
+        module: &ModuleLoadArgs,
+        context: &CompileContext,
+    ) {
+        let BinaryLoadArgs {
+            request: _,
+            importer_source: _,
+            importer_trace: _,
+        } = binary;
+        let ModuleLoadArgs {
+            request: _,
+            importer_source: _,
+            importer_trace: _,
+            extends: _,
+            module_path: _,
+            prior_defs,
+            final_defs,
+        } = module;
+        let _: &RuntimeValueRoot = prior_defs;
+        let _: &RuntimeValueRoot = final_defs;
+
+        let CompileContext {
+            values: _,
+            importer_source: _,
+            compilation_trace: _,
+            opaque_origin,
+            module_path: _,
+            prior_defs,
+            final_defs,
+            local_module_loader: _,
+            local_binary_loader: _,
+            diagnostic_emitter: _,
+            compilation_execution: _,
+        } = context;
+        let _: &Option<RuntimeValueRoot> = opaque_origin;
+        let _: &RuntimeValueRoot = prior_defs;
+        let _: &RuntimeValueRoot = final_defs;
+    }
+
+    #[test]
+    fn compiler_durable_owner_inventory_is_compile_exhaustive() {
+        let _: fn(&BinaryLoadArgs, &ModuleLoadArgs, &CompileContext) =
+            assert_compiler_owner_inventory;
+    }
+
+    #[test]
+    fn module_load_arguments_retain_definition_roots_until_handoff_retires() {
+        let values = test_value_factory();
+        let public_values = crate::api::Values::from_core_factory(values.clone());
+        let domain = crate::api::EffectTokenDomain::new(&public_values);
+        let prior_payload = Arc::new(());
+        let prior_retained = Arc::downgrade(&prior_payload);
+        let final_payload = Arc::new(());
+        let final_retained = Arc::downgrade(&final_payload);
+        let prior_defs = RuntimeValueRoot::new(&values, domain.issue(prior_payload).into_core());
+        let final_defs = RuntimeValueRoot::new(&values, domain.issue(final_payload).into_core());
+        let args = ModuleLoadArgs {
+            request: RelativeSourcePath::new("child.g").expect("request should be relative"),
+            importer_source: None,
+            importer_trace: None,
+            extends: Arc::from([]),
+            module_path: Arc::from(["child".to_owned()]),
+            prior_defs,
+            final_defs,
+        };
+
+        assert!(prior_retained.upgrade().is_some());
+        assert!(final_retained.upgrade().is_some());
+        drop(args);
+        assert!(prior_retained.upgrade().is_none());
+        assert!(final_retained.upgrade().is_none());
+    }
+
     #[test]
     fn local_source_requests_are_child_relative_and_platform_independent() {
         for request in ["child.g", "lib/child.g", "assets/payload.bin"] {

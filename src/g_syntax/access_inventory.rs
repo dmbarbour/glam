@@ -64,7 +64,7 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/compiler.rs",
-        [20, 0, 1, 3],
+        [27, 0, 1, 5],
         "rooted source definitions, final promise, origin, and import request"
     ),
     entry!(

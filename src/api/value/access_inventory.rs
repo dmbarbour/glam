@@ -114,7 +114,7 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/compiler.rs",
-        [3, 0, 0, 0, 8, 0],
+        [3, 2, 0, 0, 10, 0],
         "rooted source context, origins, definition promises, and import handoff",
         "I3E.2 bounded compiler regions; I4F.1 durable roots"
     ),
