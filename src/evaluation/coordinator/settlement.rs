@@ -85,7 +85,7 @@ pub(crate) struct RuntimeDeadlockWorkSnapshot {
     pub(crate) state: RuntimeWorkStateSnapshot,
     pub(crate) dependency: Option<RuntimeDependencySnapshot>,
     pub(crate) observed_epoch: Option<RuntimeObservationEpoch>,
-    pub(crate) blocked_error: Option<Arc<EvaluationFailure>>,
+    pub(crate) blocked_error: Option<RuntimeFailureRoot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -200,7 +200,7 @@ fn runtime_readiness_locked(state: &WorkCoordinatorState) -> RuntimeCoordinatorR
             observed_epoch: task_observation_epoch(record),
             blocked_error: task_block(record)
                 .and_then(|block| block.error.as_ref())
-                .map(|error| error.as_failure().clone()),
+                .cloned(),
         });
     }
 
@@ -279,14 +279,19 @@ impl EvaluationWorkCoordinator {
         self: &Arc<Self>,
         mutation: &dyn RuntimeMutationAuthority,
         plan: &ValidatedRuntimeSettlementPlan,
-        kill_failure: Option<Arc<EvaluationFailure>>,
+        kill_failure: Option<RuntimeFailureRoot>,
     ) -> Option<RuntimeSettlementRelease> {
         if plan.kills.is_empty() != kill_failure.is_none() {
             return None;
         }
-        let exit_promise_failure = Arc::new(EvaluationFailure::message(
-            "reflection task exited without fulfilling its promised value",
-        ));
+        let exit_promise_failure = (!plan.exits.is_empty()).then(|| {
+            RuntimeFailureRoot::from_runtime(
+                self.runtime,
+                Arc::new(EvaluationFailure::message(
+                    "reflection task exited without fulfilling its promised value",
+                )),
+            )
+        });
         let (mut selected, client_demands) = {
             let mut state = self
                 .state
@@ -344,7 +349,10 @@ impl EvaluationWorkCoordinator {
                     block: None,
                     exit: Some(exit),
                     terminal: EvaluationWaitTerminal::Exited,
-                    promise_failure: exit_promise_failure.clone(),
+                    promise_failure: exit_promise_failure
+                        .as_ref()
+                        .expect("an exit settlement must retain its promise failure")
+                        .clone(),
                 });
             }
 
@@ -362,13 +370,12 @@ impl EvaluationWorkCoordinator {
                         proposed.work,
                         None,
                         None,
-                        ClientDemandResult::Killed(RuntimeFailureRoot::from_runtime(
-                            self.runtime,
+                        ClientDemandResult::Killed(
                             kill_failure
                                 .as_ref()
                                 .expect("forced settlement must retain its failure")
                                 .clone(),
-                        )),
+                        ),
                     ));
                     continue;
                 }
@@ -404,13 +411,12 @@ impl EvaluationWorkCoordinator {
                         .obligations
                         .take_producer()
                         .expect("killed task work must retain its producer obligation");
-                    let killed = EvaluationTaskStatus::Killed(RuntimeFailureRoot::from_runtime(
-                        self.runtime,
+                    let killed = EvaluationTaskStatus::Killed(
                         kill_failure
                             .as_ref()
                             .expect("forced settlement must retain its failure")
                             .clone(),
-                    ));
+                    );
                     let status_update = match &mut producer {
                         ProducerSettlementObligation::ReflectionTask(publisher) => {
                             publisher.update_status(killed, true)
@@ -422,11 +428,10 @@ impl EvaluationWorkCoordinator {
                     (producer, status_update, promises, machine, block)
                 };
                 state.observation_waiters.remove(&proposed.work);
-                let failure = kill_failure
+                let failure_root = kill_failure
                     .as_ref()
                     .expect("forced settlement must retain its failure")
                     .clone();
-                let failure_root = RuntimeFailureRoot::from_runtime(self.runtime, failure.clone());
                 selected.push(SelectedTaskSettlement {
                     work: proposed.work,
                     producer: Some(producer),
@@ -435,8 +440,8 @@ impl EvaluationWorkCoordinator {
                     machine,
                     block,
                     exit: None,
-                    terminal: EvaluationWaitTerminal::Killed(failure_root),
-                    promise_failure: failure,
+                    terminal: EvaluationWaitTerminal::Killed(failure_root.clone()),
+                    promise_failure: failure_root,
                 });
             }
             if !selected.is_empty() || !client_demands.is_empty() {
@@ -471,7 +476,7 @@ impl EvaluationWorkCoordinator {
                     let publication = promise.publish_guarded(
                         self,
                         mutation,
-                        Err(selected.promise_failure.clone()),
+                        Err(selected.promise_failure.as_failure().clone()),
                     );
                     let (producer, completion) = publication.unwrap_or_else(|_| {
                         panic!("an exit-owned promise must remain unresolved until settlement")
@@ -488,10 +493,7 @@ impl EvaluationWorkCoordinator {
                     let (_, wake) = obligation.wait.publish_terminal_guarded(
                         self,
                         mutation,
-                        EvaluationWaitTerminal::Failed(RuntimeFailureRoot::from_runtime(
-                            obligation.wait.runtime_id(),
-                            selected.promise_failure.clone(),
-                        )),
+                        EvaluationWaitTerminal::Failed(selected.promise_failure.clone()),
                     );
                     completion_wakes.push(wake);
                 }
@@ -578,7 +580,7 @@ pub(super) struct SelectedTaskSettlement {
     pub(super) block: Option<super::EvaluationTaskBlock>,
     pub(super) exit: Option<EvaluationExitBlock>,
     pub(super) terminal: EvaluationWaitTerminal,
-    pub(super) promise_failure: Arc<EvaluationFailure>,
+    pub(super) promise_failure: RuntimeFailureRoot,
 }
 
 /// Resources detached by one successful exit settlement.
@@ -635,5 +637,34 @@ impl RuntimeSettlementRelease {
         drop(exits);
         drop(terminals);
         drop(status_publishers);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Compile-exhaustive ownership latch for the failure-bearing settlement
+    /// records migrated by I4F.1c.4.
+    fn assert_settlement_failure_boundary_inventory(
+        snapshot: &RuntimeDeadlockWorkSnapshot,
+        selected: &SelectedTaskSettlement,
+    ) {
+        let RuntimeDeadlockWorkSnapshot { blocked_error, .. } = snapshot;
+        let _: &Option<RuntimeFailureRoot> = blocked_error;
+
+        let SelectedTaskSettlement {
+            terminal,
+            promise_failure,
+            ..
+        } = selected;
+        let _: &EvaluationWaitTerminal = terminal;
+        let _: &RuntimeFailureRoot = promise_failure;
+    }
+
+    #[test]
+    fn settlement_failure_boundary_inventory_is_complete() {
+        let _: fn(&RuntimeDeadlockWorkSnapshot, &SelectedTaskSettlement) =
+            assert_settlement_failure_boundary_inventory;
     }
 }

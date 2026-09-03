@@ -299,6 +299,11 @@ impl RuntimeFailureRoot {
     pub(crate) fn direct_value_roots(&self) -> &[RuntimeValueRoot] {
         &self.0.value_roots
     }
+
+    #[cfg(test)]
+    pub(crate) fn shares_root_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
 }
 
 impl fmt::Display for RuntimeFailureRoot {

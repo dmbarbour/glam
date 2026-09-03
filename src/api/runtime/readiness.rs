@@ -15,7 +15,7 @@ use crate::evaluation::{
     RuntimeExitSnapshot, RuntimeObservationEpoch, RuntimeWorkKindSnapshot,
     RuntimeWorkStateSnapshot,
 };
-use crate::runtime::EvaluationRuntimeId;
+use crate::runtime::{EvaluationRuntimeId, RuntimeFailureRoot};
 
 pub(super) fn reasoning_diagnostic(
     values: &CoreValueFactory,
@@ -402,7 +402,7 @@ pub struct RuntimeDeadlockWork {
     dependency: Option<RuntimeDependency>,
     observed_epoch: Option<u64>,
     blocked_diagnostic: Option<Diagnostic>,
-    blocked_failure: Option<Arc<EvaluationFailure>>,
+    blocked_failure: Option<RuntimeFailureRoot>,
 }
 
 impl RuntimeDeadlockWork {
@@ -454,13 +454,21 @@ impl RuntimeDeadlockWork {
     /// evaluation work and is intended for rendering after settlement.
     #[doc(hidden)]
     pub fn project_blocked_diagnostic(&self, values: &Values) -> Result<Option<Diagnostic>, Error> {
-        let Some(failure) = self.blocked_failure.as_deref() else {
+        let Some(failure) = self.blocked_failure.as_ref() else {
             return Ok(None);
         };
         if let Some(diagnostic) = &self.blocked_diagnostic {
             diagnostic.emission.require_runtime(values.runtime)?;
         }
-        Ok(Some(reasoning_diagnostic(&values.core, failure)))
+        Ok(Some(reasoning_diagnostic(
+            &values.core,
+            failure.as_failure(),
+        )))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn blocked_failure_root(&self) -> Option<&RuntimeFailureRoot> {
+        self.blocked_failure.as_ref()
     }
 }
 
@@ -552,7 +560,7 @@ pub(super) fn runtime_disposition_from_snapshot(
 pub(super) fn runtime_killed_failure(
     values: &CoreValueFactory,
     reason: RuntimeKillReason,
-) -> Arc<EvaluationFailure> {
+) -> RuntimeFailureRoot {
     let reason = match reason {
         RuntimeKillReason::Deadlock => values.key_value(&Key::atom_from_text("deadlock")),
     };
@@ -569,11 +577,14 @@ pub(super) fn runtime_killed_failure(
             CoreValue::binary_from_text("runtime killed work in a deadlocked settlement"),
         )
         .insert((*crate::core::keys::SEVERITY).clone(), values.error());
-    Arc::new(EvaluationFailure::emission(CoreValue::Dict(
-        Dict::new_sync()
-            .insert((*crate::core::keys::MSG).clone(), CoreValue::Dict(message))
-            .insert(Key::atom_from_text("runtime"), CoreValue::Dict(detail)),
-    )))
+    RuntimeFailureRoot::new(
+        values,
+        Arc::new(EvaluationFailure::emission(CoreValue::Dict(
+            Dict::new_sync()
+                .insert((*crate::core::keys::MSG).clone(), CoreValue::Dict(message))
+                .insert(Key::atom_from_text("runtime"), CoreValue::Dict(detail)),
+        ))),
+    )
 }
 
 fn runtime_dependency_from_snapshot(snapshot: RuntimeDependencySnapshot) -> RuntimeDependency {
@@ -623,8 +634,30 @@ pub(super) fn runtime_deadlock_work_from_snapshot(
         dependency: snapshot.dependency.map(runtime_dependency_from_snapshot),
         observed_epoch: snapshot.observed_epoch.map(RuntimeObservationEpoch::get),
         blocked_diagnostic: blocked_failure
-            .as_deref()
-            .map(|error| blocked_reasoning_diagnostic(values, error)),
+            .as_ref()
+            .map(|error| blocked_reasoning_diagnostic(values, error.as_failure())),
         blocked_failure,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Compile-exhaustive ownership latch for the host-visible blocked-work
+    /// failure retained by readiness snapshots and settlement reports.
+    fn assert_runtime_deadlock_work_failure_boundary(work: &RuntimeDeadlockWork) {
+        let RuntimeDeadlockWork {
+            blocked_diagnostic,
+            blocked_failure,
+            ..
+        } = work;
+        let _: &Option<Diagnostic> = blocked_diagnostic;
+        let _: &Option<crate::runtime::RuntimeFailureRoot> = blocked_failure;
+    }
+
+    #[test]
+    fn runtime_deadlock_work_failure_boundary_is_complete() {
+        let _: fn(&RuntimeDeadlockWork) = assert_runtime_deadlock_work_failure_boundary;
     }
 }

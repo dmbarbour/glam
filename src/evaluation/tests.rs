@@ -1510,6 +1510,22 @@ impl EvaluationTaskMachine for AlwaysBlocked {
     }
 }
 
+struct BlockedWithFailure(Arc<EvaluationFailure>);
+
+impl EvaluationTaskMachine for BlockedWithFailure {
+    fn poll(
+        &mut self,
+        context: &crate::evaluation::EvaluationPollContext,
+        _step_budget: usize,
+    ) -> EvaluationMachinePoll {
+        EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
+            dependency: None,
+            observed_epoch: Some(RuntimeObservationEpoch::from_raw(7)),
+            error: Some(context.root_failure(self.0.clone())),
+        })
+    }
+}
+
 struct ScopedThenBlocked {
     context: EvalContext,
     polled: Option<mpsc::Sender<()>>,
@@ -4540,6 +4556,57 @@ fn runtime_deadlock_readiness_with_error_is_observational() {
 }
 
 #[test]
+fn settled_deadlock_report_retains_one_failure_root_after_origin_retirement() {
+    let fixture = SameRuntimeFixture::new();
+    let context = fixture.context();
+    let emission = Value::Dict(crate::core::Dict::new_sync().insert(
+        crate::core::Key::atom_from_text("payload"),
+        Value::Number(41.into()),
+    ));
+    let frame = crate::eval::evaluation_context_frame("readiness_retention");
+    let failure = Arc::new(EvaluationFailure::emission(emission).with_context(frame));
+    let weak_failure = Arc::downgrade(&failure);
+    let task_failure = failure.clone();
+    let task = context
+        .schedule_task(move |_| Ok(Box::new(BlockedWithFailure(task_failure))))
+        .expect("structured blocked task should schedule");
+
+    fixture.runtime.pump_until_stable();
+    let crate::api::RuntimeReadiness::Deadlocked(deadlock) = fixture.runtime.readiness() else {
+        panic!("the structured blocked task should produce a deadlock snapshot")
+    };
+    let snapshot_root = deadlock.unfinished()[0]
+        .blocked_failure_root()
+        .expect("the deadlock snapshot should retain the blocked failure")
+        .clone();
+    assert!(Arc::ptr_eq(snapshot_root.as_failure(), &failure));
+    assert_eq!(snapshot_root.direct_value_roots().len(), 2);
+
+    let forced = deadlock.kill(crate::api::RuntimeKillReason::Deadlock);
+    drop(deadlock);
+    let report = forced
+        .settle()
+        .expect("the unchanged structured deadlock should settle");
+    drop(forced);
+    let report_root = report.killed_work()[0]
+        .blocked_failure_root()
+        .expect("the settled report should retain the blocked failure");
+    assert!(report_root.shares_root_with(&snapshot_root));
+
+    drop(snapshot_root);
+    drop(failure);
+    drop(task);
+    drop(context);
+    drop(fixture);
+
+    let retained_failure = weak_failure
+        .upgrade()
+        .expect("the retained report must keep the structured failure alive");
+    assert!(Arc::ptr_eq(report_root.as_failure(), &retained_failure));
+    assert_eq!(report_root.direct_value_roots().len(), 2);
+}
+
+#[test]
 fn runtime_readiness_retains_exit_dispositions_without_settling_tasks() {
     let fixture = SameRuntimeFixture::new();
     let success_context = fixture.context();
@@ -4799,6 +4866,7 @@ fn forced_deadlock_settlement_preserves_exits_and_kills_other_participants() {
         client_failure.as_failure(),
         parent_failure.as_failure()
     ));
+    assert!(client_failure.shares_root_with(&parent_failure));
     assert!(matches!(
         fixture.runtime.readiness(),
         crate::api::RuntimeReadiness::Ready(_)

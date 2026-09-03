@@ -274,16 +274,15 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         RootSurface,
         "I4F.2d.1"
     ),
-    open_durable!(
-        "src/api/runtime/readiness.rs",
+    closed_durable!(
+        "src/api/runtime/readiness.rs; src/evaluation/coordinator/settlement.rs",
         "quiescence, deadlock, and unfinished-task snapshots",
-        "Arc<EvaluationFailure> report payloads",
+        "RuntimeFailureRoot settlement/block payloads plus rooted public diagnostics and dispositions",
         "host-visible readiness report",
         "stable readiness snapshot",
         "report drop",
-        FailureGraph,
+        CompatibilityRoot,
         RootSurface,
-        "I4F.1c",
         "I4F.2d.1"
     ),
     open_durable!(
@@ -757,10 +756,10 @@ fn is_production_source(relative: &Path) -> bool {
 // aggregate makes category drift legible, while the deterministic fingerprint
 // detects a declaration being exchanged for another with the same counts.
 // `owner_for_declaration` is the reviewed semantic assignment for every entry.
-const DECLARATION_BASELINE_COUNT: usize = 132;
+const DECLARATION_BASELINE_COUNT: usize = 129;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([115, 56, 1, 14, 15, 0, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 14_509_656_708_064_782_647;
+    DeclarationSignals::new([115, 56, 1, 11, 15, 0, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 896_298_444_406_156_690;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,

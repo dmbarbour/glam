@@ -1,7 +1,7 @@
 # Glam GC Integration Plan — 2026-08-19
 
 Status: in progress; Phases I0 through I3 and their mandatory reviews plus I4.0
-through I4E, I4F.1a, and I4F.1b are complete. Phase I4F.1c is pending.
+through I4E and I4F.1a through I4F.1c are complete. Phase I4F.1d is pending.
 Collector Gate G1 passed on 2026-08-25. The remaining integration work follows
 the completed owner-matrix, stable-ledger, and low-risk checkpoint corrections
 from the integration review.
@@ -106,8 +106,8 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.1c.1 | complete | non-forcing runtime failure-root compatibility boundary |
 | I4F.1c.2 | complete | machine-poll, task, wait, terminal, and failure-ledger roots |
 | I4F.1c.3 | complete | client-demand and remaining session-owner roots |
-| I4F.1c.4 | pending | settlement, readiness, and evaluation-owner closure |
-| I4F.1c | pending | evaluation, coordinator, and readiness root surfaces |
+| I4F.1c.4 | complete | settlement, readiness, and evaluation-owner closure |
+| I4F.1c | complete | evaluation, coordinator, and readiness root surfaces |
 | I4F.1d.1 | pending | reflection store, snapshot, journal, and query roots |
 | I4F.1d.2 | pending | reflection lifecycle, protocol, and search roots |
 | I4F.1d.3 | pending | reflection machine frame and request roots |
@@ -2807,6 +2807,29 @@ blocked, and retirement records move the existing `RuntimeValueRoot` without
 another wrapper. The durable-owner source latch was observed failing before
 its baseline and the client-demand/session rows were closed. Production
 remains `NoAuto`.
+
+I4F.1c.4 completed 2026-09-03. Coordinator deadlock snapshots and the
+host-visible unfinished-work records now retain their retryable blocked
+failure as `RuntimeFailureRoot`. Readiness remains observational: its
+immediate diagnostic projection borrows the rooted failure without forcing
+it, while the explicit post-settlement projection may evaluate through the
+caller's matching runtime as before.
+
+Forced settlement now constructs one root for its killed-work failure and one
+root for the unfulfilled-promise exit failure, then clones those roots through
+client results, task statuses, wait terminals, and settlement selections.
+The still-unmigrated `PromiseCell` receives a bounded projection back to the
+shared `Arc<EvaluationFailure>`; that recursive core interior remains assigned
+to I6C. Compile-exhaustive latches cover both the coordinator settlement
+records and the private host-readiness failure field. A structured-failure
+fixture forces block, snapshot, kill, settlement, work retirement, owner-
+session release, and runtime-handle release in that order, then proves the
+retained report still owns the same failure root and both direct semantic
+values. The existing task/client forced-kill fixture additionally proves that
+the two terminal surfaces share the same root allocation. The durable-owner
+source latch was observed failing before its baseline and readiness row were
+closed. This closes the evaluation/coordinator/readiness root-surface slice;
+production remains `NoAuto`.
 
 #### Phase I4F.1d — Reflection Store, Protocol, and Machine Roots
 
