@@ -44,11 +44,12 @@ impl MacroFailure {
 
     fn with_context(
         mut self: Box<Self>,
+        values: &CoreValueFactory,
         frontier: usize,
         cases: impl IntoIterator<Item = PublicValue>,
     ) -> Box<Self> {
         self.frontier = Some(frontier);
-        self.cases = unique_values(cases);
+        self.cases = unique_values(values, cases);
         self
     }
 }
@@ -160,7 +161,7 @@ pub(in crate::g_syntax) fn run_macro_effect(
             values,
             "macro input did not match any successful alternative",
         )
-        .with_context(frontier, cases));
+        .with_context(values, frontier, cases));
     };
     if successful.next().is_some() {
         return Err(macro_error(
@@ -174,6 +175,7 @@ pub(in crate::g_syntax) fn run_macro_effect(
         .as_core();
     let value = force_result(execution, value.clone()).map_err(|error| {
         error.with_context(
+            execution.macro_context().values(),
             branch.journal().cursor.consumed_end(&input),
             branch.journal().active_cases.iter().cloned(),
         )
@@ -269,10 +271,17 @@ pub(in crate::g_syntax) fn render_macro_case(
     }
 }
 
-fn unique_values(values: impl IntoIterator<Item = PublicValue>) -> Vec<PublicValue> {
+fn unique_values(
+    factory: &CoreValueFactory,
+    values: impl IntoIterator<Item = PublicValue>,
+) -> Vec<PublicValue> {
     let mut unique = Vec::new();
     for value in values {
-        if !unique.contains(&value) {
+        if !unique.iter().any(|prior| {
+            value
+                .same_core_with(factory, prior)
+                .expect("macro case values belong to the compilation runtime")
+        }) {
             unique.push(value);
         }
     }

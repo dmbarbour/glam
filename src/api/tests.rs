@@ -1507,7 +1507,7 @@ fn public_values_describe_metadata_carriers_only_as_sealed() {
     );
 
     assert_eq!(value.kind(), ValueKind::Sealed);
-    assert_eq!(format!("{value:?}"), "Value { kind: Sealed, .. }");
+    assert_eq!(format!("{value:?}"), "Value");
 }
 
 #[test]

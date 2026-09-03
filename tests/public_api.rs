@@ -69,11 +69,35 @@ fn required_access(assembler: &Assembler, root: &Value, path: &str) -> Result<Va
     evaluated_value(assembler, &required)
 }
 
+fn same_representation(assembler: &Assembler, left: &Value, right: &Value) -> bool {
+    assembler
+        .reflection()
+        .same_representation(left, right)
+        .expect("compared values should belong to the assembler runtime")
+}
+
+fn assert_same_diagnostic(assembler: &Assembler, left: &Diagnostic, right: &Diagnostic) {
+    assert_eq!(left.source(), right.source());
+    assert_eq!(left.line(), right.line());
+    assert_eq!(left.severity(), right.severity());
+    assert_eq!(left.message(), right.message());
+    assert!(same_representation(
+        assembler,
+        left.emission(),
+        right.emission()
+    ));
+    match (left.origin(), right.origin()) {
+        (Some(left), Some(right)) => assert!(same_representation(assembler, left, right)),
+        (None, None) => {}
+        _ => panic!("diagnostic origins differ"),
+    }
+}
+
 fn is_logically_undefined(assembler: &Assembler, value: Value) -> Result<bool, glam::Error> {
     let values = assembler.values();
     let marker = values.atom_from_text("public_api.undefined_marker");
     let selected = values.apply(&values.defined_or_function(), [marker.clone(), value])?;
-    evaluate(assembler, &selected).map(|selected| selected.as_value() == &marker)
+    evaluate(assembler, &selected)?.same_representation(&marker)
 }
 
 #[derive(Clone)]
@@ -203,7 +227,7 @@ fn public_api_builds_a_script_module_and_extracts_binary_data() {
         .build()
         .expect("script module should build");
 
-    assert_eq!(module.diagnostics(), []);
+    assert!(module.diagnostics().is_empty());
     assert_eq!(
         binary_at(&assembler, module.value(), "asm.result").expect("asm.result should be binary"),
         b"Hello, library!".as_slice()
@@ -437,9 +461,10 @@ fn public_promise_resolver_preserves_structured_failures() {
         .unwrap(),
         Some(7)
     );
-    assert_eq!(
-        diagnostic_contexts(&assembler, &diagnostic),
-        [context],
+    let contexts = diagnostic_contexts(&assembler, &diagnostic);
+    assert_eq!(contexts.len(), 1);
+    assert!(
+        same_representation(&assembler, &contexts[0], &context),
         "the resolver must preserve existing structured diagnostic context"
     );
 }
@@ -564,7 +589,7 @@ fn public_reasoning_report_exposes_retryable_blocked_errors() {
         .iter()
         .find_map(|task| task.blocked_diagnostic())
         .expect("repeated reporting should retain the failure");
-    assert_eq!(repeated, diagnostic);
+    assert_same_diagnostic(&assembler, repeated, diagnostic);
 }
 
 fn volume_write_annotation(assembler: &Assembler, effects: Value, value: Value) -> Value {
@@ -939,11 +964,12 @@ fn diagnostic_value_updates_preserve_structured_evaluation_failures() {
     );
     let contexts = diagnostic_contexts(&assembler, &diagnostic);
     assert_eq!(contexts.len(), 1);
-    assert_eq!(
-        required_access(&assembler, &contexts[0], "viewer.operation")
+    assert!(same_representation(
+        &assembler,
+        &required_access(&assembler, &contexts[0], "viewer.operation")
             .expect("diagnostic update failure should retain its context"),
-        values.atom_from_text("update")
-    );
+        &values.atom_from_text("update")
+    ));
 }
 
 #[test]
@@ -1141,11 +1167,12 @@ fn assembler_owns_an_authoritative_reflection_environment() {
             .expect("assembler should expose its implementation version"),
         env!("CARGO_PKG_VERSION").as_bytes()
     );
-    assert_eq!(
-        required_access(&assembler, &environment, "glam.reasoning.role")
+    assert!(same_representation(
+        &assembler,
+        &required_access(&assembler, &environment, "glam.reasoning.role")
             .expect("assembler should identify its reasoning role"),
-        values.atom_from_text("assembler")
-    );
+        &values.atom_from_text("assembler")
+    ));
     assert_eq!(
         binary_at(&assembler, &environment, "client.name")
             .expect("client environment fields should remain visible"),
@@ -1169,20 +1196,22 @@ fn service_reflection_environments_have_independent_roles() {
     let values = assembler.values();
     let logger = assembler.reflection_environment_for_role("logger");
 
-    assert_eq!(
-        required_access(&assembler, &logger, "glam.reasoning.role")
+    assert!(same_representation(
+        &assembler,
+        &required_access(&assembler, &logger, "glam.reasoning.role")
             .expect("service environment should contain its role"),
-        values.atom_from_text("logger")
-    );
-    assert_eq!(
-        required_access(
+        &values.atom_from_text("logger")
+    ));
+    assert!(same_representation(
+        &assembler,
+        &required_access(
             &assembler,
             &assembler.reflection_environment(),
             "glam.reasoning.role",
         )
         .expect("deriving a service environment must not change the assembler role"),
-        values.atom_from_text("assembler")
-    );
+        &values.atom_from_text("assembler")
+    ));
 }
 
 #[test]
@@ -1624,13 +1653,14 @@ fn caller_selected_module_path_scopes_abstract_global_paths() {
         .build()
         .expect("module should build");
 
-    assert_eq!(
-        required_access(&assembler, module.value(), "Marker")
+    assert!(same_representation(
+        &assembler,
+        &required_access(&assembler, module.value(), "Marker")
             .expect("unique declaration should define Marker"),
-        assembler
+        &assembler
             .values()
             .abstract_global_path(["client", "root", "Marker"])
-    );
+    ));
 }
 
 #[test]
@@ -1656,11 +1686,17 @@ fn public_values_convert_numbers_without_exposing_big_number_types() {
     assert_eq!(ratio.as_rational_i64().unwrap(), Some((-3, 2)));
     assert_eq!(ratio.as_i64().unwrap(), None);
     assert_eq!(ratio.as_f64().unwrap(), Some(-1.5));
-    assert_eq!(values.rational(1, 0), None);
+    assert!(values.rational(1, 0).is_none());
 
-    assert_eq!(values.number_from_f64(1.5), values.rational(3, 2));
-    assert_eq!(values.number_from_f64(f64::NAN), None);
-    assert_eq!(values.number_from_f64(f64::INFINITY), None);
+    assert!(same_representation(
+        &assembler,
+        &values
+            .number_from_f64(1.5)
+            .expect("finite number should convert"),
+        &values.rational(3, 2).expect("ratio should construct")
+    ));
+    assert!(values.number_from_f64(f64::NAN).is_none());
+    assert!(values.number_from_f64(f64::INFINITY).is_none());
     assert!(values.number_from_text("1/0").is_err());
 }
 
@@ -1811,12 +1847,13 @@ fn checked_net_builder_keeps_data_exposing_nets_opaque() {
         })
         .expect("one-output copy should normalize to a tunnel");
 
-    assert_eq!(
-        evaluate(&assembler, &net)
+    assert!(same_representation(
+        &assembler,
+        &evaluate(&assembler, &net)
             .expect("an opaque net is already in weak-head normal form")
             .into_value(),
-        net
-    );
+        &net
+    ));
 }
 
 #[test]

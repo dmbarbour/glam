@@ -137,6 +137,9 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.1g.2 | complete | hidden-owner audit and closed inventory gate |
 | I4F.1g | complete | net, hidden-owner, and gate closure |
 | I4F.1 | complete | exhaustive durable root-surface conversion |
+| I4F.2a.1a | complete | public handle semantic-trait and rendering retirement |
+| I4F.2a.1b | pending | assembly, diagnostic, and error access retirement |
+| I4F.2a.1c | pending | public facade compatibility-test closure |
 | I4F.2a.1 | pending | public facade, assembly, diagnostic, and error access retirement |
 | I4F.2a.2 | pending | core evaluator and net access retirement |
 | I4F.2a.3 | pending | reflection, compiler, macro, and host access retirement |
@@ -3419,12 +3422,22 @@ Retire operations which would become unsafe or architecturally false before
 the atomic switch. This work uses the current representation and therefore can
 be partitioned by subsystem:
 
-1. **I4F.2a.1 — Public facade, assembly, diagnostics, and errors.** Remove
+1. **I4F.2a.1 — Public facade, assembly, diagnostics, and errors.** Partition
+   this surface into three buildable slices:
+
+   - **I4F.2a.1a — Handle traits and rendering.** Remove
    handle-derived equality, ordering, hashing, kind, runtime identity, and
    content rendering from public `Value`; make optional `Debug` content-free.
+   Crate-private compatibility authority/projections may remain until the
+   subsystem slices which consume them, but no public trait may expose
+   representation-derived semantics.
+   - **I4F.2a.1b — Assembly, diagnostics, and errors.**
    Route comparison, observation, WHNF extraction, and owned host conversion
    through matching runtime authority. Keep `EvaluatedValue` as the same root
    plus its weak observer and static WHNF witness.
+   - **I4F.2a.1c — Public facade closure.** Update compile-time and public API
+   fixtures to prove the removed traits/observers stay unavailable while
+   evaluator and reflection capabilities retain the intended observations.
 2. **I4F.2a.2 — Core evaluation and net construction.** Replace unrestricted
    borrowed `as_core` projections with lifetime-bounded access and replace
    ownership-taking `into_core` with either a root-preserving move or an
@@ -3444,6 +3457,20 @@ Each slice must preserve the corresponding semantic operation through its
 runtime-authorized replacement and update compatibility-oracle tests when an
 intentionally removed public trait or observer no longer compiles. The work is
 call-site migration, not permission to publish a managed value.
+
+I4F.2a.1a completed 2026-09-03. Production `Value` and `EvaluatedValue` no
+longer implement semantic equality, and `Value::runtime_id` is no longer a
+public observation. Both handles now render as opaque names rather than
+revealing the current outer representation. Diagnostic, readiness,
+reflection-lifecycle, and query wrappers stopped deriving equality merely
+because they contain a value. The binary crate replaced its canonical
+atom/unit and diagnostic de-duplication comparisons with matching-runtime
+`ReflectionInspector::same_representation` or the observer carried by an
+`EvaluatedValue`; this operation is explicitly representation inspection, not
+Glam logical equality. A crate-test-only compatibility equality implementation
+keeps the remaining subsystem fixtures buildable while I4F.2a.1b/a.2/a.3
+migrate their assertions; I4F.2a.1c removes that oracle and proves the public
+negative trait boundary.
 
 #### Phase I4F.2b — Active-Owner Extraction Gate
 

@@ -151,9 +151,14 @@ impl Drop for EvaluationQueryHandle {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
+#[cfg_attr(test, derive(PartialEq, Eq))]
 pub(crate) enum EvaluationQueryPoll {
-    State { value: PublicValue, observed: bool },
+    State {
+        value: PublicValue,
+        #[cfg_attr(not(test), allow(dead_code))]
+        observed: bool,
+    },
     ForeignQueryDomain,
 }
 

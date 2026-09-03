@@ -505,9 +505,8 @@ mod tests {
 
         let (_generation, _store, snapshot) = input.task_capability.transaction_snapshot();
         let mut events = RuntimeEventJournal::new(snapshot);
-        assert_eq!(
-            events.read(&input.diagnostic_reader).unwrap(),
-            None,
+        assert!(
+            events.read(&input.diagnostic_reader).unwrap().is_none(),
             "logger output must not return to assembler diagnostic input"
         );
         let output = output

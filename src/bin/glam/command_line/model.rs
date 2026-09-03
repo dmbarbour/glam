@@ -7,7 +7,7 @@ use glam::{Diagnostic, Error, ModuleInput, Severity, Value, Values};
 
 use super::completion::{CliCaseExplanation, CompletionRequest};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) struct CliError {
     message: String,
     cause: Option<Box<Error>>,

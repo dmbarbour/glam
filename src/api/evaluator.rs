@@ -37,6 +37,17 @@ impl ValueEvaluator<'_> {
 }
 
 impl ReflectionInspector<'_> {
+    /// Compares the retained runtime representations without demanding either
+    /// value.
+    ///
+    /// This is a reflection operation rather than Glam's logical equality:
+    /// lazy and promised values compare by their current identities, while
+    /// immediate containers compare their currently retained structure.
+    pub fn same_representation(&self, left: &Value, right: &Value) -> Result<bool, Error> {
+        let values = self.assembler.core_values();
+        left.same_core_with(&values, right)
+    }
+
     /// Reports the current outer runtime representation without demanding it.
     pub fn kind(&self, value: &Value) -> Result<ValueKind, Error> {
         value.require_runtime(self.assembler.reasoning.runtime.id())?;

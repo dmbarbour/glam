@@ -555,10 +555,10 @@ mod tests {
         let values = input.runtime.values();
 
         let first = supervisor.install().expect("first logger should install");
-        assert_eq!(
+        assert!(matches!(
             supervisor.active_status(),
             Some(glam::reflection::EffectLifecycleStatus::Launched)
-        );
+        ));
         let first_event =
             diagnostics.publish_local(Diagnostic::new(&values, Severity::Info, "first lifecycle"));
         supervisor.finish(&first);

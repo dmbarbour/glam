@@ -74,7 +74,8 @@ mod scoped_construction_tests {
 ///
 /// Values cannot be transferred between runtimes. Construct them through
 /// [`Values`], obtained from the target runtime or assembler.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
+#[cfg_attr(test, derive(PartialEq, Eq))]
 pub struct Value(pub(super) RuntimeValueRoot);
 
 /// A runtime-local value whose outer shell has reached weak-head normal form.
@@ -656,7 +657,7 @@ impl ScopedValues<'_> {
 }
 
 impl Value {
-    pub fn runtime_id(&self) -> EvaluationRuntimeId {
+    pub(crate) fn runtime_id(&self) -> EvaluationRuntimeId {
         self.0.runtime_id()
     }
 
@@ -670,6 +671,19 @@ impl Value {
                 runtime.get()
             )))
         }
+    }
+
+    pub(crate) fn same_core_with(
+        &self,
+        values: &CoreValueFactory,
+        other: &Self,
+    ) -> Result<bool, Error> {
+        self.require_runtime(values.runtime_id())?;
+        other.require_runtime(values.runtime_id())?;
+        Ok(values.with_runtime_value_access(|access| {
+            debug_assert!(access.belongs_to(values));
+            self.as_core() == other.as_core()
+        }))
     }
 
     #[cfg(test)]
@@ -799,6 +813,21 @@ impl EvaluatedValue {
         })
     }
 
+    /// Compares this evaluated outer value with another retained runtime
+    /// representation without demanding the other value.
+    ///
+    /// This is representation identity/structure, not Glam's logical
+    /// equality. It is primarily useful when an effect protocol expects a
+    /// canonical immediate value such as an atom or unit.
+    pub fn same_representation(&self, other: &Value) -> Result<bool, Error> {
+        let values = self.observation_values()?;
+        values.with_access(|access| {
+            let left = access.core_value(self.as_value())?;
+            let right = access.core_value(other)?;
+            Ok(left == right)
+        })
+    }
+
     /// Extracts owned compact binary data under matching live runtime
     /// authority. The returned bytes do not borrow the value domain.
     pub fn as_bytes(&self) -> Result<Option<Bytes>, Error> {
@@ -866,19 +895,18 @@ impl EvaluatedValue {
 
 impl fmt::Debug for EvaluatedValue {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_tuple("EvaluatedValue")
-            .field(&self.value)
-            .finish()
+        formatter.write_str("EvaluatedValue")
     }
 }
 
+#[cfg(test)]
 impl PartialEq for EvaluatedValue {
     fn eq(&self, other: &Self) -> bool {
         self.value == other.value
     }
 }
 
+#[cfg(test)]
 impl Eq for EvaluatedValue {}
 
 impl From<EvaluatedValue> for Value {
@@ -975,10 +1003,7 @@ impl Drop for PromiseResolver {
 
 impl fmt::Debug for Value {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("Value")
-            .field("kind", &self.kind())
-            .finish_non_exhaustive()
+        formatter.write_str("Value")
     }
 }
 

@@ -32,7 +32,8 @@ struct EffectLifecycleState {
 
 /// The last committed scheduler status published for a composed effect root.
 #[doc(hidden)]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
+#[cfg_attr(test, derive(PartialEq, Eq))]
 pub enum EffectLifecycleStatus {
     Launched,
     Blocked,
@@ -74,6 +75,10 @@ impl EffectLifecycleTerminal {
 }
 
 impl EffectLifecycleStatus {
+    fn same_state(&self, other: &Self) -> bool {
+        std::mem::discriminant(self) == std::mem::discriminant(other)
+    }
+
     pub fn is_terminal(&self) -> bool {
         !matches!(self, Self::Launched | Self::Blocked)
     }
@@ -143,7 +148,7 @@ impl EffectLifecycle {
             .status
             .lock()
             .expect("effect lifecycle mutex should not be poisoned");
-        while &*status == observed {
+        while status.same_state(observed) {
             status = self
                 .inner
                 .changed

@@ -196,7 +196,14 @@ impl DefaultLogger {
             .evaluator
             .reflection()
             .dictionary_items(&frame)
-            .is_ok_and(|items| items.into_iter().any(|(tag, _)| tag == message_tag));
+            .is_ok_and(|items| {
+                items.into_iter().any(|(tag, _)| {
+                    self.evaluator
+                        .reflection()
+                        .same_representation(&tag, &message_tag)
+                        .unwrap_or(false)
+                })
+            });
         if is_message {
             return self
                 .render_context_message(&frame, terminal, frame_indent)
@@ -304,25 +311,46 @@ impl DefaultLogger {
         };
 
         let values = self.evaluator.values();
-        if tag == &values.atom_from_text("eval") {
+        if reflection
+            .same_representation(tag, &values.atom_from_text("eval"))
+            .unwrap_or(false)
+        {
             return self.eval_context_summary(payload);
         }
-        if tag == &values.atom_from_text("g") {
+        if reflection
+            .same_representation(tag, &values.atom_from_text("g"))
+            .unwrap_or(false)
+        {
             return self.g_context_summary(payload);
         }
-        if tag == &values.atom_from_text("import") {
+        if reflection
+            .same_representation(tag, &values.atom_from_text("import"))
+            .unwrap_or(false)
+        {
             return self.import_context_summary(payload);
         }
-        if tag == &values.atom_from_text("asm") {
+        if reflection
+            .same_representation(tag, &values.atom_from_text("asm"))
+            .unwrap_or(false)
+        {
             return self.asm_context_summary(payload);
         }
-        if tag == &values.atom_from_text("conf") {
+        if reflection
+            .same_representation(tag, &values.atom_from_text("conf"))
+            .unwrap_or(false)
+        {
             return self.conf_context_summary(payload);
         }
-        if tag == &values.atom_from_text("task") {
+        if reflection
+            .same_representation(tag, &values.atom_from_text("task"))
+            .unwrap_or(false)
+        {
             return self.task_context_summary(payload);
         }
-        if tag == &values.atom_from_text("runtime") {
+        if reflection
+            .same_representation(tag, &values.atom_from_text("runtime"))
+            .unwrap_or(false)
+        {
             return self.runtime_context_summary(payload);
         }
         self.context_tag_text(tag)
@@ -513,7 +541,11 @@ fn diagnostic_text(assembler: &Assembler, value: &Value) -> Option<String> {
 
 fn diagnostic_value_kind(assembler: &Assembler, value: &Value) -> &'static str {
     let values = assembler.values();
-    if value == &values.abstract_global_path(["builtin", "unit"]) {
+    if assembler
+        .reflection()
+        .same_representation(value, &values.abstract_global_path(["builtin", "unit"]))
+        .unwrap_or(false)
+    {
         return "Unit";
     }
     match assembler.reflection().kind(value) {

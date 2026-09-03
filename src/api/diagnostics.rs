@@ -24,7 +24,8 @@ use crate::source::SourceIdentity;
 /// The emission stays unchanged in the envelope. Observers may explicitly
 /// apply assembler provenance, then add viewer-specific context, without
 /// affecting other observers of the same diagnostic.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
+#[cfg_attr(test, derive(PartialEq, Eq))]
 pub struct Diagnostic {
     pub(super) emission: Value,
     pub(super) origin: Option<Value>,
@@ -300,7 +301,8 @@ impl Diagnostic {
 /// Sequence numbers are local to a [`DiagnosticBus`] and increase in commit
 /// order. The diagnostic itself is shared across subscribers without copying
 /// its value graph.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
+#[cfg_attr(test, derive(PartialEq, Eq))]
 pub struct DiagnosticEvent {
     sequence: u64,
     diagnostic: Arc<Diagnostic>,

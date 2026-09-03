@@ -94,7 +94,12 @@ pub(super) fn run_cli_completion(
             candidate.replacement() == item.candidate.replacement()
                 && candidate.kind() == item.candidate.kind()
         }) {
-            existing.merge_explanations(&item.candidate);
+            existing.merge_explanations(&item.candidate, |left, right| {
+                assembler
+                    .reflection()
+                    .same_representation(left, right)
+                    .unwrap_or(false)
+            });
         } else {
             candidates.push(item.candidate);
         }
@@ -111,7 +116,12 @@ pub(super) fn run_cli_completion(
                 && expectation.token_offset() == item.token_offset()
                 && expectation.label() == item.label()
         }) {
-            existing.merge_explanations(&item);
+            existing.merge_explanations(&item, |left, right| {
+                assembler
+                    .reflection()
+                    .same_representation(left, right)
+                    .unwrap_or(false)
+            });
         } else {
             expectations.push(item);
         }
@@ -185,7 +195,10 @@ fn completion_candidate_viable(
     Ok(branches.iter().any(|branch| {
         let journal = branch.journal();
         branch.value().is_some_and(|value| {
-            value == &assembler.values().unit()
+            assembler
+                .reflection()
+                .same_representation(value, &assembler.values().unit())
+                .unwrap_or(false)
                 && journal.cursor == argument_count
                 && plan_is_valid(journal, cli_arguments.clone())
         }) || journal
@@ -222,7 +235,11 @@ fn select_branch(
             }
             continue;
         };
-        if value != &assembler.values().unit() {
+        if !assembler
+            .reflection()
+            .same_representation(value, &assembler.values().unit())
+            .unwrap_or(false)
+        {
             retain_invalid(
                 assembler,
                 &mut best_invalid,
@@ -278,7 +295,9 @@ fn select_branch(
         let detail = best_failure
             .map(|journal| expectation_detail(assembler, journal))
             .unwrap_or_default();
-        let explanations = best_failure.map(failure_explanations).unwrap_or_default();
+        let explanations = best_failure
+            .map(|journal| failure_explanations(assembler, journal))
+            .unwrap_or_default();
         return Err(CliError::new(format!(
             "configured `conf.cli` did not match the command line{detail}"
         ))
@@ -291,6 +310,7 @@ fn select_branch(
         .any(|candidate| candidate.result.plan != selected.result.plan)
     {
         let explanations = unique_values(
+            assembler,
             successful
                 .iter()
                 .flat_map(|candidate| candidate.explanations.iter().cloned()),
@@ -316,7 +336,7 @@ fn retain_invalid(
         .as_ref()
         .is_none_or(|(existing, _)| frontier > *existing)
     {
-        let explanations = unique_values(journal.active_cases.iter().cloned());
+        let explanations = unique_values(assembler, journal.active_cases.iter().cloned());
         let detail = render_explanation_detail(assembler, &explanations);
         *best = Some((
             frontier,
@@ -351,7 +371,7 @@ fn expectation_detail(assembler: &Assembler, journal: &CliJournal) -> String {
     labels.sort_unstable();
     labels.dedup();
     if labels.is_empty() {
-        return render_explanation_detail(assembler, &failure_explanations(journal));
+        return render_explanation_detail(assembler, &failure_explanations(assembler, journal));
     }
     let expected = format!(
         " at argument {}, byte {}: expected {}",
@@ -361,13 +381,14 @@ fn expectation_detail(assembler: &Assembler, journal: &CliJournal) -> String {
     );
     format!(
         "{expected}{}",
-        render_explanation_detail(assembler, &failure_explanations(journal))
+        render_explanation_detail(assembler, &failure_explanations(assembler, journal))
     )
 }
 
-fn failure_explanations(journal: &CliJournal) -> Vec<Value> {
+fn failure_explanations(assembler: &Assembler, journal: &CliJournal) -> Vec<Value> {
     let frontier = journal_frontier(journal);
     let explanations = unique_values(
+        assembler,
         journal
             .expectations
             .iter()
@@ -378,15 +399,20 @@ fn failure_explanations(journal: &CliJournal) -> Vec<Value> {
         return explanations;
     }
     if !journal.active_cases.is_empty() {
-        return unique_values(journal.active_cases.iter().cloned());
+        return unique_values(assembler, journal.active_cases.iter().cloned());
     }
     Vec::new()
 }
 
-fn unique_values(values: impl IntoIterator<Item = Value>) -> Vec<Value> {
+fn unique_values(assembler: &Assembler, values: impl IntoIterator<Item = Value>) -> Vec<Value> {
     let mut unique = Vec::new();
     for value in values {
-        if !unique.contains(&value) {
+        if !unique.iter().any(|prior| {
+            assembler
+                .reflection()
+                .same_representation(&value, prior)
+                .unwrap_or(false)
+        }) {
             unique.push(value);
         }
     }

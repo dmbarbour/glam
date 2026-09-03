@@ -643,7 +643,11 @@ fn atom_name<'a>(
     accepted
         .iter()
         .copied()
-        .find(|name| value.as_value() == &values.atom_from_text(name))
+        .find(|name| {
+            value
+                .same_representation(&values.atom_from_text(name))
+                .unwrap_or(false)
+        })
         .ok_or_else(|| TaskHalt::new(format!("invalid CLI {kind}")))
 }
 

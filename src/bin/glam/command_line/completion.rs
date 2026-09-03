@@ -101,7 +101,7 @@ pub(crate) enum CompletionKind {
     Path,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) struct CompletionCandidate {
     replacement: OsString,
     kind: CompletionKind,
@@ -143,9 +143,17 @@ impl CompletionCandidate {
         &self.explanations
     }
 
-    pub(super) fn merge_explanations(&mut self, other: &Self) {
+    pub(super) fn merge_explanations(
+        &mut self,
+        other: &Self,
+        mut same: impl FnMut(&Value, &Value) -> bool,
+    ) {
         for explanation in &other.explanations {
-            if !self.explanations.contains(explanation) {
+            if !self
+                .explanations
+                .iter()
+                .any(|prior| same(prior.value(), explanation.value()))
+            {
                 self.explanations.push(explanation.clone());
             }
         }
@@ -153,7 +161,7 @@ impl CompletionCandidate {
 }
 
 /// One lazy, structured explanation supplied to `.case` by configuration.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) struct CliCaseExplanation {
     value: Value,
 }
@@ -203,7 +211,7 @@ impl CliCompletion {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) struct CompletionExpectation {
     argument: usize,
     token_offset: usize,
@@ -229,9 +237,17 @@ impl CompletionExpectation {
         &self.explanations
     }
 
-    pub(super) fn merge_explanations(&mut self, other: &Self) {
+    pub(super) fn merge_explanations(
+        &mut self,
+        other: &Self,
+        mut same: impl FnMut(&Value, &Value) -> bool,
+    ) {
         for explanation in &other.explanations {
-            if !self.explanations.contains(explanation) {
+            if !self
+                .explanations
+                .iter()
+                .any(|prior| same(prior.value(), explanation.value()))
+            {
                 self.explanations.push(explanation.clone());
             }
         }

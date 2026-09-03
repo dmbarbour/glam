@@ -338,7 +338,8 @@ pub trait TaskHost<S: TaskSpecialization>: TaskEnvironment + Send + Sync {
     fn wait_for_change(&self, observed_generation: u64) -> bool;
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
+#[cfg_attr(test, derive(PartialEq, Eq))]
 pub enum TaskOutcome {
     Complete(PublicValue),
     Cancelled,
