@@ -5019,6 +5019,100 @@ fn runtime_readiness_retains_exit_dispositions_without_settling_tasks() {
 }
 
 #[test]
+fn exit_readiness_snapshot_root_survives_after_settlement_report_drop() {
+    let fixture = SameRuntimeFixture::new();
+    let context = fixture.context();
+    let values = context.values().clone();
+    let message = RuntimeValueRoot::new(
+        context.values(),
+        Value::binary_from_text("snapshot-owned exit"),
+    );
+    let task = context
+        .schedule_task(move |_| {
+            Ok(Box::new(ExitVote(EvaluationExitBlock {
+                intent: ExitIntent::Error(message),
+                observed_epoch: None,
+            })))
+        })
+        .expect("the exit-snapshot fixture should schedule");
+
+    fixture.runtime.pump_until_stable();
+    let crate::api::RuntimeReadiness::Ready(snapshot) = fixture.runtime.readiness() else {
+        panic!("the stable exit vote should produce a readiness snapshot")
+    };
+    let report = snapshot.settle().expect("the exit snapshot should settle");
+    drop(report);
+    drop(task);
+
+    let snapshot_live = values
+        .collect_managed_for_test()
+        .expect("the settled readiness snapshot should retain its exit-message root");
+    assert!(snapshot.dispositions().iter().any(|disposition| {
+        matches!(
+            disposition.kind(),
+            crate::api::RuntimeDispositionKind::ExitError(value)
+                if fixture.runtime.values().clone_core(value).is_ok_and(|value| {
+                    value == Value::binary_from_text("snapshot-owned exit")
+                })
+        )
+    }));
+
+    drop(snapshot);
+    let reclaimed = values
+        .collect_managed_for_test()
+        .expect("dropping the readiness snapshot should release its managed roots");
+    assert!(reclaimed.root_entries() < snapshot_live.root_entries());
+    assert!(reclaimed.finalized_slots() >= 1);
+}
+
+#[test]
+fn settled_report_root_survives_after_exit_snapshot_and_task_retire() {
+    let fixture = SameRuntimeFixture::new();
+    let context = fixture.context();
+    let values = context.values().clone();
+    let message = RuntimeValueRoot::new(
+        context.values(),
+        Value::binary_from_text("report-owned exit"),
+    );
+    let task = context
+        .schedule_task(move |_| {
+            Ok(Box::new(ExitVote(EvaluationExitBlock {
+                intent: ExitIntent::Error(message),
+                observed_epoch: None,
+            })))
+        })
+        .expect("the settled-report fixture should schedule");
+
+    fixture.runtime.pump_until_stable();
+    let crate::api::RuntimeReadiness::Ready(snapshot) = fixture.runtime.readiness() else {
+        panic!("the stable exit vote should produce a readiness snapshot")
+    };
+    let report = snapshot.settle().expect("the exit snapshot should settle");
+    drop(snapshot);
+    drop(task);
+
+    let report_live = values
+        .collect_managed_for_test()
+        .expect("the settled report should retain its exit-message root");
+    assert!(report.dispositions().iter().any(|disposition| {
+        matches!(
+            disposition.kind(),
+            crate::api::RuntimeDispositionKind::ExitError(value)
+                if fixture.runtime.values().clone_core(value).is_ok_and(|value| {
+                    value == Value::binary_from_text("report-owned exit")
+                })
+        )
+    }));
+
+    drop(report);
+    let reclaimed = values
+        .collect_managed_for_test()
+        .expect("dropping the settled report should release its managed roots");
+    assert!(reclaimed.root_entries() < report_live.root_entries());
+    assert!(reclaimed.finalized_slots() >= 1);
+}
+
+#[test]
 fn quiescence_validation_is_observational_and_rejects_stale_state() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();

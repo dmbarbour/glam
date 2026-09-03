@@ -183,9 +183,9 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.2e.1b | complete | coordinator, demand, spark, and session owners |
 | I4F.2e.1c.1 | complete | failure-ledger and evaluation-session report owners |
 | I4F.2e.1c.2 | complete | deadlock snapshot and killed-work report owners |
-| I4F.2e.1c.3 | pending | exit-disposition and settled-report owners |
-| I4F.2e.1c | pending | readiness, ledger, and report owners |
-| I4F.2e.1 | pending | cache, evaluation, coordinator, and readiness collection fixtures |
+| I4F.2e.1c.3 | complete | exit-disposition and settled-report owners |
+| I4F.2e.1c | complete | readiness, ledger, and report owners |
+| I4F.2e.1 | complete | cache, evaluation, coordinator, and readiness collection fixtures |
 | I4F.2e.2 | pending | reflection owner collection fixtures |
 | I4F.2e.3 | pending | diagnostic, event, and delivery collection fixtures |
 | I4F.2e.4 | pending | compiler, binary-host, net, and hidden-owner collection fixtures |
@@ -4122,6 +4122,17 @@ original blocked failure. Dropping the report releases both its failure root
 and any derived diagnostic/snapshot roots. The fixtures intentionally compare
 the isolated before/after root sets rather than assigning a false one-root
 cardinality to the report's derived diagnostic view.
+
+I4F.2e.1c.3 completed 2026-09-03. Two error-exit fixtures settle the same
+production lifecycle but retire the cloned owners in opposite orders. The
+first drops the settlement report and terminal task handle before collection,
+then proves that the retained readiness proposal still projects its managed
+exit message; proposal drop releases the root. The second drops the proposal
+and task first, proves that the settled report independently retains and
+projects the message, then observes release on report drop. Counts permit the
+co-retirement of the retained reflection snapshot rather than pretending the
+public report contains only its exit disposition. This completes the
+runtime/cache/evaluation/coordinator/readiness owner matrix in I4F.2e.1.
 
 Keep every fixture in a fresh isolated collector-ready runtime/heap. Do not
 collect a shared production graph containing I5-I10 unclassified families.
