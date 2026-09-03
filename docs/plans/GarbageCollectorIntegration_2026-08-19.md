@@ -205,6 +205,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.2f.4 | complete | mandatory post-I4 review and closeout |
 | I4F.2f | complete | compatibility deletion and I4 reconciliation |
 | I4F.2 | complete | public managed-root production switch |
+| I5.0 | pending | transitive trace, core-net chronology, and lazy/promise handle decision review |
 | I5 | pending | managed lazy/promise cells, external lifecycle, and cycle reclamation |
 | I6 | pending | functions, applications, metadata, failures |
 | I7 | pending | persistent list and dictionary tracing |
@@ -4375,6 +4376,13 @@ audit the recursive payload graph.
 Production remains `NoAuto`; the switch and closed owner fixtures do not
 authorize whole-graph collection while I5-I10 families remain unclassified.
 
+A focused forward review of the now-concrete I4 handoff is recorded in
+[`GarbageCollectorIntegrationI5I10_2026-09-03.md`](../reviews/GarbageCollectorIntegrationI5I10_2026-09-03.md).
+It resolved low-risk verification, I7, I9, and I10 wording drift, but found
+three coupled representation questions which must be settled by I5.0 before
+I5 implementation: transitive managed-edge closure, managed core-net ordering,
+and the durable/scoped/weak handle roles for lazy and promise identities.
+
 From I4F.2 onward, every representation change in I5-I10 updates its exact
 visitor or root classification in the same checkpoint. No later phase may
 perform the first root conversion for a durable owner which could already
@@ -4389,21 +4397,27 @@ unrooted pointer.
   these phases verify semantic behavior, exact visitor/root construction,
   mutation-gateway placement, owner retirement, and ordinary drop behavior
   without reclaiming the whole graph.
-- Every value surviving a mutator region is already a registered root or an
-  exact managed edge after I4F.2. A later I5-I10 checkpoint may change a
-  payload's internal representation only if that same change supplies its
-  exact visitor or root disposition. If a later source audit finds a durable
-  bare value, the responsible earlier phase is reopened; I9 is not a safe
-  holding area for delayed root conversion.
-- Before any isolated fixture collects a managed family, that family completes
-  I4.0's direct/transitive destruction record. Managed destruction is passive;
-  an active cleanup path must remain in a separately inventoried external root
-  owner and may not be reachable from the managed graph.
+- Every value crossing a durable Rust boundary after I4F.2 is a registered
+  root or an exact managed edge. A `ManagedValueNode` may still contain a
+  compatibility-owned `Value` interior only while that representation stores
+  no bare managed pointer; the compile-exhaustive compatibility adapters are
+  its migration oracle. A later I5-I10 checkpoint which first introduces a
+  `Gc` must, in the same change, close every transitive enclosing trace or root
+  path through which that identity can survive a mutator region. If a later
+  source audit finds a durable bare value, the responsible earlier phase is
+  reopened; I9 is not a safe holding area for delayed root conversion.
+- Before any isolated fixture collects a managed family, that family has an
+  exact trace, stable layout and allocator-admission latch, I4.0
+  direct/transitive destruction record, rooted-survival proof, and
+  unrooted-reclamation proof. Managed destruction is passive; an active cleanup
+  path must remain in a separately inventoried external root owner and may not
+  be reachable from the managed graph.
 - A phase may force collection only in a fresh isolated collector-ready fixture
   whose complete reachable graph is closed over the family under test and
-  already certified prerequisite families. The fixture must not borrow a
-  production runtime, production cache, global root registry, or another
-  still-unclassified graph surface.
+  already certified prerequisite families. A fresh instance may and generally
+  should use the real production value facade and root representation; it must
+  not borrow a shared production runtime, long-lived production cache, another
+  runtime's root registry, or another still-unclassified graph surface.
 - Each isolated fixture first proves rooted survival, then removes the final
   root and proves reclamation. This is family-level trace evidence, not
   certification that the complete runtime graph is collectible.
@@ -4412,6 +4426,30 @@ unrooted pointer.
   the I5-I10 reclamation cases through that boundary.
 
 ## Phase I5 — Lazies and Promises
+
+### Phase I5.0 — Managed-Identity and Transitive-Trace Decision Review
+
+This is a hard design gate before I5A, not permission to begin the migration.
+Its required inputs and open findings are recorded as I5F-001 through I5F-003
+and I5F-007 in the focused forward review linked above. It must:
+
+- select the central wildcard-free walk which traces managed identities nested
+  beneath compatibility-owned values without recursively following a managed
+  identity or invoking semantic work;
+- decide whether the managed core-net ownership/durable-handle core moves
+  before I5 or whether every value-bearing external net surface receives a
+  temporary exact root representation;
+- inventory every direct `LazyValue`, `PromisedValue`, `LazyCell`, and
+  `PromiseCell` use which survives a managed-access scope; and
+- distinguish the interior managed identity, durable registered handle,
+  bounded access carrier, and edge-free coordination state, including the
+  current weak task-owned promise obligation.
+
+The review must rewrite and partition I5 and the affected portion of I8 before
+either implementation begins. At minimum, forced-order tests must cover both
+terminal-publication orderings, discarded and retained task-owned promises,
+and a managed identity nested beneath every compatibility owner capable of
+holding a `Value`. Production remains `NoAuto`.
 
 ### Phase I5A — Lazy-Cell Migration
 
@@ -4425,8 +4463,9 @@ unrooted pointer.
   first isolated collection. Any notification, task identity, or active
   cleanup state remains in an edge-free external companion rather than its
   managed fields.
-- Update I4's compatibility visitor in the same checkpoint; collection being
-  disabled permits no trace placeholder.
+- Update the central managed-edge walk and production `ManagedValueNode` trace
+  in the same checkpoint, then retire only the lazy-specific compatibility
+  step it replaces. Collection being disabled permits no trace placeholder.
 
 Verification: preserve the lazy publication/wait suites and reclaim a direct,
 two-node, and many-node lazy cycle in a closed fixture. Add
@@ -4443,6 +4482,9 @@ two-node, and many-node lazy cycle in a closed fixture. Add
   `Root`, public `Value`, or equivalent managed ownership.
 - Route one-write assignment through a representation-local safe gateway and
   preserve publication-before-notification ordering.
+- Update the central managed-edge walk and every production enclosing trace in
+  the same checkpoint, then retire only the promise-specific compatibility
+  step it replaces.
 - Complete the `PromiseCell` direct/transitive passive-destruction record
   before its first isolated collection.
 
@@ -4520,33 +4562,52 @@ structured-failure suite, and `failure_trace_invokes_no_semantic_service`.
 The reclamation case uses a closed isolated family fixture; production remains
 `NoAuto` and does not collect.
 
-### Phase I6D — Reflection and Net-Construction Payloads
+### Phase I6D.1 — Reflection Computation Payloads
 
-- Migrate reflection computations, gate targets/results, and net-construction
-  payloads. Route only actual one-write/replaceable managed edges through safe
-  representation-local mutation gateways.
-- Reconcile these visitors with I4E without performing runtime-net migration,
-  which remains I8.
+- Migrate reflection effect, optional gate target, and installed failure/result
+  ownership according to the external-owner split established by I4F.2b.2.
+  Keep reservation activation and cancellation as external lifecycle state;
+  only actual semantic value edges become managed.
+- Route one-write managed fields through representation-local gateways and
+  preserve reservation-inside/activation-outside evaluator-scope ordering.
+- Reconcile the final representation with I4C's deferred compatibility record,
+  retiring the reflection-specific adapter only after the production managed
+  trace is exact.
 
-Verification: `managed_reflection_gate_cycle_reclaims`,
-`managed_net_construction_cycle_reclaims`, and current task-result publication
-tests. Production remains `NoAuto`; only each closed family fixture may force
-collection.
+Verification: `managed_reflection_gate_cycle_reclaims`, current task-result
+publication tests, and forced reservation/activation/cancellation orderings.
+Production remains `NoAuto`; only the closed reflection-computation fixture may
+force collection.
+
+### Phase I6D.2 — Net-Construction Payloads
+
+- Replace the net-construction `Arc<Value>` compatibility payload with its exact
+  managed edge representation without performing the core runtime-net owner
+  migration selected by I5.0.
+- Preserve construction-machine polling and callback-free evaluator access;
+  the immutable effect edge requires no post-publication mutation gateway.
+
+Verification: `managed_net_construction_cycle_reclaims` and the current
+net-construction polling/publication tests. Production remains `NoAuto`; only
+the closed net-construction fixture may force collection.
 
 ## Phase I7 — Persistent List and Dictionary Trace Audit
 
 - Keep RPDS and FingerTree/`Arc` spines initially.
-- Audit and extend I4's exact logical tracing of keys, values, list chunks, lazy
-  list thunks, concatenation nodes, and shared slices against the concrete
-  representation inventory. A missing node is a soundness defect, not work
-  intentionally deferred from I4.
+- Audit the already-active central managed-edge walk through keys, values, list
+  chunks, lazy list thunks, concatenation nodes, and shared slices against the
+  concrete representation inventory. Nested managed identities must already be
+  traceable from their introduction in I5/I6; I7 is not permission to leave a
+  missing production edge until this audit.
 - In an isolated collector-ready fixture, construct the same persistent
-  representation exposed through the public value facade. Verify it retains
-  all contained managed objects across full collection and that dropping its
-  final fixture root permits a backedge cycle to be reclaimed. Do not run this
-  collection through a production runtime or its public-root registry.
-- Measure duplicate trace work for heavily shared versions and record a
-  threshold for revisiting collector-aware physical nodes.
+  representation exposed through the real production value facade in a fresh
+  runtime. Verify it retains all contained managed objects across full
+  collection and that dropping its final fixture root permits a backedge cycle
+  to be reclaimed. Do not borrow a shared or otherwise unclassified production
+  graph for this collection.
+- Measure and record duplicate trace work for heavily shared versions. Defer a
+  threshold or collector-aware physical-node migration until profiling shows
+  the logical walk is material.
 
 Logical duplicate visits are a performance issue in a mark collector, not an
 edge-counting soundness problem. This phase must not silently turn collection
@@ -4644,88 +4705,41 @@ cases after Gate G2 closes the entire graph.
 
 ## Phase I9 — Runtime-Root Lifecycle and Retirement Audits
 
-I4F.1 performs the structural conversion of durable owners to stable
-root-shaped surfaces before managed values can escape, and I4F.2c registers
-those surfaces at the managed-value switch. I9 revisits the already-rooted
-representations after the I5-I8 interior migrations to verify lifecycle,
-retirement, and exact ownership. Discovering a first-time root-surface
-conversion here is a chronology failure: stop and repair the checkpoint which
-first allowed that owner to contain a managed edge.
+I4F performs the structural conversion and registration of durable owner
+surfaces before managed interiors can escape. I9 is a delta audit after the
+I5-I8 migrations, not a repetition of I4F's owner-by-owner proof. Discovering
+a first-time root-surface conversion here is a chronology failure: stop and
+repair the checkpoint which first allowed that owner to contain a managed
+edge.
 
-### Phase I9A — Runtime Canonical and Compiler Caches
+### Phase I9A-E — Phase-Entry Delta and Conditional Subsystem Audits
 
-- Audit the explicit external roots or exact managed cache edges whose owner
-  surfaces were installed by I4F.1 and registered by I4F.2c for runtime
-  canonical values and type-indexed compiler attachments.
-- Close the `Any` registration boundary: each extension family has a stable
-  ledger record, remains structurally rooted, and cannot retain a
-  factory/domain backedge.
+- Diff the I5-I8 implementation and ownership ledger against I4F's latched
+  durable-owner inventory. Classify every changed field, constructor,
+  publication path, retirement path, and newly introduced companion by owning
+  subsystem.
+- Cover runtime canonical/compiler caches; coordinator/evaluation state;
+  reflection store/protocol state; diagnostics/runtime events; and
+  assembly/compiler/CLI owners as one source-backed checklist. Create a focused
+  implementation checkpoint only for a subsystem whose ownership, retirement,
+  or representation actually changed after I4F. Merge or omit unchanged rows
+  rather than rerunning an identical audit.
+- Preserve the established invariants even when no follow-up is needed:
+  admitted cache families remain structurally rooted without a factory/domain
+  backedge; edge-free notification companions do not imply semantic ownership;
+  persistent reflection snapshots retain only their authorized construction
+  domain; diagnostic/event callbacks and destruction remain after locks; and
+  bounded compiler/assembly/CLI locals remain inside I3 access regions.
+- For each nonempty delta, name the exact production behavior test, owner-drop
+  test, and—only where it adds evidence—a closed isolated reclamation fixture.
+  Reuse I4F's passing owner matrix as the baseline rather than duplicating its
+  test names prospectively.
 
-Verification: existing cache initialization/race tests,
-`compiler_cache_does_not_form_a_value_domain_cycle`, and
-`runtime_cache_roots_release_after_last_domain_owner`. Production tests observe
-root/owner retirement without collecting. Any reclamation assertion uses a
-closed isolated cache fixture; production remains `NoAuto`.
-
-### Phase I9B — Coordinator and Evaluation Ownership
-
-- Audit the registered roots and exact managed edges for client demands,
-  sparks, tasks, deferred producers, waits, failure ledgers, task handles, and
-  promise resolver state after the I5-I8 interior migrations.
-- Do not root a value merely because an edge-free notification companion names
-  its task/wait ID. Ownership follows semantic retention, not scheduler
-  reachability.
-
-Verification: `blocked_machine_context_does_not_retain_its_owner_lease`,
-`task_handle_acknowledges_terminal_failure_after_owner_lease_closes`,
-`task_handle_cancellation_is_harmless_after_owner_closure`, and
-`coordinator_roots_release_after_terminal_record_retirement`. Use isolated
-closed coordinator fixtures for reclamation; production remains `NoAuto`.
-
-### Phase I9C — Reflection Store and Protocol Roots
-
-- Audit the root surfaces installed by I4F.1 and registered by I4F.2c for
-  reflection environments, protected volumes, store snapshots, views,
-  journals, queries, rewrites, and parked protocol machines; update only
-  interior edge representations introduced by their owning migration phase.
-- Preserve persistent snapshot isolation and the I1B rule that an active store
-  or snapshot may retain its authorized construction domain.
-
-Verification: existing persistent-snapshot/query-retirement/volume-revoke
-tests plus `reflection_store_roots_survive_owner_close` and
-`reflection_snapshot_roots_release_after_snapshot_drop`. Production tests
-observe root and snapshot retirement with collection disabled. Any reclamation
-assertion uses a closed isolated store fixture; production remains `NoAuto`.
-
-### Phase I9D — Diagnostics and Runtime Events
-
-- Audit the root surfaces installed by I4F.1 and registered by I4F.2c for
-  diagnostic buses/ingress, event inputs, output intents, running deliveries,
-  and retained delivery failures.
-- Preserve callback-after-lock, exact delivery ownership, fallback routing, and
-  settlement activity semantics.
-
-Verification: `output_payload_is_retained_through_callback_and_dropped_after_locks`,
-`running_delivery_retains_shared_resources_until_terminal_publication`,
-`diagnostic_bus_and_ingress_do_not_retain_the_runtime`, and
-`transport_roots_release_after_delivery_and_subscription_retirement`. Only
-isolated transport fixtures may collect; production remains `NoAuto`.
-
-### Phase I9E — Assembly, Compiler, and CLI Owners
-
-- Audit the root surfaces installed by I4F.1 and registered by I4F.2c for
-  assembler/module construction state, compiler setup and origins, source/macro
-  intermediates which park across evaluation, and binary-owned
-  configuration/logger records.
-- Keep bounded locals under I3 regions; only semantically retained values
-  become roots.
-
-Verification: existing module build/import, macro protocol, configured CLI,
-and logger supervision suites plus
-`assembly_compiler_and_cli_roots_release_after_last_owner`. This checkpoint
-proves production owner retirement without collection; a closed subsystem
-fixture may prove local reclamation where practical. Production remains
-`NoAuto`.
+Verification: add `runtime_root_lifecycle_delta_is_reconciled`, mapping every
+I5-I8 ownership change to either a focused follow-up checkpoint or a recorded
+unchanged I4F owner contract. Rerun the affected existing subsystem tests and
+the I4F source-backed inventory. Production remains `NoAuto`; this phase does
+not force collection over the complete runtime.
 
 ### Phase I9F — External Active-RAII Lifecycle Audit
 
@@ -4775,24 +4789,33 @@ checkpoint proves root classification, not whole-graph reclamation.
 
 ### Phase I10A — Deferred Closure Containment
 
-`Arc<dyn Fn(&EvalContext) -> ...>` cannot be traced automatically.
+I4B already removed production semantic closures over `EvalContext` in favor
+of function pointers plus explicit traceable captures. The remaining opaque
+boundary is a genuinely external Rust callback such as `HostCallOperation`,
+compiler loaders/emitters, or task launchers. Such a callback may execute
+outside evaluator authority and return roots, but Rust does not expose its
+captured environment for tracing or structural validation.
 
-- Reconcile every production deferred constructor with I4B and replace
-  Glam-owned value captures with explicit traceable computation state wherever
-  they can participate in the managed graph. Preserve the I3E.1 operational
-  classification: callback-free semantic thunks and deterministic external
-  demands may use different state representations, but neither may hide an
-  untraced capture.
-- A remaining genuinely external Rust closure uses an explicit same-runtime
-  public-root bundle. It may not smuggle a bare managed pointer or root back to
+- Reconcile every production external callback constructor with I4B's
+  source-backed record. Treat a textual `HostCallRecord` capture description as
+  classification evidence, not proof of the closure environment.
+- Replace every Glam-owned value capture with explicit traceable computation
+  state. Where a genuinely external callback owns values, require an explicit
+  typed same-runtime public-root bundle or eliminate the value-capturing closure
+  form. It may not smuggle a bare managed pointer or hide a root backedge from
   an internally owning managed graph.
-- Apply the same rule to compiler cached functions and task launchers.
+- Apply the same rule to compiler cached functions and task launchers. If an
+  unrestricted callback must remain, record the exact conservative external
+  ownership it introduces rather than claiming the implementation can inspect
+  and reject an arbitrary Rust capture.
 
 Verification: `managed_deferred_state_cycle_reclaims`,
 `external_closure_bundle_retains_only_declared_roots`,
-`closure_bundle_rejects_internal_backedge`, and
-`deferred_closure_constructor_inventory_is_reconciled`. Only isolated closure
-fixtures may collect; production remains `NoAuto`.
+`external_callback_constructors_require_capture_classification`, and
+`deferred_closure_constructor_inventory_is_reconciled`. Negative fixtures
+reject constructors which accept bare managed pointers or unrooted core values;
+they do not claim to inspect an already-erased arbitrary closure environment.
+Only isolated closure fixtures may collect; production remains `NoAuto`.
 
 ### Phase I10B.0 — Opaque Representation Decision Review
 

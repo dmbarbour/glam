@@ -89,7 +89,8 @@ semantic children of:
 
 - builtin/application/function and explicit semantic-computation payloads;
 - failures and ordered context frames;
-- lazy source/result, promise assignment, metadata, and reflection state;
+- lazy source/result, promise assignment, and metadata, while reflection
+  computation records the external-root disposition selected by I4F.2b.2;
 - list and dictionary contents through non-forcing logical iteration; and
 - net/function identities and core-net payloads without reduction or
   materialization.

@@ -5,7 +5,10 @@ follow-up, and integration Phases I0 through I4 are complete. Gates G0 and G1
 are established, and all mandatory collector reviews through post-C6 plus the
 post-I1 through post-I4 integration reviews have been performed. Collector
 stress, metrics, and tuning continue in C7/C8 while recursive production
-payload integration proceeds with collection disabled.
+payload integration proceeds with collection disabled. The focused I5-I10
+forward review is recorded in
+[`GarbageCollectorIntegrationI5I10_2026-09-03.md`](../reviews/GarbageCollectorIntegrationI5I10_2026-09-03.md);
+its I5.0 representation questions block I5 implementation.
 
 This roadmap keeps two large transitions aligned:
 
@@ -373,14 +376,17 @@ The following must remain sequential:
 
 ## Remaining Phase Checkpoints
 
-The remaining choice below is intentionally unresolved rather than accidental
-drift:
-
 - C4 supplies one direct managed root representation: a one-word typed root
   handle, a non-generic cell containing a weak heap identity and erased `Gc`,
-  and a thin weak registry entry. I2 still chooses whether public `Value` uses
-  that root directly or wraps it to keep eligible scalars inline; no alternate
-  collector root-cell representation is required.
+  and a thin weak registry entry. I2 selected a Glam-owned opaque wrapper which
+  keeps small integers inline and otherwise shares that direct registered root;
+  I4F installed it as the production representation. No alternate collector
+  root-cell representation is required.
+
+- Before I5, I5.0 must select the transitive managed-edge walk, decide whether
+  the managed core-net ownership core moves ahead of the first managed lazy or
+  promise payload, and separate interior, durable, scoped, coordination, and
+  weak-liveness roles for those identities.
 
 The I8 ownership choice is closed: production core runtime nets use one
 managed synchronization-owning outer cell per shared net. Individual agents,
@@ -395,7 +401,7 @@ the heap, and last-owner teardown runs without manufacturing mutator authority.
 Integration must preserve that ownership boundary rather than choose another
 collector terminal protocol.
 
-Each choice must be resolved and latched by the named phase. None permits
+Each remaining choice must be resolved and latched by the named phase. None permits
 weakening runtime locality, exact tracing, or the collection-admission gates.
 
 ## Explicitly Deferred
