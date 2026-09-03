@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use crate::runtime::RuntimeMutationAuthority;
+use crate::runtime::{RuntimeFailureRoot, RuntimeMutationAuthority};
 
 use super::super::{EvaluationFailure, RuntimeObservationEpoch};
 use super::client_demand::{ClientDemandResult, detach_client_demand};
@@ -198,7 +198,9 @@ fn runtime_readiness_locked(state: &WorkCoordinatorState) -> RuntimeCoordinatorR
             state: state_snapshot,
             dependency: work_dependency(record).map(runtime_dependency_snapshot),
             observed_epoch: task_observation_epoch(record),
-            blocked_error: task_block(record).and_then(|block| block.error.clone()),
+            blocked_error: task_block(record)
+                .and_then(|block| block.error.as_ref())
+                .map(|error| error.as_failure().clone()),
         });
     }
 
@@ -401,12 +403,13 @@ impl EvaluationWorkCoordinator {
                         .obligations
                         .take_producer()
                         .expect("killed task work must retain its producer obligation");
-                    let killed = EvaluationTaskStatus::Killed(
+                    let killed = EvaluationTaskStatus::Killed(RuntimeFailureRoot::from_runtime(
+                        self.runtime,
                         kill_failure
                             .as_ref()
                             .expect("forced settlement must retain its failure")
                             .clone(),
-                    );
+                    ));
                     let status_update = match &mut producer {
                         ProducerSettlementObligation::ReflectionTask(publisher) => {
                             publisher.update_status(killed, true)
@@ -422,6 +425,7 @@ impl EvaluationWorkCoordinator {
                     .as_ref()
                     .expect("forced settlement must retain its failure")
                     .clone();
+                let failure_root = RuntimeFailureRoot::from_runtime(self.runtime, failure.clone());
                 selected.push(SelectedTaskSettlement {
                     work: proposed.work,
                     producer: Some(producer),
@@ -430,7 +434,7 @@ impl EvaluationWorkCoordinator {
                     machine,
                     block,
                     exit: None,
-                    terminal: EvaluationWaitTerminal::Killed(failure.clone()),
+                    terminal: EvaluationWaitTerminal::Killed(failure_root),
                     promise_failure: failure,
                 });
             }
@@ -483,7 +487,10 @@ impl EvaluationWorkCoordinator {
                     let (_, wake) = obligation.wait.publish_terminal_guarded(
                         self,
                         mutation,
-                        EvaluationWaitTerminal::Failed(selected.promise_failure.clone()),
+                        EvaluationWaitTerminal::Failed(RuntimeFailureRoot::from_runtime(
+                            obligation.wait.runtime_id(),
+                            selected.promise_failure.clone(),
+                        )),
                     );
                     completion_wakes.push(wake);
                 }

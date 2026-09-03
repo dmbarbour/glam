@@ -4,6 +4,7 @@
 //! allocated from one of these runtime-owned counters and is therefore
 //! interpreted together with its runtime.
 
+use std::fmt;
 use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -236,28 +237,27 @@ impl RuntimeValueRoot {
 /// owned by the root for each direct emission or context value. I6C replaces
 /// this compatibility shell after the core failure family becomes managed.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[allow(
-    dead_code,
-    reason = "I4F.1c.1 establishes the boundary migrated into durable owners by I4F.1c.2"
-)]
-pub(crate) struct RuntimeFailureRoot {
+pub(crate) struct RuntimeFailureRoot(Arc<RuntimeFailureRootInner>);
+
+#[derive(Debug, PartialEq, Eq)]
+struct RuntimeFailureRootInner {
     runtime: EvaluationRuntimeId,
     failure: Arc<EvaluationFailure>,
-    value_roots: Arc<[RuntimeValueRoot]>,
+    #[allow(
+        dead_code,
+        reason = "the compatibility root retains direct failure values until I6C manages the failure graph"
+    )]
+    value_roots: Box<[RuntimeValueRoot]>,
 }
 
-#[allow(
-    dead_code,
-    reason = "I4F.1c.1 establishes the boundary migrated into durable owners by I4F.1c.2"
-)]
 impl RuntimeFailureRoot {
     pub(crate) fn new(values: &CoreValueFactory, failure: Arc<EvaluationFailure>) -> Self {
         let value_roots = Self::root_direct_values(values.runtime_id(), &failure);
-        Self {
+        Self(Arc::new(RuntimeFailureRootInner {
             runtime: values.runtime_id(),
             failure,
             value_roots,
-        }
+        }))
     }
 
     pub(crate) fn from_runtime(
@@ -265,39 +265,45 @@ impl RuntimeFailureRoot {
         failure: Arc<EvaluationFailure>,
     ) -> Self {
         let value_roots = Self::root_direct_values(runtime, &failure);
-        Self {
+        Self(Arc::new(RuntimeFailureRootInner {
             runtime,
             failure,
             value_roots,
-        }
+        }))
     }
 
     fn root_direct_values(
         runtime: EvaluationRuntimeId,
         failure: &EvaluationFailure,
-    ) -> Arc<[RuntimeValueRoot]> {
+    ) -> Box<[RuntimeValueRoot]> {
         let mut value_roots = Vec::new();
         failure.visit_direct_values(&mut |value| {
             value_roots.push(RuntimeValueRoot::from_runtime(runtime, value.clone()));
         });
-        value_roots.into()
+        value_roots.into_boxed_slice()
     }
 
     pub(crate) fn runtime_id(&self) -> EvaluationRuntimeId {
-        self.runtime
+        self.0.runtime
     }
 
     pub(crate) fn as_failure(&self) -> &Arc<EvaluationFailure> {
-        &self.failure
+        &self.0.failure
     }
 
     pub(crate) fn into_failure(self) -> Arc<EvaluationFailure> {
-        self.failure
+        self.0.failure.clone()
     }
 
     #[cfg(test)]
     pub(crate) fn direct_value_roots(&self) -> &[RuntimeValueRoot] {
-        &self.value_roots
+        &self.0.value_roots
+    }
+}
+
+impl fmt::Display for RuntimeFailureRoot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.failure.fmt(formatter)
     }
 }
 
@@ -459,6 +465,11 @@ mod tests {
                 .all(|value| value.value == repeated)
         );
         assert!(Arc::ptr_eq(&root.clone().into_failure(), &failure));
+        assert_eq!(
+            std::mem::size_of::<RuntimeFailureRoot>(),
+            std::mem::size_of::<usize>(),
+            "durable failure roots should remain one shared pointer"
+        );
     }
 
     #[test]

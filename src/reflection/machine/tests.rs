@@ -3326,7 +3326,7 @@ fn join_propagates_task_error_and_task_error_extracts_it() {
         panic!("join should propagate its child task error")
     };
     assert!(error.to_string().contains("failed permanently"));
-    let [frame] = error.contexts() else {
+    let [frame] = error.as_failure().contexts() else {
         panic!("join should prepend exactly one propagation frame")
     };
     let Value::Dict(frame) = frame else {
@@ -4135,7 +4135,7 @@ fn task_failure_propagates_one_structured_failure_to_owned_promises() {
         let EvaluationWaitPoll::Failed(wait_failure) = owner.poll_wait(&wait) else {
             panic!("owned promise wait should publish the producer failure")
         };
-        assert!(Arc::ptr_eq(&failure, &wait_failure));
+        assert!(Arc::ptr_eq(&failure, wait_failure.as_failure()));
     }
 
     assert_eq!(
@@ -4191,7 +4191,7 @@ fn task_completion_and_cancellation_fail_unresolved_owned_promises() {
         let EvaluationWaitPoll::Failed(wait_failure) = owner.poll_wait(&wait) else {
             panic!("unfinished promise wait should publish its synthesized failure")
         };
-        assert!(Arc::ptr_eq(&observed, &wait_failure));
+        assert!(Arc::ptr_eq(&observed, wait_failure.as_failure()));
         let counts = context.task_registry_counts();
         assert_eq!(counts.promises_active, 0);
         assert_eq!(counts.promises_terminal, 0);

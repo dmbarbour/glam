@@ -894,7 +894,10 @@ impl EvaluationRuntime {
                     .map(move |(task, failure)| ReasoningFailure {
                         runtime: self.id(),
                         task: *task,
-                        diagnostic: reasoning_diagnostic(self.values().core(), failure),
+                        diagnostic: reasoning_diagnostic(
+                            self.values().core(),
+                            failure.as_failure(),
+                        ),
                         session: *session,
                     })
             })
@@ -907,7 +910,10 @@ impl EvaluationRuntime {
                     .map(move |(task, failure)| ReasoningFailure {
                         runtime: self.id(),
                         task: *task,
-                        diagnostic: reasoning_diagnostic(self.values().core(), failure),
+                        diagnostic: reasoning_diagnostic(
+                            self.values().core(),
+                            failure.as_failure(),
+                        ),
                         session: *session,
                     })
             })

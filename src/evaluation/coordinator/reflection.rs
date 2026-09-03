@@ -3,9 +3,9 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use crate::runtime::{EvaluationRuntimeId, RuntimeMutationAuthority};
+use crate::runtime::{EvaluationRuntimeId, RuntimeFailureRoot, RuntimeMutationAuthority};
 
-use super::super::{EvaluationDemandState, EvaluationFailure, EvaluationTaskBlock};
+use super::super::{EvaluationDemandState, EvaluationTaskBlock};
 use super::deferred::promote_deferred_wait_locked;
 use super::{
     ClaimedDemandSession, EvaluationExitBlock, EvaluationSessionId, EvaluationTaskId,
@@ -911,7 +911,7 @@ pub(super) fn insert_task_failure(
     ledger: &mut RuntimeFailureLedger,
     owner: EvaluationSessionId,
     task: EvaluationTaskId,
-    failure: Arc<EvaluationFailure>,
+    failure: RuntimeFailureRoot,
 ) {
     let mut failures = ledger
         .get(&owner)

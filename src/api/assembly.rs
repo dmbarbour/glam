@@ -134,7 +134,11 @@ impl CompilationExecution {
                 .publish_local(Diagnostic::new_with_factory(
                     values,
                     Severity::Error,
-                    format!("macro reflection task {} failed: {}", task.get(), error),
+                    format!(
+                        "macro reflection task {} failed: {}",
+                        task.get(),
+                        error.as_failure()
+                    ),
                 ));
         }
         if let Some(kind) = kind {

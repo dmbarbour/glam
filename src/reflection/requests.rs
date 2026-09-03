@@ -448,7 +448,7 @@ where
                 }
                 EvaluationWaitPoll::Failed(error) => {
                     handle.task.acknowledge_propagated_failure();
-                    Err(TaskHalt::failure(error)
+                    Err(TaskHalt::failure(error.into_failure())
                         .with_core_context(task_join_context(handle.task.id())))
                 }
                 EvaluationWaitPoll::Cancelled => {
@@ -462,10 +462,8 @@ where
                     "joined reflection task exited without producing a result",
                 )
                 .with_core_context(task_join_context(handle.task.id()))),
-                EvaluationWaitPoll::Killed(error) => {
-                    Err(TaskHalt::failure(error)
-                        .with_core_context(task_join_context(handle.task.id())))
-                }
+                EvaluationWaitPoll::Killed(error) => Err(TaskHalt::failure(error.into_failure())
+                    .with_core_context(task_join_context(handle.task.id()))),
             }
         }
         ReflectionRequest::TaskStatus => {
@@ -649,7 +647,7 @@ fn task_status_query_value(values: &CoreValueFactory, status: EvaluationTaskStat
         }
         EvaluationTaskStatus::Failed(error) => CoreValue::Dict(Dict::new_sync().insert(
             (*keys::ERR).clone(),
-            eval::failure_diagnostic_value_with(values, &error),
+            eval::failure_diagnostic_value_with(values, error.as_failure()),
         )),
         EvaluationTaskStatus::Cancelled => values.key_value(&keys::CANCELED),
         EvaluationTaskStatus::Abandoned => values.key_value(&keys::ABANDONED),
@@ -951,9 +949,10 @@ mod tests {
             &values,
             task_status_query_value(
                 &values,
-                EvaluationTaskStatus::Killed(Arc::new(crate::core::EvaluationFailure::message(
-                    "killed fixture",
-                ))),
+                EvaluationTaskStatus::Killed(crate::runtime::RuntimeFailureRoot::new(
+                    &values,
+                    Arc::new(crate::core::EvaluationFailure::message("killed fixture")),
+                )),
             ),
         );
         assert_eq!(killed.as_core(), &values.key_value(&keys::KILLED));

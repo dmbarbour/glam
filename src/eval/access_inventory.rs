@@ -274,8 +274,8 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/value.rs",
-        [19, 10],
-        "I3B.2/I3C.2 scoped wait projection; I3D reflection/net; I3E.1 deferred producers"
+        [20, 9],
+        "I3B.2/I3C.2 scoped wait and I4F.1c.2 failure-root projection; I3D reflection/net; I3E.1 deferred producers"
     ),
 ];
 

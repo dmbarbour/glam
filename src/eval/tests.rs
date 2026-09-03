@@ -225,10 +225,10 @@ struct GateFailureMachine(Arc<EvaluationFailure>);
 impl EvaluationTaskMachine for GateFailureMachine {
     fn poll(
         &mut self,
-        _context: &crate::evaluation::EvaluationPollContext,
+        context: &crate::evaluation::EvaluationPollContext,
         _step_budget: usize,
     ) -> EvaluationMachinePoll {
-        EvaluationMachinePoll::Failed(self.0.clone())
+        EvaluationMachinePoll::Failed(context.root_failure(self.0.clone()))
     }
 }
 
@@ -327,7 +327,9 @@ impl EvaluationTaskMachine for FixtureTaskMachine {
             FixtureTaskTerminal::Complete(value) => {
                 EvaluationMachinePoll::Complete(_context.root_value(value))
             }
-            FixtureTaskTerminal::Failed(error) => EvaluationMachinePoll::Failed(error),
+            FixtureTaskTerminal::Failed(error) => {
+                EvaluationMachinePoll::Failed(_context.root_failure(error))
+            }
             FixtureTaskTerminal::Cancelled => EvaluationMachinePoll::Cancelled,
         }
     }
@@ -1144,7 +1146,7 @@ fn promised_failure_preserves_structured_diagnostic_and_identity() {
     let EvaluationWaitPoll::Failed(wait_failure) = session.poll_wait(&wait) else {
         panic!("the promise wait should publish the same permanent failure")
     };
-    assert!(Arc::ptr_eq(&failure, &wait_failure));
+    assert!(Arc::ptr_eq(&failure, wait_failure.as_failure()));
 
     let Value::Dict(diagnostic) = failure_diagnostic_value(&observed) else {
         panic!("a structured promise failure should project to a diagnostic dictionary")

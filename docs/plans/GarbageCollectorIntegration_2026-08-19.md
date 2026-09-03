@@ -104,8 +104,8 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.1b.2 | complete | admitted type-erased runtime attachments and compiler caches |
 | I4F.1b | complete | canonical cache and type-erased attachment root surfaces |
 | I4F.1c.1 | complete | non-forcing runtime failure-root compatibility boundary |
-| I4F.1c.2 | pending | machine-poll, task, wait, terminal, and failure-ledger roots |
-| I4F.1c.3 | pending | client-demand and session report roots |
+| I4F.1c.2 | complete | machine-poll, task, wait, terminal, and failure-ledger roots |
+| I4F.1c.3 | pending | client-demand and remaining session-owner roots |
 | I4F.1c.4 | pending | settlement, readiness, and evaluation-owner closure |
 | I4F.1c | pending | evaluation, coordinator, and readiness root surfaces |
 | I4F.1d.1 | pending | reflection store, snapshot, journal, and query roots |
@@ -2726,12 +2726,16 @@ stage; I6C later replaces the failure shell and its recursive interiors.
    failure root before poll return or coordinator publication. Destructure
    every affected enum so new terminal states cannot acquire an unclassified
    value field.
-3. **I4F.1c.3 — Client demand and session reports.** Reconcile client-demand
-   operations/results/work, pending activations, session failure reports, and
-   unfinished-task records. Preserve existing failure identity while testing
-   forced park/resume, terminal publication, acknowledgement, handle
-   abandonment, and owner-session retirement. `SparkDemand` is already
-   root-shaped and receives an explicit audit rather than another wrapper.
+3. **I4F.1c.3 — Client demand and remaining session owners.** Reconcile
+   client-demand operations/results/work, pending activations, and the
+   remaining session-lifecycle owners. I4F.1c.2 necessarily migrated session
+   failure reports and unfinished-task errors together with the shared
+   coordinator ledger; this checkpoint audits those report projections and
+   closes their lifetime fixtures rather than changing their storage again.
+   Preserve existing failure identity while testing forced park/resume,
+   terminal publication, acknowledgement, handle abandonment, and
+   owner-session retirement. `SparkDemand` is already root-shaped and receives
+   an explicit audit rather than another wrapper.
 4. **I4F.1c.4 — Settlement and readiness closure.** Reconcile exit/kill
    settlement state and host-visible quiescence, deadlock, and unfinished-work
    snapshots. Close the evaluation-family durable-owner rows and source
@@ -2755,6 +2759,28 @@ occurrences, prove same-runtime root provenance and `Arc` identity, and use a
 panic-on-force lazy value to latch the non-forcing contract. The durable-owner
 source baseline now classifies the new compatibility root explicitly. Durable
 poll/coordinator owners remain unchanged until I4F.1c.2.
+
+I4F.1c.2 completed 2026-09-03. `RuntimeFailureRoot` is now one shared pointer
+to the failure identity and its shallow value-root bundle, keeping recursive
+poll and status enums pointer-sized. Evaluator and reflection poll boundaries
+must construct that root before returning a permanent failure. Machine polls,
+parked task-block errors, wait terminals and polls, task statuses, task-owned
+promise terminal publication, and producer-indexed failure ledgers now carry
+the root without reconstructing it at each publication surface. The session
+failure report and unfinished-task error fields necessarily use the same type
+because they snapshot that ledger and parked task state; I4F.1c.3 retains the
+separate responsibility for their lifetime and retirement fixtures.
+
+A forced terminal-publication test proves that the task wait, status
+publisher, and failure-ledger snapshot retain the same underlying
+`Arc<EvaluationFailure>`, not merely equivalent messages. The compile-
+exhaustive poll inventory now classifies every failure-bearing variant as a
+root, and the durable-owner source latch was deliberately observed failing
+before its reviewed count, fingerprint, and task-owner row were updated.
+Temporary projections back to `Arc<EvaluationFailure>` remain only at
+inventoried downstream client-demand, settlement/readiness, and reflection
+owners assigned to I4F.1c.3, I4F.1c.4, and I4F.1d; raw promise cells remain the
+separate recursive-core migration owned by I6C. Production remains `NoAuto`.
 
 #### Phase I4F.1d — Reflection Store, Protocol, and Machine Roots
 

@@ -7,10 +7,9 @@
 //! context; I3B-I3D partition the opaque evaluator operations which may safely
 //! open it.
 
-use crate::core::RuntimeValueAccess;
-use crate::core::Value;
+use crate::core::{EvaluationFailure, RuntimeValueAccess, Value};
 use crate::core_net::{CoreRuntimeNet, CoreRuntimeNetAccess};
-use crate::runtime::RuntimeValueRoot;
+use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 use std::cell::RefCell;
 use std::marker::PhantomData;
 use std::rc::Rc;
@@ -113,6 +112,11 @@ impl EvaluatorStepContext<'_> {
     /// step-owned boundary.
     pub(crate) fn root_value(&self, value: Value) -> RuntimeValueRoot {
         RuntimeValueRoot::new(self.context.values(), value)
+    }
+
+    /// Compatibility failure publication for one bounded evaluator result.
+    pub(crate) fn root_failure(&self, failure: Arc<EvaluationFailure>) -> RuntimeFailureRoot {
+        RuntimeFailureRoot::new(self.context.values(), failure)
     }
 
     /// Projects one owned completion back into the active evaluator step.
@@ -236,6 +240,11 @@ impl EvaluationPollContext {
     #[cfg(test)]
     pub(crate) fn root_value(&self, value: Value) -> RuntimeValueRoot {
         RuntimeValueRoot::new(&self.demand.values, value)
+    }
+
+    /// Roots a machine failure before it crosses the poll boundary.
+    pub(crate) fn root_failure(&self, failure: Arc<EvaluationFailure>) -> RuntimeFailureRoot {
+        RuntimeFailureRoot::new(&self.demand.values, failure)
     }
 }
 

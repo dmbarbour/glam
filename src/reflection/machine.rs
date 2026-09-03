@@ -2302,7 +2302,9 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for ContextualValueEffectTask<
     ) -> EvaluationMachinePoll {
         match poll_value_effect_task(&mut self.task, context, step_budget) {
             EvaluationMachinePoll::Failed(error) => {
-                EvaluationMachinePoll::Failed(Arc::new(error.with_context(self.context.clone())))
+                EvaluationMachinePoll::Failed(context.root_failure(Arc::new(
+                    error.as_failure().with_context(self.context.clone()),
+                )))
             }
             poll => poll,
         }
@@ -2324,7 +2326,7 @@ fn poll_value_effect_task<S: TaskSpecialization>(
         EffectTaskPoll::Blocked(blocked) => EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
             dependency: blocked.lazy.map(WorkDependency::Wait),
             observed_epoch: blocked.observed_generation.map(|_| observed_epoch),
-            error: blocked.error,
+            error: blocked.error.map(|error| context.root_failure(error)),
         }),
         EffectTaskPoll::Exit(exit) => EvaluationMachinePoll::Exit(EvaluationExitBlock {
             intent: exit.intent,
@@ -2333,7 +2335,9 @@ fn poll_value_effect_task<S: TaskSpecialization>(
         EffectTaskPoll::Complete(value) => {
             EvaluationMachinePoll::Complete(value.into_runtime_root())
         }
-        EffectTaskPoll::Failed(error) => EvaluationMachinePoll::Failed(error.into_failure()),
+        EffectTaskPoll::Failed(error) => {
+            EvaluationMachinePoll::Failed(context.root_failure(error.into_failure()))
+        }
         EffectTaskPoll::Cancelled => EvaluationMachinePoll::Cancelled,
     }
 }
@@ -2351,7 +2355,7 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for UnitEffectTask<S> {
                 EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
                     dependency: blocked.lazy.map(WorkDependency::Wait),
                     observed_epoch: blocked.observed_generation.map(|_| observed_epoch),
-                    error: blocked.error,
+                    error: blocked.error.map(|error| context.root_failure(error)),
                 })
             }
             EffectTaskPoll::Exit(exit) => EvaluationMachinePoll::Exit(EvaluationExitBlock {
@@ -2363,13 +2367,15 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for UnitEffectTask<S> {
             {
                 EvaluationMachinePoll::Complete(value.into_runtime_root())
             }
-            EffectTaskPoll::Complete(value) => {
-                EvaluationMachinePoll::Failed(Arc::new(EvaluationFailure::message(format!(
+            EffectTaskPoll::Complete(value) => EvaluationMachinePoll::Failed(context.root_failure(
+                Arc::new(EvaluationFailure::message(format!(
                     "effect task returned {}; expected unit",
                     value.as_core().diagnostic_kind_name()
-                ))))
+                ))),
+            )),
+            EffectTaskPoll::Failed(error) => {
+                EvaluationMachinePoll::Failed(context.root_failure(error.into_failure()))
             }
-            EffectTaskPoll::Failed(error) => EvaluationMachinePoll::Failed(error.into_failure()),
             EffectTaskPoll::Cancelled => EvaluationMachinePoll::Cancelled,
         }
     }

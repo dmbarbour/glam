@@ -230,16 +230,15 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         RootSurface,
         "I4F.2d.1"
     ),
-    open_durable!(
-        "src/evaluation/coordinator/task.rs",
+    closed_durable!(
+        "src/evaluation/coordinator.rs; src/evaluation/coordinator/reflection.rs; src/evaluation/coordinator/task.rs",
         "task, wait, exit, terminal, and failure-ledger records",
-        "RuntimeValueRoot outcomes plus Arc<EvaluationFailure> failures",
+        "RuntimeValueRoot outcomes plus RuntimeFailureRoot failures",
         "parked or terminal coordinator state",
         "guarded task/wait terminal publication",
         "acknowledgement, settlement, cancellation, or session retirement",
-        FailureGraph,
+        CompatibilityRoot,
         RootSurface,
-        "I4F.1c",
         "I4F.2d.1"
     ),
     open_durable!(
@@ -268,11 +267,11 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
     open_durable!(
         "src/evaluation/session.rs",
         "EvaluationSession and pending activation/effect state",
-        "RuntimeValueRoot effects plus Arc<EvaluationFailure> state",
+        "RuntimeValueRoot effects plus RuntimeFailureRoot reports and unfinished state",
         "session and parked reflection/effect lifecycle",
         "session demand or activation reservation",
         "session close, cancellation, or terminal settlement",
-        FailureGraph,
+        CompatibilityRoot,
         RootSurface,
         "I4F.1c",
         "I4F.2d.1"
@@ -760,10 +759,10 @@ fn is_production_source(relative: &Path) -> bool {
 // aggregate makes category drift legible, while the deterministic fingerprint
 // detects a declaration being exchanged for another with the same counts.
 // `owner_for_declaration` is the reviewed semantic assignment for every entry.
-const DECLARATION_BASELINE_COUNT: usize = 136;
+const DECLARATION_BASELINE_COUNT: usize = 132;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([115, 56, 1, 28, 15, 0, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 5_389_509_757_859_609_457;
+    DeclarationSignals::new([115, 56, 1, 17, 15, 0, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 18_173_480_541_385_730_612;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,
@@ -828,7 +827,9 @@ fn owner_for_declaration(declaration: &str) -> Option<&'static str> {
     } else if declaration.starts_with("src/api/value.rs::")
         || matches!(
             declaration,
-            "src/runtime.rs::RuntimeValueRoot" | "src/runtime.rs::RuntimeFailureRoot"
+            "src/runtime.rs::RuntimeValueRoot"
+                | "src/runtime.rs::RuntimeFailureRoot"
+                | "src/runtime.rs::RuntimeFailureRootInner"
         )
     {
         "public Value / EvaluatedValue / RuntimeValueRoot / RuntimeFailureRoot facade"

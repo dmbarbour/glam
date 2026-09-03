@@ -11,8 +11,8 @@ use crate::core::{CoreValueFactory, PromiseCell, PromiseId, PromisedValue};
 #[cfg(test)]
 use crate::runtime::RuntimeValueRoot;
 use crate::runtime::{
-    EvaluationRuntimeId, RuntimeIds, RuntimeMutationAdmission, RuntimeMutationAuthority,
-    RuntimeMutationGuard,
+    EvaluationRuntimeId, RuntimeFailureRoot, RuntimeIds, RuntimeMutationAdmission,
+    RuntimeMutationAuthority, RuntimeMutationGuard,
 };
 
 #[cfg(test)]
@@ -1317,7 +1317,10 @@ impl EvaluationWorkCoordinator {
                 let (_, wake) = obligation.wait.publish_terminal_guarded(
                     self,
                     &mutation,
-                    EvaluationWaitTerminal::Failed(promise_failure.clone()),
+                    EvaluationWaitTerminal::Failed(RuntimeFailureRoot::from_runtime(
+                        obligation.wait.runtime_id(),
+                        promise_failure.clone(),
+                    )),
                 );
                 completion_wakes.push(wake);
             }

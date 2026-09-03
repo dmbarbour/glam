@@ -9,11 +9,9 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
-use rpds::RedBlackTreeMapSync;
-
 use crate::core::{Builtin, CoreValueFactory, EvaluationFailure, LazyValue, PromisedValue, Value};
 use crate::core_net::CoreWaitToken;
-use crate::runtime::RuntimeValueRoot;
+use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 
 use super::coordinator::{
     self, ClientDemandHandle, ClientDemandOperation, ClientDemandResult, ClientDemandSink,
@@ -21,7 +19,8 @@ use super::coordinator::{
     EvaluationTaskHandle, EvaluationTaskId, EvaluationTaskMachine, EvaluationWaitPoll,
     EvaluationWaitTerminal, EvaluationWaitToken, EvaluationWorkCoordinator, InitialTaskDisposition,
     LocalPromiseOwner, PendingTaskPolicy, PreparedEvaluationTask, PromiseProducerObligation,
-    ReflectionCancellation, ReflectionTaskResultPolicy, TaskStatusPublisher, WorkDependency,
+    ReflectionCancellation, ReflectionTaskResultPolicy, TaskFailureLedger, TaskStatusPublisher,
+    WorkDependency,
 };
 #[cfg(test)]
 use super::pump::test_reflection_dependency;
@@ -42,7 +41,7 @@ pub(crate) enum EvaluationSessionRun {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct EvaluationSessionReport {
-    pub(crate) failures: RedBlackTreeMapSync<EvaluationTaskId, Arc<EvaluationFailure>>,
+    pub(crate) failures: TaskFailureLedger,
     pub(crate) unfinished: Vec<EvaluationUnfinishedTask>,
 }
 
@@ -79,7 +78,7 @@ pub(crate) struct EvaluationUnfinishedTask {
     pub(crate) dependency_session: Option<EvaluationSessionId>,
     pub(crate) wait: Option<u64>,
     pub(crate) observed_epoch: Option<RuntimeObservationEpoch>,
-    pub(crate) error: Option<Arc<EvaluationFailure>>,
+    pub(crate) error: Option<RuntimeFailureRoot>,
 }
 
 #[derive(Clone)]
@@ -1065,7 +1064,10 @@ impl EvalContext {
                 );
                 coordinator.settle_terminal_work(
                     work,
-                    EvaluationWaitTerminal::Failed(error.clone()),
+                    EvaluationWaitTerminal::Failed(RuntimeFailureRoot::new(
+                        self.values(),
+                        error.clone(),
+                    )),
                     error.clone(),
                 );
                 drop(coordinator.retire_reflection(work));
@@ -1163,7 +1165,10 @@ impl EvalContext {
                 if coordinator.terminalize_reserved_reflection(handle.work) {
                     coordinator.settle_terminal_work(
                         handle.work,
-                        EvaluationWaitTerminal::Failed(error),
+                        EvaluationWaitTerminal::Failed(RuntimeFailureRoot::new(
+                            self.values(),
+                            error,
+                        )),
                         promise_failure,
                     );
                     drop(coordinator.retire_reflection(handle.work));
@@ -1339,8 +1344,9 @@ impl EvalContext {
         if let Some(terminal) = wait.terminal_poll() {
             return terminal;
         }
-        EvaluationWaitPoll::Failed(evaluation_failure(
-            "evaluation wait token is no longer registered",
+        EvaluationWaitPoll::Failed(RuntimeFailureRoot::new(
+            self.values(),
+            evaluation_failure("evaluation wait token is no longer registered"),
         ))
     }
 
@@ -1415,7 +1421,7 @@ impl EvalContext {
         assert!(coordinator.terminalize_reflection(work));
         coordinator.settle_terminal_work(
             work,
-            EvaluationWaitTerminal::Failed(failure.clone()),
+            EvaluationWaitTerminal::Failed(RuntimeFailureRoot::new(self.values(), failure.clone())),
             failure,
         );
         drop(coordinator.retire_reflection(work));
@@ -1476,7 +1482,7 @@ impl EvalContext {
         wait: &EvaluationWaitToken,
     ) -> Option<Arc<EvaluationFailure>> {
         match wait.terminal_poll() {
-            Some(EvaluationWaitPoll::Failed(failure)) => Some(failure),
+            Some(EvaluationWaitPoll::Failed(failure)) => Some(failure.into_failure()),
             _ => None,
         }
     }

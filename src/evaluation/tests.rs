@@ -6,7 +6,7 @@ use std::sync::{Barrier, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use crate::core::{LazyCycle, LazyValue, PromisedValue};
-use crate::runtime::RuntimeValueRoot;
+use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 
 use super::coordinator::{
     ClaimedTaskWork, ClientDemandHandle, ClientDemandResult, ClientDemandSnapshot,
@@ -39,7 +39,7 @@ fn assert_evaluation_machine_poll_boundary_inventory(poll: &EvaluationMachinePol
                 Some(WorkDependency::Test(_)) | None => {}
             }
             let _: &Option<RuntimeObservationEpoch> = observed_epoch;
-            let _: &Option<Arc<EvaluationFailure>> = error;
+            let _: &Option<RuntimeFailureRoot> = error;
         }
         EvaluationMachinePoll::Exit(exit) => {
             let EvaluationExitBlock {
@@ -58,7 +58,7 @@ fn assert_evaluation_machine_poll_boundary_inventory(poll: &EvaluationMachinePol
             let _: &RuntimeValueRoot = value;
         }
         EvaluationMachinePoll::Failed(failure) => {
-            let _: &Arc<EvaluationFailure> = failure;
+            let _: &RuntimeFailureRoot = failure;
         }
     }
 }
@@ -71,8 +71,11 @@ fn evaluation_machine_poll_boundary_inventory_is_complete() {
         ("Block::Wait terminal root", "I4F.2"),
         ("Block::Promise task-owned cell", "I5B"),
         ("Block::Promise resolver-owned cell", "I5C"),
-        ("Block::error(EvaluationFailure)", "I6C"),
-        ("Failed(EvaluationFailure)", "I6C"),
+        (
+            "Block::error(RuntimeFailureRoot)",
+            "I4F.1c.2 / I6C interior",
+        ),
+        ("Failed(RuntimeFailureRoot)", "I4F.1c.2 / I6C interior"),
         (
             "Yielded/Cancelled/epoch/test dependency",
             "no managed payload",
@@ -999,9 +1002,9 @@ impl EvaluationTaskMachine for ProbePollOutcomeMachine {
             ProbePollOutcome::Complete => {
                 EvaluationMachinePoll::Complete(context.root_value(crate::core::keys::unit_value()))
             }
-            ProbePollOutcome::Failed => {
-                EvaluationMachinePoll::Failed(evaluation_failure("probe failure"))
-            }
+            ProbePollOutcome::Failed => EvaluationMachinePoll::Failed(
+                context.root_failure(evaluation_failure("probe failure")),
+            ),
             ProbePollOutcome::Cancelled => EvaluationMachinePoll::Cancelled,
             ProbePollOutcome::Exit => EvaluationMachinePoll::Exit(EvaluationExitBlock {
                 intent: ExitIntent::Error(
@@ -1223,7 +1226,7 @@ struct Await {
 impl EvaluationTaskMachine for Await {
     fn poll(
         &mut self,
-        _context: &crate::evaluation::EvaluationPollContext,
+        poll_context: &crate::evaluation::EvaluationPollContext,
         _step_budget: usize,
     ) -> EvaluationMachinePoll {
         match self.context.poll_wait(&self.dependency) {
@@ -1238,15 +1241,16 @@ impl EvaluationTaskMachine for Await {
             EvaluationWaitPoll::Failed(error) => self
                 .context
                 .lazy_failure_for_wait(&self.dependency)
-                .map(EvaluationMachinePoll::Failed)
+                .map(|error| EvaluationMachinePoll::Failed(poll_context.root_failure(error)))
                 .unwrap_or(EvaluationMachinePoll::Failed(error)),
             EvaluationWaitPoll::Cancelled => EvaluationMachinePoll::Cancelled,
-            EvaluationWaitPoll::Abandoned => {
-                EvaluationMachinePoll::Failed(evaluation_failure("waited-on task was abandoned"))
-            }
-            EvaluationWaitPoll::Exited => EvaluationMachinePoll::Failed(evaluation_failure(
-                "waited-on task exited without a result",
-            )),
+            EvaluationWaitPoll::Abandoned => EvaluationMachinePoll::Failed(
+                poll_context.root_failure(evaluation_failure("waited-on task was abandoned")),
+            ),
+            EvaluationWaitPoll::Exited => EvaluationMachinePoll::Failed(
+                poll_context
+                    .root_failure(evaluation_failure("waited-on task exited without a result")),
+            ),
             EvaluationWaitPoll::Killed(error) => EvaluationMachinePoll::Failed(error),
         }
     }
@@ -1269,7 +1273,7 @@ impl EvaluationTaskMachine for AwaitPromise {
                 error: None,
             }),
             Some(Ok(value)) => EvaluationMachinePoll::Complete(_context.root_value(value)),
-            Some(Err(error)) => EvaluationMachinePoll::Failed(error),
+            Some(Err(error)) => EvaluationMachinePoll::Failed(_context.root_failure(error)),
         }
     }
 }
@@ -1282,7 +1286,7 @@ struct AwaitCell {
 impl EvaluationTaskMachine for AwaitCell {
     fn poll(
         &mut self,
-        _context: &crate::evaluation::EvaluationPollContext,
+        poll_context: &crate::evaluation::EvaluationPollContext,
         _step_budget: usize,
     ) -> EvaluationMachinePoll {
         let dependency = self
@@ -1301,15 +1305,16 @@ impl EvaluationTaskMachine for AwaitCell {
             EvaluationWaitPoll::Failed(error) => self
                 .context
                 .lazy_failure_for_wait(dependency)
-                .map(EvaluationMachinePoll::Failed)
+                .map(|error| EvaluationMachinePoll::Failed(poll_context.root_failure(error)))
                 .unwrap_or(EvaluationMachinePoll::Failed(error)),
             EvaluationWaitPoll::Cancelled => EvaluationMachinePoll::Cancelled,
-            EvaluationWaitPoll::Abandoned => {
-                EvaluationMachinePoll::Failed(evaluation_failure("waited-on task was abandoned"))
-            }
-            EvaluationWaitPoll::Exited => EvaluationMachinePoll::Failed(evaluation_failure(
-                "waited-on task exited without a result",
-            )),
+            EvaluationWaitPoll::Abandoned => EvaluationMachinePoll::Failed(
+                poll_context.root_failure(evaluation_failure("waited-on task was abandoned")),
+            ),
+            EvaluationWaitPoll::Exited => EvaluationMachinePoll::Failed(
+                poll_context
+                    .root_failure(evaluation_failure("waited-on task exited without a result")),
+            ),
             EvaluationWaitPoll::Killed(error) => EvaluationMachinePoll::Failed(error),
         }
     }
@@ -1377,15 +1382,15 @@ struct AlwaysBlocked;
 impl EvaluationTaskMachine for AlwaysBlocked {
     fn poll(
         &mut self,
-        _context: &crate::evaluation::EvaluationPollContext,
+        context: &crate::evaluation::EvaluationPollContext,
         _step_budget: usize,
     ) -> EvaluationMachinePoll {
         EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
             dependency: None,
             observed_epoch: Some(RuntimeObservationEpoch::from_raw(7)),
-            error: Some(Arc::new(EvaluationFailure::message(
+            error: Some(context.root_failure(Arc::new(EvaluationFailure::message(
                 "retryable evaluation error",
-            ))),
+            )))),
         })
     }
 }
@@ -1514,10 +1519,10 @@ struct Fail;
 impl EvaluationTaskMachine for Fail {
     fn poll(
         &mut self,
-        _context: &crate::evaluation::EvaluationPollContext,
+        context: &crate::evaluation::EvaluationPollContext,
         _step_budget: usize,
     ) -> EvaluationMachinePoll {
-        EvaluationMachinePoll::Failed(evaluation_failure("reasoning failed"))
+        EvaluationMachinePoll::Failed(context.root_failure(evaluation_failure("reasoning failed")))
     }
 }
 
@@ -1617,7 +1622,7 @@ struct FailAfterRelease {
 impl EvaluationTaskMachine for FailAfterRelease {
     fn poll(
         &mut self,
-        _context: &crate::evaluation::EvaluationPollContext,
+        context: &crate::evaluation::EvaluationPollContext,
         _step_budget: usize,
     ) -> EvaluationMachinePoll {
         if let Some(started) = self.started.take() {
@@ -1628,7 +1633,9 @@ impl EvaluationTaskMachine for FailAfterRelease {
         self.release
             .recv_timeout(Duration::from_secs(2))
             .expect("test should release the task");
-        EvaluationMachinePoll::Failed(evaluation_failure("acknowledged task failure"))
+        EvaluationMachinePoll::Failed(
+            context.root_failure(evaluation_failure("acknowledged task failure")),
+        )
     }
 }
 
@@ -1641,7 +1648,7 @@ struct CancellableAfterRelease {
 impl EvaluationTaskMachine for CancellableAfterRelease {
     fn poll(
         &mut self,
-        _context: &crate::evaluation::EvaluationPollContext,
+        context: &crate::evaluation::EvaluationPollContext,
         _step_budget: usize,
     ) -> EvaluationMachinePoll {
         if let Some(started) = self.started.take() {
@@ -1652,9 +1659,9 @@ impl EvaluationTaskMachine for CancellableAfterRelease {
         self.release
             .recv_timeout(Duration::from_secs(2))
             .expect("test should release the task");
-        EvaluationMachinePoll::Failed(evaluation_failure(
+        EvaluationMachinePoll::Failed(context.root_failure(evaluation_failure(
             "cancellation should replace this poll result",
-        ))
+        )))
     }
 
     fn cancel(&mut self) {
@@ -1769,12 +1776,12 @@ struct CacheLazyFailure {
 impl EvaluationTaskMachine for CacheLazyFailure {
     fn poll(
         &mut self,
-        _context: &crate::evaluation::EvaluationPollContext,
+        context: &crate::evaluation::EvaluationPollContext,
         _step_budget: usize,
     ) -> EvaluationMachinePoll {
         match self.lazy.cache(Err(self.failure.clone())) {
-            Ok(value) => EvaluationMachinePoll::Complete(_context.root_value(value.into_value())),
-            Err(error) => EvaluationMachinePoll::Failed(error),
+            Ok(value) => EvaluationMachinePoll::Complete(context.root_value(value.into_value())),
+            Err(error) => EvaluationMachinePoll::Failed(context.root_failure(error)),
         }
     }
 }
@@ -2075,8 +2082,11 @@ fn redundant_deferred_registration_observes_the_canonical_lazy_cache() {
     let EvaluationWaitPoll::Failed(redundant_failure) = context.poll_wait(&redundant_wait) else {
         panic!("redundant wait should retain the lazy failure");
     };
-    assert!(Arc::ptr_eq(&canonical_failure, &redundant_failure));
-    assert!(Arc::ptr_eq(&canonical_failure, &failure));
+    assert!(Arc::ptr_eq(
+        canonical_failure.as_failure(),
+        redundant_failure.as_failure()
+    ));
+    assert!(Arc::ptr_eq(canonical_failure.as_failure(), &failure));
 }
 
 #[test]
@@ -2088,6 +2098,11 @@ fn terminal_reflection_handles_preserve_late_polling_without_records() {
     let failed = context
         .schedule_task(|_| Ok(Box::new(Fail)))
         .expect("failed task should schedule");
+    let failed_statuses = Arc::new(RecordedStatuses::default());
+    assert!(
+        context
+            .attach_task_status_publisher(&failed, RecordedStatuses::publisher(&failed_statuses),)
+    );
     let cancelled = context
         .schedule_task(|_| Ok(Box::new(Complete)))
         .expect("cancelled task should schedule");
@@ -2106,6 +2121,28 @@ fn terminal_reflection_handles_preserve_late_polling_without_records() {
     };
     assert_eq!(report.failures.size(), 1);
     assert!(report.failures.contains_key(&failed.id()));
+    let ledger_failure = report
+        .failures
+        .get(&failed.id())
+        .expect("the failure ledger should retain the failed task");
+    let EvaluationWaitPoll::Failed(wait_failure) = context.poll_reflection_task(&failed) else {
+        panic!("the task wait should publish the failed terminal")
+    };
+    let statuses = failed_statuses
+        .0
+        .lock()
+        .expect("recorded task statuses were poisoned");
+    let Some(EvaluationTaskStatus::Failed(status_failure)) = statuses.last() else {
+        panic!("the task status should publish the failed terminal")
+    };
+    assert!(Arc::ptr_eq(
+        ledger_failure.as_failure(),
+        wait_failure.as_failure()
+    ));
+    assert!(Arc::ptr_eq(
+        ledger_failure.as_failure(),
+        status_failure.as_failure()
+    ));
     assert_eq!(complete.wait().exact_subscription_count(), 0);
     assert_eq!(failed.wait().exact_subscription_count(), 0);
     assert_eq!(
@@ -2740,7 +2777,7 @@ fn owner_session_drop_fails_task_promises_but_not_host_promises() {
                 .expect("task promise should retain producer provenance")
                 .wait()
         ),
-        EvaluationWaitPoll::Failed(wait_error) if Arc::ptr_eq(&error, &wait_error)
+        EvaluationWaitPoll::Failed(wait_error) if Arc::ptr_eq(&error, wait_error.as_failure())
     ));
 
     let host_promise = {
@@ -3371,7 +3408,7 @@ fn lazy_cycles_are_canonical_and_exclude_upstream_dependents() {
     let cycle_failure = context
         .lazy_failure(&first)
         .expect("cycle member should retain its failure");
-    assert!(Arc::ptr_eq(&upstream_failure, &cycle_failure));
+    assert!(Arc::ptr_eq(upstream_failure.as_failure(), &cycle_failure));
 }
 
 #[test]
@@ -3571,7 +3608,7 @@ fn running_cancellation_waits_for_release_then_wins_over_the_poll_result() {
     assert!(matches!(
         context.poll_wait(&promise_wait),
         EvaluationWaitPoll::Failed(wait_failure)
-            if Arc::ptr_eq(&promise_failure, &wait_failure)
+            if Arc::ptr_eq(&promise_failure, wait_failure.as_failure())
     ));
     for _ in 0..2 {
         assert_eq!(
@@ -3669,7 +3706,7 @@ fn executor_shutdown_preserves_worker_owned_cancellation_and_task_promise() {
     assert!(matches!(
         context.poll_wait(&promise_wait),
         EvaluationWaitPoll::Failed(wait_failure)
-            if Arc::ptr_eq(&promise_failure, &wait_failure)
+            if Arc::ptr_eq(&promise_failure, wait_failure.as_failure())
     ));
     assert_eq!(context.task_registry_counts().reflection_active, 0);
 }
@@ -4607,7 +4644,7 @@ fn forced_deadlock_settlement_preserves_exits_and_kills_other_participants() {
         panic!("forced parent should publish a killed terminal")
     };
     assert!(matches!(
-        parent_failure.emission_value(),
+        parent_failure.as_failure().emission_value(),
         Some(Value::Dict(_))
     ));
     assert_eq!(
@@ -4617,7 +4654,7 @@ fn forced_deadlock_settlement_preserves_exits_and_kills_other_participants() {
     let Some(ClientDemandResult::Killed(client_failure)) = client.poll() else {
         panic!("forced client demand should receive a killed result")
     };
-    assert_eq!(client_failure, parent_failure);
+    assert_eq!(client_failure, *parent_failure.as_failure());
     assert!(matches!(
         fixture.runtime.readiness(),
         crate::api::RuntimeReadiness::Ready(_)
@@ -4749,7 +4786,7 @@ fn forced_kill_publishes_task_status_and_fails_owned_promises() {
         .assignment()
         .expect("owned promise should receive a terminal assignment")
         .expect_err("owned promise should fail when its producer is killed");
-    assert_eq!(promise_failure, task_failure);
+    assert_eq!(promise_failure, *task_failure.as_failure());
     assert!(matches!(
         statuses
             .0

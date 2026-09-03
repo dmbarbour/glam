@@ -16,7 +16,7 @@ use super::session::{
 };
 use super::{EvaluationDemandState, EvaluationPollContext, evaluation_failure};
 use crate::core::{EvaluationFailure, LazyCycle, LazyCycleMember};
-use crate::runtime::RuntimeValueRoot;
+use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 
 impl ClientDemandOperation {
     pub(super) fn poll(
@@ -423,7 +423,7 @@ fn release_reflection_task(
         EvaluationWaitTerminal::Complete(_) => {
             evaluation_failure("reflection task completed without fulfilling its fixpoint")
         }
-        EvaluationWaitTerminal::Failed(error) => error.clone(),
+        EvaluationWaitTerminal::Failed(error) => error.as_failure().clone(),
         EvaluationWaitTerminal::Cancelled => {
             evaluation_failure("reflection fixpoint producer was cancelled")
         }
@@ -433,7 +433,7 @@ fn release_reflection_task(
         EvaluationWaitTerminal::Exited => {
             evaluation_failure("reflection fixpoint producer exited without a result")
         }
-        EvaluationWaitTerminal::Killed(error) => error.clone(),
+        EvaluationWaitTerminal::Killed(error) => error.as_failure().clone(),
     };
     coordinator.settle_terminal_work(work, terminal, promise_failure);
     let machine = release
@@ -478,9 +478,14 @@ fn release_deferred_task(
         ),
         EvaluationMachinePoll::Cancelled => (
             DeferredWorkPoll::Terminal,
-            Some(EvaluationWaitTerminal::Failed(Arc::new(
-                EvaluationFailure::message("deferred evaluation task was cancelled"),
-            ))),
+            Some(EvaluationWaitTerminal::Failed(
+                RuntimeFailureRoot::from_runtime(
+                    coordinator.runtime_id(),
+                    Arc::new(EvaluationFailure::message(
+                        "deferred evaluation task was cancelled",
+                    )),
+                ),
+            )),
         ),
     };
 
@@ -503,7 +508,7 @@ fn release_deferred_task(
         EvaluationWaitTerminal::Complete(_) => {
             evaluation_failure("evaluation task completed without fulfilling its fixpoint")
         }
-        EvaluationWaitTerminal::Failed(error) => error.clone(),
+        EvaluationWaitTerminal::Failed(error) => error.as_failure().clone(),
         EvaluationWaitTerminal::Cancelled => {
             evaluation_failure("evaluation fixpoint producer was cancelled")
         }
@@ -513,7 +518,7 @@ fn release_deferred_task(
         EvaluationWaitTerminal::Exited => {
             evaluation_failure("evaluation fixpoint producer exited without a result")
         }
-        EvaluationWaitTerminal::Killed(error) => error.clone(),
+        EvaluationWaitTerminal::Killed(error) => error.as_failure().clone(),
     };
     coordinator.settle_terminal_work(work, terminal, promise_failure);
     let machine = release
@@ -551,7 +556,10 @@ fn poison_lazy_cycle(
         .iter()
         .map(|member| {
             let terminal = match member.lazy.cache(Err(failure.clone())) {
-                Err(error) => EvaluationWaitTerminal::Failed(error),
+                Err(error) => EvaluationWaitTerminal::Failed(RuntimeFailureRoot::from_runtime(
+                    member.wait.runtime_id(),
+                    error,
+                )),
                 Ok(value) => {
                     debug_assert!(
                         false,

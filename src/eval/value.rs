@@ -149,7 +149,7 @@ impl LazyTaskMachine {
             .expect("WHNF demand must eliminate the outer deferred variant");
         match self.lazy.cache(Ok(value)) {
             Ok(value) => EvaluationMachinePoll::Complete(context.root_value(value.into_value())),
-            Err(error) => EvaluationMachinePoll::Failed(error),
+            Err(error) => EvaluationMachinePoll::Failed(context.root_failure(error)),
         }
     }
 
@@ -160,7 +160,7 @@ impl LazyTaskMachine {
             .expect("a released lazy source must have a terminal cache")
         {
             Ok(value) => EvaluationMachinePoll::Complete(context.root_value(value.into_value())),
-            Err(error) => EvaluationMachinePoll::Failed(error),
+            Err(error) => EvaluationMachinePoll::Failed(context.root_failure(error)),
         }
     }
 
@@ -216,7 +216,7 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                     Ok(value) => {
                         EvaluationMachinePoll::Complete(context.root_value(value.into_value()))
                     }
-                    Err(error) => EvaluationMachinePoll::Failed(error),
+                    Err(error) => EvaluationMachinePoll::Failed(context.root_failure(error)),
                 };
             }
 
@@ -277,9 +277,9 @@ impl LazyTaskMachine {
             let wait = match promise_wait(context.context(), promise) {
                 Ok(wait) => wait,
                 Err(error) => {
-                    return EvaluationMachinePoll::Failed(Arc::new(EvaluationFailure::message(
-                        error.as_ref(),
-                    )));
+                    return EvaluationMachinePoll::Failed(
+                        context.root_failure(Arc::new(EvaluationFailure::message(error.as_ref()))),
+                    );
                 }
             };
             return EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
@@ -291,7 +291,7 @@ impl LazyTaskMachine {
         let failure = error.into_permanent_failure();
         match self.lazy.cache(Err(failure)) {
             Ok(value) => EvaluationMachinePoll::Complete(context.root_value(value.into_value())),
-            Err(error) => EvaluationMachinePoll::Failed(error),
+            Err(error) => EvaluationMachinePoll::Failed(context.root_failure(error)),
         }
     }
 }
@@ -335,7 +335,7 @@ impl EvaluationTaskMachine for PromiseFollower {
                     EvaluationMachinePoll::Yielded
                 }
                 Ok(value) => EvaluationMachinePoll::Complete(context.root_value(value)),
-                Err(error) => block_or_fail(context.context(), error),
+                Err(error) => block_or_fail(context, error),
             }
         })
     }
@@ -358,7 +358,10 @@ pub(super) fn promise_wait(
     })
 }
 
-fn block_or_fail(context: &EvalContext, error: EvaluationHalt) -> EvaluationMachinePoll {
+fn block_or_fail(
+    context: &EvaluatorStepContext<'_>,
+    error: EvaluationHalt,
+) -> EvaluationMachinePoll {
     if let Some(wait) = error.blocked_on() {
         return EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
             dependency: Some(WorkDependency::Wait(wait.0)),
@@ -367,18 +370,18 @@ fn block_or_fail(context: &EvalContext, error: EvaluationHalt) -> EvaluationMach
         });
     }
     if let Some(promise) = error.unassigned_promise() {
-        return match promise_wait(context, promise) {
+        return match promise_wait(context.context(), promise) {
             Ok(wait) => EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
                 dependency: Some(WorkDependency::Wait(wait)),
                 observed_epoch: None,
                 error: None,
             }),
-            Err(error) => {
-                EvaluationMachinePoll::Failed(Arc::new(EvaluationFailure::message(error.as_ref())))
-            }
+            Err(error) => EvaluationMachinePoll::Failed(
+                context.root_failure(Arc::new(EvaluationFailure::message(error.as_ref()))),
+            ),
         };
     }
-    EvaluationMachinePoll::Failed(error.into_permanent_failure())
+    EvaluationMachinePoll::Failed(context.root_failure(error.into_permanent_failure()))
 }
 
 #[cfg(test)]
@@ -470,19 +473,19 @@ fn deferred_wait_result(
         EvaluationWaitPoll::Exited => Err(EvaluationHalt::new(format!(
             "{kind} producer exited without a result"
         ))),
-        EvaluationWaitPoll::Killed(error) => Err(EvaluationHalt::failure(error)),
+        EvaluationWaitPoll::Killed(error) => Err(EvaluationHalt::failure(error.into_failure())),
     }
 }
 
 fn deferred_task_failure(
     context: &EvalContext,
     wait: &crate::evaluation::EvaluationWaitToken,
-    failure: Arc<EvaluationFailure>,
+    failure: crate::runtime::RuntimeFailureRoot,
 ) -> EvaluationHalt {
     context
         .lazy_failure_for_wait(wait)
         .map(EvaluationHalt::failure)
-        .unwrap_or_else(|| EvaluationHalt::failure(failure))
+        .unwrap_or_else(|| EvaluationHalt::failure(failure.into_failure()))
 }
 
 fn produce_lazy_source_in(
@@ -597,7 +600,8 @@ fn eval_reflection_task_source(
         },
         EvaluationWaitPoll::Failed(error) => {
             handle.acknowledge_propagated_failure();
-            Err(EvaluationHalt::failure(error).with_context(evaluation_context_frame(context_name)))
+            Err(EvaluationHalt::failure(error.into_failure())
+                .with_context(evaluation_context_frame(context_name)))
         }
         EvaluationWaitPoll::Cancelled => Err(EvaluationHalt::new(cancellation_message)),
         EvaluationWaitPoll::Abandoned => Err(EvaluationHalt::new(
@@ -608,9 +612,8 @@ fn eval_reflection_task_source(
             "reflection task exited without producing a result",
         )
         .with_context(evaluation_context_frame(context_name))),
-        EvaluationWaitPoll::Killed(error) => {
-            Err(EvaluationHalt::failure(error).with_context(evaluation_context_frame(context_name)))
-        }
+        EvaluationWaitPoll::Killed(error) => Err(EvaluationHalt::failure(error.into_failure())
+            .with_context(evaluation_context_frame(context_name))),
     }
 }
 

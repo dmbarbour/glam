@@ -203,13 +203,13 @@ impl EffectLifecycleState {
                 EffectLifecycleStatus::Complete(PublicValue::from_runtime_root(value))
             }
             EvaluationTaskStatus::Failed(error) => {
-                EffectLifecycleStatus::Failed(TaskHalt::failure(error))
+                EffectLifecycleStatus::Failed(TaskHalt::failure(error.into_failure()))
             }
             EvaluationTaskStatus::Cancelled => EffectLifecycleStatus::Cancelled,
             EvaluationTaskStatus::Abandoned => EffectLifecycleStatus::Abandoned,
             EvaluationTaskStatus::Exited => EffectLifecycleStatus::Exited,
             EvaluationTaskStatus::Killed(error) => {
-                EffectLifecycleStatus::Killed(TaskHalt::failure(error))
+                EffectLifecycleStatus::Killed(TaskHalt::failure(error.into_failure()))
             }
         }
     }
@@ -255,7 +255,10 @@ impl ScheduledEffectRun {
                     );
                 }
                 EvaluationWaitPoll::Failed(error) => {
-                    return combine_composed_result(Err(TaskHalt::failure(error)), children);
+                    return combine_composed_result(
+                        Err(TaskHalt::failure(error.into_failure())),
+                        children,
+                    );
                 }
                 EvaluationWaitPoll::Cancelled => {
                     return combine_composed_result(Ok(TaskOutcome::Cancelled), children);
@@ -275,7 +278,10 @@ impl ScheduledEffectRun {
                     );
                 }
                 EvaluationWaitPoll::Killed(error) => {
-                    return combine_composed_result(Err(TaskHalt::failure(error)), children);
+                    return combine_composed_result(
+                        Err(TaskHalt::failure(error.into_failure())),
+                        children,
+                    );
                 }
             }
         }
@@ -544,7 +550,11 @@ fn composed_child_error(run: EvaluationSessionRun) -> Option<TaskHalt> {
 
     let mut details = Vec::new();
     for (task, error) in report.failures.iter() {
-        details.push(format!("task {} failed: {}", task.get(), error));
+        details.push(format!(
+            "task {} failed: {}",
+            task.get(),
+            error.as_failure()
+        ));
     }
     if quiescent {
         details.push(format!(

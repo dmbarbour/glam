@@ -8,7 +8,9 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use rpds::RedBlackTreeMapSync;
 
 use crate::core::{EvaluationFailure, PromiseAssignment, PromiseCell, PromiseId};
-use crate::runtime::{EvaluationRuntimeId, RuntimeMutationAuthority, RuntimeValueRoot};
+use crate::runtime::{
+    EvaluationRuntimeId, RuntimeFailureRoot, RuntimeMutationAuthority, RuntimeValueRoot,
+};
 
 use super::super::{EvaluationDemandState, RuntimeObservationEpoch, evaluation_failure};
 use super::{
@@ -51,7 +53,7 @@ impl EvaluationSessionId {
 pub(crate) struct EvaluationTaskBlock {
     pub(crate) dependency: Option<WorkDependency>,
     pub(crate) observed_epoch: Option<RuntimeObservationEpoch>,
-    pub(crate) error: Option<Arc<EvaluationFailure>>,
+    pub(crate) error: Option<RuntimeFailureRoot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,11 +63,11 @@ pub(crate) enum EvaluationWaitPoll {
     // itself pointer-sized until I4F.2 replaces that interior with a managed
     // root; recursive evaluator drivers carry this enum in several frames.
     Complete(Box<RuntimeValueRoot>),
-    Failed(Arc<EvaluationFailure>),
+    Failed(RuntimeFailureRoot),
     Cancelled,
     Abandoned,
     Exited,
-    Killed(Arc<EvaluationFailure>),
+    Killed(RuntimeFailureRoot),
 }
 
 const _: () = assert!(
@@ -133,7 +135,7 @@ pub(crate) enum EvaluationMachinePoll {
     Blocked(EvaluationTaskBlock),
     Exit(EvaluationExitBlock),
     Complete(RuntimeValueRoot),
-    Failed(Arc<EvaluationFailure>),
+    Failed(RuntimeFailureRoot),
     Cancelled,
 }
 
@@ -152,11 +154,11 @@ pub(crate) enum EvaluationTaskStatus {
     Launched,
     Blocked,
     Complete(RuntimeValueRoot),
-    Failed(Arc<EvaluationFailure>),
+    Failed(RuntimeFailureRoot),
     Cancelled,
     Abandoned,
     Exited,
-    Killed(Arc<EvaluationFailure>),
+    Killed(RuntimeFailureRoot),
 }
 
 pub(super) struct TaskTerminalPublisher {
@@ -283,7 +285,7 @@ pub(crate) enum ReflectionTaskResultPolicy {
     ReturnValue,
 }
 
-pub(crate) type TaskFailureLedger = RedBlackTreeMapSync<EvaluationTaskId, Arc<EvaluationFailure>>;
+pub(crate) type TaskFailureLedger = RedBlackTreeMapSync<EvaluationTaskId, RuntimeFailureRoot>;
 pub(crate) type RuntimeFailureLedger = RedBlackTreeMapSync<EvaluationSessionId, TaskFailureLedger>;
 
 struct EvaluationWaitState {
@@ -298,11 +300,11 @@ struct EvaluationWaitState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum EvaluationWaitTerminal {
     Complete(RuntimeValueRoot),
-    Failed(Arc<EvaluationFailure>),
+    Failed(RuntimeFailureRoot),
     Cancelled,
     Abandoned,
     Exited,
-    Killed(Arc<EvaluationFailure>),
+    Killed(RuntimeFailureRoot),
 }
 
 #[derive(Clone)]
@@ -358,8 +360,16 @@ impl EvaluationWaitToken {
         &self,
         terminal: EvaluationWaitTerminal,
     ) -> EvaluationWaitTerminal {
-        if let EvaluationWaitTerminal::Complete(value) = &terminal {
-            debug_assert_eq!(value.runtime_id(), self.runtime_id());
+        match &terminal {
+            EvaluationWaitTerminal::Complete(value) => {
+                debug_assert_eq!(value.runtime_id(), self.runtime_id());
+            }
+            EvaluationWaitTerminal::Failed(failure) | EvaluationWaitTerminal::Killed(failure) => {
+                debug_assert_eq!(failure.runtime_id(), self.runtime_id());
+            }
+            EvaluationWaitTerminal::Cancelled
+            | EvaluationWaitTerminal::Abandoned
+            | EvaluationWaitTerminal::Exited => {}
         }
         if let Err(candidate) = self.0.terminal.set(terminal) {
             debug_assert_eq!(
@@ -568,7 +578,12 @@ impl LocalPromiseOwner {
                 self.complete(obligation.promise, &obligation.wait);
                 obligation
                     .wait
-                    .publish_terminal(EvaluationWaitTerminal::Failed(failure.clone()));
+                    .publish_terminal(EvaluationWaitTerminal::Failed(
+                        RuntimeFailureRoot::from_runtime(
+                            obligation.wait.runtime_id(),
+                            failure.clone(),
+                        ),
+                    ));
                 obligation.wait.notify_terminal();
             }
         }
@@ -682,7 +697,9 @@ fn promise_assignment_terminal(
             debug_assert_eq!(value.runtime_id(), runtime);
             EvaluationWaitTerminal::Complete(value.clone())
         }
-        Err(error) => EvaluationWaitTerminal::Failed(error.clone()),
+        Err(error) => {
+            EvaluationWaitTerminal::Failed(RuntimeFailureRoot::from_runtime(runtime, error.clone()))
+        }
     }
 }
 

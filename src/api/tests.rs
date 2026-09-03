@@ -71,11 +71,11 @@ fn assert_unobserved_promise(value: &Value) {
 impl EvaluationTaskMachine for FailedReasoningTask {
     fn poll(
         &mut self,
-        _context: &crate::evaluation::EvaluationPollContext,
+        context: &crate::evaluation::EvaluationPollContext,
         _step_budget: usize,
     ) -> EvaluationMachinePoll {
-        EvaluationMachinePoll::Failed(Arc::new(crate::core::EvaluationFailure::message(
-            "public reasoning failure",
+        EvaluationMachinePoll::Failed(context.root_failure(Arc::new(
+            crate::core::EvaluationFailure::message("public reasoning failure"),
         )))
     }
 }
