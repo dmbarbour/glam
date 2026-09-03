@@ -424,15 +424,16 @@ impl<S: TaskSpecialization> EffectTask<S> {
     ) -> Result<MachineWork<S>, TaskHalt> {
         let mut branch = root.entry.clone();
         let (reset_stack, state) = context.evaluate(&self.eval_context, |evaluator| {
+            let branch_state = evaluator.project_root(&branch.state);
             Ok::<_, TaskHalt>((
                 evaluator.root_value(reset_stack_value_in(
                     evaluator,
-                    branch.state.as_core(),
+                    &branch_state,
                     &self.tags.continuation_state,
                 )?),
                 evaluator.root_value(with_reset_frames_in(
                     evaluator,
-                    branch.state(),
+                    branch_state,
                     &self.tags.continuation_state,
                     &[],
                 )?),
@@ -518,11 +519,8 @@ impl<S: TaskSpecialization> EffectTask<S> {
         layers.sort_by_key(CapturedLayer::order);
 
         let mut reset_frames = context.evaluate(&self.eval_context, |evaluator| {
-            reset_frames_in(
-                evaluator,
-                branch.state.as_core(),
-                &self.tags.continuation_state,
-            )
+            let branch_state = evaluator.project_root(&branch.state);
+            reset_frames_in(evaluator, &branch_state, &self.tags.continuation_state)
         })?;
         let next_order = self
             .next_control_order
@@ -543,9 +541,10 @@ impl<S: TaskSpecialization> EffectTask<S> {
             }
         }
         let state = context.evaluate(&self.eval_context, |evaluator| {
+            let branch_state = evaluator.project_root(&branch.state);
             with_reset_frames_in(
                 evaluator,
-                branch.state(),
+                branch_state,
                 &self.tags.continuation_state,
                 &reset_frames,
             )
@@ -687,15 +686,13 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 scope_depth,
             } => {
                 branch.effect = context.evaluate(&self.eval_context, |evaluator| {
-                    apply_in(
-                        evaluator,
-                        function.into_core(),
-                        arguments
-                            .into_iter()
-                            .map(RuntimeValueRoot::into_core)
-                            .collect(),
-                    )
-                    .map(|value| evaluator.root_value(value))
+                    let function = evaluator.project_root(&function);
+                    let arguments = arguments
+                        .iter()
+                        .map(|argument| evaluator.project_root(argument))
+                        .collect();
+                    apply_in(evaluator, function, arguments)
+                        .map(|value| evaluator.root_value(value))
                 })?;
                 #[cfg(test)]
                 self.record_phase(EffectMachinePhase::ContinuationDelivered);
@@ -732,7 +729,8 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 FusedRequestAction::Get(path) => {
                     let path =
                         eval::eval_key_path_list_in(context, &path).map_err(task_eval_error)?;
-                    let value = get_value_path_in(context, branch.state.as_core(), &path)?;
+                    let state = context.project_root(&branch.state);
+                    let value = get_value_path_in(context, &state, &path)?;
                     return self.finish_fused_delivery_in(context, branch, value);
                 }
                 FusedRequestAction::Set(path, value) => {
@@ -916,30 +914,37 @@ impl<S: TaskSpecialization> EffectTask<S> {
             }
             Request::Get(path) => {
                 let value = context.evaluate(&self.eval_context, |evaluator| {
-                    let path = eval::eval_key_path_list_in(evaluator, path.as_core())
+                    let path_value = evaluator.project_root(&path);
+                    let path = eval::eval_key_path_list_in(evaluator, &path_value)
                         .map_err(task_eval_error)?;
-                    get_value_path_in(evaluator, branch.state.as_core(), &path)
+                    let state = evaluator.project_root(&branch.state);
+                    get_value_path_in(evaluator, &state, &path)
                         .map(|value| evaluator.root_value(value))
                 })?;
                 MachineWork::deliver_root(value, branch, scope_depth)
             }
             Request::Set(path, value) => {
-                let state = branch.state();
                 branch.state = context.evaluate(&self.eval_context, |evaluator| {
-                    set_state_path_in(evaluator, state, path.as_core(), value.into_core())
+                    let state = evaluator.project_root(&branch.state);
+                    let path = evaluator.project_root(&path);
+                    let value = evaluator.project_root(&value);
+                    set_state_path_in(evaluator, state, &path, value)
                         .map(|state| evaluator.root_value(state))
                 })?;
                 MachineWork::deliver(self.eval_context.values().unit(), branch, scope_depth)
             }
             Request::HeapGet(path) => {
                 let path = context.evaluate(&self.eval_context, |evaluator| {
-                    eval::eval_key_path_list_in(evaluator, path.as_core()).map_err(task_eval_error)
+                    let path = evaluator.project_root(&path);
+                    eval::eval_key_path_list_in(evaluator, &path).map_err(task_eval_error)
                 })?;
                 let checkpoint = branch.retry_candidate();
+                let values =
+                    crate::api::Values::from_core_factory(self.eval_context.values().clone());
                 let heap = if let Some(transaction) = branch.transaction.as_mut() {
                     let generation = transaction.snapshot.generation();
                     let observed = transaction.store.observe_read(&path);
-                    let heap = transaction.store.view().as_core().clone();
+                    let heap = values.clone_core(&transaction.store.view())?;
                     if observed {
                         branch.observe(checkpoint, generation);
                     }
@@ -947,14 +952,15 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 } else {
                     let snapshot = self.host.snapshot();
                     branch.observe(checkpoint, snapshot.generation());
-                    snapshot.store().root().as_core().clone()
+                    values.clone_core(snapshot.store().root())?
                 };
                 let value = lazy_value_path(&self.eval_context, heap, &path);
                 MachineWork::deliver(value, branch, scope_depth)
             }
             Request::HeapSet(path, value) => {
                 let path = context.evaluate(&self.eval_context, |evaluator| {
-                    eval::eval_key_path_list_in(evaluator, path.as_core()).map_err(task_eval_error)
+                    let path = evaluator.project_root(&path);
+                    eval::eval_key_path_list_in(evaluator, &path).map_err(task_eval_error)
                 })?;
                 if let Some(transaction) = branch.transaction.as_mut() {
                     transaction
@@ -992,7 +998,8 @@ impl<S: TaskSpecialization> EffectTask<S> {
             }
             Request::HeapRewrite(path, updater) => {
                 let path = context.evaluate(&self.eval_context, |evaluator| {
-                    eval::eval_key_path_list_in(evaluator, path.as_core()).map_err(task_eval_error)
+                    let path = evaluator.project_root(&path);
+                    eval::eval_key_path_list_in(evaluator, &path).map_err(task_eval_error)
                 })?;
                 if let Some(transaction) = branch.transaction.as_mut() {
                     transaction
@@ -1030,7 +1037,8 @@ impl<S: TaskSpecialization> EffectTask<S> {
             }
             Request::VolumeGet(volume, path) => {
                 let path = context.evaluate(&self.eval_context, |evaluator| {
-                    eval::eval_key_path_list_in(evaluator, path.as_core()).map_err(task_eval_error)
+                    let path = evaluator.project_root(&path);
+                    eval::eval_key_path_list_in(evaluator, &path).map_err(task_eval_error)
                 })?;
                 let checkpoint = branch.retry_candidate();
                 let root = if let Some(transaction) = branch.transaction.as_mut() {
@@ -1047,14 +1055,20 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     snapshot.store().volume(volume).cloned()
                 };
                 let value = match root {
-                    Some(root) => lazy_value_path(&self.eval_context, root.into_core(), &path),
+                    Some(root) => {
+                        let values = crate::api::Values::from_core_factory(
+                            self.eval_context.values().clone(),
+                        );
+                        lazy_value_path(&self.eval_context, values.clone_core(&root)?, &path)
+                    }
                     None => missing_volume_value(&self.eval_context, volume),
                 };
                 MachineWork::deliver(value, branch, scope_depth)
             }
             Request::VolumeSet(volume, path, value) => {
                 let path = context.evaluate(&self.eval_context, |evaluator| {
-                    eval::eval_key_path_list_in(evaluator, path.as_core()).map_err(task_eval_error)
+                    let path = evaluator.project_root(&path);
+                    eval::eval_key_path_list_in(evaluator, &path).map_err(task_eval_error)
                 })?;
                 if let Some(transaction) = branch.transaction.as_mut() {
                     transaction.store.write_volume(
@@ -1094,7 +1108,8 @@ impl<S: TaskSpecialization> EffectTask<S> {
             }
             Request::VolumeRewrite(volume, path, updater) => {
                 let path = context.evaluate(&self.eval_context, |evaluator| {
-                    eval::eval_key_path_list_in(evaluator, path.as_core()).map_err(task_eval_error)
+                    let path = evaluator.project_root(&path);
+                    eval::eval_key_path_list_in(evaluator, &path).map_err(task_eval_error)
                 })?;
                 if let Some(transaction) = branch.transaction.as_mut() {
                     transaction.store.rewrite_volume(
@@ -1134,13 +1149,11 @@ impl<S: TaskSpecialization> EffectTask<S> {
             }
             Request::Reset(key, operation) => {
                 let (key, mut frames) = context.evaluate(&self.eval_context, |evaluator| {
+                    let key = evaluator.project_root(&key);
+                    let state = evaluator.project_root(&branch.state);
                     Ok::<_, TaskHalt>((
-                        value_key_in(evaluator, key.into_core())?,
-                        reset_frames_in(
-                            evaluator,
-                            branch.state.as_core(),
-                            &self.tags.continuation_state,
-                        )?,
+                        value_key_in(evaluator, key)?,
+                        reset_frames_in(evaluator, &state, &self.tags.continuation_state)?,
                     ))
                 })?;
                 let order = self.allocate_control_order()?;
@@ -1155,12 +1168,15 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     scope_depth,
                     order,
                 });
-                let state = replace_reset_frames(
-                    &self.eval_context,
-                    branch.state(),
-                    &self.tags.continuation_state,
-                    &frames,
-                );
+                let state = context.evaluate(&self.eval_context, |evaluator| {
+                    let state = evaluator.project_root(&branch.state);
+                    Ok::<_, TaskHalt>(replace_reset_frames(
+                        &self.eval_context,
+                        state,
+                        &self.tags.continuation_state,
+                        &frames,
+                    ))
+                })?;
                 branch.set_state(state);
                 branch.set_effect_root(operation);
                 MachineWork::Drive {
@@ -1170,13 +1186,11 @@ impl<S: TaskSpecialization> EffectTask<S> {
             }
             Request::Shift(key, function) => {
                 let (key, mut frames) = context.evaluate(&self.eval_context, |evaluator| {
+                    let key = evaluator.project_root(&key);
+                    let state = evaluator.project_root(&branch.state);
                     Ok::<_, TaskHalt>((
-                        value_key_in(evaluator, key.into_core())?,
-                        reset_frames_in(
-                            evaluator,
-                            branch.state.as_core(),
-                            &self.tags.continuation_state,
-                        )?,
+                        value_key_in(evaluator, key)?,
+                        reset_frames_in(evaluator, &state, &self.tags.continuation_state)?,
                     ))
                 })?;
                 let Some(index) = frames.iter().rposition(|frame| frame.key == key) else {
@@ -1196,12 +1210,15 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     delimiters: inner_delimiters,
                     reset_frames: inner_reset_frames,
                 })?;
-                let state = replace_reset_frames(
-                    &self.eval_context,
-                    branch.state(),
-                    &self.tags.continuation_state,
-                    &frames,
-                );
+                let state = context.evaluate(&self.eval_context, |evaluator| {
+                    let state = evaluator.project_root(&branch.state);
+                    Ok::<_, TaskHalt>(replace_reset_frames(
+                        &self.eval_context,
+                        state,
+                        &self.tags.continuation_state,
+                        &frames,
+                    ))
+                })?;
                 branch.set_state(state);
                 branch
                     .control
@@ -1241,8 +1258,8 @@ impl<S: TaskSpecialization> EffectTask<S> {
             }
             Request::ExitError(message) => {
                 let message = context.evaluate(&self.eval_context, |evaluator| {
-                    evaluate_in(evaluator, message.into_core())
-                        .map(|message| evaluator.root_value(message))
+                    let message = evaluator.project_root(&message);
+                    evaluate_in(evaluator, message).map(|message| evaluator.root_value(message))
                 })?;
                 return Ok(MachineStep::Exit(ExitIntent::Error(message)));
             }

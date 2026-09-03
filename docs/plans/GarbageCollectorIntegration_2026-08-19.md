@@ -148,6 +148,9 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.2a.2 | complete | core evaluator and net access retirement |
 | I4F.2a.3a | complete | reflection protocol, store, and search access retirement |
 | I4F.2a.3b | complete | reflection request access retirement |
+| I4F.2a.3c.1 | complete | reflection branch and request-step access retirement |
+| I4F.2a.3c.2 | pending | reflection transition and terminal access retirement |
+| I4F.2a.3c.3 | pending | reflection wrapper, helper, and fixture access closure |
 | I4F.2a.3c | pending | reflection machine access retirement |
 | I4F.2a.3d | pending | compiler and module-lowering access retirement |
 | I4F.2a.3e | pending | compiler-cache access retirement |
@@ -3481,13 +3484,16 @@ be partitioned by subsystem:
    Execute this broad integration surface as eight source-inventoried slices:
 
    - **I4F.2a.3a — Reflection protocol, store, and search.** Replace public
-     handle projections and constructors in the common transaction, volume,
-     and isolated-search substrate with matching `Values`, evaluator-step, or
-     retained-root operations.
+   handle projections and constructors in the common transaction, volume,
+   and isolated-search substrate with matching `Values`, evaluator-step, or
+   retained-root operations.
    - **I4F.2a.3b — Reflection requests.** Migrate standard request decoding and
      response construction without broadening the public request API.
    - **I4F.2a.3c — Reflection machine.** Migrate the central interpreter and
      its parked state. Callback entry must retain the I3 mutator-free boundary.
+     Partition the large machine module into branch/request-step access
+     (I4F.2a.3c.1), transition/terminal publication (I4F.2a.3c.2), and public
+     wrappers plus in-file fixtures and final source closure (I4F.2a.3c.3).
    - **I4F.2a.3d — Compiler and module lowering.** Migrate definition promises,
      origins, import handoff, and declaration lowering through the compiler's
      existing bounded access regions.
@@ -3513,6 +3519,18 @@ Each slice must preserve the corresponding semantic operation through its
 runtime-authorized replacement and update compatibility-oracle tests when an
 intentionally removed public trait or observer no longer compiles. The work is
 call-site migration, not permission to publish a managed value.
+
+I4F.2a.3c.1 completed 2026-09-03. Reflection request interpretation now
+projects effect arguments, state, paths, reset keys, continuation state, and
+exit messages only inside the already admitted evaluator step. Transactional
+heap and volume snapshots cross the host/store boundary as public roots and
+are cloned through the matching internal `Values` service after callbacks and
+locks have returned. No managed access is retained across host snapshots,
+commits, waits, or specialization callbacks. The reflection-machine inventory
+fell from 26 direct borrowed projections and 16 ownership transfers to 10 and
+10; the remaining sites are explicitly partitioned between transition and
+terminal handling (I4F.2a.3c.2) and wrapper/helper/fixture closure
+(I4F.2a.3c.3).
 
 I4F.2a.1a completed 2026-09-03. Production `Value` and `EvaluatedValue` no
 longer implement semantic equality, and `Value::runtime_id` is no longer a
