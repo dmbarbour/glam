@@ -371,6 +371,7 @@ mod owner_tests {
             output: vec![MacroOutput::Data(output)],
         };
 
+        domain.collect_and_drain_retired_external_owners_for_test();
         assert!(retained_visited.upgrade().is_some());
         assert!(retained_output.upgrade().is_some());
         drop(run);
@@ -384,6 +385,7 @@ mod owner_tests {
             frontier: Some(0),
             cases: vec![case],
         };
+        domain.collect_and_drain_retired_external_owners_for_test();
         assert!(retained_case.upgrade().is_some());
         drop(failure);
         domain.collect_and_drain_retired_external_owners_for_test();

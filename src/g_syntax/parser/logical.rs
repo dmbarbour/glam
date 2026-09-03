@@ -754,6 +754,7 @@ mod tests {
             0,
             1,
         );
+        domain.collect_and_drain_retired_external_owners_for_test();
         assert!(retained_input.upgrade().is_some());
         drop(input);
         domain.collect_and_drain_retired_external_owners_for_test();
@@ -766,6 +767,7 @@ mod tests {
             text: EMBEDDED_MARKER.to_string(),
             embedded_values: vec![embedded_value],
         };
+        domain.collect_and_drain_retired_external_owners_for_test();
         assert!(retained_embedded.upgrade().is_some());
         drop(work);
         domain.collect_and_drain_retired_external_owners_for_test();

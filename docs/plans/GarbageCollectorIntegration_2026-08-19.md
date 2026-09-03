@@ -195,7 +195,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.2e.3c | complete | output intent, delivery, and failure owners |
 | I4F.2e.3 | complete | diagnostic, event, and delivery collection fixtures |
 | I4F.2e.4a | complete | assembly, compiler, module, and import owners |
-| I4F.2e.4b | pending | macro input, result, failure, and parser-rewrite owners |
+| I4F.2e.4b | complete | macro input, result, failure, and parser-rewrite owners |
 | I4F.2e.4c | pending | binary configuration, command-line, and logger owners |
 | I4F.2e.4d | pending | synchronized-net and hidden-owner closure |
 | I4F.2e.4 | pending | compiler, binary-host, net, and hidden-owner collection fixtures |
@@ -4255,6 +4255,18 @@ Runtime-wide compiler helpers, diagnostic formatter, and extension/compiler
 caches were already collected and re-observed in I4F.2e.1a, while their
 terminal domain retirement was proven there; repeating those cache fixtures
 under the compiler row would not identify another owner boundary.
+
+I4F.2e.4b completed 2026-09-03 by strengthening the I4F.1f.2 macro-owner
+fixtures in place. Macro visited-case state and embedded-data output survive
+collection together in a completed `MacroRun`, while a failed branch's case
+value survives through its `MacroFailure`; both release their managed shells
+at record retirement. Parser-side embedded input survives collection through
+`MacroInput`, and generated declaration data survives through
+`DeclarationMacroWork`, then each retires independently. `MacroInvocation`
+owns the already-tested input carrier and original invocation descriptors are
+edge-free, so no duplicate wrapper fixture is needed. Existing end-to-end
+macro expansion tests continue to cover stage ordering and behavior; this
+checkpoint specifically closes collection ownership.
 
 Keep every fixture in a fresh isolated collector-ready runtime/heap. Do not
 collect a shared production graph containing I5-I10 unclassified families.
