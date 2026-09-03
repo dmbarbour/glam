@@ -181,6 +181,9 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.2e.1b.2 | complete | client-demand operation and result owners |
 | I4F.2e.1b.3 | complete | spark and pending session-activation owners |
 | I4F.2e.1b | complete | coordinator, demand, spark, and session owners |
+| I4F.2e.1c.1 | complete | failure-ledger and evaluation-session report owners |
+| I4F.2e.1c.2 | pending | deadlock snapshot and killed-work report owners |
+| I4F.2e.1c.3 | pending | exit-disposition and settled-report owners |
 | I4F.2e.1c | pending | readiness, ledger, and report owners |
 | I4F.2e.1 | pending | cache, evaluation, coordinator, and readiness collection fixtures |
 | I4F.2e.2 | pending | reflection owner collection fixtures |
@@ -4033,9 +4036,10 @@ Partition the matrix along the I4F.1 ownership boundaries:
    **I4F.2e.1b.3** covers queued/claimed sparks and pending session-owned
    reflection activations; together they complete **I4F.2e.1b**. Session and
    notification companions which carry only IDs, weak routes, or value-domain
-   factories add no independent managed root. **I4F.2e.1c** covers failure
-   ledgers plus
-   quiescence, deadlock, unfinished-task, and settled readiness reports.
+   factories add no independent managed root. **I4F.2e.1c.1** covers failure
+   ledgers and evaluation-session reports; **I4F.2e.1c.2** covers deadlock
+   snapshots and killed-work reports; **I4F.2e.1c.3** covers exit dispositions
+   and settled readiness reports. Together they complete **I4F.2e.1c**.
 2. **I4F.2e.2 — Reflection owners.** Cover store/snapshot/query state,
    lifecycle/search/protocol records, and parked machine frames.
 3. **I4F.2e.3 — Transport owners.** Cover diagnostics, ingress/subscriptions,
@@ -4096,6 +4100,16 @@ notification routes carry no additional semantic value of their own; their
 factory/domain ownership was already covered by I4F.2e.1a. This completes the
 runtime-transient I4F.2e.1b matrix without activating reflection work assigned
 to I4F.2e.2.
+
+I4F.2e.1c.1 completed 2026-09-03. Two terminal structured-failure fixtures
+separate persistent-map ownership which would otherwise share one root cell.
+The first drops its session report and task handle before collecting, proving
+that the coordinator's producer-indexed failure ledger alone retains the
+managed emission; acknowledgement then reclaims it. The second acknowledges
+the coordinator ledger and drops its task handle first, proving that the
+detached `EvaluationSessionReport` snapshot independently retains and projects
+the same managed emission until report drop. This covers both retirement
+orders without counting equivalent root clones as independent registrations.
 
 Keep every fixture in a fresh isolated collector-ready runtime/heap. Do not
 collect a shared production graph containing I5-I10 unclassified families.

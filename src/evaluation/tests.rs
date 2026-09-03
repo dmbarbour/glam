@@ -994,6 +994,88 @@ fn task_handle_acknowledges_terminal_failure_after_owner_lease_closes() {
 }
 
 #[test]
+fn failure_ledger_root_survives_collection_after_report_and_handle_drop() {
+    let fixture = SameRuntimeFixture::new();
+    let context = fixture.context();
+    let coordinator = context.coordinator().expect("coordinator should be live");
+    let owner = context.session_id();
+    let failure = Arc::new(EvaluationFailure::emission(Value::binary_from_text(
+        "ledger-owned failure",
+    )));
+    let task = context
+        .schedule_task({
+            let failure = failure.clone();
+            move |_| Ok(Box::new(FailWith(failure)))
+        })
+        .expect("the ledger fixture should schedule");
+    let task_id = task.id();
+    let EvaluationSessionRun::Complete(report) = context.run_until_quiescent() else {
+        panic!("the terminal failure should leave a complete session report")
+    };
+    assert!(report.failures.contains_key(&task_id));
+
+    drop(report);
+    drop(task);
+    let ledger_live = context
+        .values()
+        .collect_managed_for_test()
+        .expect("the coordinator failure ledger should retain its managed root");
+    let ledger_roots = ledger_live.root_entries();
+    assert!(coordinator.failure_snapshot(owner).contains_key(&task_id));
+
+    coordinator.acknowledge_task_failure(owner, task_id);
+    let reclaimed = context
+        .values()
+        .collect_managed_for_test()
+        .expect("acknowledging the failure ledger should release its managed root");
+    assert_eq!(reclaimed.root_entries() + 1, ledger_roots);
+    assert_eq!(reclaimed.finalized_slots(), 1);
+}
+
+#[test]
+fn evaluation_session_report_root_survives_after_ledger_acknowledgement() {
+    let fixture = SameRuntimeFixture::new();
+    let context = fixture.context();
+    let failure = Arc::new(EvaluationFailure::emission(Value::binary_from_text(
+        "session-report failure",
+    )));
+    let task = context
+        .schedule_task({
+            let failure = failure.clone();
+            move |_| Ok(Box::new(FailWith(failure)))
+        })
+        .expect("the report fixture should schedule");
+    let task_id = task.id();
+    let EvaluationSessionRun::Complete(report) = context.run_until_quiescent() else {
+        panic!("the terminal failure should leave a complete session report")
+    };
+    task.acknowledge_failure();
+    drop(task);
+
+    let report_live = context
+        .values()
+        .collect_managed_for_test()
+        .expect("the detached session report should retain its managed failure root");
+    let report_roots = report_live.root_entries();
+    let retained = report
+        .failures
+        .get(&task_id)
+        .expect("the report should preserve its persistent failure snapshot");
+    assert_eq!(
+        retained.direct_value_roots()[0].clone_core_for_test(),
+        Value::binary_from_text("session-report failure")
+    );
+
+    drop(report);
+    let reclaimed = context
+        .values()
+        .collect_managed_for_test()
+        .expect("dropping the session report should release its managed failure root");
+    assert_eq!(reclaimed.root_entries() + 1, report_roots);
+    assert_eq!(reclaimed.finalized_slots(), 1);
+}
+
+#[test]
 fn task_handle_cancellation_is_harmless_after_owner_closure() {
     let (coordinator, _executor) =
         test_execution_resources(0).expect("test execution resources should build");
