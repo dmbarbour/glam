@@ -194,6 +194,10 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.2e.3b | complete | event input, snapshot, journal, and result owners |
 | I4F.2e.3c | complete | output intent, delivery, and failure owners |
 | I4F.2e.3 | complete | diagnostic, event, and delivery collection fixtures |
+| I4F.2e.4a | complete | assembly, compiler, module, and import owners |
+| I4F.2e.4b | pending | macro input, result, failure, and parser-rewrite owners |
+| I4F.2e.4c | pending | binary configuration, command-line, and logger owners |
+| I4F.2e.4d | pending | synchronized-net and hidden-owner closure |
 | I4F.2e.4 | pending | compiler, binary-host, net, and hidden-owner collection fixtures |
 | I4F.2e | pending | closed durable-owner collection matrix |
 | I4F.2f | pending | compatibility deletion and I4 reconciliation |
@@ -4064,9 +4068,19 @@ Partition the matrix along the I4F.1 ownership boundaries:
    occur while each authoritative owner is live and after its retirement;
    callback entry or a pre-drop weak assertion without collection is not a
    substitute.
-4. **I4F.2e.4 — Tooling and hidden owners.** Cover assembly/compiler/import,
-   macro/parser rewrite, binary configuration/logger state, synchronized
-   net/work anchors, and every admitted type-erased/callback family.
+4. **I4F.2e.4 — Tooling and hidden owners.** Follow the independent I4F.1f/g
+   boundaries: **I4F.2e.4a** covers assembly, compiler, module, and import
+   owners; **I4F.2e.4b** covers macro input/result/failure and parser rewrite
+   owners; **I4F.2e.4c** covers the binary crate's configuration, command-line,
+   and logger owners; **I4F.2e.4d** covers synchronized nets and the final
+   hidden/type-erased/callback closure. Do not expose a public collection
+   backdoor merely so the separately compiled binary crate can invoke a
+   library test helper: where its private owners contain only the already
+   proven public root facade, use compile-exhaustive field latches plus the
+   public-root collection fixture as a compositional proof and say so. Any
+   binary-private owner with a distinct managed-edge representation instead
+   requires a library-visible test seam or a representation change before this
+   row can close.
 
 I4F.2e.1a completed 2026-09-03. Production public values now have a focused
 collection fixture proving that an inline integer adds no root, a managed
@@ -4229,6 +4243,18 @@ through a detached failure snapshot, then retires with that snapshot. This
 closes the complete diagnostic/event/delivery transport matrix and preserves
 the distinction between semantic commit, external delivery, and durable
 failure observation.
+
+I4F.2e.4a completed 2026-09-03 by adding live collection to the two precise
+compiler ownership boundaries which were previously only retirement-tested.
+Deferred module-load arguments retain distinct prior and final definition
+roots after their public construction handles leave scope, survive collection,
+and release both shells when the handoff record retires. A normally built
+module likewise retains its published managed value across collection after
+the module construction scope exits, then releases it with `BuiltModule`.
+Runtime-wide compiler helpers, diagnostic formatter, and extension/compiler
+caches were already collected and re-observed in I4F.2e.1a, while their
+terminal domain retirement was proven there; repeating those cache fixtures
+under the compiler row would not identify another owner boundary.
 
 Keep every fixture in a fresh isolated collector-ready runtime/heap. Do not
 collect a shared production graph containing I5-I10 unclassified families.

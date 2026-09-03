@@ -480,6 +480,7 @@ mod tests {
             final_defs,
         };
 
+        domain.collect_and_drain_retired_external_owners_for_test();
         assert!(prior_retained.upgrade().is_some());
         assert!(final_retained.upgrade().is_some());
         drop(args);

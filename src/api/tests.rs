@@ -2039,6 +2039,7 @@ fn built_module_retains_its_published_value_after_construction_scope_exits() {
         .build()
         .expect("an already-closed value should publish as a module result");
 
+    domain.collect_and_drain_retired_external_owners_for_test();
     assert!(retained.upgrade().is_some());
     drop(module);
     domain.collect_and_drain_retired_external_owners_for_test();
