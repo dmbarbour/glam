@@ -72,6 +72,15 @@ fn diagnostic_bus_sequences_counts_and_delivers_only_to_current_subscribers() {
 fn diagnostic_events_retain_emission_and_origin_roots_until_retirement() {
     let runtime = EvaluationRuntime::new(0).expect("runtime should build");
     let domain = EffectTokenDomain::new(&runtime.values());
+    let retained_events = Arc::new(Mutex::new(Vec::new()));
+    let callback_events = retained_events.clone();
+    let bus = DiagnosticBus::for_runtime(&runtime);
+    let _subscription = bus.subscribe(DiagnosticCallback(move |event| {
+        callback_events
+            .lock()
+            .expect("diagnostic retention callback should not be poisoned")
+            .push(event);
+    }));
     let emission_payload = Arc::new(());
     let origin_payload = Arc::new(());
     let retained_emission = Arc::downgrade(&emission_payload);
@@ -84,16 +93,68 @@ fn diagnostic_events_retain_emission_and_origin_roots_until_retirement() {
         line: None,
         message: Arc::from("retained diagnostic"),
     };
-    let event = DiagnosticBus::for_runtime(&runtime)
+    let event = bus
         .publish(diagnostic)
         .expect("same-runtime diagnostic should publish");
 
+    domain.collect_and_drain_retired_external_owners_for_test();
     assert!(retained_emission.upgrade().is_some());
     assert!(retained_origin.upgrade().is_some());
     drop(event);
     domain.collect_and_drain_retired_external_owners_for_test();
+    assert!(retained_emission.upgrade().is_some());
+    assert!(retained_origin.upgrade().is_some());
+    retained_events
+        .lock()
+        .expect("diagnostic retention callback should not be poisoned")
+        .clear();
+    domain.collect_and_drain_retired_external_owners_for_test();
     assert!(retained_emission.upgrade().is_none());
     assert!(retained_origin.upgrade().is_none());
+}
+
+#[test]
+fn diagnostic_ingress_retains_roots_through_buffer_and_committed_read() {
+    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+    let domain = EffectTokenDomain::new(&runtime.values());
+    let bus = DiagnosticBus::for_runtime(&runtime);
+    let (_ingress, reader) = bus
+        .diagnostic_ingress(&runtime)
+        .expect("diagnostic ingress should attach");
+    let emission_payload = Arc::new(());
+    let retained = Arc::downgrade(&emission_payload);
+    let event = bus
+        .publish(Diagnostic {
+            emission: domain.issue(emission_payload),
+            origin: None,
+            source: None,
+            severity: Severity::Info,
+            line: None,
+            message: Arc::from("retained ingress diagnostic"),
+        })
+        .expect("same-runtime diagnostic should publish");
+
+    drop(event);
+    domain.collect_and_drain_retired_external_owners_for_test();
+    assert!(retained.upgrade().is_some());
+
+    let (_, store, snapshot) = runtime.transaction_snapshot();
+    let mut journal = RuntimeEventJournal::new(snapshot);
+    let transported = journal
+        .read(&reader)
+        .expect("diagnostic ingress should be readable")
+        .expect("the ingress should retain its diagnostic value");
+    assert_eq!(
+        runtime.try_commit_transaction(&StoreJournal::new(store), &journal),
+        StoreCommitResult::Committed
+    );
+    drop(journal);
+    domain.collect_and_drain_retired_external_owners_for_test();
+    assert!(retained.upgrade().is_some());
+
+    drop(transported);
+    domain.collect_and_drain_retired_external_owners_for_test();
+    assert!(retained.upgrade().is_none());
 }
 
 #[test]

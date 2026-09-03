@@ -190,6 +190,9 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.2e.2b | complete | reflection lifecycle, protocol, and search owners |
 | I4F.2e.2c | complete | reflection request and parked-machine owners |
 | I4F.2e.2 | complete | reflection owner collection fixtures |
+| I4F.2e.3a | complete | diagnostic event, subscription, and ingress owners |
+| I4F.2e.3b | pending | event input, snapshot, journal, and result owners |
+| I4F.2e.3c | pending | output intent, delivery, and failure owners |
 | I4F.2e.3 | pending | diagnostic, event, and delivery collection fixtures |
 | I4F.2e.4 | pending | compiler, binary-host, net, and hidden-owner collection fixtures |
 | I4F.2e | pending | closed durable-owner collection matrix |
@@ -4052,8 +4055,15 @@ Partition the matrix along the I4F.1 ownership boundaries:
    and again after that owner retires. A prior lifetime assertion without an
    intervening collection is useful structural evidence, but does not by
    itself close this collection checkpoint.
-3. **I4F.2e.3 — Transport owners.** Cover diagnostics, ingress/subscriptions,
-   event inputs, output intents, running deliveries, and retained failures.
+3. **I4F.2e.3 — Transport owners.** Strengthen the forced-order transport
+   fixtures in three checkpoints: **I4F.2e.3a** covers diagnostic events,
+   subscriber callbacks, and diagnostic ingress; **I4F.2e.3b** covers generic
+   admitted inputs, persistent event snapshots/journals, and committed read
+   results; **I4F.2e.3c** covers output intents, queued/running deliveries,
+   callback tickets, durable failures, and failure snapshots. Collection must
+   occur while each authoritative owner is live and after its retirement;
+   callback entry or a pre-drop weak assertion without collection is not a
+   substitute.
 4. **I4F.2e.4 — Tooling and hidden owners.** Cover assembly/compiler/import,
    macro/parser rewrite, binary configuration/logger state, synchronized
    net/work anchors, and every admitted type-erased/callback family.
@@ -4182,6 +4192,18 @@ fusion actions, and `PreparedDrive` handoffs are deliberately not assigned a
 synthetic durable-owner fixture: I4F.1d.3e proved they cannot park or escape
 one evaluator/interpreter step. This closes the reflection collection matrix
 without promoting bounded temporaries into architectural owners.
+
+I4F.2e.3a completed 2026-09-03 with forced retirement orders across the
+diagnostic transport boundary. A published event first survives collection
+through both its caller-visible event and subscriber callback copy; after the
+caller copy retires it survives another collection through the subscriber,
+then releases emission and origin shells when that callback-owned event is
+cleared. A runtime ingress fixture drops the immediate event, collects while
+the diagnostic envelope is buffered, commits a transactional read, retires
+the journal, and collects again while only the returned public value remains.
+Dropping that value permits reclamation. This covers events, subscriptions,
+ingress buffering, and committed read transfer without a bus-to-runtime
+strong cycle.
 
 Keep every fixture in a fresh isolated collector-ready runtime/heap. Do not
 collect a shared production graph containing I5-I10 unclassified families.
