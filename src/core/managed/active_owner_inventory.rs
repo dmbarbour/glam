@@ -47,9 +47,9 @@ const ACTIVE_DESTRUCTION_FRONTIERS: &[ActiveDestructionFrontier] = &[
     },
     ActiveDestructionFrontier {
         kind: ActiveDestructionKind::OpaquePayload,
-        path: "Value::Opaque -> OpaqueValue::payload",
-        owner: "admitted Arc<dyn Any + Send + Sync> payload family",
-        active_action: "type-erased or transitive external retirement",
+        path: "Value::Opaque -> OpaqueValue::handle -> runtime external-owner registry",
+        owner: "runtime-owned admitted opaque payload family",
+        active_action: "type-erased or transitive external retirement is externally drained",
         extraction: "I4F.2b.3 opaque-payload registry",
     },
 ];
@@ -111,7 +111,7 @@ const SOURCE_LATCHES: &[SourceLatch] = &[
     },
     SourceLatch {
         path: "src/core.rs",
-        needle: "payload: Arc<dyn Any + Send + Sync>",
+        needle: "pub struct OpaqueValue {",
         expected: 1,
         frontier: ActiveDestructionKind::OpaquePayload,
     },
@@ -209,8 +209,8 @@ fn assert_reflection_fields(computation: &ReflectionComputation) {
 }
 
 fn assert_opaque_fields(opaque: &OpaqueValue) {
-    let OpaqueValue { payload } = opaque;
-    let _ = payload;
+    let OpaqueValue { handle } = opaque;
+    let _ = handle;
 }
 
 #[test]

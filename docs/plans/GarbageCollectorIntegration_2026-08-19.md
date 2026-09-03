@@ -3804,6 +3804,17 @@ the latched ordering test proves that an unactivated reservation remains
 registered until a known-safe external-owner drain and is discarded there,
 preserving the prior uncommitted-reservation semantics.
 
+I4F.2b.3 completed 2026-09-03. `OpaqueValue` now retains the same passive
+external-owner handle as the other extracted families; its admitted
+`Arc<dyn Any>` payload lives only in the runtime registry. Downcast requires a
+matching `CoreValueFactory`, rejects another runtime before consulting its
+local owner IDs, and clones the typed owner under the registry lock before any
+client observation. This single rule covers edge-free provenance/construction
+tokens as well as revocable effect tokens and reflection task handles whose
+transitive drops retire external state. A dedicated fixture proves that last
+token drop retains the payload inertly, cross-runtime lookup fails, and the
+payload destructor runs only after a safe registry drain.
+
 Conservative retention until the next ordinary registry drain is permitted;
 retention until runtime-domain teardown is the fallback if no later operation
 occurs. This can delay Rust resource destruction but must not change Glam

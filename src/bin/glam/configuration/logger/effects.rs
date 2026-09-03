@@ -477,6 +477,8 @@ mod tests {
 
         assert!(retained.upgrade().is_some());
         drop(host);
+        assert!(retained.upgrade().is_some());
+        drop(domain);
         assert!(retained.upgrade().is_none());
     }
 

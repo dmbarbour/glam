@@ -60,15 +60,24 @@ unsafe impl OpaquePayloadFamily for CompilationOrigin {
         OpaquePayloadRecord::edge_free("compilation origin provenance", "src/diagnostic.rs");
 }
 
-pub(crate) fn opaque_compilation_origin(trace: &CompilationTrace) -> Value {
-    Value::Opaque(OpaqueValue::new(Arc::new(CompilationOrigin {
-        trace: trace.clone(),
-    })))
+pub(crate) fn opaque_compilation_origin(
+    values: &CoreValueFactory,
+    trace: &CompilationTrace,
+) -> Value {
+    Value::Opaque(OpaqueValue::new(
+        values,
+        Arc::new(CompilationOrigin {
+            trace: trace.clone(),
+        }),
+    ))
 }
 
-pub(crate) fn inspect_compilation_origin(origin: &OpaqueValue) -> Option<Value> {
+pub(crate) fn inspect_compilation_origin(
+    values: &CoreValueFactory,
+    origin: &OpaqueValue,
+) -> Option<Value> {
     origin
-        .downcast::<CompilationOrigin>()
+        .downcast::<CompilationOrigin>(values)
         .map(|origin| origin.trace.origin_value())
 }
 

@@ -134,6 +134,9 @@ mod owner_tests {
         assert!(retained_active.upgrade().is_some());
         assert!(retained_visited.upgrade().is_some());
         drop(journal);
+        assert!(retained_active.upgrade().is_some());
+        assert!(retained_visited.upgrade().is_some());
+        drop(domain);
         assert!(retained_active.upgrade().is_none());
         assert!(retained_visited.upgrade().is_none());
     }

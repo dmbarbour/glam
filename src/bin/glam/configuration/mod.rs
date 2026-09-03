@@ -367,6 +367,9 @@ mod owner_tests {
         assert!(retained_value.upgrade().is_some());
         assert!(retained_environment.upgrade().is_some());
         drop(prepared);
+        assert!(retained_value.upgrade().is_some());
+        assert!(retained_environment.upgrade().is_some());
+        drop(domain);
         assert!(retained_value.upgrade().is_none());
         assert!(retained_environment.upgrade().is_none());
     }

@@ -128,7 +128,7 @@ impl CompileContext {
     pub(crate) fn with_compilation_trace(mut self, trace: Arc<CompilationTrace>) -> Self {
         self.opaque_origin = Some(RuntimeValueRoot::new(
             &self.values,
-            crate::diagnostic::opaque_compilation_origin(&trace),
+            crate::diagnostic::opaque_compilation_origin(&self.values, &trace),
         ));
         self.compilation_trace = Some(trace);
         self
@@ -483,6 +483,7 @@ mod tests {
         assert!(prior_retained.upgrade().is_some());
         assert!(final_retained.upgrade().is_some());
         drop(args);
+        domain.drain_retired_external_owners_for_test();
         assert!(prior_retained.upgrade().is_none());
         assert!(final_retained.upgrade().is_none());
     }

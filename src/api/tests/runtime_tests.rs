@@ -226,6 +226,7 @@ fn consumed_runtime_input_retires_its_root_after_commit_and_result_drop() {
     drop(store);
     assert!(retained.upgrade().is_some());
     drop(consumed);
+    domain.drain_retired_external_owners_for_test();
     assert!(retained.upgrade().is_none());
 }
 
@@ -1629,7 +1630,7 @@ fn output_payload_is_retained_through_callback_and_dropped_after_locks() {
             &endpoint.writer(),
             public_value(
                 runtime.values().core(),
-                CoreValue::Opaque(OpaqueValue::new(lease)),
+                CoreValue::Opaque(OpaqueValue::new(runtime.values().core(), lease)),
             ),
         )
         .unwrap();
@@ -1641,6 +1642,11 @@ fn output_payload_is_retained_through_callback_and_dropped_after_locks() {
     drop(store);
     assert!(retained.upgrade().is_some());
     assert!(endpoint.delivery().deliver_next().unwrap().is_some());
+    // Delivery releases its retained runtime value outside the callback and
+    // locks, but opaque payload destruction is deliberately deferred to a
+    // known-safe external-owner drain.
+    assert!(retained.upgrade().is_some());
+    assert_eq!(runtime.values().core().drain_external_owners_for_test(), 1);
     assert!(retained.upgrade().is_none());
     assert!(dropped.load(Ordering::Acquire));
 }

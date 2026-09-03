@@ -756,6 +756,7 @@ mod tests {
         );
         assert!(retained_input.upgrade().is_some());
         drop(input);
+        domain.drain_retired_external_owners_for_test();
         assert!(retained_input.upgrade().is_none());
 
         let (embedded_value, retained_embedded) = retained_value(&domain);
@@ -767,6 +768,7 @@ mod tests {
         };
         assert!(retained_embedded.upgrade().is_some());
         drop(work);
+        domain.drain_retired_external_owners_for_test();
         assert!(retained_embedded.upgrade().is_none());
     }
 

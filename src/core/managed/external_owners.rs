@@ -11,8 +11,11 @@ use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
+use crate::runtime::EvaluationRuntimeId;
+
 #[derive(Clone)]
 pub(crate) struct ExternalOwnerHandle {
+    runtime: EvaluationRuntimeId,
     id: NonZeroU64,
     #[allow(
         dead_code,
@@ -28,13 +31,15 @@ struct ExternalOwnerEntry {
 }
 
 pub(crate) struct ExternalOwnerRegistry {
+    runtime: EvaluationRuntimeId,
     next_id: AtomicU64,
     owners: Mutex<HashMap<NonZeroU64, ExternalOwnerEntry>>,
 }
 
 impl ExternalOwnerRegistry {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(runtime: EvaluationRuntimeId) -> Self {
         Self {
+            runtime,
             next_id: AtomicU64::new(1),
             owners: Mutex::new(HashMap::new()),
         }
@@ -60,13 +65,21 @@ impl ExternalOwnerRegistry {
                 },
             );
         assert!(previous.is_none(), "external owner IDs remain unique");
-        ExternalOwnerHandle { id, lease }
+        ExternalOwnerHandle {
+            runtime: self.runtime,
+            id,
+            lease,
+        }
     }
 
     pub(crate) fn get<T>(&self, handle: &ExternalOwnerHandle) -> Arc<T>
     where
         T: Any + Send + Sync,
     {
+        assert_eq!(
+            handle.runtime, self.runtime,
+            "an external owner handle must be opened by its matching runtime"
+        );
         let owners = self
             .owners
             .lock()
@@ -74,6 +87,10 @@ impl ExternalOwnerRegistry {
         let entry = owners
             .get(&handle.id)
             .expect("a live external owner lease must retain its registry entry");
+        assert!(
+            std::ptr::eq(entry.lease.as_ptr(), Arc::as_ptr(&handle.lease)),
+            "an external owner handle must be opened by its matching registry"
+        );
         assert_eq!(
             entry.family,
             TypeId::of::<T>(),
@@ -84,6 +101,26 @@ impl ExternalOwnerRegistry {
             .downcast_ref::<Arc<T>>()
             .expect("an external owner entry must retain its recorded family")
             .clone()
+    }
+
+    pub(crate) fn try_get<T>(&self, handle: &ExternalOwnerHandle) -> Option<Arc<T>>
+    where
+        T: Any + Send + Sync,
+    {
+        if handle.runtime != self.runtime {
+            return None;
+        }
+        let owners = self
+            .owners
+            .lock()
+            .expect("external owner registry was poisoned");
+        let entry = owners.get(&handle.id)?;
+        if !std::ptr::eq(entry.lease.as_ptr(), Arc::as_ptr(&handle.lease))
+            || entry.family != TypeId::of::<T>()
+        {
+            return None;
+        }
+        entry.owner.downcast_ref::<Arc<T>>().cloned()
     }
 
     /// Detaches dead entries under the registry lock and destroys their active
@@ -122,6 +159,10 @@ impl ExternalOwnerRegistry {
 }
 
 impl ExternalOwnerHandle {
+    pub(crate) fn same_owner(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.lease, &other.lease)
+    }
+
     #[cfg(test)]
     fn lease_is_shared(&self) -> bool {
         Arc::strong_count(&self.lease) > 1
@@ -144,7 +185,7 @@ mod tests {
 
     #[test]
     fn dead_owner_is_detached_before_destructor_runs() {
-        let registry = ExternalOwnerRegistry::new();
+        let registry = ExternalOwnerRegistry::new(crate::runtime::allocate_evaluation_runtime_id());
         let drops = Arc::new(AtomicUsize::new(0));
         let handle = registry.insert(Arc::new(DropSignal(Arc::clone(&drops))));
         let clone = handle.clone();

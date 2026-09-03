@@ -9,7 +9,7 @@ pub(super) fn apply(context: &EvalContext, arguments: Vec<Value>) -> Result<Valu
             "origin inspection requires an opaque compilation origin",
         ));
     };
-    crate::diagnostic::inspect_compilation_origin(&origin).ok_or_else(|| {
+    crate::diagnostic::inspect_compilation_origin(context.values(), &origin).ok_or_else(|| {
         EvaluationHalt::new("origin inspection requires an opaque compilation origin")
     })
 }

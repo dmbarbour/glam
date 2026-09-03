@@ -617,7 +617,7 @@ fn task_handle_value(context: &EvalContext, handle: Arc<TaskHandleCell>) -> Valu
     let values = Values::from_core_factory(context.values().clone());
     debug_assert_eq!(handle.runtime, values.runtime_id());
     debug_assert_eq!(handle.runtime, handle.task.runtime_id());
-    values.wrap(CoreValue::Opaque(OpaqueValue::new(handle)))
+    values.wrap(CoreValue::Opaque(OpaqueValue::new(values.core(), handle)))
 }
 
 fn task_join_context(task: EvaluationTaskId) -> CoreValue {
@@ -734,7 +734,7 @@ fn task_handle_argument<S: TaskSpecialization>(
             )));
         };
         handle
-            .downcast::<TaskHandleCell>()
+            .downcast::<TaskHandleCell>(context.eval_context().values())
             .ok_or_else(|| TaskHalt::new(format!("`.{request}` requires a reflection task handle")))
     })?
 }
@@ -990,6 +990,7 @@ mod tests {
         };
         assert!(retained.upgrade().is_some());
         drop(journal);
+        domain.drain_retired_external_owners_for_test();
         assert!(retained.upgrade().is_none());
 
         for build in [
@@ -1000,6 +1001,7 @@ mod tests {
             let state = build(value);
             assert!(retained.upgrade().is_some());
             drop(state);
+            domain.drain_retired_external_owners_for_test();
             assert!(retained.upgrade().is_none());
         }
 
@@ -1010,6 +1012,7 @@ mod tests {
         };
         assert!(retained.upgrade().is_some());
         drop(read);
+        domain.drain_retired_external_owners_for_test();
         assert!(retained.upgrade().is_none());
     }
 
@@ -1192,7 +1195,7 @@ mod tests {
         });
         assert!(context.attach_task_status_publisher(
             &task,
-            task_status_publisher(writer, status.clone(), values),
+            task_status_publisher(writer, status.clone(), values.clone()),
         ));
         let handle = Arc::new(TaskHandleCell {
             runtime: context.values().runtime_id(),
@@ -1212,6 +1215,7 @@ mod tests {
         );
 
         drop(opaque);
+        values.drain_external_owners_for_test();
         assert!(
             status_weak.upgrade().is_none(),
             "dropping the final opaque handle must release the final query lease"

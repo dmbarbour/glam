@@ -372,7 +372,7 @@ impl CoreValueFactory {
                 extension_lookups: AtomicUsize::new(0),
             },
             work_coordinator: Arc::new(Mutex::new(Weak::new())),
-            external_owners: ExternalOwnerRegistry::new(),
+            external_owners: ExternalOwnerRegistry::new(runtime),
         });
         debug_assert_eq!(domain.heap.collection_policy(), CollectionPolicy::NoAuto);
         Self {
@@ -1187,19 +1187,24 @@ impl Eq for MetadataCarrier {}
 /// [`Value`] ownership without exposing forgeable identifiers to Glam code.
 #[derive(Clone)]
 pub struct OpaqueValue {
-    payload: Arc<dyn Any + Send + Sync>,
+    handle: ExternalOwnerHandle,
 }
 
 impl OpaqueValue {
-    pub(crate) fn new<T: OpaquePayloadFamily>(payload: Arc<T>) -> Self {
+    pub(crate) fn new<T: OpaquePayloadFamily>(values: &CoreValueFactory, payload: Arc<T>) -> Self {
         // Naming the mandatory record closes unrestricted `Any` construction
         // without adding release-build work.
         let _ = T::PAYLOAD_RECORD;
-        Self { payload }
+        Self {
+            handle: values.domain.external_owners.insert(payload),
+        }
     }
 
-    pub(crate) fn downcast<T: Any + Send + Sync>(&self) -> Option<Arc<T>> {
-        self.payload.clone().downcast().ok()
+    pub(crate) fn downcast<T: Any + Send + Sync>(
+        &self,
+        values: &CoreValueFactory,
+    ) -> Option<Arc<T>> {
+        values.domain.external_owners.try_get(&self.handle)
     }
 }
 
@@ -1211,7 +1216,7 @@ impl fmt::Debug for OpaqueValue {
 
 impl PartialEq for OpaqueValue {
     fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.payload, &other.payload)
+        self.handle.same_owner(&other.handle)
     }
 }
 

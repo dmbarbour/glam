@@ -91,6 +91,7 @@ fn diagnostic_events_retain_emission_and_origin_roots_until_retirement() {
     assert!(retained_emission.upgrade().is_some());
     assert!(retained_origin.upgrade().is_some());
     drop(event);
+    domain.drain_retired_external_owners_for_test();
     assert!(retained_emission.upgrade().is_none());
     assert!(retained_origin.upgrade().is_none());
 }

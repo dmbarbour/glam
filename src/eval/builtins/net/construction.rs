@@ -401,10 +401,13 @@ fn port_list(
         ports
             .into_iter()
             .map(|id| {
-                Value::Opaque(OpaqueValue::new(Arc::new(ConstructionPort {
-                    brand: brand.clone(),
-                    id,
-                })))
+                Value::Opaque(OpaqueValue::new(
+                    values.core(),
+                    Arc::new(ConstructionPort {
+                        brand: brand.clone(),
+                        id,
+                    }),
+                ))
             })
             .collect(),
     )))
@@ -439,8 +442,9 @@ fn construction_port_request(
     brand: &Arc<ConstructionBrand>,
 ) -> Result<ConstructionPortId, TaskHalt> {
     let value = context.evaluate(value)?;
+    let values = context.values();
     value
-        .with_core(|value| construction_port_value(value, brand))
+        .with_core(|value| construction_port_value(values.core(), value, brand))
         .map_err(|error| TaskHalt::new(error.to_string()))?
         .map_err(task_eval_error)
 }
@@ -451,10 +455,11 @@ fn construction_port_in(
     brand: &Arc<ConstructionBrand>,
 ) -> Result<ConstructionPortId, EvaluationHalt> {
     let value = eval_value_in(context, value)?;
-    construction_port_value(&value, brand)
+    construction_port_value(context.context().values(), &value, brand)
 }
 
 fn construction_port_value(
+    values: &crate::core::CoreValueFactory,
     value: &Value,
     brand: &Arc<ConstructionBrand>,
 ) -> Result<ConstructionPortId, EvaluationHalt> {
@@ -463,7 +468,7 @@ fn construction_port_value(
             "interaction-net operation requires a construction port",
         ));
     };
-    let port = port.downcast::<ConstructionPort>().ok_or_else(|| {
+    let port = port.downcast::<ConstructionPort>(values).ok_or_else(|| {
         EvaluationHalt::new("interaction-net operation requires a construction port")
     })?;
     if !Arc::ptr_eq(&port.brand, brand) {
@@ -559,14 +564,18 @@ mod tests {
 
     #[test]
     fn construction_ports_are_scoped_to_one_invocation() {
+        let values = crate::core::test_value_factory();
         let local = Arc::new(ConstructionBrand);
         let foreign = Arc::new(ConstructionBrand);
-        let value = Value::Opaque(OpaqueValue::new(Arc::new(ConstructionPort {
-            brand: foreign,
-            id: ConstructionPortId(NonZeroU64::new(1).unwrap()),
-        })));
+        let value = Value::Opaque(OpaqueValue::new(
+            &values,
+            Arc::new(ConstructionPort {
+                brand: foreign,
+                id: ConstructionPortId(NonZeroU64::new(1).unwrap()),
+            }),
+        ));
 
-        let error = construction_port_value(&value, &local).unwrap_err();
+        let error = construction_port_value(&values, &value, &local).unwrap_err();
         assert_eq!(
             error.to_string(),
             "interaction-net construction port belongs to another invocation"

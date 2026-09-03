@@ -1411,6 +1411,7 @@ fn branch_retires_its_effect_and_state_roots_exactly_with_the_branch() {
     assert!(retained_effect.upgrade().is_some());
     assert!(retained_state.upgrade().is_some());
     drop(branch);
+    domain.drain_retired_external_owners_for_test();
     assert!(retained_effect.upgrade().is_none());
     assert!(retained_state.upgrade().is_none());
 }
@@ -1426,6 +1427,7 @@ fn execution_work_and_cut_payloads_retain_roots_until_retirement() {
     let work = MachineWork::deliver(&core, value, branch(), 0);
     assert!(retained.upgrade().is_some());
     drop(work);
+    domain.drain_retired_external_owners_for_test();
     assert!(retained.upgrade().is_none());
 
     let (function, retained_function) = retained_machine_value(&values, &domain);
@@ -1434,6 +1436,7 @@ fn execution_work_and_cut_payloads_retain_roots_until_retirement() {
     assert!(retained_function.upgrade().is_some());
     assert!(retained_argument.upgrade().is_some());
     drop(work);
+    domain.drain_retired_external_owners_for_test();
     assert!(retained_function.upgrade().is_none());
     assert!(retained_argument.upgrade().is_none());
 
@@ -1441,6 +1444,7 @@ fn execution_work_and_cut_payloads_retain_roots_until_retirement() {
     let outcome = BranchOutcome::complete(&core, value, branch());
     assert!(retained.upgrade().is_some());
     drop(outcome);
+    domain.drain_retired_external_owners_for_test();
     assert!(retained.upgrade().is_none());
 
     let (operation, retained) = retained_machine_value(&values, &domain);
@@ -1457,6 +1461,7 @@ fn execution_work_and_cut_payloads_retain_roots_until_retirement() {
     };
     assert!(retained.upgrade().is_some());
     drop(cut);
+    domain.drain_retired_external_owners_for_test();
     assert!(retained.upgrade().is_none());
 }
 
@@ -1494,6 +1499,7 @@ fn captured_control_payloads_retain_roots_until_retirement() {
     };
     assert!(retained.iter().all(|weak| weak.upgrade().is_some()));
     drop(captured);
+    domain.drain_retired_external_owners_for_test();
     assert!(retained.iter().all(|weak| weak.upgrade().is_none()));
 }
 
@@ -1525,6 +1531,7 @@ fn fixpoint_frames_retain_the_shared_function_root_until_retirement() {
     drop(active);
     assert!(retained.upgrade().is_some());
     drop(restart);
+    domain.drain_retired_external_owners_for_test();
     assert!(retained.upgrade().is_none());
 }
 
@@ -1547,6 +1554,7 @@ fn contextual_effect_wrapper_retires_its_context_root_exactly_with_the_wrapper()
     );
     assert!(retained.upgrade().is_some());
     drop(task);
+    domain.drain_retired_external_owners_for_test();
     assert!(retained.upgrade().is_none());
 }
 
@@ -1583,6 +1591,7 @@ fn terminal_failure_poll_preserves_its_root_until_the_poll_is_retired() {
     drop(task);
     assert!(retained.upgrade().is_some());
     drop(error);
+    domain.drain_retired_external_owners_for_test();
     assert!(retained.upgrade().is_none());
 }
 
@@ -1608,6 +1617,7 @@ fn blocked_failure_poll_preserves_its_root_after_the_block_is_retired() {
     drop(blocked);
     assert!(retained.upgrade().is_some());
     drop(projected);
+    domain.drain_retired_external_owners_for_test();
     assert!(retained.upgrade().is_none());
 }
 

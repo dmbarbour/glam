@@ -7,7 +7,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::core::{
-    EvaluationFailure, EvaluationHalt, HostCallRecord, LazySource, LazyValue, Value,
+    EvaluationFailure, EvaluationHalt, HostCallRecord, LazySource, LazyValue, OpaquePayloadFamily,
+    OpaquePayloadRecord, OpaqueValue, Value,
 };
 use crate::evaluation::EvaluatorStepContext;
 
@@ -253,4 +254,48 @@ fn host_call_capture_retires_only_during_external_registry_drain() {
     assert_eq!(values.drain_external_owners_for_test(), 1);
     assert_eq!(drops.load(Ordering::Relaxed), 1);
     assert_eq!(values.external_owner_count_for_test(), 0);
+}
+
+struct OpaqueDropSignal(Arc<AtomicUsize>);
+
+impl Drop for OpaqueDropSignal {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+// SAFETY: this fixture contains no Glam value or managed pointer. Its drop
+// observer models an arbitrary opaque destructor owned by the external
+// registry rather than the managed-reachable token.
+unsafe impl OpaquePayloadFamily for OpaqueDropSignal {
+    const PAYLOAD_RECORD: OpaquePayloadRecord = OpaquePayloadRecord::external(
+        "opaque external-owner fixture",
+        "src/core/managed/containment_inventory.rs",
+    );
+}
+
+#[test]
+fn opaque_payload_requires_matching_runtime_and_retires_during_registry_drain() {
+    let values = crate::core::CoreValueFactory::new(
+        crate::runtime::allocate_evaluation_runtime_id(),
+        crate::runtime::RuntimeIds::new(),
+    );
+    let other_values = crate::core::CoreValueFactory::new(
+        crate::runtime::allocate_evaluation_runtime_id(),
+        crate::runtime::RuntimeIds::new(),
+    );
+    let drops = Arc::new(AtomicUsize::new(0));
+    let payload = Arc::new(OpaqueDropSignal(Arc::clone(&drops)));
+    let retained = Arc::downgrade(&payload);
+    let opaque = OpaqueValue::new(&values, payload);
+
+    assert!(opaque.downcast::<OpaqueDropSignal>(&other_values).is_none());
+    assert!(opaque.downcast::<OpaqueDropSignal>(&values).is_some());
+    drop(opaque);
+    assert!(retained.upgrade().is_some());
+    assert_eq!(drops.load(Ordering::Relaxed), 0);
+
+    assert_eq!(values.drain_external_owners_for_test(), 1);
+    assert!(retained.upgrade().is_none());
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
 }

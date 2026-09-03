@@ -218,12 +218,24 @@ where
             .insert(id, Arc::new(payload));
         assert!(replaced.is_none(), "effect token IDs remain unique");
         self.values
-            .wrap(CoreValue::Opaque(crate::core::OpaqueValue::new(Arc::new(
-                EffectToken {
+            .wrap(CoreValue::Opaque(crate::core::OpaqueValue::new(
+                self.values.core(),
+                Arc::new(EffectToken {
                     id,
                     domain: Arc::downgrade(&self.state),
-                },
-            ))))
+                }),
+            )))
+    }
+
+    /// Runs the runtime's deferred external-owner retirement at an explicit
+    /// safe point in ownership tests.
+    ///
+    /// Effect-token payload destruction is deliberately not coupled to the
+    /// last token-handle drop: the opaque token is an external owner whose
+    /// destructor may not run in an arbitrary evaluator or mutator scope.
+    #[cfg(test)]
+    pub(crate) fn drain_retired_external_owners_for_test(&self) -> usize {
+        self.values.core().drain_external_owners_for_test()
     }
 
     /// Resolves a token only when it was issued by this exact domain.
@@ -236,7 +248,7 @@ where
             let CoreValue::Opaque(token) = value else {
                 return None;
             };
-            let token = token.downcast::<EffectToken<T>>()?;
+            let token = token.downcast::<EffectToken<T>>(self.values.core())?;
             if !Weak::ptr_eq(&token.domain, &Arc::downgrade(&self.state)) {
                 return None;
             }

@@ -1501,7 +1501,7 @@ fn semantic_binary_conversion_preserves_structured_failures() {
 fn reflection_environment_explicitly_projects_compilation_origins() {
     let assembler = Assembler::new();
     let trace = test_compilation_trace("/workspace/source.g");
-    let origin = crate::diagnostic::opaque_compilation_origin(&trace);
+    let origin = crate::diagnostic::opaque_compilation_origin(&assembler.core_values(), &trace);
     assert_eq!(
         assembler
             .reflection()
@@ -1544,7 +1544,7 @@ fn origin_inspection_rejects_unrelated_opaque_values() {
         .expect("the reflection environment should expose origin inspection");
     let unrelated = public_value(
         &assembler.core_values(),
-        CoreValue::Opaque(OpaqueValue::new(Arc::new(42_u64))),
+        CoreValue::Opaque(OpaqueValue::new(&assembler.core_values(), Arc::new(42_u64))),
     );
 
     let error = assembler
@@ -2031,6 +2031,7 @@ fn built_module_retains_its_published_value_after_construction_scope_exits() {
 
     assert!(retained.upgrade().is_some());
     drop(module);
+    domain.drain_retired_external_owners_for_test();
     assert!(
         retained.upgrade().is_none(),
         "the published module value must retire with its last public root"
