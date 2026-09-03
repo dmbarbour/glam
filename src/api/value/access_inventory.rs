@@ -78,33 +78,15 @@ macro_rules! entry {
 const INVENTORY: &[InventoryEntry] = &[
     entry!(
         "src/api/assembly.rs",
-        [4, 1, 4, 2, 4, 0],
+        [2, 0, 0, 0, 4, 0],
         "assembly setup, rooted compiler handoff, import results, modules, and reflection environment",
         "I3E.2 bounded compiler regions; I4F.1 durable roots"
-    ),
-    entry!(
-        "src/api/diagnostics.rs",
-        [5, 5, 3, 2, 0, 0],
-        "diagnostic construction, enrichment, projection, and transport",
-        "I3E.3 callback regions; I4F.1 diagnostic roots"
-    ),
-    entry!(
-        "src/api/error.rs",
-        [2, 1, 2, 0, 0, 0],
-        "evaluation-error conversion and diagnostic context",
-        "I3E.3 callback regions; I4F.1 diagnostic roots"
     ),
     entry!(
         "src/api/evaluator.rs",
         [3, 0, 4, 0, 0, 0],
         "WHNF demand, reflection inspection, and owned extraction",
         "I3B.1 scoped evaluation; I4F.2 public facade switch"
-    ),
-    entry!(
-        "src/api/runtime/readiness.rs",
-        [0, 0, 2, 0, 0, 0],
-        "readiness and deadlock report values",
-        "I3A.4 outcome boundary; I4F.1 report roots"
     ),
     entry!(
         "src/api/value.rs",
@@ -222,7 +204,7 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/reflection/protocol.rs",
-        [4, 1, 2, 0, 0, 0],
+        [4, 1, 1, 0, 0, 0],
         "bounded request evaluation plus rooted protocol results, snapshots, transactions, and failures",
         "I3D.2 interpreter boundary; I4F.1d.2b rooted protocol surfaces; I4F.2a compatibility-access retirement"
     ),

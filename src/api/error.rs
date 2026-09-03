@@ -49,7 +49,7 @@ impl Error {
                     .unwrap_or(message);
                 (
                     message,
-                    Diagnostic::from_emission(Severity::Error, Value::from_core(values, emission)),
+                    Diagnostic::from_parts(values, None, Severity::Error, emission, None),
                 )
             }
             None => (
@@ -84,13 +84,20 @@ impl Error {
         diagnostic.emission.require_runtime(values.runtime)?;
         let emission = crate::diagnostic::prepend_contexts_with(
             &values.core,
-            diagnostic.emission.as_core().clone(),
-            &[context.into_core()],
+            values.clone_core(&diagnostic.emission)?,
+            &[values.clone_core(&context)?],
         )
-        .unwrap_or_else(|_| diagnostic.emission.as_core().clone());
-        self.diagnostic = Some(Arc::new(Diagnostic::from_emission(
+        .unwrap_or_else(|_| {
+            values
+                .clone_core(&diagnostic.emission)
+                .expect("the diagnostic runtime was checked")
+        });
+        self.diagnostic = Some(Arc::new(Diagnostic::from_parts(
+            &values.core,
+            None,
             diagnostic.severity,
-            Value::from_core(&values.core, emission),
+            emission,
+            None,
         )));
         Ok(self)
     }

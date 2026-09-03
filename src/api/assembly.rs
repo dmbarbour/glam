@@ -73,6 +73,7 @@ impl CompilationExecution {
             diagnostics.clone(),
         ));
         host.seal_environment(reflection_environment_for_role(
+            &reasoning.runtime.values(),
             &reasoning.environment(),
             "macro",
         ))?;
@@ -83,8 +84,9 @@ impl CompilationExecution {
         let evaluation = reasoning.runtime.new_evaluation_session()?;
 
         let assembler_diagnostics = reasoning.diagnostics();
+        let diagnostic_values = reasoning.eval_context().values().clone();
         let forwarder = diagnostics.subscribe(DiagnosticCallback(move |event: DiagnosticEvent| {
-            let diagnostic = macro_reflection_diagnostic(event.diagnostic());
+            let diagnostic = macro_reflection_diagnostic(&diagnostic_values, event.diagnostic());
             build_diagnostics
                 .lock()
                 .expect("build diagnostic mutex should not be poisoned")
@@ -179,7 +181,7 @@ impl CompilationExecution {
     }
 }
 
-fn macro_reflection_diagnostic(diagnostic: &Diagnostic) -> Diagnostic {
+fn macro_reflection_diagnostic(values: &CoreValueFactory, diagnostic: &Diagnostic) -> Diagnostic {
     let reasoning = CoreValue::Dict(Dict::new_sync().insert(
         Key::atom_from_text("role"),
         CoreValue::Atom(crate::core::Atom::from_key(&Key::binary_from_text("macro"))),
@@ -187,10 +189,12 @@ fn macro_reflection_diagnostic(diagnostic: &Diagnostic) -> Diagnostic {
     let origin =
         CoreValue::Dict(Dict::new_sync().insert(Key::atom_from_text("reasoning"), reasoning));
     Diagnostic::from_parts(
-        diagnostic.emission.runtime_id(),
+        values,
         diagnostic.source.clone(),
         diagnostic.severity,
-        diagnostic.emission.as_core().clone(),
+        Values::from_core_factory(values.clone())
+            .clone_core(&diagnostic.emission)
+            .expect("forwarded macro diagnostics belong to the compilation runtime"),
         Some(origin),
     )
 }
@@ -418,20 +422,19 @@ impl BuiltModule {
 }
 
 pub(super) fn authoritative_reflection_environment(
+    values: &Values,
     environment: Value,
     role: &str,
 ) -> Result<(Value, bool), Error> {
-    let runtime = environment.runtime_id();
-    let CoreValue::Dict(root) = environment.into_core() else {
+    let CoreValue::Dict(root) = values.clone_core(&environment)? else {
         return Err(Error::new("reflection environment must be a dictionary"));
     };
     let glam_key = Key::atom_from_text("glam");
     let replaced_glam = root.get(&glam_key).is_some();
     Ok((
-        Value::from_runtime(
-            runtime,
-            CoreValue::Dict(root.insert(glam_key, authoritative_glam_environment(role))),
-        ),
+        values.wrap(CoreValue::Dict(
+            root.insert(glam_key, authoritative_glam_environment(role)),
+        )),
         replaced_glam,
     ))
 }
@@ -472,17 +475,17 @@ fn authoritative_glam_environment(role: &str) -> CoreValue {
     CoreValue::Dict(glam)
 }
 
-fn reflection_environment_for_role(environment: &Value, role: &str) -> Value {
-    let CoreValue::Dict(root) = environment.as_core() else {
+fn reflection_environment_for_role(values: &Values, environment: &Value, role: &str) -> Value {
+    let CoreValue::Dict(root) = values
+        .clone_core(environment)
+        .expect("authoritative reflection environment belongs to its runtime")
+    else {
         unreachable!("authoritative reflection environment must be a dictionary")
     };
-    Value::from_runtime(
-        environment.runtime_id(),
-        CoreValue::Dict(root.insert(
-            Key::atom_from_text("glam"),
-            authoritative_glam_environment(role),
-        )),
-    )
+    values.wrap(CoreValue::Dict(root.insert(
+        Key::atom_from_text("glam"),
+        authoritative_glam_environment(role),
+    )))
 }
 
 /// Owner handle for one protected volume in an evaluation runtime.
@@ -562,7 +565,7 @@ impl ReflectionEnvironmentBuilder<'_> {
         let values = self.host.values();
         let promise = PromisedValue::new(&values.core, label);
         (
-            Value::from_core(&values.core, CoreValue::Promised(promise.clone())),
+            values.wrap(CoreValue::Promised(promise.clone())),
             PromiseResolver {
                 runtime: self.host.resources.id,
                 promise: Some(promise),
@@ -717,8 +720,9 @@ impl AssemblerBuilder {
         self.runtime_locked = true;
         let environment = build(&mut ReflectionEnvironmentBuilder { host: &self.host })?;
         environment.require_runtime(self.runtime.id())?;
+        let values = self.runtime.values();
         let (environment, replaced_glam) =
-            authoritative_reflection_environment(environment, "assembler")?;
+            authoritative_reflection_environment(&values, environment, "assembler")?;
         self.reflection_environment = Some(environment);
         if replaced_glam {
             self.pending_diagnostics.push(Diagnostic::new(
@@ -739,6 +743,7 @@ impl AssemblerBuilder {
             Some(environment) => environment,
             None => {
                 authoritative_reflection_environment(
+                    &self.runtime.values(),
                     self.runtime.values().empty_dict(),
                     "assembler",
                 )?
@@ -839,8 +844,9 @@ impl Assembler {
     /// work item currently blocked on the unresolved value.
     pub fn promise(&self, label: impl Into<Arc<str>>) -> (Value, PromiseResolver) {
         let promise = PromisedValue::new(self.eval_context().values(), label);
+        let values = self.values();
         (
-            Value::from_core(&self.core_values(), CoreValue::Promised(promise.clone())),
+            values.wrap(CoreValue::Promised(promise.clone())),
             PromiseResolver {
                 runtime: self.reasoning.runtime.id(),
                 promise: Some(promise),
@@ -862,10 +868,8 @@ impl Assembler {
     /// complete textual `viewer.header`, and returns bytes.
     pub fn default_diagnostic_formatter(&self) -> Value {
         let values = self.core_values();
-        Value::from_core(
-            &values,
-            crate::g_syntax::default_diagnostic_formatter(&values),
-        )
+        self.values()
+            .wrap(crate::g_syntax::default_diagnostic_formatter(&values))
     }
 
     /// Returns the read-only environment shared by reflection tasks in this
@@ -878,7 +882,11 @@ impl Assembler {
     /// role. Service sessions retain the client-provided environment while
     /// identifying themselves independently from the assembler session.
     pub fn reflection_environment_for_role(&self, role: impl AsRef<str>) -> Value {
-        reflection_environment_for_role(&self.reasoning.environment(), role.as_ref())
+        reflection_environment_for_role(
+            &self.values(),
+            &self.reasoning.environment(),
+            role.as_ref(),
+        )
     }
 
     /// Returns the shared execution resources used by this assembler and any
@@ -1014,11 +1022,10 @@ impl Assembler {
             .builder
             .try_finish(exposed)
             .map_err(net_build_error)?;
-        let values = self.core_values();
-        Ok(Value::from_core(
-            &values,
-            CoreValue::Net(NetValue::new(values.instantiate_core_net(&template))),
-        ))
+        let values = self.values();
+        Ok(values.wrap(CoreValue::Net(NetValue::new(
+            values.core().instantiate_core_net(&template),
+        ))))
     }
 
     // TODO: add reflection snapshots and event subscriptions here. Reflection

@@ -267,7 +267,7 @@ pub(crate) fn settled_report_diagnostics(
         }
         let context = runtime_report_context(values, "exit_error", args)?;
         diagnostics.push(
-            Diagnostic::from_emission(Severity::Error, message.clone())
+            Diagnostic::from_emission(values, Severity::Error, message.clone())?
                 .with_context(values, context)?,
         );
     }

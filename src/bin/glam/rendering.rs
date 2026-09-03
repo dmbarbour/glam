@@ -747,7 +747,8 @@ mod tests {
             working_directory: PathBuf::from("/work"),
         };
         let diagnostic = Diagnostic::new(&values, Severity::Warning, "first\nsecond\n\nfourth")
-            .with_source_location("/work/src/test.g", 4);
+            .with_source_location(&values, "/work/src/test.g", 4)
+            .expect("source location should use the diagnostic runtime");
         let terminal = TerminalContext {
             columns: 80,
             color: TerminalColor::None,
@@ -796,6 +797,7 @@ mod tests {
             working_directory: PathBuf::from("/work"),
         };
         let diagnostic = Diagnostic::from_emission(
+            &values,
             Severity::Error,
             record(
                 &values,
@@ -949,7 +951,8 @@ mod tests {
                     ),
                 )],
             ),
-        );
+        )
+        .expect("diagnostic emission should use the formatter runtime");
         let terminal = TerminalContext {
             columns: 80,
             color: TerminalColor::None,
@@ -978,6 +981,7 @@ mod tests {
             working_directory: PathBuf::from("/work"),
         };
         let diagnostic = Diagnostic::from_emission(
+            &values,
             Severity::Error,
             record(&values, [(
                 "msg",
@@ -1011,7 +1015,8 @@ mod tests {
                     ),
                 ]),
             )]),
-        );
+        )
+        .expect("diagnostic emission should use the formatter runtime");
         let terminal = TerminalContext {
             columns: 80,
             color: TerminalColor::None,
@@ -1060,6 +1065,7 @@ mod tests {
             working_directory: PathBuf::from("/work"),
         };
         let diagnostic = Diagnostic::from_emission(
+            &values,
             Severity::Error,
             record(
                 &values,
@@ -1074,7 +1080,8 @@ mod tests {
                     ),
                 )],
             ),
-        );
+        )
+        .expect("diagnostic emission should use the formatter runtime");
         let terminal = TerminalContext {
             columns: 80,
             color: TerminalColor::None,
@@ -1104,6 +1111,7 @@ mod tests {
             working_directory: PathBuf::from("/work"),
         };
         let diagnostic = Diagnostic::from_emission(
+            &values,
             Severity::Error,
             record(
                 &values,
@@ -1127,7 +1135,8 @@ mod tests {
                     ),
                 )],
             ),
-        );
+        )
+        .expect("diagnostic emission should use the formatter runtime");
         let terminal = TerminalContext {
             columns: 80,
             color: TerminalColor::None,
@@ -1154,6 +1163,7 @@ mod tests {
             working_directory: PathBuf::from("/work"),
         };
         let diagnostic = Diagnostic::from_emission(
+            &values,
             Severity::Warning,
             record(
                 &values,
@@ -1184,7 +1194,8 @@ mod tests {
                     ),
                 )],
             ),
-        );
+        )
+        .expect("diagnostic emission should use the formatter runtime");
         let terminal = TerminalContext {
             columns: 80,
             color: TerminalColor::None,

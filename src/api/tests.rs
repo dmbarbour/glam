@@ -1856,9 +1856,13 @@ fn attached_runtime_default_reflection_profile_cannot_be_replaced() {
     ));
     replacement
         .seal_environment(
-            authoritative_reflection_environment(runtime.values().empty_dict(), "replacement")
-                .unwrap()
-                .0,
+            authoritative_reflection_environment(
+                &runtime.values(),
+                runtime.values().empty_dict(),
+                "replacement",
+            )
+            .unwrap()
+            .0,
         )
         .unwrap();
 
@@ -1890,9 +1894,13 @@ fn retained_reflection_profile_keeps_only_shared_resources_alive() {
         DiagnosticBus::for_runtime(&runtime),
     ));
     host.seal_environment(
-        authoritative_reflection_environment(runtime.values().empty_dict(), "retained")
-            .unwrap()
-            .0,
+        authoritative_reflection_environment(
+            &runtime.values(),
+            runtime.values().empty_dict(),
+            "retained",
+        )
+        .unwrap()
+        .0,
     )
     .unwrap();
     let profile = Arc::new(ReflectionTaskProfile::sealed(coordinator_task_launcher(

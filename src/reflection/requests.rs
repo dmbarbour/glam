@@ -332,7 +332,12 @@ where
                 .try_into()
                 .map_err(|_| TaskHalt::new("`.log` received the wrong number of arguments"))?;
             let message = prepare_message(context, message)?;
-            let diagnostic = Diagnostic::from_emission(parse_severity(context, severity)?, message);
+            let diagnostic = Diagnostic::from_emission(
+                &context.values(),
+                parse_severity(context, severity)?,
+                message,
+            )
+            .map_err(|error| TaskHalt::new(error.to_string()))?;
             if let Some(mut transaction) = context.transaction() {
                 transaction
                     .parts()
@@ -982,7 +987,10 @@ mod tests {
 
         let (emission, retained) = retained_request_value(&domain);
         let journal = ReflectionJournal {
-            diagnostics: vec![Diagnostic::from_emission(Severity::Error, emission)],
+            diagnostics: vec![
+                Diagnostic::from_emission(&values, Severity::Error, emission)
+                    .expect("retained request fixture uses one runtime"),
+            ],
             updates: Vec::new(),
         };
         assert!(retained.upgrade().is_some());

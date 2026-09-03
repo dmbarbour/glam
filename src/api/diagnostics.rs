@@ -49,7 +49,7 @@ impl Diagnostic {
     ) -> Self {
         let message = message.into();
         Self::from_parts(
-            values.runtime_id(),
+            values,
             None,
             severity,
             crate::diagnostic::text_message(None, &message),
@@ -59,24 +59,39 @@ impl Diagnostic {
 
     /// Wraps an arbitrary diagnostic value with separately supplied severity.
     /// Assembler and viewer metadata remain unapplied until enrichment.
-    pub fn from_emission(severity: Severity, emission: Value) -> Self {
-        let runtime = emission.runtime_id();
-        Self::from_parts(runtime, None, severity, emission.into_core(), None)
+    pub fn from_emission(
+        values: &Values,
+        severity: Severity,
+        emission: Value,
+    ) -> Result<Self, Error> {
+        let emission = values.clone_core(&emission)?;
+        Ok(Self::from_parts(
+            values.core(),
+            None,
+            severity,
+            emission,
+            None,
+        ))
     }
 
-    pub fn with_source_location(self, source: impl Into<Arc<str>>, line: usize) -> Self {
+    pub fn with_source_location(
+        self,
+        values: &Values,
+        source: impl Into<Arc<str>>,
+        line: usize,
+    ) -> Result<Self, Error> {
         let source = source.into();
         let identity = SourceIdentity::file(Path::new(source.as_ref()));
         let origin = CoreValue::Dict(
             Dict::new_sync().insert((*crate::core::keys::SOURCE).clone(), identity.value()),
         );
-        Self::from_parts(
-            self.emission.runtime_id(),
+        Ok(Self::from_parts(
+            values.core(),
             Some(source.clone()),
             self.severity,
             crate::diagnostic::text_message(Some(line), &self.message),
             Some(origin),
-        )
+        ))
     }
 
     /// Returns the front-end or runtime value exactly as it was emitted.
@@ -96,13 +111,17 @@ impl Diagnostic {
     }
 
     pub(crate) fn enrich_with_factory(&self, values: &CoreValueFactory) -> Result<Value, Error> {
+        let public_values = Values::from_core_factory(values.clone());
         crate::diagnostic::enrich(
             values,
-            self.emission.as_core().clone(),
+            public_values.clone_core(&self.emission)?,
             self.severity,
-            self.origin.as_ref().map(|origin| origin.as_core().clone()),
+            self.origin
+                .as_ref()
+                .map(|origin| public_values.clone_core(origin))
+                .transpose()?,
         )
-        .map(|value| Value::from_core(values, value))
+        .map(|value| public_values.wrap(value))
         .map_err(|error| Error::from_eval(values, error))
     }
 
@@ -111,9 +130,13 @@ impl Diagnostic {
     pub fn enrich_with(&self, values: &Values, updates: Value) -> Result<Value, Error> {
         updates.require_runtime(values.runtime)?;
         let enriched = self.enrich(values)?;
-        crate::diagnostic::apply_updates(&values.core, enriched.into_core(), updates.into_core())
-            .map(|value| Value::from_core(&values.core, value))
-            .map_err(|error| Error::from_eval(&values.core, error))
+        crate::diagnostic::apply_updates(
+            &values.core,
+            values.clone_core(&enriched)?,
+            values.clone_core(&updates)?,
+        )
+        .map(|value| values.wrap(value))
+        .map_err(|error| Error::from_eval(&values.core, error))
     }
 
     /// Applies observer-owned updates to an arbitrary diagnostic-style value.
@@ -126,10 +149,10 @@ impl Diagnostic {
         updates.require_runtime(values.runtime)?;
         crate::diagnostic::apply_emission_updates(
             &values.core,
-            message.as_core().clone(),
-            updates.into_core(),
+            values.clone_core(message)?,
+            values.clone_core(&updates)?,
         )
-        .map(|value| Value::from_core(&values.core, value))
+        .map(|value| values.wrap(value))
         .map_err(|error| Error::from_eval(&values.core, error))
     }
 
@@ -141,16 +164,23 @@ impl Diagnostic {
         context.require_runtime(values.runtime)?;
         let emission = crate::diagnostic::prepend_contexts_with(
             &values.core,
-            self.emission.as_core().clone(),
-            &[context.into_core()],
+            values.clone_core(&self.emission)?,
+            &[values.clone_core(&context)?],
         )
-        .unwrap_or_else(|_| self.emission.as_core().clone());
+        .unwrap_or_else(|_| {
+            values
+                .clone_core(&self.emission)
+                .expect("the diagnostic runtime was checked")
+        });
         Ok(Self::from_parts(
-            values.runtime,
+            values.core(),
             self.source,
             self.severity,
             emission,
-            self.origin.map(Value::into_core),
+            self.origin
+                .as_ref()
+                .map(|origin| values.clone_core(origin))
+                .transpose()?,
         ))
     }
 
@@ -269,7 +299,7 @@ impl Diagnostic {
         message: CoreValue,
     ) -> Self {
         Self::from_parts(
-            values.runtime_id(),
+            values,
             Some(Arc::from(trace.source_label())),
             severity,
             message,
@@ -277,17 +307,18 @@ impl Diagnostic {
         )
     }
 
-    pub(super) fn from_parts(
-        runtime: EvaluationRuntimeId,
+    pub(crate) fn from_parts(
+        values: &CoreValueFactory,
         source: Option<Arc<str>>,
         severity: Severity,
         message: CoreValue,
         origin: Option<CoreValue>,
     ) -> Self {
         let (line, text) = crate::diagnostic::conventional_summary(&message);
+        let public_values = Values::from_core_factory(values.clone());
         Self {
-            emission: Value::from_runtime(runtime, message),
-            origin: origin.map(|origin| Value::from_runtime(runtime, origin)),
+            emission: public_values.wrap(message),
+            origin: origin.map(|origin| public_values.wrap(origin)),
             source,
             severity,
             line,

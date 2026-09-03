@@ -492,12 +492,12 @@ impl TaskHalt {
         let failure = self
             .permanent_failure()
             .expect("a blocked task halt has no failure diagnostic");
-        Diagnostic::from_emission(
+        Diagnostic::from_parts(
+            values.core(),
+            None,
             Severity::Error,
-            PublicValue::from_core(
-                values.core(),
-                eval::failure_diagnostic_value_with(values.core(), failure),
-            ),
+            eval::failure_diagnostic_value_with(values.core(), failure),
+            None,
         )
     }
 

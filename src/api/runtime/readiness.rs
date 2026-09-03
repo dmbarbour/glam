@@ -21,9 +21,12 @@ pub(super) fn reasoning_diagnostic(
     values: &CoreValueFactory,
     failure: &EvaluationFailure,
 ) -> Diagnostic {
-    Diagnostic::from_emission(
+    Diagnostic::from_parts(
+        values,
+        None,
         Severity::Error,
-        Value::from_core(values, eval::failure_diagnostic_value_with(values, failure)),
+        eval::failure_diagnostic_value_with(values, failure),
+        None,
     )
 }
 
@@ -42,7 +45,7 @@ fn blocked_reasoning_diagnostic(
         Some(emission) => emission.clone(),
         None => crate::diagnostic::text_message(None, failure.to_string()),
     };
-    Diagnostic::from_emission(Severity::Error, Value::from_core(values, emission))
+    Diagnostic::from_parts(values, None, Severity::Error, emission, None)
 }
 
 /// Stable, observational classification of one runtime instant.

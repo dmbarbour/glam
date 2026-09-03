@@ -190,13 +190,13 @@ fn log(
         .map_err(|_| TaskHalt::new("macro `.log` received the wrong number of arguments"))?;
     let severity = parse_severity(context, severity)?;
     let message = prepare_message(context, message)?;
+    let values = context.values();
+    let diagnostic = Diagnostic::from_emission(&values, severity, message)
+        .map_err(|error| TaskHalt::new(error.to_string()))?;
     let mut transaction = context
         .transaction()
         .ok_or_else(|| TaskHalt::new("macro `.log` escaped its isolated transaction"))?;
-    transaction
-        .parts()
-        .1
-        .push_diagnostic(Diagnostic::from_emission(severity, message));
+    transaction.parts().1.push_diagnostic(diagnostic);
     Ok(RequestResult::ReturnUnit)
 }
 

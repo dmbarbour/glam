@@ -85,7 +85,7 @@ impl CliError {
                 )])?,
             ));
         }
-        Diagnostic::from_emission(Severity::Error, values.record(entries)?)
+        Diagnostic::from_emission(values, Severity::Error, values.record(entries)?)?
             .with_context(values, configuration_entry_context(values)?)
     }
 }

@@ -138,7 +138,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.1g | complete | net, hidden-owner, and gate closure |
 | I4F.1 | complete | exhaustive durable root-surface conversion |
 | I4F.2a.1a | complete | public handle semantic-trait and rendering retirement |
-| I4F.2a.1b | pending | assembly, diagnostic, and error access retirement |
+| I4F.2a.1b | complete | assembly, diagnostic, and error access retirement |
 | I4F.2a.1c | pending | public facade compatibility-test closure |
 | I4F.2a.1 | pending | public facade, assembly, diagnostic, and error access retirement |
 | I4F.2a.2 | pending | core evaluator and net access retirement |
@@ -3471,6 +3471,17 @@ Glam logical equality. A crate-test-only compatibility equality implementation
 keeps the remaining subsystem fixtures buildable while I4F.2a.1b/a.2/a.3
 migrate their assertions; I4F.2a.1c removes that oracle and proves the public
 negative trait boundary.
+
+I4F.2a.1b completed 2026-09-03. `Diagnostic::from_emission` and
+`with_source_location` now require the matching `Values` authority and reject
+a mismatched runtime rather than deriving authority from the handle. All
+diagnostic enrichment, context, transport, and evaluator-error conversion use
+scoped clones/wrapping through that authority; the diagnostic and error
+modules retain no unrestricted core projection. Assembly reflection-
+environment rewriting, promises, formatter construction, and net construction
+likewise use a `Values` construction/access region. The only remaining
+assembly projections belong to the already-rooted internal module-sealing
+handoff assigned to I4F.2a.2, not the public facade.
 
 #### Phase I4F.2b — Active-Owner Extraction Gate
 
