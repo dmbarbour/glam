@@ -155,18 +155,6 @@ const INVENTORY: &[InventoryEntry] = &[
         "I3E.2 bounded lowering regions; I4F.1 durable roots"
     ),
     entry!(
-        "src/g_syntax/parser/logical.rs",
-        [1, 0, 3, 0, 0, 0],
-        "embedded source values and macro replay",
-        "I3E.2 compiler and macro regions; I4F.1 retained roots"
-    ),
-    entry!(
-        "src/g_syntax/parser/source.rs",
-        [3, 0, 0, 0, 0, 0],
-        "rooted macro data projection, source diagnostics, and conditional definitions",
-        "I3E.2 compiler regions; I4F.1 retained roots"
-    ),
-    entry!(
         "src/reflection/lifecycle.rs",
         [0, 2, 0, 0, 0, 0],
         "effect lifecycle activation and completion",

@@ -13,7 +13,7 @@ use super::layout::validate_delimited_layouts;
 use super::lexical::{DeclarationSection, LexedSource, TokenKind, lex_source};
 use super::logical::{DeclarationMacroWork, EMBEDDED_MARKER, OriginalMacroInvocation};
 use crate::api::CompilationExecution;
-use crate::api::Value as PublicValue;
+use crate::api::{Value as PublicValue, Values};
 use crate::compiler::CompileContext;
 use crate::core::{Atom, Dict, Key, List, Value};
 use crate::number::Number;
@@ -440,9 +440,11 @@ fn apply_public_macro_context(
     cases: &[PublicValue],
     frames: &[OriginalMacroInvocation],
 ) -> Value {
-    values.with_runtime_value_access(|_| {
-        apply_macro_context_scoped(values, message.as_core().clone(), frontier, cases, frames)
-    })
+    let public_values = Values::from_core_factory(values.clone());
+    let message = public_values
+        .clone_core(message)
+        .expect("macro diagnostic must belong to the compiler runtime");
+    apply_macro_context_scoped(values, message, frontier, cases, frames)
 }
 
 fn apply_macro_context(
@@ -452,9 +454,7 @@ fn apply_macro_context(
     cases: &[PublicValue],
     frames: &[OriginalMacroInvocation],
 ) -> Value {
-    values.with_runtime_value_access(|_| {
-        apply_macro_context_scoped(values, message, frontier, cases, frames)
-    })
+    apply_macro_context_scoped(values, message, frontier, cases, frames)
 }
 
 fn apply_macro_context_scoped(
@@ -487,10 +487,18 @@ fn apply_macro_context_scoped(
         context = context.insert(Key::atom_from_text("input_position"), Value::Dict(position));
     }
     if !cases.is_empty() {
+        let public_values = Values::from_core_factory(values.clone());
         context = context.insert(
             Key::atom_from_text("cases"),
             Value::List(List::from_values(
-                cases.iter().map(|case| case.as_core().clone()).collect(),
+                cases
+                    .iter()
+                    .map(|case| {
+                        public_values
+                            .clone_core(case)
+                            .expect("macro case must belong to the compiler runtime")
+                    })
+                    .collect(),
             )),
         );
     }
@@ -567,31 +575,34 @@ fn parse_expanded_declaration(
     embedded: Vec<PublicValue>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Vec<Declaration> {
-    values.with_runtime_value_access(|_| {
-        let embedded = embedded
-            .iter()
-            .map(|value| value.as_core().clone())
-            .collect();
-        let lexical =
-            match lex_source(rewritten).replace_unknowns_with_embedded(EMBEDDED_MARKER, embedded) {
-                Ok(lexical) => lexical,
-                Err(error) => {
-                    diagnostics.push(Diagnostic::error(1, error));
-                    return Vec::new();
-                }
-            };
-        diagnostics.extend(lexical.diagnostics().iter().cloned());
-        if lexical.has_errors() {
-            return Vec::new();
-        }
-        report_orphan_continuations(&lexical, diagnostics);
-        diagnostics.extend(validate_delimited_layouts(&lexical));
-        lexical
-            .declarations()
-            .iter()
-            .map(|declaration| parse_lexical_declaration(&lexical, declaration, diagnostics))
-            .collect()
-    })
+    let public_values = Values::from_core_factory(values.clone());
+    let embedded = embedded
+        .iter()
+        .map(|value| {
+            public_values
+                .clone_core(value)
+                .expect("expanded macro data must belong to the parser runtime")
+        })
+        .collect();
+    let lexical =
+        match lex_source(rewritten).replace_unknowns_with_embedded(EMBEDDED_MARKER, embedded) {
+            Ok(lexical) => lexical,
+            Err(error) => {
+                diagnostics.push(Diagnostic::error(1, error));
+                return Vec::new();
+            }
+        };
+    diagnostics.extend(lexical.diagnostics().iter().cloned());
+    if lexical.has_errors() {
+        return Vec::new();
+    }
+    report_orphan_continuations(&lexical, diagnostics);
+    diagnostics.extend(validate_delimited_layouts(&lexical));
+    lexical
+        .declarations()
+        .iter()
+        .map(|declaration| parse_lexical_declaration(&lexical, declaration, diagnostics))
+        .collect()
 }
 
 fn declared_language_value(language: &super::super::LanguageDecl) -> Value {

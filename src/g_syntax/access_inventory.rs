@@ -94,12 +94,12 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/g_syntax/parser/logical.rs",
-        [0, 6, 1, 1],
+        [0, 6, 0, 0],
         "rooted embedded macro data across declaration rewrites"
     ),
     entry!(
         "src/g_syntax/parser/source.rs",
-        [0, 7, 3, 3],
+        [0, 7, 0, 0],
         "bounded macro-data and diagnostic-context projection"
     ),
 ];

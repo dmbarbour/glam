@@ -7,7 +7,7 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use crate::api::Value as PublicValue;
+use crate::api::{Value as PublicValue, Values};
 use crate::core::Value;
 
 use super::super::Diagnostic;
@@ -143,40 +143,38 @@ impl DeclarationMacroWork {
         values: &crate::core::CoreValueFactory,
         original: &OriginalMacroInvocation,
     ) -> Result<MacroInvocation, Vec<Diagnostic>> {
-        values.with_runtime_value_access(|_| {
-            let lexical = self.lexical()?;
-            let Some(declaration) = lexical.declarations().first() else {
-                return Err(vec![Diagnostic::error(
+        let lexical = self.lexical(values)?;
+        let Some(declaration) = lexical.declarations().first() else {
+            return Err(vec![Diagnostic::error(
+                original.line,
+                format!(
+                    "macro invocation {} disappeared before it could expand",
+                    original.id
+                ),
+            )]);
+        };
+        let invocation = macro_invocation_at(&lexical, declaration, original.start, values)
+            .map_err(|diagnostic| {
+                vec![Diagnostic::error(
                     original.line,
                     format!(
-                        "macro invocation {} disappeared before it could expand",
-                        original.id
+                        "macro invocation {} became invalid: {}",
+                        original.id, diagnostic.message
                     ),
-                )]);
-            };
-            let invocation = macro_invocation_at(&lexical, declaration, original.start, values)
-                .map_err(|diagnostic| {
-                    vec![Diagnostic::error(
-                        original.line,
-                        format!(
-                            "macro invocation {} became invalid: {}",
-                            original.id, diagnostic.message
-                        ),
-                    )]
-                })?;
-            if invocation.path != original.path {
-                return Err(vec![Diagnostic::error(
-                    original.line,
-                    format!(
-                        "macro invocation {} changed from `{}` to `{}` before expansion",
-                        original.id,
-                        original.path.join("."),
-                        invocation.path.join(".")
-                    ),
-                )]);
-            }
-            Ok(invocation)
-        })
+                )]
+            })?;
+        if invocation.path != original.path {
+            return Err(vec![Diagnostic::error(
+                original.line,
+                format!(
+                    "macro invocation {} changed from `{}` to `{}` before expansion",
+                    original.id,
+                    original.path.join("."),
+                    invocation.path.join(".")
+                ),
+            )]);
+        }
+        Ok(invocation)
     }
 
     pub(super) fn splice(
@@ -244,13 +242,21 @@ impl DeclarationMacroWork {
         excerpt
     }
 
-    fn lexical(&self) -> Result<LexedSource<'_>, Vec<Diagnostic>> {
+    fn lexical(
+        &self,
+        values: &crate::core::CoreValueFactory,
+    ) -> Result<LexedSource<'_>, Vec<Diagnostic>> {
+        let public_values = Values::from_core_factory(values.clone());
         let lexical = lex_source(&self.text)
             .replace_unknowns_with_embedded(
                 EMBEDDED_MARKER,
                 self.embedded_values
                     .iter()
-                    .map(|value| value.as_core().clone())
+                    .map(|value| {
+                        public_values
+                            .clone_core(value)
+                            .expect("embedded macro data must belong to the parser runtime")
+                    })
                     .collect(),
             )
             .map_err(|error| vec![Diagnostic::error(self.line, error)])?;
@@ -514,6 +520,7 @@ fn macro_input(
     start: usize,
     end: usize,
 ) -> Result<MacroInput, Diagnostic> {
+    let public_values = Values::from_core_factory(values.clone());
     let mut elements = Vec::new();
     let mut element_tokens = Vec::new();
     let mut line_break = false;
@@ -532,31 +539,30 @@ fn macro_input(
                     delimiter: None,
                 }
             }
-            TokenKind::Number(id) => MacroInputKind::Data(crate::api::Value::from_core(
-                values,
-                Value::Number(
+            TokenKind::Number(id) => MacroInputKind::Data(
+                public_values.wrap(Value::Number(
                     source
                         .number(*id)
                         .expect("logical number token should reference its arena")
                         .clone(),
-                ),
-            )),
-            TokenKind::Text(id) => MacroInputKind::Data(crate::api::Value::from_core(
-                values,
-                Value::binary_from_text(
+                )),
+            ),
+            TokenKind::Text(id) => MacroInputKind::Data(
+                public_values.wrap(Value::binary_from_text(
                     source
                         .text(*id)
                         .expect("logical text token should reference its arena")
                         .value(),
+                )),
+            ),
+            TokenKind::Embedded(id) => MacroInputKind::Data(
+                public_values.wrap(
+                    source
+                        .embedded_value(*id)
+                        .expect("embedded token should reference its arena")
+                        .clone(),
                 ),
-            )),
-            TokenKind::Embedded(id) => MacroInputKind::Data(crate::api::Value::from_core(
-                values,
-                source
-                    .embedded_value(*id)
-                    .expect("embedded token should reference its arena")
-                    .clone(),
-            )),
+            ),
             TokenKind::Open { delimiter, .. } => MacroInputKind::Text {
                 text: Arc::from(delimiter_text(*delimiter, true)),
                 delimiter: Some((macro_delimiter(*delimiter), true)),

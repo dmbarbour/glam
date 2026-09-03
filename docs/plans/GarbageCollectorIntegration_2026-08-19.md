@@ -155,7 +155,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.2a.3d | complete | compiler and module-lowering access retirement |
 | I4F.2a.3e | complete | compiler-cache access retirement |
 | I4F.2a.3f | complete | macro effect and runner access retirement |
-| I4F.2a.3g | pending | parser replay and source access retirement |
+| I4F.2a.3g | complete | parser replay and source access retirement |
 | I4F.2a.3h | pending | lifecycle and host-integration closure |
 | I4F.2a.3 | pending | reflection, compiler, macro, and host access retirement |
 | I4F.2a.4 | pending | compatibility-access closure latch |
@@ -3583,6 +3583,15 @@ borrows a branch root across search or evaluation. The last temporary
 `Value::same_core_with` compiler hook was removed; case deduplication compares
 owned scoped clones. Macro effect and runner compatibility counts, plus the
 compiler-boundary projection count for the runner, are now zero.
+
+I4F.2a.3g completed 2026-09-03. Logical macro replay now rehydrates embedded
+data with the parser runtime's `Values` service, and source diagnostics clone
+public emissions, cases, and expanded embedded data through the same bounded
+service. Number, text, and embedded macro inputs are constructed through
+`Values::wrap`. This removes the parser's ad hoc outer access regions along
+with every direct public/core conversion; its retained `PublicValue` fields
+remain the explicit durable boundary between macro expansion and source
+replay.
 
 I4F.2a.1a completed 2026-09-03. Production `Value` and `EvaluatedValue` no
 longer implement semantic equality, and `Value::runtime_id` is no longer a

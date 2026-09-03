@@ -720,6 +720,7 @@ impl Value {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn from_core(values: &CoreValueFactory, value: CoreValue) -> Self {
         Self::from_runtime(values.runtime_id(), value)
     }
@@ -728,6 +729,7 @@ impl Value {
         Self(value)
     }
 
+    #[cfg(test)]
     pub(super) fn from_runtime(runtime: EvaluationRuntimeId, value: CoreValue) -> Self {
         Self(RuntimeValueRoot::from_runtime(runtime, value))
     }
