@@ -673,6 +673,8 @@ impl Value {
         }
     }
 
+    /// Temporary matching-factory comparison for compiler/macro integration.
+    /// I4F.2a.3 replaces its remaining caller with a scoped `Values` access.
     pub(crate) fn same_core_with(
         &self,
         values: &CoreValueFactory,
@@ -707,21 +709,9 @@ impl Value {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn kind(&self) -> ValueKind {
-        match self.0.as_core() {
-            CoreValue::Atom(_) => ValueKind::Atom,
-            CoreValue::Number(_) => ValueKind::Number,
-            CoreValue::Binary(_) => ValueKind::Binary,
-            CoreValue::List(_) => ValueKind::List,
-            CoreValue::Dict(_) => ValueKind::Dict,
-            CoreValue::Builtin(_) | CoreValue::PartialBuiltin(_) | CoreValue::Function(_) => {
-                ValueKind::Function
-            }
-            CoreValue::Net(_) => ValueKind::Net,
-            CoreValue::Lazy(_) | CoreValue::Promised(_) => ValueKind::Lazy,
-            CoreValue::Metadata(_) => ValueKind::Sealed,
-            CoreValue::Opaque(_) => ValueKind::Opaque,
-        }
+        ValueKind::from_core(self.0.as_core())
     }
 
     #[cfg(test)]
@@ -754,6 +744,25 @@ impl Value {
 
     pub(crate) fn into_runtime_root(self) -> RuntimeValueRoot {
         self.0
+    }
+}
+
+impl ValueKind {
+    pub(super) fn from_core(value: &CoreValue) -> Self {
+        match value {
+            CoreValue::Atom(_) => ValueKind::Atom,
+            CoreValue::Number(_) => ValueKind::Number,
+            CoreValue::Binary(_) => ValueKind::Binary,
+            CoreValue::List(_) => ValueKind::List,
+            CoreValue::Dict(_) => ValueKind::Dict,
+            CoreValue::Builtin(_) | CoreValue::PartialBuiltin(_) | CoreValue::Function(_) => {
+                ValueKind::Function
+            }
+            CoreValue::Net(_) => ValueKind::Net,
+            CoreValue::Lazy(_) | CoreValue::Promised(_) => ValueKind::Lazy,
+            CoreValue::Metadata(_) => ValueKind::Sealed,
+            CoreValue::Opaque(_) => ValueKind::Opaque,
+        }
     }
 }
 

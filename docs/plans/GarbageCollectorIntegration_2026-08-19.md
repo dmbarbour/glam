@@ -141,6 +141,10 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.2a.1b | complete | assembly, diagnostic, and error access retirement |
 | I4F.2a.1c | pending | public facade compatibility-test closure |
 | I4F.2a.1 | pending | public facade, assembly, diagnostic, and error access retirement |
+| I4F.2a.2a | complete | public evaluator and reflection-inspector access retirement |
+| I4F.2a.2b | pending | evaluation driver and rooted-completion projection retirement |
+| I4F.2a.2c | pending | core net and builtin construction adapter retirement |
+| I4F.2a.2d | pending | core evaluation and net access closure |
 | I4F.2a.2 | pending | core evaluator and net access retirement |
 | I4F.2a.3 | pending | reflection, compiler, macro, and host access retirement |
 | I4F.2a.4 | pending | compatibility-access closure latch |
@@ -3441,8 +3445,27 @@ be partitioned by subsystem:
 2. **I4F.2a.2 — Core evaluation and net construction.** Replace unrestricted
    borrowed `as_core` projections with lifetime-bounded access and replace
    ownership-taking `into_core` with either a root-preserving move or an
-   explicit clone performed inside matching runtime access. Cover evaluator,
-   poll, builtin, net construction, and core compatibility adapters.
+   explicit clone performed inside matching runtime access. Execute this as
+   four independently verified slices:
+
+   - **I4F.2a.2a — Public evaluator and inspector.** Route WHNF demand,
+     representation inspection, metadata inspection, dictionary iteration,
+     and atom-key extraction through the matching `Values` scope. No public
+     evaluator helper obtains a bare core value through a compatibility method
+     on the public handle; the existing evaluator entry may still accept an
+     owned scoped clone until the production root switch.
+   - **I4F.2a.2b — Evaluation driver and completion projection.** Move rooted
+     wait, demand, spark, reflection-activation, and effect-entry projections
+     through `EvaluatorStepContext` or another already admitted poll scope.
+     The root remains owned across orchestration boundaries; only one scoped
+     clone enters the evaluator step.
+   - **I4F.2a.2c — Net and builtin adapters.** Replace public/core conversion
+     in interaction-net construction and builtin request helpers with bounded
+     construction or evaluator access. Preserve all callback and parking
+     boundaries established by I3.
+   - **I4F.2a.2d — Subsystem closure.** Relatch the evaluator/net inventories,
+     remove superseded compatibility adapters, and prove no owned or borrowed
+     bare core value crosses the covered orchestration boundaries.
 3. **I4F.2a.3 — Reflection, compiler, macro, and host integration.** Apply the
    same rule to reflection machines/requests/stores, compiler/module lowering,
    macro replay, configuration, logging, and runtime event adapters. A callback
@@ -3482,6 +3505,22 @@ environment rewriting, promises, formatter construction, and net construction
 likewise use a `Values` construction/access region. The only remaining
 assembly projections belong to the already-rooted internal module-sealing
 handoff assigned to I4F.2a.2, not the public facade.
+
+I4F.2a.1c is intentionally verified after I4F.2a.2 and I4F.2a.3. The
+crate-test-only equality oracle retained by I4F.2a.1a is solely a migration
+bridge for internal assertions in those subsystems; it is absent from
+production and does not define public semantics. Once the internal callers
+have matching authority APIs, I4F.2a.1c removes the oracle and adds the final
+negative public-facade fixtures.
+
+I4F.2a.2a completed 2026-09-03. `ValueEvaluator` and
+`ReflectionInspector` no longer call compatibility projection or construction
+methods on public values. Representation-kind and equality inspection borrow
+through one matching `Values` scope; WHNF operations clone the input under
+that authority, release it before evaluation, and wrap owned results through
+the same runtime service. This preserves I3's rule against carrying managed
+access through waits or callbacks. The compatibility-access inventory now
+omits `src/api/evaluator.rs` entirely.
 
 #### Phase I4F.2b — Active-Owner Extraction Gate
 

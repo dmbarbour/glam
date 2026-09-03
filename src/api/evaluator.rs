@@ -44,14 +44,16 @@ impl ReflectionInspector<'_> {
     /// lazy and promised values compare by their current identities, while
     /// immediate containers compare their currently retained structure.
     pub fn same_representation(&self, left: &Value, right: &Value) -> Result<bool, Error> {
-        let values = self.assembler.core_values();
-        left.same_core_with(&values, right)
+        self.assembler
+            .values()
+            .with_access(|values| Ok(values.core_value(left)? == values.core_value(right)?))
     }
 
     /// Reports the current outer runtime representation without demanding it.
     pub fn kind(&self, value: &Value) -> Result<ValueKind, Error> {
-        value.require_runtime(self.assembler.reasoning.runtime.id())?;
-        Ok(value.kind())
+        self.assembler
+            .values()
+            .with_access(|values| Ok(ValueKind::from_core(values.core_value(value)?)))
     }
 
     /// Returns a sealed carrier's associated metadata without evaluating it.
@@ -60,27 +62,25 @@ impl ReflectionInspector<'_> {
     /// kind. Ordinary values return `None`; a failure while reaching that kind
     /// remains an evaluation error rather than a metadata mismatch.
     pub fn associated_metadata(&self, value: &Value) -> Result<Option<Value>, Error> {
-        value.require_runtime(self.assembler.reasoning.runtime.id())?;
-        let values = self.assembler.core_values();
+        let values = self.assembler.values();
+        let value = values.clone_core(value)?;
         let value = self
             .assembler
             .eval_context()
-            .evaluate_whnf(value.as_core())
+            .evaluate_whnf(&value)
             .map_err(|error| self.assembler.evaluation_error(error))?;
-        Ok(value
-            .associated_metadata()
-            .map(|value| Value::from_core(&values, value)))
+        Ok(value.associated_metadata().map(|value| values.wrap(value)))
     }
 
     /// Returns dictionary entries in canonical key order without evaluating
     /// their values. Keys are reified as ordinary keyable [`Value`]s.
     pub fn dictionary_items(&self, value: &Value) -> Result<Vec<(Value, Value)>, Error> {
-        value.require_runtime(self.assembler.reasoning.runtime.id())?;
-        let values = self.assembler.core_values();
+        let values = self.assembler.values();
+        let value = values.clone_core(value)?;
         let value = self
             .assembler
             .eval_context()
-            .evaluate_whnf(value.as_core())
+            .evaluate_whnf(&value)
             .map_err(|error| self.assembler.evaluation_error(error))?;
         let CoreValue::Dict(dict) = value else {
             return Err(Error::new(format!(
@@ -92,8 +92,8 @@ impl ReflectionInspector<'_> {
             .iter()
             .map(|(key, value)| {
                 (
-                    Value::from_core(&values, key.to_value_with(&values)),
-                    Value::from_core(&values, value.clone()),
+                    values.wrap(key.to_value_with(values.core())),
+                    values.wrap(value.clone()),
                 )
             })
             .collect())
@@ -101,12 +101,12 @@ impl ReflectionInspector<'_> {
 
     /// Returns the key value that gives an atom its identity.
     pub fn atom_key(&self, value: &Value) -> Result<Value, Error> {
-        value.require_runtime(self.assembler.reasoning.runtime.id())?;
-        let values = self.assembler.core_values();
+        let values = self.assembler.values();
+        let value = values.clone_core(value)?;
         let value = self
             .assembler
             .eval_context()
-            .evaluate_whnf(value.as_core())
+            .evaluate_whnf(&value)
             .map_err(|error| self.assembler.evaluation_error(error))?;
         let CoreValue::Atom(atom) = value else {
             return Err(Error::new(format!(
@@ -114,10 +114,7 @@ impl ReflectionInspector<'_> {
                 value.diagnostic_kind_name()
             )));
         };
-        Ok(Value::from_core(
-            &values,
-            atom.key().to_value_with(&self.assembler.core_values()),
-        ))
+        Ok(values.wrap(atom.key().to_value_with(values.core())))
     }
 }
 

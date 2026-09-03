@@ -83,12 +83,6 @@ const INVENTORY: &[InventoryEntry] = &[
         "I3E.2 bounded compiler regions; I4F.1 durable roots"
     ),
     entry!(
-        "src/api/evaluator.rs",
-        [3, 0, 4, 0, 0, 0],
-        "WHNF demand, reflection inspection, and owned extraction",
-        "I3B.1 scoped evaluation; I4F.2 public facade switch"
-    ),
-    entry!(
         "src/api/value.rs",
         [10, 3, 0, 1, 1, 1],
         "constructors, composite validation, observers, extraction, and net data",
