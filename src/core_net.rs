@@ -965,8 +965,9 @@ mod tests {
     }
 
     #[test]
-    fn shared_core_net_retires_operator_payloads_with_its_last_owner() {
+    fn shared_core_net_payload_survives_managed_owner_collection() {
         let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
+        let public_values = crate::api::Values::from_core_factory(values.clone());
         let function_runtime = values.instantiate_core_net(&closed_unit_template(&values));
         let code = Arc::new(FunctionCode::new(function_runtime, 1, 0));
         let retained = Arc::downgrade(&code);
@@ -980,15 +981,22 @@ mod tests {
         builder.wire(input, argument);
         let runtime = values.instantiate_core_net(&builder.finish(result));
         drop(code);
+        let owner = public_values.wrap(Value::Net(crate::core::NetValue::new(runtime)));
 
+        values
+            .collect_managed_for_test()
+            .expect("a rooted synchronized net should survive collection");
         assert!(
             retained.upgrade().is_some(),
-            "the shared net must retain its operator payload"
+            "the managed net owner must retain its operator payload"
         );
-        drop(runtime);
+        drop(owner);
+        values
+            .collect_managed_for_test()
+            .expect("the retired synchronized net should collect");
         assert!(
             retained.upgrade().is_none(),
-            "the last shared-net owner must retire its operator payload"
+            "retiring the managed net owner must retire its operator payload"
         );
     }
 

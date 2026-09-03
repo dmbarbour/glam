@@ -197,9 +197,9 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.2e.4a | complete | assembly, compiler, module, and import owners |
 | I4F.2e.4b | complete | macro input, result, failure, and parser-rewrite owners |
 | I4F.2e.4c | complete | binary configuration, command-line, and logger owners |
-| I4F.2e.4d | pending | synchronized-net and hidden-owner closure |
-| I4F.2e.4 | pending | compiler, binary-host, net, and hidden-owner collection fixtures |
-| I4F.2e | pending | closed durable-owner collection matrix |
+| I4F.2e.4d | complete | synchronized-net and hidden-owner closure |
+| I4F.2e.4 | complete | compiler, binary-host, net, and hidden-owner collection fixtures |
+| I4F.2e | complete | closed durable-owner collection matrix |
 | I4F.2f | pending | compatibility deletion and I4 reconciliation |
 | I4F.2 | pending | public managed-root production switch |
 | I5 | pending | managed lazy/promise cells, external lifecycle, and cycle reclamation |
@@ -4282,6 +4282,21 @@ their pre-drop weak assertions pass independently of the owner under test,
 while dropping the domain made their final assertions pass without GC. The
 compile latches plus facade collection tests are stronger evidence and avoid
 adding a public collection backdoor solely for the binary's unit tests.
+
+I4F.2e.4d completed 2026-09-03 by moving the synchronized-net lifetime
+fixture onto its actual production owner boundary. A `CoreRuntimeNet` carrying
+a function/operator payload is now enclosed in a rooted public `NetValue`;
+collection preserves the operator code while that managed owner lives, and a
+second collection after owner retirement releases it. The I4E managed
+runtime-net adapter already verifies exact non-reducing traversal and closed
+cycle reclamation, so repeating its synthetic graph here would add no owner
+coverage. The durable-owner, closure/opaque-constructor, external-host-call,
+opaque-family, passive-destruction, and type-erased runtime-cache gates were
+rerun as the hidden-owner closure. Their concrete collection fixtures are
+distributed across I4F.2b, I4F.2e.1a, and I4F.2e.3c according to the owner
+which can retire them. No newly hidden callback, `Any`, opaque, cache, or net
+owner was found. This completes I4F.2e's closed durable-owner collection
+matrix without authorizing arbitrary production-graph collection.
 
 Keep every fixture in a fresh isolated collector-ready runtime/heap. Do not
 collect a shared production graph containing I5-I10 unclassified families.
