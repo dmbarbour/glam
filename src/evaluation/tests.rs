@@ -4850,6 +4850,102 @@ fn settled_deadlock_report_retains_one_failure_root_after_origin_retirement() {
 }
 
 #[test]
+fn deadlock_snapshot_root_survives_after_coordinator_record_retirement() {
+    let fixture = SameRuntimeFixture::new();
+    let context = fixture.context();
+    let values = context.values().clone();
+    let failure = Arc::new(EvaluationFailure::emission(Value::binary_from_text(
+        "deadlock snapshot root",
+    )));
+    let weak_failure = Arc::downgrade(&failure);
+    let task = context
+        .schedule_task({
+            let failure = failure.clone();
+            move |_| Ok(Box::new(BlockedWithFailure(failure)))
+        })
+        .expect("the deadlock-snapshot fixture should schedule");
+
+    fixture.runtime.pump_until_stable();
+    let crate::api::RuntimeReadiness::Deadlocked(snapshot) = fixture.runtime.readiness() else {
+        panic!("the blocked task should produce a deadlock snapshot")
+    };
+    assert_eq!(task.cancel(), EvaluationTaskCancellation::Requested);
+    drop(task);
+    drop(failure);
+
+    let snapshot_live = values
+        .collect_managed_for_test()
+        .expect("the detached deadlock snapshot should retain its managed failure root");
+    assert!(weak_failure.upgrade().is_some());
+    let retained = snapshot.unfinished()[0]
+        .blocked_failure_root()
+        .expect("the deadlock snapshot should preserve the blocked failure root");
+    assert_eq!(
+        retained.direct_value_roots()[0].clone_core_for_test(),
+        Value::binary_from_text("deadlock snapshot root")
+    );
+
+    drop(snapshot);
+    assert!(weak_failure.upgrade().is_none());
+    let reclaimed = values
+        .collect_managed_for_test()
+        .expect("dropping the deadlock snapshot should release its managed roots");
+    assert!(reclaimed.root_entries() < snapshot_live.root_entries());
+    assert!(reclaimed.finalized_slots() >= 1);
+}
+
+#[test]
+fn killed_work_report_root_survives_after_settlement_owners_retire() {
+    let fixture = SameRuntimeFixture::new();
+    let context = fixture.context();
+    let values = context.values().clone();
+    let failure = Arc::new(EvaluationFailure::emission(Value::binary_from_text(
+        "killed work report root",
+    )));
+    let weak_failure = Arc::downgrade(&failure);
+    let task = context
+        .schedule_task({
+            let failure = failure.clone();
+            move |_| Ok(Box::new(BlockedWithFailure(failure)))
+        })
+        .expect("the killed-work fixture should schedule");
+
+    fixture.runtime.pump_until_stable();
+    let crate::api::RuntimeReadiness::Deadlocked(deadlock) = fixture.runtime.readiness() else {
+        panic!("the blocked task should produce a deadlock snapshot")
+    };
+    let forced = deadlock.kill(crate::api::RuntimeKillReason::Deadlock);
+    drop(deadlock);
+    let report = forced
+        .settle()
+        .expect("the unchanged deadlock should settle");
+    drop(forced);
+    task.acknowledge_failure();
+    drop(task);
+    drop(failure);
+
+    let report_live = values
+        .collect_managed_for_test()
+        .expect("the settled killed-work report should retain its managed failure root");
+    assert!(weak_failure.upgrade().is_some());
+    let retained = report.killed_work()[0]
+        .blocked_failure_root()
+        .expect("the settled report should preserve the original blocked failure root");
+    assert_eq!(
+        retained.direct_value_roots()[0].clone_core_for_test(),
+        Value::binary_from_text("killed work report root")
+    );
+
+    drop(report);
+    assert!(weak_failure.upgrade().is_none());
+    let reclaimed = values
+        .collect_managed_for_test()
+        .expect("dropping the settled report should release its managed roots");
+    assert!(reclaimed.root_entries() < report_live.root_entries());
+    assert!(reclaimed.finalized_slots() >= 1);
+}
+
+#[test]
 fn runtime_readiness_retains_exit_dispositions_without_settling_tasks() {
     let fixture = SameRuntimeFixture::new();
     let success_context = fixture.context();

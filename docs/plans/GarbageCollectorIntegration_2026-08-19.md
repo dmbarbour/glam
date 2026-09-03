@@ -182,7 +182,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.2e.1b.3 | complete | spark and pending session-activation owners |
 | I4F.2e.1b | complete | coordinator, demand, spark, and session owners |
 | I4F.2e.1c.1 | complete | failure-ledger and evaluation-session report owners |
-| I4F.2e.1c.2 | pending | deadlock snapshot and killed-work report owners |
+| I4F.2e.1c.2 | complete | deadlock snapshot and killed-work report owners |
 | I4F.2e.1c.3 | pending | exit-disposition and settled-report owners |
 | I4F.2e.1c | pending | readiness, ledger, and report owners |
 | I4F.2e.1 | pending | cache, evaluation, coordinator, and readiness collection fixtures |
@@ -4110,6 +4110,18 @@ the coordinator ledger and drops its task handle first, proving that the
 detached `EvaluationSessionReport` snapshot independently retains and projects
 the same managed emission until report drop. This covers both retirement
 orders without counting equivalent root clones as independent registrations.
+
+I4F.2e.1c.2 completed 2026-09-03. A deadlock snapshot containing a managed
+binary failure is retained while the originating coordinator record is
+explicitly cancelled and its task handle is dropped; collection and direct
+projection prove that the snapshot is then the remaining failure owner, and
+snapshot drop releases it. A second fixture force-settles the same shape,
+retires the proposal, coordinator failure ledger, and terminal handle, then
+proves that the settled report's killed-work record independently retains the
+original blocked failure. Dropping the report releases both its failure root
+and any derived diagnostic/snapshot roots. The fixtures intentionally compare
+the isolated before/after root sets rather than assigning a false one-root
+cardinality to the report's derived diagnostic view.
 
 Keep every fixture in a fresh isolated collector-ready runtime/heap. Do not
 collect a shared production graph containing I5-I10 unclassified families.
