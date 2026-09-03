@@ -128,6 +128,9 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.1e | complete | diagnostics, runtime-event, and delivery root surfaces |
 | I4F.1f.1 | complete | assembly, compiler, module, and import roots |
 | I4F.1f.2 | complete | macro, parser, and source-rewrite roots |
+| I4F.1f.3a | complete | command-line search, completion, and token roots |
+| I4F.1f.3b | pending | prepared and loaded configuration roots |
+| I4F.1f.3c | pending | logger supervision, rendering, and callback roots |
 | I4F.1f.3 | pending | binary configuration and logger roots |
 | I4F.1f | pending | assembly, compiler, macro, configuration, and logger root surfaces |
 | I4F.1g | pending | synchronized-net, hidden-owner, and final inventory closure |
@@ -3188,10 +3191,20 @@ single compiler checkpoint:
    failed, nested, and layout expansion plus retirement. Prefer complete
    rooted bundles for reusable macro/compiler objects.
 3. **I4F.1f.3 — Binary configuration and logger.** Extend the inventory beyond
-   the library crate to configuration values, logger supervision, prepared
-   assemblies, CLI journals/results, and callback-owned binary records. Verify
-   configured execution, logger quiescence/close, fallback diagnostics, and
-   owner retirement with forced lifecycle orderings.
+   the library crate in three independently checked closures:
+   - **I4F.1f.3a — Command line.** Reconcile configured-search snapshots and
+     journals, token-parser runs, completion evidence/results, case
+     explanations, and CLI errors. Verify parse/completion behavior and exact
+     retirement of retained evidence values.
+   - **I4F.1f.3b — Configuration.** Reconcile prepared assemblies, loaded
+     configuration/environment values, resolver-owned argument promises, and
+     preparation failures. Verify configured execution, resolve/fail paths,
+     construction-scope exit, and owner retirement.
+   - **I4F.1f.3c — Logger.** Reconcile logger task hosts, supervision and
+     installation state, settled-report selection, default-renderer state,
+     callback-owned diagnostic/binary records, and `LoggerRun`. Verify logger
+     quiescence/close, fallback diagnostics, callbacks outside managed access,
+     forced lifecycle orderings, and owner retirement.
 
 All three preserve I3's distinction between bounded compiler locals and
 values parked across an import, macro demand, diagnostic callback, module
@@ -3240,6 +3253,23 @@ successful, failed, nested, right-to-left, embedded-data, and hanging/nested
 layout behavior coverage. Both durable-owner rows close; lexical inventories
 are deliberately relatched only for test-local root use. Production remains
 `NoAuto`.
+
+I4F.1f.3a completed 2026-09-03 as a closure audit of the configured
+command-line pipeline. Search journals, token-parser successes, completion
+evidence and case explanations, successful branches, CLI errors, and final
+completion/search results retain semantic data only through the public
+`Value` and `Diagnostic` facades. Token/path capabilities are admitted opaque
+families whose payload maps contain no Glam values. Host arguments, cursor
+positions, replacement text, and command edits are edge-free.
+
+Compile-exhaustive latches cover configured-search snapshots and journals,
+token runs, completion candidates/results/expectations, and explanation
+evidence. Deterministic effect-token fixtures verify exact retirement of
+active and visited cases, successful token values, and public case
+explanations. The existing configured parse, ambiguity, completion,
+transaction rollback, and token-reader suites remain the behavioral matrix.
+The command-line durable-owner row closes without a production representation
+change. Production remains `NoAuto`.
 
 #### Phase I4F.1g — Net, Hidden-Owner, and Gate Closure
 

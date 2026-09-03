@@ -386,7 +386,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         RootSurface,
         "I4F.2d.4"
     ),
-    open_durable!(
+    closed_durable!(
         "src/bin/glam/command_line",
         "CLI command-line search and token state",
         "public Value evidence, journals, successful branches, and token runs",
@@ -395,7 +395,6 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "branch retirement or command-line completion",
         PublicRoot,
         RootSurface,
-        "I4F.1f.3",
         "I4F.2d.4"
     ),
     closed_durable!(

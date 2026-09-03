@@ -289,3 +289,66 @@ impl CompletionEvidence {
         }
     }
 }
+
+#[cfg(test)]
+mod owner_tests {
+    use super::*;
+    use glam::{EffectTokenDomain, EvaluationRuntime};
+
+    fn assert_completion_owner_inventory(
+        candidate: &CompletionCandidate,
+        explanation: &CliCaseExplanation,
+        completion: &CliCompletion,
+        expectation: &CompletionExpectation,
+        evidence: &ExpectationEvidence,
+    ) {
+        let CompletionCandidate {
+            replacement: _,
+            kind: _,
+            explanations: _,
+        } = candidate;
+        let CliCaseExplanation { value } = explanation;
+        let _: &Value = value;
+        let CliCompletion {
+            candidates: _,
+            expectations: _,
+            diagnostics: _,
+        } = completion;
+        let CompletionExpectation {
+            argument: _,
+            token_offset: _,
+            label: _,
+            explanations: _,
+        } = expectation;
+        let ExpectationEvidence {
+            frontier: _,
+            label: _,
+            explanations,
+        } = evidence;
+        let _: &Vec<Value> = explanations;
+    }
+
+    #[test]
+    fn completion_owner_inventory_is_compile_exhaustive() {
+        let _: fn(
+            &CompletionCandidate,
+            &CliCaseExplanation,
+            &CliCompletion,
+            &CompletionExpectation,
+            &ExpectationEvidence,
+        ) = assert_completion_owner_inventory;
+    }
+
+    #[test]
+    fn case_explanation_retires_its_value_root_exactly() {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let domain = EffectTokenDomain::new(&runtime.values());
+        let payload = Arc::new(());
+        let retained = Arc::downgrade(&payload);
+        let explanation = CliCaseExplanation::new(domain.issue(payload));
+
+        assert!(retained.upgrade().is_some());
+        drop(explanation);
+        assert!(retained.upgrade().is_none());
+    }
+}
