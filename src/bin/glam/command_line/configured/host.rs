@@ -88,7 +88,6 @@ pub(super) type CliHost = IsolatedTaskHost<CliSnapshot>;
 #[cfg(test)]
 mod owner_tests {
     use super::*;
-    use std::sync::Weak;
 
     fn assert_cli_owner_inventory(snapshot: &CliSnapshot, journal: &CliJournal) {
         let CliSnapshot {
@@ -108,36 +107,8 @@ mod owner_tests {
         let _: &Vec<Value> = visited_cases;
     }
 
-    fn retained_value(domain: &EffectTokenDomain<Arc<()>>) -> (Value, Weak<()>) {
-        let payload = Arc::new(());
-        let retained = Arc::downgrade(&payload);
-        (domain.issue(payload), retained)
-    }
-
     #[test]
     fn cli_journal_owner_inventory_is_compile_exhaustive() {
         let _: fn(&CliSnapshot, &CliJournal) = assert_cli_owner_inventory;
-    }
-
-    #[test]
-    fn cli_journal_retires_active_and_visited_case_roots_exactly() {
-        let runtime = glam::EvaluationRuntime::new(0).expect("runtime should build");
-        let domain = EffectTokenDomain::new(&runtime.values());
-        let (active, retained_active) = retained_value(&domain);
-        let (visited, retained_visited) = retained_value(&domain);
-        let journal = CliJournal {
-            active_cases: vec![active],
-            visited_cases: vec![visited],
-            ..CliJournal::default()
-        };
-
-        assert!(retained_active.upgrade().is_some());
-        assert!(retained_visited.upgrade().is_some());
-        drop(journal);
-        assert!(retained_active.upgrade().is_some());
-        assert!(retained_visited.upgrade().is_some());
-        drop(domain);
-        assert!(retained_active.upgrade().is_none());
-        assert!(retained_visited.upgrade().is_none());
     }
 }

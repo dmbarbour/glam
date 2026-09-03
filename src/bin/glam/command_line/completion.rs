@@ -309,7 +309,6 @@ impl CompletionEvidence {
 #[cfg(test)]
 mod owner_tests {
     use super::*;
-    use glam::{EffectTokenDomain, EvaluationRuntime};
 
     fn assert_completion_owner_inventory(
         candidate: &CompletionCandidate,
@@ -353,20 +352,5 @@ mod owner_tests {
             &CompletionExpectation,
             &ExpectationEvidence,
         ) = assert_completion_owner_inventory;
-    }
-
-    #[test]
-    fn case_explanation_retires_its_value_root_exactly() {
-        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
-        let domain = EffectTokenDomain::new(&runtime.values());
-        let payload = Arc::new(());
-        let retained = Arc::downgrade(&payload);
-        let explanation = CliCaseExplanation::new(domain.issue(payload));
-
-        assert!(retained.upgrade().is_some());
-        drop(explanation);
-        assert!(retained.upgrade().is_some());
-        drop(domain);
-        assert!(retained.upgrade().is_none());
     }
 }

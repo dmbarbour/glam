@@ -160,7 +160,6 @@ fn literal_completion(input: &str, cursor: usize, split: usize, literal: &str) -
 #[cfg(test)]
 mod owner_tests {
     use super::*;
-    use glam::{EffectTokenDomain, EvaluationRuntime};
 
     fn assert_token_owner_inventory(run: &TokenRun) {
         let TokenRun {
@@ -175,25 +174,5 @@ mod owner_tests {
     #[test]
     fn token_run_owner_inventory_is_compile_exhaustive() {
         let _: fn(&TokenRun) = assert_token_owner_inventory;
-    }
-
-    #[test]
-    fn token_run_retires_successful_value_roots_exactly() {
-        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
-        let domain = EffectTokenDomain::new(&runtime.values());
-        let payload = Arc::new(());
-        let retained = Arc::downgrade(&payload);
-        let run = TokenRun {
-            values: vec![domain.issue(payload)],
-            furthest: 0,
-            expectations: Vec::new(),
-            candidates: Vec::new(),
-        };
-
-        assert!(retained.upgrade().is_some());
-        drop(run);
-        assert!(retained.upgrade().is_some());
-        drop(domain);
-        assert!(retained.upgrade().is_none());
     }
 }

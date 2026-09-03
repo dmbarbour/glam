@@ -196,7 +196,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.2e.3 | complete | diagnostic, event, and delivery collection fixtures |
 | I4F.2e.4a | complete | assembly, compiler, module, and import owners |
 | I4F.2e.4b | complete | macro input, result, failure, and parser-rewrite owners |
-| I4F.2e.4c | pending | binary configuration, command-line, and logger owners |
+| I4F.2e.4c | complete | binary configuration, command-line, and logger owners |
 | I4F.2e.4d | pending | synchronized-net and hidden-owner closure |
 | I4F.2e.4 | pending | compiler, binary-host, net, and hidden-owner collection fixtures |
 | I4F.2e | pending | closed durable-owner collection matrix |
@@ -3314,12 +3314,13 @@ positions, replacement text, and command edits are edge-free.
 
 Compile-exhaustive latches cover configured-search snapshots and journals,
 token runs, completion candidates/results/expectations, and explanation
-evidence. Deterministic effect-token fixtures verify exact retirement of
-active and visited cases, successful token values, and public case
-explanations. The existing configured parse, ambiguity, completion,
-transaction rollback, and token-reader suites remain the behavioral matrix.
-The command-line durable-owner row closes without a production representation
-change. Production remains `NoAuto`.
+evidence. These private binary owners contain only public `Value` roots; their
+collection behavior therefore composes with the library's public-root fixture
+rather than requiring a binary-only collector backdoor. The existing
+configured parse, ambiguity, completion, transaction rollback, and
+token-reader suites remain the behavioral matrix. The command-line
+durable-owner row closes without a production representation change.
+Production remains `NoAuto`.
 
 I4F.1f.3b completed 2026-09-03 as a closure audit of batch configuration
 ownership. `PreparedAssembly` owns the runtime, assembler, logger host, loaded
@@ -3332,11 +3333,11 @@ Preparation failures retain their assembler/logger context and structured
 `Error` until the batch host renders them.
 
 A compile-exhaustive latch covers every prepared, failed-preparation, and
-loaded-configuration field. A deterministic effect-token fixture constructs a
-complete prepared owner and verifies that its loaded module/environment values
-survive construction-scope exit and retire exactly with that owner. Existing
-configured batch, environment resolve/fail, and assembly execution tests remain
-the behavioral coverage. The configuration durable-owner row closes without a
+loaded-configuration field. The loaded module/environment are public `Value`
+roots whose collector behavior is established by the library facade fixture;
+the prepared owner adds no private managed representation. Existing configured
+batch, environment resolve/fail, and assembly execution tests remain the
+behavioral coverage. The configuration durable-owner row closes without a
 production representation change. Production remains `NoAuto`.
 
 I4F.1f.3c completed 2026-09-03 as a closure audit of logger and rendering
@@ -3351,11 +3352,11 @@ endpoint backedges remain weak, preserving the established acyclic teardown.
 
 Compile-exhaustive latches cover the logger task host/journal, log host,
 supervisor state, report selection, installation, `LoggerRun`, and default
-renderer. Deterministic effect-token fixtures verify exact retirement of the
-logger reflection environment and formatter. Existing forced-order logger
-close, rearm, output isolation, fallback transfer/failure, settlement,
-callback-boundary, rendering, and teardown fixtures remain the behavioral
-matrix. The logger durable-owner row closes without a production
+renderer. The reflection environment and formatter are public `Value` roots,
+so their collection behavior composes with the facade fixture. Existing
+forced-order logger close, rearm, output isolation, fallback transfer/failure,
+settlement, callback-boundary, rendering, and teardown fixtures remain the
+behavioral matrix. The logger durable-owner row closes without a production
 representation change. With command-line and configuration owners already
 closed, I4F.1f is complete.
 
@@ -4267,6 +4268,20 @@ owns the already-tested input carrier and original invocation descriptors are
 edge-free, so no duplicate wrapper fixture is needed. Existing end-to-end
 macro expansion tests continue to cover stage ordering and behavior; this
 checkpoint specifically closes collection ownership.
+
+I4F.2e.4c completed 2026-09-03 as a compositional collection audit. The
+separately compiled binary crate intentionally has no API for forcing the
+library runtime's collector. Its compile-exhaustive owner latches show that
+command-line search/token/completion state, loaded configuration, logger
+hosts, and default rendering retain semantic data only through public `Value`
+or `Diagnostic` roots; they introduce no binary-private managed edge. The
+library's I4F.2e.1a and I4F.2e.3 fixtures already collect those exact root
+representations and transport envelopes. Six old effect-token "exact
+retirement" tests were removed because a live token-domain payload map made
+their pre-drop weak assertions pass independently of the owner under test,
+while dropping the domain made their final assertions pass without GC. The
+compile latches plus facade collection tests are stronger evidence and avoid
+adding a public collection backdoor solely for the binary's unit tests.
 
 Keep every fixture in a fresh isolated collector-ready runtime/heap. Do not
 collect a shared production graph containing I5-I10 unclassified families.

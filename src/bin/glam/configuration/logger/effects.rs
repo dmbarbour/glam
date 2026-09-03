@@ -415,7 +415,7 @@ mod tests {
     use glam::reflection::ReflectionServices;
     use glam::{
         Assembler, Diagnostic, DiagnosticBus, DiagnosticEvent, DiagnosticSubscriber,
-        EffectTokenDomain, EvaluationRuntime, RuntimeEventJournal, Severity,
+        RuntimeEventJournal, Severity,
     };
 
     use super::{LoggerTaskHost, MainJournal};
@@ -454,32 +454,6 @@ mod tests {
     #[test]
     fn logger_task_owner_inventory_is_compile_exhaustive() {
         let _: fn(&LoggerTaskHost, &MainJournal) = assert_logger_task_owner_inventory;
-    }
-
-    #[test]
-    fn logger_task_host_retires_its_reflection_environment_root_exactly() {
-        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
-        let input_diagnostics = DiagnosticBus::for_runtime(&runtime);
-        let input = Arc::new(LogHost::with_runtime(runtime.clone(), &input_diagnostics));
-        let assembler = Assembler::builder()
-            .evaluation_runtime(runtime.clone())
-            .build()
-            .expect("logger assembler should build");
-        let domain = EffectTokenDomain::new(&runtime.values());
-        let payload = Arc::new(());
-        let retained = Arc::downgrade(&payload);
-        let host = LoggerTaskHost::new(
-            input,
-            DiagnosticBus::for_runtime(&runtime),
-            domain.issue(payload),
-            assembler,
-        );
-
-        assert!(retained.upgrade().is_some());
-        drop(host);
-        assert!(retained.upgrade().is_some());
-        drop(domain);
-        assert!(retained.upgrade().is_none());
     }
 
     #[test]
