@@ -48,7 +48,7 @@ pub struct Diagnostic {
     emission: Option<RuntimeValueRoot>,
 }
 
-pub(crate) fn compile_source(source: &[u8], context: &CompileContext) -> Value {
+pub(crate) fn compile_source(source: &[u8], context: &CompileContext) -> RuntimeValueRoot {
     let LoweredSource {
         definitions,
         diagnostics,
@@ -58,7 +58,7 @@ pub(crate) fn compile_source(source: &[u8], context: &CompileContext) -> Value {
         let severity = diagnostic.severity;
         context.emit_diagnostic(severity, diagnostic.into_emission());
     }
-    definitions.into_core()
+    definitions
 }
 
 pub(crate) fn default_diagnostic_formatter(values: &CoreValueFactory) -> Value {

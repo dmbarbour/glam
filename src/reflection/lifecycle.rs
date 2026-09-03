@@ -384,8 +384,12 @@ impl<S: TaskSpecialization> EffectRun<S> {
         let runtime_id = runtime.id();
         let values = runtime.values();
         let session = runtime.new_evaluation_session()?;
+        let effect = values.clone_core(&effect).map_err(|error| {
+            contextualize_task_halt(error.into(), &values, failure_context.as_ref())
+                .root_for_runtime(runtime_id)
+        })?;
         let mut task = EffectTask::new_in_context(
-            effect.into_core(),
+            effect,
             specialization,
             host,
             EvalContext::with_task_profile(&session, task_profile),
@@ -448,13 +452,22 @@ impl<S: TaskSpecialization> EffectRun<S> {
         let session = runtime.new_evaluation_session_with_profile(task_profile)?;
         let context = EvalContext::new(&session);
         let session = Arc::new(Mutex::new(Some(session)));
-        let failure_context = failure_context.map(PublicValue::into_core);
         let prepared = context
             .prepare_machine(
                 Some(lifecycle.publisher(session.clone())),
                 move |task_context| {
+                    let values =
+                        crate::api::Values::from_core_factory(task_context.values().clone());
+                    let effect = values
+                        .clone_core(&effect)
+                        .map_err(|error| Arc::new(EvaluationFailure::message(error.to_string())))?;
+                    let failure_context = failure_context
+                        .as_ref()
+                        .map(|context| values.clone_core(context))
+                        .transpose()
+                        .map_err(|error| Arc::new(EvaluationFailure::message(error.to_string())))?;
                     let mut task = EffectTask::new_in_context_with_capabilities(
-                        effect.into_core(),
+                        effect,
                         specialization,
                         host,
                         task_context,

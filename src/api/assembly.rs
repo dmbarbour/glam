@@ -1097,10 +1097,7 @@ impl Assembler {
                     execution: execution.clone(),
                 },
             )?;
-            definitions = RuntimeValueRoot::new(
-                &self.core_values(),
-                compile_source(prepared.source.bytes(), &prepared.context),
-            );
+            definitions = compile_source(prepared.source.bytes(), &prepared.context);
             had_errors |= prepared.had_errors.load(Ordering::Relaxed);
         }
 
@@ -1285,7 +1282,7 @@ impl Assembler {
                 Some(&source),
             ))
         } else {
-            Ok(RuntimeValueRoot::new(&self.core_values(), definitions))
+            Ok(definitions)
         }
     }
 

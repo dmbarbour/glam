@@ -156,8 +156,8 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.2a.3e | complete | compiler-cache access retirement |
 | I4F.2a.3f | complete | macro effect and runner access retirement |
 | I4F.2a.3g | complete | parser replay and source access retirement |
-| I4F.2a.3h | pending | lifecycle and host-integration closure |
-| I4F.2a.3 | pending | reflection, compiler, macro, and host access retirement |
+| I4F.2a.3h | complete | lifecycle and host-integration closure |
+| I4F.2a.3 | complete | reflection, compiler, macro, and host access retirement |
 | I4F.2a.4 | pending | compatibility-access closure latch |
 | I4F.2a | pending | compatibility observation and ownership-transfer retirement |
 | I4F.2b.0 | pending | transitive destruction and active-owner inventory |
@@ -3592,6 +3592,18 @@ service. Number, text, and embedded macro inputs are constructed through
 with every direct public/core conversion; its retained `PublicValue` fields
 remain the explicit durable boundary between macro expansion and source
 replay.
+
+I4F.2a.3h and I4F.2a.3 completed 2026-09-03. Direct and scheduled effect
+lifecycle entry clone the selected effect and optional failure context through
+the runtime `Values` service at the bounded construction point; deferred task
+activation retains public roots rather than a bare core value. Source
+compilation now returns its `RuntimeValueRoot` directly to assembly/module
+handoff instead of immediately extracting and recreating it. Configuration,
+logger, and event-adapter sources contain no compatibility conversions. The
+public-value and compiler-boundary inventories are relatched; the sole direct
+reflection-protocol projection remains the previously documented structured
+`ApiError` conversion owned by I6C's managed failure shell, rather than hidden
+host-integration debt.
 
 I4F.2a.1a completed 2026-09-03. Production `Value` and `EvaluatedValue` no
 longer implement semantic equality, and `Value::runtime_id` is no longer a

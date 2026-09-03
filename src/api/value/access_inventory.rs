@@ -78,7 +78,7 @@ macro_rules! entry {
 const INVENTORY: &[InventoryEntry] = &[
     entry!(
         "src/api/assembly.rs",
-        [0, 0, 0, 0, 4, 0],
+        [0, 0, 0, 0, 2, 0],
         "assembly setup, rooted compiler handoff, import results, modules, and reflection environment",
         "I3E.2 bounded compiler regions; I4F.1 durable roots"
     ),
@@ -132,7 +132,7 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/g_syntax.rs",
-        [0, 1, 0, 0, 2, 0],
+        [0, 0, 0, 0, 2, 0],
         "rooted lowered definitions and compiler diagnostics across publication",
         "I3E.2 bounded compiler regions; I4F.1 durable roots"
     ),
@@ -153,12 +153,6 @@ const INVENTORY: &[InventoryEntry] = &[
         [0, 0, 0, 0, 2, 0],
         "declaration-to-declaration definitions and reflection annotator",
         "I3E.2 bounded lowering regions; I4F.1 durable roots"
-    ),
-    entry!(
-        "src/reflection/lifecycle.rs",
-        [0, 2, 0, 0, 0, 0],
-        "effect lifecycle activation and completion",
-        "I3C.2 root-preserving completion; I3D.1/I3D.2 reflection phases; I4F.1d.2a rooted lifecycle failures"
     ),
     entry!(
         "src/reflection/machine.rs",
