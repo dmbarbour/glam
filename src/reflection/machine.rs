@@ -654,7 +654,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         self.blocked = Some(BlockedExecution::evaluation_error(
                             error,
                             retry,
-                            self.eval_context.values().runtime_id(),
+                            self.eval_context.values(),
                         ));
                         return self.blocked_poll();
                     }
@@ -2159,9 +2159,9 @@ impl<S: TaskSpecialization> EffectTask<S> {
             return;
         }
         let terminal = match terminal {
-            TaskTerminal::Failed(error) => TaskTerminal::Failed(
-                error.root_for_runtime(self.eval_context.values().runtime_id()),
-            ),
+            TaskTerminal::Failed(error) => {
+                TaskTerminal::Failed(error.root_for_values(self.eval_context.values()))
+            }
             terminal => terminal,
         };
         let unfinished_failure = match &terminal {
@@ -2296,9 +2296,9 @@ fn poll_value_effect_task<S: TaskSpecialization>(
         EffectTaskPoll::Complete(value) => {
             EvaluationMachinePoll::Complete(value.into_runtime_root())
         }
-        EffectTaskPoll::Failed(error) => EvaluationMachinePoll::Failed(
-            error.into_failure_root(task.eval_context.values().runtime_id()),
-        ),
+        EffectTaskPoll::Failed(error) => {
+            EvaluationMachinePoll::Failed(error.into_failure_root(task.eval_context.values()))
+        }
         EffectTaskPoll::Cancelled => EvaluationMachinePoll::Cancelled,
     }
 }
@@ -2342,9 +2342,9 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for UnitEffectTask<S> {
                     )))
                 }
             }
-            EffectTaskPoll::Failed(error) => EvaluationMachinePoll::Failed(
-                error.into_failure_root(self.0.eval_context.values().runtime_id()),
-            ),
+            EffectTaskPoll::Failed(error) => {
+                EvaluationMachinePoll::Failed(error.into_failure_root(self.0.eval_context.values()))
+            }
             EffectTaskPoll::Cancelled => EvaluationMachinePoll::Cancelled,
         }
     }
@@ -2678,17 +2678,13 @@ impl<S: TaskSpecialization> BlockedExecution<S> {
         }
     }
 
-    fn evaluation_error(
-        error: TaskHalt,
-        retry: RetryWake<S>,
-        runtime: crate::EvaluationRuntimeId,
-    ) -> Self {
+    fn evaluation_error(error: TaskHalt, retry: RetryWake<S>, values: &CoreValueFactory) -> Self {
         assert!(
             error.blocked_on().is_none(),
             "a blocked task error belongs in the wait dependency field"
         );
         Self {
-            reason: BlockReason::EvaluationError(error.root_for_runtime(runtime)),
+            reason: BlockReason::EvaluationError(error.root_for_values(values)),
             retry: Some(retry),
         }
     }

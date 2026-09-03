@@ -109,7 +109,11 @@ impl Diagnostic {
 
     fn into_emission(self) -> Value {
         self.emission
-            .map(RuntimeValueRoot::into_core)
+            .map(|emission| {
+                emission
+                    .clone_core_in_own_domain()
+                    .expect("a compiler diagnostic emission remains in its live value domain")
+            })
             .unwrap_or_else(|| crate::diagnostic::text_message(Some(self.line), &self.message))
     }
 }

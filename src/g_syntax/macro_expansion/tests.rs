@@ -88,7 +88,7 @@ fn run(
 ) -> Result<MacroRun, Box<MacroFailure>> {
     run_macro_effect(
         execution,
-        effect.as_core().clone(),
+        effect.clone_core_for_test(),
         environment,
         MacroInput::empty(),
     )
@@ -170,7 +170,7 @@ fn macro_runner_distinguishes_a_non_effect_value() {
     let assembler = Assembler::default();
     let error = run_macro_effect(
         &assembler.test_compilation_execution(),
-        assembler.values().integer(42).as_core().clone(),
+        assembler.values().integer(42).clone_core_for_test(),
         Value::Dict(Dict::new_sync()),
         MacroInput::empty(),
     )
@@ -204,7 +204,7 @@ fn macro_failure_keeps_only_furthest_active_cases() {
     );
     let error = run_macro_effect(
         &assembler.test_compilation_execution(),
-        effect.as_core().clone(),
+        effect.clone_core_for_test(),
         Value::Dict(Dict::new_sync()),
         input,
     )
@@ -251,7 +251,7 @@ fn assembler_claimed_reflection_gate_is_unavailable_to_macro_session() {
     let execution = assembler.test_compilation_execution();
     let gate = Value::reflection_gate(
         &assembler.core_values(),
-        reflection.as_core().clone(),
+        reflection.clone_core_for_test(),
         keys::unit_value(),
     );
     let error = eval::eval_value(&assembler.eval_context(), &gate)
@@ -329,12 +329,15 @@ fn macro_reflection_heap_is_shared_with_the_evaluation_runtime() {
         .get(&execution.macro_heap(), "macro_only")
         .expect("macro heap read should succeed");
     let assembler_value = assembler.get(&assembler.test_reflection_heap(), "macro_only");
-    assert_eq!(macro_value.as_core(), &Value::binary_from_text("yes"));
+    assert_eq!(
+        macro_value.clone_core_for_test(),
+        Value::binary_from_text("yes")
+    );
     assert_eq!(
         assembler_value
             .expect("the assembler session should see the runtime reflection heap")
-            .as_core(),
-        &Value::binary_from_text("yes")
+            .clone_core_for_test(),
+        Value::binary_from_text("yes")
     );
 }
 
@@ -400,7 +403,7 @@ fn inline_macro_readers_and_writers_are_transactional() {
     );
     let layout_run = run_macro_effect(
         &execution,
-        effect.as_core().clone(),
+        effect.clone_core_for_test(),
         Value::Dict(Dict::new_sync()),
         input,
     )
@@ -447,7 +450,7 @@ fn layout_readers_require_scoped_anchors_and_leave_root_anchor_as_failure() {
     }]);
     let layout_run = run_macro_effect(
         &assembler.test_compilation_execution(),
-        effect.as_core().clone(),
+        effect.clone_core_for_test(),
         Value::Dict(Dict::new_sync()),
         input,
     )
@@ -606,7 +609,7 @@ fn text_span_and_end_cover_the_current_nonstructural_run() {
     );
     let run = run_macro_effect(
         &execution,
-        effect.as_core().clone(),
+        effect.clone_core_for_test(),
         Value::Dict(Dict::new_sync()),
         input,
     )
@@ -946,7 +949,8 @@ answer = @meta.expected actual
     assert!(diagnostic.message().contains("at input line 5, column"));
     assert!(diagnostic.message().contains("the word `expected`"));
 
-    let Value::Dict(message) = diagnostic.emission().as_core() else {
+    let message = diagnostic.emission().clone_core_for_test();
+    let Value::Dict(message) = &message else {
         panic!("macro failure should remain an object diagnostic")
     };
     let Value::Dict(context) = message
@@ -990,7 +994,8 @@ fn invalid_expanded_source_reports_an_excerpt_and_expansion_frames() {
         })
         .expect("invalid expanded syntax should receive macro context");
     assert!(diagnostic.message().contains("expansion: `answer = $`"));
-    let Value::Dict(message) = diagnostic.emission().as_core() else {
+    let message = diagnostic.emission().clone_core_for_test();
+    let Value::Dict(message) = &message else {
         panic!("invalid expansion should remain an object diagnostic")
     };
     assert!(matches!(
@@ -1057,7 +1062,7 @@ fn macro_reader_must_balance_only_the_delimiters_it_opens() {
     let (assembler, balanced) = compile_effects(".read.text \"(value)\" =>> .read.end =>> .r ()");
     run_macro_effect(
         &assembler.test_compilation_execution(),
-        balanced.as_core().clone(),
+        balanced.clone_core_for_test(),
         Value::Dict(Dict::new_sync()),
         input(),
     )
@@ -1066,7 +1071,7 @@ fn macro_reader_must_balance_only_the_delimiters_it_opens() {
     let (assembler, unbalanced) = compile_effects(".read.text \"(\" =>> .r ()");
     let error = run_macro_effect(
         &assembler.test_compilation_execution(),
-        unbalanced.as_core().clone(),
+        unbalanced.clone_core_for_test(),
         Value::Dict(Dict::new_sync()),
         input(),
     )
@@ -1181,7 +1186,8 @@ answer = @meta.notice
         .iter()
         .find(|diagnostic| diagnostic.message() == "macro notice")
         .expect("accepted macro log should be published");
-    let Value::Dict(message) = diagnostic.emission().as_core() else {
+    let message = diagnostic.emission().clone_core_for_test();
+    let Value::Dict(message) = &message else {
         panic!("macro log should remain an object")
     };
     let Value::Dict(context) = message

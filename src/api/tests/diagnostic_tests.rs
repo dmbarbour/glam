@@ -91,7 +91,7 @@ fn diagnostic_events_retain_emission_and_origin_roots_until_retirement() {
     assert!(retained_emission.upgrade().is_some());
     assert!(retained_origin.upgrade().is_some());
     drop(event);
-    domain.drain_retired_external_owners_for_test();
+    domain.collect_and_drain_retired_external_owners_for_test();
     assert!(retained_emission.upgrade().is_none());
     assert!(retained_origin.upgrade().is_none());
 }
@@ -653,7 +653,8 @@ fn diagnostic_callback_subscribes_to_the_existing_session() {
     let received = received
         .lock()
         .expect("callback collection mutex should not be poisoned");
-    let CoreValue::Dict(emission) = received[0].emission().as_core() else {
+    let emission = received[0].emission().clone_core_for_test();
+    let CoreValue::Dict(emission) = &emission else {
         unreachable!()
     };
     assert!(emission.get(&*crate::core::keys::SPEC).is_none());
@@ -685,7 +686,8 @@ fn diagnostic_enrichment_is_an_authoritative_object_mixin() {
     let diagnostic = Diagnostic::from_compile(values.core(), &trace, Severity::Warning, message);
     assert_eq!(diagnostic.severity(), Severity::Warning);
 
-    let CoreValue::Dict(emission) = diagnostic.emission().as_core() else {
+    let emission = diagnostic.emission().clone_core_for_test();
+    let CoreValue::Dict(emission) = &emission else {
         panic!("raw diagnostic should be a dictionary");
     };
     let Some(CoreValue::Dict(interface)) = emission.get(&*crate::core::keys::MSG) else {
@@ -701,7 +703,8 @@ fn diagnostic_enrichment_is_an_authoritative_object_mixin() {
     let enriched = diagnostic
         .enrich(&values)
         .expect("diagnostic should enrich");
-    let CoreValue::Dict(enriched) = enriched.as_core() else {
+    let enriched = enriched.clone_core_for_test();
+    let CoreValue::Dict(enriched) = &enriched else {
         panic!("enriched diagnostic should be an object dictionary");
     };
     let Some(CoreValue::Dict(interface)) = enriched.get(&*crate::core::keys::MSG) else {
@@ -759,13 +762,16 @@ fn viewers_can_inherit_one_diagnostic_independently() {
 
     let first = inherit("terminal");
     let second = inherit("ide");
-    let CoreValue::Dict(original) = diagnostic.emission().as_core() else {
+    let original = diagnostic.emission().clone_core_for_test();
+    let CoreValue::Dict(original) = &original else {
         unreachable!()
     };
-    let CoreValue::Dict(first) = first.as_core() else {
+    let first = first.clone_core_for_test();
+    let CoreValue::Dict(first) = &first else {
         unreachable!()
     };
-    let CoreValue::Dict(second) = second.as_core() else {
+    let second = second.clone_core_for_test();
+    let CoreValue::Dict(second) = &second else {
         unreachable!()
     };
     assert!(original.get(&viewer_key).is_none());

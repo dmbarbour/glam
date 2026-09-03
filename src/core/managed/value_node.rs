@@ -1,8 +1,8 @@
-//! Private production-shaped managed storage for one core value.
+//! Private production managed storage for one core value.
 //!
-//! I4F.2c prepares this node and its rooting gateway without routing normal
-//! value construction through it. The atomic production switch in I4F.2d is
-//! the first checkpoint allowed to publish these roots outside this module.
+//! I4F.2d routes every production runtime root through this private node or
+//! the allocation-free inline arm. Payload families remain compatibility Rust
+//! ownership until I5-I8 replace them with exact managed edges.
 
 use std::fmt;
 
@@ -14,10 +14,6 @@ use super::{
 use crate::core::{CoreValueFactory, Value};
 use crate::number::Number;
 
-#[allow(
-    dead_code,
-    reason = "I4F.2c prepares the production node before I4F.2d activates it"
-)]
 pub(crate) struct ManagedValueNode {
     value: Value,
 }
@@ -29,18 +25,15 @@ pub(crate) struct ManagedValueNode {
 /// Inline provenance is a weak value-domain witness; managed provenance is
 /// the collector root's heap identity. Neither arm keeps its domain alive.
 #[derive(Clone)]
-#[allow(
-    dead_code,
-    reason = "I4F.2c prepares the root representation before I4F.2d activates it"
-)]
-pub(crate) enum PreparedRuntimeValueRoot {
-    InlineInteger {
-        observer: RuntimeValueObserver,
-        value: i64,
-    },
-    Managed {
-        root: Root<ManagedValueNode>,
-    },
+pub(crate) struct PreparedRuntimeValueRoot {
+    observer: RuntimeValueObserver,
+    value: PreparedValueRepresentation,
+}
+
+#[derive(Clone)]
+enum PreparedValueRepresentation {
+    InlineInteger(i64),
+    Managed(Root<ManagedValueNode>),
 }
 
 impl fmt::Debug for PreparedRuntimeValueRoot {
@@ -49,31 +42,60 @@ impl fmt::Debug for PreparedRuntimeValueRoot {
     }
 }
 
-#[allow(
-    dead_code,
-    reason = "I4F.2c prepares the root representation before I4F.2d activates it"
-)]
 impl PreparedRuntimeValueRoot {
-    /// Selects the private inline-or-root representation without publishing
-    /// it through the production facade.
+    /// Selects the private production inline-or-root representation.
     pub(crate) fn prepare(values: &CoreValueFactory, value: Value) -> Self {
         if let Value::Number(number) = &value
             && let Some(value) = number.to_i64_if_integer()
         {
-            return Self::InlineInteger {
+            return Self {
                 observer: values.runtime_value_observer(),
-                value,
+                value: PreparedValueRepresentation::InlineInteger(value),
             };
         }
 
-        values.with_runtime_value_access(|access| Self::managed(&access, value))
+        let observer = values.runtime_value_observer();
+        values.with_runtime_value_access(|access| Self::managed(observer, &access, value))
     }
 
-    fn managed(access: &RuntimeValueAccess<'_>, value: Value) -> Self {
-        Self::Managed {
-            root: access
-                .root_managed_value(value)
-                .expect("the production managed value node must fit one collector slot"),
+    fn managed(
+        observer: RuntimeValueObserver,
+        access: &RuntimeValueAccess<'_>,
+        value: Value,
+    ) -> Self {
+        debug_assert!(access.admits(&observer));
+        Self {
+            observer,
+            value: PreparedValueRepresentation::Managed(
+                access
+                    .root_managed_value(value)
+                    .expect("the production managed value node must fit one collector slot"),
+            ),
+        }
+    }
+
+    pub(crate) fn runtime_id(&self) -> crate::runtime::EvaluationRuntimeId {
+        self.observer.runtime_id()
+    }
+
+    pub(crate) fn observer(&self) -> &RuntimeValueObserver {
+        &self.observer
+    }
+
+    pub(crate) fn same_representation(&self, other: &Self) -> bool {
+        if !self.observer.same_domain(&other.observer) {
+            return false;
+        }
+        match (&self.value, &other.value) {
+            (
+                PreparedValueRepresentation::InlineInteger(left),
+                PreparedValueRepresentation::InlineInteger(right),
+            ) => left == right,
+            (
+                PreparedValueRepresentation::Managed(left),
+                PreparedValueRepresentation::Managed(right),
+            ) => left.ptr_eq(right),
+            _ => false,
         }
     }
 
@@ -86,21 +108,20 @@ impl PreparedRuntimeValueRoot {
         access: &RuntimeValueAccess<'_>,
         operation: impl FnOnce(&Value) -> R,
     ) -> Option<R> {
-        match self {
-            Self::InlineInteger { observer, value } => access
-                .admits(observer)
-                .then(|| operation(&Value::Number(Number::integer(*value)))),
-            Self::Managed { root } => access
+        if !access.admits(&self.observer) {
+            return None;
+        }
+        match &self.value {
+            PreparedValueRepresentation::InlineInteger(value) => {
+                Some(operation(&Value::Number(Number::integer(*value))))
+            }
+            PreparedValueRepresentation::Managed(root) => access
                 .admits_root(root)
                 .then(|| operation(access.get(root).value())),
         }
     }
 }
 
-#[allow(
-    dead_code,
-    reason = "I4F.2c prepares construction and projection before the production switch"
-)]
 impl ManagedValueNode {
     fn new(value: Value) -> Self {
         Self { value }
@@ -135,8 +156,8 @@ impl ManagedValueNode {
 }
 
 // SAFETY: the wildcard-free dispatch above classifies every current `Value`
-// variant. Before the I4F.2d production switch, compatibility payloads own no
-// `Gc` pointer, so every arm reports zero edges. I5-I8 must replace an arm in
+// variant. Compatibility payloads currently own no `Gc` pointer, so every arm
+// reports zero edges. I5-I8 must replace an arm in
 // the same checkpoint that its payload first stores a managed pointer.
 unsafe impl Trace for ManagedValueNode {
     const REQUESTED_SLOT_SIZE: Option<usize> = Some(managed_slot_extent::<Self>());
@@ -163,12 +184,8 @@ impl RuntimeValueAccess<'_> {
     /// Allocates and roots one managed core value without exposing a bare
     /// pointer beyond this bounded access region.
     ///
-    /// Production constructors deliberately do not call this gateway until
-    /// the atomic root-representation switch in I4F.2d.
-    #[allow(
-        dead_code,
-        reason = "I4F.2c verifies the gateway before I4F.2d routes production roots through it"
-    )]
+    /// Production construction reaches this only through the private root
+    /// representation, so a bare managed pointer cannot escape.
     pub(crate) fn root_managed_value(
         &self,
         value: Value,
@@ -247,6 +264,9 @@ mod tests {
         );
 
         let values = values();
+        let baseline = values
+            .collect_managed_for_test()
+            .expect("canonical roots should collect before the node fixture");
         let root = values.with_runtime_value_access(|access| {
             access
                 .root_managed_value(Value::Number(42.into()))
@@ -261,19 +281,19 @@ mod tests {
         let live = values
             .collect_managed_for_test()
             .expect("a rooted production-shaped node should survive collection");
-        assert_eq!(live.root_entries(), 1);
-        assert_eq!(live.marked_slots(), 1);
+        assert_eq!(live.root_entries(), baseline.root_entries() + 1);
+        assert_eq!(live.marked_slots(), baseline.marked_slots() + 1);
 
         drop(root);
         let dead = values
             .collect_managed_for_test()
             .expect("an unrooted production-shaped node should be reclaimed");
-        assert_eq!(dead.root_entries(), 0);
+        assert_eq!(dead.root_entries(), baseline.root_entries());
         assert_eq!(dead.finalized_slots(), 1);
     }
 
     #[test]
-    fn managed_value_gateway_has_no_production_call_site_before_switch() {
+    fn managed_value_gateway_remains_private_to_the_root_representation() {
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
         let mut stack = vec![manifest.join("src")];
         let mut call_sites = Vec::new();
@@ -301,7 +321,7 @@ mod tests {
         }
         assert!(
             call_sites.is_empty(),
-            "production managed-value gateway activated before I4F.2d: {call_sites:?}"
+            "production managed-value allocation escaped its private representation: {call_sites:?}"
         );
     }
 
@@ -310,6 +330,9 @@ mod tests {
         let values = values();
         let active_drops = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let variants = closed_compatibility_variants(&values, &active_drops);
+        let baseline = values
+            .collect_managed_for_test()
+            .expect("canonical roots should collect before the variant fixture");
         let roots = values.with_runtime_value_access(|access| {
             variants
                 .into_iter()
@@ -348,8 +371,8 @@ mod tests {
         let live = values
             .collect_managed_for_test()
             .expect("rooted production nodes should trace without hidden edges");
-        assert_eq!(live.root_entries(), roots.len());
-        assert_eq!(live.marked_slots(), roots.len());
+        assert_eq!(live.root_entries(), baseline.root_entries() + roots.len());
+        assert_eq!(live.marked_slots(), baseline.marked_slots() + roots.len());
 
         drop(roots);
         let dead = values
@@ -387,6 +410,9 @@ mod tests {
         assert_transport::<PreparedRuntimeValueRoot>();
 
         let values = values();
+        let baseline = values
+            .collect_managed_for_test()
+            .expect("canonical roots should collect before the clone fixture");
         let large_integer = Number::from_u64(u64::MAX);
         let root = PreparedRuntimeValueRoot::prepare(&values, Value::Number(large_integer.clone()));
         let alias = root.clone();
@@ -400,14 +426,18 @@ mod tests {
         let live = values
             .collect_managed_for_test()
             .expect("the prepared managed root should survive collection");
-        assert_eq!(live.root_entries(), 1, "clones share one root cell");
-        assert_eq!(live.marked_slots(), 1);
+        assert_eq!(
+            live.root_entries(),
+            baseline.root_entries() + 1,
+            "clones add one shared root cell"
+        );
+        assert_eq!(live.marked_slots(), baseline.marked_slots() + 1);
 
         drop(root);
         let dead = values
             .collect_managed_for_test()
             .expect("dropping the final prepared root should permit reclamation");
-        assert_eq!(dead.root_entries(), 0);
+        assert_eq!(dead.root_entries(), baseline.root_entries());
         assert_eq!(dead.finalized_slots(), 1);
     }
 

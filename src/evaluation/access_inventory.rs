@@ -106,7 +106,7 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         ("src/core/managed/value_shell.rs", GatewayCounts::new(0, 3)),
         // I4F.2b.2 briefly projects a rooted reflection effect through a
         // bounded access region before coordinator reservation.
-        ("src/core.rs", GatewayCounts::new(2, 5)),
+        ("src/core.rs", GatewayCounts::new(3, 5)),
         ("src/core_net.rs", GatewayCounts::new(7, 0)),
         // The reflection active-owner fixture proves that managed
         // finalization leaves reservation cancellation to the external drain.
@@ -120,6 +120,7 @@ fn all_managed_entries_have_bounded_mutator_regions() {
             GatewayCounts::new(1, 0),
         ),
         ("src/g_syntax/module_lowering.rs", GatewayCounts::new(3, 0)),
+        ("src/runtime.rs", GatewayCounts::new(1, 0)),
     ]
     .into_iter()
     .map(|(path, counts)| (PathBuf::from(path), counts))

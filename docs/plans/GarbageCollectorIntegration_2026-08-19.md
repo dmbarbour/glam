@@ -174,8 +174,8 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.2c | complete | private production-root and managed-shell preparation |
 | I4F.2d.0 | complete | post-domain canonical root-bundle initialization |
 | I4F.2d.1 | complete | weak terminal root-publication authority |
-| I4F.2d.2 | pending | atomic production managed-root representation switch |
-| I4F.2d | pending | atomic production managed-root switch |
+| I4F.2d.2 | complete | atomic production managed-root representation switch |
+| I4F.2d | complete | atomic production managed-root switch |
 | I4F.2e.1 | pending | cache, evaluation, coordinator, and readiness collection fixtures |
 | I4F.2e.2 | pending | reflection owner collection fixtures |
 | I4F.2e.3 | pending | diagnostic, event, and delivery collection fixtures |
@@ -3976,6 +3976,30 @@ Verification: promote the I2 prototype fixtures to production
 cross-runtime rejection, owned extraction, nested access, and compile-time
 no-equality/no-hash. Run the public value/factory and I4 exact-dispatch suites.
 Production remains `NoAuto`, and no whole production graph is collected.
+
+I4F.2d.2 and I4F.2d completed 2026-09-03. `RuntimeValueRoot` now contains the
+private production inline-or-root representation: integral values representable
+as `i64` remain allocation-free, while every other current value occupies one
+registered `ManagedValueNode`. Cloning a runtime or public value shares that
+root cell. Numeric runtime IDs remain diagnostic and coordination provenance;
+projection requires the live weak value-domain observer and, for managed
+values, collector ownership by the exact heap.
+
+All promise, coordinator, failure, diagnostic, evaluator, compiler, reflection,
+and public-value publication paths now construct roots through a live
+`CoreValueFactory`; the old borrowed `as_core` and consuming `into_core`
+surfaces have no production or test call sites. Public values retain no
+representation equality, ordering, or hashing. Internal rooted status records
+compare only inline scalar or shared root-cell identity where their containing
+state requires `Eq`; this is not Glam value equality.
+
+Existing ownership fixtures now explicitly collect after retiring their last
+root. A test-only settle helper repeats collection and external-owner draining
+because compatibility payloads can unregister a nested root when an outer
+shell is finalized. I5-I8 replace those Rust-owned nested relationships with
+exact managed edges; the exhaustive owner-by-owner survival/reclamation matrix
+remains I4F.2e. Production collection policy remains `NoAuto`, and this phase
+does not authorize collection of an arbitrary production graph.
 
 #### Phase I4F.2e — Closed Durable-Owner Collection Matrix
 

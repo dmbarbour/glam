@@ -11,7 +11,7 @@ use super::requests::{
 use super::search::IsolatedEffectSearch;
 use super::store::{StoreJournal, StoreSnapshot, VolumeId};
 use crate::api::{Diagnostic, Error as ApiError, EvaluatedValue, Value as PublicValue, Values};
-use crate::core::{Dict, EvaluationFailure, EvaluationHalt, Key, List, Value};
+use crate::core::{CoreValueFactory, Dict, EvaluationFailure, EvaluationHalt, Key, List, Value};
 use crate::core_net::CoreWaitToken;
 use crate::diagnostic::Severity;
 use crate::eval;
@@ -411,13 +411,13 @@ impl TaskHalt {
         Self(TaskHaltKind::Failure(TaskFailure::Rooted(failure)))
     }
 
-    pub(super) fn root_for_runtime(self, runtime: EvaluationRuntimeId) -> Self {
+    pub(super) fn root_for_values(self, values: &CoreValueFactory) -> Self {
         match self.0 {
             TaskHaltKind::Failure(TaskFailure::EdgeFree(failure)) => {
-                Self::rooted_failure(RuntimeFailureRoot::from_runtime(runtime, failure))
+                Self::rooted_failure(RuntimeFailureRoot::new(values, failure))
             }
             TaskHaltKind::Failure(failure @ TaskFailure::Rooted(_)) => {
-                debug_assert_eq!(failure.runtime_id(), Some(runtime));
+                debug_assert_eq!(failure.runtime_id(), Some(values.runtime_id()));
                 Self(TaskHaltKind::Failure(failure))
             }
             TaskHaltKind::Blocked(wait) => Self::blocked(wait),
@@ -427,13 +427,13 @@ impl TaskHalt {
     /// Consumes one permanent halt at a runtime-owned publication boundary.
     /// Existing roots retain their identity; bounded evaluator failures gain
     /// their compatibility root exactly once here.
-    pub(super) fn into_failure_root(self, runtime: EvaluationRuntimeId) -> RuntimeFailureRoot {
+    pub(super) fn into_failure_root(self, values: &CoreValueFactory) -> RuntimeFailureRoot {
         match self.0 {
             TaskHaltKind::Failure(TaskFailure::EdgeFree(failure)) => {
-                RuntimeFailureRoot::from_runtime(runtime, failure)
+                RuntimeFailureRoot::new(values, failure)
             }
             TaskHaltKind::Failure(TaskFailure::Rooted(failure)) => {
-                debug_assert_eq!(failure.runtime_id(), runtime);
+                debug_assert_eq!(failure.runtime_id(), values.runtime_id());
                 failure
             }
             TaskHaltKind::Blocked(_) => {
@@ -445,11 +445,14 @@ impl TaskHalt {
     pub(super) fn with_core_context(self, context: Value) -> Self {
         match self.0 {
             TaskHaltKind::Failure(failure) => {
-                let runtime = failure.runtime_id();
+                let observer = match &failure {
+                    TaskFailure::Rooted(failure) => Some(failure.value_observer().clone()),
+                    TaskFailure::EdgeFree(_) => None,
+                };
                 let failure = Arc::new(failure.into_failure().with_context(context));
-                match runtime {
-                    Some(runtime) => {
-                        Self::rooted_failure(RuntimeFailureRoot::from_runtime(runtime, failure))
+                match observer {
+                    Some(observer) => {
+                        Self::rooted_failure(RuntimeFailureRoot::from_observer(&observer, failure))
                     }
                     None => Self::failure(failure),
                 }
@@ -482,7 +485,7 @@ impl TaskHalt {
                 .clone_core(&context)
                 .expect("task context runtime was checked"),
         )
-        .root_for_runtime(runtime)
+        .root_for_values(values.core())
     }
 
     /// Projects a permanent task failure into its structured diagnostic.
@@ -568,11 +571,17 @@ impl From<ApiError> for TaskHalt {
     fn from(error: ApiError) -> Self {
         match error.structured_diagnostic() {
             Some(diagnostic) => {
-                let runtime = diagnostic.emission().runtime_id();
+                let observer = diagnostic.emission().value_observer();
+                let values = observer
+                    .upgrade()
+                    .expect("a structured API error retains a live diagnostic value");
                 let failure = Arc::new(EvaluationFailure::emission(
-                    diagnostic.emission().as_core().clone(),
+                    diagnostic
+                        .emission()
+                        .clone_core_in_own_domain()
+                        .expect("a structured API error retains a live diagnostic value"),
                 ));
-                Self::rooted_failure(RuntimeFailureRoot::from_runtime(runtime, failure))
+                Self::rooted_failure(RuntimeFailureRoot::new(&values, failure))
             }
             None => Self::new(error.to_string()),
         }
@@ -967,7 +976,7 @@ mod root_inventory_tests {
             let result = build(value);
             assert!(retained.upgrade().is_some());
             drop(result);
-            domain.drain_retired_external_owners_for_test();
+            domain.collect_and_drain_retired_external_owners_for_test();
             assert!(retained.upgrade().is_none());
         }
 
@@ -975,7 +984,7 @@ mod root_inventory_tests {
         let outcome = TaskOutcome::Complete(value);
         assert!(retained.upgrade().is_some());
         drop(outcome);
-        domain.drain_retired_external_owners_for_test();
+        domain.collect_and_drain_retired_external_owners_for_test();
         assert!(retained.upgrade().is_none());
     }
 
@@ -990,7 +999,7 @@ mod root_inventory_tests {
         let snapshot = HostSnapshot::<ProtocolRootTestEffects>::new(1, store.snapshot(), extra);
         assert!(retained.upgrade().is_some());
         drop(snapshot);
-        domain.drain_retired_external_owners_for_test();
+        domain.collect_and_drain_retired_external_owners_for_test();
         assert!(retained.upgrade().is_none());
 
         let (extra_snapshot, retained_snapshot) = retained_protocol_value(&domain);
@@ -1004,7 +1013,7 @@ mod root_inventory_tests {
         assert!(retained_snapshot.upgrade().is_some());
         assert!(retained_journal.upgrade().is_some());
         drop(commit);
-        domain.drain_retired_external_owners_for_test();
+        domain.collect_and_drain_retired_external_owners_for_test();
         assert!(retained_snapshot.upgrade().is_none());
         assert!(retained_journal.upgrade().is_none());
 
@@ -1016,7 +1025,7 @@ mod root_inventory_tests {
         assert!(retained_snapshot.upgrade().is_some());
         assert!(retained_journal.upgrade().is_some());
         drop(transaction);
-        domain.drain_retired_external_owners_for_test();
+        domain.collect_and_drain_retired_external_owners_for_test();
         assert!(retained_snapshot.upgrade().is_none());
         assert!(retained_journal.upgrade().is_none());
     }

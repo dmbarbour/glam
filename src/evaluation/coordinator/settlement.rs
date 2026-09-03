@@ -285,8 +285,8 @@ impl EvaluationWorkCoordinator {
             return None;
         }
         let exit_promise_failure = (!plan.exits.is_empty()).then(|| {
-            RuntimeFailureRoot::from_runtime(
-                self.runtime,
+            RuntimeFailureRoot::from_observer(
+                &self.values,
                 Arc::new(EvaluationFailure::message(
                     "reflection task exited without fulfilling its promised value",
                 )),

@@ -32,7 +32,7 @@ pub(crate) use managed::{ClosedCompatibilityValue, ManagedDropRecord, ManagedFam
 pub(crate) use managed::{CoreValueAllocationScope, CoreValueDomainWitness};
 pub(crate) use managed::{
     ExternalOwnerHandle, ExternalOwnerRegistry, OpaquePayloadFamily, OpaquePayloadRecord,
-    RuntimeValueAccess, RuntimeValueObserver,
+    PreparedRuntimeValueRoot, RuntimeValueAccess, RuntimeValueObserver,
 };
 use runtime_cache::{RuntimeCacheEntry, RuntimeCacheMap, SharedRuntimeCacheMap};
 pub(crate) use runtime_cache::{RuntimeCacheFamily, RuntimeCacheFamilyRecord};
@@ -824,12 +824,23 @@ impl PromisedValue {
     }
 
     pub(crate) fn set(&self, value: Value) -> Result<(), Value> {
-        self.publish(Ok(RuntimeValueRoot::from_runtime(self.runtime_id(), value)))
+        let Some(values) = self.0.values.upgrade() else {
+            return Err(value);
+        };
+        self.publish(Ok(RuntimeValueRoot::new(&values, value)))
             .map_err(|assignment| {
                 assignment
                     .expect("setting a promised value always supplies a successful value")
-                    .into_core()
+                    .clone_core_in_own_domain()
+                    .expect("an assigned promise remains in its live value domain")
             })
+    }
+
+    pub(crate) fn set_root(&self, value: RuntimeValueRoot) -> Result<(), RuntimeValueRoot> {
+        debug_assert_eq!(value.runtime_id(), self.runtime_id());
+        self.publish(Ok(value)).map_err(|assignment| {
+            assignment.expect("setting a promised value always supplies a successful value")
+        })
     }
 
     pub(crate) fn fail(
@@ -849,11 +860,13 @@ impl PromisedValue {
     }
 
     pub(crate) fn assignment(&self) -> Option<Result<Value, Arc<EvaluationFailure>>> {
-        self.0
-            .assignment
-            .get()
-            .cloned()
-            .map(|assignment| assignment.map(RuntimeValueRoot::into_core))
+        self.0.assignment.get().cloned().map(|assignment| {
+            assignment.map(|value| {
+                value
+                    .clone_core_in_own_domain()
+                    .expect("a promise assignment is observed only in its live value domain")
+            })
+        })
     }
 
     pub(crate) fn subscribe_work(
@@ -1475,6 +1488,20 @@ impl HostCallProducer {
 impl CoreValueFactory {
     pub(crate) fn drain_external_owners_for_test(&self) -> usize {
         self.domain.external_owners.drain_retired()
+    }
+
+    pub(crate) fn collect_and_drain_external_owners_for_test(&self) -> usize {
+        let mut drained = 0;
+        loop {
+            let collection = self
+                .collect_managed_for_test()
+                .expect("external-owner fixture should collect managed value shells");
+            let retired = self.drain_external_owners_for_test();
+            drained += retired;
+            if collection.finalized_slots() == 0 && retired == 0 {
+                return drained;
+            }
+        }
     }
 
     pub(crate) fn external_owner_count_for_test(&self) -> usize {
@@ -2126,18 +2153,18 @@ mod tests {
         ];
 
         assert!(roots.iter().all(|root| root.runtime_id() == runtime));
-        assert_eq!(factory.unit(), core.unit.as_core().clone());
+        assert_eq!(factory.unit(), core.unit.clone_core_for_test());
         assert_eq!(
             factory.object_reflection_guard(),
-            core.object_reflection_guard.as_core().clone()
+            core.object_reflection_guard.clone_core_for_test()
         );
-        assert_eq!(factory.tuple(), core.tuple.as_core().clone());
-        assert_eq!(factory.info(), core.info.as_core().clone());
-        assert_eq!(factory.warn(), core.warn.as_core().clone());
-        assert_eq!(factory.error(), core.error.as_core().clone());
+        assert_eq!(factory.tuple(), core.tuple.clone_core_for_test());
+        assert_eq!(factory.info(), core.info.clone_core_for_test());
+        assert_eq!(factory.warn(), core.warn.clone_core_for_test());
+        assert_eq!(factory.error(), core.error.clone_core_for_test());
         assert_eq!(
             factory.initial_metadata(),
-            core.initial_metadata.as_core().clone()
+            core.initial_metadata.clone_core_for_test()
         );
 
         let scoped = factory.scoped();
@@ -2153,11 +2180,18 @@ mod tests {
         );
         let scoped = factory.scoped();
         let domain = Arc::downgrade(factory.value_domain());
-        let Value::Metadata(initial_metadata) = factory.core_values().initial_metadata.as_core()
-        else {
-            panic!("the complete canonical bundle should contain its metadata carrier");
-        };
-        let metadata = Arc::downgrade(&initial_metadata.metadata);
+        let metadata = factory.with_runtime_value_access(|access| {
+            factory
+                .core_values()
+                .initial_metadata
+                .with_core(&access, |value| {
+                    let Value::Metadata(initial_metadata) = value else {
+                        panic!("the complete canonical bundle should contain its metadata carrier");
+                    };
+                    Arc::downgrade(&initial_metadata.metadata)
+                })
+                .expect("canonical metadata root should belong to its factory")
+        });
 
         drop(factory);
         assert!(domain.upgrade().is_some());
@@ -2326,11 +2360,11 @@ mod tests {
             crate::runtime::allocate_evaluation_runtime_id(),
             RuntimeIds::new(),
         );
-        let runtime = factory.runtime_id();
         let domain = Arc::downgrade(factory.value_domain());
         let dropped = Arc::new(AtomicBool::new(false));
+        let root_values = factory.clone();
         let owner = factory.cached(|| RootedCachedProbe {
-            root: RuntimeValueRoot::from_runtime(runtime, Value::Number(Number::integer(31))),
+            root: RuntimeValueRoot::new(&root_values, Value::Number(Number::integer(31))),
             _dropped: DropSignal(dropped.clone()),
         });
         let owner_weak = Arc::downgrade(&owner);
@@ -2345,6 +2379,7 @@ mod tests {
         );
         assert!(!dropped.load(Ordering::Acquire));
         drop(owner);
+        drop(root_values);
         drop(factory);
 
         assert!(domain.upgrade().is_none());

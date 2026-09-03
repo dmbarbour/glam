@@ -380,12 +380,11 @@ impl<S: TaskSpecialization> EffectRun<S> {
             host.clone(),
         )));
         let runtime = runtime.expect("EffectRun construction always selects an evaluation runtime");
-        let runtime_id = runtime.id();
         let values = runtime.values();
         let session = runtime.new_evaluation_session()?;
         let effect = values.clone_core(&effect).map_err(|error| {
             contextualize_task_halt(error.into(), &values, failure_context.as_ref())
-                .root_for_runtime(runtime_id)
+                .root_for_values(values.core())
         })?;
         let mut task = EffectTask::new_in_context(
             effect,
@@ -395,7 +394,7 @@ impl<S: TaskSpecialization> EffectRun<S> {
         )
         .map_err(|error| {
             contextualize_task_halt(error, &values, failure_context.as_ref())
-                .root_for_runtime(runtime_id)
+                .root_for_values(values.core())
         })?;
         if result_policy == EffectResultPolicy::RequireUnit {
             task = task.requiring_unit_result();
@@ -405,7 +404,7 @@ impl<S: TaskSpecialization> EffectRun<S> {
         }
         run_composed_effect_task(task).map_err(|error| {
             contextualize_task_halt(error, &values, failure_context.as_ref())
-                .root_for_runtime(runtime_id)
+                .root_for_values(values.core())
         })
     }
 
@@ -494,7 +493,7 @@ impl<S: TaskSpecialization> EffectRun<S> {
                 },
             )
             .map_err(|failure| {
-                TaskHalt::rooted_failure(RuntimeFailureRoot::from_runtime(runtime.id(), failure))
+                TaskHalt::rooted_failure(RuntimeFailureRoot::new(runtime.values().core(), failure))
             })?;
         let task = match diagnostic_ingress {
             Some(ingress) => {
@@ -540,10 +539,10 @@ pub fn run<S: TaskSpecialization>(
 pub(super) fn run_composed_effect_task<S: TaskSpecialization>(
     mut task: EffectTask<S>,
 ) -> Result<TaskOutcome, TaskHalt> {
-    let runtime = task.eval_context.values().runtime_id();
+    let values = task.eval_context.values().clone();
     let parent = task.run();
     let children = task.eval_context.run_until_quiescent();
-    combine_composed_result(parent, children).map_err(|error| error.root_for_runtime(runtime))
+    combine_composed_result(parent, children).map_err(|error| error.root_for_values(&values))
 }
 
 fn combine_composed_result(

@@ -246,6 +246,9 @@ fn managed_leaf_families_trace_zero_edges() {
         "the reviewed x86-64 I4A fixture layout changed",
     );
     let values = values();
+    let baseline = values
+        .collect_managed_for_test()
+        .expect("canonical roots should collect before the shell fixture");
     let drops = Arc::new(AtomicUsize::new(0));
     let roots = values.with_managed_values(|scope| {
         let allocator = scope
@@ -271,7 +274,7 @@ fn managed_leaf_families_trace_zero_edges() {
     let live = values
         .collect_managed_for_test()
         .expect("rooted managed leaf shells should collect");
-    assert_eq!(live.marked_slots(), roots.len());
+    assert_eq!(live.marked_slots(), baseline.marked_slots() + roots.len());
     assert_eq!(drops.load(Ordering::Relaxed), 0);
 
     drop(roots);
@@ -338,6 +341,9 @@ fn managed_value_shell_dispatches_every_variant() {
 #[test]
 fn managed_value_shell_cycle_marks_once() {
     let values = values();
+    let baseline = values
+        .collect_managed_for_test()
+        .expect("canonical roots should collect before the shell-cycle fixture");
     let drops = Arc::new(AtomicUsize::new(0));
     let root = values.with_managed_values(|scope| {
         let allocator = scope
@@ -367,15 +373,15 @@ fn managed_value_shell_cycle_marks_once() {
     let live = values
         .collect_managed_for_test()
         .expect("the rooted shell cycle should collect");
-    assert_eq!(live.root_entries(), 1);
-    assert_eq!(live.marked_slots(), 1);
+    assert_eq!(live.root_entries(), baseline.root_entries() + 1);
+    assert_eq!(live.marked_slots(), baseline.marked_slots() + 1);
     assert_eq!(drops.load(Ordering::Relaxed), 0);
 
     drop(root);
     let dead = values
         .collect_managed_for_test()
         .expect("the unrooted shell cycle should be reclaimed");
-    assert_eq!(dead.root_entries(), 0);
+    assert_eq!(dead.root_entries(), baseline.root_entries());
     assert_eq!(dead.finalized_slots(), 1);
     assert_eq!(drops.load(Ordering::Relaxed), 1);
 }

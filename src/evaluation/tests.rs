@@ -252,7 +252,7 @@ fn client_demand_completes_whnf_into_its_result_cell() {
     assert!(poll_one_runtime_work(&coordinator));
     assert!(matches!(
         handle.poll(),
-        Some(ClientDemandResult::Complete(value)) if value.as_core() == &expected
+        Some(ClientDemandResult::Complete(value)) if value.clone_core_for_test() == expected
     ));
 }
 
@@ -347,7 +347,7 @@ fn client_demand_exactly_restarts_after_promise_assignment() {
     assert!(poll_one_runtime_work(&coordinator));
     assert!(matches!(
         handle.poll(),
-        Some(ClientDemandResult::Complete(value)) if value.as_core() == &expected
+        Some(ClientDemandResult::Complete(value)) if value.clone_core_for_test() == expected
     ));
 }
 
@@ -379,7 +379,7 @@ fn abandoning_one_client_demand_preserves_another_exact_consumer() {
     assert!(poll_one_runtime_work(&coordinator));
     assert!(matches!(
         survivor.poll(),
-        Some(ClientDemandResult::Complete(value)) if value.as_core() == &expected
+        Some(ClientDemandResult::Complete(value)) if value.clone_core_for_test() == expected
     ));
 }
 
@@ -424,7 +424,7 @@ fn client_demand_can_follow_a_lazy_producer_owned_by_another_session() {
     for result in [owner_demand.poll(), observer_demand.poll()] {
         assert!(matches!(
             result,
-            Some(ClientDemandResult::Complete(value)) if value.as_core() == &expected
+            Some(ClientDemandResult::Complete(value)) if value.clone_core_for_test() == expected
         ));
     }
     assert!(lazy.cached().is_some_and(|result| result.is_ok()));
@@ -664,7 +664,7 @@ fn retained_client_handle_waits_across_external_disturbance_without_a_lost_wake(
     assert!(poll_one_runtime_work(&coordinator));
     assert!(matches!(
         waiter.join().expect("client waiter should finish"),
-        ClientDemandResult::Complete(value) if value.as_core() == &expected
+        ClientDemandResult::Complete(value) if value.clone_core_for_test() == expected
     ));
     assert_eq!(coordinator.client_demand_count(), 0);
 
@@ -677,7 +677,7 @@ fn retained_client_handle_waits_across_external_disturbance_without_a_lost_wake(
     assert!(poll_one_runtime_work(&coordinator));
     assert!(matches!(
         already_complete.wait(),
-        ClientDemandResult::Complete(value) if value.as_core() == &context.values().unit()
+        ClientDemandResult::Complete(value) if value.clone_core_for_test() == context.values().unit()
     ));
 }
 
@@ -739,7 +739,7 @@ fn generic_client_demand_resumes_composed_access_and_binary_annotation() {
     assert!(matches!(
         handle.poll(),
         Some(ClientDemandResult::Complete(value))
-            if value.as_core() == &Value::Binary(bytes::Bytes::from_static(&[1, 2]))
+            if value.clone_core_for_test() == Value::Binary(bytes::Bytes::from_static(&[1, 2]))
     ));
 }
 
@@ -3105,7 +3105,7 @@ fn assigned_task_promise_is_removed_before_later_task_terminalization() {
     );
     assert!(matches!(
         context.poll_wait(&promise_wait),
-        EvaluationWaitPoll::Complete(value) if value.as_core() == &context.values().unit()
+        EvaluationWaitPoll::Complete(value) if value.clone_core_for_test() == context.values().unit()
     ));
 
     assert_eq!(task.cancel(), EvaluationTaskCancellation::Requested);
@@ -3115,7 +3115,7 @@ fn assigned_task_promise_is_removed_before_later_task_terminalization() {
     );
     assert!(matches!(
         context.poll_wait(&promise_wait),
-        EvaluationWaitPoll::Complete(value) if value.as_core() == &context.values().unit()
+        EvaluationWaitPoll::Complete(value) if value.clone_core_for_test() == context.values().unit()
     ));
     assert_eq!(context.task_registry_counts().promises_active, 0);
 }
@@ -5560,7 +5560,7 @@ fn wait_for_spark_work_counts(
 fn park_next_spark(coordinator: &EvaluationWorkCoordinator) {
     let claimed = claim_next_spark(coordinator);
     let context = EvalContext::for_spark(claimed.demand_session());
-    let halt = crate::eval::eval_value(&context, claimed.value().as_core())
+    let halt = crate::eval::eval_value(&context, &claimed.value().clone_core_for_test())
         .expect_err("the unresolved promise should park its spark follower");
     let dependency = if let Some(wait) = halt.blocked_on() {
         coordinator::WorkDependency::Wait(wait.0)
@@ -5672,7 +5672,7 @@ fn promise_completion_between_demand_and_subscription_requeues_the_spark() {
         panic!("the promise spark should be claimable")
     };
     let spark_context = EvalContext::for_spark(claimed.demand_session());
-    let halt = crate::eval::eval_value(&spark_context, claimed.value().as_core())
+    let halt = crate::eval::eval_value(&spark_context, &claimed.value().clone_core_for_test())
         .expect_err("the unresolved promise should halt the spark");
     let dependency = coordinator::WorkDependency::Promise(
         halt.unassigned_promise()
@@ -5770,7 +5770,7 @@ fn permanent_spark_failure_retires_without_a_dependency_subscription() {
     let coordinator::CoordinatorSelection::Spark(claimed) = coordinator.select() else {
         panic!("the failing spark should be claimable")
     };
-    let halt = crate::eval::demand_strategy_value(&context, claimed.value().as_core())
+    let halt = crate::eval::demand_strategy_value(&context, &claimed.value().clone_core_for_test())
         .expect_err("the spark fixture should fail permanently");
     assert!(halt.permanent_failure().is_some());
     assert!(halt.blocked_on().is_none());

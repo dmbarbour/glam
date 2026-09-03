@@ -58,10 +58,11 @@ fn value_is_undefined(assembler: &Assembler, value: &Value) -> bool {
 }
 
 fn assert_unclaimed_lazy(value: &Value) {
-    let CoreValue::Lazy(lazy) = value.as_core() else {
+    let core = value.clone_core_for_test();
+    let CoreValue::Lazy(lazy) = &core else {
         panic!(
             "expected a lazy value, received {}",
-            value.as_core().diagnostic_kind_name()
+            core.diagnostic_kind_name()
         );
     };
     assert!(
@@ -75,10 +76,11 @@ fn assert_unclaimed_lazy(value: &Value) {
 }
 
 fn assert_unobserved_promise(value: &Value) {
-    let CoreValue::Promised(promise) = value.as_core() else {
+    let core = value.clone_core_for_test();
+    let CoreValue::Promised(promise) = &core else {
         panic!(
             "expected a promised value, received {}",
-            value.as_core().diagnostic_kind_name()
+            core.diagnostic_kind_name()
         );
     };
     assert!(
@@ -124,8 +126,11 @@ fn definition_context(value: &CoreValue) -> Option<&Dict> {
 }
 
 fn diagnostic_contexts(assembler: &Assembler, diagnostic: &Diagnostic) -> Vec<CoreValue> {
-    let emission = eval::eval_value(&assembler.eval_context(), diagnostic.emission().as_core())
-        .expect("diagnostic emission should evaluate");
+    let emission = eval::eval_value(
+        &assembler.eval_context(),
+        &diagnostic.emission().clone_core_for_test(),
+    )
+    .expect("diagnostic emission should evaluate");
     let CoreValue::Dict(emission) = emission else {
         panic!("diagnostic emission should be a dictionary");
     };
@@ -571,7 +576,8 @@ fn array_and_deque_annotations_preserve_lazy_elements() {
         .anno_array(list.clone())
         .and_then(|array| assembler.evaluate(&array))
         .expect("array annotation should normalize the spine");
-    let CoreValue::List(array) = array.as_core() else {
+    let array = array.clone_core_for_test();
+    let CoreValue::List(array) = &array else {
         panic!("array annotation must return a list");
     };
     let items = eval::list_to_value_items(&assembler.eval_context(), array)
@@ -584,7 +590,8 @@ fn array_and_deque_annotations_preserve_lazy_elements() {
         .anno_deque(list)
         .and_then(|deque| assembler.evaluate(&deque))
         .expect("deque annotation should normalize the spine");
-    let CoreValue::List(deque) = deque.as_core() else {
+    let deque = deque.clone_core_for_test();
+    let CoreValue::List(deque) = &deque else {
         panic!("deque annotation must return a list");
     };
     let items = eval::list_to_value_items(&assembler.eval_context(), deque)
@@ -993,7 +1000,7 @@ fn evaluated_array_items_accept_only_one_strict_value_leaf() {
     );
 
     let (promise, resolver) = assembler.promise("deferred array spine");
-    let CoreValue::Promised(promise_core) = promise.as_core() else {
+    let CoreValue::Promised(promise_core) = promise.clone_core_for_test() else {
         unreachable!("public promise must contain a promised core value")
     };
     let deferred_spine = public_value(
@@ -1069,7 +1076,7 @@ fn value_evaluator_resumes_a_retained_resolver_promise_subscription() {
     let assembler = Assembler::new();
     let values = assembler.values();
     let (promise, resolver) = assembler.promise("public evaluator wait fixture");
-    let CoreValue::Promised(promise_core) = promise.as_core() else {
+    let CoreValue::Promised(promise_core) = promise.clone_core_for_test() else {
         unreachable!("public promise must contain a promised core value")
     };
     let promise_core = promise_core.clone();
@@ -1310,7 +1317,7 @@ fn assembler_boundaries_reject_foreign_values_before_evaluation_or_storage() {
 
     let (promise, resolver) = assembler.promise("foreign assignment");
     assert!(resolver.resolve(foreign_value.clone()).is_err());
-    let CoreValue::Promised(unassigned) = promise.as_core() else {
+    let CoreValue::Promised(unassigned) = promise.clone_core_for_test() else {
         panic!("public promise should retain its core promise cell")
     };
     assert!(
@@ -1326,7 +1333,7 @@ fn assembler_boundaries_reject_foreign_values_before_evaluation_or_storage() {
     );
     let (failed, resolver) = assembler.promise("foreign failure");
     assert!(resolver.fail(foreign_value).is_err());
-    let CoreValue::Promised(unassigned) = failed.as_core() else {
+    let CoreValue::Promised(unassigned) = failed.clone_core_for_test() else {
         panic!("public promise should retain its core promise cell")
     };
     assert!(
@@ -1518,7 +1525,7 @@ fn reflection_environment_explicitly_projects_compilation_origins() {
         .and_then(|value| assembler.evaluate(&value))
         .expect("the origin capability should inspect compilation origins");
 
-    assert_eq!(projected.as_core(), &trace.origin_value());
+    assert_eq!(projected.clone_core_for_test(), trace.origin_value());
 }
 
 #[test]
@@ -1581,7 +1588,7 @@ fn source_definitions_add_shallow_opaque_origin_context() {
 
     let broken =
         access_path(&assembler, module.value(), "broken").expect("fixture should define broken");
-    let error = eval::eval_value(&assembler.eval_context(), broken.as_core())
+    let error = eval::eval_value(&assembler.eval_context(), &broken.clone_core_for_test())
         .expect_err("the broken definition should fail");
     let failure = error.into_permanent_failure();
     let context = failure
@@ -1611,7 +1618,7 @@ fn source_definitions_add_shallow_opaque_origin_context() {
     let call = assembler
         .apply(&later, [assembler.values().integer(1)])
         .expect("calling a source function should remain lazy");
-    let error = eval::eval_value(&assembler.eval_context(), call.as_core())
+    let error = eval::eval_value(&assembler.eval_context(), &call.clone_core_for_test())
         .expect_err("the function body should fail when called");
     let failure = error.into_permanent_failure();
     assert!(
@@ -1624,8 +1631,11 @@ fn source_definitions_add_shallow_opaque_origin_context() {
 
     let object_member = access_path(&assembler, module.value(), "container.broken")
         .expect("fixture should define the nested object member");
-    let error = eval::eval_value(&assembler.eval_context(), object_member.as_core())
-        .expect_err("the nested object member should fail");
+    let error = eval::eval_value(
+        &assembler.eval_context(),
+        &object_member.clone_core_for_test(),
+    )
+    .expect_err("the nested object member should fail");
     let failure = error.into_permanent_failure();
     let context = failure
         .contexts()
@@ -1643,7 +1653,7 @@ fn source_definitions_add_shallow_opaque_origin_context() {
 
     let manual = access_path(&assembler, module.value(), "manual")
         .expect("fixture should define a manual context");
-    let error = eval::eval_value(&assembler.eval_context(), manual.as_core())
+    let error = eval::eval_value(&assembler.eval_context(), &manual.clone_core_for_test())
         .expect_err("the manually contextualized expression should fail");
     let failure = error.into_permanent_failure();
     let manual_origin = failure.contexts().iter().find_map(|frame| {
@@ -1804,7 +1814,7 @@ fn synchronous_assembler_evaluation_waits_for_a_worker_claim() {
         },
     );
     let value = public_value(&assembler.core_values(), CoreValue::Lazy(lazy));
-    assembler.eval_context().spark(value.as_core().clone());
+    assembler.eval_context().spark(value.clone_core_for_test());
     started_receiver
         .recv_timeout(std::time::Duration::from_secs(2))
         .expect("worker should claim the sparked value");
@@ -2031,7 +2041,7 @@ fn built_module_retains_its_published_value_after_construction_scope_exits() {
 
     assert!(retained.upgrade().is_some());
     drop(module);
-    domain.drain_retired_external_owners_for_test();
+    domain.collect_and_drain_retired_external_owners_for_test();
     assert!(
         retained.upgrade().is_none(),
         "the published module value must retire with its last public root"

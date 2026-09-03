@@ -990,7 +990,7 @@ mod tests {
         };
         assert!(retained.upgrade().is_some());
         drop(journal);
-        domain.drain_retired_external_owners_for_test();
+        domain.collect_and_drain_retired_external_owners_for_test();
         assert!(retained.upgrade().is_none());
 
         for build in [
@@ -1001,7 +1001,7 @@ mod tests {
             let state = build(value);
             assert!(retained.upgrade().is_some());
             drop(state);
-            domain.drain_retired_external_owners_for_test();
+            domain.collect_and_drain_retired_external_owners_for_test();
             assert!(retained.upgrade().is_none());
         }
 
@@ -1012,7 +1012,7 @@ mod tests {
         };
         assert!(retained.upgrade().is_some());
         drop(read);
-        domain.drain_retired_external_owners_for_test();
+        domain.collect_and_drain_retired_external_owners_for_test();
         assert!(retained.upgrade().is_none());
     }
 
@@ -1215,7 +1215,7 @@ mod tests {
         );
 
         drop(opaque);
-        values.drain_external_owners_for_test();
+        values.collect_and_drain_external_owners_for_test();
         assert!(
             status_weak.upgrade().is_none(),
             "dropping the final opaque handle must release the final query lease"

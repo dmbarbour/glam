@@ -367,6 +367,9 @@ fn every_real_value_variant_has_passive_managed_destruction() {
     let managed_drops = Arc::new(AtomicUsize::new(0));
     let active_drops = Arc::new(AtomicUsize::new(0));
     let variants = closed_compatibility_variants(&values, &active_drops);
+    let baseline = values
+        .collect_managed_for_test()
+        .expect("canonical roots should collect before the compatibility fixture");
 
     let roots = values.with_managed_values(|scope| {
         let allocator = scope
@@ -383,7 +386,7 @@ fn every_real_value_variant_has_passive_managed_destruction() {
     let live = values
         .collect_managed_for_test()
         .expect("rooted closed compatibility values should survive collection");
-    assert_eq!(live.marked_slots(), roots.len());
+    assert_eq!(live.marked_slots(), baseline.marked_slots() + roots.len());
     assert_eq!(managed_drops.load(Ordering::Relaxed), 0);
     assert_eq!(active_drops.load(Ordering::Relaxed), 0);
     values.with_managed_values(|scope| {

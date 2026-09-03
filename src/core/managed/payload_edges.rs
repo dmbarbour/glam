@@ -44,7 +44,12 @@ fn visit_failure_result(result: &LazyResult, visit: &mut dyn FnMut(&Value)) {
 
 fn visit_promise_assignment(assignment: &PromiseAssignment, visit: &mut dyn FnMut(&Value)) {
     match assignment {
-        Ok(value) => visit(value.as_core()),
+        Ok(value) => {
+            let value = value
+                .clone_core_in_own_domain()
+                .expect("compatibility promise edges are visited only in their live domain");
+            visit(&value);
+        }
         Err(failure) => failure.visit_compatibility_value_edges(visit),
     }
 }

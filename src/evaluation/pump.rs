@@ -480,8 +480,8 @@ fn release_deferred_task(
         EvaluationMachinePoll::Cancelled => (
             DeferredWorkPoll::Terminal,
             Some(EvaluationWaitTerminal::Failed(
-                RuntimeFailureRoot::from_runtime(
-                    coordinator.runtime_id(),
+                RuntimeFailureRoot::from_observer(
+                    &coordinator.value_observer(),
                     Arc::new(EvaluationFailure::message(
                         "deferred evaluation task was cancelled",
                     )),
@@ -550,6 +550,10 @@ fn poison_lazy_cycle(
             .collect(),
     });
     let failure = Arc::new(EvaluationFailure::dependency_cycle(cycle));
+    let values = coordinator
+        .value_observer()
+        .upgrade()
+        .expect("lazy-cycle publication requires its live value domain");
     // Make the shared failure authoritative in every lazy before any
     // producer wait wakes. The already-batched `Terminalizing` transition
     // prevents another worker from reclaiming a cycle member meanwhile.
@@ -557,8 +561,8 @@ fn poison_lazy_cycle(
         .iter()
         .map(|member| {
             let terminal = match member.lazy.cache(Err(failure.clone())) {
-                Err(error) => EvaluationWaitTerminal::Failed(RuntimeFailureRoot::from_runtime(
-                    member.wait.runtime_id(),
+                Err(error) => EvaluationWaitTerminal::Failed(RuntimeFailureRoot::from_observer(
+                    member.wait.value_observer(),
                     error,
                 )),
                 Ok(value) => {
@@ -566,8 +570,8 @@ fn poison_lazy_cycle(
                         false,
                         "a successful concurrent lazy result contradicts a strict dependency cycle"
                     );
-                    EvaluationWaitTerminal::Complete(RuntimeValueRoot::from_runtime(
-                        member.wait.runtime_id(),
+                    EvaluationWaitTerminal::Complete(RuntimeValueRoot::new(
+                        &values,
                         value.into_value(),
                     ))
                 }

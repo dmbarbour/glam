@@ -1331,8 +1331,8 @@ impl EvaluationWorkCoordinator {
                 let (_, wake) = obligation.wait.publish_terminal_guarded(
                     self,
                     &mutation,
-                    EvaluationWaitTerminal::Failed(RuntimeFailureRoot::from_runtime(
-                        obligation.wait.runtime_id(),
+                    EvaluationWaitTerminal::Failed(RuntimeFailureRoot::from_observer(
+                        obligation.wait.value_observer(),
                         promise_failure.clone(),
                     )),
                 );

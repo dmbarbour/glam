@@ -290,7 +290,7 @@ pub(crate) type RuntimeFailureLedger = RedBlackTreeMapSync<EvaluationSessionId, 
 
 struct EvaluationWaitState {
     id: NonZeroU64,
-    runtime: EvaluationRuntimeId,
+    values: crate::core::RuntimeValueObserver,
     owner_id: EvaluationSessionId,
     producer: EvaluationTaskId,
     terminal: OnceLock<EvaluationWaitTerminal>,
@@ -313,14 +313,14 @@ pub(crate) struct EvaluationWaitToken(Arc<EvaluationWaitState>);
 impl EvaluationWaitToken {
     pub(crate) fn new(
         id: NonZeroU64,
-        runtime: EvaluationRuntimeId,
+        values: &crate::core::CoreValueFactory,
         owner_id: EvaluationSessionId,
         producer: EvaluationTaskId,
         completion: CompletionSubscriptions,
     ) -> Self {
         Self(Arc::new(EvaluationWaitState {
             id,
-            runtime,
+            values: values.runtime_value_observer(),
             owner_id,
             producer,
             terminal: OnceLock::new(),
@@ -337,7 +337,11 @@ impl EvaluationWaitToken {
     }
 
     pub(crate) fn runtime_id(&self) -> EvaluationRuntimeId {
-        self.0.runtime
+        self.0.values.runtime_id()
+    }
+
+    pub(crate) fn value_observer(&self) -> &crate::core::RuntimeValueObserver {
+        &self.0.values
     }
 
     pub(crate) fn producer(&self) -> EvaluationTaskId {
@@ -579,8 +583,8 @@ impl LocalPromiseOwner {
                 obligation
                     .wait
                     .publish_terminal(EvaluationWaitTerminal::Failed(
-                        RuntimeFailureRoot::from_runtime(
-                            obligation.wait.runtime_id(),
+                        RuntimeFailureRoot::from_observer(
+                            obligation.wait.value_observer(),
                             failure.clone(),
                         ),
                     ));
@@ -666,7 +670,7 @@ impl PromiseProducerObligation {
             panic!("a task-local promise cannot publish through a coordinator guard");
         };
         coordinator.complete_task_promise_guarded(mutation, work, &self.wait, promise);
-        let terminal = promise_assignment_terminal(self.wait.runtime_id(), assignment);
+        let terminal = promise_assignment_terminal(&self.wait, assignment);
         let (_, wake) = self
             .wait
             .publish_terminal_guarded(coordinator, mutation, terminal);
@@ -682,24 +686,25 @@ impl PromiseProducerObligation {
         {
             owner.complete(*promise, &self.wait);
         }
-        let terminal = promise_assignment_terminal(self.wait.runtime_id(), assignment);
+        let terminal = promise_assignment_terminal(&self.wait, assignment);
         self.wait.publish_terminal(terminal);
         PromiseProducerPublication::Detached(self.wait.clone())
     }
 }
 
 fn promise_assignment_terminal(
-    runtime: EvaluationRuntimeId,
+    wait: &EvaluationWaitToken,
     assignment: &PromiseAssignment,
 ) -> EvaluationWaitTerminal {
     match assignment {
         Ok(value) => {
-            debug_assert_eq!(value.runtime_id(), runtime);
+            debug_assert_eq!(value.runtime_id(), wait.runtime_id());
             EvaluationWaitTerminal::Complete(value.clone())
         }
-        Err(error) => {
-            EvaluationWaitTerminal::Failed(RuntimeFailureRoot::from_runtime(runtime, error.clone()))
-        }
+        Err(error) => EvaluationWaitTerminal::Failed(RuntimeFailureRoot::from_observer(
+            wait.value_observer(),
+            error.clone(),
+        )),
     }
 }
 

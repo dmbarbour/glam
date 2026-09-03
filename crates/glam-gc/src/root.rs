@@ -62,6 +62,15 @@ impl<T: Trace> Root<T> {
         unsafe { value.get_unchecked(mutator) }
     }
 
+    /// Returns whether two handles share the same registered root cell.
+    ///
+    /// This compares root-handle identity only. It neither compares the
+    /// managed values nor enters or retains their heap.
+    #[must_use]
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.cell, &other.cell)
+    }
+
     pub(crate) fn belongs_to(&self, heap: &Arc<HeapInner>) -> bool {
         // `Weak` retains its allocation's control block, so a dead heap's
         // address cannot be recycled while this root can still be compared.

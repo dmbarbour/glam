@@ -295,6 +295,9 @@ mod tests {
     #[test]
     fn persistent_adapter_cycle_reclaims_in_isolated_heap() {
         let values = isolated_values();
+        let baseline = values
+            .collect_managed_for_test()
+            .expect("canonical roots should collect before the persistent fixture");
         let drops = Arc::new(AtomicUsize::new(0));
         let root = values.with_managed_values(|scope| {
             let allocator = scope
@@ -341,7 +344,7 @@ mod tests {
         let live = values
             .collect_managed_for_test()
             .expect("the rooted persistent cycle should collect");
-        assert_eq!(live.marked_slots(), 2);
+        assert_eq!(live.marked_slots(), baseline.marked_slots() + 2);
         assert_eq!(drops.load(Ordering::Relaxed), 0);
 
         drop(root);

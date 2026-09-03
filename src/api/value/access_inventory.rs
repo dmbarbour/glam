@@ -1,8 +1,8 @@
-//! Phase I2C inventory of the production compatibility value boundary.
+//! Inventory of the remaining production value-root construction boundary.
 //!
-//! The production facade still exposes bare-core conversion internally. This
-//! test prevents that temporary surface from growing or moving unnoticed while
-//! I3, I4F.1, and I4F.2 replace it with scoped access and managed roots.
+//! I4F.2d removed borrowed and consuming bare-core projections. This latch
+//! keeps those counts at zero and records every remaining root-construction
+//! site until I4F.2f converts it into the final forbidden-escape inventory.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -84,7 +84,7 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/api/value.rs",
-        [2, 1, 0, 0, 1, 0],
+        [0, 0, 0, 0, 1, 0],
         "constructors, composite validation, observers, extraction, and net data",
         "I3B.1 scoped construction/extraction; I4F.2 public facade switch"
     ),
@@ -96,15 +96,9 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/core.rs",
-        [8, 1, 0, 0, 4, 2],
-        "post-domain canonical-root initialization, test-only validation, compatibility promise ownership recovery, and externalized reflection effect/target roots",
+        [0, 0, 0, 0, 6, 0],
+        "post-domain canonical-root initialization, promise publication, and externalized reflection effect/target roots",
         "I4F.2d.0 canonical initialization; I4F.2a.1c fixture closure; I4F.2b.2 reflection ownership; I5 managed promise assignment"
-    ),
-    entry!(
-        "src/core/managed/payload_edges.rs",
-        [1, 0, 0, 0, 0, 0],
-        "I4C exact compatibility projection of an assigned promise root",
-        "I5 managed promise assignment visitor; I4F.2 public facade switch"
     ),
     entry!(
         "src/evaluation/access.rs",
@@ -120,7 +114,7 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/evaluation/pump.rs",
-        [0, 0, 0, 0, 0, 1],
+        [0, 0, 0, 0, 1, 0],
         "centralized client/spark evaluation and exceptional lazy-cycle publication",
         "I3A.3/I3B.1b/I3B.2/I3C.2 scoped polling; I4F.1 outcomes"
     ),
@@ -161,14 +155,8 @@ const INVENTORY: &[InventoryEntry] = &[
         "I3D.2/I3D.4 interpreter phases; I4F.1d.3 complete machine roots and bounded raw values; I4F.2a compatibility-access retirement"
     ),
     entry!(
-        "src/reflection/protocol.rs",
-        [1, 0, 0, 0, 0, 0],
-        "structured API-error conversion pending the managed diagnostic/failure boundary",
-        "I6C managed failure shell"
-    ),
-    entry!(
         "src/runtime.rs",
-        [0, 0, 0, 0, 0, 1],
+        [0, 0, 0, 0, 1, 0],
         "shallow direct-value rooting for one runtime failure root",
         "I4F.1c.1 failure-root boundary; I6C managed failure shell"
     ),

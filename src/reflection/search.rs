@@ -272,16 +272,15 @@ impl<S: TaskSpecialization> IsolatedEffectSearch<S> {
         host: Arc<S::Host>,
         context: EvalContext,
     ) -> Result<Self, TaskHalt> {
-        let runtime = context.values().runtime_id();
         let values = Values::from_core_factory(context.values().clone());
         let effect = values.clone_core(effect)?;
         EffectTask::new_isolated_in_context(effect, specialization, host, context)
             .map(|task| Self { task, _owner: None })
-            .map_err(|error| error.root_for_runtime(runtime))
+            .map_err(|error| error.root_for_values(values.core()))
     }
 
     fn root_poll_error(&self, error: TaskHalt) -> TaskHalt {
-        error.root_for_runtime(self.task.eval_context.values().runtime_id())
+        error.root_for_values(self.task.eval_context.values())
     }
 
     pub fn poll(&mut self, step_budget: usize) -> IsolatedSearchPoll<S> {
@@ -458,7 +457,7 @@ mod tests {
         assert!(retained_environment.upgrade().is_some());
         assert!(retained_extra.upgrade().is_some());
         drop(host);
-        domain.drain_retired_external_owners_for_test();
+        domain.collect_and_drain_retired_external_owners_for_test();
         assert!(retained_environment.upgrade().is_none());
         assert!(retained_extra.upgrade().is_none());
 
@@ -471,7 +470,7 @@ mod tests {
         assert!(retained_snapshot.upgrade().is_some());
         assert!(retained_journal.upgrade().is_some());
         drop(branch);
-        domain.drain_retired_external_owners_for_test();
+        domain.collect_and_drain_retired_external_owners_for_test();
         assert!(retained_result.upgrade().is_none());
         assert!(retained_snapshot.upgrade().is_none());
         assert!(retained_journal.upgrade().is_none());
@@ -482,7 +481,7 @@ mod tests {
         assert!(retained_snapshot.upgrade().is_some());
         assert!(retained_journal.upgrade().is_some());
         drop(branch);
-        domain.drain_retired_external_owners_for_test();
+        domain.collect_and_drain_retired_external_owners_for_test();
         assert!(retained_snapshot.upgrade().is_none());
         assert!(retained_journal.upgrade().is_none());
     }
@@ -504,14 +503,14 @@ mod tests {
                 .expect("all-results policy should select its left branch"),
         );
         policy.retain(result);
-        domain.drain_retired_external_owners_for_test();
+        domain.collect_and_drain_retired_external_owners_for_test();
         assert!(retained_left.upgrade().is_none());
         assert!(retained_right.upgrade().is_some());
         assert!(retained_result.upgrade().is_some());
         assert!(retained_root.upgrade().is_some());
 
         policy.discard_progress();
-        domain.drain_retired_external_owners_for_test();
+        domain.collect_and_drain_retired_external_owners_for_test();
         assert!(retained_right.upgrade().is_none());
         assert!(retained_result.upgrade().is_none());
         assert!(retained_root.upgrade().is_some());
@@ -523,11 +522,11 @@ mod tests {
             .completed()
             .expect("finished search should publish its result collection");
         drop(policy);
-        domain.drain_retired_external_owners_for_test();
+        domain.collect_and_drain_retired_external_owners_for_test();
         assert!(retained_root.upgrade().is_none());
         assert!(retained_completed.upgrade().is_some());
         drop(returned);
-        domain.drain_retired_external_owners_for_test();
+        domain.collect_and_drain_retired_external_owners_for_test();
         assert!(retained_completed.upgrade().is_none());
     }
 
@@ -549,7 +548,7 @@ mod tests {
         );
         assert!(retained.upgrade().is_some());
         drop(block);
-        domain.drain_retired_external_owners_for_test();
+        domain.collect_and_drain_retired_external_owners_for_test();
         assert!(retained.upgrade().is_none());
     }
 

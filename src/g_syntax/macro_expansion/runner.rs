@@ -374,7 +374,7 @@ mod owner_tests {
         assert!(retained_visited.upgrade().is_some());
         assert!(retained_output.upgrade().is_some());
         drop(run);
-        domain.drain_retired_external_owners_for_test();
+        domain.collect_and_drain_retired_external_owners_for_test();
         assert!(retained_visited.upgrade().is_none());
         assert!(retained_output.upgrade().is_none());
 
@@ -386,7 +386,7 @@ mod owner_tests {
         };
         assert!(retained_case.upgrade().is_some());
         drop(failure);
-        domain.drain_retired_external_owners_for_test();
+        domain.collect_and_drain_retired_external_owners_for_test();
         assert!(retained_case.upgrade().is_none());
     }
 }

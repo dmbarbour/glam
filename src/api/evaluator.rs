@@ -44,16 +44,16 @@ impl ReflectionInspector<'_> {
     /// lazy and promised values compare by their current identities, while
     /// immediate containers compare their currently retained structure.
     pub fn same_representation(&self, left: &Value, right: &Value) -> Result<bool, Error> {
-        self.assembler
-            .values()
-            .with_access(|values| Ok(values.core_value(left)? == values.core_value(right)?))
+        self.assembler.values().with_access(|values| {
+            values.with_core(left, |left| values.with_core(right, |right| left == right))?
+        })
     }
 
     /// Reports the current outer runtime representation without demanding it.
     pub fn kind(&self, value: &Value) -> Result<ValueKind, Error> {
         self.assembler
             .values()
-            .with_access(|values| Ok(ValueKind::from_core(values.core_value(value)?)))
+            .with_access(|values| values.with_core(value, ValueKind::from_core))
     }
 
     /// Returns a sealed carrier's associated metadata without evaluating it.

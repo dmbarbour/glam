@@ -9,7 +9,7 @@ use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use crate::core::{CoreValueFactory, EvaluationFailure, Value};
+use crate::core::{CoreValueFactory, EvaluationFailure, PreparedRuntimeValueRoot, Value};
 
 static NEXT_EVALUATION_RUNTIME_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -198,49 +198,73 @@ impl RuntimeActivityState {
 /// Runtime-owned records retain this wrapper rather than a bare core value so
 /// provenance cannot be lost when a value crosses a wait, task, cache, or
 /// host-event storage boundary.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone)]
 pub(crate) struct RuntimeValueRoot {
-    runtime: EvaluationRuntimeId,
-    value: Value,
+    value: PreparedRuntimeValueRoot,
 }
 
 impl RuntimeValueRoot {
     pub(crate) fn new(values: &CoreValueFactory, value: Value) -> Self {
         Self {
-            runtime: values.runtime_id(),
-            value,
+            value: PreparedRuntimeValueRoot::prepare(values, value),
         }
     }
 
-    pub(crate) fn from_runtime(runtime: EvaluationRuntimeId, value: Value) -> Self {
-        Self { runtime, value }
+    pub(crate) fn runtime_id(&self) -> EvaluationRuntimeId {
+        self.value.runtime_id()
     }
 
-    pub(crate) fn runtime_id(&self) -> EvaluationRuntimeId {
-        self.runtime
+    pub(crate) fn value_observer(&self) -> crate::core::RuntimeValueObserver {
+        self.value.observer().clone()
     }
 
     /// Clones the compatibility core representation under matching admitted
     /// value-domain authority.
     ///
-    /// The returned owned value may outlive the access region only until the
-    /// I4F.2 production-root switch; the authority argument prevents an
-    /// unqualified root projection from becoming another compatibility API.
+    /// This remains a transitional bridge for bounded evaluator/compiler
+    /// regions while I5-I8 migrate recursive payloads. Durable storage must
+    /// retain this root rather than the returned compatibility shell.
     pub(crate) fn clone_core_with(&self, access: &crate::core::RuntimeValueAccess<'_>) -> Value {
-        assert_eq!(
-            self.runtime,
-            access.runtime_id(),
-            "runtime root and managed access must share one value domain"
-        );
-        self.value.clone()
+        self.with_core(access, Clone::clone)
+            .expect("runtime root and managed access must share one value domain")
     }
 
-    pub(crate) fn as_core(&self) -> &Value {
-        &self.value
+    pub(crate) fn with_core<R>(
+        &self,
+        access: &crate::core::RuntimeValueAccess<'_>,
+        operation: impl FnOnce(&Value) -> R,
+    ) -> Option<R> {
+        self.value.with_value(access, operation)
     }
 
-    pub(crate) fn into_core(self) -> Value {
-        self.value
+    /// Reopens this root's weak domain solely for transitional owner-local
+    /// recovery where no caller-supplied access region exists yet.
+    ///
+    /// I4F.2f removes compatibility edge walkers; I5/I6 replace the remaining
+    /// promise and failure uses with exact managed edges.
+    pub(crate) fn clone_core_in_own_domain(&self) -> Option<Value> {
+        let values = self.value.observer().upgrade()?;
+        Some(values.with_runtime_value_access(|access| self.clone_core_with(&access)))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn clone_core_for_test(&self) -> Value {
+        self.clone_core_in_own_domain()
+            .expect("test root observation requires its live value domain")
+    }
+}
+
+impl PartialEq for RuntimeValueRoot {
+    fn eq(&self, other: &Self) -> bool {
+        self.value.same_representation(&other.value)
+    }
+}
+
+impl Eq for RuntimeValueRoot {}
+
+impl fmt::Debug for RuntimeValueRoot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("RuntimeValueRoot")
     }
 }
 
@@ -251,12 +275,20 @@ impl RuntimeValueRoot {
 /// identity. The parallel roots are deliberately shallow: recursive edges are
 /// owned by the root for each direct emission or context value. I6C replaces
 /// this compatibility shell after the core failure family becomes managed.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub(crate) struct RuntimeFailureRoot(Arc<RuntimeFailureRootInner>);
 
-#[derive(Debug, PartialEq, Eq)]
+impl PartialEq for RuntimeFailureRoot {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for RuntimeFailureRoot {}
+
+#[derive(Debug)]
 struct RuntimeFailureRootInner {
-    runtime: EvaluationRuntimeId,
+    values: crate::core::RuntimeValueObserver,
     failure: Arc<EvaluationFailure>,
     #[allow(
         dead_code,
@@ -267,39 +299,41 @@ struct RuntimeFailureRootInner {
 
 impl RuntimeFailureRoot {
     pub(crate) fn new(values: &CoreValueFactory, failure: Arc<EvaluationFailure>) -> Self {
-        let value_roots = Self::root_direct_values(values.runtime_id(), &failure);
+        let value_roots = Self::root_direct_values(values, &failure);
         Self(Arc::new(RuntimeFailureRootInner {
-            runtime: values.runtime_id(),
+            values: values.runtime_value_observer(),
             failure,
             value_roots,
         }))
     }
 
-    pub(crate) fn from_runtime(
-        runtime: EvaluationRuntimeId,
+    pub(crate) fn from_observer(
+        observer: &crate::core::RuntimeValueObserver,
         failure: Arc<EvaluationFailure>,
     ) -> Self {
-        let value_roots = Self::root_direct_values(runtime, &failure);
-        Self(Arc::new(RuntimeFailureRootInner {
-            runtime,
-            failure,
-            value_roots,
-        }))
+        let values = observer
+            .upgrade()
+            .expect("failure publication requires its live value domain");
+        Self::new(&values, failure)
     }
 
     fn root_direct_values(
-        runtime: EvaluationRuntimeId,
+        values: &CoreValueFactory,
         failure: &EvaluationFailure,
     ) -> Box<[RuntimeValueRoot]> {
         let mut value_roots = Vec::new();
         failure.visit_direct_values(&mut |value| {
-            value_roots.push(RuntimeValueRoot::from_runtime(runtime, value.clone()));
+            value_roots.push(RuntimeValueRoot::new(values, value.clone()));
         });
         value_roots.into_boxed_slice()
     }
 
     pub(crate) fn runtime_id(&self) -> EvaluationRuntimeId {
-        self.0.runtime
+        self.0.values.runtime_id()
+    }
+
+    pub(crate) fn value_observer(&self) -> &crate::core::RuntimeValueObserver {
+        &self.0.values
     }
 
     pub(crate) fn as_failure(&self) -> &Arc<EvaluationFailure> {
@@ -482,7 +516,7 @@ mod tests {
         assert!(
             root.direct_value_roots()
                 .iter()
-                .all(|value| value.value == repeated)
+                .all(|value| value.clone_core_for_test() == repeated)
         );
         assert!(Arc::ptr_eq(&root.clone().into_failure(), &failure));
         assert_eq!(
@@ -497,7 +531,7 @@ mod tests {
         let values = test_value_factory();
         let failure = Arc::new(EvaluationFailure::message("known runtime failure"));
 
-        let root = RuntimeFailureRoot::from_runtime(values.runtime_id(), failure.clone());
+        let root = RuntimeFailureRoot::new(&values, failure.clone());
 
         assert_eq!(root.runtime_id(), values.runtime_id());
         assert!(Arc::ptr_eq(root.as_failure(), &failure));
@@ -526,7 +560,7 @@ mod tests {
         let root = RuntimeFailureRoot::new(&values, failure);
 
         assert_eq!(root.direct_value_roots().len(), 1);
-        assert_eq!(root.direct_value_roots()[0].value, lazy);
+        assert_eq!(root.direct_value_roots()[0].clone_core_for_test(), lazy);
         assert!(!forced.load(Ordering::Acquire));
     }
 }

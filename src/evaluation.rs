@@ -77,7 +77,7 @@ fn allocate_wait_token(
     let id = session.values.ids().evaluation_wait()?;
     Ok(EvaluationWaitToken::new(
         id,
-        session.values.runtime_id(),
+        &session.values,
         session.id,
         producer,
         CompletionSubscriptions::for_wait(

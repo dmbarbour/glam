@@ -479,8 +479,8 @@ impl EvaluationWorkCoordinator {
                             claimed.id,
                             claimed.operation.take(),
                             claimed.prior_subscription.take(),
-                            ClientDemandResult::Failed(RuntimeFailureRoot::from_runtime(
-                                self.runtime,
+                            ClientDemandResult::Failed(RuntimeFailureRoot::from_observer(
+                                &self.values,
                                 Arc::new(crate::core::EvaluationFailure::message(
                                     "client demand blocked on another evaluation runtime",
                                 )),
@@ -675,7 +675,10 @@ impl EvaluationWorkCoordinator {
                 id,
                 None,
                 None,
-                ClientDemandResult::Killed(RuntimeFailureRoot::from_runtime(self.runtime, failure)),
+                ClientDemandResult::Killed(RuntimeFailureRoot::from_observer(
+                    &self.values,
+                    failure,
+                )),
             );
             state.work_generation = state.work_generation.wrapping_add(1);
             retirement

@@ -13,9 +13,49 @@ use crate::reflection::RuntimeInputSequence;
 use super::{FailedReasoningTask, assert_unclaimed_lazy, public_value};
 
 fn same_representation(runtime: &EvaluationRuntime, left: &Value, right: &Value) -> bool {
-    runtime
-        .values()
-        .with_access(|values| values.core_value(left).unwrap() == values.core_value(right).unwrap())
+    runtime.values().with_access(|values| {
+        let left = values.clone_core(left).unwrap();
+        let right = values.clone_core(right).unwrap();
+        left == right
+    })
+}
+
+#[test]
+fn public_values_use_inline_or_shared_registered_roots() {
+    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+    let core = runtime.values().core().clone();
+    let baseline = core
+        .collect_managed_for_test()
+        .expect("canonical roots should collect before the public-value fixture");
+
+    let inline = runtime.values().integer(42);
+    let after_inline = core
+        .collect_managed_for_test()
+        .expect("an inline public value should not add a managed root");
+    assert_eq!(after_inline.root_entries(), baseline.root_entries());
+    assert_eq!(after_inline.marked_slots(), baseline.marked_slots());
+    drop(inline);
+
+    let managed = runtime.values().empty_dict();
+    let alias = managed.clone();
+    let after_clone = core
+        .collect_managed_for_test()
+        .expect("a managed public value should survive collection");
+    assert_eq!(after_clone.root_entries(), baseline.root_entries() + 1);
+    assert_eq!(after_clone.marked_slots(), baseline.marked_slots() + 1);
+
+    drop(managed);
+    let after_one_drop = core
+        .collect_managed_for_test()
+        .expect("a public clone should retain the shared root cell");
+    assert_eq!(after_one_drop.root_entries(), baseline.root_entries() + 1);
+
+    drop(alias);
+    let reclaimed = core
+        .collect_managed_for_test()
+        .expect("dropping the last public clone should permit reclamation");
+    assert_eq!(reclaimed.root_entries(), baseline.root_entries());
+    assert_eq!(reclaimed.finalized_slots(), 1);
 }
 
 fn value_i64(runtime: &EvaluationRuntime, value: &Value) -> Option<i64> {
@@ -226,7 +266,7 @@ fn consumed_runtime_input_retires_its_root_after_commit_and_result_drop() {
     drop(store);
     assert!(retained.upgrade().is_some());
     drop(consumed);
-    domain.drain_retired_external_owners_for_test();
+    domain.collect_and_drain_retired_external_owners_for_test();
     assert!(retained.upgrade().is_none());
 }
 
@@ -1615,7 +1655,7 @@ fn output_payload_is_retained_through_callback_and_dropped_after_locks() {
     let endpoint = runtime
         .output_endpoint(
             |value| {
-                assert!(matches!(value.as_core(), CoreValue::Opaque(_)));
+                assert!(matches!(value.clone_core_for_test(), CoreValue::Opaque(_)));
                 Ok(())
             },
             move |()| {
@@ -1646,7 +1686,13 @@ fn output_payload_is_retained_through_callback_and_dropped_after_locks() {
     // locks, but opaque payload destruction is deliberately deferred to a
     // known-safe external-owner drain.
     assert!(retained.upgrade().is_some());
-    assert_eq!(runtime.values().core().drain_external_owners_for_test(), 1);
+    assert_eq!(
+        runtime
+            .values()
+            .core()
+            .collect_and_drain_external_owners_for_test(),
+        1
+    );
     assert!(retained.upgrade().is_none());
     assert!(dropped.load(Ordering::Acquire));
 }

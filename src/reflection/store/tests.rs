@@ -39,10 +39,12 @@ fn builtin(store: &ReflectionStore, value: Builtin) -> PublicValue {
 
 fn assert_list_values(assembler: &Assembler, actual: &PublicValue, expected: &PublicValue) {
     let actual = assembler.evaluate(actual).unwrap();
-    let Value::List(actual) = actual.as_core() else {
+    let actual = actual.clone_core_for_test();
+    let Value::List(actual) = &actual else {
         panic!("actual value should be a list")
     };
-    let Value::List(expected) = expected.as_core() else {
+    let expected = expected.clone_core_for_test();
+    let Value::List(expected) = &expected else {
         panic!("expected value should be a list")
     };
     assert_eq!(
@@ -197,6 +199,7 @@ fn unforced_store_value(
 #[test]
 fn snapshot_journal_edits_and_protected_volumes_retain_roots_without_forcing() {
     let mut store = store();
+    let collector = store.values.clone();
     let (heap_root, heap_retained, heap_forced) =
         unforced_store_value(&store.values, "snapshot heap root");
     let (volume_root, volume_retained, volume_forced) =
@@ -234,6 +237,7 @@ fn snapshot_journal_edits_and_protected_volumes_retain_roots_without_forcing() {
     }
 
     drop(journal);
+    collector.collect_and_drain_external_owners_for_test();
     assert!(heap_retained.upgrade().is_none());
     assert!(volume_retained.upgrade().is_none());
     assert!(edit_retained.upgrade().is_none());
@@ -268,6 +272,9 @@ fn query_result_remains_rooted_after_store_and_handle_retirement() {
     assert_eq!(result.runtime_id(), assembler.values().runtime_id());
 
     drop(result);
+    assembler
+        .core_values()
+        .collect_and_drain_external_owners_for_test();
     assert!(retained.upgrade().is_none());
 }
 
@@ -324,7 +331,7 @@ fn query_state_is_transactional_and_retired_after_the_last_handle() {
     assert_eq!(store.try_commit(&maintenance), StoreCommitResult::Committed);
     let root = store.roots.get(&store.runtime_volume).unwrap();
     let retired = crate::api::Values::from_core_factory(store.values.clone()).wrap(
-        lazy_core_value_path(&store.values, root.as_core().clone(), &query_path(id)),
+        lazy_core_value_path(&store.values, root.clone_core_for_test(), &query_path(id)),
     );
     let retired = assembler.evaluate(&retired).unwrap();
     assert!(

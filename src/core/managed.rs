@@ -258,6 +258,7 @@ pub(crate) unsafe trait OpaquePayloadFamily: Any + Send + Sync {
 mod external_owners;
 pub(crate) use external_owners::{ExternalOwnerHandle, ExternalOwnerRegistry};
 mod value_node;
+pub(crate) use value_node::PreparedRuntimeValueRoot;
 
 // SAFETY: this is the existing scalar collector-access probe. It has no
 // managed edge, no drop glue, and no active capability. Production value
@@ -312,6 +313,15 @@ pub(crate) struct RuntimeValueAccess<'scope> {
 pub(crate) struct RuntimeValueObserver {
     runtime: EvaluationRuntimeId,
     domain: Weak<RuntimeValueDomain>,
+}
+
+impl std::fmt::Debug for RuntimeValueObserver {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RuntimeValueObserver")
+            .field("runtime", &self.runtime)
+            .finish_non_exhaustive()
+    }
 }
 
 /// One type's allocation path borrowed from a factory allocation scope.
@@ -819,6 +829,9 @@ mod tests {
     #[test]
     fn managed_drop_has_no_runtime_or_heap_capability() {
         let values = values();
+        let baseline = values
+            .collect_managed_for_test()
+            .expect("canonical roots should collect before the drop fixture");
         let direct_drops = Arc::new(AtomicUsize::new(0));
         let resource_drops = Arc::new(AtomicUsize::new(0));
         let root = allocate_fixture(&values, &direct_drops, &resource_drops);
@@ -829,7 +842,7 @@ mod tests {
         let live = values
             .collect_managed_for_test()
             .expect("the rooted fixture should survive collection");
-        assert_eq!(live.marked_slots(), 1);
+        assert_eq!(live.marked_slots(), baseline.marked_slots() + 1);
         assert_eq!(direct_drops.load(Ordering::Relaxed), 0);
         assert_eq!(resource_drops.load(Ordering::Relaxed), 0);
 

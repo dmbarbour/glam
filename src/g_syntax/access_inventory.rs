@@ -69,7 +69,7 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/g_syntax.rs",
-        [6, 0, 0, 0],
+        [5, 0, 0, 0],
         "rooted compiler diagnostics and lowered definitions across publication"
     ),
     entry!(

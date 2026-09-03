@@ -333,6 +333,9 @@ mod tests {
     #[test]
     fn poll_context_opens_two_scopes_around_a_mutator_free_callback() {
         let values = value_factory();
+        let baseline = values
+            .collect_managed_for_test()
+            .expect("canonical roots should collect before the access fixture");
         let context = EvalContext::isolated(values.clone());
         let poll = EvaluationPollContext::for_context(&context);
         let evaluator = poll.evaluator(&context);
@@ -357,7 +360,7 @@ mod tests {
                 .expect("the callback must run without an active mutator")
         });
         assert!(callback_ran);
-        assert_eq!(callback_result.root_entries(), 0);
+        assert_eq!(callback_result.root_entries(), baseline.root_entries());
 
         let second = evaluator.with_value_access(|access| {
             assert!(matches!(

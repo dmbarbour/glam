@@ -227,15 +227,15 @@ where
             )))
     }
 
-    /// Runs the runtime's deferred external-owner retirement at an explicit
-    /// safe point in ownership tests.
-    ///
-    /// Effect-token payload destruction is deliberately not coupled to the
-    /// last token-handle drop: the opaque token is an external owner whose
-    /// destructor may not run in an arbitrary evaluator or mutator scope.
+    /// Collects unreachable managed value shells before draining any external
+    /// owners retired by their destruction. Compatibility shells can reveal
+    /// another layer of roots while being destroyed, so the fixture helper
+    /// repeats until both managed finalization and external retirement settle.
     #[cfg(test)]
-    pub(crate) fn drain_retired_external_owners_for_test(&self) -> usize {
-        self.values.core().drain_external_owners_for_test()
+    pub(crate) fn collect_and_drain_retired_external_owners_for_test(&self) -> usize {
+        self.values
+            .core()
+            .collect_and_drain_external_owners_for_test()
     }
 
     /// Resolves a token only when it was issued by this exact domain.
@@ -415,7 +415,8 @@ impl Values {
         self.with_access(|values| {
             let mut dict = Dict::new_sync();
             for (key, value) in entries {
-                let key = Key::from_value(values.core_value(&key)?)
+                let key = values
+                    .with_core(&key, Key::from_value)?
                     .ok_or_else(|| Error::new("dictionary key is not immediately keyable"))?;
                 dict = dict.insert(key, values.clone_core(&value)?);
             }
@@ -519,8 +520,10 @@ impl Values {
     /// Constructs `anno 'array Value` without demanding `Value`.
     pub fn anno_array(&self, value: Value) -> Result<Value, Error> {
         self.with_access(|values| {
-            if matches!(values.core_value(&value)?, CoreValue::List(list) if list.value_slice().is_some())
-            {
+            if values.with_core(
+                &value,
+                |value| matches!(value, CoreValue::List(list) if list.value_slice().is_some()),
+            )? {
                 return Ok(value);
             }
             let annotation = values.atom_from_text("array");
@@ -664,16 +667,20 @@ impl ScopedValues<'_> {
         self.owner.require(value)
     }
 
-    pub(super) fn core_value<'access>(
-        &'access self,
-        value: &'access Value,
-    ) -> Result<&'access CoreValue, Error> {
+    pub(super) fn with_core<R>(
+        &self,
+        value: &Value,
+        operation: impl FnOnce(&CoreValue) -> R,
+    ) -> Result<R, Error> {
         self.require(value)?;
-        Ok(value.as_core())
+        value
+            .0
+            .with_core(&self.access, operation)
+            .ok_or_else(|| Error::new("value belongs to another value domain"))
     }
 
-    fn clone_core(&self, value: &Value) -> Result<CoreValue, Error> {
-        self.core_value(value).cloned()
+    pub(super) fn clone_core(&self, value: &Value) -> Result<CoreValue, Error> {
+        self.with_core(value, Clone::clone)
     }
 
     fn atom_from_text(&self, text: &str) -> Value {
@@ -741,23 +748,26 @@ impl Value {
         Self(value)
     }
 
-    // Compatibility projection retained for the scoped `Values` adapter and
-    // the structured `ApiError` conversion assigned to I6C. The production
-    // access inventory prevents new call sites while those representations
-    // remain unmanaged.
-    pub(crate) fn as_core(&self) -> &CoreValue {
-        self.0.as_core()
+    pub(crate) fn clone_core_in_own_domain(&self) -> Result<CoreValue, Error> {
+        self.0.clone_core_in_own_domain().ok_or_else(|| {
+            Error::new(format!(
+                "evaluation runtime {} is no longer available for value observation",
+                self.runtime_id().get()
+            ))
+        })
     }
 
-    // I5 replaces this compatibility ownership recovery when promise
-    // assignments become managed. Keep it private to the affine resolver so
-    // no subsystem can use it as a general owned-core escape.
-    fn into_promise_assignment_core(self) -> CoreValue {
-        self.0.into_core()
+    pub(crate) fn value_observer(&self) -> RuntimeValueObserver {
+        self.0.value_observer()
     }
 
     pub(crate) fn into_runtime_root(self) -> RuntimeValueRoot {
         self.0
+    }
+
+    #[cfg(test)]
+    pub(crate) fn clone_core_for_test(&self) -> CoreValue {
+        self.0.clone_core_for_test()
     }
 }
 
@@ -832,10 +842,7 @@ impl EvaluatedValue {
         operation: impl for<'scope> FnOnce(&'scope CoreValue) -> R,
     ) -> Result<R, Error> {
         let values = self.observation_values()?;
-        values.with_access(|access| {
-            let value = access.core_value(self.as_value())?;
-            Ok(operation(value))
-        })
+        values.with_access(|access| access.with_core(self.as_value(), operation))
     }
 
     /// Compares this evaluated outer value with another retained runtime
@@ -847,9 +854,9 @@ impl EvaluatedValue {
     pub fn same_representation(&self, other: &Value) -> Result<bool, Error> {
         let values = self.observation_values()?;
         values.with_access(|access| {
-            let left = access.core_value(self.as_value())?;
-            let right = access.core_value(other)?;
-            Ok(left == right)
+            access.with_core(self.as_value(), |left| {
+                access.with_core(other, |right| left == right)
+            })?
         })
     }
 
@@ -904,16 +911,18 @@ impl EvaluatedValue {
     pub fn array_items(&self) -> Result<Option<Vec<Value>>, Error> {
         let values = self.observation_values()?;
         values.with_access(|access| {
-            let CoreValue::List(list) = access.core_value(self.as_value())? else {
-                return Ok(None);
-            };
-            Ok(list.value_slice().map(|items| {
-                items
-                    .iter()
-                    .cloned()
-                    .map(|item| access.wrap(item))
-                    .collect()
-            }))
+            access.with_core(self.as_value(), |value| {
+                let CoreValue::List(list) = value else {
+                    return None;
+                };
+                list.value_slice().map(|items| {
+                    items
+                        .iter()
+                        .cloned()
+                        .map(|item| access.wrap(item))
+                        .collect()
+                })
+            })
         })
     }
 }
@@ -969,7 +978,7 @@ impl PromiseResolver {
             .expect("a live promise resolver must retain its promise");
         let label = promise.label().clone();
         promise
-            .set(value.into_promise_assignment_core())
+            .set_root(value.into_runtime_root())
             .map_err(|_| Error::new(format!("promise `{label}` was already completed")))?;
         Ok(())
     }
@@ -983,7 +992,7 @@ impl PromiseResolver {
             return Err(error);
         }
         resolver.fail_with(Arc::new(EvaluationFailure::emission(
-            failure.into_promise_assignment_core(),
+            failure.clone_core_in_own_domain()?,
         )))
     }
 

@@ -198,7 +198,10 @@ impl TaskSpecialization for TestEffects {
                 let [value]: [PublicValue; 1] = arguments
                     .try_into()
                     .map_err(|_| TaskHalt::new("test stderr request received the wrong arity"))?;
-                let bytes = value_bytes(context.eval_context().values(), value.as_core())?;
+                let bytes = value_bytes(
+                    context.eval_context().values(),
+                    &value.clone_core_for_test(),
+                )?;
                 if let Some(mut transaction) = context.transaction() {
                     transaction.parts().1.stderr.push(bytes);
                 } else {
@@ -502,7 +505,7 @@ impl TaskEnvironment for TestHost {
                                 )
                                 .insert(
                                     Key::atom_from_text("env"),
-                                    process_environment.as_core().clone(),
+                                    process_environment.clone_core_for_test(),
                                 ),
                         ),
                     ),
@@ -695,7 +698,7 @@ fn run_log_test(
     host: Arc<TestHost>,
 ) -> Result<TaskOutcome, TaskHalt> {
     run_composed_effect_task(EffectTask::new_owned_in_context(
-        effect.as_core().clone(),
+        effect.clone_core_for_test(),
         TestEffects,
         host,
         EvalContext::isolated(assembler.core_values()),
@@ -710,7 +713,7 @@ fn run_log_test_with_fusion(
 ) -> (Result<TaskOutcome, TaskHalt>, Arc<EffectPhaseProbe>) {
     let probe = Arc::new(EffectPhaseProbe::default());
     let mut task = EffectTask::new_owned_in_context(
-        effect.as_core().clone(),
+        effect.clone_core_for_test(),
         TestEffects,
         host,
         EvalContext::isolated(assembler.core_values()),
@@ -745,7 +748,7 @@ fn isolated_fusion_bytes(
     let owned = EvalContext::isolated(assembler.core_values());
     let (context, owner) = owned.into_parts();
     let mut task = EffectTask::new_in_context_with_policy(
-        effect.as_core().clone(),
+        effect.clone_core_for_test(),
         TestEffects,
         Arc::new(TestHost::with_values(assembler.core_values())),
         context,
@@ -772,7 +775,7 @@ fn run_reflection_test(
 ) -> Result<TaskOutcome, TaskHalt> {
     let host: Arc<dyn ReflectionHost<ReflectionEffects>> = host;
     run_composed_effect_task(EffectTask::new_owned_in_context(
-        effect.as_core().clone(),
+        effect.clone_core_for_test(),
         ReflectionEffects,
         host,
         EvalContext::isolated(assembler.core_values()),
@@ -781,7 +784,7 @@ fn run_reflection_test(
 
 fn run_standard_test(assembler: &Assembler, effect: &PublicValue) -> Result<TaskOutcome, TaskHalt> {
     run_composed_effect_task(EffectTask::new_owned_in_context(
-        effect.as_core().clone(),
+        effect.clone_core_for_test(),
         StandardEffects,
         Arc::new(TestHost::with_values(assembler.core_values())),
         EvalContext::isolated(assembler.core_values()),
@@ -794,7 +797,7 @@ fn run_standard_on(
     host: Arc<TestHost>,
 ) -> Result<TaskOutcome, TaskHalt> {
     run_composed_effect_task(EffectTask::new_owned_in_context(
-        effect.as_core().clone(),
+        effect.clone_core_for_test(),
         StandardEffects,
         host,
         EvalContext::isolated(assembler.core_values()),
@@ -862,10 +865,12 @@ fn task_halt_contexts(assembler: &Assembler, halt: &TaskHalt) -> Vec<Value> {
 
 fn assert_list_values(assembler: &Assembler, actual: &PublicValue, expected: &PublicValue) {
     let actual = assembler.evaluate(actual).unwrap();
-    let Value::List(actual) = actual.as_core() else {
+    let actual = actual.clone_core_for_test();
+    let Value::List(actual) = &actual else {
         panic!("actual value should be a list")
     };
-    let Value::List(expected) = expected.as_core() else {
+    let expected = expected.clone_core_for_test();
+    let Value::List(expected) = &expected else {
         panic!("expected value should be a list")
     };
     assert_eq!(
@@ -1411,7 +1416,7 @@ fn branch_retires_its_effect_and_state_roots_exactly_with_the_branch() {
     assert!(retained_effect.upgrade().is_some());
     assert!(retained_state.upgrade().is_some());
     drop(branch);
-    domain.drain_retired_external_owners_for_test();
+    domain.collect_and_drain_retired_external_owners_for_test();
     assert!(retained_effect.upgrade().is_none());
     assert!(retained_state.upgrade().is_none());
 }
@@ -1427,7 +1432,7 @@ fn execution_work_and_cut_payloads_retain_roots_until_retirement() {
     let work = MachineWork::deliver(&core, value, branch(), 0);
     assert!(retained.upgrade().is_some());
     drop(work);
-    domain.drain_retired_external_owners_for_test();
+    domain.collect_and_drain_retired_external_owners_for_test();
     assert!(retained.upgrade().is_none());
 
     let (function, retained_function) = retained_machine_value(&values, &domain);
@@ -1436,7 +1441,7 @@ fn execution_work_and_cut_payloads_retain_roots_until_retirement() {
     assert!(retained_function.upgrade().is_some());
     assert!(retained_argument.upgrade().is_some());
     drop(work);
-    domain.drain_retired_external_owners_for_test();
+    domain.collect_and_drain_retired_external_owners_for_test();
     assert!(retained_function.upgrade().is_none());
     assert!(retained_argument.upgrade().is_none());
 
@@ -1444,7 +1449,7 @@ fn execution_work_and_cut_payloads_retain_roots_until_retirement() {
     let outcome = BranchOutcome::complete(&core, value, branch());
     assert!(retained.upgrade().is_some());
     drop(outcome);
-    domain.drain_retired_external_owners_for_test();
+    domain.collect_and_drain_retired_external_owners_for_test();
     assert!(retained.upgrade().is_none());
 
     let (operation, retained) = retained_machine_value(&values, &domain);
@@ -1461,7 +1466,7 @@ fn execution_work_and_cut_payloads_retain_roots_until_retirement() {
     };
     assert!(retained.upgrade().is_some());
     drop(cut);
-    domain.drain_retired_external_owners_for_test();
+    domain.collect_and_drain_retired_external_owners_for_test();
     assert!(retained.upgrade().is_none());
 }
 
@@ -1499,7 +1504,7 @@ fn captured_control_payloads_retain_roots_until_retirement() {
     };
     assert!(retained.iter().all(|weak| weak.upgrade().is_some()));
     drop(captured);
-    domain.drain_retired_external_owners_for_test();
+    domain.collect_and_drain_retired_external_owners_for_test();
     assert!(retained.iter().all(|weak| weak.upgrade().is_none()));
 }
 
@@ -1531,7 +1536,7 @@ fn fixpoint_frames_retain_the_shared_function_root_until_retirement() {
     drop(active);
     assert!(retained.upgrade().is_some());
     drop(restart);
-    domain.drain_retired_external_owners_for_test();
+    domain.collect_and_drain_retired_external_owners_for_test();
     assert!(retained.upgrade().is_none());
 }
 
@@ -1554,7 +1559,7 @@ fn contextual_effect_wrapper_retires_its_context_root_exactly_with_the_wrapper()
     );
     assert!(retained.upgrade().is_some());
     drop(task);
-    domain.drain_retired_external_owners_for_test();
+    domain.collect_and_drain_retired_external_owners_for_test();
     assert!(retained.upgrade().is_none());
 }
 
@@ -1591,7 +1596,7 @@ fn terminal_failure_poll_preserves_its_root_until_the_poll_is_retired() {
     drop(task);
     assert!(retained.upgrade().is_some());
     drop(error);
-    domain.drain_retired_external_owners_for_test();
+    domain.collect_and_drain_retired_external_owners_for_test();
     assert!(retained.upgrade().is_none());
 }
 
@@ -1608,7 +1613,7 @@ fn blocked_failure_poll_preserves_its_root_after_the_block_is_retired() {
             observed_generation: 1,
             action: WakeAction::RestartSearch,
         },
-        core.runtime_id(),
+        &core,
     );
     let projected = blocked
         .error()
@@ -1617,7 +1622,7 @@ fn blocked_failure_poll_preserves_its_root_after_the_block_is_retired() {
     drop(blocked);
     assert!(retained.upgrade().is_some());
     drop(projected);
-    domain.drain_retired_external_owners_for_test();
+    domain.collect_and_drain_retired_external_owners_for_test();
     assert!(retained.upgrade().is_none());
 }
 
@@ -1731,7 +1736,7 @@ fn effect_interpreter_callbacks_do_not_inherit_evaluator_mutators() {
     let phase_probe = Arc::new(EffectPhaseProbe::default());
 
     let task = EffectTask::new_owned_in_context(
-        effect.as_core().clone(),
+        effect.clone_core_for_test(),
         TestEffects,
         host.clone(),
         EvalContext::isolated(assembler.core_values()),
@@ -2122,7 +2127,7 @@ fn isolated_search_reports_and_resumes_lazy_dependencies() {
     let observer = session.with_new_task().unwrap();
     let effect = eval::apply_values(
         &observer,
-        function.as_core().clone(),
+        function.clone_core_for_test(),
         vec![Value::Promised(promised.clone())],
     )
     .unwrap();
@@ -2175,7 +2180,7 @@ fn effect_task_poll_yields_and_resumes_with_bounded_fuel() {
     let host = Arc::new(TestHost::with_values(assembler.core_values()));
     let mut task = EffectTask::new(
         &assembler.core_values(),
-        effect.as_core().clone(),
+        effect.clone_core_for_test(),
         TestEffects,
         host,
     )
@@ -2203,9 +2208,13 @@ fn scheduled_effect_wrapper_rejects_an_unrelated_poll_context() {
     let (task_context, _task_owner) = EvalContext::isolated(assembler.core_values()).into_parts();
     let unrelated = EvalContext::isolated(assembler.core_values());
     let poll_context = crate::evaluation::EvaluationPollContext::for_context(&unrelated);
-    let task =
-        EffectTask::new_in_context(effect.as_core().clone(), TestEffects, host, task_context)
-            .expect("effect task should build");
+    let task = EffectTask::new_in_context(
+        effect.clone_core_for_test(),
+        TestEffects,
+        host,
+        task_context,
+    )
+    .expect("effect task should build");
     let mut machine = ValueEffectTask(task);
 
     let _ = machine.poll(&poll_context, 1);
@@ -2227,7 +2236,7 @@ fn completed_effect_root_is_not_recreated_after_scope() {
         "unit-returning scheduled effects must publish the retained root"
     );
     assert!(
-        !source.contains("root_value(value.into_core())"),
+        !source.contains("root_value(value.clone_core_for_test())"),
         "scheduled effect completion must not extract and recreate a root"
     );
 }
@@ -2264,7 +2273,7 @@ fn internal_exit_success_projects_through_both_scheduled_effect_wrappers() {
         let (context, owner) = EvalContext::isolated(assembler.core_values()).into_parts();
         let poll_context = crate::evaluation::EvaluationPollContext::for_context(&context);
         let task = EffectTask::new_exit_in_context(
-            effect.as_core().clone(),
+            effect.clone_core_for_test(),
             TestEffects,
             Arc::new(TestHost::with_values(assembler.core_values())),
             context,
@@ -2297,7 +2306,7 @@ fn internal_exit_error_forces_and_roots_its_message() {
     let (context, owner) = EvalContext::isolated(assembler.core_values()).into_parts();
     let poll_context = crate::evaluation::EvaluationPollContext::for_context(&context);
     let task = EffectTask::new_exit_in_context(
-        effect.as_core().clone(),
+        effect.clone_core_for_test(),
         TestEffects,
         Arc::new(TestHost::with_values(assembler.core_values())),
         context,
@@ -2310,8 +2319,8 @@ fn internal_exit_error_forces_and_roots_its_message() {
         panic!("error exit should retain its message")
     };
     assert_eq!(message.runtime_id(), assembler.core_values().runtime_id());
-    assert!(matches!(message.as_core(), Value::Dict(_)));
-    let message = public_value(&assembler.core_values(), message.into_core());
+    assert!(matches!(message.clone_core_for_test(), Value::Dict(_)));
+    let message = public_value(&assembler.core_values(), message.clone_core_for_test());
     assert_eq!(
         assembler
             .to_binary(&assembler.get(&message, "msg.text").unwrap())
@@ -2327,7 +2336,7 @@ fn internal_exit_error_message_failure_is_an_ordinary_task_failure() {
         compile_effect(".exit.error (anno 'error {msg:{text:\"exit message failed\"}})");
     let (context, owner) = EvalContext::isolated(assembler.core_values()).into_parts();
     let mut task = EffectTask::new_exit_in_context(
-        effect.as_core().clone(),
+        effect.clone_core_for_test(),
         TestEffects,
         Arc::new(TestHost::with_values(assembler.core_values())),
         context,
@@ -2374,7 +2383,7 @@ fn permanent_exit_discards_every_speculative_cut_resource() {
     let poll_context = crate::evaluation::EvaluationPollContext::for_context(&context);
     let observer = context.clone();
     let task = EffectTask::new_exit_in_context(
-        effect.as_core().clone(),
+        effect.clone_core_for_test(),
         TestEffects,
         host.clone(),
         context,
@@ -2410,7 +2419,7 @@ fn retryable_exit_restarts_with_a_fresh_transaction_after_disturbance() {
     let (context, owner) = EvalContext::isolated(assembler.core_values()).into_parts();
     let poll_context = crate::evaluation::EvaluationPollContext::for_context(&context);
     let task = EffectTask::new_exit_in_context(
-        effect.as_core().clone(),
+        effect.clone_core_for_test(),
         TestEffects,
         host.clone(),
         context,
@@ -2478,25 +2487,27 @@ fn direct_effect_profiles_do_not_expose_exit() {
     let (assembler, effect) = compile_effect(".exit.success");
     let normal = EffectTask::new(
         &assembler.core_values(),
-        effect.as_core().clone(),
+        effect.clone_core_for_test(),
         TestEffects,
         Arc::new(TestHost::with_values(assembler.core_values())),
     )
     .expect("ordinary effect task should initialize");
-    let Value::Dict(normal_api) = normal.api.as_core() else {
+    let normal_api = normal.api.clone_core_for_test();
+    let Value::Dict(normal_api) = &normal_api else {
         panic!("effect API should be a dictionary")
     };
     assert!(normal_api.get(&Key::atom_from_text("exit")).is_none());
 
     let (context, owner) = EvalContext::isolated(assembler.core_values()).into_parts();
     let internal = EffectTask::new_exit_in_context(
-        effect.as_core().clone(),
+        effect.clone_core_for_test(),
         TestEffects,
         Arc::new(TestHost::with_values(assembler.core_values())),
         context,
     )
     .expect("internal exit task should initialize");
-    let Value::Dict(internal_api) = internal.api.as_core() else {
+    let internal_api = internal.api.clone_core_for_test();
+    let Value::Dict(internal_api) = &internal_api else {
         panic!("effect API should be a dictionary")
     };
     assert!(internal_api.get(&Key::atom_from_text("exit")).is_some());
@@ -2526,7 +2537,7 @@ fn evaluation_session_pumps_a_type_erased_effect_task() {
             launcher
                 .build(
                     task_context,
-                    effect.as_core().clone(),
+                    effect.clone_core_for_test(),
                     ReflectionTaskResultPolicy::RequireUnit,
                 )
                 .map_err(|error| Arc::from(error.to_string()))
@@ -2565,7 +2576,7 @@ fn reflection_task_launcher_returns_arbitrary_effect_result_when_requested() {
             launcher
                 .build(
                     task_context,
-                    effect.as_core().clone(),
+                    effect.clone_core_for_test(),
                     ReflectionTaskResultPolicy::ReturnValue,
                 )
                 .map_err(|error| Arc::from(error.to_string()))
@@ -2579,7 +2590,7 @@ fn reflection_task_launcher_returns_arbitrary_effect_result_when_requested() {
     let EvaluationWaitPoll::Complete(value) = context.poll_reflection_task(&task) else {
         panic!("the result-returning task should complete")
     };
-    assert_eq!(value.as_core(), &Value::Number(Number::from(42)));
+    assert_eq!(value.clone_core_for_test(), Value::Number(Number::from(42)));
 }
 
 #[test]
@@ -2595,7 +2606,7 @@ fn reflection_task_launcher_requires_unit_when_requested() {
             launcher
                 .build(
                     task_context,
-                    effect.as_core().clone(),
+                    effect.clone_core_for_test(),
                     ReflectionTaskResultPolicy::RequireUnit,
                 )
                 .map_err(|error| Arc::from(error.to_string()))
@@ -2624,7 +2635,7 @@ fn schedule_composed_test_task(
     context
         .install_reflection_launcher(task_launcher(TestEffects, host.clone()))
         .expect("fresh test session should accept a reflection launcher");
-    let effect = effect.as_core().clone();
+    let effect = effect.clone_core_for_test();
     let task = context
         .schedule_task(move |task_context| {
             EffectTask::new_in_context(effect, TestEffects, host, task_context)
@@ -2644,7 +2655,7 @@ fn schedule_exit_child_test_task(
     context
         .install_reflection_launcher(Arc::new(ExitCapableLauncher { host: host.clone() }))
         .expect("fresh test session should accept an exit-capable launcher");
-    let effect = effect.as_core().clone();
+    let effect = effect.clone_core_for_test();
     let task = context
         .schedule_task(move |task_context| {
             EffectTask::new_in_context(effect, TestEffects, host, task_context)
@@ -3182,7 +3193,7 @@ fn dictionary_items_are_available_to_reflection_in_key_order() {
     let EvaluationWaitPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
         panic!("dict_items task should complete");
     };
-    let value = value.into_core();
+    let value = value.clone_core_for_test();
     let Value::List(items) = value else {
         panic!("dict_items should return a list");
     };
@@ -3219,7 +3230,7 @@ fn metadata_inspection_returns_hidden_values_without_forcing_them() {
     let EvaluationWaitPoll::Complete(metadata) = pump_composed_test_task(&context, &task) else {
         panic!("metadata inspection should return the initial hidden dictionary");
     };
-    let Value::Dict(metadata) = metadata.into_core() else {
+    let Value::Dict(metadata) = metadata.clone_core_for_test() else {
         panic!("metadata inspection should return the initial hidden dictionary");
     };
     assert!(metadata.is_empty());
@@ -3243,7 +3254,7 @@ fn metadata_inspection_returns_hidden_values_without_forcing_them() {
     let EvaluationWaitPoll::Complete(metadata) = pump_composed_test_task(&context, &task) else {
         panic!("metadata inspection must not demand its hidden value");
     };
-    assert!(matches!(metadata.as_core(), Value::Lazy(_)));
+    assert!(matches!(metadata.clone_core_for_test(), Value::Lazy(_)));
     let error = assembler
         .evaluate(&PublicValue::from_runtime_root(*metadata))
         .expect_err("the returned hidden failure should remain demandable");
@@ -3350,7 +3361,7 @@ fn reflection_eval_returns_a_tagged_whnf_result() {
     let EvaluationWaitPoll::Complete(result) = pump_composed_test_task(&context, &task) else {
         panic!("eval should return an ok result");
     };
-    let Value::Dict(result) = result.into_core() else {
+    let Value::Dict(result) = result.clone_core_for_test() else {
         panic!("eval should return an ok result");
     };
     assert_eq!(
@@ -3367,7 +3378,7 @@ fn reflection_eval_returns_a_tagged_whnf_result() {
     let EvaluationWaitPoll::Complete(result) = pump_composed_test_task(&context, &task) else {
         panic!("eval should return a tagged dictionary");
     };
-    let Value::Dict(result) = result.into_core() else {
+    let Value::Dict(result) = result.clone_core_for_test() else {
         panic!("eval should return a tagged dictionary");
     };
     let Some(Value::Dict(payload)) = result.get(&*keys::OK) else {
@@ -3446,7 +3457,7 @@ fn reflection_eval_suspends_instead_of_failing_around_a_pending_value() {
     let observer = session.with_new_task().unwrap();
     let effect = eval::apply_values(
         &observer,
-        function.as_core().clone(),
+        function.clone_core_for_test(),
         vec![Value::Promised(promised.clone())],
     )
     .unwrap();
@@ -3496,7 +3507,7 @@ fn effect_map_runs_left_to_right_and_preserves_result_order() {
     let EvaluationWaitPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
         panic!("effect map task should complete");
     };
-    let value = value.into_core();
+    let value = value.clone_core_for_test();
     let Value::List(items) = value else {
         panic!("effect map should return a list");
     };
@@ -3555,7 +3566,7 @@ fn reflection_environment_is_available_as_plain_data() {
     let EvaluationWaitPoll::Complete(arguments) = poll else {
         panic!("process arguments should return a list, got {poll:?}")
     };
-    let Value::List(arguments) = arguments.into_core() else {
+    let Value::List(arguments) = arguments.clone_core_for_test() else {
         panic!("process arguments should return a list")
     };
     assert_eq!(
@@ -3574,7 +3585,7 @@ fn reflection_environment_is_available_as_plain_data() {
     let EvaluationWaitPoll::Complete(arguments) = pump_composed_test_task(&context, &task) else {
         panic!("child reflection task should inherit its parent profile environment")
     };
-    let Value::List(arguments) = arguments.into_core() else {
+    let Value::List(arguments) = arguments.clone_core_for_test() else {
         panic!("child reflection task should inherit a list environment")
     };
     assert_eq!(
@@ -3676,8 +3687,8 @@ fn task_observers_accept_handles_from_another_same_runtime_session() {
         panic!("a same-runtime observer should read the pre-pump task status")
     };
     assert_eq!(
-        launched.as_core(),
-        &assembler.core_values().key_value(&keys::LAUNCHED)
+        launched.clone_core_for_test(),
+        assembler.core_values().key_value(&keys::LAUNCHED)
     );
     drop(launched_observer);
 
@@ -3696,7 +3707,7 @@ fn task_observers_accept_handles_from_another_same_runtime_session() {
     else {
         panic!("same-runtime task observations should complete")
     };
-    let observed = eval::eval_value(&observer, observed.as_core())
+    let observed = eval::eval_value(&observer, &observed.clone_core_for_test())
         .expect("task observation result should evaluate");
     let Value::Dict(observed) = observed else {
         panic!("task observation fixture should return a dictionary")
@@ -3757,8 +3768,8 @@ fn task_observers_accept_handles_from_another_same_runtime_session() {
         panic!("a retained same-runtime handle should remain observable after owner closure")
     };
     assert_eq!(
-        abandoned.as_core(),
-        &assembler.core_values().key_value(&keys::ABANDONED),
+        abandoned.clone_core_for_test(),
+        assembler.core_values().key_value(&keys::ABANDONED),
         "observer-held task handles must not keep their producer demand open"
     );
 }
@@ -3829,7 +3840,7 @@ fn task_join_accepts_same_runtime_handles_across_all_terminal_states() {
     else {
         panic!("a same-runtime observer should read the published task handles")
     };
-    let Value::Dict(handles) = eval::eval_value(&handle_reader, handles.as_core())
+    let Value::Dict(handles) = eval::eval_value(&handle_reader, &handles.clone_core_for_test())
         .expect("the published task-handle dictionary should evaluate")
     else {
         panic!("the task-handle fixture should publish a dictionary")
@@ -3860,8 +3871,8 @@ fn task_join_accepts_same_runtime_handles_across_all_terminal_states() {
         panic!("a same-runtime observer should join a completed task")
     };
     assert_eq!(
-        complete_result.as_core(),
-        &Value::binary_from_text("complete result")
+        complete_result.clone_core_for_test(),
+        Value::binary_from_text("complete result")
     );
 
     let join_failed = join(handle("failed"));
@@ -3923,8 +3934,8 @@ fn task_join_accepts_same_runtime_handles_across_all_terminal_states() {
         panic!("the same-runtime join should resume when its child completes")
     };
     assert_eq!(
-        pending_result.as_core(),
-        &Value::binary_from_text("pending result")
+        pending_result.clone_core_for_test(),
+        Value::binary_from_text("pending result")
     );
 
     let join_abandoned = join(handle("abandoned"));
@@ -4071,7 +4082,7 @@ fn same_transaction_cancellation_prevents_worker_launch_and_machine_construction
     context
         .install_reflection_launcher(launcher)
         .expect("fresh test session should accept its launcher");
-    let effect = effect.as_core().clone();
+    let effect = effect.clone_core_for_test();
     let task = context
         .schedule_task(move |task_context| {
             EffectTask::new_in_context(effect, TestEffects, host.clone(), task_context)
@@ -4285,7 +4296,8 @@ fn task_errors_preserve_structured_emissions_and_contexts() {
         assembler.values().atom_from_text("emit")
     );
     let contexts = assembler.get(&error, "msg.context").unwrap();
-    let Value::List(contexts) = contexts.as_core() else {
+    let contexts = contexts.clone_core_for_test();
+    let Value::List(contexts) = &contexts else {
         panic!("task error contexts should be a list")
     };
     assert_eq!(
@@ -4449,7 +4461,7 @@ fn observed_evaluation_error_restarts_without_advancing_alternatives() {
     let host = Arc::new(TestHost::with_values(assembler.core_values()));
     let mut task = EffectTask::new(
         &assembler.core_values(),
-        effect.as_core().clone(),
+        effect.clone_core_for_test(),
         TestEffects,
         host.clone(),
     )
@@ -4503,7 +4515,7 @@ fn synchronous_error_recovery_waits_for_observed_state_change() {
     ));
     let mut task = EffectTask::new(
         &assembler.core_values(),
-        effect.as_core().clone(),
+        effect.clone_core_for_test(),
         TestEffects,
         host.clone(),
     )
@@ -4581,7 +4593,7 @@ fn polling_reports_state_block_without_waiting_in_the_machine() {
     let host = Arc::new(TestHost::with_values(assembler.core_values()));
     let mut task = EffectTask::new(
         &assembler.core_values(),
-        effect.as_core().clone(),
+        effect.clone_core_for_test(),
         TestEffects,
         host.clone(),
     )
@@ -4620,7 +4632,7 @@ fn lazy_suspension_preserves_cut_choice_and_does_not_repeat_prior_commit() {
     let host = Arc::new(TestHost::with_values(assembler.core_values()));
     let mut task = EffectTask::new(
         &assembler.core_values(),
-        effect.as_core().clone(),
+        effect.clone_core_for_test(),
         TestEffects,
         host.clone(),
     )
@@ -4674,7 +4686,7 @@ fn changed_observation_restarts_a_cut_before_its_lazy_dependency() {
     let host = Arc::new(TestHost::with_values(assembler.core_values()));
     let mut task = EffectTask::new(
         &assembler.core_values(),
-        effect.as_core().clone(),
+        effect.clone_core_for_test(),
         TestEffects,
         host.clone(),
     )
@@ -5400,7 +5412,7 @@ fn heap_root_replacement_and_path_errors_remain_lazy() {
     else {
         panic!("heap access should return its latent error value")
     };
-    assert!(matches!(value.as_core(), Value::Lazy(_)));
+    assert!(matches!(value.clone_core_for_test(), Value::Lazy(_)));
     assert_same_value!(assembler, host.heap(), assembler.values().integer(42));
     assert!(
         assembler

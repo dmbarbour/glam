@@ -196,17 +196,14 @@ impl Diagnostic {
             let mut fields = Dict::new_sync()
                 .insert(
                     Key::atom_from_text("emission"),
-                    access.core_value(&self.emission)?.clone(),
+                    access.clone_core(&self.emission)?,
                 )
                 .insert(
                     Key::atom_from_text("severity"),
                     self.severity.value(values.core()),
                 );
             if let Some(origin) = &self.origin {
-                fields = fields.insert(
-                    Key::atom_from_text("origin"),
-                    access.core_value(origin)?.clone(),
-                );
+                fields = fields.insert(Key::atom_from_text("origin"), access.clone_core(origin)?);
             }
             if let Some(source) = &self.source {
                 fields = fields.insert(
@@ -228,50 +225,56 @@ impl Diagnostic {
     pub fn from_transport_value(values: &Values, value: &Value) -> Result<Self, Error> {
         value.require_runtime(values.runtime)?;
         values.with_access(|access| {
-            let CoreValue::Dict(fields) = access.core_value(value)? else {
-                return Err(Error::new("diagnostic transport requires a dictionary"));
-            };
-            let field = |name: &str| fields.get(&Key::atom_from_text(name));
-            let emission = field("emission")
-                .cloned()
-                .ok_or_else(|| Error::new("diagnostic transport is missing `emission`"))?;
-            let severity = match field("severity").and_then(Key::from_value) {
-                Some(value) if value == *crate::core::keys::INFO => Severity::Info,
-                Some(value) if value == *crate::core::keys::WARN => Severity::Warning,
-                Some(value) if value == *crate::core::keys::ERROR => Severity::Error,
-                _ => return Err(Error::new("diagnostic transport has an invalid severity")),
-            };
-            let source = field("source")
-                .map(|source| {
-                    let CoreValue::Binary(source) = source else {
-                        return Err(Error::new("diagnostic transport source must be text"));
-                    };
-                    std::str::from_utf8(source)
-                        .map(Arc::<str>::from)
-                        .map_err(|_| Error::new("diagnostic transport source must be text"))
+            access.with_core(value, |value| {
+                let CoreValue::Dict(fields) = value else {
+                    return Err(Error::new("diagnostic transport requires a dictionary"));
+                };
+                let field = |name: &str| fields.get(&Key::atom_from_text(name));
+                let emission = field("emission")
+                    .cloned()
+                    .ok_or_else(|| Error::new("diagnostic transport is missing `emission`"))?;
+                let severity = match field("severity").and_then(Key::from_value) {
+                    Some(value) if value == *crate::core::keys::INFO => Severity::Info,
+                    Some(value) if value == *crate::core::keys::WARN => Severity::Warning,
+                    Some(value) if value == *crate::core::keys::ERROR => Severity::Error,
+                    _ => return Err(Error::new("diagnostic transport has an invalid severity")),
+                };
+                let source = field("source")
+                    .map(|source| {
+                        let CoreValue::Binary(source) = source else {
+                            return Err(Error::new("diagnostic transport source must be text"));
+                        };
+                        std::str::from_utf8(source)
+                            .map(Arc::<str>::from)
+                            .map_err(|_| Error::new("diagnostic transport source must be text"))
+                    })
+                    .transpose()?;
+                let line = field("line")
+                    .map(|line| {
+                        let CoreValue::Number(line) = line else {
+                            return Err(Error::new(
+                                "diagnostic transport line must be nonnegative",
+                            ));
+                        };
+                        line.to_i64_if_integer()
+                            .and_then(|line| usize::try_from(line).ok())
+                            .ok_or_else(|| {
+                                Error::new("diagnostic transport line must be nonnegative")
+                            })
+                    })
+                    .transpose()?;
+                let origin = field("origin").cloned().map(|origin| access.wrap(origin));
+                let (projected_line, message) = crate::diagnostic::conventional_summary(&emission);
+                Ok(Self {
+                    emission: access.wrap(emission),
+                    origin,
+                    source,
+                    severity,
+                    line: line.or(projected_line),
+                    message: message
+                        .unwrap_or_else(|| Arc::from("<diagnostic has no immediate text view>")),
                 })
-                .transpose()?;
-            let line = field("line")
-                .map(|line| {
-                    let CoreValue::Number(line) = line else {
-                        return Err(Error::new("diagnostic transport line must be nonnegative"));
-                    };
-                    line.to_i64_if_integer()
-                        .and_then(|line| usize::try_from(line).ok())
-                        .ok_or_else(|| Error::new("diagnostic transport line must be nonnegative"))
-                })
-                .transpose()?;
-            let origin = field("origin").cloned().map(|origin| access.wrap(origin));
-            let (projected_line, message) = crate::diagnostic::conventional_summary(&emission);
-            Ok(Self {
-                emission: access.wrap(emission),
-                origin,
-                source,
-                severity,
-                line: line.or(projected_line),
-                message: message
-                    .unwrap_or_else(|| Arc::from("<diagnostic has no immediate text view>")),
-            })
+            })?
         })
     }
 

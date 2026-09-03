@@ -388,6 +388,9 @@ fn prototype_root_moves_between_threads() {
     assert_transport_traits::<PrototypeEvaluatedValue>();
 
     let values = prototype_factory();
+    let baseline = values
+        .collect_managed_for_test()
+        .expect("canonical roots should collect before the prototype fixture");
     let drops = Arc::new(AtomicUsize::new(0));
     let value = PrototypeValue::managed_leaf(&values, 42, drops);
     let worker_value = value.clone();
@@ -396,7 +399,11 @@ fn prototype_root_moves_between_threads() {
     let report = values
         .collect_managed_for_test()
         .expect("the isolated managed prototype should collect");
-    assert_eq!(report.root_entries(), 1, "a clone shares one root cell");
+    assert_eq!(
+        report.root_entries(),
+        baseline.root_entries() + 1,
+        "a clone adds one shared root cell"
+    );
 
     let observed = std::thread::spawn(move || {
         PrototypeRuntime::new(&worker_values).extract_owned(&worker_value)
@@ -470,7 +477,6 @@ fn prototype_root_becomes_inert_after_domain_drop() {
 fn prototype_inline_values_allocate_no_managed_slots() {
     let values = prototype_factory();
     let before = values.managed_statistics();
-    assert_eq!(before.assigned_runs(), 0);
 
     let inline = (0..1024)
         .map(|value| PrototypeValue::inline(&values, value))
@@ -679,21 +685,24 @@ fn prototype_value_access_nests_in_one_mutator() {
 #[test]
 fn prototype_recursive_root_traces_child() {
     let values = prototype_factory();
+    let baseline = values
+        .collect_managed_for_test()
+        .expect("canonical roots should collect before the prototype fixture");
     let drops = Arc::new(AtomicUsize::new(0));
     let value = PrototypeValue::managed_pair(&values, drops.clone());
 
     let live = values
         .collect_managed_for_test()
         .expect("the rooted recursive prototype should collect");
-    assert_eq!(live.root_entries(), 1);
-    assert_eq!(live.marked_slots(), 2);
+    assert_eq!(live.root_entries(), baseline.root_entries() + 1);
+    assert_eq!(live.marked_slots(), baseline.marked_slots() + 2);
     assert_eq!(drops.load(Ordering::Relaxed), 0);
 
     drop(value);
     let dead = values
         .collect_managed_for_test()
         .expect("the unrooted recursive prototype should collect");
-    assert_eq!(dead.root_entries(), 0);
+    assert_eq!(dead.root_entries(), baseline.root_entries());
     assert_eq!(dead.finalized_slots(), 2);
     assert_eq!(drops.load(Ordering::Relaxed), 2);
 }
