@@ -1,8 +1,8 @@
 # Glam GC Integration Plan — 2026-08-19
 
 Status: in progress; Phases I0 through I3 and their mandatory reviews plus I4.0
-through I4E and I4F.1a through I4F.1c are complete. I4F.1d.1 is complete and
-I4F.1d.2 is pending.
+through I4E and I4F.1a through I4F.1c are complete. I4F.1d.1 and I4F.1d.2a
+are complete; I4F.1d.2b is pending.
 Collector Gate G1 passed on 2026-08-25. The remaining integration work follows
 the completed owner-matrix, stable-ledger, and low-risk checkpoint corrections
 from the integration review.
@@ -110,6 +110,9 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.1c.4 | complete | settlement, readiness, and evaluation-owner closure |
 | I4F.1c | complete | evaluation, coordinator, and readiness root surfaces |
 | I4F.1d.1 | complete | reflection store, snapshot, journal, and query roots |
+| I4F.1d.2a | complete | reflection task failures and effect-lifecycle roots |
+| I4F.1d.2b | pending | reflection protocol and host-snapshot roots |
+| I4F.1d.2c | pending | isolated-search branch, block, and result roots |
 | I4F.1d.2 | pending | reflection lifecycle, protocol, and search roots |
 | I4F.1d.3 | pending | reflection machine frame and request roots |
 | I4F.1d | pending | reflection store, protocol, and machine root surfaces |
@@ -2843,11 +2846,28 @@ three checkpoints:
    and protocol lifecycle in I4F.1d.2 rather than the store. Preserve snapshot
    isolation and verify snapshot/query retention, conflict, commit,
    retirement, and scope exit without collection.
-2. **I4F.1d.2 — Lifecycle, protocol, and search.** Reconcile effect runs,
-   reservations, protocol requests/results/failures, isolated search branches,
-   and host snapshots. Preserve the existing evaluator/interpreter phase
-   boundary and verify reservation, activation, branch, result, failure, and
-   retirement paths.
+2. **I4F.1d.2 — Lifecycle, protocol, and search.** Complete this boundary in
+   three independently verifiable checkpoints:
+   - **I4F.1d.2a — Task failures and effect lifecycle.** Preserve
+     `RuntimeFailureRoot` when coordinator terminal states become `TaskHalt`
+     or `EffectLifecycleStatus`; root any bounded compatibility failure before
+     it leaves a direct `EffectRun`. Reconcile the effect root, optional
+     failure context, reservation, activation, synchronous result, scheduled
+     status, and terminal retirement paths.
+   - **I4F.1d.2b — Protocol and host snapshots.** Reconcile request results,
+     specialization-owned snapshots and journals, `HostSnapshot`,
+     `TaskCommit`, `Transaction`, and host environments. Generic
+     specialization state remains an explicit external root-owner contract;
+     core protocol fields may not silently inherit that exemption.
+   - **I4F.1d.2c — Isolated search.** Reconcile the isolated host environment,
+     retained root branch, alternative stack, completed branches, blocked
+     failure, and returned result collection. Verify restart/discard,
+     successful and failed branch retention, blocking/resumption,
+     cancellation, and final retirement.
+
+   All three preserve the existing evaluator/interpreter phase boundary. Use
+   compile-exhaustive ownership latches for concrete records and deterministic
+   lifetime tests; no checkpoint may rely on repeated scheduling as evidence.
 3. **I4F.1d.3 — Machine frames and requests.** Reconcile every parked
    effect-machine frame, continuation, decoded request, delivery/apply/cut/fix
    state, and task block. A claimed machine may move raw values only within one
@@ -2882,6 +2902,29 @@ release after the last owning journal or result is dropped. Existing tests
 continue to cover snapshot isolation, conflicts, commits, volume revocation,
 and query retirement. The store owner row is therefore closed as
 `PublicRoot`; production remains `NoAuto`.
+
+I4F.1d.2a completed 2026-09-03. `TaskHalt` now records whether a permanent
+failure is the narrowly permitted edge-free/bounded compatibility form or a
+`RuntimeFailureRoot`. Text-only `TaskHalt::new` remains edge-free, structured
+public `Error` conversion establishes a root from the diagnostic's runtime,
+and adding a public context roots the complete expanded failure. The existing
+bounded `EvaluationHalt` conversion remains only for the evaluator/machine
+handoff assigned to I4F.1d.3.
+
+Effect lifecycle publication now moves coordinator `RuntimeFailureRoot`
+values directly into failed and killed `TaskHalt` states instead of stripping
+them back to raw `Arc<EvaluationFailure>`. Scheduled result polling preserves
+the same rule, while synchronous `EffectRun` roots any bounded failure before
+returning it to a Rust caller. A composed caller failure may deliberately get
+a distinct same-runtime root after child-report context is appended; the
+unmodified lifecycle status retains the coordinator root identity. Compile-
+exhaustive latches cover the complete lifecycle and `TaskHalt` representations,
+and deterministic tests cover coordinator-root identity, structured public
+error conversion, public-context rooting, direct-run publication, and
+scheduled failure publication. The lifecycle owner row is closed as a
+compatibility root, and the durable declaration latch was observed failing
+before its reviewed fingerprint was updated; protocol host state and isolated
+search remain assigned to I4F.1d.2b/c. Production remains `NoAuto`.
 
 #### Phase I4F.1e — Diagnostic, Event, and Delivery Roots
 

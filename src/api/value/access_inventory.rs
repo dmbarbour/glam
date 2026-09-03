@@ -210,9 +210,9 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/reflection/lifecycle.rs",
-        [1, 2, 0, 0, 0, 0],
+        [0, 2, 0, 0, 0, 0],
         "effect lifecycle activation and completion",
-        "I3C.2 root-preserving completion; I3D.1/I3D.2 reflection phases"
+        "I3C.2 root-preserving completion; I3D.1/I3D.2 reflection phases; I4F.1d.2a rooted lifecycle failures"
     ),
     entry!(
         "src/reflection/machine.rs",

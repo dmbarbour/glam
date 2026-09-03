@@ -448,7 +448,7 @@ where
                 }
                 EvaluationWaitPoll::Failed(error) => {
                     handle.task.acknowledge_propagated_failure();
-                    Err(TaskHalt::failure(error.into_failure())
+                    Err(TaskHalt::rooted_failure(error)
                         .with_core_context(task_join_context(handle.task.id())))
                 }
                 EvaluationWaitPoll::Cancelled => {
@@ -462,7 +462,7 @@ where
                     "joined reflection task exited without producing a result",
                 )
                 .with_core_context(task_join_context(handle.task.id()))),
-                EvaluationWaitPoll::Killed(error) => Err(TaskHalt::failure(error.into_failure())
+                EvaluationWaitPoll::Killed(error) => Err(TaskHalt::rooted_failure(error)
                     .with_core_context(task_join_context(handle.task.id()))),
             }
         }

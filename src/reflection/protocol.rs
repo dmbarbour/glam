@@ -16,7 +16,7 @@ use crate::core_net::CoreWaitToken;
 use crate::diagnostic::Severity;
 use crate::eval;
 use crate::evaluation::{EvalContext, EvaluationPollContext, EvaluationWaitToken};
-use crate::runtime::RuntimeValueRoot;
+use crate::runtime::{EvaluationRuntimeId, RuntimeFailureRoot, RuntimeValueRoot};
 
 /// One additional effect constructor contributed by a task specialization.
 pub struct EffectRequestSpec<R> {
@@ -336,14 +336,64 @@ pub enum TaskOutcome {
     Cancelled,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct TaskHalt(TaskHaltKind);
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 enum TaskHaltKind {
-    Failure(Arc<EvaluationFailure>),
+    Failure(TaskFailure),
     Blocked(EvaluationWaitToken),
 }
+
+/// Root disposition for one permanent task failure.
+///
+/// `EdgeFree` is restricted to freshly constructed text-only failures and the
+/// bounded compatibility path from an evaluator phase. Any failure retained
+/// by a lifecycle, search result, or other host-visible protocol surface is
+/// converted to `Rooted` first. I4F.1d.3 removes the evaluator compatibility
+/// case when parked machine failures adopt their final root shape.
+#[derive(Debug, Clone)]
+enum TaskFailure {
+    EdgeFree(Arc<EvaluationFailure>),
+    Rooted(RuntimeFailureRoot),
+}
+
+impl TaskFailure {
+    fn as_failure(&self) -> &Arc<EvaluationFailure> {
+        match self {
+            Self::EdgeFree(failure) => failure,
+            Self::Rooted(failure) => failure.as_failure(),
+        }
+    }
+
+    fn into_failure(self) -> Arc<EvaluationFailure> {
+        match self {
+            Self::EdgeFree(failure) => failure,
+            Self::Rooted(failure) => failure.into_failure(),
+        }
+    }
+
+    fn runtime_id(&self) -> Option<EvaluationRuntimeId> {
+        match self {
+            Self::EdgeFree(_) => None,
+            Self::Rooted(failure) => Some(failure.runtime_id()),
+        }
+    }
+}
+
+impl PartialEq for TaskHalt {
+    fn eq(&self, other: &Self) -> bool {
+        match (&self.0, &other.0) {
+            (TaskHaltKind::Failure(left), TaskHaltKind::Failure(right)) => {
+                left.as_failure() == right.as_failure()
+            }
+            (TaskHaltKind::Blocked(left), TaskHaltKind::Blocked(right)) => left == right,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for TaskHalt {}
 
 impl TaskHalt {
     pub fn new(message: impl Into<Arc<str>>) -> Self {
@@ -351,14 +401,40 @@ impl TaskHalt {
         Self::failure(Arc::new(EvaluationFailure::message(message.as_ref())))
     }
 
+    /// Constructs the bounded compatibility form used within one evaluator or
+    /// interpreter phase. The caller must root it before durable publication.
     pub(super) fn failure(failure: Arc<EvaluationFailure>) -> Self {
-        Self(TaskHaltKind::Failure(failure))
+        Self(TaskHaltKind::Failure(TaskFailure::EdgeFree(failure)))
+    }
+
+    pub(super) fn rooted_failure(failure: RuntimeFailureRoot) -> Self {
+        Self(TaskHaltKind::Failure(TaskFailure::Rooted(failure)))
+    }
+
+    pub(super) fn root_for_runtime(self, runtime: EvaluationRuntimeId) -> Self {
+        match self.0 {
+            TaskHaltKind::Failure(TaskFailure::EdgeFree(failure)) => {
+                Self::rooted_failure(RuntimeFailureRoot::from_runtime(runtime, failure))
+            }
+            TaskHaltKind::Failure(failure @ TaskFailure::Rooted(_)) => {
+                debug_assert_eq!(failure.runtime_id(), Some(runtime));
+                Self(TaskHaltKind::Failure(failure))
+            }
+            TaskHaltKind::Blocked(wait) => Self::blocked(wait),
+        }
     }
 
     pub(super) fn with_core_context(self, context: Value) -> Self {
         match self.0 {
             TaskHaltKind::Failure(failure) => {
-                Self::failure(Arc::new(failure.with_context(context)))
+                let runtime = failure.runtime_id();
+                let failure = Arc::new(failure.into_failure().with_context(context));
+                match runtime {
+                    Some(runtime) => {
+                        Self::rooted_failure(RuntimeFailureRoot::from_runtime(runtime, failure))
+                    }
+                    None => Self::failure(failure),
+                }
             }
             TaskHaltKind::Blocked(wait) => Self::blocked(wait),
         }
@@ -367,7 +443,21 @@ impl TaskHalt {
     /// Prepends one structured frame when a host client propagates this task
     /// failure through another semantic boundary.
     pub fn with_context(self, context: PublicValue) -> Self {
+        let runtime = context.runtime_id();
+        if let TaskHaltKind::Failure(failure) = &self.0
+            && failure.runtime_id().is_some_and(|owner| owner != runtime)
+        {
+            return Self::new(format!(
+                "task failure context belongs to evaluation runtime {}, not {}",
+                runtime.get(),
+                failure
+                    .runtime_id()
+                    .expect("the rooted owner was checked")
+                    .get()
+            ));
+        }
         self.with_core_context(context.into_core())
+            .root_for_runtime(runtime)
     }
 
     /// Projects a permanent task failure into its structured diagnostic.
@@ -386,7 +476,7 @@ impl TaskHalt {
 
     pub(super) fn into_failure(self) -> Arc<EvaluationFailure> {
         match self.0 {
-            TaskHaltKind::Failure(failure) => failure,
+            TaskHaltKind::Failure(failure) => failure.into_failure(),
             TaskHaltKind::Blocked(_) => {
                 panic!("a blocked task halt cannot become a permanent evaluation failure")
             }
@@ -395,14 +485,14 @@ impl TaskHalt {
 
     pub(crate) fn into_evaluation_halt(self) -> EvaluationHalt {
         match self.0 {
-            TaskHaltKind::Failure(failure) => EvaluationHalt::failure(failure),
+            TaskHaltKind::Failure(failure) => EvaluationHalt::failure(failure.into_failure()),
             TaskHaltKind::Blocked(wait) => EvaluationHalt::blocked(CoreWaitToken(wait)),
         }
     }
 
     pub(super) fn permanent_failure(&self) -> Option<&Arc<EvaluationFailure>> {
         match &self.0 {
-            TaskHaltKind::Failure(failure) => Some(failure),
+            TaskHaltKind::Failure(failure) => Some(failure.as_failure()),
             TaskHaltKind::Blocked(_) => None,
         }
     }
@@ -417,12 +507,20 @@ impl TaskHalt {
             TaskHaltKind::Failure(_) => None,
         }
     }
+
+    #[cfg(test)]
+    pub(super) fn failure_root(&self) -> Option<&RuntimeFailureRoot> {
+        match &self.0 {
+            TaskHaltKind::Failure(TaskFailure::Rooted(failure)) => Some(failure),
+            TaskHaltKind::Failure(TaskFailure::EdgeFree(_)) | TaskHaltKind::Blocked(_) => None,
+        }
+    }
 }
 
 impl fmt::Display for TaskHalt {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.0 {
-            TaskHaltKind::Failure(failure) => failure.fmt(formatter),
+            TaskHaltKind::Failure(failure) => failure.as_failure().fmt(formatter),
             TaskHaltKind::Blocked(wait) => {
                 write!(
                     formatter,
@@ -444,12 +542,16 @@ impl From<EvaluationHalt> for TaskHalt {
 
 impl From<ApiError> for TaskHalt {
     fn from(error: ApiError) -> Self {
-        Self::failure(Arc::new(EvaluationFailure::emission(
-            error
-                .structured_diagnostic()
-                .map(|diagnostic| diagnostic.emission().as_core().clone())
-                .unwrap_or_else(|| Value::binary_from_text(&error.to_string())),
-        )))
+        match error.structured_diagnostic() {
+            Some(diagnostic) => {
+                let runtime = diagnostic.emission().runtime_id();
+                let failure = Arc::new(EvaluationFailure::emission(
+                    diagnostic.emission().as_core().clone(),
+                ));
+                Self::rooted_failure(RuntimeFailureRoot::from_runtime(runtime, failure))
+            }
+            None => Self::new(error.to_string()),
+        }
     }
 }
 
@@ -642,4 +744,65 @@ impl<S: TaskSpecialization> TransactionContext<'_, S> {
 
 pub(super) fn request_value(tag: &Key, arguments: Vec<Value>) -> Value {
     Value::Dict(Dict::new_sync().insert(tag.clone(), Value::List(List::from_values(arguments))))
+}
+
+#[cfg(test)]
+mod root_inventory_tests {
+    use super::*;
+    use crate::number::Number;
+
+    fn assert_task_halt_root_inventory(halt: &TaskHalt) {
+        let TaskHalt(kind) = halt;
+        match kind {
+            TaskHaltKind::Failure(TaskFailure::EdgeFree(failure)) => {
+                let _: &Arc<EvaluationFailure> = failure;
+            }
+            TaskHaltKind::Failure(TaskFailure::Rooted(failure)) => {
+                let _: &RuntimeFailureRoot = failure;
+            }
+            TaskHaltKind::Blocked(wait) => {
+                let _: &EvaluationWaitToken = wait;
+            }
+        }
+    }
+
+    #[test]
+    fn task_halt_root_inventory_is_complete() {
+        let _: fn(&TaskHalt) = assert_task_halt_root_inventory;
+    }
+
+    #[test]
+    fn public_context_roots_a_bounded_evaluation_failure() {
+        let values = crate::core::test_value_factory();
+        let public_values = Values::from_core_factory(values.clone());
+        let emission = Value::Number(Number::integer(41));
+        let context = public_values.integer(42);
+        let halt = TaskHalt::from(EvaluationHalt::from_value(emission));
+        assert!(
+            halt.failure_root().is_none(),
+            "the evaluator conversion remains bounded until publication"
+        );
+
+        let halt = halt.with_context(context);
+        let root = halt
+            .failure_root()
+            .expect("a public context must establish the runtime root");
+        assert_eq!(root.runtime_id(), values.runtime_id());
+        assert_eq!(root.direct_value_roots().len(), 2);
+    }
+
+    #[test]
+    fn structured_api_error_preserves_its_runtime_root() {
+        let values = crate::core::test_value_factory();
+        let error = ApiError::from_eval(
+            &values,
+            EvaluationHalt::from_value(Value::Number(Number::integer(42))),
+        );
+        let halt = TaskHalt::from(error);
+        let root = halt
+            .failure_root()
+            .expect("structured public errors must remain runtime-rooted");
+        assert_eq!(root.runtime_id(), values.runtime_id());
+        assert_eq!(root.direct_value_roots().len(), 1);
+    }
 }

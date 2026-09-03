@@ -48,6 +48,16 @@ and discards the unused machine.
 Core operators merely construct tagged request values. Host operations occur
 when the effect task dispatches those requests.
 
+Permanent `TaskHalt` values distinguish freshly constructed, text-only
+validation failures from failures carrying semantic diagnostic values. The
+latter retain a `RuntimeFailureRoot`: coordinator terminal publication moves
+the existing root into the lifecycle view, structured public errors establish
+one from their diagnostic value, and a direct `EffectRun` roots any bounded
+evaluator failure before returning it to its Rust caller. Adding a context to
+an already rooted halt rebuilds the root for the expanded failure in the same
+runtime. Isolated-search publication and parked machine compatibility failures
+remain assigned to their search and machine root checkpoints respectively.
+
 ## Persistent Effect Machine
 
 An `EffectTask` retains its continuation, application, alternative, and nested

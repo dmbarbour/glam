@@ -11,6 +11,7 @@ use crate::evaluation::{
     ReflectionTaskLauncher, ReflectionTaskProfile, ReflectionTaskResultPolicy, TaskStatusPublisher,
     TaskStatusWake,
 };
+use crate::runtime::RuntimeFailureRoot;
 
 /// Host-owned observation of one coordinator-managed composed effect root.
 ///
@@ -203,13 +204,13 @@ impl EffectLifecycleState {
                 EffectLifecycleStatus::Complete(PublicValue::from_runtime_root(value))
             }
             EvaluationTaskStatus::Failed(error) => {
-                EffectLifecycleStatus::Failed(TaskHalt::failure(error.into_failure()))
+                EffectLifecycleStatus::Failed(TaskHalt::rooted_failure(error))
             }
             EvaluationTaskStatus::Cancelled => EffectLifecycleStatus::Cancelled,
             EvaluationTaskStatus::Abandoned => EffectLifecycleStatus::Abandoned,
             EvaluationTaskStatus::Exited => EffectLifecycleStatus::Exited,
             EvaluationTaskStatus::Killed(error) => {
-                EffectLifecycleStatus::Killed(TaskHalt::failure(error.into_failure()))
+                EffectLifecycleStatus::Killed(TaskHalt::rooted_failure(error))
             }
         }
     }
@@ -255,10 +256,7 @@ impl ScheduledEffectRun {
                     );
                 }
                 EvaluationWaitPoll::Failed(error) => {
-                    return combine_composed_result(
-                        Err(TaskHalt::failure(error.into_failure())),
-                        children,
-                    );
+                    return combine_composed_result(Err(TaskHalt::rooted_failure(error)), children);
                 }
                 EvaluationWaitPoll::Cancelled => {
                     return combine_composed_result(Ok(TaskOutcome::Cancelled), children);
@@ -278,10 +276,7 @@ impl ScheduledEffectRun {
                     );
                 }
                 EvaluationWaitPoll::Killed(error) => {
-                    return combine_composed_result(
-                        Err(TaskHalt::failure(error.into_failure())),
-                        children,
-                    );
+                    return combine_composed_result(Err(TaskHalt::rooted_failure(error)), children);
                 }
             }
         }
@@ -381,6 +376,7 @@ impl<S: TaskSpecialization> EffectRun<S> {
             host.clone(),
         )));
         let runtime = runtime.expect("EffectRun construction always selects an evaluation runtime");
+        let runtime_id = runtime.id();
         let session = runtime.new_evaluation_session()?;
         let mut task = EffectTask::new_in_context(
             effect.into_core(),
@@ -388,15 +384,18 @@ impl<S: TaskSpecialization> EffectRun<S> {
             host,
             EvalContext::with_task_profile(&session, task_profile),
         )
-        .map_err(|error| contextualize_task_halt(error, failure_context.as_ref()))?;
+        .map_err(|error| {
+            contextualize_task_halt(error, failure_context.as_ref()).root_for_runtime(runtime_id)
+        })?;
         if result_policy == EffectResultPolicy::RequireUnit {
             task = task.requiring_unit_result();
         }
         if let Some(diagnostic_context) = result_assertion_context {
             task = task.asserting_unit_result(diagnostic_context);
         }
-        run_composed_effect_task(task)
-            .map_err(|error| contextualize_task_halt(error, failure_context.as_ref()))
+        run_composed_effect_task(task).map_err(|error| {
+            contextualize_task_halt(error, failure_context.as_ref()).root_for_runtime(runtime_id)
+        })
     }
 
     /// Installs this effect as coordinator work in a fresh demand session.
@@ -474,7 +473,9 @@ impl<S: TaskSpecialization> EffectRun<S> {
                     })
                 },
             )
-            .map_err(TaskHalt::failure)?;
+            .map_err(|failure| {
+                TaskHalt::rooted_failure(RuntimeFailureRoot::from_runtime(runtime.id(), failure))
+            })?;
         let task = match diagnostic_ingress {
             Some(ingress) => {
                 runtime
@@ -497,7 +498,7 @@ impl<S: TaskSpecialization> EffectRun<S> {
 
 fn contextualize_task_halt(error: TaskHalt, context: Option<&PublicValue>) -> TaskHalt {
     match context {
-        Some(context) => error.with_core_context(context.as_core().clone()),
+        Some(context) => error.with_context(context.clone()),
         None => error,
     }
 }
@@ -515,9 +516,10 @@ pub fn run<S: TaskSpecialization>(
 pub(super) fn run_composed_effect_task<S: TaskSpecialization>(
     mut task: EffectTask<S>,
 ) -> Result<TaskOutcome, TaskHalt> {
+    let runtime = task.eval_context.values().runtime_id();
     let parent = task.run();
     let children = task.eval_context.run_until_quiescent();
-    combine_composed_result(parent, children)
+    combine_composed_result(parent, children).map_err(|error| error.root_for_runtime(runtime))
 }
 
 fn combine_composed_result(
@@ -638,4 +640,133 @@ pub fn run_standard(
     host: Arc<dyn TaskHost<StandardEffects>>,
 ) -> Result<TaskOutcome, TaskHalt> {
     EffectRun::new(runtime, effect, StandardEffects, host).run()
+}
+
+#[cfg(test)]
+mod root_inventory_tests {
+    use super::*;
+
+    fn assert_lifecycle_root_inventory(
+        lifecycle: &EffectLifecycle,
+        state: &EffectLifecycleState,
+        status: &EffectLifecycleStatus,
+        terminal: &EffectLifecycleTerminal,
+    ) {
+        let EffectLifecycle {
+            inner,
+            terminal: lifecycle_terminal,
+        } = lifecycle;
+        let _: &Arc<EffectLifecycleState> = inner;
+        let _: &Option<EffectLifecycleTerminal> = lifecycle_terminal;
+
+        let EffectLifecycleState {
+            status: stored_status,
+            changed,
+        } = state;
+        let _: &Mutex<EffectLifecycleStatus> = stored_status;
+        let _: &Condvar = changed;
+
+        match status {
+            EffectLifecycleStatus::Launched
+            | EffectLifecycleStatus::Blocked
+            | EffectLifecycleStatus::Cancelled
+            | EffectLifecycleStatus::Abandoned
+            | EffectLifecycleStatus::Exited => {}
+            EffectLifecycleStatus::Complete(value) => {
+                let _: &PublicValue = value;
+            }
+            EffectLifecycleStatus::Failed(failure) | EffectLifecycleStatus::Killed(failure) => {
+                let _: &TaskHalt = failure;
+            }
+        }
+
+        let EffectLifecycleTerminal { runtime, publisher } = terminal;
+        let _: &crate::runtime::EvaluationRuntimeId = runtime;
+        let _: &TaskStatusPublisher = publisher;
+    }
+
+    fn assert_effect_run_root_inventory(
+        scheduled: &ScheduledEffectRun,
+        run: &EffectRun<StandardEffects>,
+        launcher: &EffectTaskLauncher<StandardEffects>,
+    ) {
+        let ScheduledEffectRun {
+            context,
+            session,
+            task,
+        } = scheduled;
+        let _: &EvalContext = context;
+        let _: &Arc<Mutex<Option<Arc<EvaluationSession>>>> = session;
+        let _: &EvaluationTaskHandle = task;
+
+        let EffectRun {
+            effect,
+            specialization,
+            host,
+            runtime,
+            result_policy,
+            result_assertion_context,
+            failure_context,
+        } = run;
+        let _: &PublicValue = effect;
+        let _: &StandardEffects = specialization;
+        let _: &Arc<<StandardEffects as TaskSpecialization>::Host> = host;
+        let _: &Option<EvaluationRuntime> = runtime;
+        let _: &EffectResultPolicy = result_policy;
+        let _: &Option<Arc<str>> = result_assertion_context;
+        let _: &Option<PublicValue> = failure_context;
+
+        let EffectTaskLauncher {
+            specialization,
+            host,
+            exposes_exit,
+        } = launcher;
+        let _: &StandardEffects = specialization;
+        let _: &Arc<<StandardEffects as TaskSpecialization>::Host> = host;
+        let _: &bool = exposes_exit;
+    }
+
+    #[test]
+    fn lifecycle_root_inventory_is_complete() {
+        let _: fn(
+            &EffectLifecycle,
+            &EffectLifecycleState,
+            &EffectLifecycleStatus,
+            &EffectLifecycleTerminal,
+        ) = assert_lifecycle_root_inventory;
+        let _: fn(
+            &ScheduledEffectRun,
+            &EffectRun<StandardEffects>,
+            &EffectTaskLauncher<StandardEffects>,
+        ) = assert_effect_run_root_inventory;
+    }
+
+    #[test]
+    fn lifecycle_status_preserves_coordinator_failure_root_identity() {
+        let values = crate::core::test_value_factory();
+        let failure = RuntimeFailureRoot::new(
+            &values,
+            Arc::new(EvaluationFailure::emission(Value::Number(
+                crate::number::Number::integer(42),
+            ))),
+        );
+        let state = EffectLifecycleState {
+            status: Mutex::new(EffectLifecycleStatus::Launched),
+            changed: Condvar::new(),
+        };
+
+        for status in [
+            EvaluationTaskStatus::Failed(failure.clone()),
+            EvaluationTaskStatus::Killed(failure.clone()),
+        ] {
+            let halt = match state.public_status(status) {
+                EffectLifecycleStatus::Failed(halt) | EffectLifecycleStatus::Killed(halt) => halt,
+                _ => panic!("a terminal failure should remain a failure"),
+            };
+            let published = halt
+                .failure_root()
+                .expect("the public lifecycle failure should retain its runtime root");
+            assert!(published.shares_root_with(&failure));
+        }
+    }
 }

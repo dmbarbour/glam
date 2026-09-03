@@ -296,16 +296,15 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         RootSurface,
         "I4F.2d.2"
     ),
-    open_durable!(
+    closed_durable!(
         "src/reflection/lifecycle.rs",
         "EffectRun lifecycle state",
-        "evaluated effect/result and Arc<EvaluationFailure>",
+        "public effect/result/context roots and rooted TaskHalt failures",
         "active reflection effect run",
         "effect reservation/activation",
         "completion, cancellation, or abandonment",
-        FailureGraph,
+        CompatibilityRoot,
         RootSurface,
-        "I4F.1d.2",
         "I4F.2d.2"
     ),
     open_durable!(
@@ -758,7 +757,7 @@ fn is_production_source(relative: &Path) -> bool {
 const DECLARATION_BASELINE_COUNT: usize = 129;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
     DeclarationSignals::new([115, 56, 1, 11, 15, 0, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 896_298_444_406_156_690;
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 1_149_144_414_569_917_185;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,

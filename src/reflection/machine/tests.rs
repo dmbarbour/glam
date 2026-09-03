@@ -1920,11 +1920,20 @@ fn scheduled_effect_root_publishes_failure_and_cancellation() {
     )
     .schedule(&failure_lifecycle)
     .expect("failed root should first be admitted");
-    assert!(failed.run().is_err());
-    assert!(matches!(
-        failure_lifecycle.status(),
-        EffectLifecycleStatus::Failed(_)
-    ));
+    let failed = failed.run().expect_err("the scheduled root should fail");
+    let EffectLifecycleStatus::Failed(published) = failure_lifecycle.status() else {
+        panic!("the lifecycle should publish the failed root")
+    };
+    let returned_root = failed
+        .failure_root()
+        .expect("the returned scheduled failure should remain rooted");
+    let published_root = published
+        .failure_root()
+        .expect("the published lifecycle failure should remain rooted");
+    // The composed caller result may add child-report context after lifecycle
+    // publication, so it owns a distinct root in the same runtime.
+    assert_eq!(returned_root.runtime_id(), failure_runtime.id());
+    assert_eq!(published_root.runtime_id(), failure_runtime.id());
 
     let (cancel_assembler, cancel_effect) = compile_effect(".read_log");
     let cancel_runtime = cancel_assembler.evaluation_runtime();
@@ -3526,12 +3535,33 @@ fn task_halt_conversions_preserve_evaluation_and_public_error_structure() {
     let public_diagnostic = public_halt.diagnostic(&assembler.values());
     assert_eq!(public_diagnostic.message(), "converted failure");
     assert_eq!(task_halt_contexts(&assembler, &public_halt), [frame]);
+    assert!(evaluation_halt.failure_root().is_none());
+    assert_eq!(
+        public_halt
+            .failure_root()
+            .expect("the structured public error should retain its root")
+            .runtime_id(),
+        assembler.evaluation_runtime().id()
+    );
     assert_eq!(
         assembler
             .get(public_diagnostic.emission(), "detail")
             .unwrap()
             .as_i64(),
         Some(7)
+    );
+}
+
+#[test]
+fn direct_effect_run_roots_a_failure_before_returning_to_its_caller() {
+    let (assembler, effect) = compile_effect(".fail");
+    let error = run_standard_test(&assembler, &effect).expect_err("the effect should fail");
+    assert_eq!(
+        error
+            .failure_root()
+            .expect("a direct effect-run failure should be rooted")
+            .runtime_id(),
+        assembler.evaluation_runtime().id()
     );
 }
 
