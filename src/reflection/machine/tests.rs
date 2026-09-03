@@ -1,11 +1,14 @@
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Mutex, Weak};
 
 use bytes::Bytes;
 
 use super::*;
 use crate::Severity;
-use crate::api::{Assembler, Diagnostic, Error as ApiError, EvaluationRuntime, TestValueFacade};
+use crate::api::{
+    Assembler, Diagnostic, EffectTokenDomain, Error as ApiError, EvaluationRuntime,
+    TestValueFacade, Values,
+};
 use crate::evaluation::{
     EvaluationSessionRun, EvaluationTaskCancellation, EvaluationTaskHandle, EvaluationTaskStatus,
     ReflectionTaskLauncher, ReflectionTaskResultPolicy, TaskStatusPublisher, TaskStatusWake,
@@ -839,6 +842,228 @@ fn assert_list_values(assembler: &Assembler, actual: &PublicValue, expected: &Pu
         eval::list_to_value_items(&assembler.eval_context(), actual).unwrap(),
         eval::list_to_value_items(&assembler.eval_context(), expected).unwrap(),
     );
+}
+
+fn assert_effect_task_shell_inventory(task: &EffectTask<TestEffects>) {
+    let EffectTask {
+        eval_context,
+        _demand_owner,
+        id,
+        specialization,
+        host,
+        tags,
+        specialized_requests,
+        api,
+        next_continuation,
+        next_control_order,
+        continuations,
+        search,
+        execution,
+        blocked,
+        exit,
+        terminal,
+        phase_probe,
+        force_unfused,
+    } = task;
+    let _: &RuntimeValueRoot = api;
+    let _ = (
+        eval_context,
+        _demand_owner,
+        id,
+        specialization,
+        host,
+        tags,
+        specialized_requests,
+        next_continuation,
+        next_control_order,
+        continuations,
+        search,
+        execution,
+        blocked,
+        exit,
+        terminal,
+        phase_probe,
+        force_unfused,
+    );
+}
+
+fn assert_task_wrapper_inventory(
+    unit: &UnitEffectTask<TestEffects>,
+    value: &ValueEffectTask<TestEffects>,
+    contextual: &ContextualValueEffectTask<TestEffects>,
+) {
+    let UnitEffectTask(unit) = unit;
+    let ValueEffectTask(value) = value;
+    let ContextualValueEffectTask { task, context } = contextual;
+    let _: &EffectTask<TestEffects> = unit;
+    let _: &EffectTask<TestEffects> = value;
+    let _: &EffectTask<TestEffects> = task;
+    let _: &RuntimeValueRoot = context;
+}
+
+fn assert_task_block_inventory(blocked: &BlockedExecution<TestEffects>, poll: &TaskBlock) {
+    let BlockedExecution { reason, retry } = blocked;
+    match reason {
+        BlockReason::WaitingOn(wait) => {
+            let _: &EvaluationWaitToken = wait;
+        }
+        BlockReason::Exhausted => {}
+        BlockReason::EvaluationError(error) => {
+            let _: &TaskHalt = error;
+        }
+    }
+    let _: &Option<RetryWake<TestEffects>> = retry;
+
+    let TaskBlock {
+        lazy,
+        observed_generation,
+        error,
+    } = poll;
+    let _: &Option<EvaluationWaitToken> = lazy;
+    let _: &Option<u64> = observed_generation;
+    let _: &Option<crate::runtime::RuntimeFailureRoot> = error;
+}
+
+fn assert_task_exit_inventory(poll: &TaskExitBlock, state: &TaskExitState<TestEffects>) {
+    let TaskExitBlock {
+        intent,
+        observed_generation,
+    } = poll;
+    let _: &ExitIntent = intent;
+    let _: &Option<u64> = observed_generation;
+
+    let TaskExitState { poll, restart } = state;
+    let _: &TaskExitBlock = poll;
+    let _: &Option<RetryWake<TestEffects>> = restart;
+}
+
+fn assert_task_terminal_inventory(poll: &EffectTaskPoll, terminal: &TaskTerminal) {
+    match poll {
+        EffectTaskPoll::Yielded | EffectTaskPoll::Cancelled => {}
+        EffectTaskPoll::Blocked(blocked) => {
+            let _: &TaskBlock = blocked;
+        }
+        EffectTaskPoll::Exit(exit) => {
+            let _: &TaskExitBlock = exit;
+        }
+        EffectTaskPoll::Complete(value) => {
+            let _: &PublicValue = value;
+        }
+        EffectTaskPoll::Failed(error) => {
+            let _: &TaskHalt = error;
+        }
+    }
+    match terminal {
+        TaskTerminal::Complete(value) => {
+            let _: &PublicValue = value;
+        }
+        TaskTerminal::Failed(error) => {
+            let _: &TaskHalt = error;
+        }
+        TaskTerminal::Cancelled => {}
+    }
+}
+
+fn retained_machine_value(domain: &EffectTokenDomain<Arc<()>>) -> (Value, Weak<()>) {
+    let payload = Arc::new(());
+    let retained = Arc::downgrade(&payload);
+    (domain.issue(payload).into_core(), retained)
+}
+
+#[test]
+fn outer_machine_root_inventory_is_complete() {
+    let _: fn(&EffectTask<TestEffects>) = assert_effect_task_shell_inventory;
+    let _: fn(
+        &UnitEffectTask<TestEffects>,
+        &ValueEffectTask<TestEffects>,
+        &ContextualValueEffectTask<TestEffects>,
+    ) = assert_task_wrapper_inventory;
+    let _: fn(&BlockedExecution<TestEffects>, &TaskBlock) = assert_task_block_inventory;
+    let _: fn(&TaskExitBlock, &TaskExitState<TestEffects>) = assert_task_exit_inventory;
+    let _: fn(&EffectTaskPoll, &TaskTerminal) = assert_task_terminal_inventory;
+}
+
+#[test]
+fn contextual_effect_wrapper_retires_its_context_root_exactly_with_the_wrapper() {
+    let (assembler, effect) = compile_effect(".r ()");
+    let domain = EffectTokenDomain::new(&assembler.values());
+    let (context, retained) = retained_machine_value(&domain);
+    let task = EffectTask::new(
+        &assembler.core_values(),
+        effect.into_core(),
+        TestEffects,
+        Arc::new(TestHost::with_values(assembler.core_values())),
+    )
+    .expect("context-root fixture should construct");
+    let task = ContextualValueEffectTask::new(task, context);
+    assert_eq!(
+        task.context.runtime_id(),
+        assembler.evaluation_runtime().id()
+    );
+    assert!(retained.upgrade().is_some());
+    drop(task);
+    assert!(retained.upgrade().is_none());
+}
+
+#[test]
+fn terminal_failure_poll_preserves_its_root_until_the_poll_is_retired() {
+    let (assembler, effect) = compile_effect(".r ()");
+    let domain = EffectTokenDomain::new(&assembler.values());
+    let (emission, retained) = retained_machine_value(&domain);
+    let mut task = EffectTask::new(
+        &assembler.core_values(),
+        effect.into_core(),
+        TestEffects,
+        Arc::new(TestHost::with_values(assembler.core_values())),
+    )
+    .expect("terminal-root fixture should construct");
+    let error = TaskHalt::failure(Arc::new(EvaluationFailure::emission(emission)));
+    assert!(error.failure_root().is_none());
+    task.finish(TaskTerminal::Failed(error));
+    let poll = task
+        .terminal
+        .as_ref()
+        .expect("finish should retain a terminal result")
+        .poll();
+    let EffectTaskPoll::Failed(error) = poll else {
+        panic!("failed terminal should publish a failed poll")
+    };
+    assert_eq!(
+        error
+            .failure_root()
+            .expect("terminal publication must establish a failure root")
+            .runtime_id(),
+        assembler.evaluation_runtime().id()
+    );
+    drop(task);
+    assert!(retained.upgrade().is_some());
+    drop(error);
+    assert!(retained.upgrade().is_none());
+}
+
+#[test]
+fn blocked_failure_poll_preserves_its_root_after_the_block_is_retired() {
+    let core = crate::core::test_value_factory();
+    let values = Values::from_core_factory(core.clone());
+    let domain = EffectTokenDomain::new(&values);
+    let (emission, retained) = retained_machine_value(&domain);
+    let error = TaskHalt::failure(Arc::new(EvaluationFailure::emission(emission)));
+    let blocked = BlockedExecution::<TestEffects>::evaluation_error(
+        error,
+        RetryWake {
+            observed_generation: 1,
+            action: WakeAction::RestartSearch,
+        },
+        core.runtime_id(),
+    );
+    let projected = blocked
+        .error()
+        .expect("blocked evaluation error should publish its retained root");
+    assert_eq!(projected.runtime_id(), core.runtime_id());
+    drop(blocked);
+    assert!(retained.upgrade().is_some());
+    drop(projected);
+    assert!(retained.upgrade().is_none());
 }
 
 fn completed(source: &str) -> (Assembler, PublicValue) {
@@ -1698,7 +1923,7 @@ fn direct_effect_profiles_do_not_expose_exit() {
         Arc::new(TestHost::with_values(assembler.core_values())),
     )
     .expect("ordinary effect task should initialize");
-    let Value::Dict(normal_api) = &normal.api else {
+    let Value::Dict(normal_api) = normal.api.as_core() else {
         panic!("effect API should be a dictionary")
     };
     assert!(normal_api.get(&Key::atom_from_text("exit")).is_none());
@@ -1711,7 +1936,7 @@ fn direct_effect_profiles_do_not_expose_exit() {
         context,
     )
     .expect("internal exit task should initialize");
-    let Value::Dict(internal_api) = &internal.api else {
+    let Value::Dict(internal_api) = internal.api.as_core() else {
         panic!("effect API should be a dictionary")
     };
     assert!(internal_api.get(&Key::atom_from_text("exit")).is_some());

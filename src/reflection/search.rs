@@ -286,10 +286,7 @@ impl<S: TaskSpecialization> IsolatedEffectSearch<S> {
         match self.task.poll(step_budget) {
             EffectTaskPoll::Yielded => IsolatedSearchPoll::Yielded,
             EffectTaskPoll::Blocked(blocked) => {
-                let error = blocked
-                    .error
-                    .map(TaskHalt::failure)
-                    .map(|error| self.root_poll_error(error));
+                let error = blocked.error.map(TaskHalt::rooted_failure);
                 IsolatedSearchPoll::Blocked(IsolatedSearchBlock {
                     dependency: blocked.lazy,
                     observed_generation: blocked.observed_generation,

@@ -115,7 +115,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.1d.2c | complete | isolated-search branch, block, and result roots |
 | I4F.1d.2 | complete | reflection lifecycle, protocol, and search roots |
 | I4F.1d.3a | complete | reflection request, journal, query, and task-handle roots |
-| I4F.1d.3b | pending | reflection machine shell, terminal, and blocked-error roots |
+| I4F.1d.3b | complete | reflection machine shell, terminal, and blocked-error roots |
 | I4F.1d.3c | pending | reflection branch, work, cut, and retry roots |
 | I4F.1d.3d | pending | reflection continuation, reset, and fixpoint roots |
 | I4F.1d.3e | pending | reflection decoded-request handoff and machine closure |
@@ -3007,6 +3007,28 @@ their public roots exactly until retirement. Existing fixtures cover pending
 task policy ordering, task-handle query retirement, host non-retention, and
 foreign-runtime rejection. The request owner row is closed as `PublicRoot`;
 machine interiors remain assigned to I4F.1d.3b-e. Production remains `NoAuto`.
+
+I4F.1d.3b completed 2026-09-03. The effect API and optional diagnostic
+context now enter the long-lived machine shell as explicit
+`RuntimeValueRoot`s. Retryable evaluation errors are rooted when parked, and
+terminal failures are rooted by the single `finish` gateway. Blocked and
+terminal poll projections preserve those exact failure roots rather than
+extracting an `Arc<EvaluationFailure>` and depending on each consumer to root
+it again. Exit errors already retain `RuntimeValueRoot` through `ExitIntent`;
+successful completion continues to retain its public root.
+
+Compile-exhaustive latches cover the outer task shell, scheduled wrappers,
+blocked/error state, exit state, poll variants, and terminal variants.
+Deterministic fixtures verify exact retirement of contextual roots and verify
+that blocked and terminal failure roots survive retirement of their source
+owner until the projected poll root is itself dropped. The compatibility-
+access latch deliberately observed the two new root constructions and two
+bounded projections before accepting the new machine baseline. The durable-
+owner latch separately observed both raw-to-root field conversions and the
+replacement of a directly stored `EvaluationFailure` with its inventoried
+failure-root shell before accepting its new declaration fingerprint. Branch,
+execution, and captured-control interiors remain assigned to I4F.1d.3c-e.
+Production remains `NoAuto`.
 
 #### Phase I4F.1e — Diagnostic, Event, and Delivery Roots
 

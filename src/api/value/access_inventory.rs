@@ -216,9 +216,9 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/reflection/machine.rs",
-        [14, 29, 4, 0, 0, 0],
-        "rooted decoded requests plus compatibility branch, continuation, and store access",
-        "I3D.2/I3D.4 interpreter phases; I4F.1 machine roots"
+        [16, 29, 4, 0, 2, 0],
+        "rooted effect API, contextual wrapper, decoded requests, and failures plus compatibility branch, continuation, and store access",
+        "I3D.2/I3D.4 interpreter phases; I4F.1d.3b outer machine roots; I4F.1d.3c-e remaining machine roots"
     ),
     entry!(
         "src/reflection/protocol.rs",

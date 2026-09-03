@@ -432,6 +432,24 @@ impl TaskHalt {
         }
     }
 
+    /// Consumes one permanent halt at a runtime-owned publication boundary.
+    /// Existing roots retain their identity; bounded evaluator failures gain
+    /// their compatibility root exactly once here.
+    pub(super) fn into_failure_root(self, runtime: EvaluationRuntimeId) -> RuntimeFailureRoot {
+        match self.0 {
+            TaskHaltKind::Failure(TaskFailure::EdgeFree(failure)) => {
+                RuntimeFailureRoot::from_runtime(runtime, failure)
+            }
+            TaskHaltKind::Failure(TaskFailure::Rooted(failure)) => {
+                debug_assert_eq!(failure.runtime_id(), runtime);
+                failure
+            }
+            TaskHaltKind::Blocked(_) => {
+                panic!("a blocked task halt cannot become a permanent failure root")
+            }
+        }
+    }
+
     pub(super) fn with_core_context(self, context: Value) -> Self {
         match self.0 {
             TaskHaltKind::Failure(failure) => {
@@ -516,7 +534,6 @@ impl TaskHalt {
         }
     }
 
-    #[cfg(test)]
     pub(super) fn failure_root(&self) -> Option<&RuntimeFailureRoot> {
         match &self.0 {
             TaskHaltKind::Failure(TaskFailure::Rooted(failure)) => Some(failure),

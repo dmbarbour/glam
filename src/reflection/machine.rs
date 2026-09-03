@@ -99,7 +99,7 @@ pub(super) struct EffectTask<S: TaskSpecialization> {
     host: Arc<S::Host>,
     tags: Tags,
     specialized_requests: Vec<SpecializedRequest<S::Request>>,
-    api: Value,
+    api: RuntimeValueRoot,
     next_continuation: u64,
     next_control_order: usize,
     continuations: HashMap<u64, CapturedContinuation>,
@@ -250,6 +250,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             specialization.exposes_shared_heap(),
             exposes_exit,
         )?;
+        let api = RuntimeValueRoot::new(eval_context.values(), api);
         let id = eval_context
             .task_id()
             .map_err(|error| TaskHalt::new(error.as_ref()))?;
@@ -648,7 +649,11 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         return self.blocked_poll();
                     }
                     if let Some(retry) = self.retry_wake() {
-                        self.blocked = Some(BlockedExecution::evaluation_error(error, retry));
+                        self.blocked = Some(BlockedExecution::evaluation_error(
+                            error,
+                            retry,
+                            self.eval_context.values().runtime_id(),
+                        ));
                         return self.blocked_poll();
                     }
                     self.finish(TaskTerminal::Failed(error));
@@ -2213,6 +2218,12 @@ impl<S: TaskSpecialization> EffectTask<S> {
         if self.terminal.is_some() {
             return;
         }
+        let terminal = match terminal {
+            TaskTerminal::Failed(error) => TaskTerminal::Failed(
+                error.root_for_runtime(self.eval_context.values().runtime_id()),
+            ),
+            terminal => terminal,
+        };
         let unfinished_failure = match &terminal {
             TaskTerminal::Complete(_) => Arc::new(EvaluationFailure::message(
                 "reflection task completed without fulfilling its fixpoint",
@@ -2254,7 +2265,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             .ok_or_else(|| TaskHalt::new("reflection effect has no `eff` member"))?;
         let function = evaluate_in(context, function)
             .map_err(|halt| halt.with_core_context(effect_dispatch_context("function")))?;
-        let request = apply_in(context, function, vec![self.api.clone()])
+        let request = apply_in(context, function, vec![self.api.as_core().clone()])
             .map_err(|halt| halt.with_core_context(effect_dispatch_context("application")))?;
         let request = evaluate_in(context, request)
             .map_err(|halt| halt.with_core_context(effect_dispatch_context("request")))?;
@@ -2277,7 +2288,14 @@ pub(super) struct ValueEffectTask<S: TaskSpecialization>(pub(super) EffectTask<S
 
 pub(super) struct ContextualValueEffectTask<S: TaskSpecialization> {
     pub(super) task: EffectTask<S>,
-    pub(super) context: Value,
+    pub(super) context: RuntimeValueRoot,
+}
+
+impl<S: TaskSpecialization> ContextualValueEffectTask<S> {
+    pub(super) fn new(task: EffectTask<S>, context: Value) -> Self {
+        let context = RuntimeValueRoot::new(task.eval_context.values(), context);
+        Self { task, context }
+    }
 }
 
 impl<S: TaskSpecialization> EvaluationTaskMachine for ValueEffectTask<S> {
@@ -2301,11 +2319,13 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for ContextualValueEffectTask<
         step_budget: usize,
     ) -> EvaluationMachinePoll {
         match poll_value_effect_task(&mut self.task, context, step_budget) {
-            EvaluationMachinePoll::Failed(error) => {
-                EvaluationMachinePoll::Failed(context.root_failure(Arc::new(
-                    error.as_failure().with_context(self.context.clone()),
-                )))
-            }
+            EvaluationMachinePoll::Failed(error) => EvaluationMachinePoll::Failed(
+                context.root_failure(Arc::new(
+                    error
+                        .as_failure()
+                        .with_context(self.context.as_core().clone()),
+                )),
+            ),
             poll => poll,
         }
     }
@@ -2326,7 +2346,7 @@ fn poll_value_effect_task<S: TaskSpecialization>(
         EffectTaskPoll::Blocked(blocked) => EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
             dependency: blocked.lazy.map(WorkDependency::Wait),
             observed_epoch: blocked.observed_generation.map(|_| observed_epoch),
-            error: blocked.error.map(|error| context.root_failure(error)),
+            error: blocked.error,
         }),
         EffectTaskPoll::Exit(exit) => EvaluationMachinePoll::Exit(EvaluationExitBlock {
             intent: exit.intent,
@@ -2335,9 +2355,9 @@ fn poll_value_effect_task<S: TaskSpecialization>(
         EffectTaskPoll::Complete(value) => {
             EvaluationMachinePoll::Complete(value.into_runtime_root())
         }
-        EffectTaskPoll::Failed(error) => {
-            EvaluationMachinePoll::Failed(context.root_failure(error.into_failure()))
-        }
+        EffectTaskPoll::Failed(error) => EvaluationMachinePoll::Failed(
+            error.into_failure_root(task.eval_context.values().runtime_id()),
+        ),
         EffectTaskPoll::Cancelled => EvaluationMachinePoll::Cancelled,
     }
 }
@@ -2355,7 +2375,7 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for UnitEffectTask<S> {
                 EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
                     dependency: blocked.lazy.map(WorkDependency::Wait),
                     observed_epoch: blocked.observed_generation.map(|_| observed_epoch),
-                    error: blocked.error.map(|error| context.root_failure(error)),
+                    error: blocked.error,
                 })
             }
             EffectTaskPoll::Exit(exit) => EvaluationMachinePoll::Exit(EvaluationExitBlock {
@@ -2373,9 +2393,9 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for UnitEffectTask<S> {
                     value.as_core().diagnostic_kind_name()
                 ))),
             )),
-            EffectTaskPoll::Failed(error) => {
-                EvaluationMachinePoll::Failed(context.root_failure(error.into_failure()))
-            }
+            EffectTaskPoll::Failed(error) => EvaluationMachinePoll::Failed(
+                error.into_failure_root(self.0.eval_context.values().runtime_id()),
+            ),
             EffectTaskPoll::Cancelled => EvaluationMachinePoll::Cancelled,
         }
     }
@@ -2633,13 +2653,17 @@ impl<S: TaskSpecialization> BlockedExecution<S> {
         }
     }
 
-    fn evaluation_error(error: TaskHalt, retry: RetryWake<S>) -> Self {
+    fn evaluation_error(
+        error: TaskHalt,
+        retry: RetryWake<S>,
+        runtime: crate::EvaluationRuntimeId,
+    ) -> Self {
         assert!(
             error.blocked_on().is_none(),
             "a blocked task error belongs in the wait dependency field"
         );
         Self {
-            reason: BlockReason::EvaluationError(error),
+            reason: BlockReason::EvaluationError(error.root_for_runtime(runtime)),
             retry: Some(retry),
         }
     }
@@ -2655,12 +2679,12 @@ impl<S: TaskSpecialization> BlockedExecution<S> {
         self.retry.as_ref().map(|retry| retry.observed_generation)
     }
 
-    fn error(&self) -> Option<Arc<EvaluationFailure>> {
+    fn error(&self) -> Option<crate::runtime::RuntimeFailureRoot> {
         match &self.reason {
             BlockReason::EvaluationError(error) => Some(
                 error
-                    .permanent_failure()
-                    .expect("evaluation-error blocks retain permanent failures")
+                    .failure_root()
+                    .expect("evaluation-error blocks retain permanent failure roots")
                     .clone(),
             ),
             BlockReason::WaitingOn(_) | BlockReason::Exhausted => None,
@@ -2688,7 +2712,7 @@ enum WakeAction<S: TaskSpecialization> {
 pub(super) struct TaskBlock {
     pub(super) lazy: Option<EvaluationWaitToken>,
     pub(super) observed_generation: Option<u64>,
-    pub(super) error: Option<Arc<EvaluationFailure>>,
+    pub(super) error: Option<crate::runtime::RuntimeFailureRoot>,
 }
 
 #[derive(Clone)]

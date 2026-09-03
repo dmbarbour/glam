@@ -106,5 +106,9 @@ the durable-owner inventory closes storage and lifetime classifications.
   `EvaluatedValue`. This restores direct `as_*()` ergonomics without adding a
   compatibility projection, retaining the runtime heap, or changing the
   198-entry baseline.
+- I4F.1d.3b deliberately tripped the inventory while converting the reflection
+  effect API and contextual wrapper into durable roots. The machine row adds
+  two compatibility root constructions and their two bounded projections;
+  I4F.2 retires those projections when the root facade becomes managed.
 - The existing public-value suite remains the compatibility behavior oracle
   until I4F.2.

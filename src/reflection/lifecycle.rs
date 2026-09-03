@@ -467,7 +467,7 @@ impl<S: TaskSpecialization> EffectRun<S> {
                         task = task.asserting_unit_result(diagnostic_context);
                     }
                     Ok(match failure_context {
-                        Some(context) => Box::new(ContextualValueEffectTask { task, context })
+                        Some(context) => Box::new(ContextualValueEffectTask::new(task, context))
                             as Box<dyn EvaluationTaskMachine>,
                         None => Box::new(ValueEffectTask(task)) as Box<dyn EvaluationTaskMachine>,
                     })
