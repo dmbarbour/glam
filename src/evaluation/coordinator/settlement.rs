@@ -362,12 +362,13 @@ impl EvaluationWorkCoordinator {
                         proposed.work,
                         None,
                         None,
-                        ClientDemandResult::Killed(
+                        ClientDemandResult::Killed(RuntimeFailureRoot::from_runtime(
+                            self.runtime,
                             kill_failure
                                 .as_ref()
                                 .expect("forced settlement must retain its failure")
                                 .clone(),
-                        ),
+                        )),
                     ));
                     continue;
                 }

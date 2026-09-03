@@ -2,8 +2,9 @@
 
 use std::sync::{Arc, Condvar, Mutex, Weak};
 
+#[cfg(test)]
 use crate::core::EvaluationFailure;
-use crate::runtime::{EvaluationRuntimeId, RuntimeValueRoot};
+use crate::runtime::{EvaluationRuntimeId, RuntimeFailureRoot, RuntimeValueRoot};
 
 use super::super::EvaluationDemandState;
 use super::deferred::promote_deferred_wait_locked;
@@ -31,9 +32,9 @@ impl ClientDemandOperation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ClientDemandResult {
     Complete(RuntimeValueRoot),
-    Failed(Arc<EvaluationFailure>),
+    Failed(RuntimeFailureRoot),
     Abandoned,
-    Killed(Arc<EvaluationFailure>),
+    Killed(RuntimeFailureRoot),
 }
 
 pub(crate) struct ClientDemandResultCell {
@@ -249,7 +250,7 @@ pub(crate) struct ClaimedClientDemand {
 
 pub(crate) enum ClientDemandPoll {
     Complete(RuntimeValueRoot),
-    Failed(Arc<EvaluationFailure>),
+    Failed(RuntimeFailureRoot),
     Blocked(WorkDependency),
 }
 
@@ -478,9 +479,12 @@ impl EvaluationWorkCoordinator {
                             claimed.id,
                             claimed.operation.take(),
                             claimed.prior_subscription.take(),
-                            ClientDemandResult::Failed(Arc::new(EvaluationFailure::message(
-                                "client demand blocked on another evaluation runtime",
-                            ))),
+                            ClientDemandResult::Failed(RuntimeFailureRoot::from_runtime(
+                                self.runtime,
+                                Arc::new(crate::core::EvaluationFailure::message(
+                                    "client demand blocked on another evaluation runtime",
+                                )),
+                            )),
                         ))
                     }
                     ClientDemandPoll::Blocked(dependency) => {
@@ -671,7 +675,7 @@ impl EvaluationWorkCoordinator {
                 id,
                 None,
                 None,
-                ClientDemandResult::Killed(failure),
+                ClientDemandResult::Killed(RuntimeFailureRoot::from_runtime(self.runtime, failure)),
             );
             state.work_generation = state.work_generation.wrapping_add(1);
             retirement

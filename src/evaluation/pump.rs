@@ -27,7 +27,7 @@ impl ClientDemandOperation {
         poll_context.evaluate(context, |evaluator| {
             match crate::eval::eval_value_in(evaluator, self.0.as_core()) {
                 Ok(value) => coordinator::ClientDemandPoll::Complete(evaluator.root_value(value)),
-                Err(halt) => client_demand_halt_poll(halt),
+                Err(halt) => client_demand_halt_poll(evaluator, halt),
             }
         })
     }

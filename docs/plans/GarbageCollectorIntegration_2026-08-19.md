@@ -105,7 +105,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.1b | complete | canonical cache and type-erased attachment root surfaces |
 | I4F.1c.1 | complete | non-forcing runtime failure-root compatibility boundary |
 | I4F.1c.2 | complete | machine-poll, task, wait, terminal, and failure-ledger roots |
-| I4F.1c.3 | pending | client-demand and remaining session-owner roots |
+| I4F.1c.3 | complete | client-demand and remaining session-owner roots |
 | I4F.1c.4 | pending | settlement, readiness, and evaluation-owner closure |
 | I4F.1c | pending | evaluation, coordinator, and readiness root surfaces |
 | I4F.1d.1 | pending | reflection store, snapshot, journal, and query roots |
@@ -2781,6 +2781,32 @@ Temporary projections back to `Arc<EvaluationFailure>` remain only at
 inventoried downstream client-demand, settlement/readiness, and reflection
 owners assigned to I4F.1c.3, I4F.1c.4, and I4F.1d; raw promise cells remain the
 separate recursive-core migration owned by I6C. Production remains `NoAuto`.
+
+I4F.1c.3 completed 2026-09-03. `ClientDemandPoll` and
+`ClientDemandResult` now carry `RuntimeFailureRoot`; a permanent
+`EvaluationHalt` is converted while the `EvaluatorStepContext` is still
+active, before the poll crosses into coordinator state. The result cell,
+retirement record, and retained handle therefore preserve a rooted failure
+without requiring the coordinator or originating demand session to remain
+live. Forced settlement also roots the client kill result before publication;
+its broader settlement and readiness payloads remain assigned to I4F.1c.4.
+
+The compile-exhaustive client-demand latch classifies successful, failed,
+blocked, abandoned, and killed boundaries; a companion report latch
+destructures every unfinished-work field and roots its optional error. A
+structured-failure fixture forces
+a promised demand to park, publishes the external failure, resumes the exact
+subscriber, retires its work record, drops the handle, session owner, executor,
+and coordinator, and then verifies the retained root's runtime, direct edges,
+and shared failure identity. The
+persistent failure-ledger fixture now likewise retains a structured report
+across owner closure, acknowledgement, context release, and ledger mutation.
+Existing forced-order activation/cancellation fixtures cover pending
+reflection activations, while the spark audit confirms that queued, claimed,
+blocked, and retirement records move the existing `RuntimeValueRoot` without
+another wrapper. The durable-owner source latch was observed failing before
+its baseline and the client-demand/session rows were closed. Production
+remains `NoAuto`.
 
 #### Phase I4F.1d — Reflection Store, Protocol, and Machine Roots
 

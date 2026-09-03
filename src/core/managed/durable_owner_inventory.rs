@@ -241,16 +241,15 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         RootSurface,
         "I4F.2d.1"
     ),
-    open_durable!(
+    closed_durable!(
         "src/evaluation/coordinator/client_demand.rs",
         "ClientDemandOperation / ClientDemandResultCell / ClientDemandWork",
-        "RuntimeValueRoot operation/results plus Arc<EvaluationFailure>",
+        "RuntimeValueRoot operations/results plus RuntimeFailureRoot failures",
         "cross-poll client demand",
         "demand registration and terminal publication",
         "handle abandonment or terminal retirement",
-        FailureGraph,
+        CompatibilityRoot,
         RootSurface,
-        "I4F.1c",
         "I4F.2d.1"
     ),
     closed_durable!(
@@ -264,7 +263,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         RootSurface,
         "I4F.2d.1"
     ),
-    open_durable!(
+    closed_durable!(
         "src/evaluation/session.rs",
         "EvaluationSession and pending activation/effect state",
         "RuntimeValueRoot effects plus RuntimeFailureRoot reports and unfinished state",
@@ -273,7 +272,6 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "session close, cancellation, or terminal settlement",
         CompatibilityRoot,
         RootSurface,
-        "I4F.1c",
         "I4F.2d.1"
     ),
     open_durable!(
@@ -761,8 +759,8 @@ fn is_production_source(relative: &Path) -> bool {
 // `owner_for_declaration` is the reviewed semantic assignment for every entry.
 const DECLARATION_BASELINE_COUNT: usize = 132;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([115, 56, 1, 17, 15, 0, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 18_173_480_541_385_730_612;
+    DeclarationSignals::new([115, 56, 1, 14, 15, 0, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 14_509_656_708_064_782_647;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,

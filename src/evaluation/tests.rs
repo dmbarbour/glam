@@ -9,10 +9,10 @@ use crate::core::{LazyCycle, LazyValue, PromisedValue};
 use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 
 use super::coordinator::{
-    ClaimedTaskWork, ClientDemandHandle, ClientDemandResult, ClientDemandSnapshot,
-    EvaluationWaitTerminal, ReflectionWorkPoll, ReflectionWorkState,
+    ClaimedTaskWork, ClientDemandHandle, ClientDemandPoll, ClientDemandResult,
+    ClientDemandSnapshot, EvaluationWaitTerminal, ReflectionWorkPoll, ReflectionWorkState,
 };
-use super::session::EvaluationUnfinishedState;
+use super::session::{EvaluationUnfinishedState, EvaluationUnfinishedTask};
 
 /// Compile-exhaustive ownership inventory for every value-bearing machine
 /// poll boundary established by I3A.4.
@@ -89,6 +89,63 @@ fn evaluation_machine_poll_boundary_inventory_is_complete() {
             .iter()
             .all(|(boundary, checkpoint)| !boundary.is_empty() && !checkpoint.is_empty())
     );
+}
+
+/// Compile-exhaustive ownership latch for the cross-poll and terminal client
+/// demand boundaries migrated by I4F.1c.3.
+fn assert_client_demand_boundary_inventory(poll: &ClientDemandPoll, result: &ClientDemandResult) {
+    match poll {
+        ClientDemandPoll::Complete(value) => {
+            let _: &RuntimeValueRoot = value;
+        }
+        ClientDemandPoll::Failed(failure) => {
+            let _: &RuntimeFailureRoot = failure;
+        }
+        ClientDemandPoll::Blocked(_) => {}
+    }
+    match result {
+        ClientDemandResult::Complete(value) => {
+            let _: &RuntimeValueRoot = value;
+        }
+        ClientDemandResult::Failed(failure) | ClientDemandResult::Killed(failure) => {
+            let _: &RuntimeFailureRoot = failure;
+        }
+        ClientDemandResult::Abandoned => {}
+    }
+}
+
+#[test]
+fn client_demand_boundary_inventory_is_complete() {
+    let _: fn(&ClientDemandPoll, &ClientDemandResult) = assert_client_demand_boundary_inventory;
+}
+
+/// Compile-exhaustive ownership latch for session reports. Pending activation
+/// storage is private to `session`; the durable source inventory latches those
+/// `RuntimeValueRoot` fields directly.
+fn assert_evaluation_session_report_boundary(report: &EvaluationSessionReport) {
+    let EvaluationSessionReport {
+        failures,
+        unfinished,
+    } = report;
+    let _: &coordinator::TaskFailureLedger = failures;
+    let _: &Vec<EvaluationUnfinishedTask> = unfinished;
+    for task in unfinished {
+        let EvaluationUnfinishedTask {
+            task: _,
+            state: _,
+            dependency: _,
+            dependency_session: _,
+            wait: _,
+            observed_epoch: _,
+            error,
+        } = task;
+        let _: &Option<RuntimeFailureRoot> = error;
+    }
+}
+
+#[test]
+fn evaluation_session_report_boundary_is_complete() {
+    let _: fn(&EvaluationSessionReport) = assert_evaluation_session_report_boundary;
 }
 
 struct SameRuntimeFixture {
@@ -393,6 +450,64 @@ fn client_demand_result_cell_releases_after_terminal_handle_drop() {
 }
 
 #[test]
+fn client_failure_root_survives_work_and_owner_session_retirement() {
+    let (coordinator, executor) =
+        test_execution_resources(0).expect("test execution resources should build");
+    let owner = EvaluationSession::shared(&coordinator);
+    let context = EvalContext::new(&owner);
+    let runtime = context.values().runtime_id();
+    let emission = Value::Dict(crate::core::Dict::new_sync().insert(
+        crate::core::Key::atom_from_text("payload"),
+        Value::Number(37.into()),
+    ));
+    let frame = crate::eval::evaluation_context_frame("client_demand_retention");
+    let failure = Arc::new(EvaluationFailure::emission(emission).with_context(frame));
+    let promise = PromisedValue::new(context.values(), "failed client demand");
+    let handle = context
+        .demand_whnf(RuntimeValueRoot::new(
+            context.values(),
+            Value::Promised(promise.clone()),
+        ))
+        .expect("the failed client demand should be admitted");
+
+    assert!(poll_one_runtime_work(&coordinator));
+    assert!(handle.poll().is_none());
+    assert!(matches!(
+        coordinator.client_demand_snapshot(handle.work()),
+        Some(ClientDemandSnapshot::Blocked { .. })
+    ));
+    promise
+        .fail(failure.clone())
+        .expect("the external producer should publish its failure once");
+    assert!(handle.poll().is_none());
+    assert!(
+        poll_one_runtime_work(&coordinator),
+        "the disturbed client demand should resume and publish its result"
+    );
+    let Some(ClientDemandResult::Failed(root)) = handle.poll() else {
+        panic!("the client result cell should retain the structured failure")
+    };
+    assert_eq!(coordinator.client_demand_count(), 0);
+    assert!(Arc::ptr_eq(root.as_failure(), &failure));
+    assert_eq!(root.direct_value_roots().len(), 2);
+    assert!(
+        root.direct_value_roots()
+            .iter()
+            .all(|value| value.runtime_id() == runtime)
+    );
+
+    drop(handle);
+    drop(context);
+    drop(owner);
+    drop(executor);
+    drop(coordinator);
+
+    assert!(Arc::ptr_eq(root.as_failure(), &failure));
+    assert_eq!(root.runtime_id(), runtime);
+    assert_eq!(root.direct_value_roots().len(), 2);
+}
+
+#[test]
 fn client_demand_owner_close_and_forced_kill_answer_once() {
     let fixture = SameRuntimeFixture::new();
     let (closed_handle, closed_promise) = {
@@ -428,7 +543,7 @@ fn client_demand_owner_close_and_forced_kill_answer_once() {
     assert_eq!(promise.exact_subscription_count(), 0);
     assert!(matches!(
         handle.poll(),
-        Some(ClientDemandResult::Killed(actual)) if Arc::ptr_eq(&actual, &failure)
+        Some(ClientDemandResult::Killed(actual)) if Arc::ptr_eq(actual.as_failure(), &failure)
     ));
 }
 
@@ -1523,6 +1638,18 @@ impl EvaluationTaskMachine for Fail {
         _step_budget: usize,
     ) -> EvaluationMachinePoll {
         EvaluationMachinePoll::Failed(context.root_failure(evaluation_failure("reasoning failed")))
+    }
+}
+
+struct FailWith(Arc<EvaluationFailure>);
+
+impl EvaluationTaskMachine for FailWith {
+    fn poll(
+        &mut self,
+        context: &crate::evaluation::EvaluationPollContext,
+        _step_budget: usize,
+    ) -> EvaluationMachinePoll {
+        EvaluationMachinePoll::Failed(context.root_failure(self.0.clone()))
     }
 }
 
@@ -3889,8 +4016,16 @@ fn runtime_failure_ledger_preserves_owner_buckets_and_persistent_snapshots() {
     let first_context = EvalContext::new(&first_owner);
     let second_context = EvalContext::new(&second_owner);
 
+    let first_emission = Value::Dict(crate::core::Dict::new_sync().insert(
+        crate::core::Key::atom_from_text("owner"),
+        Value::Number(1.into()),
+    ));
+    let first_failure = Arc::new(EvaluationFailure::emission(first_emission));
     let first_task = first_context
-        .schedule_task(|_| Ok(Box::new(Fail)))
+        .schedule_task({
+            let first_failure = first_failure.clone();
+            move |_| Ok(Box::new(FailWith(first_failure)))
+        })
         .expect("first failing task should schedule");
     let second_task = second_context
         .schedule_task(|_| Ok(Box::new(Fail)))
@@ -3950,6 +4085,12 @@ fn runtime_failure_ledger_preserves_owner_buckets_and_persistent_snapshots() {
             .is_some_and(|failures| failures.contains_key(&second_task_id)),
         "acknowledgement must not disturb another owner bucket"
     );
+    drop(first_context);
+    let retained_failure = first_snapshot
+        .get(&first_task_id)
+        .expect("the persistent report should retain the acknowledged failure");
+    assert!(Arc::ptr_eq(retained_failure.as_failure(), &first_failure));
+    assert_eq!(retained_failure.direct_value_roots().len(), 1);
 
     drop(second_task);
     drop(second_owner);
@@ -4654,7 +4795,10 @@ fn forced_deadlock_settlement_preserves_exits_and_kills_other_participants() {
     let Some(ClientDemandResult::Killed(client_failure)) = client.poll() else {
         panic!("forced client demand should receive a killed result")
     };
-    assert_eq!(client_failure, *parent_failure.as_failure());
+    assert!(Arc::ptr_eq(
+        client_failure.as_failure(),
+        parent_failure.as_failure()
+    ));
     assert!(matches!(
         fixture.runtime.readiness(),
         crate::api::RuntimeReadiness::Ready(_)

@@ -26,8 +26,9 @@ use super::coordinator::{
 use super::pump::test_reflection_dependency;
 use super::pump::{EvaluationPumpOutcome, prioritized_task_for, pump_demand};
 use super::{
-    EvaluationDemandState, EvaluationPollContext, ReflectionTaskProfile, RuntimeObservationEpoch,
-    RuntimeObservationState, allocate_task_id, allocate_wait_token, evaluation_failure,
+    EvaluationDemandState, EvaluationPollContext, EvaluatorStepContext, ReflectionTaskProfile,
+    RuntimeObservationEpoch, RuntimeObservationState, allocate_task_id, allocate_wait_token,
+    evaluation_failure,
 };
 #[cfg(test)]
 use super::{PendingTestPromiseTask, ReflectionTaskLauncher};
@@ -1498,7 +1499,7 @@ fn terminal_client_demand_result(
 ) -> Result<ClientDemandResult, crate::core::EvaluationHalt> {
     match result {
         ClientDemandResult::Failed(failure) | ClientDemandResult::Killed(failure) => {
-            Err(crate::core::EvaluationHalt::failure(failure))
+            Err(crate::core::EvaluationHalt::failure(failure.into_failure()))
         }
         ClientDemandResult::Abandoned => Err(crate::core::EvaluationHalt::new(
             "client evaluation demand was abandoned",
@@ -1508,6 +1509,7 @@ fn terminal_client_demand_result(
 }
 
 pub(super) fn client_demand_halt_poll(
+    context: &EvaluatorStepContext<'_>,
     halt: crate::core::EvaluationHalt,
 ) -> coordinator::ClientDemandPoll {
     if let Some(wait) = halt.blocked_on() {
@@ -1515,7 +1517,7 @@ pub(super) fn client_demand_halt_poll(
     } else if let Some(promise) = halt.unassigned_promise() {
         coordinator::ClientDemandPoll::Blocked(WorkDependency::Promise(promise.clone()))
     } else {
-        coordinator::ClientDemandPoll::Failed(halt.into_permanent_failure())
+        coordinator::ClientDemandPoll::Failed(context.root_failure(halt.into_permanent_failure()))
     }
 }
 
