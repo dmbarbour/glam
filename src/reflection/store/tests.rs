@@ -51,6 +51,215 @@ fn evaluate_query_state(assembler: &Assembler, value: PublicValue) -> Option<Eva
     decode_query_state(&assembler.core_values(), value.as_core())
 }
 
+/// Compile-exhaustive ownership latch for I4F.1d.1's durable reflection-store
+/// state. Public values are compatibility roots; query identity, conflict
+/// metadata, and revision state are edge-free companions.
+fn assert_store_root_boundary_inventory(
+    snapshot: &StoreSnapshot,
+    edit: &StoreEdit,
+    journal: &StoreJournal,
+    store: &ReflectionStore,
+) {
+    let StoreSnapshot {
+        identity,
+        revision,
+        heap_volume,
+        runtime_volume,
+        query_domain,
+        roots,
+        strategy,
+        values,
+    } = snapshot;
+    let _: &Arc<()> = identity;
+    let _: &u64 = revision;
+    let _: &VolumeId = heap_volume;
+    let _: &VolumeId = runtime_volume;
+    let _: &Arc<QueryDomain> = query_domain;
+    let _: &RedBlackTreeMapSync<VolumeId, PublicValue> = roots;
+    let _: &Arc<dyn ConflictAnalysisStrategy> = strategy;
+    let _: &CoreValueFactory = values;
+
+    match edit {
+        StoreEdit::Set { address, value } => {
+            let _: &ConflictAddress = address;
+            let _: &PublicValue = value;
+        }
+        StoreEdit::Rewrite { address, updater } => {
+            let _: &ConflictAddress = address;
+            let _: &PublicValue = updater;
+        }
+    }
+
+    let StoreJournal {
+        snapshot,
+        views,
+        observations,
+        edits,
+    } = journal;
+    let _: &StoreSnapshot = snapshot;
+    let _: &RedBlackTreeMapSync<VolumeId, PublicValue> = views;
+    let _: &dyn ConflictObservationIndex = observations.as_ref();
+    let _: &Vec<StoreEdit> = edits;
+
+    let ReflectionStore {
+        identity,
+        heap_volume,
+        runtime_volume,
+        query_domain,
+        query_retirements,
+        next_volume,
+        roots,
+        revision,
+        latest_changes,
+        strategy,
+        values,
+    } = store;
+    let _: &Arc<()> = identity;
+    let _: &VolumeId = heap_volume;
+    let _: &VolumeId = runtime_volume;
+    let _: &Arc<QueryDomain> = query_domain;
+    let _: &Receiver<EvaluationQueryId> = query_retirements;
+    let _: &u64 = next_volume;
+    let _: &RedBlackTreeMapSync<VolumeId, PublicValue> = roots;
+    let _: &u64 = revision;
+    let _: &BTreeMap<ConflictAddress, u64> = latest_changes;
+    let _: &Arc<dyn ConflictAnalysisStrategy> = strategy;
+    let _: &CoreValueFactory = values;
+}
+
+fn assert_query_root_boundary_inventory(
+    query_poll: &EvaluationQueryPoll,
+    query_state: &EvaluationQueryState,
+    handle: &EvaluationQueryHandle,
+    domain: &QueryDomain,
+) {
+    match query_poll {
+        EvaluationQueryPoll::State { value, observed } => {
+            let _: &PublicValue = value;
+            let _: &bool = observed;
+        }
+        EvaluationQueryPoll::ForeignQueryDomain => {}
+    }
+
+    match query_state {
+        EvaluationQueryState::Pending => {}
+        EvaluationQueryState::Complete(value) => {
+            let _: &PublicValue = value;
+        }
+    }
+
+    let EvaluationQueryHandle {
+        id,
+        domain: handle_domain,
+    } = handle;
+    let _: &EvaluationQueryId = id;
+    let _: &Weak<QueryDomain> = handle_domain;
+    let QueryDomain { next_id, retired } = domain;
+    let _: &AtomicU64 = next_id;
+    let _: &Sender<EvaluationQueryId> = retired;
+}
+
+#[test]
+fn store_root_boundary_inventory_is_complete() {
+    let _: fn(&StoreSnapshot, &StoreEdit, &StoreJournal, &ReflectionStore) =
+        assert_store_root_boundary_inventory;
+    let _: fn(&EvaluationQueryPoll, &EvaluationQueryState, &EvaluationQueryHandle, &QueryDomain) =
+        assert_query_root_boundary_inventory;
+}
+
+fn unforced_store_value(
+    values: &CoreValueFactory,
+    label: &'static str,
+) -> (PublicValue, Weak<()>, Arc<std::sync::atomic::AtomicBool>) {
+    let retained = Arc::new(());
+    let weak = Arc::downgrade(&retained);
+    let forced = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let forced_by_thunk = forced.clone();
+    let value = Value::Lazy(LazyValue::semantic_thunk(values, label, move |_| {
+        let _ = &retained;
+        forced_by_thunk.store(true, Ordering::Release);
+        panic!("reflection-store root retention must not force its value")
+    }));
+    (PublicValue::from_core(values, value), weak, forced)
+}
+
+#[test]
+fn snapshot_journal_edits_and_protected_volumes_retain_roots_without_forcing() {
+    let mut store = store();
+    let (heap_root, heap_retained, heap_forced) =
+        unforced_store_value(&store.values, "snapshot heap root");
+    let (volume_root, volume_retained, volume_forced) =
+        unforced_store_value(&store.values, "snapshot protected volume");
+    let (edit_root, edit_retained, edit_forced) =
+        unforced_store_value(&store.values, "journal edit root");
+    store.replace_root(heap_root);
+    let volume = store
+        .create_volume(volume_root)
+        .expect("the protected volume should be created");
+    let snapshot = store.snapshot();
+    let mut journal = StoreJournal::new(snapshot.clone());
+    journal.write(path(&["edit"]), edit_root);
+
+    drop(store);
+    drop(snapshot);
+    assert_eq!(
+        journal.view().runtime_id(),
+        journal.snapshot.values.runtime_id()
+    );
+    assert_eq!(
+        journal
+            .volume_view(volume)
+            .expect("the journal should retain the protected volume")
+            .runtime_id(),
+        journal.snapshot.values.runtime_id()
+    );
+    for (retained, forced) in [
+        (&heap_retained, &heap_forced),
+        (&volume_retained, &volume_forced),
+        (&edit_retained, &edit_forced),
+    ] {
+        assert!(retained.upgrade().is_some());
+        assert!(!forced.load(Ordering::Acquire));
+    }
+
+    drop(journal);
+    assert!(heap_retained.upgrade().is_none());
+    assert!(volume_retained.upgrade().is_none());
+    assert!(edit_retained.upgrade().is_none());
+}
+
+#[test]
+fn query_result_remains_rooted_after_store_and_handle_retirement() {
+    let assembler = Assembler::default();
+    let mut store = store_with(assembler.core_values());
+    let (result, retained, forced) = unforced_store_value(&store.values, "retained query result");
+    let mut reservation = StoreJournal::new(store.snapshot());
+    let handle = reservation
+        .reserve_query_with(result)
+        .expect("the query should reserve");
+    assert_eq!(store.try_commit(&reservation), StoreCommitResult::Committed);
+    let EvaluationQueryPoll::State { value, observed } = store.snapshot().poll_query(&handle)
+    else {
+        panic!("the committed query should remain in its query domain")
+    };
+    assert!(observed);
+    let EvaluationQueryState::Complete(result) =
+        evaluate_query_state(&assembler, value).expect("the query state should decode")
+    else {
+        panic!("the query should be complete")
+    };
+
+    drop(handle);
+    drop(reservation);
+    drop(store);
+    assert!(retained.upgrade().is_some());
+    assert!(!forced.load(Ordering::Acquire));
+    assert_eq!(result.runtime_id(), assembler.values().runtime_id());
+
+    drop(result);
+    assert!(retained.upgrade().is_none());
+}
+
 #[test]
 fn query_state_is_transactional_and_retired_after_the_last_handle() {
     let assembler = Assembler::default();

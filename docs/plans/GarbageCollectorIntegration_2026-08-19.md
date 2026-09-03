@@ -1,7 +1,8 @@
 # Glam GC Integration Plan — 2026-08-19
 
 Status: in progress; Phases I0 through I3 and their mandatory reviews plus I4.0
-through I4E and I4F.1a through I4F.1c are complete. Phase I4F.1d is pending.
+through I4E and I4F.1a through I4F.1c are complete. I4F.1d.1 is complete and
+I4F.1d.2 is pending.
 Collector Gate G1 passed on 2026-08-25. The remaining integration work follows
 the completed owner-matrix, stable-ledger, and low-risk checkpoint corrections
 from the integration review.
@@ -108,7 +109,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.1c.3 | complete | client-demand and remaining session-owner roots |
 | I4F.1c.4 | complete | settlement, readiness, and evaluation-owner closure |
 | I4F.1c | complete | evaluation, coordinator, and readiness root surfaces |
-| I4F.1d.1 | pending | reflection store, snapshot, journal, and query roots |
+| I4F.1d.1 | complete | reflection store, snapshot, journal, and query roots |
 | I4F.1d.2 | pending | reflection lifecycle, protocol, and search roots |
 | I4F.1d.3 | pending | reflection machine frame and request roots |
 | I4F.1d | pending | reflection store, protocol, and machine root surfaces |
@@ -2836,11 +2837,12 @@ production remains `NoAuto`.
 Reflection owns the largest compatibility-access cluster, so migrate it in
 three checkpoints:
 
-1. **I4F.1d.1 — Store and query state.** Reconcile reflection environments,
-   protected volumes, persistent store states/snapshots, journals, queries,
-   transactions, rewrites, and commit records. Preserve snapshot isolation and
-   verify snapshot/query retention, conflict, commit, retirement, and scope
-   exit without collection.
+1. **I4F.1d.1 — Store and query state.** Reconcile protected volumes,
+   persistent store states/snapshots, journals, queries, transactions,
+   rewrites, and commit records. Reflection environments belong to the host
+   and protocol lifecycle in I4F.1d.2 rather than the store. Preserve snapshot
+   isolation and verify snapshot/query retention, conflict, commit,
+   retirement, and scope exit without collection.
 2. **I4F.1d.2 — Lifecycle, protocol, and search.** Reconcile effect runs,
    reservations, protocol requests/results/failures, isolated search branches,
    and host snapshots. Preserve the existing evaluator/interpreter phase
@@ -2858,6 +2860,28 @@ three checkpoints:
 Each checkpoint decreases the reflection compatibility-access inventory or
 records an explicit bounded projection disposition; an occurrence may not
 silently move between modules.
+
+I4F.1d.1 completed 2026-09-03 as a root-surface closure audit rather than a
+storage rewrite. The reflection store already retained every heap,
+runtime-query, and protected-volume value as the public `Value` compatibility
+root: `StoreSnapshot`, `StoreJournal` views and edits, `ReflectionStore`, query
+polls, and decoded query states contain no durable raw core value or
+`EvaluationFailure`. Query IDs/domains, revision metadata, conflict indexes,
+and commit outcomes are edge-free companions. A compile-exhaustive latch now
+destructures all of those records and variants so a new field cannot silently
+inherit either classification.
+
+The remaining `.as_core`/`.into_core` calls in `store.rs` are bounded pure
+projections used to construct lazy path accesses, rebased updates, and query
+state. Every value crossing back into a snapshot, journal, store, or query
+result is wrapped with `PublicValue::from_core` first; their later retirement
+with the facade compatibility API remains assigned to I4F.2b. New lifetime
+fixtures retain unforced lazy sentinels through heap roots, protected volumes,
+journal edits, snapshots, and query-result publication, then verify exact
+release after the last owning journal or result is dropped. Existing tests
+continue to cover snapshot isolation, conflicts, commits, volume revocation,
+and query retirement. The store owner row is therefore closed as
+`PublicRoot`; production remains `NoAuto`.
 
 #### Phase I4F.1e — Diagnostic, Event, and Delivery Roots
 

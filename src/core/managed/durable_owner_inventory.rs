@@ -285,16 +285,15 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         RootSurface,
         "I4F.2d.1"
     ),
-    open_durable!(
+    closed_durable!(
         "src/reflection/store.rs",
         "State / Set / Rewrite / StoreSnapshot / StoreJournal / query and transaction records",
-        "persistent Value maps, snapshots, and edits",
+        "persistent public Value roots in maps, snapshots, edits, and query results",
         "persistent reflection store or transaction",
         "snapshot/query/transaction creation and commit",
         "snapshot, query, journal, transaction, or store retirement",
-        BareValue,
+        PublicRoot,
         RootSurface,
-        "I4F.1d.1",
         "I4F.2d.2"
     ),
     open_durable!(

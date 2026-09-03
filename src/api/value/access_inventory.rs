@@ -242,7 +242,7 @@ const INVENTORY: &[InventoryEntry] = &[
         "src/reflection/store.rs",
         [4, 3, 11, 0, 0, 0],
         "persistent store, query roots, and transactional updates",
-        "I3D.4 store regions; I4F.1 persistent roots"
+        "I3D.4 bounded store regions; I4F.1d.1 rooted public store surfaces; I4F.2b compatibility-access retirement"
     ),
     entry!(
         "src/runtime.rs",
