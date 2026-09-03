@@ -87,7 +87,6 @@ impl RuntimeReadinessStamp {
 
 /// One work disposition proposed by a stable readiness snapshot.
 #[derive(Clone, Debug)]
-#[cfg_attr(test, derive(PartialEq, Eq))]
 pub struct RuntimeDisposition {
     work_id: u64,
     session_id: u64,
@@ -115,7 +114,6 @@ impl RuntimeDisposition {
 
 /// Payload of one proposed runtime disposition.
 #[derive(Clone, Debug)]
-#[cfg_attr(test, derive(PartialEq, Eq))]
 pub enum RuntimeDispositionKind {
     ExitSuccess,
     ExitError(Value),
@@ -398,7 +396,6 @@ impl RuntimeTaskWait {
 
 /// One unfinished participant retained by a deadlock snapshot.
 #[derive(Clone, Debug)]
-#[cfg_attr(test, derive(PartialEq, Eq))]
 pub struct RuntimeDeadlockWork {
     work_id: u64,
     session_id: u64,

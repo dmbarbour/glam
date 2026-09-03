@@ -33,7 +33,6 @@ struct EffectLifecycleState {
 /// The last committed scheduler status published for a composed effect root.
 #[doc(hidden)]
 #[derive(Debug, Clone)]
-#[cfg_attr(test, derive(PartialEq, Eq))]
 pub enum EffectLifecycleStatus {
     Launched,
     Blocked,

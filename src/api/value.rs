@@ -75,7 +75,6 @@ mod scoped_construction_tests {
 /// Values cannot be transferred between runtimes. Construct them through
 /// [`Values`], obtained from the target runtime or assembler.
 #[derive(Clone)]
-#[cfg_attr(test, derive(PartialEq, Eq))]
 pub struct Value(pub(super) RuntimeValueRoot);
 
 /// A runtime-local value whose outer shell has reached weak-head normal form.
@@ -89,6 +88,46 @@ pub struct Value(pub(super) RuntimeValueRoot);
 pub struct EvaluatedValue {
     value: Value,
     observer: RuntimeValueObserver,
+}
+
+#[cfg(test)]
+mod facade_trait_contract_tests {
+    use super::{EvaluatedValue, Value};
+
+    // Trait selection becomes ambiguous if an opaque public handle regains a
+    // representation-derived relation. This gives the facade a compile-time
+    // negative contract without exposing a semantic equality operation.
+    macro_rules! assert_does_not_implement {
+        ($module:ident, $type:ident, $trait:path) => {
+            mod $module {
+                use super::$type;
+
+                trait AmbiguousIfImplemented<Discriminator> {
+                    fn verify() {}
+                }
+
+                struct Implemented;
+
+                impl<T: ?Sized> AmbiguousIfImplemented<()> for T {}
+                impl<T: ?Sized + $trait> AmbiguousIfImplemented<Implemented> for T {}
+
+                const _: fn() = || {
+                    <$type as AmbiguousIfImplemented<_>>::verify();
+                };
+            }
+        };
+    }
+
+    assert_does_not_implement!(value_not_partial_eq, Value, PartialEq);
+    assert_does_not_implement!(value_not_eq, Value, Eq);
+    assert_does_not_implement!(value_not_partial_ord, Value, PartialOrd);
+    assert_does_not_implement!(value_not_ord, Value, Ord);
+    assert_does_not_implement!(value_not_hash, Value, std::hash::Hash);
+    assert_does_not_implement!(evaluated_value_not_partial_eq, EvaluatedValue, PartialEq);
+    assert_does_not_implement!(evaluated_value_not_eq, EvaluatedValue, Eq);
+    assert_does_not_implement!(evaluated_value_not_partial_ord, EvaluatedValue, PartialOrd);
+    assert_does_not_implement!(evaluated_value_not_ord, EvaluatedValue, Ord);
+    assert_does_not_implement!(evaluated_value_not_hash, EvaluatedValue, std::hash::Hash);
 }
 
 /// Runtime-selected construction service for Glam values.
@@ -907,16 +946,6 @@ impl fmt::Debug for EvaluatedValue {
         formatter.write_str("EvaluatedValue")
     }
 }
-
-#[cfg(test)]
-impl PartialEq for EvaluatedValue {
-    fn eq(&self, other: &Self) -> bool {
-        self.value == other.value
-    }
-}
-
-#[cfg(test)]
-impl Eq for EvaluatedValue {}
 
 impl From<EvaluatedValue> for Value {
     fn from(value: EvaluatedValue) -> Self {

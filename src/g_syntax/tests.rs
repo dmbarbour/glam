@@ -3873,8 +3873,8 @@ ordinary = "ordinary"
     let report = snapshot
         .settle()
         .expect("unchanged runtime readiness should settle");
-    assert_eq!(report.task_failures(), []);
-    assert_eq!(report.killed_work(), []);
+    assert!(report.task_failures().is_empty());
+    assert!(report.killed_work().is_empty());
     assert!(
         take_reflection_diagnostics(&diagnostics).is_empty(),
         "successful host choices must not emit diagnostics"

@@ -41,6 +41,19 @@ fn public_list(assembler: &Assembler, items: impl IntoIterator<Item = PublicValu
         .expect("test list should belong to one runtime")
 }
 
+macro_rules! assert_same_value {
+    ($assembler:expr, $left:expr, $right:expr $(,)?) => {{
+        let left = &$left;
+        let right = &$right;
+        assert!(
+            $assembler
+                .reflection()
+                .same_representation(left, right)
+                .expect("reflection test values should share one runtime")
+        );
+    }};
+}
+
 #[derive(Clone)]
 struct TestEffects;
 
@@ -1888,7 +1901,7 @@ fn isolated_search_retains_branch_local_journals_without_committing() {
         [Bytes::from_static(b"right journal")]
     );
     assert!(host.stderr().is_empty());
-    assert_eq!(host.heap(), assembler.values().empty_dict());
+    assert_same_value!(assembler, host.heap(), assembler.values().empty_dict());
 }
 
 #[test]
@@ -2704,10 +2717,16 @@ fn scheduled_effect_root_publishes_failure_and_cancellation() {
     .schedule(&cancel_lifecycle)
     .expect("blocked root should be admitted");
     cancel_runtime.pump_until_stable();
-    assert_eq!(cancel_lifecycle.status(), EffectLifecycleStatus::Blocked);
+    assert!(matches!(
+        cancel_lifecycle.status(),
+        EffectLifecycleStatus::Blocked
+    ));
     cancelled.cancel();
     assert!(matches!(cancelled.run().unwrap(), TaskOutcome::Cancelled));
-    assert_eq!(cancel_lifecycle.status(), EffectLifecycleStatus::Cancelled);
+    assert!(matches!(
+        cancel_lifecycle.status(),
+        EffectLifecycleStatus::Cancelled
+    ));
 }
 
 fn terminal_test_lifecycle(
@@ -2929,7 +2948,7 @@ fn coordinator_terminal_policy_preserves_a_descendant_failure_before_root_return
 
         runtime.pump_until_stable();
         let mut status = lifecycle.status();
-        while status != EffectLifecycleStatus::Blocked {
+        while !matches!(&status, EffectLifecycleStatus::Blocked) {
             assert!(
                 !status.is_terminal(),
                 "the held root must block before terminalizing: {status:?}"
@@ -3012,11 +3031,14 @@ fn dropping_blocked_scheduled_effect_releases_its_session_and_publishes_abandonm
     .schedule(&lifecycle)
     .expect("blocked root should be admitted");
     runtime.pump_until_stable();
-    assert_eq!(lifecycle.status(), EffectLifecycleStatus::Blocked);
+    assert!(matches!(lifecycle.status(), EffectLifecycleStatus::Blocked));
 
     drop(task);
 
-    assert_eq!(lifecycle.status(), EffectLifecycleStatus::Abandoned);
+    assert!(matches!(
+        lifecycle.status(),
+        EffectLifecycleStatus::Abandoned
+    ));
 }
 
 #[test]
@@ -4159,7 +4181,7 @@ fn acknowledged_task_failure_remains_observable_but_is_not_reported() {
                 .expect("task.status should retain the failure"),
         )
         .expect("task.status error should evaluate");
-    assert_eq!(error, status_error);
+    assert_same_value!(assembler, error, status_error);
     let EvaluationSessionRun::Complete(report) = context.run_until_quiescent() else {
         panic!("acknowledged child should leave no unfinished work")
     };
@@ -4230,7 +4252,8 @@ fn task_errors_preserve_structured_emissions_and_contexts() {
             .unwrap(),
         b"handler failed".as_slice()
     );
-    assert_eq!(
+    assert_same_value!(
+        assembler,
         assembler.get(&error, "operation").unwrap(),
         assembler.values().atom_from_text("emit")
     );
@@ -4428,7 +4451,8 @@ fn observed_evaluation_error_restarts_without_advancing_alternatives() {
             EffectTaskPoll::Exit(_) => panic!("retryable task unexpectedly voted to exit"),
         }
     };
-    assert_eq!(
+    assert_same_value!(
+        assembler,
         assembler.get(&value, "msg.text").unwrap(),
         assembler.values().text("available after retry")
     );
@@ -5142,8 +5166,8 @@ fn root_local_state_replacement_does_not_replace_shared_heap() {
     else {
         panic!("state effect should complete")
     };
-    assert_eq!(value, assembler.values().empty_dict());
-    assert_eq!(host.heap(), assembler.values().empty_dict());
+    assert_same_value!(assembler, value, assembler.values().empty_dict());
+    assert_same_value!(assembler, host.heap(), assembler.values().empty_dict());
     assert!(
         assembler
             .get(&value, "answer")
@@ -5162,7 +5186,8 @@ fn child_tasks_start_with_fresh_local_state_and_share_heap() {
         panic!("child task should complete")
     };
     let value = PublicValue::from_runtime_root(*value);
-    assert_eq!(
+    assert_same_value!(
+        assembler,
         assembler
             .evaluate(&assembler.get(&value, "local").unwrap())
             .unwrap(),
@@ -5239,19 +5264,21 @@ fn failed_alternative_rolls_back_local_and_heap_changes() {
     else {
         panic!("clean alternative should complete")
     };
-    assert_eq!(
+    assert_same_value!(
+        assembler,
         assembler
             .evaluate(&assembler.get(&value, "local").unwrap())
             .unwrap(),
         assembler.values().empty_dict()
     );
-    assert_eq!(
+    assert_same_value!(
+        assembler,
         assembler
             .evaluate(&assembler.get(&value, "shared").unwrap())
             .unwrap(),
         assembler.values().empty_dict()
     );
-    assert_eq!(host.heap(), assembler.values().empty_dict());
+    assert_same_value!(assembler, host.heap(), assembler.values().empty_dict());
 }
 
 #[test]
@@ -5261,7 +5288,7 @@ fn blind_heap_write_does_not_make_failure_retryable() {
     let error = run_standard_on(&assembler, &effect, host.clone()).unwrap_err();
     assert!(error.to_string().contains("failed permanently"));
     assert_eq!(host.wait_count(), 0);
-    assert_eq!(host.heap(), assembler.values().empty_dict());
+    assert_same_value!(assembler, host.heap(), assembler.values().empty_dict());
 }
 
 #[test]
@@ -5277,7 +5304,7 @@ fn reading_a_covering_own_write_does_not_make_failure_retryable() {
 
     assert!(error.to_string().contains("failed permanently"));
     assert_eq!(host.wait_count(), 0);
-    assert_eq!(host.heap(), assembler.values().empty_dict());
+    assert_same_value!(assembler, host.heap(), assembler.values().empty_dict());
 }
 
 #[test]
@@ -5312,7 +5339,7 @@ fn blind_heap_rewrite_does_not_make_failure_retryable() {
 
     assert!(error.to_string().contains("failed permanently"));
     assert_eq!(host.wait_count(), 0);
-    assert_eq!(host.heap(), assembler.values().empty_dict());
+    assert_same_value!(assembler, host.heap(), assembler.values().empty_dict());
 }
 
 #[test]
@@ -5329,7 +5356,7 @@ fn heap_root_get_and_set_are_explicit_whole_heap_operations() {
             .unwrap(),
         b"shared".as_slice()
     );
-    assert_eq!(value, host.heap());
+    assert_same_value!(assembler, value, host.heap());
 }
 
 #[test]
@@ -5341,7 +5368,7 @@ fn heap_root_replacement_and_path_errors_remain_lazy() {
         panic!("heap access should return its latent error value")
     };
     assert!(matches!(value.as_core(), Value::Lazy(_)));
-    assert_eq!(host.heap(), assembler.values().integer(42));
+    assert_same_value!(assembler, host.heap(), assembler.values().integer(42));
     assert!(
         assembler
             .evaluate(&value)

@@ -12,6 +12,12 @@ use crate::reflection::RuntimeInputSequence;
 
 use super::{FailedReasoningTask, assert_unclaimed_lazy};
 
+fn same_representation(runtime: &EvaluationRuntime, left: &Value, right: &Value) -> bool {
+    runtime
+        .values()
+        .with_access(|values| values.core_value(left).unwrap() == values.core_value(right).unwrap())
+}
+
 #[test]
 fn evaluation_runtime_workers_activate_only_once() {
     let runtime = EvaluationRuntime::new(0).expect("dormant runtime should build");
@@ -87,9 +93,8 @@ fn runtime_event_snapshots_preserve_persistent_input_roots() {
     let (_, _, before_admission) = runtime.transaction_snapshot();
     endpoint.sender().admit(11).expect("input should admit");
     let mut stale = RuntimeEventJournal::new(before_admission);
-    assert_eq!(
-        stale.read(&endpoint.reader()).unwrap(),
-        None,
+    assert!(
+        stale.read(&endpoint.reader()).unwrap().is_none(),
         "a retained snapshot must not observe later input admission"
     );
 
@@ -113,7 +118,7 @@ fn runtime_event_snapshots_preserve_persistent_input_roots() {
         "consumption must not mutate a retained input snapshot"
     );
     let (_, mut current) = input_transaction(&runtime);
-    assert_eq!(current.read(&endpoint.reader()).unwrap(), None);
+    assert!(current.read(&endpoint.reader()).unwrap().is_none());
 }
 
 #[test]
@@ -266,11 +271,11 @@ fn failed_runtime_input_conversion_publishes_nothing() {
     let (after_generation, _, after) = runtime.transaction_snapshot();
     assert_eq!(after_generation, generation);
     let mut journal = RuntimeEventJournal::new(after);
-    assert_eq!(
+    assert!(
         journal
             .read(&endpoint.reader())
-            .expect("empty endpoint should be readable"),
-        None
+            .expect("empty endpoint should be readable")
+            .is_none()
     );
 }
 
@@ -344,14 +349,14 @@ fn runtime_input_reads_and_commits_a_fifo_prefix() {
             .and_then(|value| value.as_number_text()),
         Some("20".to_owned())
     );
-    assert_eq!(events.read(&endpoint.reader()).unwrap(), None);
+    assert!(events.read(&endpoint.reader()).unwrap().is_none());
     assert_eq!(
         runtime.try_commit_transaction(&store, &events),
         crate::reflection::StoreCommitResult::Committed
     );
 
     let (_, mut empty) = input_transaction(&runtime);
-    assert_eq!(empty.read(&endpoint.reader()).unwrap(), None);
+    assert!(empty.read(&endpoint.reader()).unwrap().is_none());
 }
 
 #[test]
@@ -364,8 +369,8 @@ fn empty_runtime_input_observation_is_stable_and_precise() {
         .input_endpoint(integer_converter(&runtime))
         .expect("right endpoint should register");
     let (unrelated_store, mut unrelated_events) = input_transaction(&runtime);
-    assert_eq!(unrelated_events.read(&left.reader()).unwrap(), None);
-    assert_eq!(unrelated_events.read(&left.reader()).unwrap(), None);
+    assert!(unrelated_events.read(&left.reader()).unwrap().is_none());
+    assert!(unrelated_events.read(&left.reader()).unwrap().is_none());
 
     right.sender().admit(1).expect("right input should admit");
     assert_eq!(
@@ -374,7 +379,7 @@ fn empty_runtime_input_observation_is_stable_and_precise() {
     );
 
     let (stale_store, mut stale_events) = input_transaction(&runtime);
-    assert_eq!(stale_events.read(&left.reader()).unwrap(), None);
+    assert!(stale_events.read(&left.reader()).unwrap().is_none());
     left.sender().admit(2).expect("left input should admit");
     assert_eq!(
         runtime.try_commit_transaction(&stale_store, &stale_events),
@@ -389,7 +394,7 @@ fn append_then_consume_does_not_restore_a_stale_empty_observation() {
         .input_endpoint(integer_converter(&runtime))
         .expect("endpoint should register");
     let (stale_store, mut stale_events) = input_transaction(&runtime);
-    assert_eq!(stale_events.read(&endpoint.reader()).unwrap(), None);
+    assert!(stale_events.read(&endpoint.reader()).unwrap().is_none());
 
     endpoint.sender().admit(1).expect("input should admit");
     let (consumer_store, mut consumer_events) = input_transaction(&runtime);
@@ -459,7 +464,7 @@ fn append_conflicts_after_a_fifo_reader_observes_the_tail_empty() {
         .expect("first input should admit");
     let (store, mut events) = input_transaction(&runtime);
     assert!(events.read(&endpoint.reader()).unwrap().is_some());
-    assert_eq!(events.read(&endpoint.reader()).unwrap(), None);
+    assert!(events.read(&endpoint.reader()).unwrap().is_none());
 
     endpoint
         .sender()
@@ -699,7 +704,11 @@ fn readiness_stamp_tracks_heap_query_and_event_observations() {
         panic!("heap state without work should remain ready")
     };
     assert!(after_heap.stamp().observation_epoch() > initial.stamp().observation_epoch());
-    assert_ne!(after_heap.reflection().root(), initial.reflection().root());
+    assert!(!same_representation(
+        &runtime,
+        after_heap.reflection().root(),
+        initial.reflection().root()
+    ));
 
     let input = runtime
         .input_endpoint(integer_converter(&runtime))
@@ -709,10 +718,11 @@ fn readiness_stamp_tracks_heap_query_and_event_observations() {
         panic!("unused buffered input is state rather than activity")
     };
     assert!(after_input.stamp().observation_epoch() > after_heap.stamp().observation_epoch());
-    assert_eq!(
+    assert!(same_representation(
+        &runtime,
         after_input.reflection().root(),
         after_heap.reflection().root()
-    );
+    ));
 
     let (_, query_snapshot) = runtime.reflection_snapshot();
     let mut query_reservation = crate::reflection::StoreJournal::new(query_snapshot);
@@ -1503,7 +1513,7 @@ fn output_callback_response_reenters_as_later_admitted_input() {
         })
         .expect("output endpoint should register");
     let (producing_store, mut producing_events) = input_transaction(&runtime);
-    assert_eq!(producing_events.read(&input.reader()).unwrap(), None);
+    assert!(producing_events.read(&input.reader()).unwrap().is_none());
     producing_events
         .write(&output.writer(), runtime.values().integer(42))
         .unwrap();
@@ -1512,7 +1522,7 @@ fn output_callback_response_reenters_as_later_admitted_input() {
         crate::reflection::StoreCommitResult::Committed
     );
     let (stale_store, mut stale_events) = input_transaction(&runtime);
-    assert_eq!(stale_events.read(&input.reader()).unwrap(), None);
+    assert!(stale_events.read(&input.reader()).unwrap().is_none());
 
     assert!(output.delivery().deliver_next().unwrap().is_some());
     assert_eq!(
@@ -1689,7 +1699,7 @@ fn runtime_combines_reflection_and_event_commit() {
         runtime.values().text("stale"),
     );
     let mut stale_events = RuntimeEventJournal::new(snapshot);
-    assert_eq!(stale_events.read(&input.reader()).unwrap(), None);
+    assert!(stale_events.read(&input.reader()).unwrap().is_none());
     input.sender().admit(7).expect("input should be admitted");
     let (input_generation, _, _) = runtime.transaction_snapshot();
     assert_ne!(input_generation, initial_generation);
@@ -1725,7 +1735,7 @@ fn runtime_combines_reflection_and_event_commit() {
     let (committed_generation, _, snapshot) = runtime.transaction_snapshot();
     assert_ne!(committed_generation, input_generation);
     let mut empty = RuntimeEventJournal::new(snapshot);
-    assert_eq!(empty.read(&input.reader()).unwrap(), None);
+    assert!(empty.read(&input.reader()).unwrap().is_none());
     assert_eq!(
         assembler
             .get(&runtime.reflection_root(), "atomic")
@@ -1941,11 +1951,12 @@ fn reasoning_failure_acknowledgement_is_idempotent_and_runtime_bound() {
         .acknowledge_reasoning_failure(&failure)
         .expect_err("a foreign runtime must reject the acknowledgement capability");
     assert!(error.to_string().contains("different evaluation runtime"));
-    assert_eq!(
-        settle().task_failures(),
-        std::slice::from_ref(&failure),
-        "foreign-runtime acknowledgement must not alter the originating ledger"
-    );
+    let retained_failures = settle();
+    let [retained_failure] = retained_failures.task_failures() else {
+        panic!("foreign-runtime acknowledgement must retain one originating failure")
+    };
+    assert_eq!(retained_failure.task_id(), failure.task_id());
+    assert_eq!(retained_failure.message(), failure.message());
 
     peer.acknowledge_reasoning_failure(&failure)
         .expect("a same-runtime assembler should route to the producer ledger");

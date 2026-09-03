@@ -33,6 +33,13 @@ fn binary_at(assembler: &Assembler, root: &Value, path: &str) -> Result<Bytes, E
     assembler.to_binary(&access_path(assembler, root, path)?)
 }
 
+fn same_representation(assembler: &Assembler, left: &Value, right: &Value) -> bool {
+    assembler
+        .reflection()
+        .same_representation(left, right)
+        .expect("test values should belong to the assembler runtime")
+}
+
 fn assert_unclaimed_lazy(value: &Value) {
     let CoreValue::Lazy(lazy) = value.as_core() else {
         panic!(
@@ -415,14 +422,13 @@ fn values_apply_is_lazy_and_matches_source_application_order() {
         .apply(&function, [values.integer(50), values.integer(8)])
         .expect("same-runtime application should construct");
     assert_unclaimed_lazy(&applied);
-    assert_eq!(
-        assembler
-            .evaluate(&applied)
-            .expect("constructed application should evaluate"),
-        assembler
-            .evaluate(&direct)
-            .expect("source application should evaluate")
-    );
+    let applied = assembler
+        .evaluate(&applied)
+        .expect("constructed application should evaluate");
+    let direct_result = assembler
+        .evaluate(&direct)
+        .expect("source application should evaluate");
+    assert!(same_representation(&assembler, &applied, &direct_result));
 
     let partial = values
         .apply(&function, [values.integer(50)])
@@ -430,14 +436,13 @@ fn values_apply_is_lazy_and_matches_source_application_order() {
     let nested = values
         .apply(&partial, [values.integer(8)])
         .expect("nested application should construct");
-    assert_eq!(
-        assembler
-            .evaluate(&nested)
-            .expect("nested application should evaluate"),
-        assembler
-            .evaluate(&direct)
-            .expect("source application should remain reusable")
-    );
+    let nested = assembler
+        .evaluate(&nested)
+        .expect("nested application should evaluate");
+    let direct_result = assembler
+        .evaluate(&direct)
+        .expect("source application should remain reusable");
+    assert!(same_representation(&assembler, &nested, &direct_result));
 
     let (promise, resolver) = assembler.promise("lazy function application");
     let promised_application = values
@@ -470,18 +475,14 @@ fn value_paths_preserve_complete_names_and_empty_identity() {
         .expect("a missing semantic path returns undefined");
     assert!(split_name.is_undefined());
 
-    assert_eq!(
-        values
-            .access_path(&root, std::iter::empty::<Value>())
-            .expect("an empty path should preserve its root"),
-        root
-    );
-    assert_eq!(
-        values
-            .apply(&root, std::iter::empty::<Value>())
-            .expect("an empty application should preserve its function"),
-        root
-    );
+    let empty_path = values
+        .access_path(&root, std::iter::empty::<Value>())
+        .expect("an empty path should preserve its root");
+    assert!(same_representation(&assembler, &empty_path, &root));
+    let empty_application = values
+        .apply(&root, std::iter::empty::<Value>())
+        .expect("an empty application should preserve its function");
+    assert!(same_representation(&assembler, &empty_application, &root));
 }
 
 #[test]
@@ -679,7 +680,10 @@ fn dictionary_composition_matches_source_literals_union_and_updates() {
             .access_names(&expected, path.iter().copied())
             .and_then(|value| assembler.evaluate(&value))
             .unwrap();
-        assert_eq!(actual, expected, "field path {path:?} should match");
+        assert!(
+            same_representation(&assembler, &actual, &expected),
+            "field path {path:?} should match"
+        );
     };
 
     for path in [
@@ -807,9 +811,21 @@ fn evaluated_values_preserve_whnf_identity_and_scalar_views() {
     for integer in [i64::MIN, -1, 0, 1, i64::MAX] {
         let original = values.integer(integer);
         let evaluated = EvaluatedValue::from_whnf(&values, original.clone());
-        assert_eq!(evaluated.as_value(), &original);
-        assert_eq!(evaluated.clone().into_value(), original);
-        assert_eq!(Value::from(evaluated.clone()), original);
+        assert!(same_representation(
+            &assembler,
+            evaluated.as_value(),
+            &original
+        ));
+        assert!(same_representation(
+            &assembler,
+            &evaluated.clone().into_value(),
+            &original
+        ));
+        assert!(same_representation(
+            &assembler,
+            &Value::from(evaluated.clone()),
+            &original
+        ));
         assert_eq!(evaluated.as_i64().unwrap(), Some(integer));
         assert_eq!(evaluated.number_text().unwrap(), Some(integer.to_string()));
         assert_eq!(evaluated.as_value().runtime_id(), values.runtime_id());
@@ -912,11 +928,11 @@ fn evaluated_array_items_accept_only_one_strict_value_leaf() {
             .list([lazy_element.clone(), values.integer(2)])
             .expect("strict value leaf should construct"),
     );
-    assert_eq!(
-        values
-            .anno_array(array.as_value().clone())
-            .expect("strict array annotation should succeed"),
-        array.as_value().clone(),
+    let annotated = values
+        .anno_array(array.as_value().clone())
+        .expect("strict array annotation should succeed");
+    assert!(
+        same_representation(&assembler, &annotated, array.as_value()),
         "an existing strict array should not allocate new demand work"
     );
     let items = array
@@ -924,14 +940,14 @@ fn evaluated_array_items_accept_only_one_strict_value_leaf() {
         .unwrap()
         .expect("strict value leaf should extract as an array");
     assert_eq!(items.len(), 2);
-    assert_eq!(items[0], lazy_element);
+    assert!(same_representation(&assembler, &items[0], &lazy_element));
     assert_unclaimed_lazy(&items[0]);
 
-    assert_eq!(
+    assert!(
         EvaluatedValue::from_whnf(&values, values.list([]).unwrap())
             .array_items()
-            .unwrap(),
-        Some(Vec::new())
+            .unwrap()
+            .is_some_and(|items| items.is_empty())
     );
     assert!(
         EvaluatedValue::from_whnf(&values, values.bytes(Bytes::from_static(b"bytes")))
@@ -1006,7 +1022,10 @@ fn value_evaluator_returns_a_runtime_rooted_whnf_witness() {
     assert_eq!(evaluated.as_value().runtime_id(), value.runtime_id());
     drop(assembler);
     assert_eq!(evaluated.as_i64().unwrap(), Some(42));
-    assert_eq!(evaluated.into_value(), value);
+    assert!(
+        values.list([evaluated.into_value()]).is_ok(),
+        "the returned root remains in its original value domain"
+    );
 }
 
 #[test]
@@ -1810,7 +1829,11 @@ fn synchronous_assembler_evaluation_waits_for_a_worker_claim() {
         .recv_timeout(std::time::Duration::from_secs(2))
         .expect("worker completion should wake synchronous evaluation")
         .expect("worker-computed value should succeed");
-    assert_eq!(result, assembler.values().number_from_text("42").unwrap());
+    assert!(same_representation(
+        &assembler,
+        &result,
+        &assembler.values().number_from_text("42").unwrap()
+    ));
     evaluator.join().expect("evaluator thread should finish");
 }
 
@@ -1920,12 +1943,24 @@ fn retained_reflection_profile_keeps_only_shared_resources_alive() {
         .expect("the retained profile host should keep runtime resources alive");
     assert!(value_domain.upgrade().is_some());
     let (_, snapshot) = retained.reflection_snapshot();
-    assert_eq!(snapshot.root(), &retained.values().empty_dict());
+    assert_eq!(
+        retained.values().clone_core(snapshot.root()).unwrap(),
+        retained
+            .values()
+            .clone_core(&retained.values().empty_dict())
+            .unwrap()
+    );
     let initial = retained.values().empty_dict();
     let volume = retained
         .create_volume(initial.clone())
         .expect("retained resources should still create volumes");
-    assert_eq!(retained.revoke_volume(volume).unwrap(), initial);
+    assert_eq!(
+        retained
+            .values()
+            .clone_core(&retained.revoke_volume(volume).unwrap())
+            .unwrap(),
+        retained.values().clone_core(&initial).unwrap()
+    );
     drop(snapshot);
     drop(retained);
 

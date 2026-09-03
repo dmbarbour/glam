@@ -152,7 +152,6 @@ impl Drop for EvaluationQueryHandle {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(test, derive(PartialEq, Eq))]
 pub(crate) enum EvaluationQueryPoll {
     State {
         value: PublicValue,

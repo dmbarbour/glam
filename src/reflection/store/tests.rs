@@ -1,6 +1,11 @@
 use super::*;
 use crate::api::{Assembler, TestValueFacade};
 
+fn same_representation(store: &ReflectionStore, left: &PublicValue, right: &PublicValue) -> bool {
+    let values = crate::api::Values::from_core_factory(store.values.clone());
+    values.clone_core(left).unwrap() == values.clone_core(right).unwrap()
+}
+
 fn path(parts: &[&str]) -> Vec<Key> {
     parts.iter().map(Key::atom_from_text).collect()
 }
@@ -335,9 +340,9 @@ fn journal_caches_its_view_and_uncontended_commit_installs_it() {
     journal.write(path(&["value"]), integer(&store, 1));
 
     let cached_view = journal.view();
-    assert_eq!(journal.view(), cached_view);
+    assert!(same_representation(&store, &journal.view(), &cached_view));
     assert_eq!(store.try_commit(&journal), StoreCommitResult::Committed);
-    assert_eq!(store.root(), &cached_view);
+    assert!(same_representation(&store, store.root(), &cached_view));
 }
 
 #[test]
@@ -352,7 +357,11 @@ fn concurrent_commit_rebases_instead_of_installing_cached_view() {
 
     assert_eq!(store.try_commit(&first), StoreCommitResult::Committed);
     assert_eq!(store.try_commit(&second), StoreCommitResult::Committed);
-    assert_ne!(store.root(), &stale_cached_view);
+    assert!(!same_representation(
+        &store,
+        store.root(),
+        &stale_cached_view
+    ));
 }
 
 #[test]
@@ -366,14 +375,16 @@ fn one_journal_updates_multiple_volumes_atomically() {
     journal.write_volume(second, path(&["value"]), integer(&store, 2));
 
     assert_eq!(store.try_commit(&journal), StoreCommitResult::Committed);
-    assert_eq!(
-        store.volume_root(first),
-        journal.volume_view(first).as_ref()
-    );
-    assert_eq!(
-        store.volume_root(second),
-        journal.volume_view(second).as_ref()
-    );
+    assert!(same_representation(
+        &store,
+        store.volume_root(first).unwrap(),
+        journal.volume_view(first).as_ref().unwrap()
+    ));
+    assert!(same_representation(
+        &store,
+        store.volume_root(second).unwrap(),
+        journal.volume_view(second).as_ref().unwrap()
+    ));
 }
 
 #[test]
@@ -392,7 +403,11 @@ fn revoked_volume_rejects_staged_blind_edits_without_partial_commit() {
         store.try_commit(&journal),
         StoreCommitResult::MissingVolume(revoked)
     );
-    assert_eq!(store.volume_root(surviving), Some(&original_surviving));
+    assert!(same_representation(
+        &store,
+        store.volume_root(surviving).unwrap(),
+        &original_surviving
+    ));
     assert!(store.volume_root(revoked).is_none());
 }
 

@@ -331,7 +331,6 @@ pub trait TaskHost<S: TaskSpecialization>: TaskEnvironment + Send + Sync {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(test, derive(PartialEq, Eq))]
 pub enum TaskOutcome {
     Complete(PublicValue),
     Cancelled,

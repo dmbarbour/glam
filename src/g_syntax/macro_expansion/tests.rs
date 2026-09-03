@@ -27,6 +27,30 @@ impl DiagnosticSubscriber for DiagnosticMessages {
 
 struct CapturedDiagnostics(Arc<Mutex<Vec<Diagnostic>>>);
 
+macro_rules! assert_same_value {
+    ($assembler:expr, $left:expr, $right:expr $(,)?) => {{
+        let left = &$left;
+        let right = &$right;
+        assert!(
+            $assembler
+                .reflection()
+                .same_representation(left, right)
+                .expect("macro test values should share one runtime")
+        );
+    }};
+    ($assembler:expr, $left:expr, $right:expr, $($message:tt)+) => {{
+        let left = &$left;
+        let right = &$right;
+        assert!(
+            $assembler
+                .reflection()
+                .same_representation(left, right)
+                .expect("macro test values should share one runtime"),
+            $($message)+
+        );
+    }};
+}
+
 impl DiagnosticSubscriber for CapturedDiagnostics {
     fn receive(&self, event: DiagnosticEvent) {
         self.0
@@ -184,7 +208,8 @@ fn macro_failure_keeps_only_furthest_active_cases() {
 
     assert_eq!(error.frontier(), Some(13));
     assert_eq!(error.cases().len(), 1);
-    assert_eq!(
+    assert_same_value!(
+        assembler,
         error.cases()[0],
         assembler.values().text("furthest case"),
         "an earlier failed cursor must not contribute its active case",
@@ -484,14 +509,16 @@ fn source_macro_embeds_data_through_the_ordinary_parser() {
     let answer = assembler
         .get(module.value(), "answer")
         .expect("macro output should define answer");
-    assert_eq!(
+    assert_same_value!(
+        assembler,
         assembler.evaluate(&answer).expect("answer should evaluate"),
         assembler.values().integer(42)
     );
     let grouped = assembler
         .get(module.value(), "grouped")
         .expect("grouped macro output should exist");
-    assert_eq!(
+    assert_same_value!(
+        assembler,
         assembler
             .evaluate(&grouped)
             .expect("grouped output should evaluate"),
@@ -534,7 +561,8 @@ after_delete = 43
         let value = assembler
             .get(module.value(), name)
             .unwrap_or_else(|error| panic!("`{name}` should exist: {error}"));
-        assert_eq!(
+        assert_same_value!(
+            assembler,
             assembler
                 .evaluate(&value)
                 .unwrap_or_else(|error| panic!("`{name}` should evaluate: {error}")),
@@ -544,7 +572,8 @@ after_delete = 43
     let language = assembler
         .get(module.value(), "language_base")
         .expect("language macro should produce a value");
-    assert_eq!(
+    assert_same_value!(
+        assembler,
         assembler
             .evaluate(&language)
             .expect("language should evaluate"),
@@ -581,7 +610,8 @@ fn text_span_and_end_cover_the_current_nonstructural_run() {
     let [MacroOutput::Data(span)] = run.output() else {
         panic!("text-span macro should emit one data value")
     };
-    assert_eq!(
+    assert_same_value!(
+        assembler,
         assembler
             .evaluate(span)
             .expect("emitted span should evaluate"),
@@ -623,7 +653,8 @@ object bounded with
         let value = assembler
             .get(module.value(), name)
             .unwrap_or_else(|error| panic!("`{name}` should exist: {error}"));
-        assert_eq!(
+        assert_same_value!(
+            assembler,
             assembler
                 .evaluate(&value)
                 .unwrap_or_else(|error| panic!("`{name}` should evaluate: {error}")),
@@ -637,7 +668,8 @@ object bounded with
     let own = assembler
         .get(&bounded, "own")
         .expect("macro-generated member should exist");
-    assert_eq!(
+    assert_same_value!(
+        assembler,
         assembler.evaluate(&own).expect("own should evaluate"),
         assembler.values().integer(42),
         "the root macro cursor must not cross into its peer layout item",
@@ -691,7 +723,8 @@ tuple_effects = ((do @meta.steps), do .r 3)
         let value = assembler
             .get(module.value(), name)
             .unwrap_or_else(|error| panic!("`{name}` should exist: {error}"));
-        assert_eq!(
+        assert_same_value!(
+            assembler,
             assembler
                 .evaluate(&value)
                 .unwrap_or_else(|error| panic!("`{name}` should evaluate: {error}")),
@@ -709,7 +742,8 @@ tuple_effects = ((do @meta.steps), do .r 3)
             let value = assembler.get(&values, name).unwrap_or_else(|error| {
                 panic!("object member `{object_name}.{name}` should exist: {error}")
             });
-            assert_eq!(
+            assert_same_value!(
+                assembler,
                 assembler.evaluate(&value).unwrap_or_else(|error| {
                     panic!("object member `{object_name}.{name}` should evaluate: {error}")
                 }),
@@ -752,7 +786,8 @@ list_second = list.head (list.pure (list.at 1 list_effects))
         let value = assembler
             .get(module.value(), name)
             .unwrap_or_else(|error| panic!("`{name}` should exist: {error}"));
-        assert_eq!(
+        assert_same_value!(
+            assembler,
             assembler
                 .evaluate(&value)
                 .unwrap_or_else(|error| panic!("`{name}` should evaluate: {error}")),
@@ -1076,7 +1111,8 @@ layout = list.at 1 [
         let value = assembler
             .get(module.value(), name)
             .unwrap_or_else(|error| panic!("`{name}` should exist: {error}"));
-        assert_eq!(
+        assert_same_value!(
+            assembler,
             assembler
                 .evaluate(&value)
                 .unwrap_or_else(|error| panic!("`{name}` should evaluate: {error}")),
@@ -1211,7 +1247,8 @@ second = list.at 1 [@meta.left, @meta.delete @meta.wide]
         let value = assembler
             .get(module.value(), name)
             .unwrap_or_else(|error| panic!("`{name}` should exist: {error}"));
-        assert_eq!(
+        assert_same_value!(
+            assembler,
             assembler
                 .evaluate(&value)
                 .unwrap_or_else(|error| panic!("`{name}` should evaluate: {error}")),

@@ -10,7 +10,6 @@ use crate::interaction_net::NetBuildError;
 use crate::runtime::EvaluationRuntimeId;
 
 #[derive(Debug, Clone)]
-#[cfg_attr(test, derive(PartialEq, Eq))]
 pub struct Error {
     message: Arc<str>,
     diagnostic: Option<Arc<Diagnostic>>,
@@ -143,7 +142,6 @@ pub(super) fn net_build_error(error: NetBuildError) -> Error {
 }
 
 #[derive(Clone)]
-#[cfg_attr(test, derive(PartialEq, Eq))]
 pub struct ReasoningFailure {
     pub(super) runtime: EvaluationRuntimeId,
     pub(super) task: EvaluationTaskId,

@@ -139,6 +139,8 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.1 | complete | exhaustive durable root-surface conversion |
 | I4F.2a.1a | complete | public handle semantic-trait and rendering retirement |
 | I4F.2a.1b | complete | assembly, diagnostic, and error access retirement |
+| I4F.2a.1c.1 | complete | test-only equality bridge retirement |
+| I4F.2a.1c.2 | pending | test-only observer and constructor retirement |
 | I4F.2a.1c | pending | public facade compatibility-test closure |
 | I4F.2a.1 | pending | public facade, assembly, diagnostic, and error access retirement |
 | I4F.2a.2a | complete | public evaluator and reflection-inspector access retirement |
@@ -3451,8 +3453,14 @@ be partitioned by subsystem:
    through matching runtime authority. Keep `EvaluatedValue` as the same root
    plus its weak observer and static WHNF witness.
    - **I4F.2a.1c — Public facade closure.** Update compile-time and public API
-   fixtures to prove the removed traits/observers stay unavailable while
-   evaluator and reflection capabilities retain the intended observations.
+     fixtures to prove the removed traits/observers stay unavailable while
+     evaluator and reflection capabilities retain the intended observations.
+     Retire the test-only equality bridge and migrate equality fixtures to
+     explicit runtime-authorized representation inspection (I4F.2a.1c.1),
+     then retire test-only public-handle observers and constructors in favor
+     of evaluator, reflection, or scoped internal construction
+     (I4F.2a.1c.2). This partition is verification-only; neither substep adds
+     production behavior.
 2. **I4F.2a.2 — Core evaluation and net construction.** Replace unrestricted
    borrowed `as_core` projections with lifetime-bounded access and replace
    ownership-taking `into_core` with either a root-preserving move or an
@@ -3636,6 +3644,14 @@ bridge for internal assertions in those subsystems; it is absent from
 production and does not define public semantics. Once the internal callers
 have matching authority APIs, I4F.2a.1c removes the oracle and adds the final
 negative public-facade fixtures.
+
+I4F.2a.1c.1 completed 2026-09-03. `Value`, `EvaluatedValue`, and test-only
+containers which transitively held them no longer gain equality during crate
+tests. Assertions now state the actual contract: empty queues are empty,
+lifecycle states have the expected variant, readiness records retain the same
+work identities, and value representations compare only through matching
+runtime authority. Compile-time negative trait fixtures latch the absence of
+equality, ordering, and hashing on both public value handles.
 
 I4F.2a.2a completed 2026-09-03. `ValueEvaluator` and
 `ReflectionInspector` no longer call compatibility projection or construction

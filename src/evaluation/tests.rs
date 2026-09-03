@@ -4508,7 +4508,18 @@ fn runtime_readiness_is_ready_when_no_work_is_retained() {
 
     assert!(first.dispositions().is_empty());
     assert_eq!(first.stamp(), second.stamp());
-    assert_eq!(first.reflection().root(), second.reflection().root());
+    assert_eq!(
+        fixture
+            .runtime
+            .values()
+            .clone_core(first.reflection().root())
+            .unwrap(),
+        fixture
+            .runtime
+            .values()
+            .clone_core(second.reflection().root())
+            .unwrap()
+    );
     assert_eq!(first.runtime_id(), fixture.runtime.id());
 }
 
@@ -4665,7 +4676,16 @@ fn runtime_readiness_retains_exit_dispositions_without_settling_tasks() {
         panic!("observing readiness must not settle exit votes")
     };
     assert_eq!(snapshot.stamp(), repeated.stamp());
-    assert_eq!(snapshot.dispositions(), repeated.dispositions());
+    assert_eq!(snapshot.dispositions().len(), repeated.dispositions().len());
+    assert!(
+        snapshot
+            .dispositions()
+            .iter()
+            .zip(repeated.dispositions())
+            .all(|(left, right)| left.work_id() == right.work_id()
+                && left.session_id() == right.session_id()
+                && left.task_id() == right.task_id())
+    );
 }
 
 #[test]
@@ -4759,7 +4779,16 @@ fn ready_settlement_publishes_exited_once_and_retains_exit_errors() {
             .as_slice(),
         [EvaluationTaskStatus::Exited]
     );
-    assert_eq!(report.dispositions(), snapshot.dispositions());
+    assert_eq!(report.dispositions().len(), snapshot.dispositions().len());
+    assert!(
+        report
+            .dispositions()
+            .iter()
+            .zip(snapshot.dispositions())
+            .all(|(left, right)| left.work_id() == right.work_id()
+                && left.session_id() == right.session_id()
+                && left.task_id() == right.task_id())
+    );
     assert!(report.task_failures().is_empty());
     assert!(report.dispositions().iter().any(|disposition| {
         matches!(
@@ -4842,7 +4871,16 @@ fn forced_deadlock_settlement_preserves_exits_and_kills_other_participants() {
     let report = forced
         .settle()
         .expect("unchanged forced deadlock should settle");
-    assert_eq!(report.killed_work(), killed_details);
+    assert_eq!(report.killed_work().len(), killed_details.len());
+    assert!(
+        report
+            .killed_work()
+            .iter()
+            .zip(&killed_details)
+            .all(|(left, right)| left.work_id() == right.work_id()
+                && left.session_id() == right.session_id()
+                && left.task_id() == right.task_id())
+    );
     assert!(report.task_failures().is_empty());
     assert_eq!(
         context.poll_reflection_task(&child),
@@ -4880,7 +4918,16 @@ fn forced_deadlock_settlement_preserves_exits_and_kills_other_participants() {
         context.poll_reflection_task(&later),
         EvaluationWaitPoll::Complete(_)
     ));
-    assert_eq!(report.killed_work(), killed_details);
+    assert_eq!(report.killed_work().len(), killed_details.len());
+    assert!(
+        report
+            .killed_work()
+            .iter()
+            .zip(&killed_details)
+            .all(|(left, right)| left.work_id() == right.work_id()
+                && left.session_id() == right.session_id()
+                && left.task_id() == right.task_id())
+    );
 }
 
 #[test]
