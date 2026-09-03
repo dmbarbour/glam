@@ -2988,14 +2988,11 @@ fn coordinator_terminal_policy_preserves_a_descendant_failure_before_root_return
             .expect("root with a failing child should schedule");
 
         runtime.pump_until_stable();
-        let mut status = lifecycle.status();
-        while !matches!(&status, EffectLifecycleStatus::Blocked) {
-            assert!(
-                !status.is_terminal(),
-                "the held root must block before terminalizing: {status:?}"
-            );
-            status = lifecycle.wait_for_change(&status);
-        }
+        let status = lifecycle.status();
+        assert!(
+            matches!(&status, EffectLifecycleStatus::Blocked),
+            "a stable held root must already publish its blocked lifecycle state: {status:?}"
+        );
         runtime.pump_until_stable();
         host.emit_diagnostic(Diagnostic::new(
             &assembler.values(),
