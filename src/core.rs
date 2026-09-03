@@ -2170,6 +2170,13 @@ mod tests {
         let scoped = factory.scoped();
         assert_eq!(scoped.initial_metadata(), factory.initial_metadata());
         assert_eq!(scoped.unit(), factory.unit());
+
+        let live = factory
+            .collect_managed_for_test()
+            .expect("the canonical bundle should survive collection");
+        assert_eq!(live.root_entries(), roots.len());
+        assert_eq!(live.marked_slots(), roots.len());
+        assert_eq!(factory.unit(), core.unit.clone_core_for_test());
     }
 
     #[test]
@@ -2360,11 +2367,14 @@ mod tests {
             crate::runtime::allocate_evaluation_runtime_id(),
             RuntimeIds::new(),
         );
+        let baseline = factory
+            .collect_managed_for_test()
+            .expect("canonical roots should collect before the cache fixture");
         let domain = Arc::downgrade(factory.value_domain());
         let dropped = Arc::new(AtomicBool::new(false));
         let root_values = factory.clone();
         let owner = factory.cached(|| RootedCachedProbe {
-            root: RuntimeValueRoot::new(&root_values, Value::Number(Number::integer(31))),
+            root: RuntimeValueRoot::new(&root_values, Value::binary_from_text("cached root")),
             _dropped: DropSignal(dropped.clone()),
         });
         let owner_weak = Arc::downgrade(&owner);
@@ -2378,7 +2388,19 @@ mod tests {
             )
         );
         assert!(!dropped.load(Ordering::Acquire));
+        let live = factory
+            .collect_managed_for_test()
+            .expect("the runtime cache should retain its registered root");
+        assert_eq!(live.root_entries(), baseline.root_entries() + 1);
+        assert_eq!(
+            owner.root.clone_core_for_test(),
+            Value::binary_from_text("cached root")
+        );
         drop(owner);
+        let still_cached = factory
+            .collect_managed_for_test()
+            .expect("the runtime-wide cache should live until domain teardown");
+        assert_eq!(still_cached.root_entries(), baseline.root_entries() + 1);
         drop(root_values);
         drop(factory);
 

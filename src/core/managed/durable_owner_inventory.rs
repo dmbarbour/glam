@@ -145,7 +145,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "production managed core value node",
         "one passive compatibility Value payload",
         "collector allocation and its registered roots",
-        "private allocate-and-root gateway; production activation waits for I4F.2d",
+        "private production allocate-and-root gateway",
         "collector finalization after the last root and managed edge retire",
         BareValue,
         RootSurface,
@@ -179,7 +179,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "TypeId -> admitted RuntimeCacheEntry -> Arc<T>",
         "runtime or compilation-local extension cache",
         "same-runtime family validation then complete extension bundle insertion",
-        "cache/domain or scoped factory drop",
+        "runtime value-domain teardown; scoped factories retain only lookup mirrors",
         TypeErased,
         RootSurface,
         "I4F.2e.1"

@@ -1017,7 +1017,7 @@ mod tests {
         ];
         assert!(
             roots
-                .into_iter()
+                .iter()
                 .all(|root| root.runtime_id() == values.runtime_id())
         );
         assert!(
@@ -1028,9 +1028,14 @@ mod tests {
                 .values()
                 .all(|root| root.runtime_id() == values.runtime_id())
         );
-        values
+        let live = values
             .collect_managed_for_test()
             .expect("closed cache construction must release managed access");
+        assert!(live.root_entries() >= roots.len());
+        assert!(roots.iter().all(|root| matches!(
+            project_value(&values, root),
+            Value::Dict(_) | Value::Function(_)
+        )));
     }
 
     #[test]

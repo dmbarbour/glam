@@ -134,10 +134,18 @@ mod tests {
     #[test]
     fn formatter_is_cached_after_exposing_its_function() {
         let values = crate::compiler::test_value_factory();
+        let baseline = values
+            .collect_managed_for_test()
+            .expect("canonical roots should collect before the formatter fixture");
         let first = value(&values);
         let second = value(&values);
         assert!(matches!(first, Value::Function(_)));
         assert_eq!(first, second);
+        let live = values
+            .collect_managed_for_test()
+            .expect("the cached formatter root should survive collection");
+        assert_eq!(live.root_entries(), baseline.root_entries() + 1);
+        assert!(matches!(value(&values), Value::Function(_)));
     }
 
     #[test]

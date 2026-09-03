@@ -176,6 +176,9 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.2d.1 | complete | weak terminal root-publication authority |
 | I4F.2d.2 | complete | atomic production managed-root representation switch |
 | I4F.2d | complete | atomic production managed-root switch |
+| I4F.2e.1a | complete | runtime value-domain anchors and cache owners |
+| I4F.2e.1b | pending | coordinator, demand, spark, and session owners |
+| I4F.2e.1c | pending | readiness, ledger, and report owners |
 | I4F.2e.1 | pending | cache, evaluation, coordinator, and readiness collection fixtures |
 | I4F.2e.2 | pending | reflection owner collection fixtures |
 | I4F.2e.3 | pending | diagnostic, event, and delivery collection fixtures |
@@ -4004,18 +4007,27 @@ does not authorize collection of an arbitrary production graph.
 #### Phase I4F.2e — Closed Durable-Owner Collection Matrix
 
 Reuse the exhaustive real-owner fixture table registered by I4F.1. For each
-owner class, construct and publish an owner carrying only an I4-certified
-closed value graph, leave its construction scope, request full collection, and
-prove the retained value survives. Retire/drop that owner, collect again, and
-prove its root registration and otherwise unreachable value are reclaimed.
+independently retiring owner class, construct and publish an owner carrying
+only an I4-certified closed value graph, leave its construction scope, request
+full collection, and prove the retained value survives. Retire/drop that
+owner, collect again, and prove its root registration and otherwise
+unreachable value are reclaimed. Runtime-domain anchors are the deliberate
+exception: canonical values and runtime-wide extension/compiler caches live
+for the whole value domain, so their fixtures prove survival across collection
+and release during terminal heap/domain teardown rather than inventing a
+mid-domain removal API. A scoped factory's extension map is only a lookup
+mirror of the runtime cache and is not a second owner-retirement boundary.
 Use actual production owner types and constructor/retirement paths; a generic
 holder is not a substitute for a difficult owner class.
 
 Partition the matrix along the I4F.1 ownership boundaries:
 
-1. **I4F.2e.1 — Runtime owners.** Cover canonical/cache attachments,
-   evaluation/coordinator state, waits, demands, failures, and readiness/report
-   snapshots.
+1. **I4F.2e.1 — Runtime owners.** Cover these in three buildable checkpoints:
+   **I4F.2e.1a** covers the production/public root, canonical bundle,
+   runtime-wide extension and compiler caches, and external active-owner
+   registry; **I4F.2e.1b** covers coordinator task/wait/failure records, client
+   demands, sparks, and sessions; **I4F.2e.1c** covers failure ledgers plus
+   quiescence, deadlock, unfinished-task, and settled readiness reports.
 2. **I4F.2e.2 — Reflection owners.** Cover store/snapshot/query state,
    lifecycle/search/protocol records, and parked machine frames.
 3. **I4F.2e.3 — Transport owners.** Cover diagnostics, ingress/subscriptions,
@@ -4023,6 +4035,24 @@ Partition the matrix along the I4F.1 ownership boundaries:
 4. **I4F.2e.4 — Tooling and hidden owners.** Cover assembly/compiler/import,
    macro/parser rewrite, binary configuration/logger state, synchronized
    net/work anchors, and every admitted type-erased/callback family.
+
+I4F.2e.1a completed 2026-09-03. Production public values now have a focused
+collection fixture proving that an inline integer adds no root, a managed
+dictionary adds exactly one root shared by all clones, the last-clone drop
+permits reclamation, and the runtime remains `NoAuto`. The canonical bundle
+likewise accounts for its seven permanent roots and remains projectable after
+collection. A real type-erased runtime cache entry retains a managed binary
+root across collection and after its caller drops the returned `Arc`, then the
+entry and its payload retire with terminal value-domain teardown; the plan no
+longer pretends a scoped lookup mirror is an independent retirement boundary.
+
+The real compiler-helper and diagnostic-formatter caches are constructed,
+collected, and re-observed through their production accessors. The previously
+established external active-owner fixture continues to prove explicit owner
+retirement, managed-shell reclamation, and separation from collector
+finalization. Together with the I4F.2d weak-domain teardown fixtures, these
+cover all domain-anchor/cache rows assigned to I4F.2e.1a without creating an
+artificial cache-removal API.
 
 Keep every fixture in a fresh isolated collector-ready runtime/heap. Do not
 collect a shared production graph containing I5-I10 unclassified families.
