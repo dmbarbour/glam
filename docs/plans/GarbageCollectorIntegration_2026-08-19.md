@@ -191,7 +191,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.2e.2c | complete | reflection request and parked-machine owners |
 | I4F.2e.2 | complete | reflection owner collection fixtures |
 | I4F.2e.3a | complete | diagnostic event, subscription, and ingress owners |
-| I4F.2e.3b | pending | event input, snapshot, journal, and result owners |
+| I4F.2e.3b | complete | event input, snapshot, journal, and result owners |
 | I4F.2e.3c | pending | output intent, delivery, and failure owners |
 | I4F.2e.3 | pending | diagnostic, event, and delivery collection fixtures |
 | I4F.2e.4 | pending | compiler, binary-host, net, and hidden-owner collection fixtures |
@@ -4204,6 +4204,17 @@ the journal, and collects again while only the returned public value remains.
 Dropping that value permits reclamation. This covers events, subscriptions,
 ingress buffering, and committed read transfer without a bus-to-runtime
 strong cycle.
+
+I4F.2e.3b completed 2026-09-03 with one production FIFO fixture exercising
+two opposite retirement orders. The first managed input survives collection
+in the authoritative runtime buffer, is transactionally consumed, then
+survives another collection only through the journal's persistent event
+snapshot after the returned value is dropped; journal retirement releases it.
+The second input again survives buffered collection, but the journal and
+snapshot retire after commit while the returned public value remains. That
+result independently survives collection and releases the shell on drop. This
+covers admitted records, persistent snapshots, transaction-local journals,
+and committed input results without treating inline values as GC evidence.
 
 Keep every fixture in a fresh isolated collector-ready runtime/heap. Do not
 collect a shared production graph containing I5-I10 unclassified families.

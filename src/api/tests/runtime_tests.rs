@@ -239,19 +239,21 @@ fn runtime_input_conversion_precedes_admission_and_stores_only_roots() {
 }
 
 #[test]
-fn consumed_runtime_input_retires_its_root_after_commit_and_result_drop() {
+fn runtime_input_roots_follow_buffer_journal_and_committed_result_owners() {
     let runtime = EvaluationRuntime::new(0).expect("runtime should build");
     let domain = EffectTokenDomain::new(&runtime.values());
     let endpoint = runtime
         .input_endpoint::<Value, _>(Ok)
         .expect("value input endpoint should register");
-    let payload = Arc::new(());
-    let retained = Arc::downgrade(&payload);
+
+    let journal_payload = Arc::new(());
+    let journal_retained = Arc::downgrade(&journal_payload);
     endpoint
         .sender()
-        .admit(domain.issue(payload))
+        .admit(domain.issue(journal_payload))
         .expect("input should be admitted");
-    assert!(retained.upgrade().is_some());
+    domain.collect_and_drain_retired_external_owners_for_test();
+    assert!(journal_retained.upgrade().is_some());
 
     let (store, mut events) = input_transaction(&runtime);
     let consumed = events
@@ -262,12 +264,39 @@ fn consumed_runtime_input_retires_its_root_after_commit_and_result_drop() {
         runtime.try_commit_transaction(&store, &events),
         crate::reflection::StoreCommitResult::Committed
     );
-    drop(events);
-    drop(store);
-    assert!(retained.upgrade().is_some());
     drop(consumed);
     domain.collect_and_drain_retired_external_owners_for_test();
-    assert!(retained.upgrade().is_none());
+    assert!(journal_retained.upgrade().is_some());
+    drop(events);
+    drop(store);
+    domain.collect_and_drain_retired_external_owners_for_test();
+    assert!(journal_retained.upgrade().is_none());
+
+    let result_payload = Arc::new(());
+    let result_retained = Arc::downgrade(&result_payload);
+    endpoint
+        .sender()
+        .admit(domain.issue(result_payload))
+        .expect("second input should be admitted");
+    domain.collect_and_drain_retired_external_owners_for_test();
+    assert!(result_retained.upgrade().is_some());
+
+    let (store, mut events) = input_transaction(&runtime);
+    let consumed = events
+        .read(&endpoint.reader())
+        .expect("input read should succeed")
+        .expect("second admitted input should be present");
+    assert_eq!(
+        runtime.try_commit_transaction(&store, &events),
+        crate::reflection::StoreCommitResult::Committed
+    );
+    drop(events);
+    drop(store);
+    domain.collect_and_drain_retired_external_owners_for_test();
+    assert!(result_retained.upgrade().is_some());
+    drop(consumed);
+    domain.collect_and_drain_retired_external_owners_for_test();
+    assert!(result_retained.upgrade().is_none());
 }
 
 #[test]
