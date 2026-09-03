@@ -149,7 +149,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.2a.3a | complete | reflection protocol, store, and search access retirement |
 | I4F.2a.3b | complete | reflection request access retirement |
 | I4F.2a.3c.1 | complete | reflection branch and request-step access retirement |
-| I4F.2a.3c.2 | pending | reflection transition and terminal access retirement |
+| I4F.2a.3c.2 | complete | reflection transition and terminal access retirement |
 | I4F.2a.3c.3 | pending | reflection wrapper, helper, and fixture access closure |
 | I4F.2a.3c | pending | reflection machine access retirement |
 | I4F.2a.3d | pending | compiler and module-lowering access retirement |
@@ -3531,6 +3531,18 @@ fell from 26 direct borrowed projections and 16 ownership transfers to 10 and
 10; the remaining sites are explicitly partitioned between transition and
 terminal handling (I4F.2a.3c.2) and wrapper/helper/fixture closure
 (I4F.2a.3c.3).
+
+I4F.2a.3c.2 completed 2026-09-03. Delivery, continuation, reset, cut, isolated
+search, and terminal transitions now retain `RuntimeValueRoot` throughout the
+machine state and project only within a bounded `EvaluationPollContext`
+evaluation step. Specialized alternatives clone their public roots through
+the matching `Values` authority after the specialization callback returns;
+close-scope and reset continuations move roots directly rather than
+round-tripping through bare core values. This removed every direct ownership
+transfer from the reflection machine and retired the isolated-search unit
+constructor compatibility path. The remaining eight borrowed projections and
+one public constructor are local wrapper/helper or fixture work assigned to
+I4F.2a.3c.3.
 
 I4F.2a.1a completed 2026-09-03. Production `Value` and `EvaluatedValue` no
 longer implement semantic equality, and `Value::runtime_id` is no longer a

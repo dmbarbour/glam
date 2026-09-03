@@ -186,7 +186,7 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/reflection/machine.rs",
-        [10, 10, 2, 0, 4, 3],
+        [8, 0, 1, 0, 4, 3],
         "rooted reflection machine and decoded-request handoff plus bounded evaluator, parser, and store access",
         "I3D.2/I3D.4 interpreter phases; I4F.1d.3 complete machine roots and bounded raw values; I4F.2a compatibility-access retirement"
     ),
