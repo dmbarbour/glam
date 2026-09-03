@@ -523,7 +523,7 @@ impl CoreValueAllocationScope<'_> {
     }
 
     /// Borrows one exact managed edge discovered from an already authorized,
-    /// rooted prototype node.
+    /// rooted family fixture.
     ///
     /// # Safety
     ///

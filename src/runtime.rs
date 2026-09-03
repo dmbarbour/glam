@@ -240,8 +240,9 @@ impl RuntimeValueRoot {
     /// Reopens this root's weak domain solely for transitional owner-local
     /// recovery where no caller-supplied access region exists yet.
     ///
-    /// I4F.2f removes compatibility edge walkers; I5/I6 replace the remaining
-    /// promise and failure uses with exact managed edges.
+    /// The remaining callers are source-latched to the payload migrations
+    /// which remove them: promise/lazy ownership in I5, failure and metadata
+    /// ownership in I6, and the final compatibility edge vocabulary in I8.
     pub(crate) fn clone_core_in_own_domain(&self) -> Option<Value> {
         let values = self.value.observer().upgrade()?;
         Some(values.with_runtime_value_access(|access| self.clone_core_with(&access)))

@@ -201,7 +201,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.2e.4 | complete | compiler, binary-host, net, and hidden-owner collection fixtures |
 | I4F.2e | complete | closed durable-owner collection matrix |
 | I4F.2f.1 | complete | superseded I2 root and I4A shell prototype deletion |
-| I4F.2f.2 | pending | intentional compatibility bridge reconciliation |
+| I4F.2f.2 | complete | intentional compatibility bridge reconciliation |
 | I4F.2f.3 | pending | forbidden-escape latch and I4 ledger reconciliation |
 | I4F.2f.4 | pending | mandatory post-I4 review and closeout |
 | I4F.2f | pending | compatibility deletion and I4 reconciliation |
@@ -4337,6 +4337,19 @@ managed-entry and durable-owner inventories now scan only extant sources. The
 bounded construction gateway itself remains because focused I4 family and
 payload-adapter fixtures still use it; removing a live verification gateway
 would not be prototype cleanup.
+
+I4F.2f.2 completed 2026-09-03 as a deletion and ownership audit rather than an
+early payload migration. No old non-registering root constructor or
+unrestricted `as_core`/`into_core` method remains. The surviving
+`RuntimeValueRoot` scoped projections are required while its managed outer node
+still contains compatibility Rust payloads. Every `CompatibilityValueEdges`
+implementation has a named consumer: lazy/promise edges in I5, function,
+metadata, failure, and reflection edges in I6, persistent containers in I7,
+or runtime-net ownership and final vocabulary deletion in I8B. Deleting these
+adapters now would discard the compile-exhaustive edge ledger which those
+phases must translate, not remove a live escape. Source comments and the
+implementation architecture now assign their removal to those phases instead
+of incorrectly promising wholesale deletion in I4F.2f.
 
 Production remains `NoAuto`; the switch and closed owner fixtures do not
 authorize whole-graph collection while I5-I10 families remain unclassified.
