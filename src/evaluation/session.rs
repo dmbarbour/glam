@@ -298,8 +298,7 @@ impl EvaluationSession {
     fn isolated(values: CoreValueFactory) -> Arc<Self> {
         let coordinator = values.work_coordinator().unwrap_or_else(|| {
             let candidate = EvaluationWorkCoordinator::new(
-                values.runtime_id(),
-                values.ids().clone(),
+                &values,
                 crate::runtime::RuntimeMutationAdmission::new(),
                 RuntimeObservationState::new(),
             );
@@ -316,8 +315,7 @@ impl EvaluationSession {
     /// work into the runtime scheduler being initialized.
     fn private_closed(values: CoreValueFactory) -> Arc<Self> {
         let coordinator = EvaluationWorkCoordinator::new(
-            values.runtime_id(),
-            values.ids().clone(),
+            &values,
             crate::runtime::RuntimeMutationAdmission::new(),
             RuntimeObservationState::new(),
         );

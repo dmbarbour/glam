@@ -285,7 +285,7 @@ pub(crate) struct PromisedValue(Arc<PromiseCell>);
 
 pub(crate) struct PromiseCell {
     id: PromiseId,
-    runtime: EvaluationRuntimeId,
+    values: RuntimeValueObserver,
     label: Arc<str>,
     assignment: OnceLock<PromiseAssignment>,
     completion: CompletionSubscriptions,
@@ -795,7 +795,7 @@ impl PromisedValue {
         let id = PromiseId(values.deferred_value_id());
         Self(Arc::new(PromiseCell {
             id,
-            runtime: values.runtime_id(),
+            values: values.runtime_value_observer(),
             label: label.into(),
             assignment: OnceLock::new(),
             completion: CompletionSubscriptions::for_promise(
@@ -812,7 +812,7 @@ impl PromisedValue {
     }
 
     pub(crate) fn runtime_id(&self) -> EvaluationRuntimeId {
-        self.0.runtime
+        self.0.values.runtime_id()
     }
 
     pub(crate) fn label(&self) -> &Arc<str> {
@@ -2530,6 +2530,21 @@ mod tests {
             .set(cycle)
             .expect("an unresolved promise should accept a recursive value graph");
         assert!(matches!(promise.assignment(), Some(Ok(Value::Dict(_)))));
+    }
+
+    #[test]
+    fn promised_value_publication_authority_does_not_retain_value_domain() {
+        let values = CoreValueFactory::new(
+            crate::runtime::allocate_evaluation_runtime_id(),
+            RuntimeIds::new(),
+        );
+        let domain = Arc::downgrade(values.value_domain());
+        let promise = PromisedValue::new(&values, "weak publication authority");
+
+        drop(values);
+
+        assert!(domain.upgrade().is_none());
+        assert!(!promise.0.values.is_live());
     }
 
     #[test]

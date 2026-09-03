@@ -173,6 +173,8 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.2c.3 | complete | private inline-or-root representation and provenance |
 | I4F.2c | complete | private production-root and managed-shell preparation |
 | I4F.2d.0 | complete | post-domain canonical root-bundle initialization |
+| I4F.2d.1 | complete | weak terminal root-publication authority |
+| I4F.2d.2 | pending | atomic production managed-root representation switch |
 | I4F.2d | pending | atomic production managed-root switch |
 | I4F.2e.1 | pending | cache, evaluation, coordinator, and readiness collection fixtures |
 | I4F.2e.2 | pending | reflection owner collection fixtures |
@@ -3921,6 +3923,15 @@ Before the atomic representation change:
   is a behavior-neutral construction-order repair: compatibility roots and
   `NoAuto` collection remain in effect, and concurrent clients can never see a
   partial bundle.
+- **I4F.2d.1 — Weak terminal publication authority.** Give promise cells and
+  the runtime work coordinator the value domain's existing weak observer,
+  replacing numeric runtime identity as the only information available where
+  terminal values and failures are rooted. The observer must neither retain
+  the domain nor authorize direct observation; it may only be upgraded at the
+  later bounded publication operation. Preserve numeric IDs as diagnostics.
+- **I4F.2d.2 — Atomic representation switch.** Perform the previously named
+  non-partitionable `RuntimeValueRoot` cutover after both construction-order
+  prerequisites are complete.
 
 I4F.2d.0 completed 2026-09-03. `RuntimeValueCache` now holds its canonical
 bundle in a private `OnceLock`. `CoreValueFactory::new` first constructs the
@@ -3932,7 +3943,18 @@ one-bundle, scoped-factory sharing, and last-domain-owner release behavior.
 The roots themselves remain compatibility roots and collection remains
 `NoAuto`; this checkpoint changes construction order only.
 
-- In one buildable checkpoint, change `RuntimeValueRoot` to the selected
+I4F.2d.1 completed 2026-09-03. Promise cells and the runtime work coordinator
+now retain the value domain's existing `RuntimeValueObserver` rather than
+depending on a numeric runtime ID as their only future publication context.
+The observer remains weak and non-authoritative for projection: it can be
+upgraded only while the domain still exists, and I4F.2d.2 will use the
+resulting bounded factory/access region to register terminal values and direct
+failure values. Runtime IDs remain available through the observer for
+diagnostics and coordination identity. Dedicated lifetime fixtures keep a
+promise or coordinator alive after dropping the last factory and prove that
+neither weak publication route retains or revives the value domain.
+
+- In I4F.2d.2's one buildable checkpoint, change `RuntimeValueRoot` to the selected
   inline-or-registered-root representation, enable the production managed
   value node, and route every core/public factory and root-preserving
   transition through that representation.

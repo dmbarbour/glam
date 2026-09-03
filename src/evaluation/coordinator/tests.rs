@@ -927,11 +927,35 @@ fn completion_source_does_not_retain_its_runtime_coordinator() {
 }
 
 #[test]
-fn foreign_runtime_is_rejected_before_subscription_or_parking() {
-    let (coordinator, _executor, _session, claimed) = claimed_test_spark();
-    let other_coordinator = EvaluationWorkCoordinator::new(
+fn coordinator_publication_authority_does_not_retain_value_domain() {
+    let values = CoreValueFactory::new(
         crate::runtime::allocate_evaluation_runtime_id(),
         RuntimeIds::new(),
+    );
+    let domain = Arc::downgrade(values.value_domain());
+    let coordinator = EvaluationWorkCoordinator::new(
+        &values,
+        RuntimeMutationAdmission::new(),
+        RuntimeObservationState::new(),
+    );
+    let observer = coordinator.value_observer();
+
+    assert!(observer.is_live());
+    drop(values);
+
+    assert!(domain.upgrade().is_none());
+    assert!(!observer.is_live());
+}
+
+#[test]
+fn foreign_runtime_is_rejected_before_subscription_or_parking() {
+    let (coordinator, _executor, _session, claimed) = claimed_test_spark();
+    let other_values = CoreValueFactory::new(
+        crate::runtime::allocate_evaluation_runtime_id(),
+        RuntimeIds::new(),
+    );
+    let other_coordinator = EvaluationWorkCoordinator::new(
+        &other_values,
         RuntimeMutationAdmission::new(),
         RuntimeObservationState::new(),
     );

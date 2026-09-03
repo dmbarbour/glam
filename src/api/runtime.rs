@@ -420,8 +420,7 @@ impl EvaluationRuntime {
         let mutation_admission = RuntimeMutationAdmission::new();
         let observations = RuntimeObservationState::new();
         let work = EvaluationWorkCoordinator::new(
-            id,
-            ids.clone(),
+            values.core(),
             mutation_admission.clone(),
             observations.clone(),
         );
@@ -1119,8 +1118,7 @@ pub(crate) fn compiler_test_runtime() -> EvaluationRuntime {
         let ids = core.ids().clone();
         let work = core.work_coordinator().unwrap_or_else(|| {
             let candidate = EvaluationWorkCoordinator::new(
-                id,
-                ids.clone(),
+                &core,
                 RuntimeMutationAdmission::new(),
                 RuntimeObservationState::new(),
             );
