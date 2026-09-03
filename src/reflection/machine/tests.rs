@@ -1157,6 +1157,125 @@ fn assert_fixpoint_root_inventory(
 type FixpointRootInventoryFn =
     fn(&FixRoot<TestEffects>, &ActiveFix<TestEffects>, &FixRestart<TestEffects>, &FixChoice);
 
+fn assert_request_value<V>(value: &V) {
+    let _: &V = value;
+}
+
+fn assert_request_inventory<V>(request: &Request<TestRequest, V>) {
+    match request {
+        Request::Return(value)
+        | Request::Cut(value)
+        | Request::Fix(value)
+        | Request::Get(value)
+        | Request::HeapGet(value)
+        | Request::ExitError(value) => assert_request_value(value),
+        Request::Seq(left, right)
+        | Request::Alt(left, right)
+        | Request::Set(left, right)
+        | Request::HeapSet(left, right)
+        | Request::HeapRewrite(left, right)
+        | Request::Reset(left, right)
+        | Request::Shift(left, right) => {
+            assert_request_value(left);
+            assert_request_value(right);
+        }
+        Request::VolumeGet(volume, value) => {
+            let _: &VolumeId = volume;
+            assert_request_value(value);
+        }
+        Request::VolumeSet(volume, left, right) | Request::VolumeRewrite(volume, left, right) => {
+            let _: &VolumeId = volume;
+            assert_request_value(left);
+            assert_request_value(right);
+        }
+        Request::Resume(task, continuation, value) => {
+            let _: &EvaluationTaskId = task;
+            let _: &u64 = continuation;
+            assert_request_value(value);
+        }
+        Request::Specialized(request, values) => {
+            let _: &TestRequest = request;
+            let _: &Vec<V> = values;
+        }
+        Request::Fail | Request::ExitSuccess => {}
+    }
+}
+
+fn assert_request_handoff_inventory(
+    rooted: &Request<TestRequest>,
+    bounded: &Request<TestRequest, Value>,
+    fused: &FusedRequestAction<TestRequest>,
+) {
+    assert_request_inventory(rooted);
+    assert_request_inventory(bounded);
+
+    match fused {
+        FusedRequestAction::Continue => {}
+        FusedRequestAction::Deliver(value) | FusedRequestAction::Get(value) => {
+            let _: &Value = value;
+        }
+        FusedRequestAction::Set(path, value) => {
+            let _: &Value = path;
+            let _: &Value = value;
+        }
+        FusedRequestAction::Boundary(request) => assert_request_inventory(request),
+    }
+}
+
+fn assert_prepared_handoff_inventory(
+    prepared: &PreparedDrive<TestRequest>,
+    specialized: &SpecializedRequest<TestRequest>,
+    volume_operation: &VolumeOperation,
+    volume_request: &VolumeRequestIdentity,
+    step: &MachineStep<TestEffects>,
+) {
+    match prepared {
+        PreparedDrive::Request { request } => assert_request_inventory(request),
+        PreparedDrive::Continue => {}
+    }
+
+    let SpecializedRequest {
+        tag,
+        arity,
+        request,
+    } = specialized;
+    let _ = (tag, arity);
+    let _: &TestRequest = request;
+
+    match volume_operation {
+        VolumeOperation::Get | VolumeOperation::Set | VolumeOperation::Rewrite => {}
+    }
+    let VolumeRequestIdentity { volume, operation } = volume_request;
+    let _: &VolumeId = volume;
+    let _: &VolumeOperation = operation;
+
+    match step {
+        MachineStep::Continue(work) => {
+            let _: &MachineWork<TestEffects> = work;
+        }
+        MachineStep::Blocked(blocked) => {
+            let _: &BlockedExecution<TestEffects> = blocked;
+        }
+        MachineStep::Exit(intent) => {
+            let _: &ExitIntent = intent;
+        }
+        MachineStep::Terminal(terminal) => {
+            let _: &TaskTerminal = terminal;
+        }
+    }
+}
+
+type RequestHandoffInventoryFn =
+    fn(&Request<TestRequest>, &Request<TestRequest, Value>, &FusedRequestAction<TestRequest>);
+
+type PreparedHandoffInventoryFn = fn(
+    &PreparedDrive<TestRequest>,
+    &SpecializedRequest<TestRequest>,
+    &VolumeOperation,
+    &VolumeRequestIdentity,
+    &MachineStep<TestEffects>,
+);
+
 fn assert_task_block_inventory(blocked: &BlockedExecution<TestEffects>, poll: &TaskBlock) {
     let BlockedExecution { reason, retry } = blocked;
     match reason {
@@ -1241,6 +1360,8 @@ fn outer_machine_root_inventory_is_complete() {
     let _: ExecutionRootInventoryFn = assert_execution_root_inventory;
     let _: ControlRootInventoryFn = assert_control_root_inventory;
     let _: FixpointRootInventoryFn = assert_fixpoint_root_inventory;
+    let _: RequestHandoffInventoryFn = assert_request_handoff_inventory;
+    let _: PreparedHandoffInventoryFn = assert_prepared_handoff_inventory;
 }
 
 #[test]

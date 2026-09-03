@@ -122,9 +122,9 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.1d.3d.1 | complete | reflection continuation, delimiter, and reset roots |
 | I4F.1d.3d.2 | complete | reflection fixpoint roots and captured-control closure |
 | I4F.1d.3d | complete | reflection continuation, reset, and fixpoint roots |
-| I4F.1d.3e | pending | reflection decoded-request handoff and machine closure |
-| I4F.1d.3 | pending | reflection machine frame and request roots |
-| I4F.1d | pending | reflection store, protocol, and machine root surfaces |
+| I4F.1d.3e | complete | reflection decoded-request handoff and machine closure |
+| I4F.1d.3 | complete | reflection machine frame and request roots |
+| I4F.1d | complete | reflection store, protocol, and machine root surfaces |
 | I4F.1e | pending | diagnostics, runtime-event, and delivery root surfaces |
 | I4F.1f.1 | pending | assembly, compiler, module, and import roots |
 | I4F.1f.2 | pending | macro, parser, and source-rewrite roots |
@@ -3108,6 +3108,31 @@ one raw-to-root field conversion and removal of the now-unnecessary owned
 projection. This closes the captured-control/fixpoint graph; the decoded-
 request phase bundle remains assigned to I4F.1d.3e. Production remains
 `NoAuto`.
+
+I4F.1d.3e completed 2026-09-03. The rooted `Request` is now the sole handoff
+from bounded request decoding into the interpreter. Rooted sequence,
+alternative, cut, reset, shift, scoped-operation, and fixpoint values transfer
+directly into their destination owners rather than projecting and rerooting.
+The fusion-only raw `Request` and `FusedRequestAction` remain confined to one
+`EvaluatorStepContext`; once a request crosses that scope, every value is
+root-shaped.
+
+Rooting continuation payloads at their assignment gateway made the old
+parallel `FusionState::pending_sequence_values` and
+`PreparedDrive::_phase_roots` bundle redundant. Both have been removed;
+`PreparedDrive` now contains only a rooted request or a value-free continue
+signal. A compile-exhaustive latch covers both request representations, every
+fused action and prepared result, specialized request descriptors, volume
+request identities, and every `MachineStep` variant. Existing deterministic
+park/resume, callback-boundary, cut/fix/reset/shift, isolated-search, and
+terminal-retirement fixtures pass without a phase-root crutch.
+
+The two source inventories were deliberately tripped before accepting the
+removal of two obsolete durable declarations, two redundant root fields, one
+bounded raw field, and seven owned compatibility projections. This closes the
+reflection machine and the complete I4F.1d store/protocol/machine owner row as
+compatibility roots plus explicitly bounded raw evaluator values. I4F.2 will
+register and replace those compatibility roots. Production remains `NoAuto`.
 
 #### Phase I4F.1e — Diagnostic, Event, and Delivery Roots
 
