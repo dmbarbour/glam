@@ -143,7 +143,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.2a.1 | pending | public facade, assembly, diagnostic, and error access retirement |
 | I4F.2a.2a | complete | public evaluator and reflection-inspector access retirement |
 | I4F.2a.2b | complete | evaluation driver and rooted-completion projection retirement |
-| I4F.2a.2c | pending | core net and builtin construction adapter retirement |
+| I4F.2a.2c | complete | core net and builtin construction adapter retirement |
 | I4F.2a.2d | pending | core evaluation and net access closure |
 | I4F.2a.2 | pending | core evaluator and net access retirement |
 | I4F.2a.3 | pending | reflection, compiler, macro, and host access retirement |
@@ -3531,6 +3531,16 @@ requires admitted same-domain authority, making the remaining owned
 compatibility clone explicit while preserving the root across every wait and
 orchestration boundary. Production files under `src/evaluation/` now contain
 no direct compatibility `as_core` or `into_core` use.
+
+I4F.2a.2c completed 2026-09-03. Interaction-net effect construction now
+wraps and clones public values through `Values`, while evaluated copy counts
+and construction-port tokens are inspected through the weak observer carried
+by `EvaluatedValue`. No net-specific projection API was introduced. Journaled
+data remains an owned core clone only for the duration of the compatibility
+representation; callbacks continue to demand arguments through
+`RequestContext`, and the completed construction result retains its admitted
+`EvaluatorStepContext`. The compatibility-access inventory now omits the net
+construction module.
 
 #### Phase I4F.2b — Active-Owner Extraction Gate
 

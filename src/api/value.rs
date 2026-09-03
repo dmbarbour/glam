@@ -258,7 +258,7 @@ impl Values {
         })
     }
 
-    pub(super) fn wrap(&self, value: CoreValue) -> Value {
+    pub(crate) fn wrap(&self, value: CoreValue) -> Value {
         self.with_access(|values| values.wrap(value))
     }
 
@@ -273,7 +273,7 @@ impl Values {
         value.require_runtime(self.runtime)
     }
 
-    pub(super) fn clone_core(&self, value: &Value) -> Result<CoreValue, Error> {
+    pub(crate) fn clone_core(&self, value: &Value) -> Result<CoreValue, Error> {
         self.with_access(|values| values.clone_core(value))
     }
 
@@ -811,7 +811,7 @@ impl EvaluatedValue {
             })
     }
 
-    fn with_core<R>(
+    pub(crate) fn with_core<R>(
         &self,
         operation: impl for<'scope> FnOnce(&'scope CoreValue) -> R,
     ) -> Result<R, Error> {

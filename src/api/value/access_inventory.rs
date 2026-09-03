@@ -107,12 +107,6 @@ const INVENTORY: &[InventoryEntry] = &[
         "I5 managed promise assignment visitor; I4F.2 public facade switch"
     ),
     entry!(
-        "src/eval/builtins/net/construction.rs",
-        [3, 1, 6, 0, 0, 0],
-        "bounded request-evaluated interaction-net construction",
-        "I3D.3/I3D.4 scoped net access; I4F.1 outcomes; I8 managed net"
-    ),
-    entry!(
         "src/evaluation/access.rs",
         [0, 0, 0, 0, 2, 0],
         "poll/evaluator-step completion rooting and scoped projection",
