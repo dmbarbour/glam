@@ -1,11 +1,10 @@
 # Glam GC Integration Plan — 2026-08-19
 
-Status: in progress; Phases I0 through I3 and their mandatory reviews plus I4.0
-through I4E and I4F.1a through I4F.1c are complete. I4F.1d.1 and I4F.1d.2a
-are complete; I4F.1d.2b is pending.
-Collector Gate G1 passed on 2026-08-25. The remaining integration work follows
-the completed owner-matrix, stable-ledger, and low-risk checkpoint corrections
-from the integration review.
+Status: in progress; Phases I0 through I4 and their mandatory reviews are
+complete. The production public-value facade now uses an inline-or-registered-
+root representation, every durable owner stores that facade, and production
+collection remains disabled while I5-I10 migrate recursive payloads and close
+the remaining graph families. Collector Gate G1 passed on 2026-08-25.
 
 This plan integrates the collector defined by
 [`GarbageCollectorImplementation_2026-08-19.md`](GarbageCollectorImplementation_2026-08-19.md)
@@ -82,7 +81,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I3E.3 | complete | bounded event, diagnostic, rendering, and executable callback regions |
 | I3F | complete | multi-runtime admission, poll authority, worker-exit cache retirement, and managed-entry audit |
 | I3 | complete | bounded evaluator/worker mutator regions; post-I3 review passed |
-| I4 | pending | core trace vocabulary and leaf policy |
+| I4 | complete | trace vocabulary, containment, durable roots, production shell, and post-I4 review |
 | I4.0 | complete | private managed-family admission, mandatory drop records, passive destruction fixture, and external-retirement separation |
 | I4A | complete | initial monolithic shell selection, exhaustive variant dispatch, embedded leaf policy, and closed cycle fixture |
 | I4B.1 | complete | constructor inventory and private admission boundaries |
@@ -203,9 +202,9 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.2f.1 | complete | superseded I2 root and I4A shell prototype deletion |
 | I4F.2f.2 | complete | intentional compatibility bridge reconciliation |
 | I4F.2f.3 | complete | forbidden-escape latch and I4 ledger reconciliation |
-| I4F.2f.4 | pending | mandatory post-I4 review and closeout |
-| I4F.2f | pending | compatibility deletion and I4 reconciliation |
-| I4F.2 | pending | public managed-root production switch |
+| I4F.2f.4 | complete | mandatory post-I4 review and closeout |
+| I4F.2f | complete | compatibility deletion and I4 reconciliation |
+| I4F.2 | complete | public managed-root production switch |
 | I5 | pending | managed lazy/promise cells, external lifecycle, and cycle reclamation |
 | I6 | pending | functions, applications, metadata, failures |
 | I7 | pending | persistent list and dictionary tracing |
@@ -4365,6 +4364,13 @@ implementation overview likewise describe the current managed outer shell and
 the I5-I8 payload migration boundary. Historical checkpoint narratives remain
 historical evidence rather than being rewritten as if their intermediate
 states never existed.
+
+I4F.2f.4 completed 2026-09-03. The mandatory review is recorded in
+[`GarbageCollectorIntegrationI4_2026-09-03.md`](../reviews/GarbageCollectorIntegrationI4_2026-09-03.md).
+It found and resolved current-plan/index drift plus one missing production
+family layout latch. No semantic or ownership defect remains, so I4F.2f,
+I4F.2, and I4 are complete. Gate G2 remains closed while I5-I10 migrate and
+audit the recursive payload graph.
 
 Production remains `NoAuto`; the switch and closed owner fixtures do not
 authorize whole-graph collection while I5-I10 families remain unclassified.

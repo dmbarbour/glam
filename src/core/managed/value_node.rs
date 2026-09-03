@@ -18,6 +18,16 @@ pub(crate) struct ManagedValueNode {
     value: Value,
 }
 
+// The ownership ledger records stable production-family layouts on the
+// bootstrap's primary target. Keep that record compile-time checked: a layout
+// change is allowed, but it must deliberately update the ledger and this
+// assertion together before the family remains admitted.
+#[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+const _: () = {
+    assert!(std::mem::size_of::<ManagedValueNode>() == 64);
+    assert!(std::mem::align_of::<ManagedValueNode>() == 8);
+};
+
 /// Prepared private representation for the production runtime value root.
 ///
 /// Small integer values preserve I2's allocation-free inline opportunity.
