@@ -117,8 +117,8 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.1d.3a | complete | reflection request, journal, query, and task-handle roots |
 | I4F.1d.3b | complete | reflection machine shell, terminal, and blocked-error roots |
 | I4F.1d.3c.1 | complete | reflection branch effect/state roots and fused handoff |
-| I4F.1d.3c.2 | pending | reflection work, outcome, cut, and retry root closure |
-| I4F.1d.3c | pending | reflection branch, work, cut, and retry roots |
+| I4F.1d.3c.2 | complete | reflection work, outcome, cut, and retry root closure |
+| I4F.1d.3c | complete | reflection branch, work, cut, and retry roots |
 | I4F.1d.3d | pending | reflection continuation, reset, and fixpoint roots |
 | I4F.1d.3e | pending | reflection decoded-request handoff and machine closure |
 | I4F.1d.3 | pending | reflection machine frame and request roots |
@@ -3051,6 +3051,24 @@ The branch record and retry checkpoint have compile-exhaustive ownership
 latches. A deterministic effect-token fixture verifies that effect and state
 payloads remain live exactly through branch retirement. Work, branch-outcome,
 and cut payloads remain assigned to I4F.1d.3c.2. Production remains `NoAuto`.
+
+I4F.1d.3c.2 completed 2026-09-03. Deliver and application work now retain
+their value, function, and argument payloads as exact `RuntimeValueRoot`s;
+successful branch outcomes retain the same root shape through isolated-search
+or terminal publication. A cut roots its operation on entry, and both its
+alternatives and retry work delegate to the now-rooted branch/work graph. Raw
+values are projected only at the beginning of a bounded evaluator step and
+are rooted again at the single work/outcome constructors before parking.
+
+Compile-exhaustive latches cover task execution, every work and outcome
+variant, cut fields, and wake actions. A deterministic effect-token fixture
+verifies exact retention and retirement for delivery, application arguments,
+successful outcomes, and cut operations. Both source inventories were first
+allowed to report the expected mismatch, then relatched: the five durable raw
+fields became five runtime roots, while the compatibility-access row records
+only their bounded projections and construction gateways. Captured-control
+and fixpoint payloads remain assigned to I4F.1d.3d. Production remains
+`NoAuto`.
 
 #### Phase I4F.1e — Diagnostic, Event, and Delivery Roots
 

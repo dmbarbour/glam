@@ -929,6 +929,111 @@ fn assert_branch_root_inventory(
     let _: &Branch<TestEffects> = branch;
 }
 
+fn assert_execution_root_inventory(
+    execution: &TaskExecution<TestEffects>,
+    supplied_work: &MachineWork<TestEffects>,
+    outcome: &BranchOutcome<TestEffects>,
+    cut: &CutFrame<TestEffects>,
+    wake: &WakeAction<TestEffects>,
+) {
+    let TaskExecution { work, cuts } = execution;
+    let _: &MachineWork<TestEffects> = work;
+    let _: &Vec<CutFrame<TestEffects>> = cuts;
+
+    match supplied_work {
+        MachineWork::Drive {
+            branch,
+            scope_depth,
+        } => {
+            let _: &Branch<TestEffects> = branch;
+            let _: &usize = scope_depth;
+        }
+        MachineWork::Deliver {
+            value,
+            branch,
+            scope_depth,
+        } => {
+            let _: &RuntimeValueRoot = value;
+            let _: &Branch<TestEffects> = branch;
+            let _: &usize = scope_depth;
+        }
+        MachineWork::Apply {
+            function,
+            arguments,
+            branch,
+            scope_depth,
+        } => {
+            let _: &RuntimeValueRoot = function;
+            let _: &Vec<RuntimeValueRoot> = arguments;
+            let _: &Branch<TestEffects> = branch;
+            let _: &usize = scope_depth;
+        }
+        MachineWork::Outcome {
+            outcome,
+            scope_depth,
+        } => {
+            let _: &BranchOutcome<TestEffects> = outcome;
+            let _: &usize = scope_depth;
+        }
+    }
+
+    match outcome {
+        BranchOutcome::Complete(value, branch) => {
+            let _: &RuntimeValueRoot = value;
+            let _: &Branch<TestEffects> = branch;
+        }
+        BranchOutcome::Fork(left, right) => {
+            let _: &Branch<TestEffects> = left;
+            let _: &Branch<TestEffects> = right;
+        }
+        BranchOutcome::Fail(branch) | BranchOutcome::Retry(branch) => {
+            let _: &Branch<TestEffects> = branch;
+        }
+        BranchOutcome::Cancelled => {}
+    }
+
+    let CutFrame {
+        operation,
+        outer,
+        outer_sequence,
+        parent_scope_depth,
+        scope_depth,
+        owns_transaction,
+        alternatives,
+        retry,
+        observed_failure,
+    } = cut;
+    let _: &RuntimeValueRoot = operation;
+    let _ = (
+        outer,
+        outer_sequence,
+        parent_scope_depth,
+        scope_depth,
+        owns_transaction,
+        alternatives,
+        retry,
+        observed_failure,
+    );
+
+    match wake {
+        WakeAction::ReplaceWork(work) => {
+            let _: &MachineWork<TestEffects> = work;
+        }
+        WakeAction::RestartCut(index) => {
+            let _: &usize = index;
+        }
+        WakeAction::RestartSearch => {}
+    }
+}
+
+type ExecutionRootInventoryFn = fn(
+    &TaskExecution<TestEffects>,
+    &MachineWork<TestEffects>,
+    &BranchOutcome<TestEffects>,
+    &CutFrame<TestEffects>,
+    &WakeAction<TestEffects>,
+);
+
 fn assert_task_block_inventory(blocked: &BlockedExecution<TestEffects>, poll: &TaskBlock) {
     let BlockedExecution { reason, retry } = blocked;
     match reason {
@@ -1010,6 +1115,7 @@ fn outer_machine_root_inventory_is_complete() {
     let _: fn(&TaskExitBlock, &TaskExitState<TestEffects>) = assert_task_exit_inventory;
     let _: fn(&EffectTaskPoll, &TaskTerminal) = assert_task_terminal_inventory;
     let _: fn(&Branch<TestEffects>, &RetryCheckpoint<TestEffects>) = assert_branch_root_inventory;
+    let _: ExecutionRootInventoryFn = assert_execution_root_inventory;
 }
 
 #[test]
@@ -1028,6 +1134,51 @@ fn branch_retires_its_effect_and_state_roots_exactly_with_the_branch() {
     drop(branch);
     assert!(retained_effect.upgrade().is_none());
     assert!(retained_state.upgrade().is_none());
+}
+
+#[test]
+fn execution_work_and_cut_payloads_retain_roots_until_retirement() {
+    let core = crate::core::test_value_factory();
+    let values = Values::from_core_factory(core.clone());
+    let domain = EffectTokenDomain::new(&values);
+    let branch = || Branch::<TestEffects>::new(&core, core.unit(), core.unit());
+
+    let (value, retained) = retained_machine_value(&domain);
+    let work = MachineWork::deliver(value, branch(), 0);
+    assert!(retained.upgrade().is_some());
+    drop(work);
+    assert!(retained.upgrade().is_none());
+
+    let (function, retained_function) = retained_machine_value(&domain);
+    let (argument, retained_argument) = retained_machine_value(&domain);
+    let work = MachineWork::apply(function, vec![argument], branch(), 0);
+    assert!(retained_function.upgrade().is_some());
+    assert!(retained_argument.upgrade().is_some());
+    drop(work);
+    assert!(retained_function.upgrade().is_none());
+    assert!(retained_argument.upgrade().is_none());
+
+    let (value, retained) = retained_machine_value(&domain);
+    let outcome = BranchOutcome::complete(value, branch());
+    assert!(retained.upgrade().is_some());
+    drop(outcome);
+    assert!(retained.upgrade().is_none());
+
+    let (operation, retained) = retained_machine_value(&domain);
+    let cut = CutFrame {
+        operation: RuntimeValueRoot::new(&core, operation),
+        outer: branch(),
+        outer_sequence: Vec::new(),
+        parent_scope_depth: 0,
+        scope_depth: 1,
+        owns_transaction: false,
+        alternatives: Vec::new(),
+        retry: None,
+        observed_failure: false,
+    };
+    assert!(retained.upgrade().is_some());
+    drop(cut);
+    assert!(retained.upgrade().is_none());
 }
 
 #[test]
