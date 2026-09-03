@@ -428,7 +428,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         RootSurface,
         "I4F.2d.4"
     ),
-    open_durable!(
+    closed_durable!(
         "src/g_syntax/macro_expansion/runner.rs",
         "MacroRun and suspended expansion state",
         "public Value macro inputs/results/failures",
@@ -437,10 +437,9 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "expansion completion/failure",
         PublicRoot,
         RootSurface,
-        "I4F.1f.2",
         "I4F.2d.4"
     ),
-    open_durable!(
+    closed_durable!(
         "src/g_syntax/parser/logical.rs",
         "macro invocation/work/journal logical source state",
         "embedded public Value data",
@@ -449,7 +448,6 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "logical parse/rewrite completion",
         PublicRoot,
         RootSurface,
-        "I4F.1f.2",
         "I4F.2d.4"
     ),
     open_durable!(

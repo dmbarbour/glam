@@ -689,7 +689,80 @@ fn validate_generated_text(text: &str) -> Result<(), Vec<Diagnostic>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::{EffectTokenDomain, Values};
     use crate::diagnostic::Severity;
+    use std::sync::Weak;
+
+    fn assert_rewrite_owner_inventory(
+        invocation: &MacroInvocation,
+        original: &OriginalMacroInvocation,
+        work: &DeclarationMacroWork,
+    ) {
+        let MacroInvocation {
+            path: _,
+            start: _,
+            anchor_position: _,
+            indentation: _,
+            input,
+        } = invocation;
+        let _: &MacroInput = input;
+        let OriginalMacroInvocation {
+            id: _,
+            path: _,
+            start: _,
+            line: _,
+        } = original;
+        let DeclarationMacroWork {
+            line: _,
+            invocations: _,
+            text: _,
+            embedded_values,
+        } = work;
+        let _: &Vec<PublicValue> = embedded_values;
+    }
+
+    fn retained_value(domain: &EffectTokenDomain<Arc<()>>) -> (PublicValue, Weak<()>) {
+        let payload = Arc::new(());
+        let retained = Arc::downgrade(&payload);
+        (domain.issue(payload), retained)
+    }
+
+    #[test]
+    fn macro_rewrite_owner_inventory_is_compile_exhaustive() {
+        let _: fn(&MacroInvocation, &OriginalMacroInvocation, &DeclarationMacroWork) =
+            assert_rewrite_owner_inventory;
+    }
+
+    #[test]
+    fn macro_input_and_rewrite_state_retain_embedded_data_until_retirement() {
+        let values = Values::from_core_factory(crate::core::test_value_factory());
+        let domain = EffectTokenDomain::new(&values);
+        let (input_value, retained_input) = retained_value(&domain);
+        let input = MacroInput::new(
+            vec![MacroInputElement {
+                kind: MacroInputKind::Data(input_value),
+                separated: false,
+                start: 0,
+                end: 1,
+            }],
+            0,
+            1,
+        );
+        assert!(retained_input.upgrade().is_some());
+        drop(input);
+        assert!(retained_input.upgrade().is_none());
+
+        let (embedded_value, retained_embedded) = retained_value(&domain);
+        let work = DeclarationMacroWork {
+            line: 1,
+            invocations: Vec::new(),
+            text: EMBEDDED_MARKER.to_string(),
+            embedded_values: vec![embedded_value],
+        };
+        assert!(retained_embedded.upgrade().is_some());
+        drop(work);
+        assert!(retained_embedded.upgrade().is_none());
+    }
 
     fn original_macro_paths(source: &str) -> Result<Vec<Vec<String>>, Diagnostic> {
         let lexical = lex_source(source);

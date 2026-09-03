@@ -289,3 +289,77 @@ fn macro_error(
         cases: Vec::new(),
     })
 }
+
+#[cfg(test)]
+mod owner_tests {
+    use super::*;
+    use crate::api::{EffectTokenDomain, Values};
+    use std::sync::Weak;
+
+    fn assert_macro_run_owner(run: &MacroRun) {
+        let MacroRun {
+            diagnostics,
+            visited_cases,
+            consumed_end,
+            output,
+        } = run;
+        let _: &Vec<Diagnostic> = diagnostics;
+        let _: &Vec<PublicValue> = visited_cases;
+        let _: &usize = consumed_end;
+        let _: &Vec<MacroOutput> = output;
+    }
+
+    fn assert_macro_failure_owner(failure: &MacroFailure) {
+        let MacroFailure {
+            diagnostic,
+            frontier,
+            cases,
+        } = failure;
+        let _: &Diagnostic = diagnostic;
+        let _: &Option<usize> = frontier;
+        let _: &Vec<PublicValue> = cases;
+    }
+
+    fn retained_value(domain: &EffectTokenDomain<Arc<()>>) -> (PublicValue, Weak<()>) {
+        let payload = Arc::new(());
+        let retained = Arc::downgrade(&payload);
+        (domain.issue(payload), retained)
+    }
+
+    #[test]
+    fn macro_result_owner_inventory_is_compile_exhaustive() {
+        let _: fn(&MacroRun) = assert_macro_run_owner;
+        let _: fn(&MacroFailure) = assert_macro_failure_owner;
+    }
+
+    #[test]
+    fn macro_results_and_failures_retain_public_values_until_retirement() {
+        let core = crate::core::test_value_factory();
+        let values = Values::from_core_factory(core.clone());
+        let domain = EffectTokenDomain::new(&values);
+        let (visited, retained_visited) = retained_value(&domain);
+        let (output, retained_output) = retained_value(&domain);
+        let run = MacroRun {
+            diagnostics: Vec::new(),
+            visited_cases: vec![visited],
+            consumed_end: 0,
+            output: vec![MacroOutput::Data(output)],
+        };
+
+        assert!(retained_visited.upgrade().is_some());
+        assert!(retained_output.upgrade().is_some());
+        drop(run);
+        assert!(retained_visited.upgrade().is_none());
+        assert!(retained_output.upgrade().is_none());
+
+        let (case, retained_case) = retained_value(&domain);
+        let failure = MacroFailure {
+            diagnostic: Diagnostic::new_with_factory(&core, Severity::Error, "failed macro"),
+            frontier: Some(0),
+            cases: vec![case],
+        };
+        assert!(retained_case.upgrade().is_some());
+        drop(failure);
+        assert!(retained_case.upgrade().is_none());
+    }
+}

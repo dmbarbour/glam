@@ -127,7 +127,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.1d | complete | reflection store, protocol, and machine root surfaces |
 | I4F.1e | complete | diagnostics, runtime-event, and delivery root surfaces |
 | I4F.1f.1 | complete | assembly, compiler, module, and import roots |
-| I4F.1f.2 | pending | macro, parser, and source-rewrite roots |
+| I4F.1f.2 | complete | macro, parser, and source-rewrite roots |
 | I4F.1f.3 | pending | binary configuration and logger roots |
 | I4F.1f | pending | assembly, compiler, macro, configuration, and logger root surfaces |
 | I4F.1g | pending | synchronized-net, hidden-owner, and final inventory closure |
@@ -3220,6 +3220,25 @@ behavioral coverage. The durable-owner rows close without changing production
 storage. Both lexical access inventories were deliberately tripped and
 relatched for the test-only root constructors and projections used by the new
 retirement fixture; their production surface is unchanged. Production remains
+`NoAuto`.
+
+I4F.1f.2 completed 2026-09-03 as a closure audit of the public-root macro
+protocol. Embedded macro input data, evolving declaration-rewrite journals,
+successful output data, retained case explanations, diagnostics, and failure
+context already use the public `Value` facade. Raw semantic values occur only
+after a bounded projection for lookup, result forcing, source reconstruction,
+or diagnostic enrichment; no rewrite continuation retains them across a macro
+demand or parser stage. Macro host/search state is separately closed by the
+reflection-owner checkpoints.
+
+Compile-exhaustive latches cover every `MacroRun`, `MacroFailure`,
+`MacroInvocation`, `OriginalMacroInvocation`, and `DeclarationMacroWork`
+field. Deterministic effect-token fixtures verify exact retirement for macro
+inputs, rewrite-journal embedded data, successful output and visited-case
+values, and failed-branch case values. The existing macro suite supplies
+successful, failed, nested, right-to-left, embedded-data, and hanging/nested
+layout behavior coverage. Both durable-owner rows close; lexical inventories
+are deliberately relatched only for test-local root use. Production remains
 `NoAuto`.
 
 #### Phase I4F.1g — Net, Hidden-Owner, and Gate Closure

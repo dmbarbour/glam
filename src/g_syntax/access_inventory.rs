@@ -84,7 +84,7 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/g_syntax/macro_expansion/runner.rs",
-        [0, 11, 0, 2],
+        [0, 14, 0, 2],
         "rooted macro inputs, outputs, failures, and public diagnostic values"
     ),
     entry!(
@@ -94,7 +94,7 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/g_syntax/parser/logical.rs",
-        [0, 4, 1, 1],
+        [0, 6, 1, 1],
         "rooted embedded macro data across declaration rewrites"
     ),
     entry!(
