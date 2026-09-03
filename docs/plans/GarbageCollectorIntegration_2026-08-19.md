@@ -178,7 +178,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.2d | complete | atomic production managed-root switch |
 | I4F.2e.1a | complete | runtime value-domain anchors and cache owners |
 | I4F.2e.1b.1 | complete | coordinator task, wait, and blocked-record owners |
-| I4F.2e.1b.2 | pending | client-demand operation and result owners |
+| I4F.2e.1b.2 | complete | client-demand operation and result owners |
 | I4F.2e.1b.3 | pending | spark and pending session-activation owners |
 | I4F.2e.1b | pending | coordinator, demand, spark, and session owners |
 | I4F.2e.1c | pending | readiness, ledger, and report owners |
@@ -4072,6 +4072,16 @@ retains that root, and explicit cancellation retires the record and permits
 reclamation while leaving the value-free cancelled wait observable. These
 fixtures cover task, wait, and blocked-failure records without involving the
 failure ledger assigned to I4F.2e.1c.
+
+I4F.2e.1b.2 completed 2026-09-03. One production client demand is collected
+while still queued, proving that its coordinator-owned operation retains the
+single managed input root; explicit handle abandonment retires the work and
+reclaims the shell. A second demand is driven through evaluation and work
+retirement, then collected while only its external result cell/handle remains.
+The terminal result stays projectable and owns the same single managed root
+until the handle is dropped, after which collection reclaims it. The fixture
+therefore distinguishes the operation and result-cell lifetimes instead of
+allowing one to mask a missing root in the other.
 
 Keep every fixture in a fresh isolated collector-ready runtime/heap. Do not
 collect a shared production graph containing I5-I10 unclassified families.

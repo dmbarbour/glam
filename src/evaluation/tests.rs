@@ -450,6 +450,59 @@ fn client_demand_result_cell_releases_after_terminal_handle_drop() {
 }
 
 #[test]
+fn client_demand_operation_and_result_roots_follow_owner_lifecycle() {
+    let fixture = SameRuntimeFixture::new();
+    let context = fixture.context();
+    let coordinator = context.coordinator().expect("coordinator should be live");
+    let baseline = context
+        .values()
+        .collect_managed_for_test()
+        .expect("the isolated client-demand fixture should collect before admission");
+
+    let queued = context
+        .demand_whnf(RuntimeValueRoot::new(
+            context.values(),
+            Value::binary_from_text("queued client operation"),
+        ))
+        .expect("the queued client demand should be admitted");
+    let queued_live = context
+        .values()
+        .collect_managed_for_test()
+        .expect("the queued operation should retain its managed root");
+    assert_eq!(queued_live.root_entries(), baseline.root_entries() + 1);
+    queued.abandon();
+    let queued_reclaimed = context
+        .values()
+        .collect_managed_for_test()
+        .expect("abandoning the queued demand should release its operation root");
+    assert_eq!(queued_reclaimed.root_entries(), baseline.root_entries());
+    assert_eq!(queued_reclaimed.finalized_slots(), 1);
+
+    let expected = Value::binary_from_text("terminal client result");
+    let completed = context
+        .demand_whnf(RuntimeValueRoot::new(context.values(), expected.clone()))
+        .expect("the completing client demand should be admitted");
+    assert!(poll_one_runtime_work(&coordinator));
+    let result_live = context
+        .values()
+        .collect_managed_for_test()
+        .expect("the client result cell should retain its managed result root");
+    assert_eq!(result_live.root_entries(), baseline.root_entries() + 1);
+    assert!(matches!(
+        completed.poll(),
+        Some(ClientDemandResult::Complete(value)) if value.clone_core_for_test() == expected
+    ));
+
+    drop(completed);
+    let result_reclaimed = context
+        .values()
+        .collect_managed_for_test()
+        .expect("dropping the terminal client handle should release its result root");
+    assert_eq!(result_reclaimed.root_entries(), baseline.root_entries());
+    assert_eq!(result_reclaimed.finalized_slots(), 1);
+}
+
+#[test]
 fn client_failure_root_survives_work_and_owner_session_retirement() {
     let (coordinator, executor) =
         test_execution_resources(0).expect("test execution resources should build");
