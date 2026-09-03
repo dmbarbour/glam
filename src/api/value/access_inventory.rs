@@ -235,8 +235,8 @@ const INVENTORY: &[InventoryEntry] = &[
     entry!(
         "src/reflection/search.rs",
         [3, 0, 1, 0, 0, 0],
-        "isolated effect search and environment",
-        "I3D.2/I3D.4 search regions; I4F.1d.2c search roots"
+        "isolated effect search construction and bounded machine handoff",
+        "I3D.2/I3D.4 search regions; I4F.1d.2c rooted search surfaces; I4F.2b compatibility-access retirement"
     ),
     entry!(
         "src/reflection/store.rs",

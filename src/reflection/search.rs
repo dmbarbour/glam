@@ -272,25 +272,30 @@ impl<S: TaskSpecialization> IsolatedEffectSearch<S> {
         host: Arc<S::Host>,
         context: EvalContext,
     ) -> Result<Self, TaskHalt> {
-        Ok(Self {
-            task: EffectTask::new_isolated_in_context(
-                effect.as_core().clone(),
-                specialization,
-                host,
-                context,
-            )?,
-            _owner: None,
-        })
+        let runtime = context.values().runtime_id();
+        EffectTask::new_isolated_in_context(effect.as_core().clone(), specialization, host, context)
+            .map(|task| Self { task, _owner: None })
+            .map_err(|error| error.root_for_runtime(runtime))
+    }
+
+    fn root_poll_error(&self, error: TaskHalt) -> TaskHalt {
+        error.root_for_runtime(self.task.eval_context.values().runtime_id())
     }
 
     pub fn poll(&mut self, step_budget: usize) -> IsolatedSearchPoll<S> {
         match self.task.poll(step_budget) {
             EffectTaskPoll::Yielded => IsolatedSearchPoll::Yielded,
-            EffectTaskPoll::Blocked(blocked) => IsolatedSearchPoll::Blocked(IsolatedSearchBlock {
-                dependency: blocked.lazy,
-                observed_generation: blocked.observed_generation,
-                error: blocked.error.map(TaskHalt::failure),
-            }),
+            EffectTaskPoll::Blocked(blocked) => {
+                let error = blocked
+                    .error
+                    .map(TaskHalt::failure)
+                    .map(|error| self.root_poll_error(error));
+                IsolatedSearchPoll::Blocked(IsolatedSearchBlock {
+                    dependency: blocked.lazy,
+                    observed_generation: blocked.observed_generation,
+                    error,
+                })
+            }
             EffectTaskPoll::Complete(_) => {
                 let results = self
                     .task
@@ -298,7 +303,9 @@ impl<S: TaskSpecialization> IsolatedEffectSearch<S> {
                     .expect("isolated search completion must retain its branch results");
                 IsolatedSearchPoll::Complete(results)
             }
-            EffectTaskPoll::Failed(error) => IsolatedSearchPoll::Failed(error),
+            EffectTaskPoll::Failed(error) => {
+                IsolatedSearchPoll::Failed(self.root_poll_error(error))
+            }
             EffectTaskPoll::Cancelled => IsolatedSearchPoll::Cancelled,
             EffectTaskPoll::Exit(_) => {
                 unreachable!("isolated effect-search profiles do not expose runtime exit")
@@ -314,8 +321,231 @@ impl<S: TaskSpecialization> IsolatedEffectSearch<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::{EffectTokenDomain, Values};
     use crate::core::{Dict, Value};
     use crate::reflection::{StandardEffects, StoreJournal};
+    use std::convert::Infallible;
+    use std::sync::Weak;
+
+    #[derive(Clone, Copy)]
+    struct SearchRootTestEffects;
+
+    impl TaskSpecialization for SearchRootTestEffects {
+        type Host = dyn TaskHost<Self>;
+        type Request = Infallible;
+        type Snapshot = PublicValue;
+        type Journal = Vec<PublicValue>;
+
+        fn requests(&self) -> Vec<super::super::protocol::EffectRequestSpec<Self::Request>> {
+            Vec::new()
+        }
+
+        fn handle_request(
+            &self,
+            request: Self::Request,
+            _arguments: Vec<PublicValue>,
+            _context: &mut super::super::protocol::RequestContext<'_, Self>,
+        ) -> Result<super::super::protocol::RequestResult, TaskHalt> {
+            match request {}
+        }
+    }
+
+    fn assert_isolated_host_inventory(host: &IsolatedTaskHost<PublicValue>) {
+        let IsolatedTaskHost {
+            environment,
+            store,
+            extra,
+        } = host;
+        let _: &PublicValue = environment;
+        let _: &StoreSnapshot = store;
+        let _: &PublicValue = extra;
+    }
+
+    fn assert_search_policy_inventory(policy: &SearchPolicy<PublicValue, PublicValue>) {
+        match policy {
+            SearchPolicy::FirstSuccess => {}
+            SearchPolicy::RetainAll(AllResults {
+                root,
+                alternatives,
+                results,
+                completed,
+            }) => {
+                let _: &PublicValue = root;
+                let _: &Vec<PublicValue> = alternatives;
+                let _: &Vec<PublicValue> = results;
+                let _: &Option<Arc<[PublicValue]>> = completed;
+            }
+        }
+    }
+
+    fn assert_search_result_inventory(
+        branch: &IsolatedSearchBranch<SearchRootTestEffects>,
+        block: &IsolatedSearchBlock,
+        poll: &IsolatedSearchPoll<SearchRootTestEffects>,
+    ) {
+        let IsolatedSearchBranch { value, transaction } = branch;
+        let _: &Option<PublicValue> = value;
+        let _: &TaskCommit<SearchRootTestEffects> = transaction;
+
+        let IsolatedSearchBlock {
+            dependency,
+            observed_generation,
+            error,
+        } = block;
+        let _: &Option<EvaluationWaitToken> = dependency;
+        let _: &Option<u64> = observed_generation;
+        let _: &Option<TaskHalt> = error;
+
+        match poll {
+            IsolatedSearchPoll::Yielded | IsolatedSearchPoll::Cancelled => {}
+            IsolatedSearchPoll::Blocked(block) => {
+                let _: &IsolatedSearchBlock = block;
+            }
+            IsolatedSearchPoll::Complete(branches) => {
+                let _: &Arc<[IsolatedSearchBranch<SearchRootTestEffects>]> = branches;
+            }
+            IsolatedSearchPoll::Failed(error) => {
+                let _: &TaskHalt = error;
+            }
+        }
+    }
+
+    fn assert_effect_search_inventory(search: &IsolatedEffectSearch<SearchRootTestEffects>) {
+        let IsolatedEffectSearch { task, _owner } = search;
+        let _: &EffectTask<SearchRootTestEffects> = task;
+        let _: &Option<Arc<super::super::super::evaluation::EvaluationSession>> = _owner;
+    }
+
+    #[test]
+    fn isolated_search_root_inventory_is_complete() {
+        let _: fn(&IsolatedTaskHost<PublicValue>) = assert_isolated_host_inventory;
+        let _: fn(&SearchPolicy<PublicValue, PublicValue>) = assert_search_policy_inventory;
+        let _: fn(
+            &IsolatedSearchBranch<SearchRootTestEffects>,
+            &IsolatedSearchBlock,
+            &IsolatedSearchPoll<SearchRootTestEffects>,
+        ) = assert_search_result_inventory;
+        let _: fn(&IsolatedEffectSearch<SearchRootTestEffects>) = assert_effect_search_inventory;
+    }
+
+    fn retained_search_value(domain: &EffectTokenDomain<Arc<()>>) -> (PublicValue, Weak<()>) {
+        let payload = Arc::new(());
+        let retained = Arc::downgrade(&payload);
+        (domain.issue(payload), retained)
+    }
+
+    fn search_store(values: &Values) -> ReflectionStore {
+        ReflectionStore::new(values.core().clone(), Arc::new(ExactConflictAnalysis))
+    }
+
+    fn search_commit(
+        store: &ReflectionStore,
+        snapshot: PublicValue,
+        journal: PublicValue,
+    ) -> TaskCommit<SearchRootTestEffects> {
+        TaskCommit::new(StoreJournal::new(store.snapshot()), snapshot, vec![journal])
+    }
+
+    #[test]
+    fn isolated_host_and_branches_retain_roots_until_retirement() {
+        let core = crate::core::test_value_factory();
+        let values = Values::from_core_factory(core);
+        let domain = EffectTokenDomain::new(&values);
+        let store = search_store(&values);
+
+        let (environment, retained_environment) = retained_search_value(&domain);
+        let (extra, retained_extra) = retained_search_value(&domain);
+        let host = IsolatedTaskHost::new(&values, environment, extra)
+            .expect("same-runtime roots should construct an isolated host");
+        assert!(retained_environment.upgrade().is_some());
+        assert!(retained_extra.upgrade().is_some());
+        drop(host);
+        assert!(retained_environment.upgrade().is_none());
+        assert!(retained_extra.upgrade().is_none());
+
+        let (result, retained_result) = retained_search_value(&domain);
+        let (snapshot, retained_snapshot) = retained_search_value(&domain);
+        let (journal, retained_journal) = retained_search_value(&domain);
+        let branch =
+            IsolatedSearchBranch::complete(result, search_commit(&store, snapshot, journal));
+        assert!(retained_result.upgrade().is_some());
+        assert!(retained_snapshot.upgrade().is_some());
+        assert!(retained_journal.upgrade().is_some());
+        drop(branch);
+        assert!(retained_result.upgrade().is_none());
+        assert!(retained_snapshot.upgrade().is_none());
+        assert!(retained_journal.upgrade().is_none());
+
+        let (snapshot, retained_snapshot) = retained_search_value(&domain);
+        let (journal, retained_journal) = retained_search_value(&domain);
+        let branch = IsolatedSearchBranch::failed(search_commit(&store, snapshot, journal));
+        assert!(retained_snapshot.upgrade().is_some());
+        assert!(retained_journal.upgrade().is_some());
+        drop(branch);
+        assert!(retained_snapshot.upgrade().is_none());
+        assert!(retained_journal.upgrade().is_none());
+    }
+
+    #[test]
+    fn search_policy_discards_progress_but_returned_results_own_their_roots() {
+        let core = crate::core::test_value_factory();
+        let values = Values::from_core_factory(core);
+        let domain = EffectTokenDomain::new(&values);
+        let (root, retained_root) = retained_search_value(&domain);
+        let (left, retained_left) = retained_search_value(&domain);
+        let (right, retained_right) = retained_search_value(&domain);
+        let (result, retained_result) = retained_search_value(&domain);
+        let mut policy = SearchPolicy::retaining_all(root);
+
+        drop(
+            policy
+                .fork(left, right)
+                .expect("all-results policy should select its left branch"),
+        );
+        policy.retain(result);
+        assert!(retained_left.upgrade().is_none());
+        assert!(retained_right.upgrade().is_some());
+        assert!(retained_result.upgrade().is_some());
+        assert!(retained_root.upgrade().is_some());
+
+        policy.discard_progress();
+        assert!(retained_right.upgrade().is_none());
+        assert!(retained_result.upgrade().is_none());
+        assert!(retained_root.upgrade().is_some());
+
+        let (completed, retained_completed) = retained_search_value(&domain);
+        policy.retain(completed);
+        policy.finish();
+        let returned = policy
+            .completed()
+            .expect("finished search should publish its result collection");
+        drop(policy);
+        assert!(retained_root.upgrade().is_none());
+        assert!(retained_completed.upgrade().is_some());
+        drop(returned);
+        assert!(retained_completed.upgrade().is_none());
+    }
+
+    #[test]
+    fn blocked_search_error_retains_a_runtime_root_until_retirement() {
+        let core = crate::core::test_value_factory();
+        let values = Values::from_core_factory(core);
+        let domain = EffectTokenDomain::new(&values);
+        let (context, retained) = retained_search_value(&domain);
+        let error = TaskHalt::new("retryable search failure").with_context(context);
+        let block = IsolatedSearchBlock {
+            dependency: None,
+            observed_generation: Some(1),
+            error: Some(error),
+        };
+        assert!(
+            block.error().and_then(TaskHalt::failure_root).is_some(),
+            "a published blocked error must retain its explicit runtime root"
+        );
+        assert!(retained.upgrade().is_some());
+        drop(block);
+        assert!(retained.upgrade().is_none());
+    }
 
     #[test]
     fn isolated_task_host_has_one_immutable_non_committing_snapshot() {

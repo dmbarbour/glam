@@ -1245,9 +1245,17 @@ fn isolated_search_retries_observed_errors_without_advancing_choice() {
             IsolatedSearchPoll::Yielded => {}
             IsolatedSearchPoll::Blocked(blocked) => {
                 assert!(!blocked.waiting_on_dependency());
-                assert!(blocked.error().is_some_and(|error| {
-                    error.to_string().contains("requires a function value")
-                }));
+                let error = blocked
+                    .error()
+                    .expect("the retryable search must retain its evaluation error");
+                assert!(error.to_string().contains("requires a function value"));
+                assert_eq!(
+                    error
+                        .failure_root()
+                        .expect("a published blocked search error must be rooted")
+                        .runtime_id(),
+                    assembler.core_values().runtime_id()
+                );
                 break blocked
                     .observed_generation()
                     .expect("observed error must retain its generation");
@@ -1289,6 +1297,13 @@ fn isolated_search_keeps_unobserved_errors_terminal() {
             IsolatedSearchPoll::Yielded => {}
             IsolatedSearchPoll::Failed(error) => {
                 assert!(error.to_string().contains("requires a function value"));
+                assert_eq!(
+                    error
+                        .failure_root()
+                        .expect("a published terminal search error must be rooted")
+                        .runtime_id(),
+                    assembler.core_values().runtime_id()
+                );
                 break;
             }
             IsolatedSearchPoll::Blocked(_) => panic!("unobserved error should not block"),

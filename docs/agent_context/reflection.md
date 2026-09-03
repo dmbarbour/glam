@@ -106,6 +106,10 @@ and control flow.
   nested `.cut` remains first-success. A changed state observation restarts the
   whole isolated search conservatively, while a lazy dependency resumes its
   current branch.
+- An isolated-search poll roots both retryable blocked errors and terminal
+  errors before publishing them to its host. Restart/discard retires only
+  branch-local alternatives and results, retaining the immutable root branch;
+  a returned result collection owns its branches after the search retires.
 - Choice and lazy demand are deterministic. A blocked branch waits on at most
   one lazy value, though it may retain several prior state observations. Any
   racing choice must be introduced as a distinct explicit effect.

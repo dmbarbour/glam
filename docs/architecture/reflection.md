@@ -105,6 +105,16 @@ an observed-state change conservatively restarts the complete isolated search.
 Ordinary `EffectRun` retains its explicit-cut requirement and single-result
 behavior.
 
+The isolated host environment, branch values, and returned result collection
+are public roots. Specialization snapshot/journal roots follow the protocol
+contract above. Retryable and terminal search failures are rooted before a
+poll result crosses back to the host, including errors retained beside an
+observed generation. Restart drops branch-local alternatives and results but
+retains the immutable root branch; a returned `Arc` result collection owns its
+branches independently of the search machine. The nested `EffectTask` remains
+the separately inventoried machine owner rather than duplicating its interior
+ownership in the search wrapper.
+
 A specialization request may return an ordered collection of alternatives.
 The machine resumes the current continuation once for each value using the
 same ordinary choice machinery; an empty collection is effect failure. This is

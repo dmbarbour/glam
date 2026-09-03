@@ -112,8 +112,8 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.1d.1 | complete | reflection store, snapshot, journal, and query roots |
 | I4F.1d.2a | complete | reflection task failures and effect-lifecycle roots |
 | I4F.1d.2b | complete | reflection protocol and host-snapshot roots |
-| I4F.1d.2c | pending | isolated-search branch, block, and result roots |
-| I4F.1d.2 | pending | reflection lifecycle, protocol, and search roots |
+| I4F.1d.2c | complete | isolated-search branch, block, and result roots |
+| I4F.1d.2 | complete | reflection lifecycle, protocol, and search roots |
 | I4F.1d.3 | pending | reflection machine frame and request roots |
 | I4F.1d | pending | reflection store, protocol, and machine root surfaces |
 | I4F.1e | pending | diagnostics, runtime-event, and delivery root surfaces |
@@ -2942,6 +2942,24 @@ specialization to prove request results, outcomes, snapshots, commits, and
 transactions retain their public roots until the owning carrier retires. The
 durable-owner inventory now closes the protocol row independently and assigns
 isolated search its own open I4F.1d.2c row. Production remains `NoAuto`.
+
+I4F.1d.2c completed 2026-09-03. Isolated-search construction, retryable block
+publication, and terminal failure publication now root every bounded
+`TaskHalt` in the search runtime before returning it to a host. The search host
+environment, successful values, specialization snapshots/journals, and
+returned result collection already use the protocol's public-root contract.
+The nested `EffectTask` remains the separately inventoried I4F.1d.3 owner; the
+search wrapper does not duplicate its interior ownership classification.
+
+Compile-exhaustive latches cover the host, search policy, result branch,
+blocked state, poll variants, and wrapper. Deterministic lifetime fixtures
+verify host, successful and failed branch, snapshot/journal, restart/discard,
+completed-result, and blocked-error retention and exact retirement. Existing
+fixtures cover state and lazy blocking/resumption, branch order, complete
+search restart, and cancellation; the blocked and terminal evaluation-error
+fixtures now also require an explicit runtime failure root. The isolated-
+search owner row is closed as a compatibility root. Production remains
+`NoAuto`.
 
 #### Phase I4F.1e — Diagnostic, Event, and Delivery Roots
 

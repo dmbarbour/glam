@@ -19,7 +19,6 @@ enum CurrentStorage {
     BareValue,
     CompatibilityRoot,
     PublicRoot,
-    FailureGraph,
     SynchronizedNet,
     TypeErased,
     CallbackCapture,
@@ -318,16 +317,15 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         RootSurface,
         "I4F.2d.2"
     ),
-    open_durable!(
+    closed_durable!(
         "src/reflection/search.rs",
         "isolated search host, branch, block, and result state",
-        "public Value environment/results, specialization journals, TaskHalt failures, and effect-machine state",
+        "public Value environment/results, specialization-owned snapshot/journal roots, rooted TaskHalt failures, and the separately inventoried nested effect machine",
         "pollable isolated search and returned result collection",
         "isolated-search construction and branch publication",
         "restart, cancellation, or search/result retirement",
-        FailureGraph,
+        CompatibilityRoot,
         RootSurface,
-        "I4F.1d.2c",
         "I4F.2d.2"
     ),
     open_durable!(
