@@ -99,6 +99,7 @@ pub(crate) fn start_logger(
                 task_diagnostics.publish_local(
                     error
                         .with_context(
+                            &task_values,
                             entry_context(&task_values, "log")
                                 .expect("configuration context is local"),
                         )

@@ -21,7 +21,7 @@ use std::sync::{Arc, LazyLock, Weak};
 
 use rpds::RedBlackTreeMapSync;
 
-use crate::api::Value as PublicValue;
+use crate::api::{Value as PublicValue, Values};
 use crate::core::{Builtin, CoreValueFactory, Dict, Key, LazyValue, List, Value};
 use crate::core_net::CoreDataKey;
 use crate::number::Number;
@@ -193,17 +193,21 @@ impl StoreSnapshot {
         if !query_belongs_to(&self.query_domain, handle) {
             return EvaluationQueryPoll::ForeignQueryDomain;
         }
+        let values = Values::from_core_factory(self.values.clone());
         let Some(root) = self.volume(self.runtime_volume) else {
             return EvaluationQueryPoll::State {
-                value: PublicValue::from_core(&self.values, Value::Dict(Dict::new_sync())),
+                value: values.empty_dict(),
                 observed: true,
             };
         };
         EvaluationQueryPoll::State {
-            value: PublicValue::from_core(
+            value: values.wrap(lazy_core_value_path(
                 &self.values,
-                lazy_core_value_path(&self.values, root.as_core().clone(), &query_path(handle.id)),
-            ),
+                values
+                    .clone_core(root)
+                    .expect("query root belongs to its store runtime"),
+                &query_path(handle.id),
+            )),
             observed: true,
         }
     }
@@ -347,21 +351,21 @@ impl StoreJournal {
         if !query_belongs_to(&self.snapshot.query_domain, handle) {
             return EvaluationQueryPoll::ForeignQueryDomain;
         }
+        let values = Values::from_core_factory(self.snapshot.values.clone());
         let Some(root) = self.volume_view(self.snapshot.runtime_volume) else {
             return EvaluationQueryPoll::State {
-                value: PublicValue::from_core(&self.snapshot.values, Value::Dict(Dict::new_sync())),
+                value: values.empty_dict(),
                 observed,
             };
         };
         EvaluationQueryPoll::State {
-            value: PublicValue::from_core(
+            value: values.wrap(lazy_core_value_path(
                 &self.snapshot.values,
-                lazy_core_value_path(
-                    &self.snapshot.values,
-                    root.into_core(),
-                    &query_path(handle.id),
-                ),
-            ),
+                values
+                    .clone_core(&root)
+                    .expect("query view belongs to its store runtime"),
+                &query_path(handle.id),
+            )),
             observed,
         }
     }
@@ -437,6 +441,7 @@ impl ReflectionStore {
         let heap_volume = VolumeId::from_u64(1).expect("one is a nonzero volume ID");
         let runtime_volume = VolumeId::from_u64(2).expect("two is a nonzero volume ID");
         let (query_domain, query_retirements) = QueryDomain::new();
+        let public_values = Values::from_core_factory(values.clone());
         Self {
             identity: Arc::new(()),
             heap_volume,
@@ -445,14 +450,8 @@ impl ReflectionStore {
             query_retirements,
             next_volume: 3,
             roots: RedBlackTreeMapSync::new_sync()
-                .insert(
-                    heap_volume,
-                    PublicValue::from_core(&values, Value::Dict(Dict::new_sync())),
-                )
-                .insert(
-                    runtime_volume,
-                    PublicValue::from_core(&values, Value::Dict(Dict::new_sync())),
-                ),
+                .insert(heap_volume, public_values.empty_dict())
+                .insert(runtime_volume, public_values.empty_dict()),
             revision: 0,
             latest_changes: BTreeMap::new(),
             strategy,
@@ -712,22 +711,26 @@ fn query_path(id: EvaluationQueryId) -> Vec<Key> {
 
 #[cfg(test)]
 fn pending_query_value(values: &CoreValueFactory) -> PublicValue {
-    PublicValue::from_core(
-        values,
-        Value::Dict(Dict::new_sync().insert(QUERY_PENDING.clone(), values.unit())),
-    )
+    Values::from_core_factory(values.clone()).wrap(Value::Dict(
+        Dict::new_sync().insert(QUERY_PENDING.clone(), values.unit()),
+    ))
 }
 
 fn complete_query_value(values: &CoreValueFactory, result: PublicValue) -> PublicValue {
+    let public_values = Values::from_core_factory(values.clone());
     let payload = Value::Dict(
         Dict::new_sync()
             .insert(QUERY_PRESENT.clone(), values.unit())
-            .insert(QUERY_RESULT.clone(), result.into_core()),
+            .insert(
+                QUERY_RESULT.clone(),
+                public_values
+                    .clone_core(&result)
+                    .expect("query result belongs to its store runtime"),
+            ),
     );
-    PublicValue::from_core(
-        values,
-        Value::Dict(Dict::new_sync().insert(QUERY_COMPLETE.clone(), payload)),
-    )
+    public_values.wrap(Value::Dict(
+        Dict::new_sync().insert(QUERY_COMPLETE.clone(), payload),
+    ))
 }
 
 pub(crate) fn decode_query_state(
@@ -747,27 +750,44 @@ pub(crate) fn decode_query_state(
         return None;
     };
     complete.get(&QUERY_PRESENT)?;
-    Some(EvaluationQueryState::Complete(PublicValue::from_core(
-        values,
-        complete
-            .get(&QUERY_RESULT)
-            .cloned()
-            .unwrap_or_else(|| Value::Dict(Dict::new_sync())),
-    )))
+    Some(EvaluationQueryState::Complete(
+        Values::from_core_factory(values.clone()).wrap(
+            complete
+                .get(&QUERY_RESULT)
+                .cloned()
+                .unwrap_or_else(|| Value::Dict(Dict::new_sync())),
+        ),
+    ))
 }
 
 fn apply_edit(values: &CoreValueFactory, root: PublicValue, edit: &StoreEdit) -> PublicValue {
+    let public_values = Values::from_core_factory(values.clone());
     match edit {
         StoreEdit::Set { address, value } => {
             let (_, path) = address.reflection_parts();
-            apply_value_at_path(values, root, path, value.as_core().clone())
+            apply_value_at_path(
+                values,
+                root,
+                path,
+                public_values
+                    .clone_core(value)
+                    .expect("store edit belongs to its store runtime"),
+            )
         }
         StoreEdit::Rewrite { address, updater } => {
             let (_, path) = address.reflection_parts();
-            let prior = lazy_core_value_path(values, root.as_core().clone(), path.keys());
+            let prior = lazy_core_value_path(
+                values,
+                public_values
+                    .clone_core(&root)
+                    .expect("store root belongs to its store runtime"),
+                path.keys(),
+            );
             let updated = Value::Lazy(LazyValue::from_application(
                 values,
-                updater.as_core().clone(),
+                public_values
+                    .clone_core(updater)
+                    .expect("store updater belongs to its store runtime"),
                 Arc::from([prior]),
             ));
             apply_value_at_path(values, root, path, updated)
@@ -781,8 +801,9 @@ fn apply_value_at_path(
     path: &ConflictPath,
     value: Value,
 ) -> PublicValue {
+    let public_values = Values::from_core_factory(values.clone());
     if path.depth() == 0 {
-        return PublicValue::from_core(values, value);
+        return public_values.wrap(value);
     }
     let path = Value::List(List::from_values(
         path.keys()
@@ -790,14 +811,17 @@ fn apply_value_at_path(
             .map(|key| key.to_value_with(values))
             .collect(),
     ));
-    PublicValue::from_core(
+    public_values.wrap(Value::builtin_call(
         values,
-        Value::builtin_call(
-            values,
-            Builtin::DictUpdate,
-            vec![path, value, root.into_core()],
-        ),
-    )
+        Builtin::DictUpdate,
+        vec![
+            path,
+            value,
+            public_values
+                .clone_core(&root)
+                .expect("store root belongs to its store runtime"),
+        ],
+    ))
 }
 
 fn lazy_core_value_path(values: &CoreValueFactory, value: Value, path: &[Key]) -> Value {

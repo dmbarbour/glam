@@ -146,6 +146,14 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.2a.2c | complete | core net and builtin construction adapter retirement |
 | I4F.2a.2d | complete | core evaluation and net access closure |
 | I4F.2a.2 | complete | core evaluator and net access retirement |
+| I4F.2a.3a | complete | reflection protocol, store, and search access retirement |
+| I4F.2a.3b | pending | reflection request access retirement |
+| I4F.2a.3c | pending | reflection machine access retirement |
+| I4F.2a.3d | pending | compiler and module-lowering access retirement |
+| I4F.2a.3e | pending | compiler-cache access retirement |
+| I4F.2a.3f | pending | macro effect and runner access retirement |
+| I4F.2a.3g | pending | parser replay and source access retirement |
+| I4F.2a.3h | pending | lifecycle and host-integration closure |
 | I4F.2a.3 | pending | reflection, compiler, macro, and host access retirement |
 | I4F.2a.4 | pending | compatibility-access closure latch |
 | I4F.2a | pending | compatibility observation and ownership-transfer retirement |
@@ -3470,6 +3478,31 @@ be partitioned by subsystem:
    same rule to reflection machines/requests/stores, compiler/module lowering,
    macro replay, configuration, logging, and runtime event adapters. A callback
    receives a root or owned host data, never a borrowed core representation.
+   Execute this broad integration surface as eight source-inventoried slices:
+
+   - **I4F.2a.3a — Reflection protocol, store, and search.** Replace public
+     handle projections and constructors in the common transaction, volume,
+     and isolated-search substrate with matching `Values`, evaluator-step, or
+     retained-root operations.
+   - **I4F.2a.3b — Reflection requests.** Migrate standard request decoding and
+     response construction without broadening the public request API.
+   - **I4F.2a.3c — Reflection machine.** Migrate the central interpreter and
+     its parked state. Callback entry must retain the I3 mutator-free boundary.
+   - **I4F.2a.3d — Compiler and module lowering.** Migrate definition promises,
+     origins, import handoff, and declaration lowering through the compiler's
+     existing bounded access regions.
+   - **I4F.2a.3e — Compiler caches.** Migrate runtime-cached compiler helpers
+     and the diagnostic formatter without adding cache-local authority.
+   - **I4F.2a.3f — Macro effects and runner.** Migrate rooted macro inputs,
+     outputs, comparisons, and diagnostic values. Expansion callbacks retain
+     public roots or owned source data, never a borrowed semantic value.
+   - **I4F.2a.3g — Parser replay and source.** Migrate embedded macro data,
+     source diagnostics, and conditional-definition projections through the
+     parser/compiler's selected runtime authority.
+   - **I4F.2a.3h — Lifecycle and host closure.** Retire remaining reflection
+     lifecycle ownership transfers and audit configuration, logging, and
+     event adapters for hidden compatibility access. Relatch both public-value
+     and compiler-boundary inventories.
 4. **I4F.2a.4 — Access closure.** Relatch the production access inventory with
    only the private managed-root gateway and explicitly lifetime-bounded core
    adapters remaining. Add negative source/compile-time fixtures for an owned
@@ -3552,6 +3585,17 @@ removed by I4F.2a.1c, while promise assignment ownership recovery and its
 compatibility edge visitor are replaced by I5's managed promise representation.
 The public compatibility-access and managed-admission inventories pass with
 those assignments recorded.
+
+I4F.2a.3a completed 2026-09-03. Effect constructors, request-context demand,
+path evaluation, isolated-search entry, persistent-store query roots, and
+transactional updates now clone or wrap public values through their matching
+`Values` service. `TaskHalt::with_context` likewise requires that authority;
+the CLI logger and internal callers supply it explicitly. Reflection store and
+search sources retain no compatibility projection or construction call. The
+one protocol exception is the structured `ApiError` to `TaskHalt` conversion:
+the current diagnostic owns a public root but not a reusable value service, so
+its emission projection remains source-latched to I6C's managed
+diagnostic/failure boundary rather than gaining an authority-free workaround.
 
 #### Phase I4F.2b — Active-Owner Extraction Gate
 

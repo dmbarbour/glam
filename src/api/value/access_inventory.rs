@@ -192,27 +192,15 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/reflection/protocol.rs",
-        [4, 1, 1, 0, 0, 0],
-        "bounded request evaluation plus rooted protocol results, snapshots, transactions, and failures",
-        "I3D.2 interpreter boundary; I4F.1d.2b rooted protocol surfaces; I4F.2a compatibility-access retirement"
+        [1, 0, 0, 0, 0, 0],
+        "structured API-error conversion pending the managed diagnostic/failure boundary",
+        "I6C managed failure shell"
     ),
     entry!(
         "src/reflection/requests.rs",
         [20, 3, 19, 0, 0, 0],
         "rooted standard reflection request parsing and results",
         "I3C.2 rooted task joins; I3D.2 interpreter boundary; I4F.1d.3a rooted request owners; I4F.2a compatibility-access retirement"
-    ),
-    entry!(
-        "src/reflection/search.rs",
-        [3, 0, 1, 0, 0, 0],
-        "isolated effect search construction and bounded machine handoff",
-        "I3D.2/I3D.4 search regions; I4F.1d.2c rooted search surfaces; I4F.2a compatibility-access retirement"
-    ),
-    entry!(
-        "src/reflection/store.rs",
-        [4, 3, 11, 0, 0, 0],
-        "persistent store, query roots, and transactional updates",
-        "I3D.4 bounded store regions; I4F.1d.1 rooted public store surfaces; I4F.2a compatibility-access retirement"
     ),
     entry!(
         "src/runtime.rs",

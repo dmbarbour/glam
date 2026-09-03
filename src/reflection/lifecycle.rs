@@ -382,6 +382,7 @@ impl<S: TaskSpecialization> EffectRun<S> {
         )));
         let runtime = runtime.expect("EffectRun construction always selects an evaluation runtime");
         let runtime_id = runtime.id();
+        let values = runtime.values();
         let session = runtime.new_evaluation_session()?;
         let mut task = EffectTask::new_in_context(
             effect.into_core(),
@@ -390,7 +391,8 @@ impl<S: TaskSpecialization> EffectRun<S> {
             EvalContext::with_task_profile(&session, task_profile),
         )
         .map_err(|error| {
-            contextualize_task_halt(error, failure_context.as_ref()).root_for_runtime(runtime_id)
+            contextualize_task_halt(error, &values, failure_context.as_ref())
+                .root_for_runtime(runtime_id)
         })?;
         if result_policy == EffectResultPolicy::RequireUnit {
             task = task.requiring_unit_result();
@@ -399,7 +401,8 @@ impl<S: TaskSpecialization> EffectRun<S> {
             task = task.asserting_unit_result(diagnostic_context);
         }
         run_composed_effect_task(task).map_err(|error| {
-            contextualize_task_halt(error, failure_context.as_ref()).root_for_runtime(runtime_id)
+            contextualize_task_halt(error, &values, failure_context.as_ref())
+                .root_for_runtime(runtime_id)
         })
     }
 
@@ -501,9 +504,13 @@ impl<S: TaskSpecialization> EffectRun<S> {
     }
 }
 
-fn contextualize_task_halt(error: TaskHalt, context: Option<&PublicValue>) -> TaskHalt {
+fn contextualize_task_halt(
+    error: TaskHalt,
+    values: &crate::api::Values,
+    context: Option<&PublicValue>,
+) -> TaskHalt {
     match context {
-        Some(context) => error.with_context(context.clone()),
+        Some(context) => error.with_context(values, context.clone()),
         None => error,
     }
 }

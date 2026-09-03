@@ -96,25 +96,17 @@ impl<R> EffectRequestSpec<R> {
                 arguments.len()
             )));
         }
-        for argument in &arguments {
-            if argument.runtime_id() != values.runtime_id() {
-                return Err(ApiError::new(format!(
-                    "effect request argument belongs to evaluation runtime {}, expected evaluation runtime {}",
-                    argument.runtime_id().get(),
-                    values.runtime_id().get()
-                )));
-            }
-        }
-        Ok(PublicValue::from_core(
+        let arguments = arguments
+            .iter()
+            .map(|argument| values.clone_core(argument))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(values.wrap(eval::constant_effect(
             values.core(),
-            eval::constant_effect(
-                values.core(),
-                request_value(
-                    &Key::abstract_global_path(self.tag_path.iter().map(Arc::as_ref)),
-                    arguments.into_iter().map(PublicValue::into_core).collect(),
-                ),
+            request_value(
+                &Key::abstract_global_path(self.tag_path.iter().map(Arc::as_ref)),
+                arguments,
             ),
-        ))
+        )))
     }
 }
 
@@ -469,8 +461,11 @@ impl TaskHalt {
 
     /// Prepends one structured frame when a host client propagates this task
     /// failure through another semantic boundary.
-    pub fn with_context(self, context: PublicValue) -> Self {
-        let runtime = context.runtime_id();
+    pub fn with_context(self, values: &Values, context: PublicValue) -> Self {
+        if let Err(error) = values.require(&context) {
+            return Self::new(error.to_string());
+        }
+        let runtime = values.runtime_id();
         if let TaskHaltKind::Failure(failure) = &self.0
             && failure.runtime_id().is_some_and(|owner| owner != runtime)
         {
@@ -483,8 +478,12 @@ impl TaskHalt {
                     .get()
             ));
         }
-        self.with_core_context(context.into_core())
-            .root_for_runtime(runtime)
+        self.with_core_context(
+            values
+                .clone_core(&context)
+                .expect("task context runtime was checked"),
+        )
+        .root_for_runtime(runtime)
     }
 
     /// Projects a permanent task failure into its structured diagnostic.
@@ -634,10 +633,10 @@ impl<'a, S: TaskSpecialization> RequestContext<'a, S> {
     /// phase. The resulting keys contain no managed value authority and may
     /// safely cross back into the request interpreter.
     pub(crate) fn evaluate_key_path(&self, value: &PublicValue) -> Result<Vec<Key>, TaskHalt> {
-        self.require_runtime_value(value)?;
+        let value = self.values().clone_core(value)?;
         self.poll_context
             .evaluate(self.eval_context, |evaluator| {
-                eval::eval_key_path_list_in(evaluator, value.as_core())
+                eval::eval_key_path_list_in(evaluator, &value)
             })
             .map_err(task_eval_error)
     }
@@ -649,11 +648,11 @@ impl<'a, S: TaskSpecialization> RequestContext<'a, S> {
         value: &PublicValue,
         path: &[Key],
     ) -> Result<PublicValue, TaskHalt> {
-        self.require_runtime_value(value)?;
+        let value = self.values().clone_core(value)?;
         let value = self
             .poll_context
             .evaluate(self.eval_context, |evaluator| {
-                let mut current = value.as_core().clone();
+                let mut current = value;
                 for key in path {
                     let Value::Dict(dict) = eval::eval_value_in(evaluator, &current)? else {
                         return Err(EvaluationHalt::new(
@@ -672,26 +671,16 @@ impl<'a, S: TaskSpecialization> RequestContext<'a, S> {
     }
 
     fn evaluate_root(&self, value: &PublicValue) -> Result<RuntimeValueRoot, TaskHalt> {
-        self.require_runtime_value(value)?;
+        let value = self.values().clone_core(value)?;
         self.poll_context
             .evaluate(self.eval_context, |evaluator| {
-                let mut value = value.as_core().clone();
+                let mut value = value;
                 while matches!(value, Value::Lazy(_) | Value::Promised(_)) {
                     value = eval::eval_value_in(evaluator, &value)?;
                 }
                 Ok(evaluator.root_value(value))
             })
             .map_err(task_eval_error)
-    }
-
-    fn require_runtime_value(&self, value: &PublicValue) -> Result<(), TaskHalt> {
-        if value.runtime_id() != self.eval_context.values().runtime_id() {
-            Err(TaskHalt::new(
-                "effect request value belongs to another runtime",
-            ))
-        } else {
-            Ok(())
-        }
     }
 
     /// Starts a nested isolated search in the current evaluation session.
@@ -1040,7 +1029,7 @@ mod root_inventory_tests {
             "the evaluator conversion remains bounded until publication"
         );
 
-        let halt = halt.with_context(context);
+        let halt = halt.with_context(&public_values, context);
         let root = halt
             .failure_root()
             .expect("a public context must establish the runtime root");

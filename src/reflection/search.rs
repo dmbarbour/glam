@@ -6,7 +6,7 @@ use super::protocol::{
 };
 use super::requests::ReflectionServices;
 use super::store::{ExactConflictAnalysis, ReflectionStore, StoreSnapshot};
-use crate::api::{Diagnostic, Value as PublicValue};
+use crate::api::{Diagnostic, Value as PublicValue, Values};
 use crate::core::CoreValueFactory;
 use crate::evaluation::{EvalContext, EvaluationWaitToken};
 
@@ -273,7 +273,9 @@ impl<S: TaskSpecialization> IsolatedEffectSearch<S> {
         context: EvalContext,
     ) -> Result<Self, TaskHalt> {
         let runtime = context.values().runtime_id();
-        EffectTask::new_isolated_in_context(effect.as_core().clone(), specialization, host, context)
+        let values = Values::from_core_factory(context.values().clone());
+        let effect = values.clone_core(effect)?;
+        EffectTask::new_isolated_in_context(effect, specialization, host, context)
             .map(|task| Self { task, _owner: None })
             .map_err(|error| error.root_for_runtime(runtime))
     }
@@ -319,7 +321,6 @@ impl<S: TaskSpecialization> IsolatedEffectSearch<S> {
 mod tests {
     use super::*;
     use crate::api::{EffectTokenDomain, Values};
-    use crate::core::{Dict, Value};
     use crate::reflection::{StandardEffects, StoreJournal};
     use std::convert::Infallible;
     use std::sync::Weak;
@@ -529,7 +530,7 @@ mod tests {
         let values = Values::from_core_factory(core);
         let domain = EffectTokenDomain::new(&values);
         let (context, retained) = retained_search_value(&domain);
-        let error = TaskHalt::new("retryable search failure").with_context(context);
+        let error = TaskHalt::new("retryable search failure").with_context(&values, context);
         let block = IsolatedSearchBlock {
             dependency: None,
             observed_generation: Some(1),
@@ -547,15 +548,20 @@ mod tests {
     #[test]
     fn isolated_task_host_has_one_immutable_non_committing_snapshot() {
         let values = crate::core::test_value_factory();
-        let environment = PublicValue::from_core(&values, Value::Dict(Dict::new_sync()));
+        let public_values = Values::from_core_factory(values.clone());
+        let environment = public_values.empty_dict();
         let host = IsolatedTaskHost::new_core(values, environment.clone(), ());
         let snapshot = <IsolatedTaskHost<()> as TaskHost<StandardEffects>>::snapshot(&host);
 
         assert_eq!(snapshot.generation(), 1);
         assert_eq!(snapshot.extra(), &());
         assert_eq!(
-            host.reflection_environment().as_core(),
-            environment.as_core()
+            public_values
+                .clone_core(&host.reflection_environment())
+                .expect("host environment belongs to the search runtime"),
+            public_values
+                .clone_core(&environment)
+                .expect("test environment belongs to the search runtime")
         );
         assert!(!<IsolatedTaskHost<()> as TaskHost<StandardEffects>>::wait_for_change(&host, 1));
 

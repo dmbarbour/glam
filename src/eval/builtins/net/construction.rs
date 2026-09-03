@@ -248,7 +248,7 @@ impl NetConstructionMachine {
                         let values = Values::from_core_factory(context.context().values().clone());
                         Err(halt
                             .clone()
-                            .with_context(values.wrap(net_construction_context()))
+                            .with_context(&values, values.wrap(net_construction_context()))
                             .into_evaluation_halt())
                     }
                     None => Err(EvaluationHalt::new(
@@ -278,7 +278,7 @@ impl NetConstructionMachine {
             IsolatedSearchPoll::Failed(halt) => {
                 let values = Values::from_core_factory(context.context().values().clone());
                 Err(halt
-                    .with_context(values.wrap(net_construction_context()))
+                    .with_context(&values, values.wrap(net_construction_context()))
                     .into_evaluation_halt())
             }
             IsolatedSearchPoll::Cancelled => Err(EvaluationHalt::new(
@@ -415,10 +415,10 @@ fn construction_copy_count(
     value: &PublicValue,
 ) -> Result<usize, TaskHalt> {
     let value = context.evaluate(value).map_err(|halt| {
+        let values = context.values();
         halt.with_context(
-            context
-                .values()
-                .wrap(crate::eval::evaluation_context_frame("copy_count")),
+            &values,
+            values.wrap(crate::eval::evaluation_context_frame("copy_count")),
         )
     })?;
     value

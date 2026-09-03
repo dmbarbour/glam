@@ -269,7 +269,7 @@ impl Values {
         }
     }
 
-    pub(super) fn require(&self, value: &Value) -> Result<(), Error> {
+    pub(crate) fn require(&self, value: &Value) -> Result<(), Error> {
         value.require_runtime(self.runtime)
     }
 
