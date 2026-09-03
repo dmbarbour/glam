@@ -205,11 +205,11 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.2f.4 | complete | mandatory post-I4 review and closeout |
 | I4F.2f | complete | compatibility deletion and I4 reconciliation |
 | I4F.2 | complete | public managed-root production switch |
-| I5.0 | pending | transitive trace, core-net chronology, and lazy/promise handle decision review |
-| I5 | pending | managed lazy/promise cells, external lifecycle, and cycle reclamation |
+| I5.0 | pending | durable/scoped/coordination and weak promise handle decision review |
+| I5 | pending | atomic managed lazy/promise/core-net identity closure and cycle audit |
 | I6 | pending | functions, applications, metadata, failures |
 | I7 | pending | persistent list and dictionary tracing |
-| I8 | pending | managed core-net outer cells, exact tracing, and mutation gateways |
+| I8 | pending | post-cutover core-net trace, mutation, cursor, and lifecycle audit |
 | I9 | pending | runtime-root lifecycle and retirement audits |
 | I10 | pending | deferred closures and opaque boundaries |
 | I10B.0 | pending | opaque representation decision review gate |
@@ -3395,7 +3395,8 @@ Partition this final gate into two independently reviewable checkpoints:
   cursor claim remains bounded; a parked driver, function stage, source-net
   identity, or host work record needs a stable root-shaped anchor which I4F.2c
   will register and whose I4E logical visitor reaches its retained value/net
-  payloads until I8 replaces the outer representation.
+  payloads until I5's atomic recursive-identity cutover replaces the
+  production core-net outer representation.
 - Re-run the closure, callback, opaque, and type-erasure searches after the
   preceding conversions. Unknown `Any`/closure/generic payloads are rejected;
   root-bearing external families require a named stable record, while managed
@@ -4343,13 +4344,14 @@ early payload migration. No old non-registering root constructor or
 unrestricted `as_core`/`into_core` method remains. The surviving
 `RuntimeValueRoot` scoped projections are required while its managed outer node
 still contains compatibility Rust payloads. Every `CompatibilityValueEdges`
-implementation has a named consumer: lazy/promise edges in I5, function,
-metadata, failure, and reflection edges in I6, persistent containers in I7,
-or runtime-net ownership and final vocabulary deletion in I8B. Deleting these
-adapters now would discard the compile-exhaustive edge ledger which those
-phases must translate, not remove a live escape. Source comments and the
-implementation architecture now assign their removal to those phases instead
-of incorrectly promising wholesale deletion in I4F.2f.
+implementation has a named consumer: I5B composes their immediate-child
+enumeration into the central transitive walk; I5D replaces the lazy, promise,
+and core-net identity leaves; I6 replaces function, metadata, failure, and
+reflection steps; and I7 audits persistent containers. The central walk may
+remain beyond I8 while raw structural `Value` interiors remain and is finally
+replaced by Value Representation Refinement. Deleting these adapters now would
+discard the compile-exhaustive edge ledger which those phases must translate,
+not remove a live escape.
 
 I4F.2f.3 completed 2026-09-03. The former six-field compatibility-access
 counter had combined two opposing policies: registered `RuntimeValueRoot`
@@ -4378,10 +4380,11 @@ authorize whole-graph collection while I5-I10 families remain unclassified.
 
 A focused forward review of the now-concrete I4 handoff is recorded in
 [`GarbageCollectorIntegrationI5I10_2026-09-03.md`](../reviews/GarbageCollectorIntegrationI5I10_2026-09-03.md).
-It resolved low-risk verification, I7, I9, and I10 wording drift, but found
-three coupled representation questions which must be settled by I5.0 before
-I5 implementation: transitive managed-edge closure, managed core-net ordering,
-and the durable/scoped/weak handle roles for lazy and promise identities.
+It resolved low-risk verification, I7, I9, and I10 wording drift. A subsequent
+design discussion resolved transitive managed-edge closure and core-net
+chronology through one prepared atomic lazy/promise/net identity cutover. I5.0
+now retains one blocker: the durable/scoped/coordination and weak promise
+handle model.
 
 From I4F.2 onward, every representation change in I5-I10 updates its exact
 visitor or root classification in the same checkpoint. No later phase may
@@ -4406,6 +4409,15 @@ unrooted pointer.
   path through which that identity can survive a mutator region. If a later
   source audit finds a durable bare value, the responsible earlier phase is
   reopened; I9 is not a safe holding area for delayed root conversion.
+- I5 introduces the first cycle-forming managed identities as one atomic
+  closure. Its transitive compatibility walk may recurse through ordinary
+  Rust-owned value structure, but it reports and stops at managed lazy,
+  promise, and core-net identities; the collector worklist follows those
+  edges. Removing those three managed identity families from the semantic
+  graph must leave an acyclic compatibility-owned graph. A raw recursive
+  `Arc` identity, managed-reachable registered root, or unreported `Gc` below
+  a compatibility owner violates that closure even while production remains
+  `NoAuto`.
 - Before any isolated fixture collects a managed family, that family has an
   exact trace, stable layout and allocator-admission latch, I4.0
   direct/transitive destruction record, rooted-survival proof, and
@@ -4425,104 +4437,183 @@ unrooted pointer.
   first forced full collections over an actual production runtime and repeats
   the I5-I10 reclamation cases through that boundary.
 
-## Phase I5 — Lazies and Promises
+## Phase I5 — Recursive Identity Closure: Lazies, Promises, and Core Nets
 
 ### Phase I5.0 — Managed-Identity and Transitive-Trace Decision Review
 
-This is a hard design gate before I5A, not permission to begin the migration.
-Its required inputs and open findings are recorded as I5F-001 through I5F-003
-and I5F-007 in the focused forward review linked above. It must:
+This is the remaining hard design gate before representation preparation in
+I5C. The chronology and trace decisions from I5F-001, I5F-002, and I5F-007 are
+closed: lazies, promises, and production core nets change representation in
+one atomic checkpoint, and a central compatibility walk stops at those managed
+identities. I5.0 now resolves I5F-003 only. It must inventory every direct
+`LazyValue`, `PromisedValue`, `CoreRuntimeNet`, cell, and coordination use which
+survives managed access and distinguish:
 
-- select the central wildcard-free walk which traces managed identities nested
-  beneath compatibility-owned values without recursively following a managed
-  identity or invoking semantic work;
-- decide whether the managed core-net ownership/durable-handle core moves
-  before I5 or whether every value-bearing external net surface receives a
-  temporary exact root representation;
-- inventory every direct `LazyValue`, `PromisedValue`, `LazyCell`, and
-  `PromiseCell` use which survives a managed-access scope; and
-- distinguish the interior managed identity, durable registered handle,
-  bounded access carrier, and edge-free coordination state, including the
-  current weak task-owned promise obligation.
+- an interior semantic `Gc` edge;
+- a durable registered root for parked or externally retained work;
+- a bounded access carrier tied to matching mutator authority;
+- edge-free coordination state for IDs, subscriptions, revisions, waits, and
+  notifications; and
+- the current weak task-owned promise obligation, selecting either a
+  collector-aware weak facility, a documented stronger producer-root lifetime,
+  or another representation which introduces no hidden root backedge.
 
-The review must rewrite and partition I5 and the affected portion of I8 before
-either implementation begins. At minimum, forced-order tests must cover both
-terminal-publication orderings, discarded and retained task-owned promises,
-and a managed identity nested beneath every compatibility owner capable of
-holding a `Value`. Production remains `NoAuto`.
+The decision must also specify the analogous durable/scoped/coordination split
+for core nets and how normalization leases behave after the managed net cell
+dies. Forced-order tests must cover both terminal-publication orderings plus
+discarded and retained task-owned promises. Production remains `NoAuto`.
 
-### Phase I5A — Lazy-Cell Migration
+### Phase I5A — Cycle-Source and Owner Inventory
 
-- Replace `Arc<LazyCell>` with a managed identity cell and trace every lazy
-  source, terminal evaluated value, and permanent failure.
-- Preserve source replacement and terminal publication order. Route source
-  replacement and result installation through representation-local safe
-  managed-edge gateways; clear/release the source after terminal publication
-  as today.
-- Complete the `LazyCell` direct/transitive destruction record before its
-  first isolated collection. Any notification, task identity, or active
-  cleanup state remains in an edge-free external companion rather than its
-  managed fields.
-- Update the central managed-edge walk and production `ManagedValueNode` trace
-  in the same checkpoint, then retire only the lazy-specific compatibility
-  step it replaces. Collection being disabled permits no trace placeholder.
+- Prove from current source that `LazyCell`, `PromiseCell`, and
+  `CoreRuntimeNet` are the complete set of mutable/shared semantic identities
+  capable of closing a recursive value cycle. Functions close cycles through
+  nets, while fixpoints and deferred computations close them through lazies or
+  promises; immutable lists, dictionaries, applications, metadata, and
+  failures are paths between identities rather than independent cycle sources.
+- Search every `Mutex`, `RwLock`, `OnceLock`, mutable container, `Arc` owner,
+  external-owner record, callback capture, and coordination companion capable
+  of retaining a value, one of the three identities, or a `RuntimeValueRoot`.
+  Record any exception to the three-identity claim rather than forcing it into
+  the proposed model.
+- Extend the durable-owner inventory with each direct identity occurrence and
+  classify it as a future interior edge, durable root, bounded access value,
+  edge-free companion, or unresolved I5.0 weak-liveness case.
 
-Verification: preserve the lazy publication/wait suites and reclaim a direct,
-two-node, and many-node lazy cycle in a closed fixture. Add
-`managed_lazy_drop_is_passive_and_releases_rust_resources`. Production remains
-`NoAuto` and does not collect.
+Verification: first latch a deliberately incomplete identity list, then add
+`recursive_identity_source_inventory_is_complete` and
+`compatibility_graph_cycle_sources_are_classified`. This phase changes no
+production representation and performs no collection.
 
-### Phase I5B — Promise-Cell Migration
+### Phase I5B — Transitive Compatibility Managed-Edge Walk
 
-- Replace `Arc<PromiseCell>` with a managed identity cell. Store successful
-  assignment and other logical managed edges inside the traceable cell rather
-  than hiding them behind registered roots.
-- Keep task/waiter IDs, subscriptions, notifications, and producer
-  coordination in ordinary Rust companions only where they contain no `Gc`,
-  `Root`, public `Value`, or equivalent managed ownership.
-- Route one-write assignment through a representation-local safe gateway and
-  preserve publication-before-notification ordering.
-- Update the central managed-edge walk and every production enclosing trace in
-  the same checkpoint, then retire only the promise-specific compatibility
-  step it replaces.
-- Complete the `PromiseCell` direct/transitive passive-destruction record
-  before its first isolated collection.
+- Introduce one central, wildcard-free traversal which recursively walks raw
+  compatibility-owned value structure only far enough to find a managed
+  identity. At a lazy, promise, or core-net identity it reports the `Gc` edge
+  and stops; it never dereferences or recursively traces that cell.
+- Build the walk from compile-exhaustive immediate-child enumerators. It may
+  report duplicate edges, but may not evaluate, format, compare, reduce,
+  materialize, invoke a callback, retain the collector visitor, or cross an
+  external registered-root boundary.
+- Treat all three current raw recursive identities as declared stop points
+  during preparation. A test-only managed-leaf adapter exercises edge
+  reporting before production cutover without recursively walking the current
+  `Arc` cells or nets.
+- Wire `ManagedValueNode` to this authoritative traversal while its production
+  payload still contains no managed identity. Later family migrations replace
+  local compatibility steps but preserve the same stop-at-`Gc` contract.
 
-Verification: preserve resolver/task publication races and reclaim a resolved
-promise whose result contains that promise. Add
-`managed_promise_drop_is_passive_and_producer_companion_is_edge_free`.
-Production remains `NoAuto` and does not collect.
+Verification: a nested matrix places a synthetic managed leaf beneath every
+compatibility owner capable of holding a `Value`; source latches prove that
+the production managed node delegates to the central walk and that identity
+stop points never recurse. Production remains `NoAuto` and does not collect.
 
-### Phase I5C — External Promise and Producer Lifecycle
+### Phase I5C — Representation-Neutral Family Preparation
 
-- Keep `PromiseResolver` and any producer/task owner which performs failure,
-  cancellation, abandonment, notification, or wakeup as an external/rooted
-  owner with the exact authorized runtime capability it needs. It is not a
-  managed finalizer and must not be reachable from `PromiseCell` or another
-  managed allocation.
-- Express cleanup as an explicit idempotent retirement operation. Preserve the
-  existing `Drop` fallback where dropping the final unresolved resolver or
-  producer currently establishes a permanent failure or terminal state.
-- Preserve lock/callback ordering: terminal state is published under the
-  reviewed coordinator/component protocol; wakes, callbacks, and destruction
-  occur after locks are released.
-- Prove retirement releases its registered roots and runtime capability and
-  that duplicate explicit/`Drop` retirement is harmless.
+Complete dormant, private production-ready machinery without exposing a mixed
+production identity graph:
+
+1. **I5C.1 — Ownership-neutral generic net seam.** Refactor generic shared-net
+   and cross-net reference operations so the production core owner need not be
+   `Arc<SharedRuntimeNetInner<_>>`. Keep generic/test specializations
+   collector-independent and preserve I3D.3 authority gating.
+2. **I5C.2 — Managed cell and access types.** Implement the selected managed
+   lazy, promise, and synchronization-owning core-net cells; interior, durable,
+   bounded-access, and coordination types from I5.0; stable layouts; and
+   allocator admission. These types remain unreachable from production
+   constructors.
+3. **I5C.3 — Exact dormant traces and gateways.** Implement exact traces over
+   lazy source/result, promise assignment, every core-net payload and cross-net
+   reference, plus the representation-local mutation gateways. Trace one
+   stable state, use nonblocking net locking under exclusive collection, and
+   never perform semantic work. Complete passive direct/transitive destruction
+   records and isolated family fixtures.
+4. **I5C.4 — Atomic-cutover readiness audit.** Prove every production
+   constructor, durable owner, publication path, mutation path, and retirement
+   path has a prepared destination. A missing destination blocks I5D rather
+   than creating a temporary mixed representation.
+
+The dormant fixtures may force collection only over graphs closed entirely
+inside the prepared families. Production remains unchanged and `NoAuto`.
+
+### Phase I5D — Atomic Recursive-Identity Production Cutover
+
+This is deliberately one indivisible production representation checkpoint.
+Preparatory commits may build and test unused private machinery, but no
+buildable production state may manage only a subset of lazy, promise, and core
+net identities.
+
+- Change `Value::Lazy`, `Value::Promised`, `Value::Net`, function/net shells,
+  lazy sources, promise assignments, core-net payloads, and cross-net source
+  references to the prepared managed identity representation together.
+- Activate the central transitive managed-edge walk from `ManagedValueNode`,
+  `LazyCell`, `PromiseCell`, and `CoreRuntimeNetCell`. Each raw compatibility
+  path must terminate at one of those managed identities; the collector
+  worklist follows the reported edge.
+- Convert every durable Rust holder to the selected registered root and every
+  evaluator-local holder to the bounded access representation. Install the
+  edge-free coordination companions selected by I5.0.
+- Store a promise's successful assignment and every other internal semantic
+  relation as a traced managed edge, not a `RuntimeValueRoot`. No object
+  reachable from the managed graph may retain a registered root back into that
+  graph.
+- Preserve lazy terminal publication before source release; promise assignment
+  before notification; core-net lock, revision, and disturbance semantics; and
+  every I3 callback/wait boundary. Route all post-construction edge writes
+  through the prepared mutation gateways.
+
+Verification: all existing lazy, promise, function/net, interaction-net,
+Cursor-WHNF, publication, cancellation, abandonment, and normalization suites
+pass at the new representation. Source latches reject any surviving production
+`Arc<LazyCell>`, `Arc<PromiseCell>`, or production
+`Arc<SharedRuntimeNetInner<CoreSpecialization>>`, any durable bare `Gc`, and
+any managed-reachable `Root`. Production remains `NoAuto`; this checkpoint
+does not run a full production collection.
+
+### Phase I5E — External Lifecycle and Coordination Closure
+
+- Keep `PromiseResolver` and every producer/task owner which performs failure,
+  cancellation, abandonment, notification, or wakeup as an external owner
+  with exactly the root/capability authorized by I5.0. It is not a managed
+  finalizer and must not be reachable from a managed allocation.
+- Express cleanup as explicit idempotent retirement and preserve the existing
+  `Drop` fallback where dropping the last unresolved resolver or producer
+  establishes a terminal result. Preserve publication under the reviewed
+  coordinator protocol and invoke wakes, callbacks, and destruction after
+  component locks are released.
+- Prove lazy and net coordination companions contain no managed pointer, root,
+  public value, or active external owner. A dead managed net makes its weak
+  normalization/wait companion inert rather than reviving semantic state.
+- Prove retirement releases every registered root and runtime capability and
+  that explicit retirement followed by `Drop` is harmless.
 
 Verification: retain unresolved-resolver failure, producer cancellation,
-owner-session closure, and cross-session observation tests after promise values
-become managed. Add `promise_resolver_drop_invokes_idempotent_retire_once` and
-`external_promise_owner_has_no_managed_backedge`. Production remains `NoAuto`.
+owner-session closure, cross-session observation, normalization-lease close,
+and forced terminal-publication ordering tests. Add
+`promise_resolver_drop_invokes_idempotent_retire_once`,
+`external_promise_owner_has_no_managed_backedge`, and
+`recursive_identity_coordination_is_edge_free`. Production remains `NoAuto`.
 
-### Phase I5D — Cross-Family Cycle Reclamation
+### Phase I5F — Recursive Cycle-Closure Audit
 
-After I5A-I5C pass, use closed collector-ready fixtures to construct and
-reclaim promise-to-lazy and lazy-to-promise graphs, a deferred producer retained
-by a worker, and the terminal value still reachable from another public root.
-Prove the live rooted case survives, then retire the external owner/drop the
-last root and prove the otherwise unreachable cycle is reclaimed. This phase
-does not repeat or weaken the I4.0 family drop audits. The complete production
-runtime remains `NoAuto` and does not collect.
+- First prove rooted survival, then remove the final root and reclaim direct
+  lazy, promise, and core-net self-cycles; every pairwise cycle; and one
+  lazy-to-net-to-promise-to-lazy cycle.
+- Repeat cycles through lists, dictionaries, partial applications, function
+  stages, fixpoint sources, metadata, failures/context frames, cursor state,
+  and shared persistent versions. These structures exercise the transitive
+  compatibility walk; they need not yet have their final compact managed
+  representation.
+- Re-run the cycle-source inventory and prove that removing managed lazy,
+  promise, and core-net identities leaves an acyclic compatibility-owned
+  semantic graph. Audit external owners for hidden roots and managed
+  backedges.
+- Record duplicate logical visits as profiling evidence only. Do not add
+  traversal caches, root deduplication, tagged values, or persistent-spine
+  optimizations; those belong to Value Representation Refinement.
+
+Only closed isolated fixtures collect. The complete production runtime remains
+`NoAuto`, and the mandatory post-I5 review follows before I6 begins.
 
 ## Phase I6 — Functions, Applications, Metadata, and Failures
 
@@ -4582,8 +4673,9 @@ force collection.
 ### Phase I6D.2 — Net-Construction Payloads
 
 - Replace the net-construction `Arc<Value>` compatibility payload with its exact
-  managed edge representation without performing the core runtime-net owner
-  migration selected by I5.0.
+  managed edge representation after I5 has already installed the managed core
+  runtime-net identity. This checkpoint does not reopen or duplicate the net
+  owner migration.
 - Preserve construction-machine polling and callback-free evaluator access;
   the immutable effect edge requires no post-publication mutation gateway.
 
@@ -4614,94 +4706,64 @@ edge-counting soundness problem. This phase must not silently turn collection
 updates into whole-map copies. Production remains `NoAuto`; I11 repeats these
 reclamation cases only after Gate G2 closes the whole graph.
 
-## Phase I8 — Managed Core Runtime Nets and Trace Audit
+## Phase I8 — Post-Cutover Core Runtime Net Closure Audit
 
-The production representation uses one managed synchronization-owning outer
-cell per shared core runtime net. The cell owns the semantic mutex, revisions,
-normalization state, and ordinary Rust topology containers. Individual agents,
-ports, map entries, and topology allocations do not become separate GC
-allocations in this phase. Generic non-core interaction-net ownership remains
-collector-independent.
+I5 already introduces the production managed core-net identity together with
+lazies and promises. I8 revisits that representation after I6 and I7 have
+migrated or audited every value family which a net may retain. It is not a
+second owner migration and may not defer an edge required by I5's initial
+recursive-identity closure.
 
-### Phase I8A — Ownership-Neutral Generic Net Seam
+### Phase I8A — Final Net Payload and Mutation Audit
 
-- Reconcile I0/I4's inventory of every core value stored in net templates,
-  agents, active pairs, stuck pairs, cursors, logical copies, normalization
-  state, and every concrete `SharedRuntimeNet<S>` reference embedded in generic
-  callable/copy/frontier/contention structures.
-- Refactor the generic runtime boundary so its shared-owner and cross-net
-  reference operations do not require the production core representation to
-  be `Arc<SharedRuntimeNetInner<_>>`. Use a statically typed owner seam; do not
-  type-erase net references or add a `glam_gc` dependency to generic topology.
-- Preserve I3D.3's private authority-gated `CoreRuntimeNet` facade and all
-  existing interaction-net behavior while it still uses the pre-migration
-  owner internally. This checkpoint changes neither GC reachability nor
-  production collection policy.
+- Reconcile every core value stored in templates, agents, active pairs, stuck
+  pairs, cursors, logical copies, normalization state, and callable/copy/
+  frontier/contention records against the final I5-I7 representation.
+- Destructure every `RuntimeNet`, runtime-entry/node, `CoreOperator`, stuck
+  reason, and pending-state variant. Prove the I5 trace reports every current
+  managed identity without reducing the net, following a cursor, or invoking
+  semantic work.
+- Re-audit every insertion, replacement, and removal of a managed edge against
+  the I5 mutation gateways. Preserve the one semantic mutex boundary,
+  publication/revision order, and callback/destruction-after-unlock rules.
+- Recheck nonblocking trace acquisition under exclusive collection,
+  `CoreRuntimeNetAccess` scope confinement, durable rooted net holders, and
+  edge-free normalization/wait companions. Generic non-core specializations
+  remain collector-independent.
 
-Verification: retain the complete generic interaction-net and Cursor-WHNF
-suite; add compile-time/privacy coverage that generic topology has no collector
-dependency and core/evaluator callers cannot recover the underlying generic
-owner. Latch the concrete cross-net handle inventory for I8B. Production
-remains `NoAuto`.
+Verification: compile-exhaustive payload and writer inventories, existing
+interaction-net and Cursor-WHNF suites, mutation-gateway tests for every
+value-installing rewrite, and privacy tests rejecting unscoped dereference or
+parked bare net handles. Production remains `NoAuto`.
 
-### Phase I8B — Managed Outer Cell, Exact Trace, and Mutation Gateways
+### Phase I8B — Final Net Cycle Matrix
 
-- Introduce a managed `CoreRuntimeNetCell` (final name selected during the
-  checkpoint) which directly owns the semantic mutex, revisions,
-  subscriber/normalization state, and `RuntimeNet<CoreSpecialization>`. Change
-  the private `CoreRuntimeNet` facade to carry this managed identity. The old
-  production `Arc` owner must not remain nested underneath the managed cell.
-- Convert core cross-net source/copy references to exact managed edges. Preserve
-  the proven hierarchical copy topology, while allowing value payloads to form
-  arbitrary cycles through nets, lazies, promises, functions, and other nets.
-- Keep generic/test specializations free to use their existing external owner;
-  do not make each generic runtime node a managed allocation.
-- Trace every managed data, operator, failure/stuck, pending-work, and cross-net
-  edge from the outer cell without reducing the net or materializing a cursor.
-  Trace under the semantic mutex with nonblocking `try_lock`. `WouldBlock` is an
-  invariant defect because exclusive collection precludes the scoped runtime
-  access required by every legitimate ordinary lock holder. Treat poisoning
-  according to the collector's reviewed panic policy.
-- Route every replacement of a managed edge through the representation-local
-  mutation gateway. It remains a no-op for the full collector; future moving or
-  concurrent collectors may extend it under their own plans.
-- In the same checkpoint, root or scope every `CoreRuntimeNet` handle which can
-  survive an evaluator region. No bare managed net handle may enter parked,
-  type-erased, callback-owned, or coordinator state. Adapt normalization
-  leases, contention observations, and weak/external ownership conventions to
-  the managed identity without weakening I3D.3's non-escape rules.
-- Give the managed outer cell the reviewed internal finalization needed to drop
-  its mutex and ordinary Rust containers. It must fit one typed-run slot; this
-  phase introduces no large-object or multi-run exception.
-- Close the pre-managed edge vocabulary after installing the final net
-  visitor: delete `CompatibilityValueEdges` and its `payload_edges.rs` module,
-  and migrate every remaining compatibility-edge fixture to the managed family
-  test which replaces it. A source-backed latch must prove that no
-  compatibility implementation or call site survives I8B.
+- In closed isolated fixtures, repeat rooted survival and unrooted reclamation
+  for a direct net-to-value-to-the-same-net cycle, mutually linked nets, shared
+  function stages, cursor materialization, stuck nets, pending active-pair
+  work, and hierarchical copy-source references.
+- Include values from every family migrated in I6 and the persistent forms
+  audited in I7 so the final net visitor is tested against the complete
+  pre-Gate-G2 payload vocabulary.
+- Re-audit normalization batches, contention waits, unwind dispositions,
+  finalization, and Cursor-WHNF ownership against I3D and the ownership ledger.
 
-Verification: source inventory accounts for every old production
-`Arc`/`Weak<SharedRuntimeNetInner<CoreSpecialization>>` owner and every durable
-core-net handle. Exact-visitor tests cover every runtime-node and pending-state
-variant. Mutation tests cover each value-installing rewrite. Compile-time or
-privacy fixtures reject unscoped dereference and parked bare handles. Add
-`managed_edge_vocabulary_has_no_compatibility_adapter` to latch final removal.
-Production remains `NoAuto`; only closed subsystem fixtures may collect.
+### Phase I8C — Net-Specific Compatibility Retirement
 
-### Phase I8C — Cycle Reclamation and Final Net Audit
+- Delete compatibility adapters and old generic-owner scaffolding made
+  redundant specifically by I5's managed production net. A source-backed latch
+  proves no production `Arc`/`Weak<SharedRuntimeNetInner<CoreSpecialization>>`
+  owner or raw cross-net identity survives.
+- Do **not** delete the central transitive compatibility-value walk merely
+  because net identity is managed. It remains the exact trace for raw
+  structural `Value` interiors until Value Representation Refinement replaces
+  those representations. Retire local traversal steps only when their managed
+  replacement is exact.
 
-- Force collection in isolated collector-ready fixtures covering a direct
-  net-to-value-to-the-same-net cycle, mutually linked nets through data values,
-  shared function stages, cursor materialization, stuck nets, pending
-  active-pair work, and hierarchical copy-source references.
-- Prove a rooted net and its complete topology survive collection, then prove
-  dropping the final root reclaims its outer cell and every otherwise
-  unreachable managed cycle.
-- Re-audit Cursor-WHNF ownership, normalization batches, contention waits,
-  unwind dispositions, finalization, and lock ordering against I3D and the
-  ownership ledger.
-
-The complete production runtime remains `NoAuto` until I11 repeats the net
-cases after Gate G2 closes the entire graph.
+Verification: `managed_core_net_has_no_legacy_owner` plus the final payload,
+writer, durable-handle, and compatibility-adapter source inventories. The
+complete production runtime remains `NoAuto` until I11 repeats the net cases
+after Gate G2 closes the entire graph.
 
 ## Phase I9 — Runtime-Root Lifecycle and Retirement Audits
 

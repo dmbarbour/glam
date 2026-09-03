@@ -4,13 +4,13 @@ Baseline: `0091a62`, including completed and reviewed Phases I1-I4. This is a
 forward review of the pending integration plan, not a post-implementation
 certification of I5-I10.
 
-Status: complete as a review. The low-risk documentation and phase-shape
-findings are resolved in the integration plan. Three related representation
-questions remain open and block I5 implementation: transitive managed-edge
-closure, the ordering of managed core-net ownership relative to the first
-managed recursive value, and the durable/scoped/weak handle model for lazy and
-promise identities. They require an explicit I5.0 design review rather than an
-incidental choice during implementation.
+Status: complete as a review and updated after the recursive-identity closure
+discussion. The integration plan now prepares lazies, promises, and production
+core nets separately but changes their production representation in one
+indivisible cutover. That resolves transitive managed-edge closure and core-net
+chronology without a temporary rooted-net layer. The durable/scoped/weak
+handle model—especially task-owned promise liveness—remains open and blocks
+implementation through the explicit I5.0 design gate.
 
 ## Scope
 
@@ -39,7 +39,8 @@ It asks:
 
 This review does not select the I5 lazy/promise handle representation, enable
 production collection, implement a managed core net, or choose the I10 opaque
-representation.
+representation. It does select the phase-level chronology and trace boundary
+for the first three cycle-forming managed identities.
 
 ## Summary
 
@@ -53,10 +54,11 @@ identities; updating only the newly managed `Value` arm is insufficient.
 The synchronized core-net owner is the important chronology case. A durable
 `CoreRuntimeNet` currently owns ordinary `Value` payloads outside the managed
 outer value node. Once any such payload may contain a `Gc`, the net needs an
-exact root or managed-edge disposition immediately. The plan must decide
-whether to pull the managed-net ownership core ahead of I5 or introduce a
-temporary rooted-net payload representation. The former appears cleaner, but
-this review deliberately leaves the choice for I5.0.
+exact root or managed-edge disposition immediately. The accepted resolution
+therefore treats lazy cells, promise cells, and production core-net cells as
+one recursive-identity closure: preparatory checkpoints may remain
+representation-neutral, but no buildable production state may manage only a
+subset of those three identities.
 
 The same first-managed-identity boundary exposes handle questions which the
 old `Arc` representation concealed. Evaluator machines and coordinator work
@@ -66,12 +68,21 @@ needs distinct vocabulary for interior `Gc` edges, durable registered roots,
 bounded scoped access, and edge-free coordination. `glam-gc` currently has no
 weak managed-pointer facility, so promise liveness must be decided explicitly.
 
+The atomic cutover relies on one transitive compatibility walk. It recursively
+crosses ordinary Rust-owned value structure, reports a `Gc` when it reaches a
+managed lazy, promise, or net identity, and stops at that identity. The
+collector worklist, not the compatibility walk, follows the managed edge. The
+structural invariant is that removing those three managed identity families
+from the semantic graph leaves an acyclic compatibility-owned graph.
+
 Later work can be simplified. I9 should be a delta audit over ownership changed
 by I5-I8 rather than a repetition of I4F's complete owner proof. I7 remains a
-persistent-container coverage and performance audit, not the first point at
-which nested managed edges become traceable. I6 and I8 need finer checkpoints,
-while I10 needs its closure wording updated to the external host-call boundary
-which actually remains.
+persistent-container coverage audit, not the first point at which nested
+managed edges become traceable. Compatibility traversal performance and its
+eventual replacement belong to Value Representation Refinement rather than
+this integration. I6 and the post-cutover I8 audit still need bounded
+checkpoints, while I10 needs its closure wording updated to the external
+host-call boundary which actually remains.
 
 ## Findings
 
@@ -80,7 +91,7 @@ which actually remains.
 **Classification:** trace chronology and soundness blocker  
 **Priority:** critical  
 **Confidence:** high  
-**Status:** open; blocks I5
+**Status:** resolved in plan
 
 `ManagedValueNode::trace_managed_edges` is correctly zero-edge for the current
 I4 representation. The I5 text says to replace `Arc<LazyCell>` and update I4's
@@ -90,15 +101,15 @@ or net payload. The production node and any other managed family containing
 such a compatibility payload must discover the new pointer in the same
 checkpoint.
 
-I5.0 must select one central, wildcard-free managed-edge walk. It may reuse the
-logical child enumeration proven by `CompatibilityValueEdges`, but it must
-ultimately call the collector visitor for every actual `Gc` and stop at managed
-identity boundaries. It must neither recursively follow a managed identity nor
-force, format, compare, or evaluate a compatibility payload. Each later family
-migration replaces its corresponding compatibility step without changing that
-transitive rule.
+The plan now selects one central, wildcard-free managed-edge walk. It may reuse
+the logical child enumeration proven by `CompatibilityValueEdges`, but it
+ultimately calls the collector visitor for every actual `Gc` and stops at
+managed lazy, promise, and net identity boundaries. It neither recursively
+follows a managed identity nor forces, formats, compares, or evaluates a
+compatibility payload. Later family migrations may replace individual
+compatibility steps without changing that transitive rule.
 
-Required evidence before I5A:
+Required evidence is now distributed across I5A-I5F:
 
 - a nested matrix placing the first managed identity under every current
   compatibility owner which can hold a `Value`;
@@ -112,7 +123,7 @@ Required evidence before I5A:
 **Classification:** ownership chronology blocker  
 **Priority:** critical  
 **Confidence:** high  
-**Status:** open; blocks I5
+**Status:** resolved in plan
 
 `CoreRuntimeNet` remains an `Arc`-owned synchronized graph with ordinary
 `Value` and `CoreOperator` payloads. Core contention, normalization, frontier,
@@ -126,17 +137,17 @@ unregistered compatibility owner. Production `NoAuto` prevents immediate
 collection but is not a trace or lifetime proof, and the integration plan
 already forbids using disabled collection to excuse a durable bare pointer.
 
-I5.0 must compare two concrete transitions:
+The accepted resolution is stricter than merely moving I8 earlier: I5 prepares
+the net seam and managed outer cell alongside lazy and promise cells, then one
+atomic production checkpoint changes all three recursive identities together.
+This avoids both a temporary rooted-net payload representation and a mixed
+state in which a raw `Arc` identity must be traversed recursively to discover
+managed values beneath it. The later I8 phase becomes a post-cutover net and
+mutation audit rather than the point where managed net identity first appears.
 
-1. move I8A plus the representation, durable-handle, and exact-current-trace
-   core of I8B before I5, retaining later I8 payload/cycle audits after I5-I7;
-2. introduce a temporary exact rooted representation for every value-bearing
-   external net surface, then remove it during I8.
-
-The first option avoids deliberate conservative retention and duplicate
-migration work and is provisionally preferred. No ordering change is committed
-until the handle discussion also establishes how a durable net root differs
-from an interior cross-net `Gc` and bounded `CoreRuntimeNetAccess`.
+The handle discussion must still establish how a durable net root differs from
+an interior cross-net `Gc` and bounded `CoreRuntimeNetAccess`, but that choice
+no longer changes the chronology.
 
 ### I5F-003 — Lazy and promise handle roles are not yet explicit
 
@@ -169,9 +180,10 @@ promises are not retained until their producer terminates. Because `glam-gc`
 has no weak managed pointer, I5.0 must choose among a collector-aware weak
 facility, deriving producer failure from the existing terminal wait without
 writing an otherwise unreachable cell, or stronger rooted retention with its
-costs and cycle behavior documented. This decision belongs before I5B; I5C
-then verifies external resolver/producer retirement rather than inventing the
-representation after publication paths have already migrated.
+costs and cycle behavior documented. This decision belongs before I5C's
+representation preparation; I5E then verifies external resolver/producer
+retirement rather than inventing the representation after I5D has already
+changed production publication paths.
 
 ### I5F-004 — The I5-I10 verification boundary describes I4 ownership too strongly
 
@@ -230,14 +242,14 @@ or require a performance threshold before evidence exists.
 **Classification:** implementation-risk partitioning  
 **Priority:** high  
 **Confidence:** high  
-**Status:** open; resolved together with I5F-002
+**Status:** resolved in plan
 
 Current I8B combines the generic owner seam, managed outer cell, durable and
 interior handle representations, cross-net edges, trace locking, every
 mutation gateway, owner migration, passive-drop admission, and deletion of all
 compatibility adapters. These are independent proof boundaries.
 
-The final plan must separate at least:
+The revised plan separates:
 
 1. generic owner seam;
 2. managed outer cell plus durable root/interior `Gc`/scoped-access model;
@@ -247,8 +259,11 @@ The final plan must separate at least:
 6. final compatibility-adapter deletion after every I5-I7 consumer has been
    replaced.
 
-If the net ownership core moves before I5, only the final payload audit, cycle
-matrix, and adapter deletion remain in chronological I8.
+I5 now owns items 1-5 as preparation plus one indivisible recursive-identity
+cutover. Chronological I8 retains the final payload/mutation audit and retires
+only obsolete net-specific compatibility adapters. The central compatibility
+walk remains until Value Representation Refinement replaces the raw value
+representation; deleting it is no longer an I8 completion criterion.
 
 ### I5F-008 — I9 repeats completed I4F ownership work
 
@@ -295,15 +310,13 @@ opaque storage.
 
 ## Recommended Resolution Order
 
-1. Complete the plan-only corrections recorded by I5F-004, I5F-006,
-   I5F-008, and I5F-009.
-2. Hold the I5.0 design discussion covering I5F-001 through I5F-003 and the
-   representation portion of I5F-007.
-3. Rewrite and partition I5 plus the affected portion of I8 from that decision.
-4. Partition I6 using the resulting managed-edge and durable-handle vocabulary.
-5. Implement I5, then perform the normal mandatory post-I5 review before
+1. Complete the remaining I5.0 handle discussion recorded by I5F-003.
+2. Finalize the dormant family/root/access types in I5C from that decision;
+   the transitive-walk and atomic-cutover chronology is already fixed.
+3. Implement I5A-I5F, then perform the normal mandatory post-I5 review before
    continuing.
-6. Revisit I7-I10 checkpoint sizes at their major-stage boundaries; merge or
+4. Partition I6 using the resulting managed-edge and durable-handle vocabulary.
+5. Revisit I7-I10 checkpoint sizes at their major-stage boundaries; merge or
    delete audit-only checkpoints when the phase-entry delta proves they add no
    evidence.
 

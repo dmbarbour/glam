@@ -8,7 +8,8 @@ stress, metrics, and tuning continue in C7/C8 while recursive production
 payload integration proceeds with collection disabled. The focused I5-I10
 forward review is recorded in
 [`GarbageCollectorIntegrationI5I10_2026-09-03.md`](../reviews/GarbageCollectorIntegrationI5I10_2026-09-03.md);
-its I5.0 representation questions block I5 implementation.
+its recursive-identity chronology is resolved, while the remaining I5.0
+durable/scoped/coordination and weak promise handle decision blocks I5C.
 
 This roadmap keeps two large transitions aligned:
 
@@ -383,17 +384,18 @@ The following must remain sequential:
   I4F installed it as the production representation. No alternate collector
   root-cell representation is required.
 
-- Before I5, I5.0 must select the transitive managed-edge walk, decide whether
-  the managed core-net ownership core moves ahead of the first managed lazy or
-  promise payload, and separate interior, durable, scoped, coordination, and
-  weak-liveness roles for those identities.
+- I5 prepares one transitive managed-edge walk and lazy, promise, and core-net
+  families separately, then changes all three production recursive identities
+  in one indivisible checkpoint. I5.0 must first separate interior, durable,
+  scoped, coordination, and weak-liveness roles for those identities.
 
 The I8 ownership choice is closed: production core runtime nets use one
 managed synchronization-owning outer cell per shared net. Individual agents,
 ports, maps, and topology allocations remain ordinary fields/storage inside
 that cell. Generic non-core interaction-net ownership remains
-collector-independent. I8 performs this transition without introducing a
-managed allocation per net node.
+collector-independent. I5 performs this transition atomically with lazy and
+promise identity; I8 performs the final post-cutover payload, mutation, and
+cycle audit without introducing a managed allocation per net node.
 
 C6D has resolved the collector-side terminal question: allocation capabilities
 are mutator-scoped and non-owning, roots retain their cell but only weakly name
