@@ -3769,6 +3769,16 @@ before placing it in a managed allocation:
    scheduler, host callback, diagnostic/event service, or active external
    retirement.
 
+I4F.2b.0 completed 2026-09-03. A compile-exhaustive direct `Value`/`LazySource`
+classification and source-backed exceptional-field ledger identify exactly
+three active destruction frontiers: deferred host-call closure environments,
+unactivated reflection reservations whose drop cancels coordinator work, and
+type-erased opaque payloads (including their transitive retirement handles).
+Recursive value/failure storage, promises, and synchronized nets remain
+semantic-edge work for I5-I8 but have passive destruction once these three
+frontiers are extracted. Compatibility `core::Value` is now negatively
+latched against `ManagedFamily` admission until I4F.2b.4 closes the inventory.
+
 Conservative retention until the next ordinary registry drain is permitted;
 retention until runtime-domain teardown is the fallback if no later operation
 occurs. This can delay Rust resource destruction but must not change Glam

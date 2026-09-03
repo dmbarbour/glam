@@ -502,6 +502,9 @@ mod value_shell;
 mod containment_inventory;
 
 #[cfg(test)]
+mod active_owner_inventory;
+
+#[cfg(test)]
 mod durable_owner_inventory;
 
 mod payload_edges;
@@ -577,6 +580,7 @@ mod tests {
     assert_not_managed_family!(factory_is_not_admitted, super::CoreValueFactory);
     assert_not_managed_family!(domain_is_not_admitted, super::RuntimeValueDomain);
     assert_not_managed_family!(observer_is_not_admitted, super::RuntimeValueObserver);
+    assert_not_managed_family!(compatibility_value_is_not_admitted, super::Value);
     assert_not_opaque_payload!(bare_managed_pointer_is_not_admitted, glam_gc::Gc<u64>);
     assert_not_opaque_payload!(raw_core_value_is_not_admitted, super::Value);
     assert_not_opaque_payload!(runtime_root_is_not_admitted, super::RuntimeValueRoot);
