@@ -137,7 +137,7 @@ macro_rules! edge_free {
 }
 
 // I4F.1g closed every inventoried owner. The collection checkpoint names the
-// I4F.2d slice which will exercise the real owner after RuntimeValueRoot
+// I4F.2e slice which will exercise the real owner after RuntimeValueRoot
 // becomes a registered collector root.
 const OWNER_INVENTORY: &[OwnerEntry] = &[
     closed_durable!(
@@ -149,7 +149,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "last public/runtime root drop",
         CompatibilityRoot,
         RootSurface,
-        "I4F.2d.1"
+        "I4F.2e.1"
     ),
     closed_durable!(
         "src/core.rs",
@@ -160,7 +160,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "last RuntimeValueDomain owner",
         CompatibilityRoot,
         RootSurface,
-        "I4F.2d.1"
+        "I4F.2e.1"
     ),
     closed_durable!(
         "src/core.rs; src/core/runtime_cache.rs",
@@ -171,7 +171,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "cache/domain or scoped factory drop",
         TypeErased,
         RootSurface,
-        "I4F.2d.1"
+        "I4F.2e.1"
     ),
     closed_durable!(
         "src/g_syntax/compiler_values.rs",
@@ -182,7 +182,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "runtime value-domain cache drop",
         CompatibilityRoot,
         RootSurface,
-        "I4F.2d.1"
+        "I4F.2e.1"
     ),
     closed_durable!(
         "src/g_syntax/diagnostic_formatter.rs",
@@ -193,7 +193,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "runtime value-domain cache drop",
         CompatibilityRoot,
         RootSurface,
-        "I4F.2d.1"
+        "I4F.2e.1"
     ),
     closed_durable!(
         "src/evaluation/coordinator.rs; src/evaluation/coordinator/reflection.rs; src/evaluation/coordinator/task.rs",
@@ -204,7 +204,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "acknowledgement, settlement, cancellation, or session retirement",
         CompatibilityRoot,
         RootSurface,
-        "I4F.2d.1"
+        "I4F.2e.1"
     ),
     closed_durable!(
         "src/evaluation/coordinator/client_demand.rs",
@@ -215,7 +215,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "handle abandonment or terminal retirement",
         CompatibilityRoot,
         RootSurface,
-        "I4F.2d.1"
+        "I4F.2e.1"
     ),
     closed_durable!(
         "src/evaluation/coordinator/spark.rs",
@@ -226,7 +226,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "spark completion or abandonment",
         CompatibilityRoot,
         RootSurface,
-        "I4F.2d.1"
+        "I4F.2e.1"
     ),
     closed_durable!(
         "src/evaluation/session.rs",
@@ -237,7 +237,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "session close, cancellation, or terminal settlement",
         CompatibilityRoot,
         RootSurface,
-        "I4F.2d.1"
+        "I4F.2e.1"
     ),
     closed_durable!(
         "src/api/runtime/readiness.rs; src/evaluation/coordinator/settlement.rs",
@@ -248,7 +248,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "report drop",
         CompatibilityRoot,
         RootSurface,
-        "I4F.2d.1"
+        "I4F.2e.1"
     ),
     closed_durable!(
         "src/reflection/store.rs",
@@ -259,7 +259,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "snapshot, query, journal, transaction, or store retirement",
         PublicRoot,
         RootSurface,
-        "I4F.2d.2"
+        "I4F.2e.2"
     ),
     closed_durable!(
         "src/reflection/lifecycle.rs",
@@ -270,7 +270,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "completion, cancellation, or abandonment",
         CompatibilityRoot,
         RootSurface,
-        "I4F.2d.2"
+        "I4F.2e.2"
     ),
     closed_durable!(
         "src/reflection/protocol.rs",
@@ -281,7 +281,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "protocol completion or transaction retirement",
         CompatibilityRoot,
         RootSurface,
-        "I4F.2d.2"
+        "I4F.2e.2"
     ),
     closed_durable!(
         "src/reflection/search.rs",
@@ -292,7 +292,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "restart, cancellation, or search/result retirement",
         CompatibilityRoot,
         RootSurface,
-        "I4F.2d.2"
+        "I4F.2e.2"
     ),
     closed_durable!(
         "src/reflection/machine.rs",
@@ -303,7 +303,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "frame consumption, terminal publication, cancellation, or abandonment",
         CompatibilityRoot,
         RootSurface,
-        "I4F.2d.2"
+        "I4F.2e.2"
     ),
     closed_durable!(
         "src/reflection/requests.rs",
@@ -314,7 +314,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "commit, response delivery, or request retirement",
         PublicRoot,
         RootSurface,
-        "I4F.2d.2"
+        "I4F.2e.2"
     ),
     closed_durable!(
         "src/api/diagnostics.rs",
@@ -325,7 +325,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "delivery, subscription retirement, or bus drop",
         PublicRoot,
         RootSurface,
-        "I4F.2d.3"
+        "I4F.2e.3"
     ),
     closed_durable!(
         "src/api/runtime/events.rs",
@@ -336,7 +336,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "consumption, delivery terminalization, or runtime event-state drop",
         CallbackCapture,
         RootSurface,
-        "I4F.2d.3"
+        "I4F.2e.3"
     ),
     closed_durable!(
         "src/api/assembly.rs",
@@ -347,7 +347,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "assembly/session/module/diagnostic retirement",
         CompatibilityRoot,
         RootSurface,
-        "I4F.2d.4"
+        "I4F.2e.4"
     ),
     closed_durable!(
         "src/bin/glam/command_line",
@@ -358,7 +358,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "branch retirement or command-line completion",
         PublicRoot,
         RootSurface,
-        "I4F.2d.4"
+        "I4F.2e.4"
     ),
     closed_durable!(
         "src/compiler.rs",
@@ -369,7 +369,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "compilation drain, loader completion, or context drop",
         CallbackCapture,
         RootSurface,
-        "I4F.2d.4"
+        "I4F.2e.4"
     ),
     exact_managed!(
         "src/core.rs; src/core/evaluation_halt.rs",
@@ -388,7 +388,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "lowering completion",
         CompatibilityRoot,
         RootSurface,
-        "I4F.2d.4"
+        "I4F.2e.4"
     ),
     closed_durable!(
         "src/g_syntax/macro_expansion/runner.rs",
@@ -399,7 +399,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "expansion completion/failure",
         PublicRoot,
         RootSurface,
-        "I4F.2d.4"
+        "I4F.2e.4"
     ),
     closed_durable!(
         "src/g_syntax/parser/logical.rs",
@@ -410,7 +410,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "logical parse/rewrite completion",
         PublicRoot,
         RootSurface,
-        "I4F.2d.4"
+        "I4F.2e.4"
     ),
     closed_durable!(
         "src/bin/glam/configuration/mod.rs",
@@ -421,7 +421,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "batch completion or configuration drop",
         PublicRoot,
         RootSurface,
-        "I4F.2d.4"
+        "I4F.2e.4"
     ),
     closed_durable!(
         "src/bin/glam/configuration/logger/supervisor.rs",
@@ -432,7 +432,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "logger completion, fallback, or supervisor drop",
         PublicRoot,
         RootSurface,
-        "I4F.2d.4"
+        "I4F.2e.4"
     ),
     closed_durable!(
         "src/core.rs; src/core_net.rs; src/eval/net.rs",
@@ -443,7 +443,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "value/net retirement or net owner drop",
         SynchronizedNet,
         RootSurface,
-        "I4F.2d.4"
+        "I4F.2e.4"
     ),
     edge_free!(
         "src/core.rs; src/eval/builtins/net/construction.rs; src/reflection/requests.rs",
