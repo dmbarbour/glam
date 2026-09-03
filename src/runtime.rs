@@ -220,6 +220,21 @@ impl RuntimeValueRoot {
         self.runtime
     }
 
+    /// Clones the compatibility core representation under matching admitted
+    /// value-domain authority.
+    ///
+    /// The returned owned value may outlive the access region only until the
+    /// I4F.2 production-root switch; the authority argument prevents an
+    /// unqualified root projection from becoming another compatibility API.
+    pub(crate) fn clone_core_with(&self, access: &crate::core::RuntimeValueAccess<'_>) -> Value {
+        assert_eq!(
+            self.runtime,
+            access.runtime_id(),
+            "runtime root and managed access must share one value domain"
+        );
+        self.value.clone()
+    }
+
     pub(crate) fn as_core(&self) -> &Value {
         &self.value
     }

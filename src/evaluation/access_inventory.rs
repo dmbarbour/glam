@@ -98,7 +98,7 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         ("src/core_net.rs", GatewayCounts::new(7, 0)),
         ("src/evaluation/access.rs", GatewayCounts::new(5, 0)),
         ("src/evaluation/executor.rs", GatewayCounts::new(1, 0)),
-        ("src/evaluation/session.rs", GatewayCounts::new(1, 0)),
+        ("src/evaluation/session.rs", GatewayCounts::new(2, 0)),
         ("src/g_syntax/compiler_values.rs", GatewayCounts::new(1, 0)),
         (
             "src/g_syntax/diagnostic_formatter.rs",

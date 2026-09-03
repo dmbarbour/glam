@@ -128,7 +128,7 @@ impl ReflectionTaskReservation {
         }
         self.inner.context.activate_reflection_task(
             &self.inner.handle,
-            activation.effect.as_core().clone(),
+            &activation.effect,
             activation.result_policy,
             activation.task_profile.clone(),
             None,
@@ -165,7 +165,7 @@ impl PendingReflectionTask {
             InitialTaskDisposition::Launch => {
                 self.inner.context.activate_reflection_task(
                     &self.inner.handle,
-                    self.inner.effect.as_core().clone(),
+                    &self.inner.effect,
                     ReflectionTaskResultPolicy::ReturnValue,
                     self.inner.context.task_profile.clone(),
                     Some(publisher),
@@ -542,6 +542,19 @@ impl EvalContext {
 
     pub(crate) fn values(&self) -> &CoreValueFactory {
         &self.session.values
+    }
+
+    /// Projects one compatibility root for a callback which must run after
+    /// managed access has ended.
+    fn clone_root(&self, root: &RuntimeValueRoot) -> Value {
+        self.values().with_runtime_value_access(|access| {
+            assert_eq!(
+                root.runtime_id(),
+                self.values().runtime_id(),
+                "runtime root and evaluation context must share one value domain"
+            );
+            root.clone_core_with(&access)
+        })
     }
 
     fn coordinator_for_admission(&self) -> Result<Arc<EvaluationWorkCoordinator>, Arc<str>> {
@@ -1119,7 +1132,7 @@ impl EvalContext {
     fn activate_reflection_task(
         &self,
         handle: &EvaluationTaskHandle,
-        effect: Value,
+        effect: &RuntimeValueRoot,
         result_policy: ReflectionTaskResultPolicy,
         task_profile: Arc<ReflectionTaskProfile>,
         status_publisher: Option<TaskStatusPublisher>,
@@ -1136,6 +1149,9 @@ impl EvalContext {
         {
             return;
         }
+        // Clone under matching managed access, then release that access before
+        // the launcher invokes reflection-owned construction callbacks.
+        let effect = self.clone_root(effect);
         let result = task_profile
             .launcher()
             .ok_or_else(|| {

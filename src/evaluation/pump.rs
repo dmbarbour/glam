@@ -25,7 +25,8 @@ impl ClientDemandOperation {
         context: &EvalContext,
     ) -> coordinator::ClientDemandPoll {
         poll_context.evaluate(context, |evaluator| {
-            match crate::eval::eval_value_in(evaluator, self.0.as_core()) {
+            let value = evaluator.project_root(&self.0);
+            match crate::eval::eval_value_in(evaluator, &value) {
                 Ok(value) => coordinator::ClientDemandPoll::Complete(evaluator.root_value(value)),
                 Err(halt) => client_demand_halt_poll(evaluator, halt),
             }
@@ -646,7 +647,8 @@ impl EvaluationWorkCoordinator {
         let poll_context = EvaluationPollContext::for_claim(claimed.demand());
         let context = EvalContext::for_spark(claimed.demand_session());
         let result = poll_context.evaluate(&context, |evaluator| {
-            crate::eval::demand_strategy_value_in(evaluator, claimed.value().as_core())
+            let value = evaluator.project_root(claimed.value());
+            crate::eval::demand_strategy_value_in(evaluator, &value)
         });
         let poll = match result {
             Ok(()) => coordinator::SparkWorkPoll::Complete,

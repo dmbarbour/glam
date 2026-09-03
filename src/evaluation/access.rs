@@ -75,6 +75,12 @@ impl<'scope> EvaluationValueAccess<'scope> {
     ) -> CoreRuntimeNetAccess<'access, 'scope> {
         runtime.access(&self.values)
     }
+
+    /// Clones one compatibility root only while matching value-domain access
+    /// is admitted for this evaluator step.
+    pub(crate) fn clone_root(&self, root: &RuntimeValueRoot) -> Value {
+        root.clone_core_with(&self.values)
+    }
 }
 
 impl EvaluatorStepContext<'_> {
@@ -130,7 +136,7 @@ impl EvaluatorStepContext<'_> {
             self.context.values().runtime_id(),
             "wait completion and evaluator context must share one value domain"
         );
-        self.with_value_access(|_| root.as_core().clone())
+        self.with_value_access(|access| access.clone_root(root))
     }
 
     pub(crate) fn defer_reflection_activation(&self, task: ReflectionTaskReservation) {

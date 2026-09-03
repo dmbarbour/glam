@@ -142,7 +142,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.2a.1c | pending | public facade compatibility-test closure |
 | I4F.2a.1 | pending | public facade, assembly, diagnostic, and error access retirement |
 | I4F.2a.2a | complete | public evaluator and reflection-inspector access retirement |
-| I4F.2a.2b | pending | evaluation driver and rooted-completion projection retirement |
+| I4F.2a.2b | complete | evaluation driver and rooted-completion projection retirement |
 | I4F.2a.2c | pending | core net and builtin construction adapter retirement |
 | I4F.2a.2d | pending | core evaluation and net access closure |
 | I4F.2a.2 | pending | core evaluator and net access retirement |
@@ -3521,6 +3521,16 @@ that authority, release it before evaluation, and wrap owned results through
 the same runtime service. This preserves I3's rule against carrying managed
 access through waits or callbacks. The compatibility-access inventory now
 omits `src/api/evaluator.rs` entirely.
+
+I4F.2a.2b completed 2026-09-03. Client demand and spark polls now project
+their retained `RuntimeValueRoot` through the active `EvaluatorStepContext`
+before entering the evaluator. Reflection activation projects its rooted
+effect through a separate matching access region and releases that region
+before invoking the launcher callback. `RuntimeValueRoot::clone_core_with`
+requires admitted same-domain authority, making the remaining owned
+compatibility clone explicit while preserving the root across every wait and
+orchestration boundary. Production files under `src/evaluation/` now contain
+no direct compatibility `as_core` or `into_core` use.
 
 #### Phase I4F.2b — Active-Owner Extraction Gate
 

@@ -114,7 +114,7 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/evaluation/access.rs",
-        [1, 0, 0, 0, 2, 0],
+        [0, 0, 0, 0, 2, 0],
         "poll/evaluator-step completion rooting and scoped projection",
         "I3A.4/I3C.2 outcome typing and projection; I4F.2 managed root switch"
     ),
@@ -126,13 +126,13 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/evaluation/pump.rs",
-        [2, 0, 0, 0, 0, 1],
+        [0, 0, 0, 0, 0, 1],
         "centralized client/spark evaluation and exceptional lazy-cycle publication",
         "I3A.3/I3B.1b/I3B.2/I3C.2 scoped polling; I4F.1 outcomes"
     ),
     entry!(
         "src/evaluation/session.rs",
-        [2, 0, 0, 0, 4, 0],
+        [0, 0, 0, 0, 4, 0],
         "session demand, reserved reflection activation, effect entry, and patient completion",
         "I3A.3/I3B.2/I3C.1-I3D.1 scoped polling and activation; I4F.1 outcomes"
     ),
