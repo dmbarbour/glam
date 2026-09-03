@@ -125,7 +125,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.1d.3e | complete | reflection decoded-request handoff and machine closure |
 | I4F.1d.3 | complete | reflection machine frame and request roots |
 | I4F.1d | complete | reflection store, protocol, and machine root surfaces |
-| I4F.1e | pending | diagnostics, runtime-event, and delivery root surfaces |
+| I4F.1e | complete | diagnostics, runtime-event, and delivery root surfaces |
 | I4F.1f.1 | pending | assembly, compiler, module, and import roots |
 | I4F.1f.2 | pending | macro, parser, and source-rewrite roots |
 | I4F.1f.3 | pending | binary configuration and logger roots |
@@ -3150,6 +3150,27 @@ Verification: input admission/consumption, output claim/callback/terminalization
 delivery failure retention, diagnostic subscription, and fallback-rendering
 fixtures, including forced callback/retirement orderings. Construct, publish,
 and retire each owner without collection.
+
+I4F.1e completed 2026-09-03 as a closure audit of the root conversion already
+established by the runtime-event and diagnostic-bus work. Authoritative input
+records, output intents, queued/running delivery records, prepared input, and
+delivery tickets retain `RuntimeValueRoot`. Diagnostic emissions and origins
+retain the public root facade; events share their diagnostic envelope through
+`Arc`. Failure snapshots retain `Error`/failure roots without reconstructing a
+value. Input conversion occurs before admission, while output decode and
+adapter callbacks receive a retained public value after locks and mutation
+admission have been released. Endpoint, ingress, and bus back-references stay
+weak, so the audit introduced no runtime cycle.
+
+The existing forced-order fixtures cover snapshot persistence, queued and
+running delivery retention, callback terminalization, decode/adapter/panic
+failure publication, diagnostic fallback transfer, logger close, and runtime
+retirement. Two deterministic additions close the semantic-value lifetime
+edge directly: a diagnostic event retains both emission and origin tokens
+until the event retires, and a consumed input retains its token through commit
+until the returned public value is dropped. The durable-owner and
+compatibility-access inventories do not change because the production fields
+were already root-shaped. Production remains `NoAuto`.
 
 #### Phase I4F.1f — Assembly, Compiler, Macro, Configuration, and Logger Roots
 

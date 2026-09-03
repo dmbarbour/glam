@@ -169,6 +169,37 @@ fn runtime_input_conversion_precedes_admission_and_stores_only_roots() {
 }
 
 #[test]
+fn consumed_runtime_input_retires_its_root_after_commit_and_result_drop() {
+    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+    let domain = EffectTokenDomain::new(&runtime.values());
+    let endpoint = runtime
+        .input_endpoint::<Value, _>(Ok)
+        .expect("value input endpoint should register");
+    let payload = Arc::new(());
+    let retained = Arc::downgrade(&payload);
+    endpoint
+        .sender()
+        .admit(domain.issue(payload))
+        .expect("input should be admitted");
+    assert!(retained.upgrade().is_some());
+
+    let (store, mut events) = input_transaction(&runtime);
+    let consumed = events
+        .read(&endpoint.reader())
+        .expect("input read should succeed")
+        .expect("admitted input should be present");
+    assert_eq!(
+        runtime.try_commit_transaction(&store, &events),
+        crate::reflection::StoreCommitResult::Committed
+    );
+    drop(events);
+    drop(store);
+    assert!(retained.upgrade().is_some());
+    drop(consumed);
+    assert!(retained.upgrade().is_none());
+}
+
+#[test]
 fn event_delivery_invokes_callback_without_mutator() {
     let runtime = EvaluationRuntime::new(0).expect("runtime should build");
     let decode_values = runtime.values().core().clone();

@@ -69,6 +69,33 @@ fn diagnostic_bus_sequences_counts_and_delivers_only_to_current_subscribers() {
 }
 
 #[test]
+fn diagnostic_events_retain_emission_and_origin_roots_until_retirement() {
+    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+    let domain = EffectTokenDomain::new(&runtime.values());
+    let emission_payload = Arc::new(());
+    let origin_payload = Arc::new(());
+    let retained_emission = Arc::downgrade(&emission_payload);
+    let retained_origin = Arc::downgrade(&origin_payload);
+    let diagnostic = Diagnostic {
+        emission: domain.issue(emission_payload),
+        origin: Some(domain.issue(origin_payload)),
+        source: None,
+        severity: Severity::Info,
+        line: None,
+        message: Arc::from("retained diagnostic"),
+    };
+    let event = DiagnosticBus::for_runtime(&runtime)
+        .publish(diagnostic)
+        .expect("same-runtime diagnostic should publish");
+
+    assert!(retained_emission.upgrade().is_some());
+    assert!(retained_origin.upgrade().is_some());
+    drop(event);
+    assert!(retained_emission.upgrade().is_none());
+    assert!(retained_origin.upgrade().is_none());
+}
+
+#[test]
 fn diagnostic_ingress_is_runtime_bound_and_installed_once() {
     let owner = EvaluationRuntime::new(0).expect("owner runtime should build");
     let foreign = EvaluationRuntime::new(0).expect("foreign runtime should build");
