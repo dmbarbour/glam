@@ -186,6 +186,9 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.2e.1c.3 | complete | exit-disposition and settled-report owners |
 | I4F.2e.1c | complete | readiness, ledger, and report owners |
 | I4F.2e.1 | complete | cache, evaluation, coordinator, and readiness collection fixtures |
+| I4F.2e.2a | complete | reflection store, snapshot, journal, and query owners |
+| I4F.2e.2b | pending | reflection lifecycle, protocol, and search owners |
+| I4F.2e.2c | pending | reflection request and parked-machine owners |
 | I4F.2e.2 | pending | reflection owner collection fixtures |
 | I4F.2e.3 | pending | diagnostic, event, and delivery collection fixtures |
 | I4F.2e.4 | pending | compiler, binary-host, net, and hidden-owner collection fixtures |
@@ -4040,8 +4043,15 @@ Partition the matrix along the I4F.1 ownership boundaries:
    ledgers and evaluation-session reports; **I4F.2e.1c.2** covers deadlock
    snapshots and killed-work reports; **I4F.2e.1c.3** covers exit dispositions
    and settled readiness reports. Together they complete **I4F.2e.1c**.
-2. **I4F.2e.2 — Reflection owners.** Cover store/snapshot/query state,
-   lifecycle/search/protocol records, and parked machine frames.
+2. **I4F.2e.2 — Reflection owners.** Reuse and strengthen the production-owner
+   lifetime fixtures established by I4F.1d rather than constructing a second
+   parallel matrix. **I4F.2e.2a** covers store, snapshot, journal, and query
+   state; **I4F.2e.2b** covers lifecycle, protocol, and isolated-search
+   records; **I4F.2e.2c** covers reusable request state and parked machine
+   frames. Each fixture must collect once while its precise owner remains live
+   and again after that owner retires. A prior lifetime assertion without an
+   intervening collection is useful structural evidence, but does not by
+   itself close this collection checkpoint.
 3. **I4F.2e.3 — Transport owners.** Cover diagnostics, ingress/subscriptions,
    event inputs, output intents, running deliveries, and retained failures.
 4. **I4F.2e.4 — Tooling and hidden owners.** Cover assembly/compiler/import,
@@ -4133,6 +4143,18 @@ projects the message, then observes release on report drop. Counts permit the
 co-retirement of the retained reflection snapshot rather than pretending the
 public report contains only its exit disposition. This completes the
 runtime/cache/evaluation/coordinator/readiness owner matrix in I4F.2e.1.
+
+I4F.2e.2a completed 2026-09-03 by strengthening the production store fixtures
+instead of adding parallel synthetic holders. One fixture now collects while
+the live store, detached snapshot, and journal each retain distinct values,
+then retires those owners in journal/store/snapshot order. The journal edit,
+replacement store root, and original snapshot roots disappear at their exact
+boundaries without forcing the lazy sentinels. The decoded query-result
+fixture likewise collects after the store, reservation, and handle retire,
+proving that the returned public result independently keeps its managed shell
+alive until result drop. These forced retirement orders cover store, protected
+volume, snapshot, journal, and query ownership without confusing shared root
+clones with separate registrations.
 
 Keep every fixture in a fresh isolated collector-ready runtime/heap. Do not
 collect a shared production graph containing I5-I10 unclassified families.

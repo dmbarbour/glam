@@ -202,6 +202,8 @@ fn snapshot_journal_edits_and_protected_volumes_retain_roots_without_forcing() {
     let collector = store.values.clone();
     let (heap_root, heap_retained, heap_forced) =
         unforced_store_value(&store.values, "snapshot heap root");
+    let (replacement_root, replacement_retained, replacement_forced) =
+        unforced_store_value(&store.values, "store replacement root");
     let (volume_root, volume_retained, volume_forced) =
         unforced_store_value(&store.values, "snapshot protected volume");
     let (edit_root, edit_retained, edit_forced) =
@@ -213,9 +215,9 @@ fn snapshot_journal_edits_and_protected_volumes_retain_roots_without_forcing() {
     let snapshot = store.snapshot();
     let mut journal = StoreJournal::new(snapshot.clone());
     journal.write(path(&["edit"]), edit_root);
+    store.replace_root(replacement_root);
 
-    drop(store);
-    drop(snapshot);
+    collector.collect_and_drain_external_owners_for_test();
     assert_eq!(
         journal.view().runtime_id(),
         journal.snapshot.values.runtime_id()
@@ -229,6 +231,7 @@ fn snapshot_journal_edits_and_protected_volumes_retain_roots_without_forcing() {
     );
     for (retained, forced) in [
         (&heap_retained, &heap_forced),
+        (&replacement_retained, &replacement_forced),
         (&volume_retained, &volume_forced),
         (&edit_retained, &edit_forced),
     ] {
@@ -238,9 +241,21 @@ fn snapshot_journal_edits_and_protected_volumes_retain_roots_without_forcing() {
 
     drop(journal);
     collector.collect_and_drain_external_owners_for_test();
+    assert!(edit_retained.upgrade().is_none());
+    assert!(heap_retained.upgrade().is_some());
+    assert!(volume_retained.upgrade().is_some());
+    assert!(replacement_retained.upgrade().is_some());
+
+    drop(store);
+    collector.collect_and_drain_external_owners_for_test();
+    assert!(replacement_retained.upgrade().is_none());
+    assert!(heap_retained.upgrade().is_some());
+    assert!(volume_retained.upgrade().is_some());
+
+    drop(snapshot);
+    collector.collect_and_drain_external_owners_for_test();
     assert!(heap_retained.upgrade().is_none());
     assert!(volume_retained.upgrade().is_none());
-    assert!(edit_retained.upgrade().is_none());
 }
 
 #[test]
@@ -267,6 +282,9 @@ fn query_result_remains_rooted_after_store_and_handle_retirement() {
     drop(handle);
     drop(reservation);
     drop(store);
+    assembler
+        .core_values()
+        .collect_and_drain_external_owners_for_test();
     assert!(retained.upgrade().is_some());
     assert!(!forced.load(Ordering::Acquire));
     assert_eq!(result.runtime_id(), assembler.values().runtime_id());
