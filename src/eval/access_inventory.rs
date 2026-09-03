@@ -311,6 +311,7 @@ fn is_evaluator_surface_source(relative: &Path) -> bool {
 fn is_lazy_producer_inventory_source(relative: &Path) -> bool {
     relative.starts_with("src")
         && relative != Path::new("src/core.rs")
+        && relative != Path::new("src/core/managed/active_owner_inventory.rs")
         && relative != Path::new("src/core/managed/containment_inventory.rs")
         && relative != Path::new("src/eval/access_inventory.rs")
         && !relative

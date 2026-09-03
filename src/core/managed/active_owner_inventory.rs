@@ -1,19 +1,27 @@
-//! I4F.2b.0 inventory of active destruction reachable from `core::Value`.
+//! I4F.2b inventory and closure proof for formerly active destruction below
+//! `core::Value`.
 //!
 //! Most compatibility payloads recursively release values, synchronized net
-//! storage, scheduler identities, or ordinary Rust resources. Those drops are
-//! passive. Three frontiers are not: host-call closure environments have an
-//! unconstrained destructor, reflection reservations cancel unactivated work
-//! on drop, and opaque payloads can hide reviewed external retirement. The
-//! source latches below keep those exceptional paths explicit until I4F.2b.1
-//! through I4F.2b.3 move their owners outside the managed graph.
+//! storage, scheduler identities, or ordinary Rust resources. I4F.2b.1-.3
+//! moved the three active frontiers into a runtime registry: host-call closure
+//! environments, reflection reservations, and opaque payloads. Managed-
+//! reachable values now retain only passive handles. The source latches below
+//! keep both sides of that boundary explicit.
 
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use bytes::Bytes;
 
 use crate::core::{
-    HostCallProducer, LazyCell, LazySource, OpaqueValue, ReflectionComputation, Value,
+    Builtin, ClosedCompatibilityValue, Dict, FunctionValue, HostCallProducer, HostCallRecord,
+    LazyCell, LazySource, List, NetValue, OpaquePayloadFamily, OpaquePayloadRecord, OpaqueValue,
+    PromisedValue, ReflectionComputation, Value,
 };
+use crate::core_net::CoreSpecialization;
+use crate::interaction_net::NetBuilder;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ActiveDestructionKind {
@@ -213,6 +221,95 @@ fn assert_opaque_fields(opaque: &OpaqueValue) {
     let _ = handle;
 }
 
+fn assert_closed_compatibility_fields(value: &ClosedCompatibilityValue) {
+    let ClosedCompatibilityValue { value, drops } = value;
+    let _: &Value = value;
+    let _: &Arc<AtomicUsize> = drops;
+}
+
+fn compatibility_variant_name(value: &Value) -> &'static str {
+    match value {
+        Value::Atom(_) => "atom",
+        Value::Number(_) => "number",
+        Value::Binary(_) => "binary",
+        Value::List(_) => "list",
+        Value::Dict(_) => "dict",
+        Value::Builtin(_) => "builtin",
+        Value::PartialBuiltin(_) => "partial builtin",
+        Value::Function(_) => "function",
+        Value::Net(_) => "net",
+        Value::Lazy(_) => "lazy",
+        Value::Promised(_) => "promised",
+        Value::Metadata(_) => "metadata",
+        Value::Opaque(_) => "opaque",
+    }
+}
+
+struct ExternalDropProbe(Arc<AtomicUsize>);
+
+impl Drop for ExternalDropProbe {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+// SAFETY: this test payload contains no Glam value or managed pointer. It is
+// intentionally external so the closure test can distinguish managed
+// finalization from the later safe registry drain.
+unsafe impl OpaquePayloadFamily for ExternalDropProbe {
+    const PAYLOAD_RECORD: OpaquePayloadRecord = OpaquePayloadRecord::external(
+        "I4F.2b passive-closure opaque probe",
+        "src/core/managed/active_owner_inventory.rs",
+    );
+}
+
+fn closed_net(values: &crate::core::CoreValueFactory) -> crate::core_net::CoreRuntimeNet {
+    let mut builder = NetBuilder::<CoreSpecialization>::new();
+    let exposed = builder.data(Value::Number(0.into()));
+    values.instantiate_core_net(&builder.finish(exposed))
+}
+
+fn closed_compatibility_variants(
+    values: &crate::core::CoreValueFactory,
+    active_drops: &Arc<AtomicUsize>,
+) -> Vec<Value> {
+    let runtime = closed_net(values);
+    let function = FunctionValue::new(NetValue::new(runtime.clone()), 1);
+    let host_probe = ExternalDropProbe(Arc::clone(active_drops));
+    let opaque_probe = Arc::new(ExternalDropProbe(Arc::clone(active_drops)));
+
+    vec![
+        values.unit(),
+        Value::Number(1.into()),
+        Value::Binary(Bytes::from_static(b"closed")),
+        Value::List(List::from_values(vec![Value::Number(2.into())])),
+        Value::Dict(Dict::new_sync().insert(
+            crate::core::Key::binary_from_text("field"),
+            Value::Number(3.into()),
+        )),
+        Value::Builtin(Builtin::Append),
+        Value::builtin_call(values, Builtin::Append, vec![Value::Number(4.into())]),
+        Value::Function(function),
+        Value::Net(NetValue::new(runtime)),
+        Value::external_host_call(
+            values,
+            "I4F.2b passive closure host probe",
+            HostCallRecord::external(
+                "I4F.2b passive closure host probe",
+                "src/core/managed/active_owner_inventory.rs",
+                "one external drop probe",
+            ),
+            move || {
+                let _ = &host_probe;
+                unreachable!("passive-closure collection must not invoke a host callback")
+            },
+        ),
+        Value::Promised(PromisedValue::new(values, "I4F.2b passive closure promise")),
+        values.initial_metadata(),
+        Value::Opaque(OpaqueValue::new(values, opaque_probe)),
+    ]
+}
+
 #[test]
 fn active_value_destruction_frontiers_are_source_latched() {
     assert_eq!(ACTIVE_DESTRUCTION_FRONTIERS.len(), 3);
@@ -248,4 +345,83 @@ fn active_value_destruction_frontiers_are_source_latched() {
             latch.needle
         );
     }
+}
+
+#[test]
+fn every_real_value_variant_has_passive_managed_destruction() {
+    assert_eq!(
+        <ClosedCompatibilityValue as super::ManagedFamily>::DROP_RECORD.fields(),
+        (
+            "I4F.2b closed compatibility value fixture",
+            "src/core/managed.rs",
+            "direct Drop updates only an external atomic counter",
+            "compatibility Value ownership is passive after active-owner extraction",
+        )
+    );
+    let _: fn(&ClosedCompatibilityValue) = assert_closed_compatibility_fields;
+
+    let values = crate::core::CoreValueFactory::new(
+        crate::runtime::allocate_evaluation_runtime_id(),
+        crate::runtime::RuntimeIds::new(),
+    );
+    let managed_drops = Arc::new(AtomicUsize::new(0));
+    let active_drops = Arc::new(AtomicUsize::new(0));
+    let variants = closed_compatibility_variants(&values, &active_drops);
+
+    let roots = values.with_managed_values(|scope| {
+        let allocator = scope
+            .allocator::<ClosedCompatibilityValue>()
+            .expect("the closed compatibility wrapper should fit a managed run");
+        variants
+            .into_iter()
+            .map(|value| {
+                scope.root(allocator.alloc(ClosedCompatibilityValue::new(value, &managed_drops)))
+            })
+            .collect::<Vec<_>>()
+    });
+
+    let live = values
+        .collect_managed_for_test()
+        .expect("rooted closed compatibility values should survive collection");
+    assert_eq!(live.marked_slots(), roots.len());
+    assert_eq!(managed_drops.load(Ordering::Relaxed), 0);
+    assert_eq!(active_drops.load(Ordering::Relaxed), 0);
+    values.with_managed_values(|scope| {
+        assert_eq!(
+            roots
+                .iter()
+                .map(|root| compatibility_variant_name(scope.get(root).value()))
+                .collect::<Vec<_>>(),
+            [
+                "atom",
+                "number",
+                "binary",
+                "list",
+                "dict",
+                "builtin",
+                "partial builtin",
+                "function",
+                "net",
+                "lazy",
+                "promised",
+                "metadata",
+                "opaque",
+            ]
+        );
+    });
+
+    drop(roots);
+    let dead = values
+        .collect_managed_for_test()
+        .expect("unrooted closed compatibility values should be reclaimed");
+    assert_eq!(dead.finalized_slots(), 13);
+    assert_eq!(managed_drops.load(Ordering::Relaxed), 13);
+    assert_eq!(
+        active_drops.load(Ordering::Relaxed),
+        0,
+        "managed finalization must not retire external callback or opaque owners"
+    );
+
+    assert_eq!(values.drain_external_owners_for_test(), 2);
+    assert_eq!(active_drops.load(Ordering::Relaxed), 2);
 }

@@ -100,6 +100,7 @@ fn collect_rust_sources(directory: &Path, sources: &mut Vec<PathBuf>) {
 fn is_production_inventory_source(relative: &Path) -> bool {
     relative != Path::new("src/core.rs")
         && relative != Path::new("src/core/managed.rs")
+        && relative != Path::new("src/core/managed/active_owner_inventory.rs")
         && relative != Path::new("src/core/managed/containment_inventory.rs")
         && relative != Path::new("src/eval/access_inventory.rs")
         && !relative

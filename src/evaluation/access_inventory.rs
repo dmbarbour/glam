@@ -85,6 +85,12 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // construction gateway; production allocation still enters through
         // the same higher-ranked scope.
         ("src/core/managed.rs", GatewayCounts::new(0, 2)),
+        // I4F.2b's test-only passive-closure matrix allocates each real
+        // compatibility value variant through the same bounded gateway.
+        (
+            "src/core/managed/active_owner_inventory.rs",
+            GatewayCounts::new(0, 2),
+        ),
         (
             "src/core/managed/payload_edges/persistent.rs",
             GatewayCounts::new(0, 1),
@@ -98,6 +104,9 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // bounded access region before coordinator reservation.
         ("src/core.rs", GatewayCounts::new(2, 5)),
         ("src/core_net.rs", GatewayCounts::new(7, 0)),
+        // The reflection active-owner fixture proves that managed
+        // finalization leaves reservation cancellation to the external drain.
+        ("src/eval/tests.rs", GatewayCounts::new(0, 1)),
         ("src/evaluation/access.rs", GatewayCounts::new(5, 0)),
         ("src/evaluation/executor.rs", GatewayCounts::new(1, 0)),
         ("src/evaluation/session.rs", GatewayCounts::new(2, 0)),

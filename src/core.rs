@@ -27,13 +27,13 @@ pub(crate) use evaluation_halt::{EvaluationHalt, EvaluationHaltPayload};
 mod managed;
 mod runtime_cache;
 #[cfg(test)]
+pub(crate) use managed::{ClosedCompatibilityValue, ManagedDropRecord, ManagedFamily};
+#[cfg(test)]
 pub(crate) use managed::{CoreValueAllocationScope, CoreValueDomainWitness};
 pub(crate) use managed::{
     ExternalOwnerHandle, ExternalOwnerRegistry, OpaquePayloadFamily, OpaquePayloadRecord,
     RuntimeValueAccess, RuntimeValueObserver,
 };
-#[cfg(test)]
-pub(crate) use managed::{ManagedDropRecord, ManagedFamily};
 use runtime_cache::{RuntimeCacheEntry, RuntimeCacheMap, SharedRuntimeCacheMap};
 pub(crate) use runtime_cache::{RuntimeCacheFamily, RuntimeCacheFamilyRecord};
 

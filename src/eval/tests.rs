@@ -4,7 +4,8 @@ use std::sync::{Arc, Barrier, Mutex};
 use bytes::Bytes;
 
 use crate::core::{
-    Dict, EvaluatedValue, EvaluationFailure, FixpointComputation, Key, LazyValue, Value, keys,
+    ClosedCompatibilityValue, Dict, EvaluatedValue, EvaluationFailure, FixpointComputation, Key,
+    LazyValue, Value, keys,
 };
 use crate::evaluation::{
     EvaluationMachinePoll, EvaluationTaskMachine, EvaluationWaitPoll, ReflectionTaskLauncher,
@@ -4962,6 +4963,13 @@ fn unactivated_reflection_reservation_cancels_only_during_external_owner_drain()
         .task(&context)
         .expect("reflection observation should reserve its task");
     let handle = reservation.handle().clone();
+    let managed_drops = Arc::new(AtomicUsize::new(0));
+    let root = context.values().with_managed_values(|scope| {
+        let allocator = scope
+            .allocator::<ClosedCompatibilityValue>()
+            .expect("the closed reflection value should fit a managed run");
+        scope.root(allocator.alloc(ClosedCompatibilityValue::new(value, &managed_drops)))
+    });
     assert!(matches!(
         context.poll_reflection_task(&handle),
         EvaluationWaitPoll::Pending(_)
@@ -4969,7 +4977,13 @@ fn unactivated_reflection_reservation_cancels_only_during_external_owner_drain()
 
     drop(reservation);
     drop(computation);
-    drop(value);
+    drop(root);
+    let report = context
+        .values()
+        .collect_managed_for_test()
+        .expect("unrooted reflection wrapper should collect passively");
+    assert_eq!(report.finalized_slots(), 1);
+    assert_eq!(managed_drops.load(Ordering::Relaxed), 1);
     assert!(matches!(
         context.poll_reflection_task(&handle),
         EvaluationWaitPoll::Pending(_)

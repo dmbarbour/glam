@@ -162,12 +162,12 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.2a.3 | complete | reflection, compiler, macro, and host access retirement |
 | I4F.2a.4 | complete | compatibility-access closure latch |
 | I4F.2a | complete | compatibility observation and ownership-transfer retirement |
-| I4F.2b.0 | pending | transitive destruction and active-owner inventory |
-| I4F.2b.1 | pending | external host-call ownership extraction |
-| I4F.2b.2 | pending | reflection-reservation ownership extraction |
-| I4F.2b.3 | pending | opaque-payload ownership extraction |
-| I4F.2b.4 | pending | passive-destruction closure gate |
-| I4F.2b | pending | active-owner extraction before managed value ownership |
+| I4F.2b.0 | complete | transitive destruction and active-owner inventory |
+| I4F.2b.1 | complete | external host-call ownership extraction |
+| I4F.2b.2 | complete | reflection-reservation ownership extraction |
+| I4F.2b.3 | complete | opaque-payload ownership extraction |
+| I4F.2b.4 | complete | passive-destruction closure gate |
+| I4F.2b | complete | active-owner extraction before managed value ownership |
 | I4F.2c.1 | pending | private production managed-node and family contract |
 | I4F.2c.2 | pending | exact production-shell visitor composition |
 | I4F.2c.3 | pending | private inline-or-root representation and provenance |
@@ -3822,6 +3822,22 @@ evaluation results, task terminal publication, or callback invocation count.
 I5C, I6D, and I10 retain the later representation- and lifecycle-specific
 audits, updated to recognize that this common external ownership boundary was
 established here.
+
+I4F.2b.4 and I4F.2b completed 2026-09-03. A test-only
+`ClosedCompatibilityValue` is the first collector-admitted wrapper around the
+real compatibility `Value`; its zero-edge trace is valid because all current
+recursive ownership remains ordinary Rust ownership and the three active
+destructors now live behind passive external-owner handles. A compile-
+exhaustive thirteen-variant fixture proves rooted survival and unrooted
+reclamation for every real value shell. Host-callback and opaque-payload drop
+counters remain untouched during managed finalization and change only during
+the subsequent safe registry drain. The reflection reservation fixture now
+also places an unactivated reflection value in this managed wrapper and proves
+that collection does not cancel the task; the external drain retains sole
+responsibility for that active retirement. The complete containment, active-
+owner, and durable-owner inventories pass at this gate. Compatibility `Value`
+itself remains deliberately unadmitted; I4F.2c introduces the private
+production node rather than making the old enum a collector allocation.
 
 #### Phase I4F.2c — Private Production Root and Shell Preparation
 

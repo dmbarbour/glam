@@ -131,6 +131,65 @@ pub(crate) unsafe trait ManagedFamily: Trace {
     const DROP_RECORD: ManagedDropRecord;
 }
 
+/// Test-only admission gate for the complete compatibility value shell.
+///
+/// This wrapper deliberately reports no managed edges: before I4F.2d, every
+/// recursive compatibility edge remains ordinary Rust ownership. Its only
+/// purpose is to prove that those owners now have passive destruction before
+/// the production managed node is introduced.
+#[cfg(test)]
+pub(crate) struct ClosedCompatibilityValue {
+    value: super::Value,
+    drops: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[cfg(test)]
+impl ClosedCompatibilityValue {
+    pub(crate) fn new(value: super::Value, drops: &Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        Self {
+            value,
+            drops: Arc::clone(drops),
+        }
+    }
+
+    pub(crate) fn value(&self) -> &super::Value {
+        &self.value
+    }
+}
+
+#[cfg(test)]
+impl Drop for ClosedCompatibilityValue {
+    fn drop(&mut self) {
+        self.drops
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+// SAFETY: the compatibility representation contains no `Gc` edge before the
+// production switch. I4B-I4E exhaustively inventory its ordinary Rust value
+// and net ownership; I4F.2b.1-.3 moved every active destructor behind passive
+// external-owner handles. The test fixture therefore has zero managed edges.
+#[cfg(test)]
+unsafe impl Trace for ClosedCompatibilityValue {
+    const REQUESTED_SLOT_SIZE: Option<usize> = Some(managed_slot_extent::<Self>());
+
+    fn trace(&self, _visitor: &mut glam_gc::Visitor<'_>) {}
+}
+
+// SAFETY: direct destruction only updates an external atomic counter. The
+// wrapped compatibility value recursively releases passive Rust ownership;
+// callbacks, reservations, and opaque payloads remain in the runtime's
+// external-owner registry and are not retired by this destructor.
+#[cfg(test)]
+unsafe impl ManagedFamily for ClosedCompatibilityValue {
+    const DROP_RECORD: ManagedDropRecord = ManagedDropRecord::passive(
+        "I4F.2b closed compatibility value fixture",
+        "src/core/managed.rs",
+        "direct Drop updates only an external atomic counter",
+        "compatibility Value ownership is passive after active-owner extraction",
+    );
+}
+
 /// The reviewed containment policy for one type-erased opaque payload.
 ///
 /// Unlike [`ManagedDropRecord`], this is not collector admission. It prevents
