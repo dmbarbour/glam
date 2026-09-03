@@ -1369,10 +1369,13 @@ fn assert_task_terminal_inventory(poll: &EffectTaskPoll, terminal: &TaskTerminal
     }
 }
 
-fn retained_machine_value(domain: &EffectTokenDomain<Arc<()>>) -> (Value, Weak<()>) {
+fn retained_machine_value(
+    values: &Values,
+    domain: &EffectTokenDomain<Arc<()>>,
+) -> (Value, Weak<()>) {
     let payload = Arc::new(());
     let retained = Arc::downgrade(&payload);
-    (domain.issue(payload).into_core(), retained)
+    (values.clone_core(&domain.issue(payload)).unwrap(), retained)
 }
 
 #[test]
@@ -1399,8 +1402,8 @@ fn branch_retires_its_effect_and_state_roots_exactly_with_the_branch() {
     let core = crate::core::test_value_factory();
     let values = Values::from_core_factory(core.clone());
     let domain = EffectTokenDomain::new(&values);
-    let (effect, retained_effect) = retained_machine_value(&domain);
-    let (state, retained_state) = retained_machine_value(&domain);
+    let (effect, retained_effect) = retained_machine_value(&values, &domain);
+    let (state, retained_state) = retained_machine_value(&values, &domain);
     let branch = Branch::<TestEffects>::new(&core, effect, state);
 
     assert_eq!(branch.effect.runtime_id(), core.runtime_id());
@@ -1419,14 +1422,14 @@ fn execution_work_and_cut_payloads_retain_roots_until_retirement() {
     let domain = EffectTokenDomain::new(&values);
     let branch = || Branch::<TestEffects>::new(&core, core.unit(), core.unit());
 
-    let (value, retained) = retained_machine_value(&domain);
+    let (value, retained) = retained_machine_value(&values, &domain);
     let work = MachineWork::deliver(&core, value, branch(), 0);
     assert!(retained.upgrade().is_some());
     drop(work);
     assert!(retained.upgrade().is_none());
 
-    let (function, retained_function) = retained_machine_value(&domain);
-    let (argument, retained_argument) = retained_machine_value(&domain);
+    let (function, retained_function) = retained_machine_value(&values, &domain);
+    let (argument, retained_argument) = retained_machine_value(&values, &domain);
     let work = MachineWork::apply(&core, function, vec![argument], branch(), 0);
     assert!(retained_function.upgrade().is_some());
     assert!(retained_argument.upgrade().is_some());
@@ -1434,13 +1437,13 @@ fn execution_work_and_cut_payloads_retain_roots_until_retirement() {
     assert!(retained_function.upgrade().is_none());
     assert!(retained_argument.upgrade().is_none());
 
-    let (value, retained) = retained_machine_value(&domain);
+    let (value, retained) = retained_machine_value(&values, &domain);
     let outcome = BranchOutcome::complete(&core, value, branch());
     assert!(retained.upgrade().is_some());
     drop(outcome);
     assert!(retained.upgrade().is_none());
 
-    let (operation, retained) = retained_machine_value(&domain);
+    let (operation, retained) = retained_machine_value(&values, &domain);
     let cut = CutFrame {
         operation: RuntimeValueRoot::new(&core, operation),
         outer: branch(),
@@ -1464,7 +1467,7 @@ fn captured_control_payloads_retain_roots_until_retirement() {
     let domain = EffectTokenDomain::new(&values);
     let mut retained = Vec::new();
     let mut rooted_value = || {
-        let (value, weak) = retained_machine_value(&domain);
+        let (value, weak) = retained_machine_value(&values, &domain);
         retained.push(weak);
         RuntimeValueRoot::new(&core, value)
     };
@@ -1499,7 +1502,7 @@ fn fixpoint_frames_retain_the_shared_function_root_until_retirement() {
     let assembler = Assembler::default();
     let core = assembler.core_values();
     let domain = EffectTokenDomain::new(&assembler.values());
-    let (function, retained) = retained_machine_value(&domain);
+    let (function, retained) = retained_machine_value(&assembler.values(), &domain);
     let root = Arc::new(FixRoot {
         function: RuntimeValueRoot::new(&core, function),
         entry: Branch::<TestEffects>::new(&core, core.unit(), core.unit()),
@@ -1529,10 +1532,10 @@ fn fixpoint_frames_retain_the_shared_function_root_until_retirement() {
 fn contextual_effect_wrapper_retires_its_context_root_exactly_with_the_wrapper() {
     let (assembler, effect) = compile_effect(".r ()");
     let domain = EffectTokenDomain::new(&assembler.values());
-    let (context, retained) = retained_machine_value(&domain);
+    let (context, retained) = retained_machine_value(&assembler.values(), &domain);
     let task = EffectTask::new(
         &assembler.core_values(),
-        effect.into_core(),
+        assembler.values().clone_core(&effect).unwrap(),
         TestEffects,
         Arc::new(TestHost::with_values(assembler.core_values())),
     )
@@ -1551,10 +1554,10 @@ fn contextual_effect_wrapper_retires_its_context_root_exactly_with_the_wrapper()
 fn terminal_failure_poll_preserves_its_root_until_the_poll_is_retired() {
     let (assembler, effect) = compile_effect(".r ()");
     let domain = EffectTokenDomain::new(&assembler.values());
-    let (emission, retained) = retained_machine_value(&domain);
+    let (emission, retained) = retained_machine_value(&assembler.values(), &domain);
     let mut task = EffectTask::new(
         &assembler.core_values(),
-        effect.into_core(),
+        assembler.values().clone_core(&effect).unwrap(),
         TestEffects,
         Arc::new(TestHost::with_values(assembler.core_values())),
     )
@@ -1588,7 +1591,7 @@ fn blocked_failure_poll_preserves_its_root_after_the_block_is_retired() {
     let core = crate::core::test_value_factory();
     let values = Values::from_core_factory(core.clone());
     let domain = EffectTokenDomain::new(&values);
-    let (emission, retained) = retained_machine_value(&domain);
+    let (emission, retained) = retained_machine_value(&values, &domain);
     let error = TaskHalt::failure(Arc::new(EvaluationFailure::emission(emission)));
     let blocked = BlockedExecution::<TestEffects>::evaluation_error(
         error,
@@ -3457,7 +3460,7 @@ fn reflection_eval_suspends_instead_of_failing_around_a_pending_value() {
     let EffectTaskPoll::Complete(value) = poll else {
         panic!("eval should retry a terminal dependency and return err");
     };
-    let Value::Dict(result) = value.into_core() else {
+    let Value::Dict(result) = assembler.values().clone_core(&value).unwrap() else {
         panic!("eval should return a tagged result");
     };
     let Some(error) = result.get(&*keys::ERR) else {

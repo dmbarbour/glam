@@ -84,7 +84,7 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/api/value.rs",
-        [3, 3, 0, 0, 1, 0],
+        [2, 1, 0, 0, 1, 0],
         "constructors, composite validation, observers, extraction, and net data",
         "I3B.1 scoped construction/extraction; I4F.2 public facade switch"
     ),
@@ -255,4 +255,53 @@ fn public_value_compatibility_access_inventory_is_complete() {
     }
 
     assert_eq!(actual, expected);
+}
+
+fn braced_item_after<'a>(source: &'a str, marker: &str) -> &'a str {
+    let start = source
+        .find(marker)
+        .expect("source item marker should exist");
+    let open = source[start..]
+        .find('{')
+        .map(|offset| start + offset)
+        .expect("source item should have a body");
+    let mut depth = 0_usize;
+    for (offset, byte) in source[open..].bytes().enumerate() {
+        match byte {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &source[start..=open + offset];
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("source item body should be balanced");
+}
+
+#[test]
+fn public_value_facade_exposes_no_core_or_provenance_observer() {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let source = fs::read_to_string(manifest.join("src/api/value.rs"))
+        .expect("the public value facade should be readable");
+    let value_impl = braced_item_after(&source, "impl Value {");
+
+    for forbidden in [
+        "pub fn as_core",
+        "pub fn into_core",
+        "pub(crate) fn into_core",
+        "pub fn runtime_id",
+        "pub fn is_undefined",
+        "pub fn as_binary",
+        "pub fn as_i64",
+        "pub fn kind",
+        "pub fn as_number_text",
+    ] {
+        assert!(
+            !value_impl.contains(forbidden),
+            "public Value facade regained forbidden surface `{forbidden}`"
+        );
+    }
 }

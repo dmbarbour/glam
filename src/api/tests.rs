@@ -1373,7 +1373,10 @@ fn public_error_contexts_prepend_without_rewriting_the_message() {
     assert_eq!(error.to_string(), "original");
     assert_eq!(
         diagnostic_contexts(&assembler, &error.diagnostic(&values).unwrap()),
-        [outer.into_core(), inner.into_core()]
+        [
+            values.clone_core(&outer).unwrap(),
+            values.clone_core(&inner).unwrap()
+        ]
     );
 }
 
@@ -1455,7 +1458,7 @@ fn callers_can_attach_path_context_to_semantic_access() {
     assert_eq!(error.to_string(), "path target failed");
     assert_eq!(
         diagnostic_contexts(&assembler, &error.diagnostic(&assembler.values()).unwrap()),
-        [frame.into_core()]
+        [values.clone_core(&frame).unwrap()]
     );
 
     let missing = values

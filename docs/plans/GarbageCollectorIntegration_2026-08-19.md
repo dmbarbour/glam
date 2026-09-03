@@ -160,8 +160,8 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.2a.3g | complete | parser replay and source access retirement |
 | I4F.2a.3h | complete | lifecycle and host-integration closure |
 | I4F.2a.3 | complete | reflection, compiler, macro, and host access retirement |
-| I4F.2a.4 | pending | compatibility-access closure latch |
-| I4F.2a | pending | compatibility observation and ownership-transfer retirement |
+| I4F.2a.4 | complete | compatibility-access closure latch |
+| I4F.2a | complete | compatibility observation and ownership-transfer retirement |
 | I4F.2b.0 | pending | transitive destruction and active-owner inventory |
 | I4F.2b.1 | pending | external host-call ownership extraction |
 | I4F.2b.2 | pending | reflection-reservation ownership extraction |
@@ -3663,6 +3663,15 @@ authority explicitly instead of relying on a standalone `Value` observer.
 The production inventory consequently records no `Value::from_core`,
 `Value::from_runtime`, or direct `RuntimeValueRoot::from_runtime` path in the
 facade.
+
+I4F.2a.4 and I4F.2a completed 2026-09-03. The remaining generic owned-core
+escape on `Value` was renamed and made private to affine promise resolution,
+where I5 replaces it with the managed promise assignment. The borrowed
+compatibility projection remains crate-private only for the bounded `Values`
+adapter and the single source-latched structured-`ApiError` conversion assigned
+to I6C. Exact production counts prevent either exception from spreading, while
+a source fixture rejects public core/provenance/scalar observers and the
+compile-time facade fixtures reject representation-derived semantic traits.
 
 I4F.2a.2a completed 2026-09-03. `ValueEvaluator` and
 `ReflectionInspector` no longer call compatibility projection or construction

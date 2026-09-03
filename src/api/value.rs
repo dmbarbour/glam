@@ -729,11 +729,18 @@ impl Value {
         Self(value)
     }
 
+    // Compatibility projection retained for the scoped `Values` adapter and
+    // the structured `ApiError` conversion assigned to I6C. The production
+    // access inventory prevents new call sites while those representations
+    // remain unmanaged.
     pub(crate) fn as_core(&self) -> &CoreValue {
         self.0.as_core()
     }
 
-    pub(crate) fn into_core(self) -> CoreValue {
+    // I5 replaces this compatibility ownership recovery when promise
+    // assignments become managed. Keep it private to the affine resolver so
+    // no subsystem can use it as a general owned-core escape.
+    fn into_promise_assignment_core(self) -> CoreValue {
         self.0.into_core()
     }
 
@@ -764,7 +771,9 @@ impl ValueKind {
 impl EvaluatedValue {
     pub(crate) fn from_whnf(values: &Values, value: Value) -> Self {
         debug_assert!(!matches!(
-            value.as_core(),
+            values
+                .with_access(|access| access.clone_core(&value))
+                .expect("the WHNF witness must belong to its values service"),
             CoreValue::Lazy(_) | CoreValue::Promised(_)
         ));
         debug_assert_eq!(value.runtime_id(), values.runtime_id());
@@ -948,7 +957,7 @@ impl PromiseResolver {
             .expect("a live promise resolver must retain its promise");
         let label = promise.label().clone();
         promise
-            .set(value.into_core())
+            .set(value.into_promise_assignment_core())
             .map_err(|_| Error::new(format!("promise `{label}` was already completed")))?;
         Ok(())
     }
@@ -961,7 +970,9 @@ impl PromiseResolver {
             resolver.promise.take();
             return Err(error);
         }
-        resolver.fail_with(Arc::new(EvaluationFailure::emission(failure.into_core())))
+        resolver.fail_with(Arc::new(EvaluationFailure::emission(
+            failure.into_promise_assignment_core(),
+        )))
     }
 
     /// Completes the promise with a conventional textual producer error.
