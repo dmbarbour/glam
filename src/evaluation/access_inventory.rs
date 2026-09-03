@@ -78,7 +78,7 @@ fn all_managed_entries_have_bounded_mutator_regions() {
     let expected_gateways = [
         ("src/api/assembly.rs", GatewayCounts::new(1, 0)),
         ("src/api/tests.rs", GatewayCounts::new(0, 2)),
-        ("src/api/value.rs", GatewayCounts::new(3, 0)),
+        ("src/api/value.rs", GatewayCounts::new(2, 0)),
         ("src/api/value/prototype.rs", GatewayCounts::new(0, 4)),
         ("src/compiler.rs", GatewayCounts::new(1, 0)),
         // I4.0's owner-local destruction fixtures exercise the admitted

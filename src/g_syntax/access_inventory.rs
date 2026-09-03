@@ -84,7 +84,7 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/g_syntax/macro_expansion/runner.rs",
-        [0, 14, 0, 2],
+        [0, 12, 0, 0],
         "rooted macro inputs, outputs, failures, and public diagnostic values"
     ),
     entry!(

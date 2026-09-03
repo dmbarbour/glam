@@ -510,20 +510,19 @@ fn hidden_effect(context: &RequestContext<'_, MacroEffects>, tag: [&str; 5]) -> 
         Key::abstract_global_path(tag),
         CoreValue::List(List::empty()),
     ));
-    Value::from_core(
+    context.values().wrap(eval::constant_effect(
         context.eval_context().values(),
-        eval::constant_effect(context.eval_context().values(), request),
-    )
+        request,
+    ))
 }
 
 fn span_value(context: &RequestContext<'_, MacroEffects>, span: String) -> Value {
-    Value::from_core(
-        context.eval_context().values(),
-        CoreValue::Dict(Dict::new_sync().insert(
+    context
+        .values()
+        .wrap(CoreValue::Dict(Dict::new_sync().insert(
             Key::atom_from_text("span"),
             CoreValue::binary_from_text(&span),
-        )),
-    )
+        )))
 }
 
 fn macro_transaction<'context, 'request>(
@@ -541,7 +540,10 @@ fn text_value(
     request: &str,
 ) -> Result<String, TaskHalt> {
     let value = context.evaluate(&value)?;
-    let CoreValue::Binary(bytes) = value.as_value().as_core() else {
+    let Some(bytes) = value
+        .as_bytes()
+        .map_err(|error| TaskHalt::new(error.to_string()))?
+    else {
         return Err(TaskHalt::new(format!("{request} requires text")));
     };
     String::from_utf8(bytes.to_vec())

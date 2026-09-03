@@ -154,7 +154,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.2a.3c | complete | reflection machine access retirement |
 | I4F.2a.3d | complete | compiler and module-lowering access retirement |
 | I4F.2a.3e | complete | compiler-cache access retirement |
-| I4F.2a.3f | pending | macro effect and runner access retirement |
+| I4F.2a.3f | complete | macro effect and runner access retirement |
 | I4F.2a.3g | pending | parser replay and source access retirement |
 | I4F.2a.3h | pending | lifecycle and host-integration closure |
 | I4F.2a.3 | pending | reflection, compiler, macro, and host access retirement |
@@ -3573,6 +3573,16 @@ diagnostic-formatter cache now project their retained roots through the
 cache creates independent authority or borrows through a root compatibility
 accessor, and both compiler-boundary inventories now record zero direct
 projections.
+
+I4F.2a.3f completed 2026-09-03. Macro protocol constructors now publish
+through `RequestContext::values`, and evaluated text is extracted through the
+`EvaluatedValue` observer instead of borrowing its representation. The macro
+runner wraps compiler-produced inputs through its runtime `Values`, clones
+successful and diagnostic-case roots through that same authority, and never
+borrows a branch root across search or evaluation. The last temporary
+`Value::same_core_with` compiler hook was removed; case deduplication compares
+owned scoped clones. Macro effect and runner compatibility counts, plus the
+compiler-boundary projection count for the runner, are now zero.
 
 I4F.2a.1a completed 2026-09-03. Production `Value` and `EvaluatedValue` no
 longer implement semantic equality, and `Value::runtime_id` is no longer a

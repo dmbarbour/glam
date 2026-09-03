@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::api::{CompilationExecution, Diagnostic, Value as PublicValue};
+use crate::api::{CompilationExecution, Diagnostic, Value as PublicValue, Values};
 use crate::core::CoreValueFactory;
 use crate::core::Value;
 use crate::diagnostic::Severity;
@@ -80,8 +80,9 @@ pub(in crate::g_syntax) fn run_macro_effect(
     input: MacroInput,
 ) -> Result<MacroRun, Box<MacroFailure>> {
     let values = execution.macro_context().values();
-    let effect = PublicValue::from_core(values, effect);
-    let environment = PublicValue::from_core(values, environment);
+    let public_values = Values::from_core_factory(values.clone());
+    let effect = public_values.wrap(effect);
+    let environment = public_values.wrap(environment);
     let host = Arc::new(MacroHost::new_core(
         values.clone(),
         environment.clone(),
@@ -171,9 +172,14 @@ pub(in crate::g_syntax) fn run_macro_effect(
     }
     let value = branch
         .value()
-        .expect("successful branch was selected above")
-        .as_core();
-    let value = force_result(execution, value.clone()).map_err(|error| {
+        .expect("successful branch was selected above");
+    let value = public_values.clone_core(value).map_err(|error| {
+        macro_error(
+            values,
+            format!("macro result belongs to another runtime: {error}"),
+        )
+    })?;
+    let value = force_result(execution, value).map_err(|error| {
         error.with_context(
             execution.macro_context().values(),
             branch.journal().cursor.consumed_end(&input),
@@ -238,7 +244,12 @@ pub(in crate::g_syntax) fn render_macro_case(
     execution: &CompilationExecution,
     value: &PublicValue,
 ) -> String {
-    let value = match force_result(execution, value.as_core().clone()) {
+    let values = Values::from_core_factory(execution.macro_context().values().clone());
+    let value = match values
+        .clone_core(value)
+        .map_err(|error| macro_error(execution.macro_context().values(), error.to_string()))
+        .and_then(|value| force_result(execution, value))
+    {
         Ok(value) => value,
         Err(error) => return format!("explanation unavailable ({})", error.message()),
     };
@@ -275,12 +286,17 @@ fn unique_values(
     factory: &CoreValueFactory,
     values: impl IntoIterator<Item = PublicValue>,
 ) -> Vec<PublicValue> {
+    let public_values = Values::from_core_factory(factory.clone());
     let mut unique = Vec::new();
     for value in values {
+        let core_value = public_values
+            .clone_core(&value)
+            .expect("macro case values belong to the compilation runtime");
         if !unique.iter().any(|prior| {
-            value
-                .same_core_with(factory, prior)
-                .expect("macro case values belong to the compilation runtime")
+            let prior = public_values
+                .clone_core(prior)
+                .expect("macro case values belong to the compilation runtime");
+            core_value == prior
         }) {
             unique.push(value);
         }

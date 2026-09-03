@@ -84,7 +84,7 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/api/value.rs",
-        [10, 3, 0, 1, 1, 1],
+        [8, 3, 0, 1, 1, 1],
         "constructors, composite validation, observers, extraction, and net data",
         "I3B.1 scoped construction/extraction; I4F.2 public facade switch"
     ),
@@ -147,18 +147,6 @@ const INVENTORY: &[InventoryEntry] = &[
         [0, 0, 0, 0, 1, 0],
         "runtime-cached closed diagnostic formatter",
         "I3E.2 rooted cache publication; I4F.1 durable roots"
-    ),
-    entry!(
-        "src/g_syntax/macro_expansion/effects.rs",
-        [1, 0, 2, 0, 0, 0],
-        "macro protocol callback values and embedded values",
-        "I3E.2 compiler and macro regions; I4F.1 retained roots"
-    ),
-    entry!(
-        "src/g_syntax/macro_expansion/runner.rs",
-        [2, 0, 2, 0, 0, 0],
-        "macro runner demand and result conversion",
-        "I3E.2 compiler and macro regions; I4F.1 retained roots"
     ),
     entry!(
         "src/g_syntax/module_lowering.rs",

@@ -686,21 +686,6 @@ impl Value {
         }
     }
 
-    /// Temporary matching-factory comparison for compiler/macro integration.
-    /// I4F.2a.3 replaces its remaining caller with a scoped `Values` access.
-    pub(crate) fn same_core_with(
-        &self,
-        values: &CoreValueFactory,
-        other: &Self,
-    ) -> Result<bool, Error> {
-        self.require_runtime(values.runtime_id())?;
-        other.require_runtime(values.runtime_id())?;
-        Ok(values.with_runtime_value_access(|access| {
-            debug_assert!(access.belongs_to(values));
-            self.as_core() == other.as_core()
-        }))
-    }
-
     #[cfg(test)]
     pub(crate) fn is_undefined(&self) -> bool {
         matches!(self.0.as_core(), CoreValue::Dict(dict) if dict.is_empty())
