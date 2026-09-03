@@ -187,7 +187,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.2e.1c | complete | readiness, ledger, and report owners |
 | I4F.2e.1 | complete | cache, evaluation, coordinator, and readiness collection fixtures |
 | I4F.2e.2a | complete | reflection store, snapshot, journal, and query owners |
-| I4F.2e.2b | pending | reflection lifecycle, protocol, and search owners |
+| I4F.2e.2b | complete | reflection lifecycle, protocol, and search owners |
 | I4F.2e.2c | pending | reflection request and parked-machine owners |
 | I4F.2e.2 | pending | reflection owner collection fixtures |
 | I4F.2e.3 | pending | diagnostic, event, and delivery collection fixtures |
@@ -4155,6 +4155,18 @@ proving that the returned public result independently keeps its managed shell
 alive until result drop. These forced retirement orders cover store, protected
 volume, snapshot, journal, and query ownership without confusing shared root
 clones with separate registrations.
+
+I4F.2e.2b completed 2026-09-03 by inserting collection into the existing
+compile-exhaustive lifecycle, protocol, and isolated-search lifetime fixtures.
+Failed and killed lifecycle statuses each retain the coordinator's original
+managed failure root through collection, then release it with the projected
+`TaskHalt`. Request returns, alternatives, scoped operations, task outcomes,
+host snapshots, commits, and transactions likewise retain their specialization
+values until their precise record retires. Isolated hosts, complete and failed
+branches, search-policy progress/results, and blocked failure records now all
+survive at least one collection while live; the existing staged retirement
+assertions then prove reclamation. This credits the earlier owner fixtures
+rather than duplicating their production constructors merely for the matrix.
 
 Keep every fixture in a fresh isolated collector-ready runtime/heap. Do not
 collect a shared production graph containing I5-I10 unclassified families.

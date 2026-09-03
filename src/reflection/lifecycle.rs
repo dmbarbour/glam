@@ -767,21 +767,26 @@ mod root_inventory_tests {
     #[test]
     fn lifecycle_status_preserves_coordinator_failure_root_identity() {
         let values = crate::core::test_value_factory();
-        let failure = RuntimeFailureRoot::new(
-            &values,
-            Arc::new(EvaluationFailure::emission(Value::Number(
-                crate::number::Number::integer(42),
-            ))),
-        );
+        let public_values = crate::api::Values::from_core_factory(values.clone());
+        let domain = crate::api::EffectTokenDomain::new(&public_values);
         let state = EffectLifecycleState {
             status: Mutex::new(EffectLifecycleStatus::Launched),
             changed: Condvar::new(),
         };
 
-        for status in [
-            EvaluationTaskStatus::Failed(failure.clone()),
-            EvaluationTaskStatus::Killed(failure.clone()),
-        ] {
+        for failed in [true, false] {
+            let payload = Arc::new(());
+            let retained = Arc::downgrade(&payload);
+            let emission = public_values
+                .clone_core(&domain.issue(payload))
+                .expect("the lifecycle fixture value should belong to its runtime");
+            let failure =
+                RuntimeFailureRoot::new(&values, Arc::new(EvaluationFailure::emission(emission)));
+            let status = if failed {
+                EvaluationTaskStatus::Failed(failure.clone())
+            } else {
+                EvaluationTaskStatus::Killed(failure.clone())
+            };
             let halt = match state.public_status(status) {
                 EffectLifecycleStatus::Failed(halt) | EffectLifecycleStatus::Killed(halt) => halt,
                 _ => panic!("a terminal failure should remain a failure"),
@@ -790,6 +795,12 @@ mod root_inventory_tests {
                 .failure_root()
                 .expect("the public lifecycle failure should retain its runtime root");
             assert!(published.shares_root_with(&failure));
+            drop(failure);
+            domain.collect_and_drain_retired_external_owners_for_test();
+            assert!(retained.upgrade().is_some());
+            drop(halt);
+            domain.collect_and_drain_retired_external_owners_for_test();
+            assert!(retained.upgrade().is_none());
         }
     }
 }

@@ -454,6 +454,7 @@ mod tests {
         let (extra, retained_extra) = retained_search_value(&domain);
         let host = IsolatedTaskHost::new(&values, environment, extra)
             .expect("same-runtime roots should construct an isolated host");
+        domain.collect_and_drain_retired_external_owners_for_test();
         assert!(retained_environment.upgrade().is_some());
         assert!(retained_extra.upgrade().is_some());
         drop(host);
@@ -466,6 +467,7 @@ mod tests {
         let (journal, retained_journal) = retained_search_value(&domain);
         let branch =
             IsolatedSearchBranch::complete(result, search_commit(&store, snapshot, journal));
+        domain.collect_and_drain_retired_external_owners_for_test();
         assert!(retained_result.upgrade().is_some());
         assert!(retained_snapshot.upgrade().is_some());
         assert!(retained_journal.upgrade().is_some());
@@ -478,6 +480,7 @@ mod tests {
         let (snapshot, retained_snapshot) = retained_search_value(&domain);
         let (journal, retained_journal) = retained_search_value(&domain);
         let branch = IsolatedSearchBranch::failed(search_commit(&store, snapshot, journal));
+        domain.collect_and_drain_retired_external_owners_for_test();
         assert!(retained_snapshot.upgrade().is_some());
         assert!(retained_journal.upgrade().is_some());
         drop(branch);
@@ -542,6 +545,7 @@ mod tests {
             observed_generation: Some(1),
             error: Some(error),
         };
+        domain.collect_and_drain_retired_external_owners_for_test();
         assert!(
             block.error().and_then(TaskHalt::failure_root).is_some(),
             "a published blocked error must retain its explicit runtime root"

@@ -974,6 +974,7 @@ mod root_inventory_tests {
         ] {
             let (value, retained) = retained_protocol_value(&domain);
             let result = build(value);
+            domain.collect_and_drain_retired_external_owners_for_test();
             assert!(retained.upgrade().is_some());
             drop(result);
             domain.collect_and_drain_retired_external_owners_for_test();
@@ -982,6 +983,7 @@ mod root_inventory_tests {
 
         let (value, retained) = retained_protocol_value(&domain);
         let outcome = TaskOutcome::Complete(value);
+        domain.collect_and_drain_retired_external_owners_for_test();
         assert!(retained.upgrade().is_some());
         drop(outcome);
         domain.collect_and_drain_retired_external_owners_for_test();
@@ -997,6 +999,7 @@ mod root_inventory_tests {
 
         let (extra, retained) = retained_protocol_value(&domain);
         let snapshot = HostSnapshot::<ProtocolRootTestEffects>::new(1, store.snapshot(), extra);
+        domain.collect_and_drain_retired_external_owners_for_test();
         assert!(retained.upgrade().is_some());
         drop(snapshot);
         domain.collect_and_drain_retired_external_owners_for_test();
@@ -1010,6 +1013,7 @@ mod root_inventory_tests {
             extra_snapshot,
             vec![journal_value],
         );
+        domain.collect_and_drain_retired_external_owners_for_test();
         assert!(retained_snapshot.upgrade().is_some());
         assert!(retained_journal.upgrade().is_some());
         drop(commit);
@@ -1022,6 +1026,7 @@ mod root_inventory_tests {
         let snapshot = HostSnapshot::<ProtocolRootTestEffects>::new(2, store.snapshot(), extra);
         let mut transaction = Transaction::new(snapshot);
         transaction.journal.push(journal_value);
+        domain.collect_and_drain_retired_external_owners_for_test();
         assert!(retained_snapshot.upgrade().is_some());
         assert!(retained_journal.upgrade().is_some());
         drop(transaction);
