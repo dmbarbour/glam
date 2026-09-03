@@ -764,8 +764,8 @@ fn is_production_source(relative: &Path) -> bool {
 // `owner_for_declaration` is the reviewed semantic assignment for every entry.
 const DECLARATION_BASELINE_COUNT: usize = 128;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([100, 71, 1, 10, 15, 0, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 11_486_289_761_918_447_924;
+    DeclarationSignals::new([99, 72, 1, 10, 15, 0, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 6_593_715_991_801_300_180;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,

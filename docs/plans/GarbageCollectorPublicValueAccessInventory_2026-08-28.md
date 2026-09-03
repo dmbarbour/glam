@@ -31,14 +31,14 @@ more conservative than the production build alone.
 
 ## Baseline
 
-The 24 inventoried modules contain 200 compatibility occurrences after
+The 24 inventoried modules contain 199 compatibility occurrences after
 I3B.1d.1 moved public construction behind `ScopedValues` and I3B.1d.2 moved
 public evaluated-value extraction behind matching runtime authority:
 
 | Operation family | Count |
 | --- | ---: |
 | borrowed `as_core()` projection | 71 |
-| owned `into_core()` projection | 34 |
+| owned `into_core()` projection | 33 |
 | `Value`/`PublicValue::from_core` construction | 77 |
 | `Value::from_runtime` construction, including facade-local `Self` delegation | 6 |
 | `RuntimeValueRoot::new` construction | 8 |
@@ -51,7 +51,7 @@ public evaluated-value extraction behind matching runtime authority:
 | Core interaction-net construction | 1 | 10 | I3D.3-I3D.4 scoped net access; I4F.1 outcomes; I8 managed net |
 | Evaluation access, sessions, pump, executor, coordinator task/spark | 6 | 12 | I3A.3-I3A.4, I3B.2, and I3C.1-I3C.2; I4F.1 durable outcome surfaces |
 | Built-in `.g` compiler, macro expansion, logical/source parsing | 4 | 16 | I3E.2 compiler/macro regions; I4F.1 retained root surfaces |
-| Reflection lifecycle, machine, protocol, requests, search, store | 6 | 100 | I3D.1-I3D.4 phase boundaries; I4F.1 machine/store root surfaces |
+| Reflection lifecycle, machine, protocol, requests, search, store | 6 | 99 | I3D.1-I3D.4 phase boundaries; I4F.1 machine/store root surfaces |
 
 The executable table supplies the exact per-module counts, role descriptions,
 and checkpoint assignments behind this grouped summary.
@@ -122,5 +122,8 @@ the durable-owner inventory closes storage and lifetime classifications.
   continuation, delimiter, and reset-frame payloads. Six raw declaration
   fields become six runtime roots; the added projections are confined to
   bounded continuation execution and reset-stack encoding.
+- I4F.1d.3d.2 deliberately tripped both inventories while converting the
+  shared fixpoint function. It becomes one runtime root, and exact root
+  transfer into application work removes one owned projection.
 - The existing public-value suite remains the compatibility behavior oracle
   until I4F.2.

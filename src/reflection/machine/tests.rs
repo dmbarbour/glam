@@ -1114,6 +1114,49 @@ fn assert_control_root_inventory(
 type ControlRootInventoryFn =
     fn(&Control, &Continuation, &Delimiter, &CapturedContinuation, &ResetFrame, &CapturedLayer);
 
+fn assert_fixpoint_root_inventory(
+    root: &FixRoot<TestEffects>,
+    active: &ActiveFix<TestEffects>,
+    restart: &FixRestart<TestEffects>,
+    choice: &FixChoice,
+) {
+    let FixRoot {
+        function,
+        entry,
+        scope_depth,
+    } = root;
+    let _: &RuntimeValueRoot = function;
+    let _: &Branch<TestEffects> = entry;
+    let _: &usize = scope_depth;
+
+    let ActiveFix {
+        root,
+        choices,
+        next_choice,
+        handle,
+    } = active;
+    let _: &FixRoot<TestEffects> = root;
+    let _: &Vec<FixChoice> = choices;
+    let _: &usize = next_choice;
+    let _: &PromisedValue = handle;
+
+    let FixRestart {
+        root,
+        choices,
+        inherited_restarts,
+    } = restart;
+    let _: &FixRoot<TestEffects> = root;
+    let _: &Vec<FixChoice> = choices;
+    let _: &Vec<FixRestart<TestEffects>> = inherited_restarts;
+
+    match choice {
+        FixChoice::Left | FixChoice::Right => {}
+    }
+}
+
+type FixpointRootInventoryFn =
+    fn(&FixRoot<TestEffects>, &ActiveFix<TestEffects>, &FixRestart<TestEffects>, &FixChoice);
+
 fn assert_task_block_inventory(blocked: &BlockedExecution<TestEffects>, poll: &TaskBlock) {
     let BlockedExecution { reason, retry } = blocked;
     match reason {
@@ -1197,6 +1240,7 @@ fn outer_machine_root_inventory_is_complete() {
     let _: fn(&Branch<TestEffects>, &RetryCheckpoint<TestEffects>) = assert_branch_root_inventory;
     let _: ExecutionRootInventoryFn = assert_execution_root_inventory;
     let _: ControlRootInventoryFn = assert_control_root_inventory;
+    let _: FixpointRootInventoryFn = assert_fixpoint_root_inventory;
 }
 
 #[test]
@@ -1297,6 +1341,37 @@ fn captured_control_payloads_retain_roots_until_retirement() {
     assert!(retained.iter().all(|weak| weak.upgrade().is_some()));
     drop(captured);
     assert!(retained.iter().all(|weak| weak.upgrade().is_none()));
+}
+
+#[test]
+fn fixpoint_frames_retain_the_shared_function_root_until_retirement() {
+    let assembler = Assembler::default();
+    let core = assembler.core_values();
+    let domain = EffectTokenDomain::new(&assembler.values());
+    let (function, retained) = retained_machine_value(&domain);
+    let root = Arc::new(FixRoot {
+        function: RuntimeValueRoot::new(&core, function),
+        entry: Branch::<TestEffects>::new(&core, core.unit(), core.unit()),
+        scope_depth: 0,
+    });
+    let active = ActiveFix {
+        root: root.clone(),
+        choices: vec![FixChoice::Left],
+        next_choice: 0,
+        handle: PromisedValue::new(&core, "test fixpoint"),
+    };
+    let restart = FixRestart {
+        root: root.clone(),
+        choices: vec![FixChoice::Right],
+        inherited_restarts: Vec::new(),
+    };
+    drop(root);
+
+    assert!(retained.upgrade().is_some());
+    drop(active);
+    assert!(retained.upgrade().is_some());
+    drop(restart);
+    assert!(retained.upgrade().is_none());
 }
 
 #[test]

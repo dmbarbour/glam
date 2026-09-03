@@ -120,8 +120,8 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.1d.3c.2 | complete | reflection work, outcome, cut, and retry root closure |
 | I4F.1d.3c | complete | reflection branch, work, cut, and retry roots |
 | I4F.1d.3d.1 | complete | reflection continuation, delimiter, and reset roots |
-| I4F.1d.3d.2 | pending | reflection fixpoint roots and captured-control closure |
-| I4F.1d.3d | pending | reflection continuation, reset, and fixpoint roots |
+| I4F.1d.3d.2 | complete | reflection fixpoint roots and captured-control closure |
+| I4F.1d.3d | complete | reflection continuation, reset, and fixpoint roots |
 | I4F.1d.3e | pending | reflection decoded-request handoff and machine closure |
 | I4F.1d.3 | pending | reflection machine frame and request roots |
 | I4F.1d | pending | reflection store, protocol, and machine root surfaces |
@@ -3092,6 +3092,22 @@ captured graph is retired. Both source inventories were deliberately tripped
 and relatched: six durable raw fields became six runtime roots. Fix roots and
 the redundant fused phase-root bundle remain assigned to I4F.1d.3d.2 and
 I4F.1d.3e respectively. Production remains `NoAuto`.
+
+I4F.1d.3d.2 completed 2026-09-03. A shared `FixRoot` now retains its function
+as a `RuntimeValueRoot`, and both initial and restarted fixpoint application
+move that exact root into machine work instead of projecting and rerooting it.
+Active and deferred restart frames continue to share the `Arc<FixRoot>`;
+their promise handle is deliberately unchanged because promise assignment and
+producer lifecycle remain an I5-managed contract.
+
+The fixpoint records and choice enum have a compile-exhaustive latch. A
+deterministic fixture drops the originating root, then the active frame, then
+the restart frame and verifies that the function payload retires only with the
+last shared fix root. The source inventories were tripped before accepting the
+one raw-to-root field conversion and removal of the now-unnecessary owned
+projection. This closes the captured-control/fixpoint graph; the decoded-
+request phase bundle remains assigned to I4F.1d.3e. Production remains
+`NoAuto`.
 
 #### Phase I4F.1e — Diagnostic, Event, and Delivery Roots
 

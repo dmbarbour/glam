@@ -441,7 +441,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         let order = self.allocate_control_order()?;
         let handle = PromisedValue::fixpoint(&self.eval_context, "reflection effect fixpoint")
             .map_err(|error| TaskHalt::new(error.as_ref()))?;
-        let marker = Value::Promised(handle.clone());
+        let marker = branch.root_value(Value::Promised(handle.clone()));
         let outer_control = std::mem::take(&mut branch.control);
         branch.state = state;
         branch.active_fixes.push(ActiveFix {
@@ -457,7 +457,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             scope_depth: root.scope_depth,
             order,
         });
-        Ok(MachineWork::apply(
+        Ok(MachineWork::apply_roots(
             root.function.clone(),
             vec![marker],
             branch,
@@ -1303,7 +1303,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             }
             Request::Fix(function) => {
                 let root = Arc::new(FixRoot {
-                    function: function.into_core(),
+                    function,
                     entry: branch,
                     scope_depth,
                 });
@@ -2482,6 +2482,21 @@ impl<S: TaskSpecialization> MachineWork<S> {
             .into_iter()
             .map(|argument| branch.root_value(argument))
             .collect();
+        Self::apply_roots(function, arguments, branch, scope_depth)
+    }
+
+    fn apply_roots(
+        function: RuntimeValueRoot,
+        arguments: Vec<RuntimeValueRoot>,
+        branch: Branch<S>,
+        scope_depth: usize,
+    ) -> Self {
+        debug_assert_eq!(function.runtime_id(), branch.effect.runtime_id());
+        debug_assert!(
+            arguments
+                .iter()
+                .all(|argument| argument.runtime_id() == branch.effect.runtime_id())
+        );
         Self::Apply {
             function,
             arguments,
@@ -2747,7 +2762,7 @@ struct RetryCheckpoint<S: TaskSpecialization> {
 
 #[derive(Clone)]
 struct FixRoot<S: TaskSpecialization> {
-    function: Value,
+    function: RuntimeValueRoot,
     entry: Branch<S>,
     scope_depth: usize,
 }
