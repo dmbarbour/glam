@@ -1089,6 +1089,24 @@ impl EvaluationTaskMachine for Complete {
     }
 }
 
+struct CompleteWithValue(Option<Value>);
+
+impl EvaluationTaskMachine for CompleteWithValue {
+    fn poll(
+        &mut self,
+        context: &crate::evaluation::EvaluationPollContext,
+        _step_budget: usize,
+    ) -> EvaluationMachinePoll {
+        EvaluationMachinePoll::Complete(
+            context.root_value(
+                self.0
+                    .take()
+                    .expect("the value-completion fixture must be polled only once"),
+            ),
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 enum ProbePollOutcome {
     Yielded,
@@ -1991,6 +2009,85 @@ fn terminal_waits_retain_runtime_root_provenance() {
         context.poll_reflection_task(&task),
         EvaluationWaitPoll::Complete(_)
     ));
+}
+
+#[test]
+fn terminal_task_wait_root_survives_collection_until_handle_drop() {
+    let fixture = SameRuntimeFixture::new();
+    let context = fixture.context();
+    let baseline = context
+        .values()
+        .collect_managed_for_test()
+        .expect("the isolated task fixture should collect before admission");
+    let expected = Value::binary_from_text("terminal task root");
+    let task = context
+        .schedule_task({
+            let expected = expected.clone();
+            move |_| Ok(Box::new(CompleteWithValue(Some(expected))))
+        })
+        .expect("the value-returning task should schedule");
+
+    assert_eq!(
+        context.pump_wait(task.wait(), 256),
+        EvaluationPumpOutcome::TargetReady
+    );
+    let live = context
+        .values()
+        .collect_managed_for_test()
+        .expect("the terminal wait should retain its managed result root");
+    assert_eq!(live.root_entries(), baseline.root_entries() + 1);
+    assert!(matches!(
+        context.poll_reflection_task(&task),
+        EvaluationWaitPoll::Complete(value) if value.clone_core_for_test() == expected
+    ));
+
+    drop(task);
+    let reclaimed = context
+        .values()
+        .collect_managed_for_test()
+        .expect("dropping the terminal task handle should release its wait root");
+    assert_eq!(reclaimed.root_entries(), baseline.root_entries());
+    assert_eq!(reclaimed.finalized_slots(), 1);
+}
+
+#[test]
+fn blocked_task_record_root_survives_collection_until_cancellation() {
+    let fixture = SameRuntimeFixture::new();
+    let context = fixture.context();
+    let baseline = context
+        .values()
+        .collect_managed_for_test()
+        .expect("the isolated blocked-task fixture should collect before admission");
+    let emission = Value::binary_from_text("blocked task root");
+    let failure = Arc::new(EvaluationFailure::emission(emission));
+    let task = context
+        .schedule_task({
+            let failure = failure.clone();
+            move |_| Ok(Box::new(BlockedWithFailure(failure)))
+        })
+        .expect("the blocked task should schedule");
+
+    assert_eq!(
+        context.pump_wait(task.wait(), 256),
+        EvaluationPumpOutcome::NoProgress
+    );
+    let live = context
+        .values()
+        .collect_managed_for_test()
+        .expect("the coordinator's blocked record should retain its failure root");
+    assert_eq!(live.root_entries(), baseline.root_entries() + 1);
+
+    assert_eq!(task.cancel(), EvaluationTaskCancellation::Requested);
+    let reclaimed = context
+        .values()
+        .collect_managed_for_test()
+        .expect("cancelling the blocked task should retire its blocked failure root");
+    assert_eq!(reclaimed.root_entries(), baseline.root_entries());
+    assert_eq!(reclaimed.finalized_slots(), 1);
+    assert_eq!(
+        context.poll_reflection_task(&task),
+        EvaluationWaitPoll::Cancelled
+    );
 }
 
 #[test]

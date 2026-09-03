@@ -177,6 +177,9 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.2d.2 | complete | atomic production managed-root representation switch |
 | I4F.2d | complete | atomic production managed-root switch |
 | I4F.2e.1a | complete | runtime value-domain anchors and cache owners |
+| I4F.2e.1b.1 | complete | coordinator task, wait, and blocked-record owners |
+| I4F.2e.1b.2 | pending | client-demand operation and result owners |
+| I4F.2e.1b.3 | pending | spark and pending session-activation owners |
 | I4F.2e.1b | pending | coordinator, demand, spark, and session owners |
 | I4F.2e.1c | pending | readiness, ledger, and report owners |
 | I4F.2e.1 | pending | cache, evaluation, coordinator, and readiness collection fixtures |
@@ -4025,8 +4028,13 @@ Partition the matrix along the I4F.1 ownership boundaries:
 1. **I4F.2e.1 — Runtime owners.** Cover these in three buildable checkpoints:
    **I4F.2e.1a** covers the production/public root, canonical bundle,
    runtime-wide extension and compiler caches, and external active-owner
-   registry; **I4F.2e.1b** covers coordinator task/wait/failure records, client
-   demands, sparks, and sessions; **I4F.2e.1c** covers failure ledgers plus
+   registry; **I4F.2e.1b.1** covers coordinator task, wait, and blocked-failure
+   records; **I4F.2e.1b.2** covers client-demand operation and result cells;
+   **I4F.2e.1b.3** covers queued/claimed sparks and pending session-owned
+   reflection activations; together they complete **I4F.2e.1b**. Session and
+   notification companions which carry only IDs, weak routes, or value-domain
+   factories add no independent managed root. **I4F.2e.1c** covers failure
+   ledgers plus
    quiescence, deadlock, unfinished-task, and settled readiness reports.
 2. **I4F.2e.2 — Reflection owners.** Cover store/snapshot/query state,
    lifecycle/search/protocol records, and parked machine frames.
@@ -4053,6 +4061,17 @@ retirement, managed-shell reclamation, and separation from collector
 finalization. Together with the I4F.2d weak-domain teardown fixtures, these
 cover all domain-anchor/cache rows assigned to I4F.2e.1a without creating an
 artificial cache-removal API.
+
+I4F.2e.1b.1 completed 2026-09-03. A terminal task now returns a managed binary
+through the production poll, coordinator-publication, and wait-token path;
+collection after machine retirement proves that the terminal wait retains the
+single shared root, while dropping the task handle permits its shell to be
+reclaimed. A separate task publishes a structured blocked failure containing a
+managed binary. Collection proves that the coordinator's parked task record
+retains that root, and explicit cancellation retires the record and permits
+reclamation while leaving the value-free cancelled wait observable. These
+fixtures cover task, wait, and blocked-failure records without involving the
+failure ledger assigned to I4F.2e.1c.
 
 Keep every fixture in a fresh isolated collector-ready runtime/heap. Do not
 collect a shared production graph containing I5-I10 unclassified families.
