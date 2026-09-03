@@ -188,11 +188,7 @@ fn is_inventoried_source(relative: &Path) -> bool {
     }
     !matches!(
         relative.to_str(),
-        Some(
-            "src/api/value/prototype.rs"
-                | "src/api/value/access_inventory.rs"
-                | "src/g_syntax/access_inventory.rs"
-        )
+        Some("src/api/value/access_inventory.rs" | "src/g_syntax/access_inventory.rs")
     )
 }
 

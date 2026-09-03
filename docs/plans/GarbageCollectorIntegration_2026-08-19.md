@@ -200,6 +200,10 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.2e.4d | complete | synchronized-net and hidden-owner closure |
 | I4F.2e.4 | complete | compiler, binary-host, net, and hidden-owner collection fixtures |
 | I4F.2e | complete | closed durable-owner collection matrix |
+| I4F.2f.1 | complete | superseded I2 root and I4A shell prototype deletion |
+| I4F.2f.2 | pending | intentional compatibility bridge reconciliation |
+| I4F.2f.3 | pending | forbidden-escape latch and I4 ledger reconciliation |
+| I4F.2f.4 | pending | mandatory post-I4 review and closeout |
 | I4F.2f | pending | compatibility deletion and I4 reconciliation |
 | I4F.2 | pending | public managed-root production switch |
 | I5 | pending | managed lazy/promise cells, external lifecycle, and cycle reclamation |
@@ -4306,17 +4310,33 @@ failures identify the owner row which retained too little or failed to release.
 
 #### Phase I4F.2f — Compatibility Deletion and I4 Reconciliation
 
-- Delete the obsolete I2 prototype, representative I4 shell scaffolding, old
+- **I4F.2f.1 — Retire superseded prototypes.** Delete the obsolete isolated I2
+  public-root prototype and representative I4A shell. Remove any witness,
+  constructor, or access-inventory surface used only by those predecessors.
+- **I4F.2f.2 — Reconcile intentional compatibility bridges.** Audit old
   non-registering root constructors, unrestricted `as_core`/`into_core`
-  methods, and compatibility traits/adapters which are no longer required by a
-  named I5-I8 transition.
-- Convert the compatibility access inventory into a forbidden-escape
-  inventory. Reconcile the ownership ledger, public-value inventory, family
-  records, and every I4 completion statement with the implemented production
-  types.
-- Add `public_value_switch_inventory_has_no_compatibility_escape` and rerun the
-  complete repository checks. Then perform the mandatory post-I4 review before
-  beginning I5.
+  methods, and compatibility traits/adapters. Delete what has no named owner;
+  retain only bridges explicitly required by an I5-I8 payload migration and
+  correct stale comments which claim I4F.2f removes them early.
+- **I4F.2f.3 — Establish the forbidden-escape latch.** Convert the
+  compatibility access inventory into a forbidden-escape inventory. Reconcile
+  the ownership ledger, public-value inventory, family records, and every I4
+  completion statement with the implemented production types. Add
+  `public_value_switch_inventory_has_no_compatibility_escape` and rerun the
+  complete repository checks.
+- **I4F.2f.4 — Close I4.** Perform the mandatory post-I4 review before
+  beginning I5. This checkpoint may merge with the repository-wide review
+  record when a separate mechanical closeout would add no evidence.
+
+I4F.2f.1 completed 2026-09-03. The production
+`PreparedRuntimeValueRoot`/`ManagedValueNode` representation now subsumes both
+test-only predecessors, so `src/api/value/prototype.rs` and
+`src/core/managed/value_shell.rs` were deleted together. The prototype-only
+weak domain witness and ownership probe were deleted with them, and the
+managed-entry and durable-owner inventories now scan only extant sources. The
+bounded construction gateway itself remains because focused I4 family and
+payload-adapter fixtures still use it; removing a live verification gateway
+would not be prototype cleanup.
 
 Production remains `NoAuto`; the switch and closed owner fixtures do not
 authorize whole-graph collection while I5-I10 families remain unclassified.

@@ -79,7 +79,6 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         ("src/api/assembly.rs", GatewayCounts::new(1, 0)),
         ("src/api/tests.rs", GatewayCounts::new(0, 2)),
         ("src/api/value.rs", GatewayCounts::new(2, 0)),
-        ("src/api/value/prototype.rs", GatewayCounts::new(0, 4)),
         ("src/compiler.rs", GatewayCounts::new(1, 0)),
         // I4.0's owner-local destruction fixtures exercise the admitted
         // construction gateway; production allocation still enters through
@@ -103,7 +102,6 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // while their local lifecycle, provenance, and nested-access fixtures
         // exercise construction and observation.
         ("src/core/managed/value_node.rs", GatewayCounts::new(8, 0)),
-        ("src/core/managed/value_shell.rs", GatewayCounts::new(0, 3)),
         // I4F.2b.2 briefly projects a rooted reflection effect through a
         // bounded access region before coordinator reservation.
         ("src/core.rs", GatewayCounts::new(3, 5)),

@@ -23,8 +23,6 @@ use crate::runtime::{EvaluationRuntimeId, RuntimeValueRoot};
 #[cfg(test)]
 mod access_inventory;
 #[cfg(test)]
-mod prototype;
-#[cfg(test)]
 mod scoped_construction_tests {
     use super::*;
     use crate::runtime::{RuntimeIds, allocate_evaluation_runtime_id};

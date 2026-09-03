@@ -723,9 +723,7 @@ fn is_production_source(relative: &Path) -> bool {
     !matches!(
         relative.to_str(),
         Some(
-            "src/api/value/prototype.rs"
-                | "src/core/managed/value_shell.rs"
-                | "src/core/managed/containment_inventory.rs"
+            "src/core/managed/containment_inventory.rs"
                 | "src/core/managed/durable_owner_inventory.rs"
                 | "src/api/value/access_inventory.rs"
                 | "src/evaluation/access_inventory.rs"

@@ -333,17 +333,6 @@ pub(crate) struct CoreValueAllocator<'scope, T: ManagedFamily> {
     allocator: Allocator<'scope, T>,
 }
 
-/// Non-owning provenance for an inline value in the isolated public-root
-/// prototype.
-///
-/// This is deliberately private verification scaffolding for I2's selected
-/// wrapper contract. I4F.2 enacts that contract in the production facade.
-/// Pointer identity is authoritative inside one process; the weak reference
-/// neither preserves nor revives the value domain.
-#[cfg(test)]
-#[derive(Clone)]
-pub(crate) struct CoreValueDomainWitness(Weak<RuntimeValueDomain>);
-
 impl CoreValueFactory {
     /// Runs one bounded managed-allocation region in this factory's value
     /// domain.
@@ -390,21 +379,6 @@ impl CoreValueFactory {
             runtime: self.runtime_id(),
             domain: Arc::downgrade(&self.domain),
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn managed_domain_witness(&self) -> CoreValueDomainWitness {
-        CoreValueDomainWitness(Arc::downgrade(&self.domain))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn owns_managed_domain_witness(&self, witness: &CoreValueDomainWitness) -> bool {
-        Weak::ptr_eq(&witness.0, &Arc::downgrade(&self.domain))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn owns_managed_root<T: ManagedFamily>(&self, root: &Root<T>) -> bool {
-        self.domain.heap.owns(root)
     }
 
     #[cfg(test)]
@@ -575,9 +549,6 @@ impl<T: ManagedFamily> CoreValueAllocator<'_, T> {
         self.allocator.alloc(value)
     }
 }
-
-#[cfg(test)]
-mod value_shell;
 
 #[cfg(test)]
 mod containment_inventory;

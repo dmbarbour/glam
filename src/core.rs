@@ -28,8 +28,6 @@ mod managed;
 mod runtime_cache;
 #[cfg(test)]
 pub(crate) use managed::{ClosedCompatibilityValue, ManagedDropRecord, ManagedFamily};
-#[cfg(test)]
-pub(crate) use managed::{CoreValueAllocationScope, CoreValueDomainWitness};
 pub(crate) use managed::{
     ExternalOwnerHandle, ExternalOwnerRegistry, OpaquePayloadFamily, OpaquePayloadRecord,
     PreparedRuntimeValueRoot, RuntimeValueAccess, RuntimeValueObserver,
