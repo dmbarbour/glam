@@ -372,12 +372,14 @@ impl<S: TaskSpecialization> EffectTask<S> {
     }
 
     pub(super) fn asserting_unit_result(mut self, diagnostic_context: Arc<str>) -> Self {
+        let values = self.eval_context.values().clone();
         let branch = self
             .execution
             .work
             .branch_mut()
             .expect("a fresh effect task must contain its initial branch");
-        let diagnostic_context = branch.root_value(Value::binary_from_text(&diagnostic_context));
+        let diagnostic_context =
+            branch.root_value(&values, Value::binary_from_text(&diagnostic_context));
         branch
             .control
             .sequence
@@ -442,7 +444,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         let order = self.allocate_control_order()?;
         let handle = PromisedValue::fixpoint(&self.eval_context, "reflection effect fixpoint")
             .map_err(|error| TaskHalt::new(error.as_ref()))?;
-        let marker = branch.root_value(Value::Promised(handle.clone()));
+        let marker = branch.root_value(self.eval_context.values(), Value::Promised(handle.clone()));
         let outer_control = std::mem::take(&mut branch.control);
         branch.state = state;
         branch.active_fixes.push(ActiveFix {
@@ -715,12 +717,12 @@ impl<S: TaskSpecialization> EffectTask<S> {
     ) -> Result<PreparedDrive<S::Request>, TaskHalt> {
         if !self.fusion_enabled() {
             return self
-                .effect_request_in(context, branch.effect())
+                .effect_request_in(context, branch.effect_in(context))
                 .map(|request| PreparedDrive::Request { request });
         }
 
         for _ in 0..EFFECT_FUSION_BUDGET {
-            let request = self.effect_request_values_in(context, branch.effect())?;
+            let request = self.effect_request_values_in(context, branch.effect_in(context))?;
             match self.classify_fused_request(branch, request) {
                 FusedRequestAction::Continue => continue,
                 FusedRequestAction::Deliver(value) => {
@@ -734,8 +736,8 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     return self.finish_fused_delivery_in(context, branch, value);
                 }
                 FusedRequestAction::Set(path, value) => {
-                    let state = set_state_path_in(context, branch.state(), &path, value)?;
-                    branch.set_state(state);
+                    let state = set_state_path_in(context, branch.state_in(context), &path, value)?;
+                    branch.set_state(self.eval_context.values(), state);
                     return self.finish_fused_delivery_in(
                         context,
                         branch,
@@ -759,11 +761,10 @@ impl<S: TaskSpecialization> EffectTask<S> {
         match request {
             Request::Seq(operation, continuation) => {
                 self.record_fused_request();
-                branch
-                    .control
-                    .sequence
-                    .push(Continuation::Glam(branch.root_value(continuation)));
-                branch.set_effect(operation);
+                branch.control.sequence.push(Continuation::Glam(
+                    branch.root_value(self.eval_context.values(), continuation),
+                ));
+                branch.set_effect(self.eval_context.values(), operation);
                 FusedRequestAction::Continue
             }
             Request::Return(value) => FusedRequestAction::Deliver(value),
@@ -801,7 +802,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         branch: &mut Branch<S>,
         effect: Value,
     ) -> PreparedDrive<S::Request> {
-        branch.set_effect(effect);
+        branch.set_effect(self.eval_context.values(), effect);
         PreparedDrive::Continue
     }
 
@@ -931,7 +932,12 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     set_state_path_in(evaluator, state, &path, value)
                         .map(|state| evaluator.root_value(state))
                 })?;
-                MachineWork::deliver(self.eval_context.values().unit(), branch, scope_depth)
+                MachineWork::deliver(
+                    self.eval_context.values(),
+                    self.eval_context.values().unit(),
+                    branch,
+                    scope_depth,
+                )
             }
             Request::HeapGet(path) => {
                 let path = context.evaluate(&self.eval_context, |evaluator| {
@@ -955,7 +961,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     values.clone_core(snapshot.store().root())?
                 };
                 let value = lazy_value_path(&self.eval_context, heap, &path);
-                MachineWork::deliver(value, branch, scope_depth)
+                MachineWork::deliver(self.eval_context.values(), value, branch, scope_depth)
             }
             Request::HeapSet(path, value) => {
                 let path = context.evaluate(&self.eval_context, |evaluator| {
@@ -966,7 +972,12 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     transaction
                         .store
                         .write(path, PublicValue::from_runtime_root(value));
-                    MachineWork::deliver(self.eval_context.values().unit(), branch, scope_depth)
+                    MachineWork::deliver(
+                        self.eval_context.values(),
+                        self.eval_context.values().unit(),
+                        branch,
+                        scope_depth,
+                    )
                 } else {
                     let snapshot = self.host.snapshot();
                     let mut store = StoreJournal::new(snapshot.store().clone());
@@ -977,6 +988,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         CommitResult::Committed => {
                             branch.retry = None;
                             MachineWork::deliver(
+                                self.eval_context.values(),
                                 self.eval_context.values().unit(),
                                 branch,
                                 scope_depth,
@@ -1005,7 +1017,12 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     transaction
                         .store
                         .rewrite(path, PublicValue::from_runtime_root(updater));
-                    MachineWork::deliver(self.eval_context.values().unit(), branch, scope_depth)
+                    MachineWork::deliver(
+                        self.eval_context.values(),
+                        self.eval_context.values().unit(),
+                        branch,
+                        scope_depth,
+                    )
                 } else {
                     let snapshot = self.host.snapshot();
                     let mut store = StoreJournal::new(snapshot.store().clone());
@@ -1016,6 +1033,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         CommitResult::Committed => {
                             branch.retry = None;
                             MachineWork::deliver(
+                                self.eval_context.values(),
                                 self.eval_context.values().unit(),
                                 branch,
                                 scope_depth,
@@ -1063,7 +1081,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     }
                     None => missing_volume_value(&self.eval_context, volume),
                 };
-                MachineWork::deliver(value, branch, scope_depth)
+                MachineWork::deliver(self.eval_context.values(), value, branch, scope_depth)
             }
             Request::VolumeSet(volume, path, value) => {
                 let path = context.evaluate(&self.eval_context, |evaluator| {
@@ -1076,7 +1094,12 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         path,
                         PublicValue::from_runtime_root(value),
                     );
-                    MachineWork::deliver(self.eval_context.values().unit(), branch, scope_depth)
+                    MachineWork::deliver(
+                        self.eval_context.values(),
+                        self.eval_context.values().unit(),
+                        branch,
+                        scope_depth,
+                    )
                 } else {
                     let snapshot = self.host.snapshot();
                     let mut store = StoreJournal::new(snapshot.store().clone());
@@ -1087,6 +1110,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         CommitResult::Committed => {
                             branch.retry = None;
                             MachineWork::deliver(
+                                self.eval_context.values(),
                                 self.eval_context.values().unit(),
                                 branch,
                                 scope_depth,
@@ -1117,7 +1141,12 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         path,
                         PublicValue::from_runtime_root(updater),
                     );
-                    MachineWork::deliver(self.eval_context.values().unit(), branch, scope_depth)
+                    MachineWork::deliver(
+                        self.eval_context.values(),
+                        self.eval_context.values().unit(),
+                        branch,
+                        scope_depth,
+                    )
                 } else {
                     let snapshot = self.host.snapshot();
                     let mut store = StoreJournal::new(snapshot.store().clone());
@@ -1128,6 +1157,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         CommitResult::Committed => {
                             branch.retry = None;
                             MachineWork::deliver(
+                                self.eval_context.values(),
                                 self.eval_context.values().unit(),
                                 branch,
                                 scope_depth,
@@ -1164,20 +1194,20 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 })?;
                 frames.push(ResetFrame {
                     key,
-                    continuation: branch.root_value(continuation),
+                    continuation: branch.root_value(self.eval_context.values(), continuation),
                     scope_depth,
                     order,
                 });
                 let state = context.evaluate(&self.eval_context, |evaluator| {
                     let state = evaluator.project_root(&branch.state);
                     Ok::<_, TaskHalt>(replace_reset_frames(
-                        &self.eval_context,
+                        evaluator,
                         state,
                         &self.tags.continuation_state,
                         &frames,
                     ))
                 })?;
-                branch.set_state(state);
+                branch.set_state(self.eval_context.values(), state);
                 branch.set_effect_root(operation);
                 MachineWork::Drive {
                     branch,
@@ -1213,20 +1243,20 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 let state = context.evaluate(&self.eval_context, |evaluator| {
                     let state = evaluator.project_root(&branch.state);
                     Ok::<_, TaskHalt>(replace_reset_frames(
-                        &self.eval_context,
+                        evaluator,
                         state,
                         &self.tags.continuation_state,
                         &frames,
                     ))
                 })?;
-                branch.set_state(state);
+                branch.set_state(self.eval_context.values(), state);
                 branch
                     .control
                     .sequence
                     .push(Continuation::Glam(target.continuation));
                 MachineWork::apply_roots(
                     function,
-                    vec![branch.root_value(continuation)],
+                    vec![branch.root_value(self.eval_context.values(), continuation)],
                     branch,
                     scope_depth,
                 )
@@ -1311,13 +1341,21 @@ impl<S: TaskSpecialization> EffectTask<S> {
                                 outcome: branch.into_failure(),
                                 scope_depth,
                             },
-                            [value] => MachineWork::deliver(value.clone(), branch, scope_depth),
+                            [value] => MachineWork::deliver(
+                                self.eval_context.values(),
+                                value.clone(),
+                                branch,
+                                scope_depth,
+                            ),
                             _ => MachineWork::Drive {
-                                branch: branch.with_effect(alternative_returns(
+                                branch: branch.with_effect(
                                     self.eval_context.values(),
-                                    &self.tags,
-                                    values,
-                                )),
+                                    alternative_returns(
+                                        self.eval_context.values(),
+                                        &self.tags,
+                                        values,
+                                    ),
+                                ),
                                 scope_depth,
                             },
                         }
@@ -1332,9 +1370,12 @@ impl<S: TaskSpecialization> EffectTask<S> {
                             scope_depth,
                         }
                     }
-                    RequestResult::ReturnUnit => {
-                        MachineWork::deliver(self.eval_context.values().unit(), branch, scope_depth)
-                    }
+                    RequestResult::ReturnUnit => MachineWork::deliver(
+                        self.eval_context.values(),
+                        self.eval_context.values().unit(),
+                        branch,
+                        scope_depth,
+                    ),
                     RequestResult::Fail => MachineWork::Outcome {
                         outcome: branch.into_failure(),
                         scope_depth,
@@ -1482,13 +1523,13 @@ impl<S: TaskSpecialization> EffectTask<S> {
             let state = context.evaluate(&self.eval_context, |evaluator| {
                 let state = evaluator.project_root(&branch.state);
                 Ok::<_, TaskHalt>(replace_reset_frames(
-                    &self.eval_context,
+                    evaluator,
                     state,
                     &self.tags.continuation_state,
                     &resets,
                 ))
             })?;
-            branch.set_state(state);
+            branch.set_state(self.eval_context.values(), state);
             return Ok(MachineStep::Continue(MachineWork::apply_roots(
                 frame.continuation,
                 vec![value],
@@ -2164,7 +2205,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             .ok_or_else(|| TaskHalt::new("reflection effect has no `eff` member"))?;
         let function = evaluate_in(context, function)
             .map_err(|halt| halt.with_core_context(effect_dispatch_context("function")))?;
-        let request = apply_in(context, function, vec![self.api.as_core().clone()])
+        let request = apply_in(context, function, vec![context.project_root(&self.api)])
             .map_err(|halt| halt.with_core_context(effect_dispatch_context("application")))?;
         let request = evaluate_in(context, request)
             .map_err(|halt| halt.with_core_context(effect_dispatch_context("request")))?;
@@ -2218,13 +2259,14 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for ContextualValueEffectTask<
         step_budget: usize,
     ) -> EvaluationMachinePoll {
         match poll_value_effect_task(&mut self.task, context, step_budget) {
-            EvaluationMachinePoll::Failed(error) => EvaluationMachinePoll::Failed(
-                context.root_failure(Arc::new(
+            EvaluationMachinePoll::Failed(error) => {
+                let failure = context.evaluate(&self.task.eval_context, |evaluator| {
                     error
                         .as_failure()
-                        .with_context(self.context.as_core().clone()),
-                )),
-            ),
+                        .with_context(evaluator.project_root(&self.context))
+                });
+                EvaluationMachinePoll::Failed(context.root_failure(Arc::new(failure)))
+            }
             poll => poll,
         }
     }
@@ -2281,17 +2323,25 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for UnitEffectTask<S> {
                 intent: exit.intent,
                 observed_epoch: exit.observed_generation.map(|_| observed_epoch),
             }),
-            EffectTaskPoll::Complete(value)
-                if value.as_core() == &self.0.eval_context.values().unit() =>
-            {
-                EvaluationMachinePoll::Complete(value.into_runtime_root())
+            EffectTaskPoll::Complete(value) => {
+                let value = value.into_runtime_root();
+                let (is_unit, kind) = context.evaluate(&self.0.eval_context, |evaluator| {
+                    let value = evaluator.project_root(&value);
+                    (
+                        value == self.0.eval_context.values().unit(),
+                        value.diagnostic_kind_name(),
+                    )
+                });
+                if is_unit {
+                    EvaluationMachinePoll::Complete(value)
+                } else {
+                    EvaluationMachinePoll::Failed(context.root_failure(Arc::new(
+                        EvaluationFailure::message(format!(
+                            "effect task returned {kind}; expected unit"
+                        )),
+                    )))
+                }
             }
-            EffectTaskPoll::Complete(value) => EvaluationMachinePoll::Failed(context.root_failure(
-                Arc::new(EvaluationFailure::message(format!(
-                    "effect task returned {}; expected unit",
-                    value.as_core().diagnostic_kind_name()
-                ))),
-            )),
             EffectTaskPoll::Failed(error) => EvaluationMachinePoll::Failed(
                 error.into_failure_root(self.0.eval_context.values().runtime_id()),
             ),
@@ -2328,9 +2378,9 @@ impl<S: TaskSpecialization> Branch<S> {
         }
     }
 
-    fn with_effect(&self, effect: Value) -> Self {
+    fn with_effect(&self, values: &CoreValueFactory, effect: Value) -> Self {
         let mut branch = self.clone();
-        branch.set_effect(effect);
+        branch.set_effect(values, effect);
         branch
     }
 
@@ -2340,12 +2390,13 @@ impl<S: TaskSpecialization> Branch<S> {
         branch
     }
 
-    fn effect(&self) -> Value {
-        self.effect.as_core().clone()
+    fn effect_in(&self, context: &EvaluatorStepContext<'_>) -> Value {
+        context.project_root(&self.effect)
     }
 
-    fn set_effect(&mut self, effect: Value) {
-        self.effect = RuntimeValueRoot::from_runtime(self.effect.runtime_id(), effect);
+    fn set_effect(&mut self, values: &CoreValueFactory, effect: Value) {
+        debug_assert_eq!(values.runtime_id(), self.effect.runtime_id());
+        self.effect = RuntimeValueRoot::new(values, effect);
     }
 
     fn set_effect_root(&mut self, effect: RuntimeValueRoot) {
@@ -2353,16 +2404,18 @@ impl<S: TaskSpecialization> Branch<S> {
         self.effect = effect;
     }
 
-    fn state(&self) -> Value {
-        self.state.as_core().clone()
+    fn state_in(&self, context: &EvaluatorStepContext<'_>) -> Value {
+        context.project_root(&self.state)
     }
 
-    fn set_state(&mut self, state: Value) {
-        self.state = RuntimeValueRoot::from_runtime(self.state.runtime_id(), state);
+    fn set_state(&mut self, values: &CoreValueFactory, state: Value) {
+        debug_assert_eq!(values.runtime_id(), self.state.runtime_id());
+        self.state = RuntimeValueRoot::new(values, state);
     }
 
-    fn root_value(&self, value: Value) -> RuntimeValueRoot {
-        RuntimeValueRoot::from_runtime(self.effect.runtime_id(), value)
+    fn root_value(&self, values: &CoreValueFactory, value: Value) -> RuntimeValueRoot {
+        debug_assert_eq!(values.runtime_id(), self.effect.runtime_id());
+        RuntimeValueRoot::new(values, value)
     }
 
     fn retry_candidate(&self) -> Option<Box<Self>> {
@@ -2434,8 +2487,13 @@ enum MachineWork<S: TaskSpecialization> {
 }
 
 impl<S: TaskSpecialization> MachineWork<S> {
-    fn deliver(value: Value, branch: Branch<S>, scope_depth: usize) -> Self {
-        let value = branch.root_value(value);
+    fn deliver(
+        values: &CoreValueFactory,
+        value: Value,
+        branch: Branch<S>,
+        scope_depth: usize,
+    ) -> Self {
+        let value = branch.root_value(values, value);
         Self::Deliver {
             value,
             branch,
@@ -2454,15 +2512,16 @@ impl<S: TaskSpecialization> MachineWork<S> {
 
     #[cfg(test)]
     fn apply(
+        values: &CoreValueFactory,
         function: Value,
         arguments: Vec<Value>,
         branch: Branch<S>,
         scope_depth: usize,
     ) -> Self {
-        let function = branch.root_value(function);
+        let function = branch.root_value(values, function);
         let arguments = arguments
             .into_iter()
-            .map(|argument| branch.root_value(argument))
+            .map(|argument| branch.root_value(values, argument))
             .collect();
         Self::apply_roots(function, arguments, branch, scope_depth)
     }
@@ -2526,8 +2585,8 @@ enum BranchOutcome<S: TaskSpecialization> {
 
 impl<S: TaskSpecialization> BranchOutcome<S> {
     #[cfg(test)]
-    fn complete(value: Value, branch: Branch<S>) -> Self {
-        let value = branch.root_value(value);
+    fn complete(values: &CoreValueFactory, value: Value, branch: Branch<S>) -> Self {
+        let value = branch.root_value(values, value);
         Self::Complete(value, branch)
     }
 
@@ -3100,20 +3159,17 @@ pub(crate) fn volume_effects(values: &CoreValueFactory, volume: VolumeId) -> Pub
             ),
         )
     };
-    PublicValue::from_core(
-        values,
-        Value::Dict(
-            [
-                entry("get", VolumeOperation::Get, 1),
-                entry("set", VolumeOperation::Set, 2),
-                entry("rewrite", VolumeOperation::Rewrite, 2),
-            ]
-            .into_iter()
-            .fold(Dict::new_sync(), |dict, (key, value)| {
-                dict.insert(key, value)
-            }),
-        ),
-    )
+    crate::api::Values::from_core_factory(values.clone()).wrap(Value::Dict(
+        [
+            entry("get", VolumeOperation::Get, 1),
+            entry("set", VolumeOperation::Set, 2),
+            entry("rewrite", VolumeOperation::Rewrite, 2),
+        ]
+        .into_iter()
+        .fold(Dict::new_sync(), |dict, (key, value)| {
+            dict.insert(key, value)
+        }),
+    ))
 }
 
 fn request_id_in(
@@ -3341,7 +3397,7 @@ fn fuse_glam_delivery_in<S: TaskSpecialization>(
     let Some(Continuation::Glam(function)) = branch.control.sequence.last().cloned() else {
         return Ok(None);
     };
-    let function = evaluate_in(context, function.as_core().clone())?;
+    let function = evaluate_in(context, context.project_root(&function))?;
     branch.control.sequence.pop();
     apply_in(context, function, vec![value]).map(Some)
 }
@@ -3544,14 +3600,14 @@ fn reset_frames_from_value_in(
         .collect()
 }
 
-fn reset_frames_value(values: &CoreValueFactory, frames: &[ResetFrame]) -> Value {
+fn reset_frames_value(context: &EvaluatorStepContext<'_>, frames: &[ResetFrame]) -> Value {
     Value::List(List::from_values(
         frames
             .iter()
             .map(|frame| {
                 Value::List(List::from_values(vec![
-                    frame.key.to_value_with(values),
-                    frame.continuation.as_core().clone(),
+                    frame.key.to_value_with(context.context().values()),
+                    context.project_root(&frame.continuation),
                     Value::Number(Number::from_usize(frame.scope_depth)),
                     Value::Number(Number::from_usize(frame.order)),
                 ]))
@@ -3570,25 +3626,25 @@ fn with_reset_frames_in(
         context,
         state,
         continuation_state,
-        reset_frames_value(context.context().values(), frames),
+        reset_frames_value(context, frames),
     )
 }
 
 fn replace_reset_frames(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     state: Value,
     continuation_state: &Key,
     frames: &[ResetFrame],
 ) -> Value {
     let Value::Dict(state) = state else {
         return Value::error(
-            context.values(),
+            context.context().values(),
             "reflection user state must remain a dictionary",
         );
     };
     Value::Dict(state.insert(
         continuation_state.clone(),
-        reset_frames_value(context.values(), frames),
+        reset_frames_value(context, frames),
     ))
 }
 

@@ -1390,14 +1390,14 @@ fn execution_work_and_cut_payloads_retain_roots_until_retirement() {
     let branch = || Branch::<TestEffects>::new(&core, core.unit(), core.unit());
 
     let (value, retained) = retained_machine_value(&domain);
-    let work = MachineWork::deliver(value, branch(), 0);
+    let work = MachineWork::deliver(&core, value, branch(), 0);
     assert!(retained.upgrade().is_some());
     drop(work);
     assert!(retained.upgrade().is_none());
 
     let (function, retained_function) = retained_machine_value(&domain);
     let (argument, retained_argument) = retained_machine_value(&domain);
-    let work = MachineWork::apply(function, vec![argument], branch(), 0);
+    let work = MachineWork::apply(&core, function, vec![argument], branch(), 0);
     assert!(retained_function.upgrade().is_some());
     assert!(retained_argument.upgrade().is_some());
     drop(work);
@@ -1405,7 +1405,7 @@ fn execution_work_and_cut_payloads_retain_roots_until_retirement() {
     assert!(retained_argument.upgrade().is_none());
 
     let (value, retained) = retained_machine_value(&domain);
-    let outcome = BranchOutcome::complete(value, branch());
+    let outcome = BranchOutcome::complete(&core, value, branch());
     assert!(retained.upgrade().is_some());
     drop(outcome);
     assert!(retained.upgrade().is_none());
@@ -2171,12 +2171,17 @@ fn scheduled_effect_wrapper_rejects_an_unrelated_poll_context() {
 #[test]
 fn completed_effect_root_is_not_recreated_after_scope() {
     let source = include_str!("../machine.rs");
-    assert_eq!(
-        source
-            .matches("EvaluationMachinePoll::Complete(value.into_runtime_root())")
-            .count(),
-        2,
-        "value-returning and unit-returning scheduled effects must preserve their public roots"
+    assert!(
+        source.contains("EvaluationMachinePoll::Complete(value.into_runtime_root())"),
+        "value-returning scheduled effects must preserve their public roots"
+    );
+    assert!(
+        source.contains("let value = value.into_runtime_root();"),
+        "unit-returning scheduled effects must retain the public root before inspecting it"
+    );
+    assert!(
+        source.contains("EvaluationMachinePoll::Complete(value)"),
+        "unit-returning scheduled effects must publish the retained root"
     );
     assert!(
         !source.contains("root_value(value.into_core())"),

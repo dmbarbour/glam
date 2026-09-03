@@ -150,8 +150,8 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.2a.3b | complete | reflection request access retirement |
 | I4F.2a.3c.1 | complete | reflection branch and request-step access retirement |
 | I4F.2a.3c.2 | complete | reflection transition and terminal access retirement |
-| I4F.2a.3c.3 | pending | reflection wrapper, helper, and fixture access closure |
-| I4F.2a.3c | pending | reflection machine access retirement |
+| I4F.2a.3c.3 | complete | reflection wrapper, helper, and fixture access closure |
+| I4F.2a.3c | complete | reflection machine access retirement |
 | I4F.2a.3d | pending | compiler and module-lowering access retirement |
 | I4F.2a.3e | pending | compiler-cache access retirement |
 | I4F.2a.3f | pending | macro effect and runner access retirement |
@@ -3543,6 +3543,20 @@ transfer from the reflection machine and retired the isolated-search unit
 constructor compatibility path. The remaining eight borrowed projections and
 one public constructor are local wrapper/helper or fixture work assigned to
 I4F.2a.3c.3.
+
+I4F.2a.3c.3 and I4F.2a.3c completed 2026-09-03. Effect dispatch now projects
+its rooted API through the active evaluator step; contextual and unit task
+wrappers inspect completions only through the matching poll authority while
+publishing the original root unchanged. Branch helpers now require either an
+evaluator step for projection or the matching core factory for root creation,
+so they cannot infer authority from a handle's representation. Reset-frame
+encoding follows the same scoped rule, and volume-effect construction uses
+the internal `Values` service. The root-preservation source fixture was
+updated to latch the consolidated unit-result path. The reflection-machine
+inventory is now zero for direct borrowed projection, ownership transfer,
+public construction, and provenance-only root construction; its seven explicit
+`RuntimeValueRoot::new` sites are the intended private root-publication
+gateway for this transitional representation.
 
 I4F.2a.1a completed 2026-09-03. Production `Value` and `EvaluatedValue` no
 longer implement semantic equality, and `Value::runtime_id` is no longer a
