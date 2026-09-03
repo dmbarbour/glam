@@ -166,3 +166,21 @@ pub(crate) struct LoggerRun {
     pub(crate) diagnostics: DiagnosticBus,
     pub(crate) supervisor: Arc<LoggerSupervisor>,
 }
+
+#[cfg(test)]
+mod owner_tests {
+    use super::*;
+
+    fn assert_logger_run_owner_inventory(run: &LoggerRun) {
+        let LoggerRun {
+            thread: _,
+            diagnostics: _,
+            supervisor: _,
+        } = run;
+    }
+
+    #[test]
+    fn logger_run_owner_inventory_is_compile_exhaustive() {
+        let _: fn(&LoggerRun) = assert_logger_run_owner_inventory;
+    }
+}

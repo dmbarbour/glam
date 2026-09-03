@@ -1039,6 +1039,11 @@ impl EvaluationRuntime {
     }
 
     #[cfg(test)]
+    pub(crate) fn observation_wait_count(&self) -> u64 {
+        self.state.shared_resources.observations.wait_count()
+    }
+
+    #[cfg(test)]
     pub(in crate::api) fn reflection_snapshot(&self) -> (u64, crate::reflection::StoreSnapshot) {
         self.state.shared_resources.reflection_snapshot()
     }

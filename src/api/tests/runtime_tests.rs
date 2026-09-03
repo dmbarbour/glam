@@ -612,11 +612,16 @@ fn runtime_input_admission_wakes_after_releasing_mutation_admission() {
         .input_endpoint(integer_converter(&runtime))
         .expect("endpoint should register");
     let (generation, _, _) = runtime.transaction_snapshot();
+    let prior_waits = runtime.observation_wait_count();
     let waiting_runtime = runtime.clone();
     let waiter = std::thread::spawn(move || {
         assert!(waiting_runtime.wait_for_change(generation));
         assert!(waiting_runtime.exclusive_admission_available());
     });
+
+    while runtime.observation_wait_count() == prior_waits {
+        std::thread::yield_now();
+    }
 
     endpoint.sender().admit(1).expect("input should admit");
     waiter.join().expect("broad observer should wake cleanly");

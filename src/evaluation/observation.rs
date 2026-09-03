@@ -8,6 +8,8 @@
 use std::num::NonZeroU64;
 #[cfg(test)]
 use std::sync::MutexGuard;
+#[cfg(test)]
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 /// Runtime-wide semantic-state revision observed by retryable evaluation.
@@ -43,6 +45,8 @@ impl RuntimeObservationEpoch {
 pub(crate) struct RuntimeObservationState {
     epoch: Mutex<RuntimeObservationEpoch>,
     changed: Condvar,
+    #[cfg(test)]
+    waits: AtomicU64,
 }
 
 impl RuntimeObservationState {
@@ -50,6 +54,8 @@ impl RuntimeObservationState {
         Arc::new(Self {
             epoch: Mutex::new(RuntimeObservationEpoch::from_raw(1)),
             changed: Condvar::new(),
+            #[cfg(test)]
+            waits: AtomicU64::new(0),
         })
     }
 
@@ -84,11 +90,18 @@ impl RuntimeObservationState {
             .lock()
             .expect("runtime observation mutex should not be poisoned");
         while *epoch == observed {
+            #[cfg(test)]
+            self.waits.fetch_add(1, Ordering::Release);
             epoch = self
                 .changed
                 .wait(epoch)
                 .expect("runtime observation mutex should not be poisoned");
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn wait_count(&self) -> u64 {
+        self.waits.load(Ordering::Acquire)
     }
 
     #[cfg(test)]

@@ -130,9 +130,9 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.1f.2 | complete | macro, parser, and source-rewrite roots |
 | I4F.1f.3a | complete | command-line search, completion, and token roots |
 | I4F.1f.3b | complete | prepared and loaded configuration roots |
-| I4F.1f.3c | pending | logger supervision, rendering, and callback roots |
-| I4F.1f.3 | pending | binary configuration and logger roots |
-| I4F.1f | pending | assembly, compiler, macro, configuration, and logger root surfaces |
+| I4F.1f.3c | complete | logger supervision, rendering, and callback roots |
+| I4F.1f.3 | complete | binary configuration and logger roots |
+| I4F.1f | complete | assembly, compiler, macro, configuration, and logger root surfaces |
 | I4F.1g | pending | synchronized-net, hidden-owner, and final inventory closure |
 | I4F.1 | pending | durable root-surface conversion gate |
 | I4F.2a.1 | pending | private production managed-node and family contract |
@@ -3288,6 +3288,37 @@ survive construction-scope exit and retire exactly with that owner. Existing
 configured batch, environment resolve/fail, and assembly execution tests remain
 the behavioral coverage. The configuration durable-owner row closes without a
 production representation change. Production remains `NoAuto`.
+
+I4F.1f.3c completed 2026-09-03 as a closure audit of logger and rendering
+ownership, completing I4F.1f. Logger task hosts retain their reflection
+environment through the public root facade; event journals, diagnostic
+transports, output deliveries, failure reports, and effect lifecycles delegate
+semantic retention to their already-inventoried runtime/reflection owners.
+`DefaultLogger` retains its formatter as a public root alongside its assembler.
+Supervisor callbacks receive rooted diagnostics or decoded bytes only after
+runtime locks and managed-access regions have ended. All bus/ingress and
+endpoint backedges remain weak, preserving the established acyclic teardown.
+
+Compile-exhaustive latches cover the logger task host/journal, log host,
+supervisor state, report selection, installation, `LoggerRun`, and default
+renderer. Deterministic effect-token fixtures verify exact retirement of the
+logger reflection environment and formatter. Existing forced-order logger
+close, rearm, output isolation, fallback transfer/failure, settlement,
+callback-boundary, rendering, and teardown fixtures remain the behavioral
+matrix. The logger durable-owner row closes without a production
+representation change. With command-line and configuration owners already
+closed, I4F.1f is complete.
+
+The full checkpoint suite also exposed a pre-existing test-ordering gap in
+`runtime_input_admission_wakes_after_releasing_mutation_admission`. An observer
+which begins late may see the already-advanced authoritative epoch before the
+publisher releases mutation admission; that is a valid recheck, not the
+parked-wakeup ordering the test intended to prove. Test-only observation-wait
+instrumentation now latches entry into the condition-variable wait while its
+epoch mutex is held. The fixture admits input only after that latch, forcing
+the notification path and proving it runs after admission release without
+depending on scheduler luck. No runtime semantics changed. Production remains
+`NoAuto`.
 
 #### Phase I4F.1g — Net, Hidden-Owner, and Gate Closure
 

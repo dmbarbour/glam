@@ -415,10 +415,10 @@ mod tests {
     use glam::reflection::ReflectionServices;
     use glam::{
         Assembler, Diagnostic, DiagnosticBus, DiagnosticEvent, DiagnosticSubscriber,
-        RuntimeEventJournal, Severity,
+        EffectTokenDomain, EvaluationRuntime, RuntimeEventJournal, Severity,
     };
 
-    use super::LoggerTaskHost;
+    use super::{LoggerTaskHost, MainJournal};
     use crate::configuration::logger::LogHost;
 
     struct Capture(Arc<Mutex<Vec<DiagnosticEvent>>>);
@@ -430,6 +430,54 @@ mod tests {
                 .expect("output capture should not be poisoned")
                 .push(event);
         }
+    }
+
+    fn assert_logger_task_owner_inventory(host: &LoggerTaskHost, journal: &MainJournal) {
+        let LoggerTaskHost {
+            resources: _,
+            _diagnostic_ingress: _,
+            diagnostic_reader: _,
+            diagnostics: _,
+            reflection_environment,
+            diagnostic_writer: _,
+            diagnostic_delivery: _,
+            stderr_writer: _,
+            stderr_delivery: _,
+        } = host;
+        let _: &glam::Value = reflection_environment;
+        let MainJournal {
+            reflection: _,
+            events: _,
+        } = journal;
+    }
+
+    #[test]
+    fn logger_task_owner_inventory_is_compile_exhaustive() {
+        let _: fn(&LoggerTaskHost, &MainJournal) = assert_logger_task_owner_inventory;
+    }
+
+    #[test]
+    fn logger_task_host_retires_its_reflection_environment_root_exactly() {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let input_diagnostics = DiagnosticBus::for_runtime(&runtime);
+        let input = Arc::new(LogHost::with_runtime(runtime.clone(), &input_diagnostics));
+        let assembler = Assembler::builder()
+            .evaluation_runtime(runtime.clone())
+            .build()
+            .expect("logger assembler should build");
+        let domain = EffectTokenDomain::new(&runtime.values());
+        let payload = Arc::new(());
+        let retained = Arc::downgrade(&payload);
+        let host = LoggerTaskHost::new(
+            input,
+            DiagnosticBus::for_runtime(&runtime),
+            domain.issue(payload),
+            assembler,
+        );
+
+        assert!(retained.upgrade().is_some());
+        drop(host);
+        assert!(retained.upgrade().is_none());
     }
 
     #[test]

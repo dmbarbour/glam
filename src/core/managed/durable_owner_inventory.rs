@@ -460,7 +460,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         RootSurface,
         "I4F.2d.4"
     ),
-    open_durable!(
+    closed_durable!(
         "src/bin/glam/configuration/logger/supervisor.rs",
         "LogHost / LoggerSupervisor / LoggerInstallation / SettledReportSelection",
         "logger task, diagnostic, report, and callback-owned public values",
@@ -469,7 +469,6 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "logger completion, fallback, or supervisor drop",
         PublicRoot,
         RootSurface,
-        "I4F.1f.3",
         "I4F.2d.4"
     ),
     open_durable!(

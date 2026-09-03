@@ -622,6 +622,42 @@ impl TerminalColor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use glam::{EffectTokenDomain, EvaluationRuntime};
+
+    fn assert_default_logger_owner_inventory(logger: &DefaultLogger) {
+        let DefaultLogger {
+            evaluator: _,
+            formatter,
+            working_directory: _,
+        } = logger;
+        let _: &Value = formatter;
+    }
+
+    #[test]
+    fn default_logger_owner_inventory_is_compile_exhaustive() {
+        let _: fn(&DefaultLogger) = assert_default_logger_owner_inventory;
+    }
+
+    #[test]
+    fn default_logger_retires_its_formatter_root_exactly() {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let assembler = Assembler::builder()
+            .evaluation_runtime(runtime.clone())
+            .build()
+            .expect("logger assembler should build");
+        let domain = EffectTokenDomain::new(&runtime.values());
+        let payload = std::sync::Arc::new(());
+        let retained = std::sync::Arc::downgrade(&payload);
+        let logger = DefaultLogger {
+            evaluator: assembler,
+            formatter: domain.issue(payload),
+            working_directory: PathBuf::from("/work"),
+        };
+
+        assert!(retained.upgrade().is_some());
+        drop(logger);
+        assert!(retained.upgrade().is_none());
+    }
 
     struct CollectingWriter {
         heap: glam_gc::Heap,

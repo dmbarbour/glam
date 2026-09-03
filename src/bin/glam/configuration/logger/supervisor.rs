@@ -475,8 +475,57 @@ mod tests {
 
     use glam::{Diagnostic, DiagnosticBus, Severity};
 
-    use super::{LogHost, LoggerSupervisor};
+    use super::{
+        LogHost, LoggerInstallation, LoggerSupervisor, LoggerSupervisorState,
+        SettledReportSelection,
+    };
     use crate::DiagnosticBusLocal;
+
+    fn assert_logger_supervisor_owner_inventory(
+        host: &LogHost,
+        supervisor: &LoggerSupervisor,
+        state: &LoggerSupervisorState,
+        selection: &SettledReportSelection,
+        installation: &LoggerInstallation,
+    ) {
+        let LogHost {
+            runtime: _,
+            task_capability: _,
+            diagnostic_ingress: _,
+            diagnostic_reader: _,
+        } = host;
+        let LoggerSupervisor {
+            input: _,
+            fallback_writer: _,
+            fallback_delivery: _,
+            state: _,
+        } = supervisor;
+        let LoggerSupervisorState {
+            next_generation: _,
+            active: _,
+        } = state;
+        let SettledReportSelection {
+            task_failures: _,
+            delivery_failures: _,
+            exit_errors: _,
+            killed_work: _,
+        } = selection;
+        let LoggerInstallation {
+            generation: _,
+            lifecycle: _,
+        } = installation;
+    }
+
+    #[test]
+    fn logger_supervisor_owner_inventory_is_compile_exhaustive() {
+        let _: fn(
+            &LogHost,
+            &LoggerSupervisor,
+            &LoggerSupervisorState,
+            &SettledReportSelection,
+            &LoggerInstallation,
+        ) = assert_logger_supervisor_owner_inventory;
+    }
 
     #[test]
     fn bus_error_count_survives_absent_subscribers_and_queue_reads() {
