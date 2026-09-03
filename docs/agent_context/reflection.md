@@ -22,6 +22,12 @@ and control flow.
 - `TaskSpecialization` adds a request family, private tags, and transactional
   host data. Reusable request families map their request enum into a host
   specialization rather than depending on it directly.
+- Concrete protocol results, outcomes, environments, snapshots, commits, and
+  transactions retain public/runtime roots across interpreter phases. A
+  specialization is responsible for the same root contract inside its generic
+  request, snapshot, and journal types; those types may not hide a durable bare
+  core value. `RequestContext` and `TransactionContext` are borrowed,
+  callback-bounded views and must not escape the dispatch that created them.
 - Spawned `.task.new` children inherit their parent's complete task profile,
   including specialization requests, immutable environment, diagnostic
   destination, and host resources. Annotation tasks begin with the runtime

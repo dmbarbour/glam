@@ -24,6 +24,15 @@ reusable by mapping their request type into a specialization. The existing
 `requests`, `search`, and `store` children retain their focused roles rather
 than becoming implementation details of one of the three layers.
 
+The protocol owns the root shape of its concrete fields: request results,
+task outcomes, and reflection environments cross phases only as public values,
+while task failures use the explicit rooted-or-bounded disposition described
+below. A specialization owns the corresponding contract for semantic values
+inside its generic request, snapshot, and journal types. Such values must be
+public/runtime roots; generic specialization state is not an exemption for
+storing bare core values across a transaction or search boundary. Borrowed
+request and transaction contexts remain bounded to one interpreter callback.
+
 The reusable `ReflectionEffects` family adds environment lookup, diagnostic
 emission, dictionary iteration, lazy-shell value observation, and child-task
 operations. `main` defines a broader logger specialization with diagnostic

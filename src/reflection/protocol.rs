@@ -163,8 +163,16 @@ pub(super) struct RequestActivity {
 /// its [`TaskHost`], so cloning the specialization should remain inexpensive.
 pub trait TaskSpecialization: Clone + Sized + Send + Sync + 'static {
     type Host: TaskHost<Self> + ?Sized;
+    /// Decoded specialization state. Any semantic value retained here must
+    /// use a public/runtime root rather than a bare core value.
     type Request: Clone + Send + Sync + 'static;
+    /// Immutable specialization state retained across an optimistic
+    /// transaction. Implementations own the exact tracing/root contract for
+    /// any semantic values reachable from this type.
     type Snapshot: Clone + Send + Sync + 'static;
+    /// Specialization changes retained by an active transaction or published
+    /// search result. Implementations own the exact tracing/root contract for
+    /// any semantic values reachable from this type.
     type Journal: Clone + Default + Send + Sync + 'static;
 
     /// Controls whether the shared `.heap.*` family is installed in this
@@ -749,7 +757,143 @@ pub(super) fn request_value(tag: &Key, arguments: Vec<Value>) -> Value {
 #[cfg(test)]
 mod root_inventory_tests {
     use super::*;
+    use crate::api::EffectTokenDomain;
     use crate::number::Number;
+    use crate::reflection::{ExactConflictAnalysis, ReflectionStore};
+    use std::sync::Weak;
+
+    #[derive(Clone, Copy)]
+    struct ProtocolRootTestEffects;
+
+    impl TaskSpecialization for ProtocolRootTestEffects {
+        type Host = dyn TaskHost<Self>;
+        type Request = Infallible;
+        type Snapshot = PublicValue;
+        type Journal = Vec<PublicValue>;
+
+        fn requests(&self) -> Vec<EffectRequestSpec<Self::Request>> {
+            Vec::new()
+        }
+
+        fn handle_request(
+            &self,
+            request: Self::Request,
+            _arguments: Vec<PublicValue>,
+            _context: &mut RequestContext<'_, Self>,
+        ) -> Result<RequestResult, TaskHalt> {
+            match request {}
+        }
+    }
+
+    fn assert_effect_request_spec_inventory<R>(spec: &EffectRequestSpec<R>) {
+        let EffectRequestSpec {
+            api_path,
+            tag_path,
+            arity,
+            request,
+        } = spec;
+        let _: &Option<Arc<[Arc<str>]>> = api_path;
+        let _: &Arc<[Arc<str>]> = tag_path;
+        let _: &usize = arity;
+        let _: &R = request;
+    }
+
+    fn assert_request_result_inventory(result: &RequestResult) {
+        match result {
+            RequestResult::Return(value) => {
+                let _: &PublicValue = value;
+            }
+            RequestResult::Alternatives(values) => {
+                let _: &Vec<PublicValue> = values;
+            }
+            RequestResult::Scoped { operation, close } => {
+                let _: &PublicValue = operation;
+                let _: &PublicValue = close;
+            }
+            RequestResult::ReturnUnit | RequestResult::Fail | RequestResult::Cancelled => {}
+        }
+    }
+
+    fn assert_edge_free_protocol_inventory(
+        session: &ReasoningSessionId,
+        activity: &RequestActivity,
+        result: &CommitResult,
+    ) {
+        let ReasoningSessionId(id) = session;
+        let _: &NonZeroU64 = id;
+        let RequestActivity {
+            observed_generation,
+            committed,
+        } = activity;
+        let _: &Option<u64> = observed_generation;
+        let _: &bool = committed;
+        match result {
+            CommitResult::Committed | CommitResult::Conflict | CommitResult::Closed => {}
+            CommitResult::MissingVolume(volume) => {
+                let _: &VolumeId = volume;
+            }
+        }
+    }
+
+    fn assert_protocol_transaction_inventory(
+        snapshot: &HostSnapshot<ProtocolRootTestEffects>,
+        commit: &TaskCommit<ProtocolRootTestEffects>,
+        transaction: &Transaction<ProtocolRootTestEffects>,
+    ) {
+        let HostSnapshot {
+            wake_generation,
+            store,
+            extra,
+        } = snapshot;
+        let _: &u64 = wake_generation;
+        let _: &StoreSnapshot = store;
+        let _: &PublicValue = extra;
+
+        let TaskCommit {
+            store,
+            extra_snapshot,
+            extra,
+        } = commit;
+        let _: &StoreJournal = store;
+        let _: &PublicValue = extra_snapshot;
+        let _: &Vec<PublicValue> = extra;
+
+        let Transaction {
+            snapshot,
+            store,
+            journal,
+            observed,
+        } = transaction;
+        let _: &HostSnapshot<ProtocolRootTestEffects> = snapshot;
+        let _: &StoreJournal = store;
+        let _: &Vec<PublicValue> = journal;
+        let _: &bool = observed;
+    }
+
+    fn assert_borrowed_protocol_context_inventory<S: TaskSpecialization>(
+        request: &RequestContext<'_, S>,
+        transaction_context: &TransactionContext<'_, S>,
+    ) {
+        let RequestContext {
+            eval_context,
+            poll_context,
+            host,
+            transaction,
+            activity,
+        } = request;
+        let _ = (eval_context, poll_context, host, transaction, activity);
+        let TransactionContext { transaction } = transaction_context;
+        let _ = transaction;
+    }
+
+    fn assert_task_outcome_inventory(outcome: &TaskOutcome) {
+        match outcome {
+            TaskOutcome::Complete(value) => {
+                let _: &PublicValue = value;
+            }
+            TaskOutcome::Cancelled => {}
+        }
+    }
 
     fn assert_task_halt_root_inventory(halt: &TaskHalt) {
         let TaskHalt(kind) = halt;
@@ -769,6 +913,101 @@ mod root_inventory_tests {
     #[test]
     fn task_halt_root_inventory_is_complete() {
         let _: fn(&TaskHalt) = assert_task_halt_root_inventory;
+    }
+
+    #[test]
+    fn reflection_protocol_root_inventory_is_complete() {
+        let _: fn(&EffectRequestSpec<Infallible>) = assert_effect_request_spec_inventory;
+        let _: fn(&RequestResult) = assert_request_result_inventory;
+        let _: fn(&ReasoningSessionId, &RequestActivity, &CommitResult) =
+            assert_edge_free_protocol_inventory;
+        let _: fn(
+            &HostSnapshot<ProtocolRootTestEffects>,
+            &TaskCommit<ProtocolRootTestEffects>,
+            &Transaction<ProtocolRootTestEffects>,
+        ) = assert_protocol_transaction_inventory;
+        let _: fn(
+            &RequestContext<'_, ProtocolRootTestEffects>,
+            &TransactionContext<'_, ProtocolRootTestEffects>,
+        ) = assert_borrowed_protocol_context_inventory;
+        let _: fn(&TaskOutcome) = assert_task_outcome_inventory;
+    }
+
+    fn retained_protocol_value(domain: &EffectTokenDomain<Arc<()>>) -> (PublicValue, Weak<()>) {
+        let payload = Arc::new(());
+        let retained = Arc::downgrade(&payload);
+        (domain.issue(payload), retained)
+    }
+
+    fn protocol_store(values: &Values) -> ReflectionStore {
+        ReflectionStore::new(values.core().clone(), Arc::new(ExactConflictAnalysis))
+    }
+
+    #[test]
+    fn request_results_and_outcomes_retain_public_roots_until_retirement() {
+        let core = crate::core::test_value_factory();
+        let values = Values::from_core_factory(core);
+        let domain = EffectTokenDomain::new(&values);
+
+        for build in [
+            RequestResult::Return as fn(PublicValue) -> RequestResult,
+            |value| RequestResult::Alternatives(vec![value]),
+            |value| RequestResult::Scoped {
+                operation: value.clone(),
+                close: value,
+            },
+        ] {
+            let (value, retained) = retained_protocol_value(&domain);
+            let result = build(value);
+            assert!(retained.upgrade().is_some());
+            drop(result);
+            assert!(retained.upgrade().is_none());
+        }
+
+        let (value, retained) = retained_protocol_value(&domain);
+        let outcome = TaskOutcome::Complete(value);
+        assert!(retained.upgrade().is_some());
+        drop(outcome);
+        assert!(retained.upgrade().is_none());
+    }
+
+    #[test]
+    fn protocol_snapshots_commits_and_transactions_retain_specialization_roots() {
+        let core = crate::core::test_value_factory();
+        let values = Values::from_core_factory(core);
+        let domain = EffectTokenDomain::new(&values);
+        let store = protocol_store(&values);
+
+        let (extra, retained) = retained_protocol_value(&domain);
+        let snapshot = HostSnapshot::<ProtocolRootTestEffects>::new(1, store.snapshot(), extra);
+        assert!(retained.upgrade().is_some());
+        drop(snapshot);
+        assert!(retained.upgrade().is_none());
+
+        let (extra_snapshot, retained_snapshot) = retained_protocol_value(&domain);
+        let (journal_value, retained_journal) = retained_protocol_value(&domain);
+        let store_snapshot = store.snapshot();
+        let commit = TaskCommit::<ProtocolRootTestEffects>::new(
+            StoreJournal::new(store_snapshot),
+            extra_snapshot,
+            vec![journal_value],
+        );
+        assert!(retained_snapshot.upgrade().is_some());
+        assert!(retained_journal.upgrade().is_some());
+        drop(commit);
+        assert!(retained_snapshot.upgrade().is_none());
+        assert!(retained_journal.upgrade().is_none());
+
+        let (extra, retained_snapshot) = retained_protocol_value(&domain);
+        let (journal_value, retained_journal) = retained_protocol_value(&domain);
+        let snapshot = HostSnapshot::<ProtocolRootTestEffects>::new(2, store.snapshot(), extra);
+        let mut transaction = Transaction::new(snapshot);
+        transaction.journal.push(journal_value);
+        assert!(retained_snapshot.upgrade().is_some());
+        assert!(retained_journal.upgrade().is_some());
+        drop(transaction);
+        assert!(retained_snapshot.upgrade().is_none());
+        assert!(retained_journal.upgrade().is_none());
     }
 
     #[test]

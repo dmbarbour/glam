@@ -111,7 +111,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.1c | complete | evaluation, coordinator, and readiness root surfaces |
 | I4F.1d.1 | complete | reflection store, snapshot, journal, and query roots |
 | I4F.1d.2a | complete | reflection task failures and effect-lifecycle roots |
-| I4F.1d.2b | pending | reflection protocol and host-snapshot roots |
+| I4F.1d.2b | complete | reflection protocol and host-snapshot roots |
 | I4F.1d.2c | pending | isolated-search branch, block, and result roots |
 | I4F.1d.2 | pending | reflection lifecycle, protocol, and search roots |
 | I4F.1d.3 | pending | reflection machine frame and request roots |
@@ -2925,6 +2925,23 @@ scheduled failure publication. The lifecycle owner row is closed as a
 compatibility root, and the durable declaration latch was observed failing
 before its reviewed fingerprint was updated; protocol host state and isolated
 search remain assigned to I4F.1d.2b/c. Production remains `NoAuto`.
+
+I4F.1d.2b completed 2026-09-03 as a protocol-boundary closure. Concrete
+request results, task outcomes, host snapshots, commits, and transactions
+already retain semantic values through the public `Value`, `StoreSnapshot`,
+and `StoreJournal` root surfaces; their borrowed request/transaction contexts
+remain bounded to one interpreter callback. Compile-exhaustive latches now
+cover every field and variant so a new protocol field cannot silently inherit
+either classification.
+
+Generic `TaskSpecialization::Request`, `Snapshot`, and `Journal` state remains
+an explicit implementor-owned root contract rather than an exemption: any
+semantic value retained across dispatch, transaction, or search boundaries
+must use a public/runtime root. Deterministic lifetime fixtures use such a
+specialization to prove request results, outcomes, snapshots, commits, and
+transactions retain their public roots until the owning carrier retires. The
+durable-owner inventory now closes the protocol row independently and assigns
+isolated search its own open I4F.1d.2c row. Production remains `NoAuto`.
 
 #### Phase I4F.1e — Diagnostic, Event, and Delivery Roots
 

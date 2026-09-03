@@ -223,8 +223,8 @@ const INVENTORY: &[InventoryEntry] = &[
     entry!(
         "src/reflection/protocol.rs",
         [4, 1, 2, 0, 0, 0],
-        "bounded request evaluation, results, and failures",
-        "I3D.2 interpreter boundary; I4F.1 task roots"
+        "bounded request evaluation plus rooted protocol results, snapshots, transactions, and failures",
+        "I3D.2 interpreter boundary; I4F.1d.2b rooted protocol surfaces; I4F.2b compatibility-access retirement"
     ),
     entry!(
         "src/reflection/requests.rs",
@@ -236,7 +236,7 @@ const INVENTORY: &[InventoryEntry] = &[
         "src/reflection/search.rs",
         [3, 0, 1, 0, 0, 0],
         "isolated effect search and environment",
-        "I3D.2/I3D.4 search regions; I4F.1 search roots"
+        "I3D.2/I3D.4 search regions; I4F.1d.2c search roots"
     ),
     entry!(
         "src/reflection/store.rs",

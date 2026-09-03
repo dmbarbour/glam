@@ -307,16 +307,27 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         RootSurface,
         "I4F.2d.2"
     ),
-    open_durable!(
+    closed_durable!(
         "src/reflection/protocol.rs",
-        "protocol requests, results, failures, and effect searches",
-        "RuntimeValueRoot, public/evaluated Value, and Arc<EvaluationFailure>",
+        "reflection protocol requests, results, snapshots, transactions, and failures",
+        "public Value results plus specialization-owned Snapshot / Journal root contracts and rooted TaskHalt failures",
         "cross-phase reflection protocol state",
         "decoded request/result publication",
-        "protocol completion or search retirement",
+        "protocol completion or transaction retirement",
+        CompatibilityRoot,
+        RootSurface,
+        "I4F.2d.2"
+    ),
+    open_durable!(
+        "src/reflection/search.rs",
+        "isolated search host, branch, block, and result state",
+        "public Value environment/results, specialization journals, TaskHalt failures, and effect-machine state",
+        "pollable isolated search and returned result collection",
+        "isolated-search construction and branch publication",
+        "restart, cancellation, or search/result retirement",
         FailureGraph,
         RootSurface,
-        "I4F.1d.2",
+        "I4F.1d.2c",
         "I4F.2d.2"
     ),
     open_durable!(
@@ -891,7 +902,9 @@ fn owner_for_declaration(declaration: &str) -> Option<&'static str> {
     } else if declaration.starts_with("src/reflection/machine.rs::") {
         "EffectTask frames, requests, continuations, fixpoints, branches, and task blocks"
     } else if declaration.starts_with("src/reflection/protocol.rs::") {
-        "protocol requests, results, failures, and effect searches"
+        "reflection protocol requests, results, snapshots, transactions, and failures"
+    } else if declaration.starts_with("src/reflection/search.rs::") {
+        "isolated search host, branch, block, and result state"
     } else if declaration.starts_with("src/reflection/requests.rs::") {
         "ReflectionJournal / QueryRead / decoded standard requests"
     } else if declaration.starts_with("src/reflection/store.rs::") {
