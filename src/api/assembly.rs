@@ -1330,14 +1330,15 @@ impl Assembler {
         context: &CompileContext,
         definitions: &RuntimeValueRoot,
     ) -> Result<RuntimeValueRoot, Error> {
-        let module_value = self.core_values().with_runtime_value_access(|_| {
+        let module_value = self.core_values().with_runtime_value_access(|access| {
             let CoreValue::Promised(final_defs) = context.final_defs() else {
                 panic!("CompileContext.final_defs must be a promised value");
             };
+            let definitions = definitions.clone_core_with(&access);
             final_defs
-                .set(definitions.as_core().clone())
+                .set(definitions.clone())
                 .expect("CompileContext.final_defs future must be unassigned");
-            definitions.as_core().clone()
+            definitions
         });
         self.eval_context()
             .evaluate_whnf(&module_value)

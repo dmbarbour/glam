@@ -144,8 +144,8 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.2a.2a | complete | public evaluator and reflection-inspector access retirement |
 | I4F.2a.2b | complete | evaluation driver and rooted-completion projection retirement |
 | I4F.2a.2c | complete | core net and builtin construction adapter retirement |
-| I4F.2a.2d | pending | core evaluation and net access closure |
-| I4F.2a.2 | pending | core evaluator and net access retirement |
+| I4F.2a.2d | complete | core evaluation and net access closure |
+| I4F.2a.2 | complete | core evaluator and net access retirement |
 | I4F.2a.3 | pending | reflection, compiler, macro, and host access retirement |
 | I4F.2a.4 | pending | compatibility-access closure latch |
 | I4F.2a | pending | compatibility observation and ownership-transfer retirement |
@@ -3541,6 +3541,17 @@ representation; callbacks continue to demand arguments through
 `RequestContext`, and the completed construction result retains its admitted
 `EvaluatorStepContext`. The compatibility-access inventory now omits the net
 construction module.
+
+I4F.2a.2d completed 2026-09-03. The module-sealing handoff and runtime's
+canonical core-value cache now clone retained roots only through matching
+`RuntimeValueAccess`; production evaluator, poll, session, assembly handoff,
+and net-construction sources retain no direct compatibility projection or
+ownership-transfer calls. The two residual core-family exceptions remain
+explicitly latched rather than hidden: test-only canonical-root assertions are
+removed by I4F.2a.1c, while promise assignment ownership recovery and its
+compatibility edge visitor are replaced by I5's managed promise representation.
+The public compatibility-access and managed-admission inventories pass with
+those assignments recorded.
 
 #### Phase I4F.2b — Active-Owner Extraction Gate
 

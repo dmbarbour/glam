@@ -78,7 +78,7 @@ macro_rules! entry {
 const INVENTORY: &[InventoryEntry] = &[
     entry!(
         "src/api/assembly.rs",
-        [2, 0, 0, 0, 4, 0],
+        [0, 0, 0, 0, 4, 0],
         "assembly setup, rooted compiler handoff, import results, modules, and reflection environment",
         "I3E.2 bounded compiler regions; I4F.1 durable roots"
     ),
@@ -96,9 +96,9 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/core.rs",
-        [15, 1, 0, 0, 1, 3],
-        "canonical/cache root construction, validation fixtures, and compatibility projection in core promise/deferred machinery",
-        "I4F.1b cache roots; I4A-I4E exact value shell; I4F.2 public facade switch"
+        [8, 1, 0, 0, 1, 3],
+        "test-only canonical-root validation plus compatibility ownership recovery in core promise machinery",
+        "I4F.2a.1c fixture closure; I5 managed promise assignment"
     ),
     entry!(
         "src/core/managed/payload_edges.rs",

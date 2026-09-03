@@ -446,37 +446,38 @@ impl CoreValueFactory {
         self.domain.ids.deferred_value()
     }
 
+    /// Clones one runtime-owned compatibility root through this factory's
+    /// matching managed-access gateway.
+    fn clone_cached_root(&self, root: &RuntimeValueRoot) -> Value {
+        self.with_runtime_value_access(|access| root.clone_core_with(&access))
+    }
+
     pub(crate) fn unit(&self) -> Value {
-        self.domain.cache.core.unit.as_core().clone()
+        self.clone_cached_root(&self.domain.cache.core.unit)
     }
 
     pub(crate) fn object_reflection_guard(&self) -> Value {
-        self.domain
-            .cache
-            .core
-            .object_reflection_guard
-            .as_core()
-            .clone()
+        self.clone_cached_root(&self.domain.cache.core.object_reflection_guard)
     }
 
     pub(crate) fn tuple(&self) -> Value {
-        self.domain.cache.core.tuple.as_core().clone()
+        self.clone_cached_root(&self.domain.cache.core.tuple)
     }
 
     pub(crate) fn info(&self) -> Value {
-        self.domain.cache.core.info.as_core().clone()
+        self.clone_cached_root(&self.domain.cache.core.info)
     }
 
     pub(crate) fn warn(&self) -> Value {
-        self.domain.cache.core.warn.as_core().clone()
+        self.clone_cached_root(&self.domain.cache.core.warn)
     }
 
     pub(crate) fn error(&self) -> Value {
-        self.domain.cache.core.error.as_core().clone()
+        self.clone_cached_root(&self.domain.cache.core.error)
     }
 
     pub(crate) fn initial_metadata(&self) -> Value {
-        self.domain.cache.core.initial_metadata.as_core().clone()
+        self.clone_cached_root(&self.domain.cache.core.initial_metadata)
     }
 
     fn atom(&self, atom: Atom) -> Value {
