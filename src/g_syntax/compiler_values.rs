@@ -146,7 +146,7 @@ fn project_value(values: &CoreValueFactory, root: &RuntimeValueRoot) -> Value {
         values.runtime_id(),
         "cached compiler value and requesting compiler must share one runtime"
     );
-    values.with_runtime_value_access(|_| root.as_core().clone())
+    values.with_runtime_value_access(|access| root.clone_core_with(&access))
 }
 
 fn project_module(values: &CoreValueFactory, module: &RootedBuiltinModule) -> BuiltinModule {

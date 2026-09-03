@@ -153,7 +153,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.2a.3c.3 | complete | reflection wrapper, helper, and fixture access closure |
 | I4F.2a.3c | complete | reflection machine access retirement |
 | I4F.2a.3d | complete | compiler and module-lowering access retirement |
-| I4F.2a.3e | pending | compiler-cache access retirement |
+| I4F.2a.3e | complete | compiler-cache access retirement |
 | I4F.2a.3f | pending | macro effect and runner access retirement |
 | I4F.2a.3g | pending | parser replay and source access retirement |
 | I4F.2a.3h | pending | lifecycle and host-integration closure |
@@ -3566,6 +3566,13 @@ for each declaration, and roots the completed definition set only after that
 region closes. Import handoff continues to move durable roots unchanged.
 Compiler and module-lowering compatibility projections and ownership
 transfers are now both zero in the source inventory.
+
+I4F.2a.3e completed 2026-09-03. The runtime-owned g compiler cache and default
+diagnostic-formatter cache now project their retained roots through the
+`RuntimeValueAccess` already admitted by their cache read helpers. Neither
+cache creates independent authority or borrows through a root compatibility
+accessor, and both compiler-boundary inventories now record zero direct
+projections.
 
 I4F.2a.1a completed 2026-09-03. Production `Value` and `EvaluatedValue` no
 longer implement semantic equality, and `Value::runtime_id` is no longer a

@@ -28,7 +28,7 @@ unsafe impl RuntimeCacheFamily for CachedDiagnosticFormatter {
 pub(super) fn value(values: &CoreValueFactory) -> Value {
     let root = &cached(values).0;
     assert_eq!(root.runtime_id(), values.runtime_id());
-    values.with_runtime_value_access(|_| root.as_core().clone())
+    values.with_runtime_value_access(|access| root.clone_core_with(&access))
 }
 
 fn cached(values: &CoreValueFactory) -> Arc<CachedDiagnosticFormatter> {
