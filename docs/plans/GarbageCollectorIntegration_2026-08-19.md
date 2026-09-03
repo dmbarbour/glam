@@ -116,6 +116,8 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.1d.2 | complete | reflection lifecycle, protocol, and search roots |
 | I4F.1d.3a | complete | reflection request, journal, query, and task-handle roots |
 | I4F.1d.3b | complete | reflection machine shell, terminal, and blocked-error roots |
+| I4F.1d.3c.1 | complete | reflection branch effect/state roots and fused handoff |
+| I4F.1d.3c.2 | pending | reflection work, outcome, cut, and retry root closure |
 | I4F.1d.3c | pending | reflection branch, work, cut, and retry roots |
 | I4F.1d.3d | pending | reflection continuation, reset, and fixpoint roots |
 | I4F.1d.3e | pending | reflection decoded-request handoff and machine closure |
@@ -2885,10 +2887,17 @@ three checkpoints:
      contextual wrapper, task terminal, blocked evaluation error, exit state,
      and public poll projection. Root errors when they enter parked blocked or
      terminal state rather than relying on every eventual poll consumer.
-   - **I4F.1d.3c — Branch and execution state.** Convert branch effect/state,
-     drive/deliver/apply/outcome work, cut alternatives, and retry checkpoints
-     to root-shaped storage. Raw values may exist only within one bounded
-     evaluator/interpreter step.
+   - **I4F.1d.3c — Branch and execution state.** Complete this graph in two
+     checkpoints:
+     - **I4F.1d.3c.1 — Branch roots.** Convert branch effect/state and their
+       retry clones to root-shaped storage. Root fused effect/state updates at
+       the assignment gateway rather than retaining a parallel phase-root
+       bundle; pending raw continuation values remain bounded by that bundle
+       until I4F.1d.3d.
+     - **I4F.1d.3c.2 — Work and cut roots.** Convert deliver/apply/outcome
+       work, cut operations/alternatives, and retry work to root-shaped
+       storage, then close the branch/execution inventory. Raw values may
+       exist only within one bounded evaluator/interpreter step.
    - **I4F.1d.3d — Captured control and fixpoints.** Convert continuations,
      delimiter/reset payloads, captured continuations, fix roots/restarts, and
      active fixpoint payloads. Promise handles retain their separately
@@ -3029,6 +3038,19 @@ replacement of a directly stored `EvaluationFailure` with its inventoried
 failure-root shell before accepting its new declaration fingerprint. Branch,
 execution, and captured-control interiors remain assigned to I4F.1d.3c-e.
 Production remains `NoAuto`.
+
+I4F.1d.3c.1 completed 2026-09-03. `Branch` now retains its current effect and
+local state as explicit `RuntimeValueRoot`s, so cloning a retry candidate also
+clones stable roots. All branch replacement flows pass through same-runtime
+root setters or directly retain a root produced by the current evaluator
+step. Fused effect and state changes therefore no longer need parallel roots
+in `PreparedDrive`; only raw continuation values awaiting I4F.1d.3d remain in
+that bounded phase bundle.
+
+The branch record and retry checkpoint have compile-exhaustive ownership
+latches. A deterministic effect-token fixture verifies that effect and state
+payloads remain live exactly through branch retirement. Work, branch-outcome,
+and cut payloads remain assigned to I4F.1d.3c.2. Production remains `NoAuto`.
 
 #### Phase I4F.1e — Diagnostic, Event, and Delivery Roots
 

@@ -901,6 +901,34 @@ fn assert_task_wrapper_inventory(
     let _: &RuntimeValueRoot = context;
 }
 
+fn assert_branch_root_inventory(
+    branch: &Branch<TestEffects>,
+    retry: &RetryCheckpoint<TestEffects>,
+) {
+    let Branch {
+        effect,
+        control,
+        state,
+        transaction,
+        active_fixes,
+        fix_restarts,
+        retry: branch_retry,
+    } = branch;
+    let _: &RuntimeValueRoot = effect;
+    let _: &RuntimeValueRoot = state;
+    let _ = (
+        control,
+        transaction,
+        active_fixes,
+        fix_restarts,
+        branch_retry,
+    );
+
+    let RetryCheckpoint { generation, branch } = retry;
+    let _: &Option<u64> = generation;
+    let _: &Branch<TestEffects> = branch;
+}
+
 fn assert_task_block_inventory(blocked: &BlockedExecution<TestEffects>, poll: &TaskBlock) {
     let BlockedExecution { reason, retry } = blocked;
     match reason {
@@ -981,6 +1009,25 @@ fn outer_machine_root_inventory_is_complete() {
     let _: fn(&BlockedExecution<TestEffects>, &TaskBlock) = assert_task_block_inventory;
     let _: fn(&TaskExitBlock, &TaskExitState<TestEffects>) = assert_task_exit_inventory;
     let _: fn(&EffectTaskPoll, &TaskTerminal) = assert_task_terminal_inventory;
+    let _: fn(&Branch<TestEffects>, &RetryCheckpoint<TestEffects>) = assert_branch_root_inventory;
+}
+
+#[test]
+fn branch_retires_its_effect_and_state_roots_exactly_with_the_branch() {
+    let core = crate::core::test_value_factory();
+    let values = Values::from_core_factory(core.clone());
+    let domain = EffectTokenDomain::new(&values);
+    let (effect, retained_effect) = retained_machine_value(&domain);
+    let (state, retained_state) = retained_machine_value(&domain);
+    let branch = Branch::<TestEffects>::new(&core, effect, state);
+
+    assert_eq!(branch.effect.runtime_id(), core.runtime_id());
+    assert_eq!(branch.state.runtime_id(), core.runtime_id());
+    assert!(retained_effect.upgrade().is_some());
+    assert!(retained_state.upgrade().is_some());
+    drop(branch);
+    assert!(retained_effect.upgrade().is_none());
+    assert!(retained_state.upgrade().is_none());
 }
 
 #[test]

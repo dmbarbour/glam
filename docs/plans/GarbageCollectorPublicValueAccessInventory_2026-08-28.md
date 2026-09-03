@@ -110,5 +110,9 @@ the durable-owner inventory closes storage and lifetime classifications.
   effect API and contextual wrapper into durable roots. The machine row adds
   two compatibility root constructions and their two bounded projections;
   I4F.2 retires those projections when the root facade becomes managed.
+- I4F.1d.3c.1 deliberately tripped both inventories while converting branch
+  effect/state into durable roots. Immediate root assignment removes five
+  owned projections and the redundant fused branch phase roots; the remaining
+  projections are bounded reads of those roots inside evaluator phases.
 - The existing public-value suite remains the compatibility behavior oracle
   until I4F.2.

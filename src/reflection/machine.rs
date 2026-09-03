@@ -255,7 +255,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             .task_id()
             .map_err(|error| TaskHalt::new(error.as_ref()))?;
         let initial_state = Value::Dict(Dict::new_sync());
-        let root = Branch::new(effect, initial_state);
+        let root = Branch::new(eval_context.values(), effect, initial_state);
         let (search, branch) = if retain_all {
             let mut branch = root.clone();
             branch.transaction = Some(Transaction::new(host.snapshot()));
@@ -426,19 +426,18 @@ impl<S: TaskSpecialization> EffectTask<S> {
             Ok::<_, TaskHalt>((
                 evaluator.root_value(reset_stack_value_in(
                     evaluator,
-                    &branch.state,
+                    branch.state.as_core(),
                     &self.tags.continuation_state,
                 )?),
                 evaluator.root_value(with_reset_frames_in(
                     evaluator,
-                    branch.state.clone(),
+                    branch.state(),
                     &self.tags.continuation_state,
                     &[],
                 )?),
             ))
         })?;
         let reset_stack = reset_stack.into_core();
-        let state = state.into_core();
         let order = self.allocate_control_order()?;
         let handle = PromisedValue::fixpoint(&self.eval_context, "reflection effect fixpoint")
             .map_err(|error| TaskHalt::new(error.as_ref()))?;
@@ -519,7 +518,11 @@ impl<S: TaskSpecialization> EffectTask<S> {
         layers.sort_by_key(CapturedLayer::order);
 
         let mut reset_frames = context.evaluate(&self.eval_context, |evaluator| {
-            reset_frames_in(evaluator, &branch.state, &self.tags.continuation_state)
+            reset_frames_in(
+                evaluator,
+                branch.state.as_core(),
+                &self.tags.continuation_state,
+            )
         })?;
         let next_order = self
             .next_control_order
@@ -539,17 +542,15 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 }
             }
         }
-        let state = context
-            .evaluate(&self.eval_context, |evaluator| {
-                with_reset_frames_in(
-                    evaluator,
-                    branch.state.clone(),
-                    &self.tags.continuation_state,
-                    &reset_frames,
-                )
-                .map(|state| evaluator.root_value(state))
-            })?
-            .into_core();
+        let state = context.evaluate(&self.eval_context, |evaluator| {
+            with_reset_frames_in(
+                evaluator,
+                branch.state(),
+                &self.tags.continuation_state,
+                &reset_frames,
+            )
+            .map(|state| evaluator.root_value(state))
+        })?;
         self.next_control_order = next_order;
         branch.state = state;
         branch.control.delimiters.extend(delimiters);
@@ -685,12 +686,10 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 mut branch,
                 scope_depth,
             } => {
-                branch.effect = context
-                    .evaluate(&self.eval_context, |evaluator| {
-                        apply_in(evaluator, function, arguments)
-                            .map(|value| evaluator.root_value(value))
-                    })?
-                    .into_core();
+                branch.effect = context.evaluate(&self.eval_context, |evaluator| {
+                    apply_in(evaluator, function, arguments)
+                        .map(|value| evaluator.root_value(value))
+                })?;
                 #[cfg(test)]
                 self.record_phase(EffectMachinePhase::ContinuationDelivered);
                 Ok(MachineStep::Continue(MachineWork::Drive {
@@ -712,7 +711,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
     ) -> Result<PreparedDrive<S::Request>, TaskHalt> {
         if !self.fusion_enabled() {
             return self
-                .effect_request_in(context, branch.effect.clone())
+                .effect_request_in(context, branch.effect())
                 .map(|request| PreparedDrive::Request {
                     request,
                     _phase_roots: Vec::new(),
@@ -722,7 +721,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         let mut fusion = FusionState::new(branch.control.sequence.len());
 
         for _ in 0..EFFECT_FUSION_BUDGET {
-            let request = self.effect_request_values_in(context, branch.effect.clone())?;
+            let request = self.effect_request_values_in(context, branch.effect())?;
             match self.classify_fused_request(branch, request, &mut fusion) {
                 FusedRequestAction::Continue => continue,
                 FusedRequestAction::Deliver(value) => {
@@ -731,12 +730,12 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 FusedRequestAction::Get(path) => {
                     let path =
                         eval::eval_key_path_list_in(context, &path).map_err(task_eval_error)?;
-                    let value = get_value_path_in(context, &branch.state, &path)?;
+                    let value = get_value_path_in(context, branch.state.as_core(), &path)?;
                     return self.finish_fused_delivery_in(context, branch, value, fusion);
                 }
                 FusedRequestAction::Set(path, value) => {
-                    branch.state = set_state_path_in(context, branch.state.clone(), &path, value)?;
-                    fusion.state_dirty = true;
+                    let state = set_state_path_in(context, branch.state(), &path, value)?;
+                    branch.set_state(state);
                     return self.finish_fused_delivery_in(
                         context,
                         branch,
@@ -747,26 +746,14 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 FusedRequestAction::Boundary(request) => {
                     return Ok(self.finish_fused_request(
                         context,
-                        branch,
                         request,
                         fusion.pending_sequence_values,
-                        fusion.effect_dirty,
-                        fusion.state_dirty,
                     ));
                 }
             }
         }
 
-        let mut phase_roots = self.root_fused_branch_updates(
-            context,
-            branch,
-            fusion.pending_sequence_values,
-            false,
-            fusion.state_dirty,
-        );
-        let effect = self.root_request_value(context, branch.effect.clone());
-        branch.effect = effect.as_core().clone();
-        phase_roots.push(effect);
+        let phase_roots = self.root_fused_continuations(context, fusion.pending_sequence_values);
         Ok(PreparedDrive::Continue {
             _phase_roots: phase_roots,
         })
@@ -786,8 +773,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     .control
                     .sequence
                     .push(Continuation::Glam(continuation));
-                branch.effect = operation;
-                fusion.effect_dirty = true;
+                branch.set_effect(operation);
                 FusedRequestAction::Continue
             }
             Request::Return(value) => FusedRequestAction::Deliver(value),
@@ -817,35 +803,22 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 branch,
                 effect,
                 fusion.pending_sequence_values,
-                fusion.state_dirty,
             ));
         }
         Ok(self.finish_fused_request(
             context,
-            branch,
             Request::Return(value),
             fusion.pending_sequence_values,
-            fusion.effect_dirty,
-            fusion.state_dirty,
         ))
     }
 
     fn finish_fused_request(
         &self,
         context: &EvaluatorStepContext<'_>,
-        branch: &Branch<S>,
         request: Request<S::Request, Value>,
         pending_sequence_values: Vec<Value>,
-        effect_dirty: bool,
-        state_dirty: bool,
     ) -> PreparedDrive<S::Request> {
-        let phase_roots = self.root_fused_branch_updates(
-            context,
-            branch,
-            pending_sequence_values,
-            effect_dirty,
-            state_dirty,
-        );
+        let phase_roots = self.root_fused_continuations(context, pending_sequence_values);
         PreparedDrive::Request {
             request: request.map_values(|value| self.root_request_value(context, value)),
             _phase_roots: phase_roots,
@@ -858,42 +831,23 @@ impl<S: TaskSpecialization> EffectTask<S> {
         branch: &mut Branch<S>,
         effect: Value,
         pending_sequence_values: Vec<Value>,
-        state_dirty: bool,
     ) -> PreparedDrive<S::Request> {
-        let mut phase_roots = self.root_fused_branch_updates(
-            context,
-            branch,
-            pending_sequence_values,
-            false,
-            state_dirty,
-        );
-        let effect = self.root_request_value(context, effect);
-        branch.effect = effect.as_core().clone();
-        phase_roots.push(effect);
+        let phase_roots = self.root_fused_continuations(context, pending_sequence_values);
+        branch.set_effect(effect);
         PreparedDrive::Continue {
             _phase_roots: phase_roots,
         }
     }
 
-    fn root_fused_branch_updates(
+    fn root_fused_continuations(
         &self,
         context: &EvaluatorStepContext<'_>,
-        branch: &Branch<S>,
         pending_sequence_values: Vec<Value>,
-        effect_dirty: bool,
-        state_dirty: bool,
     ) -> Vec<RuntimeValueRoot> {
-        let mut roots = pending_sequence_values
+        pending_sequence_values
             .into_iter()
             .map(|value| self.root_request_value(context, value))
-            .collect::<Vec<_>>();
-        if effect_dirty {
-            roots.push(self.root_request_value(context, branch.effect.clone()));
-        }
-        if state_dirty {
-            roots.push(self.root_request_value(context, branch.state.clone()));
-        }
-        roots
+            .collect()
     }
 
     fn drive_step(
@@ -952,7 +906,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     .control
                     .sequence
                     .push(Continuation::Glam(continuation.into_core()));
-                branch.effect = operation.into_core();
+                branch.set_effect(operation.into_core());
                 MachineWork::Drive {
                     branch,
                     scope_depth,
@@ -970,17 +924,17 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         .expect("checked nonempty fixpoint stack");
                     if let Some(choice) = active.choices.get(active.next_choice).copied() {
                         active.next_choice += 1;
-                        branch.effect = match choice {
+                        branch.set_effect(match choice {
                             FixChoice::Left => left,
                             FixChoice::Right => right,
-                        };
+                        });
                     } else {
                         let root = active.root.clone();
                         let mut right_choices = active.choices.clone();
                         right_choices.push(FixChoice::Right);
                         active.choices.push(FixChoice::Left);
                         active.next_choice += 1;
-                        branch.effect = left;
+                        branch.set_effect(left);
                         branch.fix_restarts.push(FixRestart {
                             root,
                             choices: right_choices,
@@ -1017,7 +971,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     .evaluate(&self.eval_context, |evaluator| {
                         let path = eval::eval_key_path_list_in(evaluator, path.as_core())
                             .map_err(task_eval_error)?;
-                        get_value_path_in(evaluator, &branch.state, &path)
+                        get_value_path_in(evaluator, branch.state.as_core(), &path)
                             .map(|value| evaluator.root_value(value))
                     })?
                     .into_core();
@@ -1028,17 +982,11 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 }
             }
             Request::Set(path, value) => {
-                branch.state = context
-                    .evaluate(&self.eval_context, |evaluator| {
-                        set_state_path_in(
-                            evaluator,
-                            branch.state,
-                            path.as_core(),
-                            value.into_core(),
-                        )
+                let state = branch.state();
+                branch.state = context.evaluate(&self.eval_context, |evaluator| {
+                    set_state_path_in(evaluator, state, path.as_core(), value.into_core())
                         .map(|state| evaluator.root_value(state))
-                    })?
-                    .into_core();
+                })?;
                 MachineWork::Deliver {
                     value: self.eval_context.values().unit(),
                     branch,
@@ -1274,7 +1222,11 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 let (key, mut frames) = context.evaluate(&self.eval_context, |evaluator| {
                     Ok::<_, TaskHalt>((
                         value_key_in(evaluator, key.into_core())?,
-                        reset_frames_in(evaluator, &branch.state, &self.tags.continuation_state)?,
+                        reset_frames_in(
+                            evaluator,
+                            branch.state.as_core(),
+                            &self.tags.continuation_state,
+                        )?,
                     ))
                 })?;
                 let order = self.allocate_control_order()?;
@@ -1289,13 +1241,14 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     scope_depth,
                     order,
                 });
-                branch.state = replace_reset_frames(
+                let state = replace_reset_frames(
                     &self.eval_context,
-                    branch.state,
+                    branch.state(),
                     &self.tags.continuation_state,
                     &frames,
                 );
-                branch.effect = operation.into_core();
+                branch.set_state(state);
+                branch.set_effect(operation.into_core());
                 MachineWork::Drive {
                     branch,
                     scope_depth,
@@ -1305,7 +1258,11 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 let (key, mut frames) = context.evaluate(&self.eval_context, |evaluator| {
                     Ok::<_, TaskHalt>((
                         value_key_in(evaluator, key.into_core())?,
-                        reset_frames_in(evaluator, &branch.state, &self.tags.continuation_state)?,
+                        reset_frames_in(
+                            evaluator,
+                            branch.state.as_core(),
+                            &self.tags.continuation_state,
+                        )?,
                     ))
                 })?;
                 let Some(index) = frames.iter().rposition(|frame| frame.key == key) else {
@@ -1325,12 +1282,13 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     delimiters: inner_delimiters,
                     reset_frames: inner_reset_frames,
                 })?;
-                branch.state = replace_reset_frames(
+                let state = replace_reset_frames(
                     &self.eval_context,
-                    branch.state,
+                    branch.state(),
                     &self.tags.continuation_state,
                     &frames,
                 );
+                branch.set_state(state);
                 branch
                     .control
                     .sequence
@@ -1548,7 +1506,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         .control
                         .sequence
                         .push(Continuation::RestoreScopedValue(value));
-                    branch.effect = close;
+                    branch.set_effect(close);
                     Ok(MachineStep::Continue(MachineWork::Drive {
                         branch,
                         scope_depth,
@@ -1572,7 +1530,11 @@ impl<S: TaskSpecialization> EffectTask<S> {
         }
 
         let mut resets = context.evaluate(&self.eval_context, |evaluator| {
-            reset_frames_in(evaluator, &branch.state, &self.tags.continuation_state)
+            reset_frames_in(
+                evaluator,
+                branch.state.as_core(),
+                &self.tags.continuation_state,
+            )
         })?;
         let reset_order = resets
             .last()
@@ -1586,12 +1548,13 @@ impl<S: TaskSpecialization> EffectTask<S> {
             .map(Delimiter::order);
         if reset_order > delimiter_order {
             let frame = resets.pop().expect("reset order came from a frame");
-            branch.state = replace_reset_frames(
+            let state = replace_reset_frames(
                 &self.eval_context,
-                branch.state,
+                branch.state(),
                 &self.tags.continuation_state,
                 &resets,
             );
+            branch.set_state(state);
             return Ok(MachineStep::Continue(MachineWork::Apply {
                 function: frame.continuation,
                 arguments: vec![value],
@@ -1619,17 +1582,15 @@ impl<S: TaskSpecialization> EffectTask<S> {
             Delimiter::Restore {
                 outer, reset_stack, ..
             } => {
-                let state = context
-                    .evaluate(&self.eval_context, |evaluator| {
-                        with_reset_stack_value_in(
-                            evaluator,
-                            branch.state.clone(),
-                            &self.tags.continuation_state,
-                            reset_stack,
-                        )
-                        .map(|state| evaluator.root_value(state))
-                    })?
-                    .into_core();
+                let state = context.evaluate(&self.eval_context, |evaluator| {
+                    with_reset_stack_value_in(
+                        evaluator,
+                        branch.state(),
+                        &self.tags.continuation_state,
+                        reset_stack,
+                    )
+                    .map(|state| evaluator.root_value(state))
+                })?;
                 branch.control.delimiters.pop();
                 branch.state = state;
                 branch.control = *outer;
@@ -2407,9 +2368,9 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for UnitEffectTask<S> {
 
 #[derive(Clone)]
 struct Branch<S: TaskSpecialization> {
-    effect: Value,
+    effect: RuntimeValueRoot,
     control: Control,
-    state: Value,
+    state: RuntimeValueRoot,
     transaction: Option<Transaction<S>>,
     active_fixes: Vec<ActiveFix<S>>,
     fix_restarts: Vec<FixRestart<S>>,
@@ -2417,11 +2378,11 @@ struct Branch<S: TaskSpecialization> {
 }
 
 impl<S: TaskSpecialization> Branch<S> {
-    fn new(effect: Value, state: Value) -> Self {
+    fn new(values: &CoreValueFactory, effect: Value, state: Value) -> Self {
         Self {
-            effect,
+            effect: RuntimeValueRoot::new(values, effect),
             control: Control::default(),
-            state,
+            state: RuntimeValueRoot::new(values, state),
             transaction: None,
             active_fixes: Vec::new(),
             fix_restarts: Vec::new(),
@@ -2431,8 +2392,24 @@ impl<S: TaskSpecialization> Branch<S> {
 
     fn with_effect(&self, effect: Value) -> Self {
         let mut branch = self.clone();
-        branch.effect = effect;
+        branch.set_effect(effect);
         branch
+    }
+
+    fn effect(&self) -> Value {
+        self.effect.as_core().clone()
+    }
+
+    fn set_effect(&mut self, effect: Value) {
+        self.effect = RuntimeValueRoot::from_runtime(self.effect.runtime_id(), effect);
+    }
+
+    fn state(&self) -> Value {
+        self.state.as_core().clone()
+    }
+
+    fn set_state(&mut self, state: Value) {
+        self.state = RuntimeValueRoot::from_runtime(self.state.runtime_id(), state);
     }
 
     fn retry_candidate(&self) -> Option<Box<Self>> {
@@ -2589,8 +2566,6 @@ const EFFECT_FUSION_BUDGET: usize = 32;
 struct FusionState {
     initial_sequence_depth: usize,
     pending_sequence_values: Vec<Value>,
-    effect_dirty: bool,
-    state_dirty: bool,
 }
 
 impl FusionState {
@@ -2598,8 +2573,6 @@ impl FusionState {
         Self {
             initial_sequence_depth,
             pending_sequence_values: Vec::new(),
-            effect_dirty: false,
-            state_dirty: false,
         }
     }
 }
