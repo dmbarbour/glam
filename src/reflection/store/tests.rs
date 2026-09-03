@@ -22,19 +22,19 @@ fn store_with(values: CoreValueFactory) -> ReflectionStore {
 }
 
 fn text(store: &ReflectionStore, value: &str) -> PublicValue {
-    PublicValue::from_core(&store.values, Value::binary_from_text(value))
+    crate::api::Values::from_core_factory(store.values.clone()).wrap(Value::binary_from_text(value))
 }
 
 fn integer(store: &ReflectionStore, value: i64) -> PublicValue {
-    PublicValue::from_core(&store.values, Value::Number(value.into()))
+    crate::api::Values::from_core_factory(store.values.clone()).wrap(Value::Number(value.into()))
 }
 
 fn empty(store: &ReflectionStore) -> PublicValue {
-    PublicValue::from_core(&store.values, Value::Dict(Dict::new_sync()))
+    crate::api::Values::from_core_factory(store.values.clone()).wrap(Value::Dict(Dict::new_sync()))
 }
 
 fn builtin(store: &ReflectionStore, value: Builtin) -> PublicValue {
-    PublicValue::from_core(&store.values, Value::Builtin(value))
+    crate::api::Values::from_core_factory(store.values.clone()).wrap(Value::Builtin(value))
 }
 
 fn assert_list_values(assembler: &Assembler, actual: &PublicValue, expected: &PublicValue) {
@@ -187,7 +187,11 @@ fn unforced_store_value(
         forced_by_thunk.store(true, Ordering::Release);
         panic!("reflection-store root retention must not force its value")
     }));
-    (PublicValue::from_core(values, value), weak, forced)
+    (
+        crate::api::Values::from_core_factory(values.clone()).wrap(value),
+        weak,
+        forced,
+    )
 }
 
 #[test]
@@ -299,7 +303,8 @@ fn query_state_is_transactional_and_retired_after_the_last_handle() {
     assert!(matches!(
         evaluate_query_state(&assembler, value),
         Some(EvaluationQueryState::Complete(value))
-            if value.as_binary() == Some(b"snapshot".as_slice())
+            if assembler.evaluator().eval(&value).unwrap().as_bytes().unwrap().as_deref()
+                == Some(b"snapshot".as_slice())
     ));
 
     assert!(store.update_query(&handle, text(&store, "updated")));
@@ -309,7 +314,8 @@ fn query_state_is_transactional_and_retired_after_the_last_handle() {
     assert!(matches!(
         evaluate_query_state(&assembler, value),
         Some(EvaluationQueryState::Complete(value))
-            if value.as_binary() == Some(b"updated".as_slice())
+            if assembler.evaluator().eval(&value).unwrap().as_bytes().unwrap().as_deref()
+                == Some(b"updated".as_slice())
     ));
 
     let id = handle.id;
@@ -317,11 +323,16 @@ fn query_state_is_transactional_and_retired_after_the_last_handle() {
     let maintenance = StoreJournal::new(store.snapshot());
     assert_eq!(store.try_commit(&maintenance), StoreCommitResult::Committed);
     let root = store.roots.get(&store.runtime_volume).unwrap();
-    let retired = PublicValue::from_core(
-        &store.values,
+    let retired = crate::api::Values::from_core_factory(store.values.clone()).wrap(
         lazy_core_value_path(&store.values, root.as_core().clone(), &query_path(id)),
     );
-    assert!(assembler.evaluate(&retired).unwrap().is_undefined());
+    let retired = assembler.evaluate(&retired).unwrap();
+    assert!(
+        assembler
+            .reflection()
+            .same_representation(&retired, &assembler.values().empty_dict())
+            .unwrap()
+    );
 }
 
 #[test]

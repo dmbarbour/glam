@@ -41,6 +41,23 @@ fn public_list(assembler: &Assembler, items: impl IntoIterator<Item = PublicValu
         .expect("test list should belong to one runtime")
 }
 
+fn public_value(values: &CoreValueFactory, value: Value) -> PublicValue {
+    Values::from_core_factory(values.clone()).wrap(value)
+}
+
+fn value_i64(assembler: &Assembler, value: &PublicValue) -> Option<i64> {
+    assembler.evaluator().eval(value).unwrap().as_i64().unwrap()
+}
+
+fn value_is_undefined(assembler: &Assembler, value: &PublicValue) -> bool {
+    assembler
+        .evaluator()
+        .eval(value)
+        .unwrap()
+        .same_representation(&assembler.values().empty_dict())
+        .unwrap()
+}
+
 macro_rules! assert_same_value {
     ($assembler:expr, $left:expr, $right:expr $(,)?) => {{
         let left = &$left;
@@ -191,11 +208,11 @@ impl TaskSpecialization for TestEffects {
                 Ok(RequestResult::ReturnUnit)
             }
             TestRequest::Alternatives => Ok(RequestResult::Alternatives(vec![
-                PublicValue::from_core(
+                public_value(
                     context.eval_context().values(),
                     Value::binary_from_text("first"),
                 ),
-                PublicValue::from_core(
+                public_value(
                     context.eval_context().values(),
                     Value::binary_from_text("second"),
                 ),
@@ -454,14 +471,14 @@ impl TaskEnvironment for TestHost {
     fn reflection_environment(&self) -> PublicValue {
         let state = self.state.lock().unwrap();
         let values = state.store.values();
-        let process_environment = PublicValue::from_core(
+        let process_environment = public_value(
             values,
             Value::Dict(Dict::new_sync().insert(
                 Key::binary_from_text("GLAM_TEST_ENV"),
                 Value::binary_from_text("present"),
             )),
         );
-        PublicValue::from_core(
+        public_value(
             values,
             Value::Dict(
                 Dict::new_sync()
@@ -2098,7 +2115,7 @@ fn isolated_search_reports_and_resumes_lazy_dependencies() {
     .unwrap();
     let host = Arc::new(TestHost::with_values(assembler.core_values()));
     let mut search = IsolatedEffectSearch::new_in_context(
-        &PublicValue::from_core(&assembler.core_values(), effect),
+        &public_value(&assembler.core_values(), effect),
         TestEffects,
         host,
         observer,
@@ -2281,7 +2298,7 @@ fn internal_exit_error_forces_and_roots_its_message() {
     };
     assert_eq!(message.runtime_id(), assembler.core_values().runtime_id());
     assert!(matches!(message.as_core(), Value::Dict(_)));
-    let message = PublicValue::from_core(&assembler.core_values(), message.into_core());
+    let message = public_value(&assembler.core_values(), message.into_core());
     assert_eq!(
         assembler
             .to_binary(&assembler.get(&message, "msg.text").unwrap())
@@ -2358,7 +2375,7 @@ fn permanent_exit_discards_every_speculative_cut_resource() {
     assert!(
         assembler
             .get(&host.heap(), "discarded")
-            .is_ok_and(|value| value.is_undefined())
+            .is_ok_and(|value| value_is_undefined(&assembler, &value))
     );
     assert!(host.diagnostics().is_empty());
     assert!(host.stderr().is_empty());
@@ -2394,7 +2411,7 @@ fn retryable_exit_restarts_with_a_fresh_transaction_after_disturbance() {
     assert!(
         assembler
             .get(&host.heap(), "attempt")
-            .is_ok_and(|value| value.is_undefined())
+            .is_ok_and(|value| value_is_undefined(&assembler, &value))
     );
     assert!(host.stderr().is_empty());
     assert!(host.diagnostics().is_empty());
@@ -3014,7 +3031,7 @@ fn scheduled_effect_handle_retains_root_after_lifecycle_observer_drops() {
     let TaskOutcome::Complete(value) = task.run().unwrap() else {
         panic!("hidden task handle should retain the coordinator root")
     };
-    assert_eq!(value.as_i64(), Some(42));
+    assert_eq!(value_i64(&assembler, &value), Some(42));
 }
 
 #[test]
@@ -3195,7 +3212,7 @@ fn metadata_inspection_returns_hidden_values_without_forcing_them() {
     assert!(metadata.is_empty());
 
     let (assembler, inspect) = compile_effect("\\value -> .meta.inspect value");
-    let carrier = PublicValue::from_core(
+    let carrier = public_value(
         &assembler.core_values(),
         Value::metadata_carrier(Value::error(
             &assembler.core_values(),
@@ -3446,7 +3463,7 @@ fn reflection_eval_suspends_instead_of_failing_around_a_pending_value() {
     let Some(error) = result.get(&*keys::ERR) else {
         panic!("eval should return the dependency failure under err");
     };
-    let error = PublicValue::from_core(&assembler.core_values(), error.clone());
+    let error = public_value(&assembler.core_values(), error.clone());
     assert_eq!(
         assembler
             .to_binary(&assembler.get(&error, "msg.text").unwrap())
@@ -3817,10 +3834,7 @@ fn task_join_accepts_same_runtime_handles_across_all_terminal_states() {
         compile_effect_with_runtime(&assembler.evaluation_runtime(), "\\task -> .task.join task");
     let join = |task: Value| {
         assembler
-            .apply(
-                &join,
-                [PublicValue::from_core(&assembler.core_values(), task)],
-            )
+            .apply(&join, [public_value(&assembler.core_values(), task)])
             .expect("task.join should apply to a task handle")
     };
 
@@ -4302,10 +4316,12 @@ fn task_halt_conversions_preserve_evaluation_and_public_error_structure() {
         std::slice::from_ref(&frame)
     );
     assert_eq!(
-        assembler
-            .get(evaluation_diagnostic.emission(), "detail")
-            .unwrap()
-            .as_i64(),
+        value_i64(
+            &assembler,
+            &assembler
+                .get(evaluation_diagnostic.emission(), "detail")
+                .unwrap(),
+        ),
         Some(7)
     );
 
@@ -4324,10 +4340,12 @@ fn task_halt_conversions_preserve_evaluation_and_public_error_structure() {
         assembler.evaluation_runtime().id()
     );
     assert_eq!(
-        assembler
-            .get(public_diagnostic.emission(), "detail")
-            .unwrap()
-            .as_i64(),
+        value_i64(
+            &assembler,
+            &assembler
+                .get(public_diagnostic.emission(), "detail")
+                .unwrap(),
+        ),
         Some(7)
     );
 }
@@ -4355,10 +4373,12 @@ fn effect_dispatch_preserves_structured_failure_and_adds_stage_context() {
     let diagnostic = halt.diagnostic(&assembler.values());
     assert_eq!(diagnostic.message(), "dispatch failed");
     assert_eq!(
-        assembler
-            .get(diagnostic.emission(), "detail")
-            .expect("dispatch should preserve ad hoc diagnostic fields")
-            .as_i64(),
+        value_i64(
+            &assembler,
+            &assembler
+                .get(diagnostic.emission(), "detail")
+                .expect("dispatch should preserve ad hoc diagnostic fields"),
+        ),
         Some(7)
     );
 
@@ -4575,7 +4595,7 @@ fn lazy_suspension_preserves_cut_choice_and_does_not_repeat_prior_commit() {
     let (assembler, build_effect) = compile_effect(
         "\\x -> (.write_stderr \"once\") =>> .cut (.alt (.r x >>= (\\value -> (value == \"done\") =>> .r value)) ((.write_stderr \"wrong\") =>> .r \"wrong\"))",
     );
-    let gate = PublicValue::from_core(
+    let gate = public_value(
         &assembler.core_values(),
         Value::Lazy(LazyValue::from_reflection_gate(
             &assembler.core_values(),
@@ -4629,7 +4649,7 @@ fn changed_observation_restarts_a_cut_before_its_lazy_dependency() {
     let (assembler, build_effect) = compile_effect(
         "\\x -> .cut (.alt (.read_log >>= (\\message -> .r message.msg.text)) (.r x >>= (\\value -> (value == \"unused\") =>> .r value)))",
     );
-    let gate = PublicValue::from_core(
+    let gate = public_value(
         &assembler.core_values(),
         Value::Lazy(LazyValue::from_reflection_gate(
             &assembler.core_values(),
@@ -5171,7 +5191,7 @@ fn root_local_state_replacement_does_not_replace_shared_heap() {
     assert!(
         assembler
             .get(&value, "answer")
-            .is_ok_and(|answer| answer.is_undefined())
+            .is_ok_and(|answer| value_is_undefined(&assembler, &answer))
     );
 }
 

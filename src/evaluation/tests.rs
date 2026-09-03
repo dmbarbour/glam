@@ -4661,7 +4661,9 @@ fn runtime_readiness_retains_exit_dispositions_without_settling_tasks() {
             && matches!(
                 disposition.kind(),
                 crate::api::RuntimeDispositionKind::ExitError(value)
-                    if value.as_binary() == Some(b"exit message".as_slice())
+                    if fixture.runtime.values().clone_core(value).is_ok_and(|value| {
+                        matches!(value, Value::Binary(bytes) if bytes.as_ref() == b"exit message")
+                    })
             )
     }));
     assert!(matches!(
@@ -4794,7 +4796,9 @@ fn ready_settlement_publishes_exited_once_and_retains_exit_errors() {
         matches!(
             disposition.kind(),
             crate::api::RuntimeDispositionKind::ExitError(value)
-                if value.as_binary() == Some(b"retained exit failure".as_slice())
+                if fixture.runtime.values().clone_core(value).is_ok_and(|value| {
+                    matches!(value, Value::Binary(bytes) if bytes.as_ref() == b"retained exit failure")
+                })
         )
     }));
     assert!(

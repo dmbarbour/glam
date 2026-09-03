@@ -77,6 +77,10 @@ fn compile_effects(source: &str) -> (Assembler, PublicValue) {
     (assembler, effects)
 }
 
+fn public_value(values: &CoreValueFactory, value: Value) -> PublicValue {
+    crate::api::Values::from_core_factory(values.clone()).wrap(value)
+}
+
 fn run(
     execution: &CompilationExecution,
     effect: &PublicValue,
@@ -232,7 +236,7 @@ fn unstarted_reflection_gate_runs_inside_the_macro_session() {
     let execution = assembler.test_compilation_execution();
     let reflection = return_effect(&assembler.core_values(), keys::unit_value());
     let gate = Value::reflection_gate(&assembler.core_values(), reflection, keys::unit_value());
-    let macro_effect = PublicValue::from_core(
+    let macro_effect = public_value(
         &assembler.core_values(),
         return_effect(&assembler.core_values(), gate),
     );
@@ -253,7 +257,7 @@ fn assembler_claimed_reflection_gate_is_unavailable_to_macro_session() {
     let error = eval::eval_value(&assembler.eval_context(), &gate)
         .expect_err("assembler observation should start and block the gate");
     assert!(error.blocked_on().is_some());
-    let macro_effect = PublicValue::from_core(
+    let macro_effect = public_value(
         &assembler.core_values(),
         return_effect(&assembler.core_values(), gate),
     );

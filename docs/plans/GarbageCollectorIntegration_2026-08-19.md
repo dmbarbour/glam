@@ -140,9 +140,9 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.2a.1a | complete | public handle semantic-trait and rendering retirement |
 | I4F.2a.1b | complete | assembly, diagnostic, and error access retirement |
 | I4F.2a.1c.1 | complete | test-only equality bridge retirement |
-| I4F.2a.1c.2 | pending | test-only observer and constructor retirement |
-| I4F.2a.1c | pending | public facade compatibility-test closure |
-| I4F.2a.1 | pending | public facade, assembly, diagnostic, and error access retirement |
+| I4F.2a.1c.2 | complete | test-only observer and constructor retirement |
+| I4F.2a.1c | complete | public facade compatibility-test closure |
+| I4F.2a.1 | complete | public facade, assembly, diagnostic, and error access retirement |
 | I4F.2a.2a | complete | public evaluator and reflection-inspector access retirement |
 | I4F.2a.2b | complete | evaluation driver and rooted-completion projection retirement |
 | I4F.2a.2c | complete | core net and builtin construction adapter retirement |
@@ -3652,6 +3652,17 @@ lifecycle states have the expected variant, readiness records retain the same
 work identities, and value representations compare only through matching
 runtime authority. Compile-time negative trait fixtures latch the absence of
 equality, ordering, and hashing on both public value handles.
+
+I4F.2a.1c.2, I4F.2a.1c, and I4F.2a.1 completed 2026-09-03. The public handle's
+crate-test-only scalar, binary, kind, undefined, and bare-core construction
+shortcuts are gone. Public facade fixtures now demand through
+`ValueEvaluator`, inspect through `ReflectionInspector`, or construct through
+the matching `Values`; lower-level subsystem fixtures use the same scoped
+internal service. Output-decoder tests now capture their runtime `Values`
+authority explicitly instead of relying on a standalone `Value` observer.
+The production inventory consequently records no `Value::from_core`,
+`Value::from_runtime`, or direct `RuntimeValueRoot::from_runtime` path in the
+facade.
 
 I4F.2a.2a completed 2026-09-03. `ValueEvaluator` and
 `ReflectionInspector` no longer call compatibility projection or construction

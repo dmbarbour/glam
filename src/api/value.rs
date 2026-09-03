@@ -725,52 +725,8 @@ impl Value {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn is_undefined(&self) -> bool {
-        matches!(self.0.as_core(), CoreValue::Dict(dict) if dict.is_empty())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn as_binary(&self) -> Option<&[u8]> {
-        match self.0.as_core() {
-            CoreValue::Binary(bytes) => Some(bytes.as_ref()),
-            _ => None,
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn as_i64(&self) -> Option<i64> {
-        match self.0.as_core() {
-            CoreValue::Number(number) => number.to_i64_if_integer(),
-            _ => None,
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn kind(&self) -> ValueKind {
-        ValueKind::from_core(self.0.as_core())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn as_number_text(&self) -> Option<String> {
-        match self.0.as_core() {
-            CoreValue::Number(number) => Some(number.to_string()),
-            _ => None,
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn from_core(values: &CoreValueFactory, value: CoreValue) -> Self {
-        Self::from_runtime(values.runtime_id(), value)
-    }
-
     pub(crate) fn from_runtime_root(value: RuntimeValueRoot) -> Self {
         Self(value)
-    }
-
-    #[cfg(test)]
-    pub(super) fn from_runtime(runtime: EvaluationRuntimeId, value: CoreValue) -> Self {
-        Self(RuntimeValueRoot::from_runtime(runtime, value))
     }
 
     pub(crate) fn as_core(&self) -> &CoreValue {

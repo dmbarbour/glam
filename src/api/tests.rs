@@ -40,6 +40,23 @@ fn same_representation(assembler: &Assembler, left: &Value, right: &Value) -> bo
         .expect("test values should belong to the assembler runtime")
 }
 
+fn public_value(values: &crate::core::CoreValueFactory, value: CoreValue) -> Value {
+    Values::from_core_factory(values.clone()).wrap(value)
+}
+
+fn value_i64(assembler: &Assembler, value: &Value) -> Option<i64> {
+    assembler.evaluator().eval(value).unwrap().as_i64().unwrap()
+}
+
+fn value_is_undefined(assembler: &Assembler, value: &Value) -> bool {
+    assembler
+        .evaluator()
+        .eval(value)
+        .unwrap()
+        .same_representation(&assembler.values().empty_dict())
+        .unwrap()
+}
+
 fn assert_unclaimed_lazy(value: &Value) {
     let CoreValue::Lazy(lazy) = value.as_core() else {
         panic!(
@@ -366,7 +383,7 @@ fn access_and_annotation_construction_do_not_demand_inputs() {
     let demanded_by_thunk = demanded.clone();
     let core_values = assembler.core_values();
     let unit = core_values.unit();
-    let lazy = Value::from_core(
+    let lazy = public_value(
         &core_values,
         CoreValue::Lazy(LazyValue::semantic_thunk(
             &core_values,
@@ -467,13 +484,13 @@ fn value_paths_preserve_complete_names_and_empty_identity() {
         .access_names(&root, ["a.b"])
         .and_then(|value| assembler.evaluate(&value))
         .expect("a dotted complete name should remain one atom");
-    assert_eq!(complete_name.as_i64(), Some(42));
+    assert_eq!(value_i64(&assembler, &complete_name), Some(42));
 
     let split_name = values
         .access_names(&root, ["a", "b"])
         .and_then(|value| assembler.evaluate(&value))
         .expect("a missing semantic path returns undefined");
-    assert!(split_name.is_undefined());
+    assert!(value_is_undefined(&assembler, &split_name));
 
     let empty_path = values
         .access_path(&root, std::iter::empty::<Value>())
@@ -538,7 +555,7 @@ fn array_and_deque_annotations_preserve_lazy_elements() {
     let assembler = Assembler::new();
     let values = assembler.values();
     let core_values = assembler.core_values();
-    let element = Value::from_core(
+    let element = public_value(
         &core_values,
         CoreValue::Lazy(LazyValue::semantic_thunk(
             &core_values,
@@ -727,26 +744,20 @@ fn dictionary_composition_matches_source_literals_union_and_updates() {
     let singleton = values
         .dict_singleton(values.atom_from_text("only"), values.integer(9))
         .expect("singleton should construct");
-    assert_eq!(
-        values
-            .access_names(&singleton, ["only"])
-            .and_then(|value| assembler.evaluate(&value))
-            .unwrap()
-            .as_i64(),
-        Some(9)
-    );
+    let only = values
+        .access_names(&singleton, ["only"])
+        .and_then(|value| assembler.evaluate(&value))
+        .unwrap();
+    assert_eq!(value_i64(&assembler, &only), Some(9));
     let identity = values
         .dict_union(values.empty_dict(), singleton.clone())
         .expect("empty dictionary should be union identity");
     assert_field(&identity, "source_remove", &["missing"]);
-    assert_eq!(
-        values
-            .access_names(&identity, ["only"])
-            .and_then(|value| assembler.evaluate(&value))
-            .unwrap()
-            .as_i64(),
-        Some(9)
-    );
+    let only = values
+        .access_names(&identity, ["only"])
+        .and_then(|value| assembler.evaluate(&value))
+        .unwrap();
+    assert_eq!(value_i64(&assembler, &only), Some(9));
 }
 
 #[test]
@@ -754,11 +765,11 @@ fn cached_defined_selection_helpers_match_glam_undefined_semantics() {
     let assembler = Assembler::new();
     let values = assembler.values();
     let core_values = assembler.core_values();
-    let defined_or = Value::from_core(
+    let defined_or = public_value(
         &core_values,
         crate::g_syntax::defined_or_value(&core_values),
     );
-    let require_defined = Value::from_core(
+    let require_defined = public_value(
         &core_values,
         crate::g_syntax::require_defined_value(&core_values),
     );
@@ -774,14 +785,14 @@ fn cached_defined_selection_helpers_match_glam_undefined_semantics() {
             .apply(&defined_or, [fallback.clone(), undefined])
             .and_then(|value| assembler.evaluate(&value))
             .expect("defined-or should select its fallback");
-        assert_eq!(selected.as_i64(), Some(7));
+        assert_eq!(value_i64(&assembler, &selected), Some(7));
     }
 
     let selected = values
         .apply(&defined_or, [fallback, values.integer(9)])
         .and_then(|value| assembler.evaluate(&value))
         .expect("defined-or should preserve a defined candidate");
-    assert_eq!(selected.as_i64(), Some(9));
+    assert_eq!(value_i64(&assembler, &selected), Some(9));
 
     let required = values
         .apply(
@@ -790,7 +801,7 @@ fn cached_defined_selection_helpers_match_glam_undefined_semantics() {
         )
         .and_then(|value| assembler.evaluate(&value))
         .expect("required helper should preserve a defined value");
-    assert_eq!(required.as_i64(), Some(11));
+    assert_eq!(value_i64(&assembler, &required), Some(11));
     assert!(
         values
             .apply(
@@ -914,7 +925,7 @@ fn evaluated_array_items_accept_only_one_strict_value_leaf() {
     let assembler = Assembler::new();
     let values = assembler.values();
     let core_values = assembler.core_values();
-    let lazy_element = Value::from_core(
+    let lazy_element = public_value(
         &core_values,
         CoreValue::Lazy(LazyValue::semantic_thunk(
             &core_values,
@@ -956,7 +967,7 @@ fn evaluated_array_items_accept_only_one_strict_value_leaf() {
             .is_none()
     );
 
-    let concatenated = Value::from_core(
+    let concatenated = public_value(
         &core_values,
         CoreValue::List(List::concat(
             List::from_values(vec![CoreValue::Number(Number::integer(1))]),
@@ -985,7 +996,7 @@ fn evaluated_array_items_accept_only_one_strict_value_leaf() {
     let CoreValue::Promised(promise_core) = promise.as_core() else {
         unreachable!("public promise must contain a promised core value")
     };
-    let deferred_spine = Value::from_core(
+    let deferred_spine = public_value(
         &core_values,
         CoreValue::List(List::from_thunk(promise_core.clone().into())),
     );
@@ -1092,7 +1103,7 @@ fn value_evaluator_caches_lazy_success_and_preserves_structured_failure() {
     let core_values = assembler.core_values();
     let evaluations = Arc::new(AtomicUsize::new(0));
     let evaluations_by_thunk = evaluations.clone();
-    let lazy = Value::from_core(
+    let lazy = public_value(
         &core_values,
         CoreValue::Lazy(LazyValue::semantic_thunk(
             &core_values,
@@ -1145,7 +1156,7 @@ fn semantic_binary_slice_does_not_force_an_unused_poisoned_tail() {
     let poison = LazyValue::semantic_thunk(&core_values, "unused binary tail", |_| {
         Err(EvaluationHalt::new("unused binary tail was forced"))
     });
-    let source = Value::from_core(
+    let source = public_value(
         &core_values,
         CoreValue::List(List::concat(
             List::from_bytes(Bytes::from_static(b"ok")),
@@ -1335,7 +1346,7 @@ fn runtime_event_boundaries_reject_foreign_converted_and_output_values() {
     assert!(input.sender().admit(()).is_err());
 
     let output = runtime
-        .output_endpoint(decode_test_integer, |_: i64| Ok(()))
+        .output_endpoint(decode_test_integer(runtime.values()), |_: i64| Ok(()))
         .expect("output endpoint should register");
     let (_, mut events) = input_transaction(&runtime);
     assert!(
@@ -1391,23 +1402,20 @@ fn binary_annotation_preserves_a_nested_failure_context() {
         contexts.first().and_then(definition_context).is_some(),
         "semantic binary conversion should preserve the target's source context without a host-only frame"
     );
-    assert_eq!(
-        assembler
-            .get(
-                error.diagnostic(&assembler.values()).unwrap().emission(),
-                "detail",
-            )
-            .expect("ad hoc diagnostic fields should survive contextualization")
-            .as_binary(),
-        Some(b"kept".as_slice())
-    );
+    let detail = assembler
+        .get(
+            error.diagnostic(&assembler.values()).unwrap().emission(),
+            "detail",
+        )
+        .expect("ad hoc diagnostic fields should survive contextualization");
+    assert_eq!(assembler.to_binary(&detail).unwrap(), b"kept".as_slice());
 }
 
 #[test]
 fn callers_can_attach_path_context_to_semantic_access() {
     let assembler = Assembler::new();
     let values = assembler.values();
-    let root = Value::from_core(
+    let root = public_value(
         &assembler.core_values(),
         CoreValue::Dict(Dict::new_sync().insert(
             Key::atom_from_text("broken"),
@@ -1453,14 +1461,7 @@ fn callers_can_attach_path_context_to_semantic_access() {
     let missing = values
         .access_names(&root, ["missing", "member"])
         .expect("an absent path remains an ordinary semantic access");
-    assert!(
-        assembler
-            .evaluator()
-            .eval(&missing)
-            .unwrap()
-            .as_value()
-            .is_undefined()
-    );
+    assert!(value_is_undefined(&assembler, &missing));
 }
 
 #[test]
@@ -1499,7 +1500,10 @@ fn reflection_environment_explicitly_projects_compilation_origins() {
     let trace = test_compilation_trace("/workspace/source.g");
     let origin = crate::diagnostic::opaque_compilation_origin(&trace);
     assert_eq!(
-        Value::from_core(&assembler.core_values(), origin.clone()).kind(),
+        assembler
+            .reflection()
+            .kind(&public_value(&assembler.core_values(), origin.clone()))
+            .unwrap(),
         ValueKind::Opaque
     );
 
@@ -1507,10 +1511,7 @@ fn reflection_environment_explicitly_projects_compilation_origins() {
         .get(&assembler.reflection_environment(), "glam.origin.inspect")
         .expect("the reflection environment should expose origin inspection");
     let projected = assembler
-        .apply(
-            &inspect,
-            [Value::from_core(&assembler.core_values(), origin)],
-        )
+        .apply(&inspect, [public_value(&assembler.core_values(), origin)])
         .and_then(|value| assembler.evaluate(&value))
         .expect("the origin capability should inspect compilation origins");
 
@@ -1520,12 +1521,15 @@ fn reflection_environment_explicitly_projects_compilation_origins() {
 #[test]
 fn public_values_describe_metadata_carriers_only_as_sealed() {
     let assembler = Assembler::new();
-    let value = Value::from_core(
+    let value = public_value(
         &assembler.core_values(),
         CoreValue::metadata_carrier(CoreValue::binary_from_text("private trace")),
     );
 
-    assert_eq!(value.kind(), ValueKind::Sealed);
+    assert_eq!(
+        assembler.reflection().kind(&value).unwrap(),
+        ValueKind::Sealed
+    );
     assert_eq!(format!("{value:?}"), "Value");
 }
 
@@ -1535,7 +1539,7 @@ fn origin_inspection_rejects_unrelated_opaque_values() {
     let inspect = assembler
         .get(&assembler.reflection_environment(), "glam.origin.inspect")
         .expect("the reflection environment should expose origin inspection");
-    let unrelated = Value::from_core(
+    let unrelated = public_value(
         &assembler.core_values(),
         CoreValue::Opaque(OpaqueValue::new(Arc::new(42_u64))),
     );
@@ -1681,12 +1685,12 @@ fn builder_seals_the_environment_into_one_reasoning_session() {
         .expect("configured environment should be valid");
     let assembler = assembler.build().expect("assembler should build");
 
+    let client = assembler
+        .get(&assembler.reflection_environment(), "client")
+        .expect("configured environment should be installed");
     assert_eq!(
-        assembler
-            .get(&assembler.reflection_environment(), "client")
-            .expect("configured environment should be installed")
-            .as_binary(),
-        Some(b"new environment".as_slice())
+        assembler.to_binary(&client).unwrap(),
+        b"new environment".as_slice()
     );
 }
 
@@ -1711,13 +1715,10 @@ fn builder_environment_promise_can_resolve_after_early_observation() {
         .expect("resolver should escape the builder")
         .resolve(assembler.values().text("ready"))
         .expect("promise should resolve once");
-    assert_eq!(
-        assembler
-            .evaluate(&promised)
-            .expect("resolved promise should evaluate")
-            .as_binary(),
-        Some(b"ready".as_slice())
-    );
+    let resolved = assembler
+        .evaluate(&promised)
+        .expect("resolved promise should evaluate");
+    assert_eq!(assembler.to_binary(&resolved).unwrap(), b"ready".as_slice());
 }
 
 #[test]
@@ -1799,7 +1800,7 @@ fn synchronous_assembler_evaluation_waits_for_a_worker_claim() {
             Ok(CoreValue::Number(42.into()))
         },
     );
-    let value = Value::from_core(&assembler.core_values(), CoreValue::Lazy(lazy));
+    let value = public_value(&assembler.core_values(), CoreValue::Lazy(lazy));
     assembler.eval_context().spark(value.as_core().clone());
     started_receiver
         .recv_timeout(std::time::Duration::from_secs(2))

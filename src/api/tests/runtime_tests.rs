@@ -10,12 +10,37 @@ use crate::evaluation::{
 use crate::number::Number;
 use crate::reflection::RuntimeInputSequence;
 
-use super::{FailedReasoningTask, assert_unclaimed_lazy};
+use super::{FailedReasoningTask, assert_unclaimed_lazy, public_value};
 
 fn same_representation(runtime: &EvaluationRuntime, left: &Value, right: &Value) -> bool {
     runtime
         .values()
         .with_access(|values| values.core_value(left).unwrap() == values.core_value(right).unwrap())
+}
+
+fn value_i64(runtime: &EvaluationRuntime, value: &Value) -> Option<i64> {
+    let CoreValue::Number(number) = runtime.values().clone_core(value).unwrap() else {
+        return None;
+    };
+    number.to_i64_if_integer()
+}
+
+fn value_number_text(runtime: &EvaluationRuntime, value: &Value) -> Option<String> {
+    let CoreValue::Number(number) = runtime.values().clone_core(value).unwrap() else {
+        return None;
+    };
+    Some(number.to_string())
+}
+
+fn value_bytes(runtime: &EvaluationRuntime, value: &Value) -> Option<bytes::Bytes> {
+    let CoreValue::Binary(bytes) = runtime.values().clone_core(value).unwrap() else {
+        return None;
+    };
+    Some(bytes)
+}
+
+fn value_is_undefined(runtime: &EvaluationRuntime, value: &Value) -> bool {
+    same_representation(runtime, value, &runtime.values().empty_dict())
 }
 
 #[test]
@@ -113,7 +138,7 @@ fn runtime_event_snapshots_preserve_persistent_input_roots() {
         historical
             .read(&endpoint.reader())
             .unwrap()
-            .and_then(|value| value.as_i64()),
+            .and_then(|value| value_i64(&runtime, &value)),
         Some(11),
         "consumption must not mutate a retained input snapshot"
     );
@@ -168,8 +193,8 @@ fn runtime_input_conversion_precedes_admission_and_stores_only_roots() {
         .expect("the converted root should be buffered");
     assert_eq!(record.payload.runtime_id(), runtime.id());
     assert_eq!(
-        record.payload.value(runtime.id()).as_binary(),
-        Some(b"rooted".as_slice())
+        value_bytes(&runtime, &record.payload.value(runtime.id())),
+        Some(bytes::Bytes::from_static(b"rooted"))
     );
 }
 
@@ -222,7 +247,7 @@ fn event_delivery_invokes_callback_without_mutator() {
                     .lock()
                     .expect("callback-order mutex should not be poisoned")
                     .push("decode");
-                decode_test_integer(value)
+                decode_test_integer(Values::from_core_factory(decode_values.clone()))(value)
             },
             move |value| {
                 adapter_values
@@ -339,14 +364,14 @@ fn runtime_input_reads_and_commits_a_fifo_prefix() {
         events
             .read(&endpoint.reader())
             .unwrap()
-            .and_then(|value| value.as_number_text()),
+            .and_then(|value| value_number_text(&runtime, &value)),
         Some("10".to_owned())
     );
     assert_eq!(
         events
             .read(&endpoint.reader())
             .unwrap()
-            .and_then(|value| value.as_number_text()),
+            .and_then(|value| value_number_text(&runtime, &value)),
         Some("20".to_owned())
     );
     assert!(events.read(&endpoint.reader()).unwrap().is_none());
@@ -443,7 +468,7 @@ fn nonempty_fifo_read_survives_a_concurrent_append_under_coarse_heap_analysis() 
         events
             .read(&endpoint.reader())
             .unwrap()
-            .and_then(|value| value.as_i64()),
+            .and_then(|value| value_i64(&runtime, &value)),
         Some(2)
     );
     assert_eq!(
@@ -551,7 +576,7 @@ fn abandoned_runtime_input_claim_does_not_consume() {
             .expect("the admitted value should be readable")
     };
     assert_eq!(
-        retained.as_number_text(),
+        value_number_text(&runtime, &retained),
         Some("7".to_owned()),
         "the returned value must retain its own runtime root after the journal is dropped"
     );
@@ -560,7 +585,7 @@ fn abandoned_runtime_input_claim_does_not_consume() {
         events
             .read(&endpoint.reader())
             .unwrap()
-            .and_then(|value| value.as_number_text()),
+            .and_then(|value| value_number_text(&runtime, &value)),
         Some("7".to_owned())
     );
     assert_eq!(
@@ -605,7 +630,7 @@ fn combined_heap_conflict_rolls_back_runtime_input_consumption() {
         retry
             .read(&endpoint.reader())
             .unwrap()
-            .and_then(|value| value.as_number_text()),
+            .and_then(|value| value_number_text(&runtime, &value)),
         Some("9".to_owned())
     );
 }
@@ -827,7 +852,7 @@ fn quiescence_validation_rejects_observation_and_delivery_changes() {
         panic!("heap state without work should remain ready")
     };
     let endpoint = runtime
-        .output_endpoint(decode_test_integer, |_: i64| Ok(()))
+        .output_endpoint(decode_test_integer(runtime.values()), |_: i64| Ok(()))
         .expect("output endpoint should register");
     let (store, mut events) = input_transaction(&runtime);
     events
@@ -863,12 +888,12 @@ fn quiescence_report_snapshots_failures_independently_of_acknowledgement() {
     acknowledged_task.acknowledge_failure();
 
     let acknowledged_delivery = runtime
-        .output_endpoint(decode_test_integer, |_: i64| {
+        .output_endpoint(decode_test_integer(runtime.values()), |_: i64| {
             Err(Error::new("acknowledged delivery failure"))
         })
         .expect("acknowledged delivery endpoint should register");
     let retained_delivery = runtime
-        .output_endpoint(decode_test_integer, |_: i64| {
+        .output_endpoint(decode_test_integer(runtime.values()), |_: i64| {
             Err(Error::new("retained delivery failure"))
         })
         .expect("retained delivery endpoint should register");
@@ -986,11 +1011,18 @@ fn quiescence_report_snapshots_failures_independently_of_acknowledgement() {
     assert_eq!(report.runtime_id(), runtime.id());
 }
 
-pub(super) fn decode_test_integer(value: Value) -> Result<i64, Error> {
-    value
-        .as_number_text()
-        .and_then(|text| text.parse().ok())
-        .ok_or_else(|| Error::new("integer output expected"))
+pub(super) fn decode_test_integer(
+    values: Values,
+) -> impl Fn(Value) -> Result<i64, Error> + Send + Sync + 'static {
+    move |value| {
+        let value = values.clone_core(&value)?;
+        let CoreValue::Number(number) = value else {
+            return Err(Error::new("integer output expected"));
+        };
+        number
+            .to_i64_if_integer()
+            .ok_or_else(|| Error::new("integer output expected"))
+    }
 }
 
 #[test]
@@ -1002,7 +1034,7 @@ fn output_journaling_preserves_lazy_payload_until_decoder_demand() {
         .expect("assembler should seal the runtime");
     let evaluations = Arc::new(AtomicUsize::new(0));
     let producer_evaluations = evaluations.clone();
-    let lazy = Value::from_core(
+    let lazy = public_value(
         &assembler.core_values(),
         CoreValue::Lazy(LazyValue::semantic_thunk(
             &assembler.core_values(),
@@ -1066,10 +1098,10 @@ fn abandoned_output_intents_burn_ids_without_publishing_work() {
     let runtime = EvaluationRuntime::new(0).expect("runtime should build");
     let foreign = EvaluationRuntime::new(0).expect("foreign runtime should build");
     let endpoint = runtime
-        .output_endpoint(decode_test_integer, |_: i64| Ok(()))
+        .output_endpoint(decode_test_integer(runtime.values()), |_: i64| Ok(()))
         .expect("output endpoint should register");
     let next = runtime
-        .output_endpoint(decode_test_integer, |_: i64| Ok(()))
+        .output_endpoint(decode_test_integer(runtime.values()), |_: i64| Ok(()))
         .expect("second output endpoint should register");
     assert_eq!(next.writer().id().get(), endpoint.writer().id().get() + 1);
 
@@ -1109,7 +1141,7 @@ fn runtime_pump_waits_for_running_output_delivery() {
     let callback_release = release.clone();
     let (entered, callback_entered) = std::sync::mpsc::channel();
     let endpoint = runtime
-        .output_endpoint(decode_test_integer, move |_: i64| {
+        .output_endpoint(decode_test_integer(runtime.values()), move |_: i64| {
             entered
                 .send(())
                 .expect("delivery observer should remain live");
@@ -1165,7 +1197,7 @@ fn runtime_pump_waits_for_running_output_delivery() {
 fn output_identity_exhaustion_changes_no_runtime_state() {
     let runtime = EvaluationRuntime::new(0).expect("runtime should build");
     let endpoint = runtime
-        .output_endpoint(decode_test_integer, |_: i64| Ok(()))
+        .output_endpoint(decode_test_integer(runtime.values()), |_: i64| Ok(()))
         .expect("output endpoint should register");
     runtime.state.shared_resources.ids.exhaust_deliveries();
     let (_, mut events) = input_transaction(&runtime);
@@ -1194,7 +1226,7 @@ fn output_identity_exhaustion_changes_no_runtime_state() {
         .exhaust_output_endpoints();
     assert!(
         runtime
-            .output_endpoint(decode_test_integer, |_: i64| Ok(()))
+            .output_endpoint(decode_test_integer(runtime.values()), |_: i64| Ok(()))
             .is_err()
     );
     assert_eq!(
@@ -1217,7 +1249,7 @@ fn output_identity_exhaustion_changes_no_runtime_state() {
 fn combined_heap_conflict_rolls_back_output_admission() {
     let runtime = EvaluationRuntime::new(0).expect("runtime should build");
     let endpoint = runtime
-        .output_endpoint(decode_test_integer, |_: i64| Ok(()))
+        .output_endpoint(decode_test_integer(runtime.values()), |_: i64| Ok(()))
         .expect("output endpoint should register");
     let (_, store_snapshot, event_snapshot) = runtime.transaction_snapshot();
     let mut combined_store = crate::reflection::StoreJournal::new(store_snapshot.clone());
@@ -1260,7 +1292,7 @@ fn output_claim_is_unique_and_callbacks_run_outside_runtime_guards() {
         .output_endpoint(
             move |value| {
                 assert!(decode_runtime.exclusive_admission_available());
-                decode_test_integer(value)
+                decode_test_integer(decode_runtime.values())(value)
             },
             move |_: i64| {
                 assert!(adapter_runtime.exclusive_admission_available());
@@ -1298,7 +1330,7 @@ fn output_delivery_preserves_endpoint_order_and_allows_endpoint_concurrency() {
     let ordered = Arc::new(Mutex::new(Vec::new()));
     let ordered_sink = ordered.clone();
     let sequential = runtime
-        .output_endpoint(decode_test_integer, move |value| {
+        .output_endpoint(decode_test_integer(runtime.values()), move |value| {
             ordered_sink.lock().unwrap().push(value);
             Ok(())
         })
@@ -1322,13 +1354,13 @@ fn output_delivery_preserves_endpoint_order_and_allows_endpoint_concurrency() {
     let left_barrier = barrier.clone();
     let right_barrier = barrier.clone();
     let left = runtime
-        .output_endpoint(decode_test_integer, move |_: i64| {
+        .output_endpoint(decode_test_integer(runtime.values()), move |_: i64| {
             left_barrier.wait();
             Ok(())
         })
         .expect("left endpoint should register");
     let right = runtime
-        .output_endpoint(decode_test_integer, move |_: i64| {
+        .output_endpoint(decode_test_integer(runtime.values()), move |_: i64| {
             right_barrier.wait();
             Ok(())
         })
@@ -1360,7 +1392,7 @@ fn output_delivery_orders_by_commit_not_reservation() {
     let delivered = Arc::new(Mutex::new(Vec::new()));
     let sink = delivered.clone();
     let endpoint = runtime
-        .output_endpoint(decode_test_integer, move |value| {
+        .output_endpoint(decode_test_integer(runtime.values()), move |value| {
             sink.lock().unwrap().push(value);
             Ok(())
         })
@@ -1394,7 +1426,7 @@ fn output_delivery_orders_by_commit_not_reservation() {
 fn cloned_output_intent_cannot_republish_a_terminal_delivery_id() {
     let runtime = EvaluationRuntime::new(0).expect("runtime should build");
     let endpoint = runtime
-        .output_endpoint(decode_test_integer, |_: i64| Ok(()))
+        .output_endpoint(decode_test_integer(runtime.values()), |_: i64| Ok(()))
         .expect("output endpoint should register");
     let (_, store_snapshot, event_snapshot) = runtime.transaction_snapshot();
     let first_store = crate::reflection::StoreJournal::new(store_snapshot.clone());
@@ -1427,14 +1459,15 @@ fn output_failures_are_terminal_durable_and_acknowledgeable() {
         )
         .expect("decode endpoint should register");
     let adapter = runtime
-        .output_endpoint(decode_test_integer, |_: i64| {
+        .output_endpoint(decode_test_integer(runtime.values()), |_: i64| {
             Err(Error::new("adapter failure"))
         })
         .expect("adapter endpoint should register");
     let panic = runtime
-        .output_endpoint(decode_test_integer, |_: i64| -> Result<(), Error> {
-            panic!("adapter panic")
-        })
+        .output_endpoint(
+            decode_test_integer(runtime.values()),
+            |_: i64| -> Result<(), Error> { panic!("adapter panic") },
+        )
         .expect("panic endpoint should register");
     let (store, mut events) = input_transaction(&runtime);
     let decode_id = events
@@ -1507,7 +1540,7 @@ fn output_callback_response_reenters_as_later_admitted_input() {
         .expect("input endpoint should register");
     let response = input.sender();
     let output = runtime
-        .output_endpoint(decode_test_integer, move |value| {
+        .output_endpoint(decode_test_integer(runtime.values()), move |value| {
             response.admit(value)?;
             Ok(())
         })
@@ -1534,7 +1567,7 @@ fn output_callback_response_reenters_as_later_admitted_input() {
         fresh_events
             .read(&input.reader())
             .unwrap()
-            .and_then(|value| value.as_number_text()),
+            .and_then(|value| value_number_text(&runtime, &value)),
         Some("42".to_owned())
     );
 }
@@ -1594,7 +1627,7 @@ fn output_payload_is_retained_through_callback_and_dropped_after_locks() {
     events
         .write(
             &endpoint.writer(),
-            Value::from_core(
+            public_value(
                 runtime.values().core(),
                 CoreValue::Opaque(OpaqueValue::new(lease)),
             ),
@@ -1621,7 +1654,7 @@ fn running_delivery_retains_shared_resources_until_terminal_publication() {
     let callback_barrier = barrier.clone();
     let (entered, waiting) = std::sync::mpsc::channel();
     let endpoint = runtime
-        .output_endpoint(decode_test_integer, move |_: i64| {
+        .output_endpoint(decode_test_integer(runtime.values()), move |_: i64| {
             entered.send(()).unwrap();
             callback_barrier.wait();
             Ok(())
@@ -1678,7 +1711,7 @@ fn independent_runtimes_have_independent_reflection_heaps() {
     assert!(
         foreign
             .get(&foreign.test_reflection_heap(), "runtime_only")
-            .is_ok_and(|value| value.is_undefined())
+            .is_ok_and(|value| value_is_undefined(&foreign.evaluation_runtime(), &value))
     );
 }
 
@@ -1711,7 +1744,7 @@ fn runtime_combines_reflection_and_event_commit() {
     assert!(
         assembler
             .get(&runtime.reflection_root(), "atomic")
-            .is_ok_and(|value| value.is_undefined())
+            .is_ok_and(|value| value_is_undefined(&runtime, &value))
     );
 
     let (_, store, snapshot) = runtime.transaction_snapshot();
@@ -1725,7 +1758,7 @@ fn runtime_combines_reflection_and_event_commit() {
         events
             .read(&input.reader())
             .expect("admitted input should be readable")
-            .and_then(|value| value.as_i64()),
+            .and_then(|value| value_i64(&runtime, &value)),
         Some(7)
     );
     assert_eq!(
@@ -1736,12 +1769,12 @@ fn runtime_combines_reflection_and_event_commit() {
     assert_ne!(committed_generation, input_generation);
     let mut empty = RuntimeEventJournal::new(snapshot);
     assert!(empty.read(&input.reader()).unwrap().is_none());
+    let committed = assembler
+        .get(&runtime.reflection_root(), "atomic")
+        .expect("the store edit should commit");
     assert_eq!(
-        assembler
-            .get(&runtime.reflection_root(), "atomic")
-            .expect("the store edit should commit")
-            .as_binary(),
-        Some(b"committed".as_slice())
+        value_bytes(&runtime, &committed),
+        Some(bytes::Bytes::from_static(b"committed"))
     );
 }
 
