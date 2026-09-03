@@ -1155,6 +1155,70 @@ pub(super) fn resolve_core_access_in(
 mod driver_tests {
     use super::*;
 
+    fn assert_net_driver_bounded_owner_inventory(
+        request: &NormalizationRequest,
+        work: &NetDriverWork,
+        worklist: &NetDriverWorklist,
+        driver: &NetDriver,
+    ) {
+        let NormalizationRequest {
+            runtime,
+            root_interface,
+            mode,
+        } = request;
+        let _: &CoreRuntimeNet = runtime;
+        let _: &Port = root_interface;
+        let _: &NormalizationMode = mode;
+
+        match work {
+            NetDriverWork::RequestRoot { runtime, interface } => {
+                let _: &CoreRuntimeNet = runtime;
+                let _: &Port = interface;
+            }
+            NetDriverWork::Cursor { runtime, cursor } => {
+                let _: &CoreRuntimeNet = runtime;
+                let _: &crate::interaction_net::NodeId = cursor;
+            }
+            NetDriverWork::ActivePair { runtime, pair } => {
+                let _: &CoreRuntimeNet = runtime;
+                let _: &ActivePairKey = pair;
+            }
+            NetDriverWork::ObservedCursor {
+                observation,
+                cursor,
+            } => {
+                let _: &FrontierObservation = observation;
+                let _: &crate::interaction_net::NodeId = cursor;
+            }
+            NetDriverWork::ObservedActivePair { observation, pair } => {
+                let _: &FrontierObservation = observation;
+                let _: &ActivePairKey = pair;
+            }
+            NetDriverWork::ResumeCursorDependency {
+                runtime,
+                cursor,
+                expected_dependency,
+                disposition,
+            } => {
+                let _: &CoreRuntimeNet = runtime;
+                let _: &crate::interaction_net::NodeId = cursor;
+                let _: &CursorDependency = expected_dependency;
+                let _: &CursorDependencyDisposition = disposition;
+            }
+        }
+
+        let NetDriverWorklist { items } = worklist;
+        let _: &Vec<NetDriverWork> = items;
+        let NetDriver {
+            request,
+            worklist,
+            progressed,
+        } = driver;
+        let _: &NormalizationRequest = request;
+        let _: &NetDriverWorklist = worklist;
+        let _: &bool = progressed;
+    }
+
     macro_rules! assert_does_not_implement {
         ($module:ident, $type:ty, $trait:path) => {
             mod $module {
@@ -1181,6 +1245,12 @@ mod driver_tests {
         CoreCallClaim<'static, 'static>,
         Send
     );
+
+    #[test]
+    fn net_driver_owner_inventory_is_compile_exhaustive_and_bounded() {
+        let _: fn(&NormalizationRequest, &NetDriverWork, &NetDriverWorklist, &NetDriver) =
+            assert_net_driver_bounded_owner_inventory;
+    }
     assert_does_not_implement!(
         core_call_claim_is_not_sync,
         CoreCallClaim<'static, 'static>,

@@ -133,6 +133,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.1f.3c | complete | logger supervision, rendering, and callback roots |
 | I4F.1f.3 | complete | binary configuration and logger roots |
 | I4F.1f | complete | assembly, compiler, macro, configuration, and logger root surfaces |
+| I4F.1g.1 | complete | synchronized-net owners and bounded driver work |
 | I4F.1g | pending | synchronized-net, hidden-owner, and final inventory closure |
 | I4F.1 | pending | durable root-surface conversion gate |
 | I4F.2a.1 | pending | private production managed-node and family contract |
@@ -3322,6 +3323,19 @@ depending on scheduler luck. No runtime semantics changed. Production remains
 
 #### Phase I4F.1g — Net, Hidden-Owner, and Gate Closure
 
+Partition this final gate into two independently reviewable checkpoints:
+
+1. **I4F.1g.1 — Synchronized-net ownership.** Compile-latch the durable core
+   net facade, source observations, contention handoffs, function/operator
+   payloads, and the evaluator's bounded driver descriptors. Verify that a
+   shared net retains semantic payloads until its last owner retires. Driver
+   work and live claims remain stack-bounded and reconstructible; only the
+   shared net contains authoritative parked state.
+2. **I4F.1g.2 — Hidden-owner and gate closure.** Re-run the repository-wide
+   closure, opaque, callback, and type-erasure audits; close every previously
+   completed inventory row; require the inventory to contain no open migration
+   before freezing the I4F.2 baseline.
+
 - Reconcile synchronized core-net/work records and every durable net handle
   held outside an already inventoried value root. A transient active-pair or
   cursor claim remains bounded; a parked driver, function stage, source-net
@@ -3341,6 +3355,20 @@ fixtures, the complete `durable_value_owner_inventory_is_complete` baseline,
 and one table-driven non-collecting publish/retain/retire pass over every
 registered owner fixture. I4F.1 completes only when the inventory has no open
 row.
+
+I4F.1g.1 completed 2026-09-03. Compile-exhaustive latches now cover the
+durable core-net facade, prepared copy source, contention and frontier
+handles, every `CoreOperator` payload variant, and all evaluator driver/work
+descriptors. The audit confirmed that `NetDriver`, its worklist, and call and
+operator claims are bounded evaluator state: they are consumed or rebuilt
+within one drive operation and never become a durable parked owner.
+Authoritative blocked calls, cursor dependencies, stuck reasons, copied source
+nets, and semantic node payloads remain in the synchronized runtime net.
+A deterministic lifetime fixture proves that this shared owner retains a
+function/operator payload after construction scope and releases it with the
+last net owner. Existing forced park, retry, unwind, contention, and
+normalization-close fixtures remain the behavioral verification. No
+production representation or semantics changed.
 
 ### Phase I4F.2 — Public-Root Production Switch
 

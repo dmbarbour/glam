@@ -853,6 +853,68 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
+    fn assert_core_net_durable_owner_inventory(
+        runtime: &CoreRuntimeNet,
+        prepared: &CorePreparedCopySource,
+        contention: &CoreNetContention,
+        observation: &CoreFrontierObservation,
+        operator: &CoreOperator,
+    ) {
+        let CoreRuntimeNet { inner, values } = runtime;
+        let _: &SharedRuntimeNet<CoreSpecialization> = inner;
+        let _: &RuntimeValueObserver = values;
+
+        let CorePreparedCopySource { inner, values } = prepared;
+        let _: &PreparedCopySource<CoreSpecialization> = inner;
+        let _: &RuntimeValueObserver = values;
+
+        let CoreNetContention { runtime, revisions } = contention;
+        let _: &CoreRuntimeNet = runtime;
+        let _: &RuntimeNetRevisions = revisions;
+
+        let CoreFrontierObservation { inner, source } = observation;
+        let _: &FrontierObservation<CoreSpecialization> = inner;
+        let _: &CoreRuntimeNet = source;
+
+        match operator {
+            CoreOperator::ApplyArity { arity, supplied }
+            | CoreOperator::List { arity, supplied } => {
+                let _: &usize = arity;
+                let _: &Arc<[Value]> = supplied;
+            }
+            CoreOperator::FunctionCaptures { code, supplied }
+            | CoreOperator::ComputationCaptures { code, supplied } => {
+                let _: &Arc<FunctionCode> = code;
+                let _: &Arc<[Value]> = supplied;
+            }
+            CoreOperator::Dict { keys, supplied } => {
+                let _: &Arc<[Key]> = keys;
+                let _: &Arc<[Value]> = supplied;
+            }
+            CoreOperator::Builtin(call) => {
+                let _: &BuiltinCall = call;
+            }
+            CoreOperator::Applicable(value) => {
+                let _: &Value = value;
+            }
+            CoreOperator::Access { path, supplied } => {
+                let _: &Arc<[CoreDataKey]> = path;
+                let _: &Arc<[Value]> = supplied;
+            }
+            CoreOperator::Request {
+                tag,
+                arity,
+                supplied,
+                wrap_effect,
+            } => {
+                let _: &Key = tag;
+                let _: &usize = arity;
+                let _: &Arc<[Value]> = supplied;
+                let _: &bool = wrap_effect;
+            }
+        }
+    }
+
     macro_rules! assert_does_not_implement {
         ($module:ident, $type:ty, $trait:path) => {
             mod $module {
@@ -889,6 +951,45 @@ mod tests {
         let mut builder = crate::interaction_net::NetBuilder::<CoreSpecialization>::new();
         let data = builder.data(values.unit());
         builder.finish(data)
+    }
+
+    #[test]
+    fn core_net_durable_owner_inventory_is_compile_exhaustive() {
+        let _: fn(
+            &CoreRuntimeNet,
+            &CorePreparedCopySource,
+            &CoreNetContention,
+            &CoreFrontierObservation,
+            &CoreOperator,
+        ) = assert_core_net_durable_owner_inventory;
+    }
+
+    #[test]
+    fn shared_core_net_retires_operator_payloads_with_its_last_owner() {
+        let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
+        let function_runtime = values.instantiate_core_net(&closed_unit_template(&values));
+        let code = Arc::new(FunctionCode::new(function_runtime, 1, 0));
+        let retained = Arc::downgrade(&code);
+
+        let mut builder = crate::interaction_net::NetBuilder::<CoreSpecialization>::new();
+        let [input, result] = builder.operator(CoreOperator::FunctionCaptures {
+            code: code.clone(),
+            supplied: Arc::from([]),
+        });
+        let argument = builder.data(values.unit());
+        builder.wire(input, argument);
+        let runtime = values.instantiate_core_net(&builder.finish(result));
+        drop(code);
+
+        assert!(
+            retained.upgrade().is_some(),
+            "the shared net must retain its operator payload"
+        );
+        drop(runtime);
+        assert!(
+            retained.upgrade().is_none(),
+            "the last shared-net owner must retire its operator payload"
+        );
     }
 
     #[test]
