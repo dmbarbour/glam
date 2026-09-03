@@ -48,7 +48,9 @@ fn assert_list_values(assembler: &Assembler, actual: &PublicValue, expected: &Pu
 
 fn evaluate_query_state(assembler: &Assembler, value: PublicValue) -> Option<EvaluationQueryState> {
     let value = assembler.evaluate(&value).unwrap();
-    decode_query_state(&assembler.core_values(), value.as_core())
+    let values = assembler.values();
+    let value = values.clone_core(&value).unwrap();
+    decode_query_state(&values, &value)
 }
 
 /// Compile-exhaustive ownership latch for I4F.1d.1's durable reflection-store

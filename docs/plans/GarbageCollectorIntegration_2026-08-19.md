@@ -147,7 +147,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.2a.2d | complete | core evaluation and net access closure |
 | I4F.2a.2 | complete | core evaluator and net access retirement |
 | I4F.2a.3a | complete | reflection protocol, store, and search access retirement |
-| I4F.2a.3b | pending | reflection request access retirement |
+| I4F.2a.3b | complete | reflection request access retirement |
 | I4F.2a.3c | pending | reflection machine access retirement |
 | I4F.2a.3d | pending | compiler and module-lowering access retirement |
 | I4F.2a.3e | pending | compiler-cache access retirement |
@@ -3596,6 +3596,16 @@ one protocol exception is the structured `ApiError` to `TaskHalt` conversion:
 the current diagnostic owns a public root but not a reusable value service, so
 its emission projection remains source-latched to I6C's managed
 diagnostic/failure boundary rather than gaining an authority-free workaround.
+
+I4F.2a.3b completed 2026-09-03. Standard reflection request handlers now use
+`RequestContext::values` for construction and owned cloning, and inspect
+evaluated dictionaries, metadata carriers, task handles, messages, and
+severity values through `EvaluatedValue`'s weak observer. Task-status encoding
+clones coordinator result roots through the matching `Values` authority; query
+decoding accepts the same authority. The in-module status and lifecycle tests
+were migrated with the production code, leaving `src/reflection/requests.rs`
+with no compatibility projection, transfer, or construction calls and no
+inventory entry.
 
 #### Phase I4F.2b — Active-Owner Extraction Gate
 

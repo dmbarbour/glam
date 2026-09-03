@@ -277,6 +277,19 @@ impl Values {
         self.with_access(|values| values.clone_core(value))
     }
 
+    pub(crate) fn clone_runtime_root(&self, value: &RuntimeValueRoot) -> Result<CoreValue, Error> {
+        if value.runtime_id() != self.runtime {
+            return Err(Error::new(format!(
+                "value belongs to evaluation runtime {}, expected evaluation runtime {}",
+                value.runtime_id().get(),
+                self.runtime.get()
+            )));
+        }
+        Ok(self
+            .core
+            .with_runtime_value_access(|access| value.clone_core_with(&access)))
+    }
+
     /// Injects host bytes as compact binary data.
     pub fn bytes(&self, bytes: impl Into<Bytes>) -> Value {
         self.with_access(|values| values.wrap(CoreValue::Binary(bytes.into())))

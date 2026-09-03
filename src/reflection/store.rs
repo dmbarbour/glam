@@ -733,10 +733,7 @@ fn complete_query_value(values: &CoreValueFactory, result: PublicValue) -> Publi
     ))
 }
 
-pub(crate) fn decode_query_state(
-    values: &CoreValueFactory,
-    value: &Value,
-) -> Option<EvaluationQueryState> {
+pub(crate) fn decode_query_state(values: &Values, value: &Value) -> Option<EvaluationQueryState> {
     let Value::Dict(state) = value else {
         return None;
     };
@@ -751,7 +748,7 @@ pub(crate) fn decode_query_state(
     };
     complete.get(&QUERY_PRESENT)?;
     Some(EvaluationQueryState::Complete(
-        Values::from_core_factory(values.clone()).wrap(
+        values.wrap(
             complete
                 .get(&QUERY_RESULT)
                 .cloned()

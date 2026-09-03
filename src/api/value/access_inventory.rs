@@ -197,12 +197,6 @@ const INVENTORY: &[InventoryEntry] = &[
         "I6C managed failure shell"
     ),
     entry!(
-        "src/reflection/requests.rs",
-        [20, 3, 19, 0, 0, 0],
-        "rooted standard reflection request parsing and results",
-        "I3C.2 rooted task joins; I3D.2 interpreter boundary; I4F.1d.3a rooted request owners; I4F.2a compatibility-access retirement"
-    ),
-    entry!(
         "src/runtime.rs",
         [0, 0, 0, 0, 0, 1],
         "shallow direct-value rooting for one runtime failure root",
