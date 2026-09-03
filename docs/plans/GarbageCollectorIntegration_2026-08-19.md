@@ -192,8 +192,8 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.2e.2 | complete | reflection owner collection fixtures |
 | I4F.2e.3a | complete | diagnostic event, subscription, and ingress owners |
 | I4F.2e.3b | complete | event input, snapshot, journal, and result owners |
-| I4F.2e.3c | pending | output intent, delivery, and failure owners |
-| I4F.2e.3 | pending | diagnostic, event, and delivery collection fixtures |
+| I4F.2e.3c | complete | output intent, delivery, and failure owners |
+| I4F.2e.3 | complete | diagnostic, event, and delivery collection fixtures |
 | I4F.2e.4 | pending | compiler, binary-host, net, and hidden-owner collection fixtures |
 | I4F.2e | pending | closed durable-owner collection matrix |
 | I4F.2f | pending | compatibility deletion and I4 reconciliation |
@@ -4215,6 +4215,20 @@ snapshot retire after commit while the returned public value remains. That
 result independently survives collection and releases the shell on drop. This
 covers admitted records, persistent snapshots, transaction-local journals,
 and committed input results without treating inline values as GC evidence.
+
+I4F.2e.3c completed 2026-09-03 by extending the existing opaque-payload
+delivery fixture across every output ownership transition. Collection occurs
+while the value belongs only to a transaction-local intent, after commit while
+it is queued, and from inside the adapter while the running delivery ticket
+owns it; terminalization then permits managed-shell finalization and the
+already-inventoried external-owner drain outside locks. A separate structured
+failure fixture uses two delivery-owned diagnostic contexts. One survives
+collection through the authoritative failure ledger and retires on
+acknowledgement. The other is acknowledged first but survives collection
+through a detached failure snapshot, then retires with that snapshot. This
+closes the complete diagnostic/event/delivery transport matrix and preserves
+the distinction between semantic commit, external delivery, and durable
+failure observation.
 
 Keep every fixture in a fresh isolated collector-ready runtime/heap. Do not
 collect a shared production graph containing I5-I10 unclassified families.

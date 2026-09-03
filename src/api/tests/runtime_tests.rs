@@ -1681,6 +1681,7 @@ fn output_payload_is_retained_through_callback_and_dropped_after_locks() {
     });
     let retained = Arc::downgrade(&lease);
     let callback_retained = retained.clone();
+    let callback_collector = runtime.values().core().clone();
     let endpoint = runtime
         .output_endpoint(
             |value| {
@@ -1688,6 +1689,7 @@ fn output_payload_is_retained_through_callback_and_dropped_after_locks() {
                 Ok(())
             },
             move |()| {
+                callback_collector.collect_and_drain_external_owners_for_test();
                 assert!(callback_retained.upgrade().is_some());
                 Ok(())
             },
@@ -1703,12 +1705,21 @@ fn output_payload_is_retained_through_callback_and_dropped_after_locks() {
             ),
         )
         .unwrap();
+    runtime
+        .values()
+        .core()
+        .collect_and_drain_external_owners_for_test();
+    assert!(retained.upgrade().is_some());
     assert_eq!(
         runtime.try_commit_transaction(&store, &events),
         crate::reflection::StoreCommitResult::Committed
     );
     drop(events);
     drop(store);
+    runtime
+        .values()
+        .core()
+        .collect_and_drain_external_owners_for_test();
     assert!(retained.upgrade().is_some());
     assert!(endpoint.delivery().deliver_next().unwrap().is_some());
     // Delivery releases its retained runtime value outside the callback and
@@ -1724,6 +1735,91 @@ fn output_payload_is_retained_through_callback_and_dropped_after_locks() {
     );
     assert!(retained.upgrade().is_none());
     assert!(dropped.load(Ordering::Acquire));
+}
+
+#[test]
+fn delivery_failure_roots_follow_ledger_and_snapshot_owners() {
+    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+    let domain = EffectTokenDomain::new(&runtime.values());
+    let ledger_payload = Arc::new(());
+    let snapshot_payload = Arc::new(());
+    let ledger_retained = Arc::downgrade(&ledger_payload);
+    let snapshot_retained = Arc::downgrade(&snapshot_payload);
+    let contexts = Arc::new(Mutex::new(std::collections::VecDeque::from([
+        domain.issue(ledger_payload),
+        domain.issue(snapshot_payload),
+    ])));
+    let callback_contexts = contexts.clone();
+    let error_values = runtime.values();
+    let endpoint = runtime
+        .output_endpoint(
+            |_: Value| Ok(()),
+            move |()| {
+                let context = callback_contexts
+                    .lock()
+                    .expect("failure context queue should not be poisoned")
+                    .pop_front()
+                    .expect("each delivery should have one structured context");
+                Err(Error::new("structured delivery failure")
+                    .with_context(&error_values, context)
+                    .expect("the failure context should belong to its runtime"))
+            },
+        )
+        .expect("failure endpoint should register");
+    let (store, mut events) = input_transaction(&runtime);
+    let ledger_id = events
+        .write(&endpoint.writer(), runtime.values().unit())
+        .expect("first failure should journal");
+    let snapshot_id = events
+        .write(&endpoint.writer(), runtime.values().unit())
+        .expect("second failure should journal");
+    assert_eq!(
+        runtime.try_commit_transaction(&store, &events),
+        crate::reflection::StoreCommitResult::Committed
+    );
+    drop(events);
+    drop(store);
+
+    let RuntimeDeliveryOutcome::Failed(ledger_failure) = endpoint
+        .delivery()
+        .deliver_next()
+        .expect("first delivery should run")
+        .expect("first delivery should exist")
+    else {
+        panic!("the first delivery should fail")
+    };
+    assert_eq!(ledger_failure.delivery_id(), ledger_id);
+    drop(ledger_failure);
+    domain.collect_and_drain_retired_external_owners_for_test();
+    assert!(ledger_retained.upgrade().is_some());
+    assert!(runtime.acknowledge_delivery_failure(ledger_id));
+    domain.collect_and_drain_retired_external_owners_for_test();
+    assert!(ledger_retained.upgrade().is_none());
+
+    let RuntimeDeliveryOutcome::Failed(snapshot_failure) = endpoint
+        .delivery()
+        .deliver_next()
+        .expect("second delivery should run")
+        .expect("second delivery should exist")
+    else {
+        panic!("the second delivery should fail")
+    };
+    assert_eq!(snapshot_failure.delivery_id(), snapshot_id);
+    drop(snapshot_failure);
+    let snapshot = runtime.delivery_failure_snapshot();
+    assert!(runtime.acknowledge_delivery_failure(snapshot_id));
+    domain.collect_and_drain_retired_external_owners_for_test();
+    assert!(snapshot_retained.upgrade().is_some());
+    assert!(snapshot.get(snapshot_id).is_some());
+    drop(snapshot);
+    domain.collect_and_drain_retired_external_owners_for_test();
+    assert!(snapshot_retained.upgrade().is_none());
+    assert!(
+        contexts
+            .lock()
+            .expect("failure context queue should not be poisoned")
+            .is_empty()
+    );
 }
 
 #[test]
