@@ -328,12 +328,12 @@ struct CoreValues {
 }
 
 impl CoreValues {
-    fn new(runtime: EvaluationRuntimeId) -> Self {
+    fn new(values: &CoreValueFactory) -> Self {
         let atom = |key: &Key| match key {
             Key::Atom(atom) => Value::Atom(*atom),
             _ => Value::Atom(Atom::from_key(key)),
         };
-        let root = |value| RuntimeValueRoot::from_runtime(runtime, value);
+        let root = |value| RuntimeValueRoot::new(values, value);
         Self {
             unit: root(atom(&keys::UNIT)),
             object_reflection_guard: root(atom(&keys::OBJECT_REFLECTION_GUARD)),
@@ -353,7 +353,7 @@ impl CoreValues {
 /// layers: `TypeId` supplies the private namespace, while each layer owns the
 /// concrete cached type.
 struct RuntimeValueCache {
-    core: CoreValues,
+    core: OnceLock<CoreValues>,
     extensions: Mutex<RuntimeCacheMap>,
     #[cfg(test)]
     extension_lookups: AtomicUsize,
@@ -366,7 +366,7 @@ impl CoreValueFactory {
             ids,
             heap: Heap::new_with_policy(CollectionPolicy::NoAuto),
             cache: RuntimeValueCache {
-                core: CoreValues::new(runtime),
+                core: OnceLock::new(),
                 extensions: Mutex::new(RuntimeCacheMap::default()),
                 #[cfg(test)]
                 extension_lookups: AtomicUsize::new(0),
@@ -375,10 +375,17 @@ impl CoreValueFactory {
             external_owners: ExternalOwnerRegistry::new(runtime),
         });
         debug_assert_eq!(domain.heap.collection_policy(), CollectionPolicy::NoAuto);
-        Self {
+        let values = Self {
             domain,
             local_extensions: None,
-        }
+        };
+        values
+            .domain
+            .cache
+            .core
+            .set(CoreValues::new(&values))
+            .unwrap_or_else(|_| panic!("canonical runtime values must initialize exactly once"));
+        values
     }
 
     /// Creates a compilation-local view which remembers resolved runtime
@@ -455,32 +462,40 @@ impl CoreValueFactory {
         self.with_runtime_value_access(|access| root.clone_core_with(&access))
     }
 
+    fn core_values(&self) -> &CoreValues {
+        self.domain
+            .cache
+            .core
+            .get()
+            .expect("canonical runtime values initialize before factory publication")
+    }
+
     pub(crate) fn unit(&self) -> Value {
-        self.clone_cached_root(&self.domain.cache.core.unit)
+        self.clone_cached_root(&self.core_values().unit)
     }
 
     pub(crate) fn object_reflection_guard(&self) -> Value {
-        self.clone_cached_root(&self.domain.cache.core.object_reflection_guard)
+        self.clone_cached_root(&self.core_values().object_reflection_guard)
     }
 
     pub(crate) fn tuple(&self) -> Value {
-        self.clone_cached_root(&self.domain.cache.core.tuple)
+        self.clone_cached_root(&self.core_values().tuple)
     }
 
     pub(crate) fn info(&self) -> Value {
-        self.clone_cached_root(&self.domain.cache.core.info)
+        self.clone_cached_root(&self.core_values().info)
     }
 
     pub(crate) fn warn(&self) -> Value {
-        self.clone_cached_root(&self.domain.cache.core.warn)
+        self.clone_cached_root(&self.core_values().warn)
     }
 
     pub(crate) fn error(&self) -> Value {
-        self.clone_cached_root(&self.domain.cache.core.error)
+        self.clone_cached_root(&self.core_values().error)
     }
 
     pub(crate) fn initial_metadata(&self) -> Value {
-        self.clone_cached_root(&self.domain.cache.core.initial_metadata)
+        self.clone_cached_root(&self.core_values().initial_metadata)
     }
 
     fn atom(&self, atom: Atom) -> Value {
@@ -2099,7 +2114,7 @@ mod tests {
     fn canonical_cache_publishes_one_complete_root_bundle() {
         let runtime = crate::runtime::allocate_evaluation_runtime_id();
         let factory = CoreValueFactory::new(runtime, RuntimeIds::new());
-        let core = &factory.domain.cache.core;
+        let core = factory.core_values();
         let roots = [
             &core.unit,
             &core.object_reflection_guard,
@@ -2138,8 +2153,7 @@ mod tests {
         );
         let scoped = factory.scoped();
         let domain = Arc::downgrade(factory.value_domain());
-        let Value::Metadata(initial_metadata) =
-            factory.domain.cache.core.initial_metadata.as_core()
+        let Value::Metadata(initial_metadata) = factory.core_values().initial_metadata.as_core()
         else {
             panic!("the complete canonical bundle should contain its metadata carrier");
         };

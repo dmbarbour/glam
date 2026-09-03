@@ -172,6 +172,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.2c.2 | complete | exact production-shell visitor composition |
 | I4F.2c.3 | complete | private inline-or-root representation and provenance |
 | I4F.2c | complete | private production-root and managed-shell preparation |
+| I4F.2d.0 | complete | post-domain canonical root-bundle initialization |
 | I4F.2d | pending | atomic production managed-root switch |
 | I4F.2e.1 | pending | cache, evaluation, coordinator, and readiness collection fixtures |
 | I4F.2e.2 | pending | reflection owner collection fixtures |
@@ -3909,6 +3910,27 @@ ordering, or hash traits. Production remains `NoAuto` and retains its
 compatibility root until the atomic I4F.2d switch.
 
 #### Phase I4F.2d — Atomic Production Switch
+
+Before the atomic representation change:
+
+- **I4F.2d.0 — Post-domain canonical initialization.** Replace the canonical
+  cache bundle's structurally early construction with a private `OnceLock`
+  installed immediately after the value domain and its managed heap exist.
+  Build the complete bundle through the finished factory and keep every
+  observer behind an accessor which requires successful initialization. This
+  is a behavior-neutral construction-order repair: compatibility roots and
+  `NoAuto` collection remain in effect, and concurrent clients can never see a
+  partial bundle.
+
+I4F.2d.0 completed 2026-09-03. `RuntimeValueCache` now holds its canonical
+bundle in a private `OnceLock`. `CoreValueFactory::new` first constructs the
+complete value domain and managed heap, then builds and installs all seven
+canonical roots through that finished factory before returning it. Every
+canonical observer goes through `core_values()`, which rejects an impossible
+uninitialized domain rather than exposing the cell. Tests retain the prior
+one-bundle, scoped-factory sharing, and last-domain-owner release behavior.
+The roots themselves remain compatibility roots and collection remains
+`NoAuto`; this checkpoint changes construction order only.
 
 - In one buildable checkpoint, change `RuntimeValueRoot` to the selected
   inline-or-registered-root representation, enable the production managed

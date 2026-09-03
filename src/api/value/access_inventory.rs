@@ -96,9 +96,9 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/core.rs",
-        [8, 1, 0, 0, 3, 3],
-        "test-only canonical-root validation, compatibility promise ownership recovery, and externalized reflection effect/target roots",
-        "I4F.2a.1c fixture closure; I4F.2b.2 reflection ownership; I5 managed promise assignment"
+        [8, 1, 0, 0, 4, 2],
+        "post-domain canonical-root initialization, test-only validation, compatibility promise ownership recovery, and externalized reflection effect/target roots",
+        "I4F.2d.0 canonical initialization; I4F.2a.1c fixture closure; I4F.2b.2 reflection ownership; I5 managed promise assignment"
     ),
     entry!(
         "src/core/managed/payload_edges.rs",
