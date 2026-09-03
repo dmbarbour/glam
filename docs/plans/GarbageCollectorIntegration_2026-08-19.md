@@ -188,8 +188,8 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.2e.1 | complete | cache, evaluation, coordinator, and readiness collection fixtures |
 | I4F.2e.2a | complete | reflection store, snapshot, journal, and query owners |
 | I4F.2e.2b | complete | reflection lifecycle, protocol, and search owners |
-| I4F.2e.2c | pending | reflection request and parked-machine owners |
-| I4F.2e.2 | pending | reflection owner collection fixtures |
+| I4F.2e.2c | complete | reflection request and parked-machine owners |
+| I4F.2e.2 | complete | reflection owner collection fixtures |
 | I4F.2e.3 | pending | diagnostic, event, and delivery collection fixtures |
 | I4F.2e.4 | pending | compiler, binary-host, net, and hidden-owner collection fixtures |
 | I4F.2e | pending | closed durable-owner collection matrix |
@@ -4167,6 +4167,21 @@ branches, search-policy progress/results, and blocked failure records now all
 survive at least one collection while live; the existing staged retirement
 assertions then prove reclamation. This credits the earlier owner fixtures
 rather than duplicating their production constructors merely for the matrix.
+
+I4F.2e.2c completed 2026-09-03 by collecting the existing production request
+and machine-frame fixtures while each owner remains live, then again after its
+explicit retirement. Diagnostic journals, decoded complete/failed states, and
+query reads retain their public roots. Branch effect/state, deliver/apply
+work, successful outcomes, cut operations, every captured-control payload,
+shared fix roots, contextual wrappers, and blocked/terminal failure
+projections retain their managed shells at each forced intermediate owner
+boundary. The fixpoint and failure fixtures additionally collect between
+successive clone-owner retirement steps, so a surviving sibling cannot be
+mistaken for proof about the owner just dropped. Bounded decoded requests,
+fusion actions, and `PreparedDrive` handoffs are deliberately not assigned a
+synthetic durable-owner fixture: I4F.1d.3e proved they cannot park or escape
+one evaluator/interpreter step. This closes the reflection collection matrix
+without promoting bounded temporaries into architectural owners.
 
 Keep every fixture in a fresh isolated collector-ready runtime/heap. Do not
 collect a shared production graph containing I5-I10 unclassified families.

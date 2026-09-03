@@ -1411,6 +1411,7 @@ fn branch_retires_its_effect_and_state_roots_exactly_with_the_branch() {
     let (state, retained_state) = retained_machine_value(&values, &domain);
     let branch = Branch::<TestEffects>::new(&core, effect, state);
 
+    domain.collect_and_drain_retired_external_owners_for_test();
     assert_eq!(branch.effect.runtime_id(), core.runtime_id());
     assert_eq!(branch.state.runtime_id(), core.runtime_id());
     assert!(retained_effect.upgrade().is_some());
@@ -1430,6 +1431,7 @@ fn execution_work_and_cut_payloads_retain_roots_until_retirement() {
 
     let (value, retained) = retained_machine_value(&values, &domain);
     let work = MachineWork::deliver(&core, value, branch(), 0);
+    domain.collect_and_drain_retired_external_owners_for_test();
     assert!(retained.upgrade().is_some());
     drop(work);
     domain.collect_and_drain_retired_external_owners_for_test();
@@ -1438,6 +1440,7 @@ fn execution_work_and_cut_payloads_retain_roots_until_retirement() {
     let (function, retained_function) = retained_machine_value(&values, &domain);
     let (argument, retained_argument) = retained_machine_value(&values, &domain);
     let work = MachineWork::apply(&core, function, vec![argument], branch(), 0);
+    domain.collect_and_drain_retired_external_owners_for_test();
     assert!(retained_function.upgrade().is_some());
     assert!(retained_argument.upgrade().is_some());
     drop(work);
@@ -1447,6 +1450,7 @@ fn execution_work_and_cut_payloads_retain_roots_until_retirement() {
 
     let (value, retained) = retained_machine_value(&values, &domain);
     let outcome = BranchOutcome::complete(&core, value, branch());
+    domain.collect_and_drain_retired_external_owners_for_test();
     assert!(retained.upgrade().is_some());
     drop(outcome);
     domain.collect_and_drain_retired_external_owners_for_test();
@@ -1464,6 +1468,7 @@ fn execution_work_and_cut_payloads_retain_roots_until_retirement() {
         retry: None,
         observed_failure: false,
     };
+    domain.collect_and_drain_retired_external_owners_for_test();
     assert!(retained.upgrade().is_some());
     drop(cut);
     domain.collect_and_drain_retired_external_owners_for_test();
@@ -1502,6 +1507,7 @@ fn captured_control_payloads_retain_roots_until_retirement() {
             order: 2,
         }],
     };
+    domain.collect_and_drain_retired_external_owners_for_test();
     assert!(retained.iter().all(|weak| weak.upgrade().is_some()));
     drop(captured);
     domain.collect_and_drain_retired_external_owners_for_test();
@@ -1532,8 +1538,10 @@ fn fixpoint_frames_retain_the_shared_function_root_until_retirement() {
     };
     drop(root);
 
+    domain.collect_and_drain_retired_external_owners_for_test();
     assert!(retained.upgrade().is_some());
     drop(active);
+    domain.collect_and_drain_retired_external_owners_for_test();
     assert!(retained.upgrade().is_some());
     drop(restart);
     domain.collect_and_drain_retired_external_owners_for_test();
@@ -1557,6 +1565,7 @@ fn contextual_effect_wrapper_retires_its_context_root_exactly_with_the_wrapper()
         task.context.runtime_id(),
         assembler.evaluation_runtime().id()
     );
+    domain.collect_and_drain_retired_external_owners_for_test();
     assert!(retained.upgrade().is_some());
     drop(task);
     domain.collect_and_drain_retired_external_owners_for_test();
@@ -1593,7 +1602,10 @@ fn terminal_failure_poll_preserves_its_root_until_the_poll_is_retired() {
             .runtime_id(),
         assembler.evaluation_runtime().id()
     );
+    domain.collect_and_drain_retired_external_owners_for_test();
+    assert!(retained.upgrade().is_some());
     drop(task);
+    domain.collect_and_drain_retired_external_owners_for_test();
     assert!(retained.upgrade().is_some());
     drop(error);
     domain.collect_and_drain_retired_external_owners_for_test();
@@ -1619,7 +1631,10 @@ fn blocked_failure_poll_preserves_its_root_after_the_block_is_retired() {
         .error()
         .expect("blocked evaluation error should publish its retained root");
     assert_eq!(projected.runtime_id(), core.runtime_id());
+    domain.collect_and_drain_retired_external_owners_for_test();
+    assert!(retained.upgrade().is_some());
     drop(blocked);
+    domain.collect_and_drain_retired_external_owners_for_test();
     assert!(retained.upgrade().is_some());
     drop(projected);
     domain.collect_and_drain_retired_external_owners_for_test();

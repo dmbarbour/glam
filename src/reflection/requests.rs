@@ -988,6 +988,7 @@ mod tests {
             ],
             updates: Vec::new(),
         };
+        domain.collect_and_drain_retired_external_owners_for_test();
         assert!(retained.upgrade().is_some());
         drop(journal);
         domain.collect_and_drain_retired_external_owners_for_test();
@@ -999,6 +1000,7 @@ mod tests {
         ] {
             let (value, retained) = retained_request_value(&domain);
             let state = build(value);
+            domain.collect_and_drain_retired_external_owners_for_test();
             assert!(retained.upgrade().is_some());
             drop(state);
             domain.collect_and_drain_retired_external_owners_for_test();
@@ -1010,6 +1012,7 @@ mod tests {
             value: Some(value),
             generation: 1,
         };
+        domain.collect_and_drain_retired_external_owners_for_test();
         assert!(retained.upgrade().is_some());
         drop(read);
         domain.collect_and_drain_retired_external_owners_for_test();
