@@ -129,7 +129,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.1f.1 | complete | assembly, compiler, module, and import roots |
 | I4F.1f.2 | complete | macro, parser, and source-rewrite roots |
 | I4F.1f.3a | complete | command-line search, completion, and token roots |
-| I4F.1f.3b | pending | prepared and loaded configuration roots |
+| I4F.1f.3b | complete | prepared and loaded configuration roots |
 | I4F.1f.3c | pending | logger supervision, rendering, and callback roots |
 | I4F.1f.3 | pending | binary configuration and logger roots |
 | I4F.1f | pending | assembly, compiler, macro, configuration, and logger root surfaces |
@@ -3270,6 +3270,24 @@ explanations. The existing configured parse, ambiguity, completion,
 transaction rollback, and token-reader suites remain the behavioral matrix.
 The command-line durable-owner row closes without a production representation
 change. Production remains `NoAuto`.
+
+I4F.1f.3b completed 2026-09-03 as a closure audit of batch configuration
+ownership. `PreparedAssembly` owns the runtime, assembler, logger host, loaded
+configuration, and unresolved process/reflection argument resolvers as one
+lifecycle bundle. `LoadedConfiguration` retains its module and selected
+environment through public roots. Resolver-owned promises remain the existing
+external promise lifecycle rather than hiding a value in configuration state;
+`resolve_environment` and `fail_environment` consume each resolver once.
+Preparation failures retain their assembler/logger context and structured
+`Error` until the batch host renders them.
+
+A compile-exhaustive latch covers every prepared, failed-preparation, and
+loaded-configuration field. A deterministic effect-token fixture constructs a
+complete prepared owner and verifies that its loaded module/environment values
+survive construction-scope exit and retire exactly with that owner. Existing
+configured batch, environment resolve/fail, and assembly execution tests remain
+the behavioral coverage. The configuration durable-owner row closes without a
+production representation change. Production remains `NoAuto`.
 
 #### Phase I4F.1g — Net, Hidden-Owner, and Gate Closure
 

@@ -449,7 +449,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         RootSurface,
         "I4F.2d.4"
     ),
-    open_durable!(
+    closed_durable!(
         "src/bin/glam/configuration/mod.rs",
         "PreparedAssembly / LoadedConfiguration",
         "public Value configuration roots and evaluated observations",
@@ -458,7 +458,6 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "batch completion or configuration drop",
         PublicRoot,
         RootSurface,
-        "I4F.1f.3",
         "I4F.2d.4"
     ),
     open_durable!(

@@ -299,3 +299,75 @@ fn home_dir() -> Option<PathBuf> {
         .filter(|home| !home.is_empty())
         .map(PathBuf::from)
 }
+
+#[cfg(test)]
+mod owner_tests {
+    use super::*;
+    use glam::{DiagnosticBus, EffectTokenDomain};
+
+    fn assert_configuration_owner_inventory(
+        prepared: &PreparedAssembly,
+        failure: &PreparationFailure,
+        loaded: &LoadedConfiguration,
+    ) {
+        let PreparedAssembly {
+            local_files: _,
+            runtime: _,
+            log_host: _,
+            assembler: _,
+            configuration: _,
+            process_args: _,
+            reflection_args: _,
+        } = prepared;
+        let PreparationFailure {
+            local_files: _,
+            log_host: _,
+            assembler: _,
+            error: _,
+        } = failure;
+        let LoadedConfiguration { value, environment } = loaded;
+        let _: &Value = value;
+        let _: &Value = environment;
+    }
+
+    #[test]
+    fn configuration_owner_inventory_is_compile_exhaustive() {
+        let _: fn(&PreparedAssembly, &PreparationFailure, &LoadedConfiguration) =
+            assert_configuration_owner_inventory;
+    }
+
+    #[test]
+    fn prepared_assembly_retires_loaded_configuration_roots_exactly() {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let diagnostics = DiagnosticBus::for_runtime(&runtime);
+        let log_host = Arc::new(LogHost::with_runtime(runtime.clone(), &diagnostics));
+        let assembler = Assembler::builder()
+            .evaluation_runtime(runtime.clone())
+            .diagnostic_bus(diagnostics)
+            .build()
+            .expect("prepared assembler should build");
+        let domain = EffectTokenDomain::new(&runtime.values());
+        let value_payload = Arc::new(());
+        let retained_value = Arc::downgrade(&value_payload);
+        let environment_payload = Arc::new(());
+        let retained_environment = Arc::downgrade(&environment_payload);
+        let prepared = PreparedAssembly {
+            local_files: FileSourceSystem::default(),
+            runtime,
+            log_host,
+            assembler,
+            configuration: LoadedConfiguration {
+                value: domain.issue(value_payload),
+                environment: domain.issue(environment_payload),
+            },
+            process_args: None,
+            reflection_args: None,
+        };
+
+        assert!(retained_value.upgrade().is_some());
+        assert!(retained_environment.upgrade().is_some());
+        drop(prepared);
+        assert!(retained_value.upgrade().is_none());
+        assert!(retained_environment.upgrade().is_none());
+    }
+}
