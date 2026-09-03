@@ -464,6 +464,14 @@ impl RuntimeValueAccess<'_> {
         std::ptr::eq(self.domain, observer.domain.as_ptr())
     }
 
+    /// Returns whether `root` belongs to this exact admitted value heap.
+    ///
+    /// Unlike a diagnostic runtime ID, collector-root provenance is the
+    /// authoritative ownership check for managed value representations.
+    pub(crate) fn admits_root<T: ManagedFamily>(&self, root: &Root<T>) -> bool {
+        self.domain.heap.owns(root)
+    }
+
     /// Discovers or reuses one heap-local allocation class for this region.
     #[allow(
         dead_code,

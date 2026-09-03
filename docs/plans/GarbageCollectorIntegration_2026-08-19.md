@@ -170,8 +170,8 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.2b | complete | active-owner extraction before managed value ownership |
 | I4F.2c.1 | complete | private production managed-node and family contract |
 | I4F.2c.2 | complete | exact production-shell visitor composition |
-| I4F.2c.3 | pending | private inline-or-root representation and provenance |
-| I4F.2c | pending | private production-root and managed-shell preparation |
+| I4F.2c.3 | complete | private inline-or-root representation and provenance |
+| I4F.2c | complete | private production-root and managed-shell preparation |
 | I4F.2d | pending | atomic production managed-root switch |
 | I4F.2e.1 | pending | cache, evaluation, coordinator, and readiness collection fixtures |
 | I4F.2e.2 | pending | reflection owner collection fixtures |
@@ -3887,6 +3887,26 @@ and proves collection marks exactly the registered roots with no hidden edge
 or active external retirement. The older representative shell remains only as
 I4A historical scaffolding and is deleted with the other compatibility
 fixtures in I4F.2f.
+
+I4F.2c.3 and I4F.2c completed 2026-09-03. The private
+`PreparedRuntimeValueRoot` now applies I2's selected representation to the
+real production managed node without changing `RuntimeValueRoot` or any
+factory call site. Integral `Number` values representable as `i64` use the
+allocation-free inline arm and carry only a weak value-domain observer; all
+other current values use one registered `Root<ManagedValueNode>`. This is a
+conservative inline policy, not the eventual tagged-word decision: atoms,
+binaries, builtins, large integers, and ratios remain managed until the value-
+representation plan reviews them.
+
+Managed access validates the collector root's heap identity in all builds;
+the managed arm carries no parallel runtime ID or second root cell. Inline
+access validates the weak domain witness, and neither arm retains the value
+domain. The promoted private suite proves allocation-free inline construction,
+one root registration shared across clones and threads, same-runtime nested
+projection, rejection by another runtime, inert handles after domain teardown,
+opaque debug output, and absence of representation-derived equality,
+ordering, or hash traits. Production remains `NoAuto` and retains its
+compatibility root until the atomic I4F.2d switch.
 
 #### Phase I4F.2d — Atomic Production Switch
 

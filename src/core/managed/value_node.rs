@@ -4,10 +4,15 @@
 //! value construction through it. The atomic production switch in I4F.2d is
 //! the first checkpoint allowed to publish these roots outside this module.
 
+use std::fmt;
+
 use glam_gc::{Root, Trace, UnsupportedLayout, Visitor};
 
-use super::{ManagedDropRecord, ManagedFamily, RuntimeValueAccess, managed_slot_extent};
-use crate::core::Value;
+use super::{
+    ManagedDropRecord, ManagedFamily, RuntimeValueAccess, RuntimeValueObserver, managed_slot_extent,
+};
+use crate::core::{CoreValueFactory, Value};
+use crate::number::Number;
 
 #[allow(
     dead_code,
@@ -15,6 +20,81 @@ use crate::core::Value;
 )]
 pub(crate) struct ManagedValueNode {
     value: Value,
+}
+
+/// Prepared private representation for the production runtime value root.
+///
+/// Small integer values preserve I2's allocation-free inline opportunity.
+/// Every other current value is kept in the exact production managed shell.
+/// Inline provenance is a weak value-domain witness; managed provenance is
+/// the collector root's heap identity. Neither arm keeps its domain alive.
+#[derive(Clone)]
+#[allow(
+    dead_code,
+    reason = "I4F.2c prepares the root representation before I4F.2d activates it"
+)]
+pub(crate) enum PreparedRuntimeValueRoot {
+    InlineInteger {
+        observer: RuntimeValueObserver,
+        value: i64,
+    },
+    Managed {
+        root: Root<ManagedValueNode>,
+    },
+}
+
+impl fmt::Debug for PreparedRuntimeValueRoot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("RuntimeValueRoot")
+    }
+}
+
+#[allow(
+    dead_code,
+    reason = "I4F.2c prepares the root representation before I4F.2d activates it"
+)]
+impl PreparedRuntimeValueRoot {
+    /// Selects the private inline-or-root representation without publishing
+    /// it through the production facade.
+    pub(crate) fn prepare(values: &CoreValueFactory, value: Value) -> Self {
+        if let Value::Number(number) = &value
+            && let Some(value) = number.to_i64_if_integer()
+        {
+            return Self::InlineInteger {
+                observer: values.runtime_value_observer(),
+                value,
+            };
+        }
+
+        values.with_runtime_value_access(|access| Self::managed(&access, value))
+    }
+
+    fn managed(access: &RuntimeValueAccess<'_>, value: Value) -> Self {
+        Self::Managed {
+            root: access
+                .root_managed_value(value)
+                .expect("the production managed value node must fit one collector slot"),
+        }
+    }
+
+    /// Projects the core shell only while matching runtime access is active.
+    ///
+    /// The temporary inline shell and managed borrow cannot escape because
+    /// callers receive only the operation's result.
+    pub(crate) fn with_value<R>(
+        &self,
+        access: &RuntimeValueAccess<'_>,
+        operation: impl FnOnce(&Value) -> R,
+    ) -> Option<R> {
+        match self {
+            Self::InlineInteger { observer, value } => access
+                .admits(observer)
+                .then(|| operation(&Value::Number(Number::integer(*value)))),
+            Self::Managed { root } => access
+                .admits_root(root)
+                .then(|| operation(access.get(root).value())),
+        }
+    }
 }
 
 #[allow(
@@ -102,6 +182,7 @@ impl RuntimeValueAccess<'_> {
 mod tests {
     use std::fs;
     use std::path::Path;
+    use std::sync::Arc;
 
     use glam_gc::Trace;
 
@@ -115,6 +196,39 @@ mod tests {
     fn values() -> CoreValueFactory {
         CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new())
     }
+
+    fn project(value: &PreparedRuntimeValueRoot, values: &CoreValueFactory) -> Option<Value> {
+        values.with_runtime_value_access(|access| value.with_value(&access, Clone::clone))
+    }
+
+    // Trait selection becomes ambiguous if the private opaque root gains a
+    // representation-derived semantic relation.
+    macro_rules! assert_prepared_root_does_not_implement {
+        ($module:ident, $trait:path) => {
+            mod $module {
+                use super::PreparedRuntimeValueRoot;
+
+                trait AmbiguousIfImplemented<Discriminator> {
+                    fn verify() {}
+                }
+
+                struct Implemented;
+
+                impl<T: ?Sized> AmbiguousIfImplemented<()> for T {}
+                impl<T: ?Sized + $trait> AmbiguousIfImplemented<Implemented> for T {}
+
+                const _: fn() = || {
+                    <PreparedRuntimeValueRoot as AmbiguousIfImplemented<_>>::verify();
+                };
+            }
+        };
+    }
+
+    assert_prepared_root_does_not_implement!(prepared_root_not_partial_eq, PartialEq);
+    assert_prepared_root_does_not_implement!(prepared_root_not_eq, Eq);
+    assert_prepared_root_does_not_implement!(prepared_root_not_partial_ord, PartialOrd);
+    assert_prepared_root_does_not_implement!(prepared_root_not_ord, Ord);
+    assert_prepared_root_does_not_implement!(prepared_root_not_hash, std::hash::Hash);
 
     #[test]
     fn managed_value_node_family_contract_and_lifecycle() {
@@ -248,5 +362,103 @@ mod tests {
             "exact shell dispatch must not retire external owners"
         );
         assert_eq!(values.drain_external_owners_for_test(), 2);
+    }
+
+    #[test]
+    fn prepared_root_preserves_inline_values_without_managed_allocation() {
+        let values = values();
+        let before = values.managed_statistics();
+        let roots = (-512..512)
+            .map(|value| PreparedRuntimeValueRoot::prepare(&values, Value::Number(value.into())))
+            .collect::<Vec<_>>();
+
+        assert_eq!(values.managed_statistics(), before);
+        assert!(roots.iter().enumerate().all(|(offset, root)| {
+            project(root, &values)
+                == Some(Value::Number(Number::integer(
+                    i64::try_from(offset).unwrap() - 512,
+                )))
+        }));
+    }
+
+    #[test]
+    fn prepared_root_uses_one_registered_root_for_managed_clones() {
+        fn assert_transport<T: Clone + Send + Sync>() {}
+        assert_transport::<PreparedRuntimeValueRoot>();
+
+        let values = values();
+        let large_integer = Number::from_u64(u64::MAX);
+        let root = PreparedRuntimeValueRoot::prepare(&values, Value::Number(large_integer.clone()));
+        let alias = root.clone();
+        let worker_values = values.clone();
+        let worker = std::thread::spawn(move || project(&alias, &worker_values))
+            .join()
+            .expect("managed-root projection worker should not panic");
+        assert_eq!(worker, Some(Value::Number(large_integer)));
+        assert_eq!(format!("{root:?}"), "RuntimeValueRoot");
+
+        let live = values
+            .collect_managed_for_test()
+            .expect("the prepared managed root should survive collection");
+        assert_eq!(live.root_entries(), 1, "clones share one root cell");
+        assert_eq!(live.marked_slots(), 1);
+
+        drop(root);
+        let dead = values
+            .collect_managed_for_test()
+            .expect("dropping the final prepared root should permit reclamation");
+        assert_eq!(dead.root_entries(), 0);
+        assert_eq!(dead.finalized_slots(), 1);
+    }
+
+    #[test]
+    fn prepared_root_rejects_other_runtime_access_for_both_arms() {
+        let owner = values();
+        let other = values();
+        let inline = PreparedRuntimeValueRoot::prepare(&owner, Value::Number(42.into()));
+        let managed =
+            PreparedRuntimeValueRoot::prepare(&owner, Value::Dict(crate::core::Dict::new_sync()));
+
+        assert_eq!(project(&inline, &owner), Some(Value::Number(42.into())));
+        assert!(matches!(project(&managed, &owner), Some(Value::Dict(dict)) if dict.is_empty()));
+        assert_eq!(project(&inline, &other), None);
+        assert_eq!(project(&managed, &other), None);
+    }
+
+    #[test]
+    fn prepared_root_becomes_inaccessible_when_its_domain_is_dropped() {
+        let owner = values();
+        let domain = Arc::downgrade(owner.value_domain());
+        let inline = PreparedRuntimeValueRoot::prepare(&owner, Value::Number((-7).into()));
+        let managed =
+            PreparedRuntimeValueRoot::prepare(&owner, Value::Dict(crate::core::Dict::new_sync()));
+
+        drop(owner);
+        assert!(domain.upgrade().is_none());
+
+        let other = values();
+        assert_eq!(project(&inline, &other), None);
+        assert_eq!(project(&managed, &other), None);
+    }
+
+    #[test]
+    fn prepared_root_projection_nests_inside_one_runtime_access_region() {
+        let values = values();
+        let root =
+            PreparedRuntimeValueRoot::prepare(&values, Value::Dict(crate::core::Dict::new_sync()));
+
+        values.with_runtime_value_access(|outer| {
+            root.with_value(&outer, |before| {
+                let before = std::ptr::from_ref(before);
+                let nested = values.with_runtime_value_access(|inner| {
+                    root.with_value(&inner, |value| {
+                        assert_eq!(std::ptr::from_ref(value), before);
+                        matches!(value, Value::Dict(dict) if dict.is_empty())
+                    })
+                });
+                assert_eq!(nested, Some(true));
+            })
+            .expect("the outer projection should accept its own runtime");
+        });
     }
 }
