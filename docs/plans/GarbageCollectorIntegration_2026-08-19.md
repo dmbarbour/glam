@@ -206,6 +206,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.2f | complete | compatibility deletion and I4 reconciliation |
 | I4F.2 | complete | public managed-root production switch |
 | I5.0 | complete | durable/scoped/coordination and promise-root handle decision review |
+| I5A | complete | recursive cycle-source and direct identity-owner inventory |
 | I5 | pending | atomic managed lazy/promise/core-net identity closure and cycle audit |
 | I6 | pending | functions, applications, metadata, failures |
 | I7 | pending | persistent list and dictionary tracing |
@@ -4482,6 +4483,17 @@ Production remains `NoAuto`.
 
 ### Phase I5A — Cycle-Source and Owner Inventory
 
+Completed 2026-09-04. The source-backed inventory in
+`src/core/managed/recursive_identity_inventory.rs` first failed against an
+intentionally empty baseline with 31 production declarations. The reconciled
+inventory assigns 11 declarations to exact managed edges, 10 to durable roots,
+9 to bounded access, and 1 to edge-free coordination. It identifies exactly
+`LazyCell`, `PromiseCell`, and `CoreRuntimeNet` as the authoritative mutable
+cycle sources; all other direct occurrences are classified edges, owners,
+access carriers, or coordination. The existing I4 durable-owner inventory
+continues to cover general `Value` and `RuntimeValueRoot` containers whose
+field spelling does not expose one family directly.
+
 - Prove from current source that `LazyCell`, `PromiseCell`, and
   `CoreRuntimeNet` are the complete set of mutable/shared semantic identities
   capable of closing a recursive value cycle. Functions close cycles through
@@ -4501,8 +4513,8 @@ Production remains `NoAuto`.
 
 Verification: first latch a deliberately incomplete identity list, then add
 `recursive_identity_source_inventory_is_complete` and
-`compatibility_graph_cycle_sources_are_classified`. This phase changes no
-production representation and performs no collection.
+`compatibility_graph_cycle_sources_are_classified`. Both now pass. This phase
+changes no production representation and performs no collection.
 
 ### Phase I5B — Transitive Compatibility Managed-Edge Walk
 

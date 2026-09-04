@@ -287,11 +287,11 @@ checkpoints and focused tests:
 4. **Private naming (low risk):** names such as `RuntimeLazyRoot` and
    `RuntimePromiseRoot` are provisional. The proof is the M/R/A/C role and
    source inventory, not a particular spelling.
-5. **Rejected foreign-runtime resolver input (separate API question):** the
-   current consuming method disarms `Drop` before returning the provenance
-   error, leaving the promise unassigned. I5 must preserve current behavior or
-   change it with its own semantic regression; the handle migration must not
-   alter it accidentally.
+
+Rejected foreign-runtime input to a consuming `PromiseResolver` remains a
+separate public-API question and is explicitly outside this GC integration
+plan. I5 preserves the existing behavior; its handle migration must not change
+that behavior accidentally.
 
 ### I5F-004 — The I5-I10 verification boundary describes I4 ownership too strongly
 
