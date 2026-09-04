@@ -9,8 +9,10 @@ discussion. The integration plan now prepares lazies, promises, and production
 core nets separately but changes their production representation in one
 indivisible cutover. That resolves transitive managed-edge closure and core-net
 chronology without a temporary rooted-net layer. The durable/scoped/weak
-handle model—especially task-owned promise liveness—remains open and blocks
-implementation through the explicit I5.0 design gate.
+handle model was subsequently closed by the source-backed I5F-003 disposition
+inventory below. Implementation may now enter I5A; the exact private type
+names and the generic-net guard shape remain checkpoint-local engineering
+choices rather than semantic blockers.
 
 ## Scope
 
@@ -37,10 +39,11 @@ It asks:
 - whether the remaining phase boundaries are small enough to verify without
   combining independent representation and lifecycle decisions.
 
-This review does not select the I5 lazy/promise handle representation, enable
-production collection, implement a managed core net, or choose the I10 opaque
-representation. It does select the phase-level chronology and trace boundary
-for the first three cycle-forming managed identities.
+The original forward-review pass did not select the I5 lazy/promise handle
+representation. The 2026-09-04 I5F-003 addendum below now selects its semantic
+owner roles while leaving private type layout to the implementation
+checkpoints. This review still does not enable production collection,
+implement a managed core net, or choose the I10 opaque representation.
 
 ## Summary
 
@@ -145,16 +148,17 @@ state in which a raw `Arc` identity must be traversed recursively to discover
 managed values beneath it. The later I8 phase becomes a post-cutover net and
 mutation audit rather than the point where managed net identity first appears.
 
-The handle discussion must still establish how a durable net root differs from
-an interior cross-net `Gc` and bounded `CoreRuntimeNetAccess`, but that choice
-no longer changes the chronology.
+The I5F-003 inventory now distinguishes a durable net root from an interior
+cross-net `Gc` and bounded `CoreRuntimeNetAccess`. The exact private guard
+layout remains an I5C.1 implementation choice and does not change the
+chronology.
 
-### I5F-003 — Lazy and promise handle roles are not yet explicit
+### I5F-003 — Lazy and promise handle roles required an explicit disposition
 
 **Classification:** representation and lifecycle design blocker  
 **Priority:** high  
 **Confidence:** high  
-**Status:** open; blocks I5
+**Status:** resolved in plan; implementation remains I5
 
 The current `Arc` identities serve several roles simultaneously:
 
@@ -166,7 +170,8 @@ The current `Arc` identities serve several roles simultaneously:
 - a weak promise target retained by task/local producer obligations.
 
 Those roles cannot all become one bare `Gc<LazyCell>` or `Gc<PromiseCell>`.
-I5.0 must inventory direct method and field use and select distinct types for:
+I5.0 therefore inventoried direct method and field use and selected distinct
+roles for:
 
 - the managed semantic identity stored as an exact graph edge;
 - a registered durable handle for parked machines, coordinator work, resolver
@@ -177,13 +182,116 @@ I5.0 must inventory direct method and field use and select distinct types for:
 
 Task-owned promise obligations currently use `Weak<PromiseCell>` so forgotten
 promises are not retained until their producer terminates. Because `glam-gc`
-has no weak managed pointer, I5.0 must choose among a collector-aware weak
+has no weak managed pointer, I5.0 had to choose among a collector-aware weak
 facility, deriving producer failure from the existing terminal wait without
 writing an otherwise unreachable cell, or stronger rooted retention with its
-costs and cycle behavior documented. This decision belongs before I5C's
-representation preparation; I5E then verifies external resolver/producer
-retirement rather than inventing the representation after I5D has already
-changed production publication paths.
+costs and cycle behavior documented. The disposition inventory below selects
+obligation-scoped registered roots and, critically, reverses the current
+producer link so the managed promise cell has only a weak backlink to the
+external obligation which owns its root.
+
+#### I5F-003 disposition inventory — 2026-09-04
+
+The source review covered every production occurrence of `LazyValue`,
+`PromisedValue`, `PromiseCell`, and `CoreRuntimeNet`, plus every production
+`Weak<_>` field which can affect their liveness. Test-only weak probes were
+excluded after confirming that they do not define another production owner.
+The inventory uses roles rather than committing prematurely to final private
+type names:
+
+- **M** is an exact managed semantic edge, represented by `Gc<Cell>` after the
+  atomic cutover;
+- **R** is a cloneable registered root which may survive a mutator region;
+- **A** is a non-escaping access/view branded by the matching
+  `RuntimeValueAccess` region; and
+- **C** is edge-free coordination containing IDs, revisions, registrations,
+  atomics, condition variables, or weak runtime routes, but no `Gc`, `Root`,
+  `Value`, or active external owner.
+
+| Current owner/use | Source evidence | Final disposition | Confidence and reason |
+| --- | --- | --- | --- |
+| `Value::Lazy`, `ListThunk::Lazy`, and lazy identities reached through raw compatibility `Value` structure | `src/core.rs`; `src/core/managed/payload_edges.rs` | **M**: exact `Gc<LazyCell>` stop edge | High. These are recursive semantic graph edges, never independent Rust liveness claims. |
+| `Value::Promised`, `ListThunk::Promised`, and `EvaluationHalt::UnassignedPromise` | `src/core.rs`; `src/core/evaluation_halt.rs` | **M**: exact `Gc<PromiseCell>` stop edge | High. The halt may itself be retained by a net, so it cannot hide a root or become coordination-only. |
+| `NetValue`, `FunctionCode`, function stages, lazy net sources, net payloads, and cross-net copy sources | `src/core.rs`; `src/core_net.rs`; `src/interaction_net/runtime.rs` | **M**: exact `Gc<CoreRuntimeNetCell>` edge | High. These links are what make net/value cycles collectible. |
+| `LazyCell::source` and terminal result | `src/core.rs` | Managed cell fields with exact child traversal and one publication gateway | High. Terminal result is published before source release; neither field may contain a registered root. |
+| `PromiseCell::assignment` | `src/core.rs` | Managed semantic result/failure edge, not `RuntimeValueRoot` | High. A rooted assignment inside the cell would make an ordinary promise backedge uncollectible. |
+| Core net topology, values, operators, stuck reasons, and source-net links | `src/interaction_net/runtime.rs`; `src/core_net.rs` | Managed cell state with exact tracing and mutation gateways | High. The current semantic mutex/revision boundary remains authoritative. |
+| `LazyTaskMachine::lazy`, `DeferredProducer::Lazy`, and `DeferredLazyCycleMember::lazy` | `src/eval/value.rs`; `src/evaluation/coordinator/deferred.rs` | **R**: registered lazy root for each durable owner | High. Each can remain parked after its evaluator access region closes and must still publish a cache result or failure. Duplicate clones of one root cell are acceptable initially. |
+| `PromiseFollower::promise`, `DeferredProducer::Promise`, reflection `ActiveFix::handle`, and `Continuation::Fix` | `src/eval/value.rs`; `src/evaluation/coordinator/deferred.rs`; `src/reflection/machine.rs` | **R**: registered promise root | High. These are parked machine or coordinator state, not semantic interiors. |
+| `LazyTaskWork::Follow`, `PromiseFollowerState::FollowAssignment`, and other parked machine values which may contain any recursive identity | `src/eval/value.rs`; `src/reflection/machine.rs`; `src/eval/builtins/net/construction.rs` | Existing general `RuntimeValueRoot`, not a family-specific bare `Gc` | High. I4 already established the correct general durable-value surface. |
+| Public `PromiseResolver` | `src/api/value.rs`; constructors in `src/api/assembly.rs` | `RuntimeValueObserver` plus `Option<R>` for the promise | High. The weak observer reopens the matching runtime; `Option` is solely the affine `Drop`-disarm state. A live resolver intentionally retains its promise even if the public value was discarded. |
+| Coordinator `TaskOwnedPromiseObligation` and direct-runner `LocalPromiseObligation` | `src/evaluation/coordinator.rs`; `src/evaluation/coordinator/task.rs` | External producer obligation owns **R** until that individual promise settles | High. Retention is bounded by unresolved producer obligations already tracked today; disappearing observers do not semantically cancel the producer. The root is removed on promise settlement, not delayed until whole-task retirement. |
+| `PromiseCell::producer` | `src/core.rs`; `src/evaluation/coordinator/task.rs` | Weak backlink to an externally owned `Arc<PromiseProducerObligation>` (or an equivalent weak/scalar **C** link) | High. The current strong cell-to-obligation direction must reverse when the obligation gains a root, otherwise `cell -> obligation -> Root<cell>` is a permanent hidden cycle. Coordinator/local owner records become the strong obligation owners. |
+| `WorkDependency::Promise` | `src/evaluation/coordinator.rs`; `src/evaluation/coordinator/{completion,client_demand,spark}.rs` | **R** while the dependency record/subscription is live | High. The dependency actively observes assignment, subscribes, and may project a producer wait. Sharing the already registered root is simpler than a weak managed pointer and adds no new semantic retention: the blocked machine, spark input, or client demand already owns the demanded value. |
+| Lazy/promise ID and label reads, source/result/assignment inspection, cache/assignment publication | `src/core.rs`; `src/eval/value.rs`; `src/evaluation/session.rs` | **A** through matching runtime access | High. IDs and labels remain in the managed cell. Cycle diagnostics copy `LazyId` plus label only when constructing the diagnostic; no permanent duplicate label is required. |
+| `CompletionSubscriptions` and promise producer lookup | `src/evaluation/coordinator/completion.rs`; `src/evaluation/coordinator/task.rs` | **C** plus bounded access to the rooted promise where assignment state is needed | High for the boundary, medium for the exact field split. Registrations and weak coordinator routing are edge-free. A managed cell must not strongly reach an `EvaluationWaitToken` capable of later holding rooted terminal data. |
+| `CoreRuntimeNetAccess`, call/operator claims, `NormalizationRequest`, `NetDriverWork`, `CoreFrontierObservation`, and `CorePreparedCopySource` before installation | `src/core_net.rs`; `src/eval/net.rs` | **A**, with a source-net **M** edge installed when a prepared copy enters topology | High. These values exist only inside one callback-free evaluator quantum and can be scope-branded instead of rooted. |
+| Core net construction or another handoff which must survive before installation into a managed semantic owner | `src/core_net.rs`; front-end/evaluator constructors | **R** until publication, then replace it with **M** | High. A constructor must never publish or park a bare `Gc`. |
+| `CoreNetContention` | `src/core_net.rs`; `src/eval/net.rs` | **C**: disturbance signal plus observed revision, while the enclosing request/access retains net liveness | Medium-high. It needs synchronization, not semantic ownership. The precise signal placement depends on the I5C.1 generic-net seam. |
+| Generic `NormalizationBatchLease<CoreSpecialization>` | `src/interaction_net/runtime.rs`; `src/core_net.rs` | Core use becomes an access-bounded guard or weak edge-free **C** lease; generic non-core `SharedRuntimeNet` may retain its current `Weak<SharedRuntimeNetInner<_>>` | Medium. The semantic disposition is fixed—no weak managed pointer and no durable root—but I5C.1 must choose the least intrusive generic API shape. |
+
+The producer-root ownership graph is therefore:
+
+```text
+coordinator work record or LocalPromiseOwner
+  -> Arc<PromiseProducerObligation>
+       -> Root<PromiseCell>
+       -> producer/wait IDs and weak owner/coordinator route
+
+PromiseCell
+  -> Weak<PromiseProducerObligation>
+  -> completion registrations with weak coordinator route
+```
+
+Assignment temporarily upgrades the weak backlink, publishes the assignment,
+removes the authoritative obligation and its root, detaches wakes, leaves all
+locks/access regions, and only then notifies. Task termination instead walks
+the same rooted obligations and fails each still-unresolved promise. This
+preserves one terminal winner without requiring `Weak<Gc<_>>` or
+`WeakRoot<_>`.
+
+#### Existing weak edges outside the promise ownership inversion
+
+| Weak edge | Final disposition | Confidence |
+| --- | --- | --- |
+| `RuntimeValueObserver -> RuntimeValueDomain` and `RuntimeValueDomain -> EvaluationWorkCoordinator` | Keep weak. Values/observers must not retain the runtime, and the value domain must not close the runtime/coordinator cycle. | High |
+| Coordinator demand-session registry, spark demand, and client-demand work -> `EvaluationDemandState` | Keep weak. Work cannot manufacture or prolong the external demand-owner lease. | High |
+| Executor, task handle, client-demand handle, wait/completion source -> coordinator | Keep weak. These are observation/control routes; escaped handles must not retain runtime execution. | High |
+| `PromiseProducerSource::{Coordinator,Local}` -> coordinator/local owner | Keep weak inside the producer obligation. The authoritative owner already owns the obligation, so a reverse strong link would cycle. | High |
+| `NormalizationBatchLease -> SharedRuntimeNetInner` | Keep for non-core generic nets only. Replace the core specialization as described above. | Medium |
+| Collector root registry/TLS -> heap | Keep weak; this is the established `glam-gc` lifetime boundary and is independent of I5 semantic handles. | High |
+| Diagnostic ingress/bus, runtime event endpoint, reflection query domain, opaque external-owner lease, and effect-token domain weak routes | Keep weak and unchanged. They prevent unrelated external-owner/runtime cycles and do not point at lazy, promise, or core-net cells. | High |
+
+No other production `Weak<_>` occurrence is a candidate weak semantic pointer
+for I5. In particular, task-owned and local promise-cell weakness is the only
+current weak edge whose *payload liveness* changes at the cutover.
+
+#### Remaining implementation-local choices
+
+The following do not reopen the semantic decision, but deserve explicit I5C
+checkpoints and focused tests:
+
+1. **Net guard layout (medium confidence):** choose whether the core
+   normalization guard borrows the managed cell directly or owns a weak
+   edge-free signaling companion. It must be non-escaping and generic
+   non-core specializations must remain collector-independent.
+2. **Promise coordination split (medium confidence):** select the smallest
+   cell-resident edge-free fields which preserve subscribe-and-recheck while
+   ensuring the cell cannot reach a wait token after that token contains a
+   rooted terminal value.
+3. **Snapshot-to-machine conversion (medium-high confidence):** a lazy source
+   snapshot is scoped. Any branch retained across a yield must project its
+   recursive payloads to existing roots before the access region closes; the
+   implementation may root the whole retained value instead of inventing
+   family-specific fields.
+4. **Private naming (low risk):** names such as `RuntimeLazyRoot` and
+   `RuntimePromiseRoot` are provisional. The proof is the M/R/A/C role and
+   source inventory, not a particular spelling.
+5. **Rejected foreign-runtime resolver input (separate API question):** the
+   current consuming method disarms `Drop` before returning the provenance
+   error, leaving the promise unassigned. I5 must preserve current behavior or
+   change it with its own semantic regression; the handle migration must not
+   alter it accidentally.
 
 ### I5F-004 — The I5-I10 verification boundary describes I4 ownership too strongly
 
@@ -208,7 +316,7 @@ family's isolated collection.
 **Classification:** checkpoint-size and terminology drift  
 **Priority:** medium  
 **Confidence:** high  
-**Status:** partially resolved; final subdivision follows I5.0
+**Status:** partially resolved; final subdivision follows the I5 cutover
 
 Functions/stages, partial applications, fixpoint/capture state, metadata,
 failures, reflection computation, and net-construction payloads do not share
@@ -310,7 +418,7 @@ opaque storage.
 
 ## Recommended Resolution Order
 
-1. Complete the remaining I5.0 handle discussion recorded by I5F-003.
+1. Begin I5A from the completed I5.0 handle inventory recorded by I5F-003.
 2. Finalize the dormant family/root/access types in I5C from that decision;
    the transitive-walk and atomic-cutover chronology is already fixed.
 3. Implement I5A-I5F, then perform the normal mandatory post-I5 review before

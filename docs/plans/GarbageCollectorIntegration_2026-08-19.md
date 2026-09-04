@@ -205,7 +205,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.2f.4 | complete | mandatory post-I4 review and closeout |
 | I4F.2f | complete | compatibility deletion and I4 reconciliation |
 | I4F.2 | complete | public managed-root production switch |
-| I5.0 | pending | durable/scoped/coordination and weak promise handle decision review |
+| I5.0 | complete | durable/scoped/coordination and promise-root handle decision review |
 | I5 | pending | atomic managed lazy/promise/core-net identity closure and cycle audit |
 | I6 | pending | functions, applications, metadata, failures |
 | I7 | pending | persistent list and dictionary tracing |
@@ -4382,9 +4382,9 @@ A focused forward review of the now-concrete I4 handoff is recorded in
 [`GarbageCollectorIntegrationI5I10_2026-09-03.md`](../reviews/GarbageCollectorIntegrationI5I10_2026-09-03.md).
 It resolved low-risk verification, I7, I9, and I10 wording drift. A subsequent
 design discussion resolved transitive managed-edge closure and core-net
-chronology through one prepared atomic lazy/promise/net identity cutover. I5.0
-now retains one blocker: the durable/scoped/coordination and weak promise
-handle model.
+chronology through one prepared atomic lazy/promise/net identity cutover. The
+subsequent I5.0 source inventory closed the durable/scoped/coordination and
+promise-root handle model; implementation may proceed with I5A.
 
 From I4F.2 onward, every representation change in I5-I10 updates its exact
 visitor or root classification in the same checkpoint. No later phase may
@@ -4441,27 +4441,44 @@ unrooted pointer.
 
 ### Phase I5.0 — Managed-Identity and Transitive-Trace Decision Review
 
-This is the remaining hard design gate before representation preparation in
-I5C. The chronology and trace decisions from I5F-001, I5F-002, and I5F-007 are
+Completed 2026-09-04 by the source-backed I5F-003 disposition inventory in
+[`GarbageCollectorIntegrationI5I10_2026-09-03.md`](../reviews/GarbageCollectorIntegrationI5I10_2026-09-03.md).
+The chronology and trace decisions from I5F-001, I5F-002, and I5F-007 remain
 closed: lazies, promises, and production core nets change representation in
 one atomic checkpoint, and a central compatibility walk stops at those managed
-identities. I5.0 now resolves I5F-003 only. It must inventory every direct
-`LazyValue`, `PromisedValue`, `CoreRuntimeNet`, cell, and coordination use which
-survives managed access and distinguish:
+identities. The inventory distinguishes:
 
 - an interior semantic `Gc` edge;
 - a durable registered root for parked or externally retained work;
 - a bounded access carrier tied to matching mutator authority;
 - edge-free coordination state for IDs, subscriptions, revisions, waits, and
   notifications; and
-- the current weak task-owned promise obligation, selecting either a
-  collector-aware weak facility, a documented stronger producer-root lifetime,
-  or another representation which introduces no hidden root backedge.
+- producer-owned promise roots whose managed cells retain only weak backlinks,
+  introducing no hidden root backedge.
 
-The decision must also specify the analogous durable/scoped/coordination split
-for core nets and how normalization leases behave after the managed net cell
-dies. Forced-order tests must cover both terminal-publication orderings plus
-discarded and retained task-owned promises. Production remains `NoAuto`.
+The binding decisions are:
+
+- managed semantic occurrences use exact `Gc<Cell>` edges; parked and external
+  owners use registered roots; evaluator-local operations use access-branded
+  views; and routing-only state remains edge-free;
+- task/local promise producer obligations strongly own registered promise
+  roots until each individual promise settles, while `PromiseCell` holds only
+  a weak backlink to its externally owned obligation;
+- `PromiseResolver` owns a promise root plus a weak runtime observer and keeps
+  `Option` only as its affine `Drop`-disarm state;
+- parked promise dependencies retain a clone of the registered promise root;
+- IDs and labels remain cell-resident and are copied only into concrete
+  diagnostics or explicit indexes;
+- core-net frontier/copy/claim state remains access-bounded, durable
+  construction handoffs are rooted, and contention/normalization bookkeeping
+  is edge-free or access-bounded rather than a weak managed pointer; and
+- the current generic weak normalization lease may remain for non-core
+  specializations, while I5C.1 selects the precise bounded core guard shape.
+
+I5C must preserve this role split. Forced-order tests cover both terminal
+publication orderings, discarded and retained task-owned promises, per-promise
+root release before whole-task retirement, and managed-cell producer backlinks.
+Production remains `NoAuto`.
 
 ### Phase I5A — Cycle-Source and Owner Inventory
 
@@ -4478,7 +4495,9 @@ discarded and retained task-owned promises. Production remains `NoAuto`.
   the proposed model.
 - Extend the durable-owner inventory with each direct identity occurrence and
   classify it as a future interior edge, durable root, bounded access value,
-  edge-free companion, or unresolved I5.0 weak-liveness case.
+  or edge-free companion according to the completed I5.0 disposition. Record
+  any newly discovered role which does not fit those classes as a plan defect
+  rather than silently inventing a fifth ownership category.
 
 Verification: first latch a deliberately incomplete identity list, then add
 `recursive_identity_source_inventory_is_complete` and
