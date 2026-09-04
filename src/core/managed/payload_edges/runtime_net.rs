@@ -459,6 +459,7 @@ mod tests {
     impl NetSpecialization for ManagedNetFixtureSpecialization {
         type Data = Gc<ManagedNetFixtureNode>;
         type Operator = ();
+        type RuntimeSource = crate::interaction_net::SharedRuntimeNet<Self>;
         type WaitToken = ();
         type StuckReason = ();
     }

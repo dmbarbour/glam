@@ -96,6 +96,13 @@ impl FanIdentity {
 pub trait NetSpecialization: Clone + fmt::Debug + PartialEq + Eq + Sized + 'static {
     type Data: Clone + fmt::Debug + PartialEq + Eq + 'static;
     type Operator: Clone + fmt::Debug + PartialEq + Eq + 'static;
+    /// Opaque identity retained when one runtime net refers to another.
+    ///
+    /// Generic topology clones, compares, and reports this identity, but does
+    /// not assume how it owns or accesses the referenced net. The ordinary
+    /// shared runtime uses `SharedRuntimeNet<Self>`; the core specialization
+    /// may instead select a managed identity without changing `RuntimeNet`.
+    type RuntimeSource: Clone + fmt::Debug + PartialEq + Eq + 'static;
     /// Opaque identity for one externally blocked operation.
     ///
     /// Equality lets an evaluator reject a stale wakeup after a pair has been

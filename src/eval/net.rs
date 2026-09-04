@@ -678,6 +678,10 @@ fn drive_net_interface_with_contention_handoff(
 impl NetSpecialization for CoreSpecialization {
     type Data = Value;
     type Operator = CoreOperator;
+    // I5C.1a makes source ownership a specialization choice without changing
+    // production representation. I5C.1c switches this to the core facade once
+    // source operations accept explicit scoped access.
+    type RuntimeSource = crate::interaction_net::SharedRuntimeNet<Self>;
     type WaitToken = crate::core_net::CoreWaitToken;
     type StuckReason = EvaluationHalt;
 }

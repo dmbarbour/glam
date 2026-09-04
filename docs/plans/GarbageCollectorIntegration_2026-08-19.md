@@ -4563,7 +4563,55 @@ production identity graph:
 1. **I5C.1 — Ownership-neutral generic net seam.** Refactor generic shared-net
    and cross-net reference operations so the production core owner need not be
    `Arc<SharedRuntimeNetInner<_>>`. Keep generic/test specializations
-   collector-independent and preserve I3D.3 authority gating.
+   collector-independent and preserve I3D.3 authority gating. Implement this
+   through the following bounded checkpoints:
+
+   - **I5C.1a — Source-identity parameter.** Give each `NetSpecialization` an
+     opaque runtime-source identity and store that identity in copy state,
+     prepared sources, cursor dependencies, frontier observations, claims, and
+     payload visitation. The ordinary generic specialization continues to use
+     `SharedRuntimeNet<S>`; a synthetic specialization must prove that bare
+     `RuntimeNet` topology can retain and report a non-`Arc` source token
+     without learning how to operate it. This checkpoint changes no production
+     owner or behavior.
+   - **I5C.1b — Synchronized cell and wake companion.** Separate the mutable
+     runtime-net cell and its edge-free disturbance signal from the generic
+     `Arc` owner. Move owner-independent locked operations onto that cell while
+     retaining `SharedRuntimeNet` as the collector-independent owning adapter.
+     Preserve mutation publication, source/target lock separation, and exact
+     wake behavior before changing the core source type.
+   - **I5C.1c — Scoped source-operation adapter.** Make cursor/frontier
+     progression obtain source inspection and stepping from an explicit
+     access-scoped adapter rather than from the stored identity itself. Switch
+     the core specialization's stored source identity to `CoreRuntimeNet` (or
+     its prepared managed-edge form), while generic shared nets keep their
+     direct adapter. Prove that core source operations still require matching
+     I3D.3 value/net authority and never open a second net lock concurrently.
+   - **I5C.1d — Bounded batches and edge-free contention.** Give core
+     normalization an access-bounded guard over the cell. Replace durable core
+     contention ownership with an edge-free disturbance companion plus the
+     observed revision; the still-active normalization request retains the
+     source identity. Generic non-core shared nets may retain their weak
+     owner-backed lease for compatibility.
+   - **I5C.1e — Seam closure audit.** Re-run the generic cursor, copy,
+     contention, unwind, source-frontier, and lock-separation matrices; extend
+     source inventories to reject raw core-specialized shared owners or leases
+     outside the facade. No production core source identity may depend on the
+     generic `Arc` owner before I5C.2 begins.
+
+   I5C.1a completed 2026-09-04. `NetSpecialization::RuntimeSource` is now the
+   opaque identity stored by every copy, prepared source, cursor claim,
+   dependency observation, and logical source-payload occurrence. Generic
+   topology only clones, compares, and reports that identity. The ordinary
+   shared runtime and the production core specialization deliberately still
+   select `SharedRuntimeNet<S>` at this checkpoint, so ownership and reduction
+   behavior are unchanged. A synthetic specialization stores a copy source as
+   a plain numeric token, then enumerates it through the authoritative logical
+   payload walk; this proves bare `RuntimeNet` no longer fixes cross-net
+   topology to an `Arc` owner. Direct frontier progression remains available
+   only for the ordinary self-owned shared specialization until I5C.1c installs
+   the scoped source-operation adapter.
+
 2. **I5C.2 — Managed cell and access types.** Implement the selected managed
    lazy, promise, and synchronization-owning core-net cells; interior, durable,
    bounded-access, and coordination types from I5.0; stable layouts; and

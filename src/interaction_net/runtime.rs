@@ -21,7 +21,10 @@ impl<S: NetSpecialization> InteractionNet<S> {
         RuntimeNet::new(self)
     }
 
-    pub fn instantiate_shared(&self) -> SharedRuntimeNet<S> {
+    pub fn instantiate_shared(&self) -> SharedRuntimeNet<S>
+    where
+        S: NetSpecialization<RuntimeSource = SharedRuntimeNet<S>>,
+    {
         SharedRuntimeNet::new(self.instantiate())
     }
 }
@@ -194,20 +197,25 @@ pub enum ActivePairStep<S: NetSpecialization> {
 /// parent cursor and evaluator request root.
 #[derive(Clone, PartialEq, Eq)]
 pub struct FrontierObservation<S: NetSpecialization> {
-    source: SharedRuntimeNet<S>,
+    source: S::RuntimeSource,
     observed_topology: u64,
     endpoint: DemandEndpoint,
 }
 
 impl<S: NetSpecialization> FrontierObservation<S> {
-    pub fn source(&self) -> &SharedRuntimeNet<S> {
+    pub fn source(&self) -> &S::RuntimeSource {
         &self.source
     }
 
     pub fn endpoint(&self) -> DemandEndpoint {
         self.endpoint
     }
+}
 
+impl<S> FrontierObservation<S>
+where
+    S: NetSpecialization<RuntimeSource = SharedRuntimeNet<S>>,
+{
     /// Takes one non-blocking step at the observed pair. Unlike `reduce_pair`,
     /// this reports claimed, blocked, stuck, gone, and disturbed states
     /// explicitly for an iterative normalization driver.
@@ -270,7 +278,7 @@ impl<S: NetSpecialization> CursorDependency<S> {
         dead_code,
         reason = "I4E installs exact runtime-net source visitation before I8 uses it in production tracing"
     )]
-    fn source_runtime(&self) -> Option<&SharedRuntimeNet<S>> {
+    fn source_runtime(&self) -> Option<&S::RuntimeSource> {
         match self {
             Self::LocalCursor(_) => None,
             Self::SourceCursor(observation) | Self::SourceFrontier(observation) => {
@@ -526,7 +534,10 @@ pub(crate) enum RuntimeNetMutation<R> {
     Changed(R),
 }
 
-impl<S: NetSpecialization> SharedRuntimeNet<S> {
+impl<S> SharedRuntimeNet<S>
+where
+    S: NetSpecialization<RuntimeSource = SharedRuntimeNet<S>>,
+{
     pub fn new(runtime: RuntimeNet<S>) -> Self {
         Self {
             inner: Arc::new(SharedRuntimeNetInner {
@@ -623,10 +634,6 @@ impl<S: NetSpecialization> SharedRuntimeNet<S> {
     pub(crate) fn test_advance_claimed_cursor(&self, cursor: NodeId) -> Option<CursorProgress> {
         self.test_cursor_claim_guard(cursor)
             .map(CursorClaimGuard::advance)
-    }
-
-    pub fn ptr_eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.inner, &other.inner)
     }
 
     pub fn with<R>(&self, inspect: impl FnOnce(&RuntimeNet<S>) -> R) -> R {
@@ -945,6 +952,12 @@ impl<S: NetSpecialization> SharedRuntimeNet<S> {
     }
 }
 
+impl<S: NetSpecialization> SharedRuntimeNet<S> {
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+}
+
 impl<S: NetSpecialization> Clone for SharedRuntimeNet<S> {
     fn clone(&self) -> Self {
         Self {
@@ -971,7 +984,7 @@ impl<S: NetSpecialization> PartialEq for SharedRuntimeNet<S> {
 impl<S: NetSpecialization> Eq for SharedRuntimeNet<S> {}
 
 struct CopyState<S: NetSpecialization> {
-    source: SharedRuntimeNet<S>,
+    source: S::RuntimeSource,
     frontiers: HashMap<Port, NodeId>,
     fan_sites: HashMap<FanSite, FanSite>,
 }
@@ -982,7 +995,7 @@ struct CursorClaim<S: NetSpecialization> {
     owner: CursorClaimOwner,
     copy: CopyId,
     remote: Port,
-    source: SharedRuntimeNet<S>,
+    source: S::RuntimeSource,
 }
 
 enum CursorDisposition<S: NetSpecialization> {
@@ -998,13 +1011,19 @@ enum CursorDisposition<S: NetSpecialization> {
 /// guard, so source-frontier inspection and target publication remain
 /// disjoint. Dropping an unfinished guard restores ready owner state.
 #[must_use = "a cursor claim must be advanced or released"]
-struct CursorClaimGuard<'claim, S: NetSpecialization> {
+struct CursorClaimGuard<'claim, S>
+where
+    S: NetSpecialization<RuntimeSource = SharedRuntimeNet<S>>,
+{
     target: &'claim SharedRuntimeNet<S>,
     claim: Option<CursorClaim<S>>,
     _thread_bound: PhantomData<Rc<()>>,
 }
 
-impl<'claim, S: NetSpecialization> CursorClaimGuard<'claim, S> {
+impl<'claim, S> CursorClaimGuard<'claim, S>
+where
+    S: NetSpecialization<RuntimeSource = SharedRuntimeNet<S>>,
+{
     fn new(target: &'claim SharedRuntimeNet<S>, claim: CursorClaim<S>) -> Self {
         Self {
             target,
@@ -1060,7 +1079,10 @@ impl<'claim, S: NetSpecialization> CursorClaimGuard<'claim, S> {
     }
 }
 
-impl<S: NetSpecialization> Drop for CursorClaimGuard<'_, S> {
+impl<S> Drop for CursorClaimGuard<'_, S>
+where
+    S: NetSpecialization<RuntimeSource = SharedRuntimeNet<S>>,
+{
     fn drop(&mut self) {
         if self.claim.is_some() {
             let _ = self.restore_fallback();
@@ -1107,7 +1129,7 @@ struct RuntimeEntry<S: NetSpecialization> {
 pub(crate) enum RuntimeNetPayload<'payload, S: NetSpecialization> {
     Data(&'payload S::Data),
     Operator(&'payload S::Operator),
-    Source(&'payload SharedRuntimeNet<S>),
+    Source(&'payload S::RuntimeSource),
     StuckReason(&'payload S::StuckReason),
 }
 

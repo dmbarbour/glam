@@ -18,17 +18,17 @@ impl<S: NetSpecialization> SourceFrontierShape<S> {
     }
 }
 
-impl<S: NetSpecialization> SharedRuntimeNet<S> {
+impl<S> SharedRuntimeNet<S>
+where
+    S: NetSpecialization<RuntimeSource = SharedRuntimeNet<S>>,
+{
     /// Captures the immutable source endpoint needed to start a logical copy.
     ///
     /// Callers must prepare the source before acquiring the target net lock.
     /// The resulting token lets target mutation proceed without inspecting a
     /// second shared net.
     pub(crate) fn prepare_copy_source(&self) -> PreparedCopySource<S> {
-        PreparedCopySource {
-            source: self.clone(),
-            remote: self.with(RuntimeNet::exposed),
-        }
+        PreparedCopySource::new(self.clone(), self.with(RuntimeNet::exposed))
     }
 
     /// Traverses one source demand spine under the source lock, retaining its
@@ -54,8 +54,14 @@ impl<S: NetSpecialization> SharedRuntimeNet<S> {
 }
 
 pub(crate) struct PreparedCopySource<S: NetSpecialization> {
-    source: SharedRuntimeNet<S>,
+    source: S::RuntimeSource,
     remote: Port,
+}
+
+impl<S: NetSpecialization> PreparedCopySource<S> {
+    pub(in crate::interaction_net::runtime) fn new(source: S::RuntimeSource, remote: Port) -> Self {
+        Self { source, remote }
+    }
 }
 
 impl<S: NetSpecialization> RuntimeNet<S> {

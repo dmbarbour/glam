@@ -96,6 +96,7 @@ impl<D: TestData> Eq for TestOperator<D> {}
 impl<D: TestData> NetSpecialization for D {
     type Data = D;
     type Operator = TestOperator<D>;
+    type RuntimeSource = SharedRuntimeNet<D>;
     type WaitToken = u64;
     type StuckReason = Arc<str>;
 }
@@ -118,14 +119,54 @@ impl fmt::Display for StructuredStuckReason {
 impl NetSpecialization for StructuredSpecialization {
     type Data = i32;
     type Operator = ();
+    type RuntimeSource = SharedRuntimeNet<Self>;
     type WaitToken = u64;
     type StuckReason = StructuredStuckReason;
 }
 
-fn finish_claimed_cursor<S: NetSpecialization>(
-    target: &mut RuntimeNet<S>,
-    cursor: NodeId,
-) -> CursorProgress {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OwnershipNeutralSpecialization;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OpaqueRuntimeSource(u64);
+
+impl NetSpecialization for OwnershipNeutralSpecialization {
+    type Data = ();
+    type Operator = ();
+    type RuntimeSource = OpaqueRuntimeSource;
+    type WaitToken = ();
+    type StuckReason = ();
+}
+
+#[test]
+fn runtime_topology_retains_an_opaque_non_shared_source_identity() {
+    let source = OpaqueRuntimeSource(42);
+    let mut runtime = RuntimeNet::<OwnershipNeutralSpecialization>::empty();
+    let cursor = runtime.begin_copy(PreparedCopySource::new(
+        source,
+        Port::principal(NodeId::from_zero_based(0)),
+    ));
+
+    let mut visited = Vec::new();
+    let stats = runtime.visit_logical_payloads(&mut |payload| match payload {
+        RuntimeNetPayload::Source(source) => visited.push(*source),
+        RuntimeNetPayload::Data(())
+        | RuntimeNetPayload::Operator(())
+        | RuntimeNetPayload::StuckReason(()) => {}
+    });
+
+    assert!(matches!(
+        runtime.node(cursor),
+        Some(RuntimeNode::RemoteCursor { .. })
+    ));
+    assert_eq!(visited, [source]);
+    assert_eq!(stats.source_nets, 1);
+}
+
+fn finish_claimed_cursor<S>(target: &mut RuntimeNet<S>, cursor: NodeId) -> CursorProgress
+where
+    S: NetSpecialization<RuntimeSource = SharedRuntimeNet<S>>,
+{
     let claim = target
         .cursor_claim(cursor)
         .expect("cursor reduction should leave an inspectable claim");
@@ -133,9 +174,10 @@ fn finish_claimed_cursor<S: NetSpecialization>(
     target.finish_cursor_claim(claim, frontier)
 }
 
-fn reduce_next_cursor<S: NetSpecialization>(
-    target: &mut RuntimeNet<S>,
-) -> (NodeId, CursorProgress) {
+fn reduce_next_cursor<S>(target: &mut RuntimeNet<S>) -> (NodeId, CursorProgress)
+where
+    S: NetSpecialization<RuntimeSource = SharedRuntimeNet<S>>,
+{
     let Some(Reduction {
         kind:
             ReductionKind::RemoteCursor {
@@ -218,7 +260,10 @@ fn claimed_pair_owned_cursor_fixture() -> (SharedRuntimeNet<&'static str>, NodeI
     (target, cursor, pair)
 }
 
-fn remove_unwired_test_copy<S: NetSpecialization>(target: &SharedRuntimeNet<S>, cursor: NodeId) {
+fn remove_unwired_test_copy<S>(target: &SharedRuntimeNet<S>, cursor: NodeId)
+where
+    S: NetSpecialization<RuntimeSource = SharedRuntimeNet<S>>,
+{
     target.with_mut(|runtime| {
         let copy = match runtime.node(cursor) {
             Some(RuntimeNode::RemoteCursor { copy, .. }) => *copy,
@@ -267,10 +312,13 @@ fn pair_owned_cursor_dependency_fixture() -> (SharedRuntimeNet<()>, NodeId, Curs
     (SharedRuntimeNet::new(target), cursor, expected)
 }
 
-fn reduce_pair_cursor<S: NetSpecialization>(
+fn reduce_pair_cursor<S>(
     target: &mut RuntimeNet<S>,
     pair: ActivePairKey,
-) -> (NodeId, CursorProgress) {
+) -> (NodeId, CursorProgress)
+where
+    S: NetSpecialization<RuntimeSource = SharedRuntimeNet<S>>,
+{
     let Some(Reduction {
         kind:
             ReductionKind::RemoteCursor {
