@@ -252,6 +252,9 @@ fn host_call_capture_retires_only_during_external_registry_drain() {
         0,
         "dropping the lazy lease must not destroy its host capture"
     );
+    values
+        .collect_managed_for_test()
+        .expect("the unrooted managed lazy should retire its external-owner handle");
     assert_eq!(values.drain_external_owners_for_test(), 1);
     assert_eq!(drops.load(Ordering::Relaxed), 1);
     assert_eq!(values.external_owner_count_for_test(), 0);

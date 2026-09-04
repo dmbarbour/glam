@@ -548,7 +548,6 @@ impl EvaluationWorkCoordinator {
                 .as_ref()
                 .and_then(|block| block.dependency.as_ref())
                 .and_then(WorkDependency::producer_wait)
-                .cloned()
             {
                 promote_deferred_wait_locked(&mut state, &wait);
             }

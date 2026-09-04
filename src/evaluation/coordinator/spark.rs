@@ -283,7 +283,6 @@ impl EvaluationWorkCoordinator {
                     .get(&claimed.id)
                     .and_then(|record| spark_work(record).dependency.as_ref())
                     .and_then(WorkDependency::producer_wait)
-                    .cloned()
             {
                 promote_deferred_wait_locked(&mut state, &wait);
             }

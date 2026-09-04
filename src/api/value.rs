@@ -12,8 +12,8 @@ use super::Error;
 use super::error::net_build_error;
 use crate::core::Value as CoreValue;
 use crate::core::{
-    Builtin, CoreValueFactory, Dict, EvaluationFailure, Key, LazyValue, List, PromisedValue,
-    RuntimeValueAccess, RuntimeValueObserver,
+    Builtin, CoreValueFactory, Dict, EvaluationFailure, Key, LazyValue, List, ManagedPromiseRoot,
+    PromisedValue, RuntimeValueAccess, RuntimeValueObserver,
 };
 use crate::core_net::{CoreDataKey, CoreSpecialization};
 use crate::interaction_net::{NetBuilder as CoreNetBuilder, Port as CorePort};
@@ -960,7 +960,7 @@ impl From<EvaluatedValue> for Value {
 #[must_use = "dropping an unresolved promise resolver fails its value"]
 pub struct PromiseResolver {
     pub(super) runtime: EvaluationRuntimeId,
-    pub(super) promise: Option<PromisedValue>,
+    pub(super) promise: Option<ManagedPromiseRoot>,
 }
 
 impl PromiseResolver {
@@ -975,7 +975,7 @@ impl PromiseResolver {
             .take()
             .expect("a live promise resolver must retain its promise");
         let label = promise.label().clone();
-        promise
+        PromisedValue::from_root(&promise)
             .set_root(value.into_runtime_root())
             .map_err(|_| Error::new(format!("promise `{label}` was already completed")))?;
         Ok(())
@@ -1005,7 +1005,7 @@ impl PromiseResolver {
             .take()
             .expect("a live promise resolver must retain its promise");
         let label = promise.label().clone();
-        promise
+        PromisedValue::from_root(&promise)
             .fail(failure)
             .map_err(|_| Error::new(format!("promise `{label}` was already completed")))?;
         Ok(())
@@ -1021,7 +1021,7 @@ impl Drop for PromiseResolver {
             "promise resolver for `{}` was dropped before completion",
             promise.label()
         );
-        let _ = promise.fail_message(message);
+        let _ = PromisedValue::from_root(&promise).fail_message(message);
     }
 }
 

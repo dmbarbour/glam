@@ -447,6 +447,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         let marker = branch.root_value(self.eval_context.values(), Value::Promised(handle.clone()));
         let outer_control = std::mem::take(&mut branch.control);
         branch.state = state;
+        let handle = handle.root();
         branch.active_fixes.push(ActiveFix {
             root: root.clone(),
             choices,
@@ -1451,7 +1452,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     let active = branch.active_fixes.last().ok_or_else(|| {
                         TaskHalt::new("reflection fixpoint lost its active branch")
                     })?;
-                    if active.handle != handle {
+                    if active.handle.id() != handle.id() {
                         return Err(TaskHalt::new(
                             "reflection fixpoint control became unbalanced",
                         ));
@@ -1460,7 +1461,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         return Err(TaskHalt::new("reflection fixpoint choice replay diverged"));
                     }
                     context.evaluate(&self.eval_context, |evaluator| {
-                        handle
+                        PromisedValue::from_root(&handle)
                             .set(evaluator.project_root(&value))
                             .map_err(|_| TaskHalt::new("reflection fixpoint initialized twice"))
                     })?;
@@ -2791,7 +2792,7 @@ struct ActiveFix<S: TaskSpecialization> {
     root: Arc<FixRoot<S>>,
     choices: Vec<FixChoice>,
     next_choice: usize,
-    handle: PromisedValue,
+    handle: crate::core::ManagedPromiseRoot,
 }
 
 #[derive(Clone)]
@@ -2818,7 +2819,7 @@ enum Continuation {
     Glam(RuntimeValueRoot),
     RequireUnit,
     AssertUnit(RuntimeValueRoot),
-    Fix(PromisedValue),
+    Fix(crate::core::ManagedPromiseRoot),
     CloseScope(RuntimeValueRoot),
     RestoreScopedValue(RuntimeValueRoot),
 }

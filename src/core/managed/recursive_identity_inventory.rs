@@ -79,9 +79,21 @@ impl<'ast> Visit<'ast> for IdentityVisitor {
     fn visit_path(&mut self, path: &'ast syn::Path) {
         if let Some(identifier) = path.segments.last().map(|segment| &segment.ident) {
             match identifier.to_string().as_str() {
-                "LazyValue" | "LazyCell" => self.signals.lazy += 1,
-                "PromisedValue" | "PromiseCell" => self.signals.promise += 1,
-                "CoreRuntimeNet" => self.signals.core_net += 1,
+                "LazyValue" | "LazyCell" | "ManagedLazyCell" | "ManagedLazyEdge"
+                | "ManagedLazyRoot" | "ManagedLazyAccess" => self.signals.lazy += 1,
+                "PromisedValue"
+                | "PromiseCell"
+                | "ManagedPromiseCell"
+                | "ManagedPromiseEdge"
+                | "ManagedPromiseRoot"
+                | "ManagedPromiseAccess" => {
+                    self.signals.promise += 1;
+                }
+                "CoreRuntimeNet"
+                | "ManagedCoreNetCell"
+                | "ManagedCoreNetEdge"
+                | "ManagedCoreNetRoot"
+                | "ManagedCoreNetAccess" => self.signals.core_net += 1,
                 _ => {}
             }
         }
@@ -143,9 +155,9 @@ fn visit_fields(visitor: &mut IdentityVisitor, fields: &Fields) {
 
 fn defined_identity(name: &str) -> IdentitySignals {
     match name {
-        "LazyValue" | "LazyCell" => IdentitySignals::new(1, 0, 0),
-        "PromisedValue" | "PromiseCell" => IdentitySignals::new(0, 1, 0),
-        "CoreRuntimeNet" => IdentitySignals::new(0, 0, 1),
+        "LazyValue" | "LazyCell" | "ManagedLazyCell" => IdentitySignals::new(1, 0, 0),
+        "PromisedValue" | "PromiseCell" | "ManagedPromiseCell" => IdentitySignals::new(0, 1, 0),
+        "CoreRuntimeNet" | "ManagedCoreNetCell" => IdentitySignals::new(0, 0, 1),
         _ => IdentitySignals::default(),
     }
 }
@@ -324,13 +336,6 @@ const DIRECT_IDENTITY_INVENTORY: &[IdentityOwnerEntry] = &[
         "function code semantically refers to its runtime net"
     ),
     owner!(
-        "src/core.rs::LazyCell",
-        [1, 0, 0],
-        ExactManagedEdge,
-        Some(CycleSource::Lazy),
-        "authoritative mutable lazy source and terminal cache"
-    ),
-    owner!(
         "src/core.rs::LazyValue",
         [2, 0, 0],
         ExactManagedEdge,
@@ -350,13 +355,6 @@ const DIRECT_IDENTITY_INVENTORY: &[IdentityOwnerEntry] = &[
         ExactManagedEdge,
         None,
         "semantic net value edge"
-    ),
-    owner!(
-        "src/core.rs::PromiseCell",
-        [0, 1, 0],
-        ExactManagedEdge,
-        Some(CycleSource::Promise),
-        "authoritative mutable promise assignment"
     ),
     owner!(
         "src/core.rs::PromisedValue",
@@ -387,15 +385,113 @@ const DIRECT_IDENTITY_INVENTORY: &[IdentityOwnerEntry] = &[
         "borrowed halt payload exposes the same semantic promise edge"
     ),
     owner!(
-        "src/core_net.rs::CoreRuntimeNet",
+        "src/core/managed/recursive_cells.rs::ManagedLazyCell",
+        [1, 0, 0],
+        ExactManagedEdge,
+        Some(CycleSource::Lazy),
+        "authoritative managed lazy source and terminal cache"
+    ),
+    owner!(
+        "src/core/managed/recursive_cells.rs::ManagedLazyEdge",
+        [1, 0, 0],
+        ExactManagedEdge,
+        None,
+        "non-rooting semantic lazy pointer"
+    ),
+    owner!(
+        "src/core/managed/recursive_cells.rs::ManagedLazyRoot",
+        [2, 0, 0],
+        DurableRoot,
+        None,
+        "registered lazy root retains its reconstructible semantic edge"
+    ),
+    owner!(
+        "src/core/managed/recursive_cells.rs::ManagedLazyAccess",
+        [1, 0, 0],
+        BoundedAccess,
+        None,
+        "thread-bound lazy cell observation"
+    ),
+    owner!(
+        "src/core/managed/recursive_cells.rs::ManagedPromiseCell",
+        [0, 1, 0],
+        ExactManagedEdge,
+        Some(CycleSource::Promise),
+        "authoritative managed promise assignment"
+    ),
+    owner!(
+        "src/core/managed/recursive_cells.rs::ManagedPromiseEdge",
+        [0, 1, 0],
+        ExactManagedEdge,
+        None,
+        "non-rooting semantic promise pointer"
+    ),
+    owner!(
+        "src/core/managed/recursive_cells.rs::ManagedPromiseRoot",
+        [0, 2, 0],
+        DurableRoot,
+        None,
+        "registered promise root retains its reconstructible semantic edge"
+    ),
+    owner!(
+        "src/core/managed/recursive_cells.rs::ManagedPromiseAccess",
+        [0, 1, 0],
+        BoundedAccess,
+        None,
+        "thread-bound promise cell observation"
+    ),
+    owner!(
+        "src/core/managed/recursive_cells.rs::ManagedCoreNetCell",
         [0, 0, 1],
         ExactManagedEdge,
         Some(CycleSource::CoreNet),
-        "authoritative mutable interaction-net topology and payload identity"
+        "authoritative managed interaction-net topology and payload identity"
+    ),
+    owner!(
+        "src/core/managed/recursive_cells.rs::ManagedCoreNetEdge",
+        [0, 0, 1],
+        ExactManagedEdge,
+        None,
+        "non-rooting semantic core-net pointer"
+    ),
+    owner!(
+        "src/core/managed/recursive_cells.rs::ManagedCoreNetRoot",
+        [0, 0, 1],
+        DurableRoot,
+        None,
+        "registered core-net root retains the cell for bounded observation"
+    ),
+    owner!(
+        "src/core/managed/recursive_cells.rs::ManagedCoreNetAccess",
+        [0, 0, 1],
+        BoundedAccess,
+        None,
+        "thread-bound core-net cell observation"
+    ),
+    owner!(
+        "src/core_net.rs::CoreFrontierObservation",
+        [0, 0, 1],
+        DurableRoot,
+        None,
+        "frontier observation keeps its source net alive after source access closes"
+    ),
+    owner!(
+        "src/core_net.rs::CorePreparedCopySource",
+        [0, 0, 1],
+        DurableRoot,
+        None,
+        "prepared copy handoff keeps its source net alive until topology installation"
+    ),
+    owner!(
+        "src/core_net.rs::CoreRuntimeNet",
+        [0, 0, 2],
+        ExactManagedEdge,
+        None,
+        "semantic core-net identity handle"
     ),
     owner!(
         "src/core_net.rs::CoreRuntimeNetAccess",
-        [0, 0, 1],
+        [0, 0, 2],
         BoundedAccess,
         None,
         "access view is branded by one matching runtime value-access scope"
@@ -444,10 +540,10 @@ const DIRECT_IDENTITY_INVENTORY: &[IdentityOwnerEntry] = &[
     ),
     owner!(
         "src/eval/net.rs::NormalizationRequest",
-        [0, 0, 1],
-        BoundedAccess,
+        [0, 0, 2],
+        DurableRoot,
         None,
-        "normalization request is retried from rooted enclosing evaluator state"
+        "normalization request roots its net across retryable evaluator boundaries"
     ),
     owner!(
         "src/eval/value.rs::LazyTaskMachine",
@@ -553,9 +649,18 @@ fn compatibility_graph_cycle_sources_are_classified() {
     assert_eq!(
         sources,
         BTreeMap::from([
-            (CycleSource::Lazy, "src/core.rs::LazyCell"),
-            (CycleSource::Promise, "src/core.rs::PromiseCell"),
-            (CycleSource::CoreNet, "src/core_net.rs::CoreRuntimeNet"),
+            (
+                CycleSource::Lazy,
+                "src/core/managed/recursive_cells.rs::ManagedLazyCell"
+            ),
+            (
+                CycleSource::Promise,
+                "src/core/managed/recursive_cells.rs::ManagedPromiseCell"
+            ),
+            (
+                CycleSource::CoreNet,
+                "src/core/managed/recursive_cells.rs::ManagedCoreNetCell"
+            ),
         ]),
         "removing the three authoritative cells must leave only classified compatibility paths"
     );
@@ -573,7 +678,7 @@ fn compatibility_graph_cycle_sources_are_classified() {
         });
     assert_eq!(
         counts,
-        [11, 10, 8],
+        [15, 16, 10],
         "every direct identity occurrence remains assigned to the reviewed M/R/A split"
     );
 }

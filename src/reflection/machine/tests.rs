@@ -1093,7 +1093,7 @@ fn assert_control_root_inventory(
         }
         Continuation::RequireUnit => {}
         Continuation::Fix(handle) => {
-            let _: &PromisedValue = handle;
+            let _: &crate::core::ManagedPromiseRoot = handle;
         }
     }
 
@@ -1173,7 +1173,7 @@ fn assert_fixpoint_root_inventory(
     let _: &FixRoot<TestEffects> = root;
     let _: &Vec<FixChoice> = choices;
     let _: &usize = next_choice;
-    let _: &PromisedValue = handle;
+    let _: &crate::core::ManagedPromiseRoot = handle;
 
     let FixRestart {
         root,
@@ -1529,7 +1529,7 @@ fn fixpoint_frames_retain_the_shared_function_root_until_retirement() {
         root: root.clone(),
         choices: vec![FixChoice::Left],
         next_choice: 0,
-        handle: PromisedValue::new(&core, "test fixpoint"),
+        handle: PromisedValue::new(&core, "test fixpoint").root(),
     };
     let restart = FixRestart {
         root: root.clone(),

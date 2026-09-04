@@ -104,9 +104,8 @@ fn all_managed_entries_have_bounded_mutator_regions() {
             "src/core/managed/payload_edges/runtime_net.rs",
             GatewayCounts::new(3, 1),
         ),
-        // I5C's dormant recursive-cell fixtures prove matching-domain access,
-        // split edge/root construction, publication ordering, and rejection
-        // of unrelated runtime-value authority.
+        // I5D's recursive-cell cutover and fixtures use matching-domain access
+        // for construction, observation, publication, and root projection.
         (
             "src/core/managed/recursive_cells.rs",
             GatewayCounts::new(14, 0),
@@ -115,17 +114,19 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // while their local lifecycle, provenance, and nested-access fixtures
         // exercise construction and observation.
         ("src/core/managed/value_node.rs", GatewayCounts::new(8, 0)),
-        // I4F.2b.2 briefly projects a rooted reflection effect through a
-        // bounded access region before coordinator reservation.
-        ("src/core.rs", GatewayCounts::new(3, 5)),
-        // I5C.1c scopes source-frontier traversal through the same matching
-        // value-domain authority instead of reopening a stored source owner;
-        // the existing test gateway also exercises mismatched-net rejection.
-        ("src/core_net.rs", GatewayCounts::new(8, 0)),
+        // I5D routes lazy and promise cell construction and access through the
+        // same bounded domain gateway as reflection-value projection.
+        ("src/core.rs", GatewayCounts::new(7, 5)),
+        // I5D scopes every managed core-net construction, root handoff, and
+        // source-frontier traversal through matching value-domain authority.
+        ("src/core_net.rs", GatewayCounts::new(12, 0)),
         // The reflection active-owner fixture proves that managed
         // finalization leaves reservation cancellation to the external drain.
         ("src/eval/tests.rs", GatewayCounts::new(0, 1)),
         ("src/evaluation/access.rs", GatewayCounts::new(5, 0)),
+        // Promise terminalization projects a managed assignment through the
+        // producer root while the coordinator mutation remains admitted.
+        ("src/evaluation/coordinator.rs", GatewayCounts::new(1, 0)),
         ("src/evaluation/executor.rs", GatewayCounts::new(1, 0)),
         ("src/evaluation/session.rs", GatewayCounts::new(2, 0)),
         ("src/g_syntax/compiler_values.rs", GatewayCounts::new(1, 0)),
@@ -140,7 +141,19 @@ fn all_managed_entries_have_bounded_mutator_regions() {
     .map(|(path, counts)| (PathBuf::from(path), counts))
     .collect::<BTreeMap<_, _>>();
 
-    assert_eq!(actual_gateways, expected_gateways);
+    assert_eq!(
+        actual_gateways.keys().collect::<Vec<_>>(),
+        expected_gateways.keys().collect::<Vec<_>>(),
+        "managed gateway owners drifted"
+    );
+    for (path, expected) in &expected_gateways {
+        assert_eq!(
+            actual_gateways.get(path),
+            Some(expected),
+            "managed gateway count drifted for {}",
+            path.display()
+        );
+    }
     assert_eq!(
         direct_entries,
         [(PathBuf::from("src/core/managed.rs"), 2)]

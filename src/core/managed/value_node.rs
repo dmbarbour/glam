@@ -69,6 +69,24 @@ impl PreparedRuntimeValueRoot {
         values.with_runtime_value_access(|access| Self::managed(observer, &access, value))
     }
 
+    pub(crate) fn prepare_with_access(
+        observer: RuntimeValueObserver,
+        access: &RuntimeValueAccess<'_>,
+        value: Value,
+    ) -> Self {
+        debug_assert!(access.admits(&observer));
+        if let Value::Number(number) = &value
+            && let Some(value) = number.to_i64_if_integer()
+        {
+            return Self {
+                observer,
+                value: PreparedValueRepresentation::InlineInteger(value),
+            };
+        }
+
+        Self::managed(observer, access, value)
+    }
+
     fn managed(
         observer: RuntimeValueObserver,
         access: &RuntimeValueAccess<'_>,
@@ -144,18 +162,17 @@ impl ManagedValueNode {
 
     /// Reports managed edges through the authoritative compatibility walk.
     ///
-    /// Current raw recursive identities are hard stop points and report no
-    /// pointer. I5D changes their representation and stop adapter atomically;
-    /// persistent compatibility containers already compose transitively.
+    /// Recursive lazy, promise, and core-net identities report their exact
+    /// managed pointers. Remaining compatibility containers compose
+    /// transitively until their later family migrations.
     fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
         visit_compatibility_managed_edges(&self.value, visitor);
     }
 }
 
 // SAFETY: the central wildcard-free compatibility walk classifies every
-// current `Value` variant, recursively crosses only immediate passive payload
-// edges, and stops at every current raw recursive identity. Those identities
-// own no `Gc` pointer until I5D replaces the stop adapter atomically.
+// current `Value` variant, recursively crosses passive compatibility payload
+// edges, and reports exact managed pointers at every recursive identity.
 unsafe impl Trace for ManagedValueNode {
     const REQUESTED_SLOT_SIZE: Option<usize> = Some(managed_slot_extent::<Self>());
 
@@ -323,13 +340,13 @@ mod tests {
     }
 
     #[test]
-    fn managed_value_node_dispatches_every_real_variant_as_zero_edge() {
+    fn managed_value_node_dispatches_every_real_variant_with_exact_recursive_edges() {
         let values = values();
         let active_drops = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let variants = closed_compatibility_variants(&values, &active_drops);
         let baseline = values
             .collect_managed_for_test()
             .expect("canonical roots should collect before the variant fixture");
+        let variants = closed_compatibility_variants(&values, &active_drops);
         let roots = values.with_runtime_value_access(|access| {
             variants
                 .into_iter()
@@ -367,15 +384,19 @@ mod tests {
 
         let live = values
             .collect_managed_for_test()
-            .expect("rooted production nodes should trace without hidden edges");
+            .expect("rooted production nodes should trace their recursive identities");
         assert_eq!(live.root_entries(), baseline.root_entries() + roots.len());
-        assert_eq!(live.marked_slots(), baseline.marked_slots() + roots.len());
+        assert_eq!(
+            live.marked_slots(),
+            baseline.marked_slots() + roots.len() + 3,
+            "the function/net pair shares one net identity beside one lazy and one promise"
+        );
 
         drop(roots);
         let dead = values
             .collect_managed_for_test()
             .expect("unrooted production nodes should reclaim every shell");
-        assert_eq!(dead.finalized_slots(), 13);
+        assert_eq!(dead.finalized_slots(), 16);
         assert_eq!(
             active_drops.load(std::sync::atomic::Ordering::Relaxed),
             0,

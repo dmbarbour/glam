@@ -1683,11 +1683,14 @@ fn forwarding_chain_preserves_one_structured_failure() {
 
 #[test]
 fn concurrent_host_calls_share_one_rooted_producer_without_parking() {
-    let context = test_context();
+    let values = crate::core::CoreValueFactory::new(
+        crate::runtime::allocate_evaluation_runtime_id(),
+        crate::runtime::RuntimeIds::new(),
+    );
+    let context = EvalContext::isolated(values.clone());
     let release = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
     let producer_release = release.clone();
     let (started_sender, started_receiver) = std::sync::mpsc::channel();
-    let values = crate::core::test_value_factory();
     let producer_values = values.clone();
     let producer_runs = Arc::new(AtomicUsize::new(0));
     let counted_runs = producer_runs.clone();
@@ -4903,7 +4906,10 @@ fn reflection_computation(value: &Value) -> Arc<crate::core::ReflectionComputati
 
 #[test]
 fn reflection_gate_reserves_inside_and_activates_outside_scope() {
-    let context = test_context();
+    let context = EvalContext::isolated(crate::core::CoreValueFactory::new(
+        crate::runtime::allocate_evaluation_runtime_id(),
+        crate::runtime::RuntimeIds::new(),
+    ));
     let builds = Arc::new(AtomicUsize::new(0));
     context
         .install_reflection_launcher(Arc::new(ScopedReflectionLauncher {
@@ -4982,7 +4988,11 @@ fn unactivated_reflection_reservation_cancels_only_during_external_owner_drain()
         .values()
         .collect_managed_for_test()
         .expect("unrooted reflection wrapper should collect passively");
-    assert_eq!(report.finalized_slots(), 1);
+    assert_eq!(
+        report.finalized_slots(),
+        2,
+        "collection retires both the closed wrapper and its managed reflection lazy"
+    );
     assert_eq!(managed_drops.load(Ordering::Relaxed), 1);
     assert!(matches!(
         context.poll_reflection_task(&handle),
@@ -6061,6 +6071,10 @@ fn completed_metadata_updates_release_sources_and_task_records() {
     )
     .expect("seq should complete the derived metadata");
     assert_eq!(result, n(42));
+    context
+        .values()
+        .collect_managed_for_test()
+        .expect("unreachable metadata inputs should be collectible after completion");
     assert!(
         prior_source_dropped.load(Ordering::Acquire),
         "a completed update which ignores its input should release the prior metadata graph"

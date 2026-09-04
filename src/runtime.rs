@@ -210,6 +210,26 @@ impl RuntimeValueRoot {
         }
     }
 
+    pub(crate) fn new_from_access(
+        observer: crate::core::RuntimeValueObserver,
+        access: &crate::core::RuntimeValueAccess<'_>,
+        value: Value,
+    ) -> Self {
+        Self {
+            value: PreparedRuntimeValueRoot::prepare_with_access(observer, access, value),
+        }
+    }
+
+    pub(crate) fn from_observer(
+        observer: &crate::core::RuntimeValueObserver,
+        value: Value,
+    ) -> Self {
+        let values = observer
+            .upgrade()
+            .expect("a runtime value can only be rooted while its domain is live");
+        Self::new(&values, value)
+    }
+
     pub(crate) fn runtime_id(&self) -> EvaluationRuntimeId {
         self.value.runtime_id()
     }

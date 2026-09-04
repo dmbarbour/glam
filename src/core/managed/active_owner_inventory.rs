@@ -17,7 +17,7 @@ use bytes::Bytes;
 
 use crate::core::{
     Builtin, ClosedCompatibilityValue, Dict, FunctionValue, HostCallProducer, HostCallRecord,
-    LazyCell, LazySource, List, NetValue, OpaquePayloadFamily, OpaquePayloadRecord, OpaqueValue,
+    LazySource, LazyValue, List, NetValue, OpaquePayloadFamily, OpaquePayloadRecord, OpaqueValue,
     PromisedValue, ReflectionComputation, Value,
 };
 use crate::core_net::CoreSpecialization;
@@ -176,12 +176,7 @@ fn assert_value_active_destruction_paths(value: &Value) {
         | Value::Promised(_)
         | Value::Metadata(_) => {}
         Value::Lazy(lazy) => {
-            let LazyCell {
-                id: _,
-                label: _,
-                source: _,
-                result: _,
-            } = lazy.0.as_ref();
+            let _: &LazyValue = lazy;
         }
         Value::Opaque(opaque) => assert_opaque_fields(opaque),
     }

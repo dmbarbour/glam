@@ -34,7 +34,7 @@ fn assert_evaluation_machine_poll_boundary_inventory(poll: &EvaluationMachinePol
                     let _: &EvaluationWaitToken = wait;
                 }
                 Some(WorkDependency::Promise(promise)) => {
-                    let _: &PromisedValue = promise;
+                    let _: &crate::core::ManagedPromiseRoot = promise;
                 }
                 Some(WorkDependency::Test(_)) | None => {}
             }
@@ -1536,7 +1536,7 @@ impl EvaluationTaskMachine for AwaitPromise {
     ) -> EvaluationMachinePoll {
         match self.promise.assignment() {
             None => EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
-                dependency: Some(WorkDependency::Promise(self.promise.clone())),
+                dependency: Some(WorkDependency::Promise(self.promise.root())),
                 observed_epoch: None,
                 error: None,
             }),
@@ -3121,10 +3121,10 @@ fn owner_session_drop_fails_task_promises_but_not_host_promises() {
         let (promise, _owner_task, _owner_context) = owner
             .task_owned_promise(Arc::from("abandoned task promise"))
             .expect("task promise should register");
-        let wait = promise
+        let producer = promise
             .task()
-            .expect("task promise should retain producer provenance")
-            .wait();
+            .expect("task promise should retain producer provenance");
+        let wait = producer.wait();
         assert_eq!(
             wait.subscribe_test_work(),
             CompletionSubscriptionOutcome::Pending
@@ -6101,7 +6101,7 @@ fn park_next_spark(coordinator: &EvaluationWorkCoordinator) {
     let dependency = if let Some(wait) = halt.blocked_on() {
         coordinator::WorkDependency::Wait(wait.0)
     } else if let Some(promise) = halt.unassigned_promise() {
-        coordinator::WorkDependency::Promise(promise.clone())
+        coordinator::WorkDependency::Promise(promise.root())
     } else {
         panic!("an unresolved promise should expose a retryable dependency")
     };
@@ -6213,7 +6213,7 @@ fn promise_completion_between_demand_and_subscription_requeues_the_spark() {
     let dependency = coordinator::WorkDependency::Promise(
         halt.unassigned_promise()
             .expect("the halt should preserve the promise")
-            .clone(),
+            .root(),
     );
     promise
         .set(context.values().unit())

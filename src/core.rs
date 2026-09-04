@@ -14,12 +14,12 @@ use rpds::RedBlackTreeMapSync;
 
 use crate::core_net::{CoreDataKey, CoreRuntimeNet};
 use crate::evaluation::{
-    CompletionSubscriptionOutcome, CompletionSubscriptions, EvalContext, EvaluationWorkCoordinator,
-    EvaluatorStepContext, PromiseProducerObligation, PromiseProducerPublication,
-    ReflectionTaskReservation, ReflectionTaskResultPolicy, WakeRegistration,
+    CompletionSubscriptionOutcome, EvalContext, EvaluationWorkCoordinator, EvaluatorStepContext,
+    PromiseProducerObligation, ReflectionTaskReservation, ReflectionTaskResultPolicy,
+    WakeRegistration,
 };
 use crate::number::Number;
-use crate::runtime::{EvaluationRuntimeId, RuntimeIds, RuntimeMutationAuthority, RuntimeValueRoot};
+use crate::runtime::{EvaluationRuntimeId, RuntimeIds, RuntimeValueRoot};
 
 mod evaluation_halt;
 pub(crate) mod keys;
@@ -27,10 +27,14 @@ pub(crate) use evaluation_halt::{EvaluationHalt, EvaluationHaltPayload};
 mod managed;
 mod runtime_cache;
 #[cfg(test)]
-pub(crate) use managed::{ClosedCompatibilityValue, ManagedDropRecord, ManagedFamily};
 pub(crate) use managed::{
-    ExternalOwnerHandle, ExternalOwnerRegistry, OpaquePayloadFamily, OpaquePayloadRecord,
-    PreparedRuntimeValueRoot, RuntimeValueAccess, RuntimeValueObserver,
+    ClosedCompatibilityValue, ManagedDropRecord, ManagedFamily,
+    thread_has_runtime_value_access_for_test,
+};
+pub(crate) use managed::{
+    ExternalOwnerHandle, ExternalOwnerRegistry, ManagedCoreNetAccess, ManagedCoreNetEdge,
+    ManagedCoreNetRoot, ManagedLazyRoot, ManagedPromiseRoot, OpaquePayloadFamily,
+    OpaquePayloadRecord, PreparedRuntimeValueRoot, RuntimeValueAccess, RuntimeValueObserver,
 };
 use runtime_cache::{RuntimeCacheEntry, RuntimeCacheMap, SharedRuntimeCacheMap};
 pub(crate) use runtime_cache::{RuntimeCacheFamily, RuntimeCacheFamilyRecord};
@@ -262,13 +266,11 @@ pub(crate) struct LazyCycleMember {
 }
 
 #[derive(Clone)]
-pub struct LazyValue(Arc<LazyCell>);
-
-struct LazyCell {
+pub struct LazyValue {
     id: LazyId,
     label: Arc<str>,
-    source: Mutex<Option<LazySource>>,
-    result: OnceLock<LazyResult>,
+    edge: managed::ManagedLazyEdge,
+    values: RuntimeValueObserver,
 }
 
 /// The one terminal assignment retained by a named promise.
@@ -276,18 +278,14 @@ struct LazyCell {
 /// Successful assignments may still name deferred values, which observers
 /// follow normally. The failure arm is permanent: retryable demand halts never
 /// enter this cell.
-pub(crate) type PromiseAssignment = Result<RuntimeValueRoot, Arc<EvaluationFailure>>;
+pub(crate) type PromiseAssignment = Result<Value, Arc<EvaluationFailure>>;
 
 #[derive(Clone)]
-pub(crate) struct PromisedValue(Arc<PromiseCell>);
-
-pub(crate) struct PromiseCell {
+pub(crate) struct PromisedValue {
     id: PromiseId,
-    values: RuntimeValueObserver,
     label: Arc<str>,
-    assignment: OnceLock<PromiseAssignment>,
-    completion: CompletionSubscriptions,
-    producer: OnceLock<Arc<PromiseProducerObligation>>,
+    edge: managed::ManagedPromiseEdge,
+    values: RuntimeValueObserver,
 }
 
 /// Runtime-selected construction authority for values which allocate stable
@@ -602,17 +600,41 @@ pub(crate) fn test_value_factory() -> CoreValueFactory {
 }
 
 impl LazyValue {
+    pub(crate) fn from_root(root: &managed::ManagedLazyRoot) -> Self {
+        Self {
+            id: root.id(),
+            label: root.label().clone(),
+            edge: root.edge(),
+            values: root.observer().clone(),
+        }
+    }
+
+    pub(crate) fn trace_managed_edge(&self, visitor: &mut glam_gc::Visitor<'_>) {
+        self.edge.trace(visitor);
+    }
+
     fn with_source(
         values: &CoreValueFactory,
         label: impl Into<Arc<str>>,
         source: LazySource,
     ) -> Self {
-        Self(Arc::new(LazyCell {
-            id: LazyId(values.deferred_value_id()),
-            label: label.into(),
-            source: Mutex::new(Some(source)),
-            result: OnceLock::new(),
-        }))
+        let observer = values.runtime_value_observer();
+        let label = label.into();
+        values.with_runtime_value_access(|access| {
+            let edge = access
+                .allocate_managed_lazy(values, label.clone(), source)
+                .expect("managed lazy representation must fit one collector run");
+            let id = edge
+                .access(&observer, &access)
+                .expect("new lazy belongs to its allocation domain")
+                .id();
+            Self {
+                id,
+                label,
+                edge,
+                values: observer,
+            }
+        })
     }
 
     pub(crate) fn computed_fixpoint(
@@ -717,11 +739,39 @@ impl LazyValue {
     }
 
     pub(crate) fn id(&self) -> LazyId {
-        self.0.id
+        self.id
     }
 
     pub(crate) fn label(&self) -> &Arc<str> {
-        &self.0.label
+        &self.label
+    }
+
+    pub(crate) fn access<'access, 'scope>(
+        &'access self,
+        access: &'access RuntimeValueAccess<'scope>,
+    ) -> managed::ManagedLazyAccess<'access, 'scope> {
+        self.edge
+            .access(&self.values, access)
+            .expect("lazy value and access must share one value domain")
+    }
+
+    pub(crate) fn root(&self) -> managed::ManagedLazyRoot {
+        let observer = self.values.clone();
+        self.with_runtime_access(|access| access.root_managed_lazy(observer, self.edge))
+    }
+
+    fn with_runtime_access<R>(
+        &self,
+        operation: impl for<'scope> FnOnce(RuntimeValueAccess<'scope>) -> R,
+    ) -> R {
+        self.values
+            .upgrade()
+            .expect("a managed lazy can only be observed in its live value domain")
+            .with_runtime_value_access(operation)
+    }
+
+    fn with_access<R>(&self, operation: impl FnOnce(managed::ManagedLazyAccess<'_, '_>) -> R) -> R {
+        self.with_runtime_access(|access| operation(self.access(&access)))
     }
 
     /// Clones the producer while this lazy remains unresolved.
@@ -730,47 +780,32 @@ impl LazyValue {
     /// A worker which wins this snapshot may therefore finish concurrent work,
     /// while later observers take the lock-free cached-result path.
     pub(crate) fn source_snapshot(&self) -> Option<LazySource> {
-        if self.0.result.get().is_some() {
-            return None;
-        }
-        let source = self.0.source.lock().expect("lazy source cell was poisoned");
-        if self.0.result.get().is_some() {
-            return None;
-        }
-        Some(
-            source
-                .as_ref()
-                .expect("an unresolved lazy value must retain its source")
-                .clone(),
-        )
+        self.with_access(|lazy| lazy.source_snapshot())
     }
 
     pub(crate) fn cached(&self) -> Option<LazyResult> {
-        self.0.result.get().cloned()
+        self.with_access(|lazy| lazy.cached())
     }
 
     pub(crate) fn cache(&self, result: LazyResult) -> LazyResult {
-        let _ = self.0.result.set(result);
-        let result = self
-            .0
-            .result
-            .get()
-            .expect("lazy cache should contain a value after set")
-            .clone();
-
-        // Publish the terminal result before removing its producer. Workers
-        // which already cloned the source may finish harmlessly; a subsequent
-        // cache attempt observes this same canonical result.
-        let source = {
-            let mut source = self.0.source.lock().expect("lazy source cell was poisoned");
-            source.take()
-        };
-        drop(source);
-        result
+        self.with_access(|lazy| lazy.cache(result))
     }
 }
 
 impl PromisedValue {
+    pub(crate) fn from_root(root: &managed::ManagedPromiseRoot) -> Self {
+        Self {
+            id: root.id(),
+            label: root.label().clone(),
+            edge: root.edge(),
+            values: root.observer().clone(),
+        }
+    }
+
+    pub(crate) fn trace_managed_edge(&self, visitor: &mut glam_gc::Visitor<'_>) {
+        self.edge.trace(visitor);
+    }
+
     pub(crate) fn new(values: &CoreValueFactory, label: impl Into<Arc<str>>) -> Self {
         Self::with_cell(values, label)
     }
@@ -780,64 +815,96 @@ impl PromisedValue {
         label: impl Into<Arc<str>>,
     ) -> Result<Self, Arc<str>> {
         let promise = Self::with_cell(context.values(), label);
-        let producer = Arc::new(context.register_promise(&promise.0)?);
+        let producer = context.register_promise(&promise)?;
         promise
-            .0
-            .producer
-            .set(producer)
+            .with_access(|promise| promise.install_producer(&producer))
             .map_err(|_| Arc::<str>::from("promise producer was installed twice"))?;
         Ok(promise)
     }
 
     fn with_cell(values: &CoreValueFactory, label: impl Into<Arc<str>>) -> Self {
-        let id = PromiseId(values.deferred_value_id());
-        Self(Arc::new(PromiseCell {
-            id,
-            values: values.runtime_value_observer(),
-            label: label.into(),
-            assignment: OnceLock::new(),
-            completion: CompletionSubscriptions::for_promise(
-                values.runtime_id(),
+        let observer = values.runtime_value_observer();
+        let label = label.into();
+        values.with_runtime_value_access(|access| {
+            let edge = access
+                .allocate_managed_promise(values, label.clone())
+                .expect("managed promise representation must fit one collector run");
+            let id = edge
+                .access(&observer, &access)
+                .expect("new promise belongs to its allocation domain")
+                .id();
+            Self {
                 id,
-                values.work_coordinator_binding(),
-            ),
-            producer: OnceLock::new(),
-        }))
+                label,
+                edge,
+                values: observer,
+            }
+        })
+    }
+
+    pub(crate) fn access<'access, 'scope>(
+        &'access self,
+        access: &'access RuntimeValueAccess<'scope>,
+    ) -> managed::ManagedPromiseAccess<'access, 'scope> {
+        self.edge
+            .access(&self.values, access)
+            .expect("promise value and access must share one value domain")
+    }
+
+    pub(crate) fn root(&self) -> managed::ManagedPromiseRoot {
+        let observer = self.values.clone();
+        self.with_runtime_access(|access| access.root_managed_promise(observer, self.edge))
+    }
+
+    fn with_runtime_access<R>(
+        &self,
+        operation: impl for<'scope> FnOnce(RuntimeValueAccess<'scope>) -> R,
+    ) -> R {
+        self.values
+            .upgrade()
+            .expect("a managed promise can only be observed in its live value domain")
+            .with_runtime_value_access(operation)
+    }
+
+    fn with_access<R>(
+        &self,
+        operation: impl FnOnce(managed::ManagedPromiseAccess<'_, '_>) -> R,
+    ) -> R {
+        self.with_runtime_access(|access| operation(self.access(&access)))
     }
 
     pub(crate) fn id(&self) -> PromiseId {
-        self.0.id
+        self.id
     }
 
     pub(crate) fn runtime_id(&self) -> EvaluationRuntimeId {
-        self.0.values.runtime_id()
+        self.values.runtime_id()
     }
 
     pub(crate) fn label(&self) -> &Arc<str> {
-        &self.0.label
+        &self.label
     }
 
-    pub(crate) fn task(&self) -> Option<&PromiseProducerObligation> {
-        self.0.producer.get().map(Arc::as_ref)
+    pub(crate) fn task(&self) -> Option<Arc<PromiseProducerObligation>> {
+        self.with_access(|promise| promise.producer())
     }
 
     pub(crate) fn set(&self, value: Value) -> Result<(), Value> {
-        let Some(values) = self.0.values.upgrade() else {
-            return Err(value);
-        };
-        self.publish(Ok(RuntimeValueRoot::new(&values, value)))
-            .map_err(|assignment| {
-                assignment
-                    .expect("setting a promised value always supplies a successful value")
-                    .clone_core_in_own_domain()
-                    .expect("an assigned promise remains in its live value domain")
-            })
+        self.publish(Ok(value)).map_err(|assignment| {
+            assignment.expect("setting a promised value always supplies a successful value")
+        })
     }
 
     pub(crate) fn set_root(&self, value: RuntimeValueRoot) -> Result<(), RuntimeValueRoot> {
         debug_assert_eq!(value.runtime_id(), self.runtime_id());
-        self.publish(Ok(value)).map_err(|assignment| {
-            assignment.expect("setting a promised value always supplies a successful value")
+        let value = value
+            .clone_core_in_own_domain()
+            .expect("an assigned promise remains in its live value domain");
+        self.set(value).map_err(|value| {
+            RuntimeValueRoot::new(
+                &self.values.upgrade().expect("promise domain remains live"),
+                value,
+            )
         })
     }
 
@@ -858,13 +925,7 @@ impl PromisedValue {
     }
 
     pub(crate) fn assignment(&self) -> Option<Result<Value, Arc<EvaluationFailure>>> {
-        self.0.assignment.get().cloned().map(|assignment| {
-            assignment.map(|value| {
-                value
-                    .clone_core_in_own_domain()
-                    .expect("a promise assignment is observed only in its live value domain")
-            })
-        })
+        self.with_access(|promise| promise.assignment())
     }
 
     pub(crate) fn subscribe_work(
@@ -872,45 +933,29 @@ impl PromisedValue {
         runtime: EvaluationRuntimeId,
         registration: WakeRegistration,
     ) -> CompletionSubscriptionOutcome {
-        self.0
-            .completion
-            .subscribe(runtime, registration, || self.0.assignment.get().is_some())
+        self.with_access(|promise| promise.subscribe_work(runtime, registration))
     }
 
     pub(crate) fn unsubscribe_work(&self, registration: WakeRegistration) -> bool {
-        self.0.completion.unsubscribe(registration)
+        self.with_access(|promise| promise.unsubscribe_work(registration))
     }
 
     #[cfg(test)]
     pub(crate) fn exact_subscription_count(&self) -> usize {
-        self.0.completion.len()
+        self.with_access(|promise| promise.exact_subscription_count())
     }
 
     fn publish(&self, assignment: PromiseAssignment) -> Result<(), PromiseAssignment> {
-        self.0.publish(assignment)
-    }
-}
-
-impl PromiseCell {
-    pub(crate) fn id(&self) -> PromiseId {
-        self.id
-    }
-
-    pub(crate) fn fail(
-        &self,
-        failure: Arc<EvaluationFailure>,
-    ) -> Result<(), Arc<EvaluationFailure>> {
-        self.publish(Err(failure)).map_err(|assignment| {
-            assignment.expect_err("failing a promised value always supplies an error")
-        })
-    }
-
-    fn publish(&self, assignment: PromiseAssignment) -> Result<(), PromiseAssignment> {
-        if let Some(producer) = self.producer.get()
+        let producer = self.with_access(|promise| promise.producer());
+        if let Some(producer) = producer
             && let Some(coordinator) = producer.coordinator()
         {
             let mutation = coordinator.mutation_guard();
-            let published = self.publish_guarded(&coordinator, &mutation, assignment);
+            let published = self.with_access(|promise| {
+                promise.publish_guarded(&coordinator, &mutation, assignment, |assignment| {
+                    producer.publish_assignment_guarded(&coordinator, &mutation, assignment)
+                })
+            });
             let (producer, completion) = published?;
             drop(mutation);
             completion.notify();
@@ -918,48 +963,17 @@ impl PromiseCell {
             return Ok(());
         }
 
-        let producer = self.completion.publish(|| {
-            self.assignment.set(assignment)?;
-            Ok(self.producer.get().map(|producer| {
-                producer.publish_assignment_detached(
-                    self.assignment
-                        .get()
-                        .expect("promise publication must initialize its assignment"),
-                )
-            }))
+        let producer = self.with_access(|promise| {
+            promise.publish_detached(assignment, |assignment| {
+                promise
+                    .producer()
+                    .map(|producer| producer.publish_assignment_detached(assignment))
+            })
         })?;
         if let Some(producer) = producer {
             producer.notify();
         }
         Ok(())
-    }
-
-    pub(crate) fn publish_guarded(
-        &self,
-        coordinator: &Arc<EvaluationWorkCoordinator>,
-        mutation: &dyn RuntimeMutationAuthority,
-        assignment: PromiseAssignment,
-    ) -> Result<
-        (
-            PromiseProducerPublication,
-            crate::evaluation::CompletionWake,
-        ),
-        PromiseAssignment,
-    > {
-        let producer = self
-            .producer
-            .get()
-            .expect("guarded promise publication requires a coordinator producer");
-        self.completion.publish_guarded(coordinator, mutation, || {
-            self.assignment.set(assignment)?;
-            Ok(producer.publish_assignment_guarded(
-                coordinator,
-                mutation,
-                self.assignment
-                    .get()
-                    .expect("promise publication must initialize its assignment"),
-            ))
-        })
     }
 }
 
@@ -2599,7 +2613,7 @@ mod tests {
         drop(values);
 
         assert!(domain.upgrade().is_none());
-        assert!(!promise.0.values.is_live());
+        assert!(!promise.values.is_live());
     }
 
     #[test]

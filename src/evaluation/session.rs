@@ -720,13 +720,13 @@ impl EvalContext {
                     subscription_epoch,
                 } => {
                     if let Some(wait) = dependency.producer_wait() {
-                        if let Some(task) = prioritized_task_for(&coordinator, wait)
+                        if let Some(task) = prioritized_task_for(&coordinator, &wait)
                             && let Some(work) = coordinator.claim_task(task)
                         {
                             coordinator.poll_claimed_task(work);
                             continue;
                         }
-                        if coordinator.target_has_running_producer(wait) {
+                        if coordinator.target_has_running_producer(&wait) {
                             if handle.poll().is_none()
                                 && coordinator.work_generation() == generation
                             {
@@ -852,7 +852,7 @@ impl EvalContext {
     where
         F: FnOnce(EvalContext) -> Box<dyn EvaluationTaskMachine>,
     {
-        self.deferred_task(DeferredProducer::Lazy(lazy.clone()), build)
+        self.deferred_task(DeferredProducer::Lazy(lazy.root()), build)
     }
 
     pub(crate) fn promise_task<F>(
@@ -863,7 +863,7 @@ impl EvalContext {
     where
         F: FnOnce(EvalContext) -> Box<dyn EvaluationTaskMachine>,
     {
-        self.deferred_task(DeferredProducer::Promise(promise.clone()), build)
+        self.deferred_task(DeferredProducer::Promise(promise.root()), build)
     }
 
     fn deferred_task<F>(
@@ -989,8 +989,8 @@ impl EvalContext {
 
     pub(crate) fn register_promise(
         &self,
-        promise: &Arc<crate::core::PromiseCell>,
-    ) -> Result<PromiseProducerObligation, Arc<str>> {
+        promise: &PromisedValue,
+    ) -> Result<Arc<PromiseProducerObligation>, Arc<str>> {
         if self.session.is_closed() {
             return Err(Arc::from("evaluation demand session is closed"));
         }
@@ -998,21 +998,16 @@ impl EvalContext {
         let wait = allocate_wait_token(&self.session, owner)?;
         if self.scheduled_task {
             let coordinator = self.coordinator_for_admission()?;
-            let work = coordinator.register_task_promise(owner, wait.clone(), promise)?;
-            Ok(PromiseProducerObligation::coordinator_owned(
-                owner,
-                wait,
-                work,
-                promise.id(),
-                &coordinator,
-            ))
+            coordinator.register_task_promise(owner, wait, promise)
         } else if let Some(local_owner) = &self.local_promise_owner {
-            Ok(PromiseProducerObligation::local_owned(
+            let producer = Arc::new(PromiseProducerObligation::local_owned(
                 owner,
-                wait,
-                promise,
+                wait.clone(),
+                promise.id(),
                 local_owner,
-            ))
+            ));
+            local_owner.register(promise.root(), producer.clone());
+            Ok(producer)
         } else {
             Err(format!(
                 "task {} has no active work record for its promise",
@@ -1529,7 +1524,7 @@ pub(super) fn client_demand_halt_poll(
     if let Some(wait) = halt.blocked_on() {
         coordinator::ClientDemandPoll::Blocked(WorkDependency::Wait(wait.0))
     } else if let Some(promise) = halt.unassigned_promise() {
-        coordinator::ClientDemandPoll::Blocked(WorkDependency::Promise(promise.clone()))
+        coordinator::ClientDemandPoll::Blocked(WorkDependency::Promise(promise.root()))
     } else {
         coordinator::ClientDemandPoll::Failed(context.root_failure(halt.into_permanent_failure()))
     }
@@ -1538,7 +1533,9 @@ pub(super) fn client_demand_halt_poll(
 fn client_demand_halt(dependency: WorkDependency) -> crate::core::EvaluationHalt {
     match dependency {
         WorkDependency::Wait(wait) => crate::core::EvaluationHalt::blocked(CoreWaitToken(wait)),
-        WorkDependency::Promise(promise) => crate::core::EvaluationHalt::unassigned(promise),
+        WorkDependency::Promise(promise) => {
+            crate::core::EvaluationHalt::unassigned(PromisedValue::from_root(&promise))
+        }
         #[cfg(test)]
         WorkDependency::Test(_) => crate::core::EvaluationHalt::new(
             "client evaluation blocked on a synthetic test dependency",

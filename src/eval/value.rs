@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::core::{
     Dict, EvaluatedValue, EvaluationFailure, EvaluationHalt, FixpointComputation, Key, LazySource,
-    LazyValue, List, ListThunk, PromisedValue, Value, keys,
+    LazyValue, List, ListThunk, ManagedLazyRoot, ManagedPromiseRoot, PromisedValue, Value, keys,
 };
 use crate::core_net::CoreWaitToken;
 use crate::evaluation::{
@@ -139,15 +139,19 @@ enum LazyTaskWork {
 
 struct LazyTaskMachine {
     context: EvalContext,
-    lazy: LazyValue,
+    lazy: ManagedLazyRoot,
     work: LazyTaskWork,
 }
 
 impl LazyTaskMachine {
+    fn lazy(&self) -> LazyValue {
+        LazyValue::from_root(&self.lazy)
+    }
+
     fn complete(&self, context: &EvaluatorStepContext<'_>, value: Value) -> EvaluationMachinePoll {
         let value = EvaluatedValue::try_from(value)
             .expect("WHNF demand must eliminate the outer deferred variant");
-        match self.lazy.cache(Ok(value)) {
+        match self.lazy().cache(Ok(value)) {
             Ok(value) => EvaluationMachinePoll::Complete(context.root_value(value.into_value())),
             Err(error) => EvaluationMachinePoll::Failed(context.root_failure(error)),
         }
@@ -155,7 +159,7 @@ impl LazyTaskMachine {
 
     fn cached_poll(&self, context: &EvaluatorStepContext<'_>) -> EvaluationMachinePoll {
         match self
-            .lazy
+            .lazy()
             .cached()
             .expect("a released lazy source must have a terminal cache")
         {
@@ -211,7 +215,7 @@ impl EvaluationTaskMachine for LazyTaskMachine {
             });
         }
         poll_context.evaluate(&durable_context, |context| {
-            if let Some(result) = self.lazy.cached() {
+            if let Some(result) = self.lazy().cached() {
                 return match result {
                     Ok(value) => {
                         EvaluationMachinePoll::Complete(context.root_value(value.into_value()))
@@ -221,7 +225,7 @@ impl EvaluationTaskMachine for LazyTaskMachine {
             }
 
             if matches!(self.work, LazyTaskWork::Produce) {
-                let Some(source) = self.lazy.source_snapshot() else {
+                let Some(source) = self.lazy().source_snapshot() else {
                     return self.cached_poll(context);
                 };
                 if let LazySource::NetConstruction(effect) = source {
@@ -239,7 +243,7 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                     self.work = LazyTaskWork::HostCall(producer);
                     return EvaluationMachinePoll::Yielded;
                 }
-                let result = produce_lazy_source_in(context, &self.lazy, &source);
+                let result = produce_lazy_source_in(context, &self.lazy(), &source);
                 return self.finish_poll(context, result);
             }
 
@@ -289,7 +293,7 @@ impl LazyTaskMachine {
             });
         }
         let failure = error.into_permanent_failure();
-        match self.lazy.cache(Err(failure)) {
+        match self.lazy().cache(Err(failure)) {
             Ok(value) => EvaluationMachinePoll::Complete(context.root_value(value.into_value())),
             Err(error) => EvaluationMachinePoll::Failed(context.root_failure(error)),
         }
@@ -303,7 +307,7 @@ enum PromiseFollowerState {
 
 struct PromiseFollower {
     context: EvalContext,
-    promise: PromisedValue,
+    promise: ManagedPromiseRoot,
     state: PromiseFollowerState,
 }
 
@@ -316,16 +320,18 @@ impl EvaluationTaskMachine for PromiseFollower {
         let durable_context = self.context.clone();
         poll_context.evaluate(&durable_context, |context| {
             let result = match &self.state {
-                PromiseFollowerState::AwaitAssignment => match self.promise.assignment() {
-                    Some(result) => result.map_err(EvaluationHalt::failure),
-                    None => {
-                        return EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
-                            dependency: Some(WorkDependency::Promise(self.promise.clone())),
-                            observed_epoch: None,
-                            error: None,
-                        });
+                PromiseFollowerState::AwaitAssignment => {
+                    match PromisedValue::from_root(&self.promise).assignment() {
+                        Some(result) => result.map_err(EvaluationHalt::failure),
+                        None => {
+                            return EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
+                                dependency: Some(WorkDependency::Promise(self.promise.clone())),
+                                observed_epoch: None,
+                                error: None,
+                            });
+                        }
                     }
-                },
+                }
                 PromiseFollowerState::FollowAssignment(target) => eval_value_in(context, target),
             };
 
@@ -352,7 +358,7 @@ pub(super) fn promise_wait(
     context.promise_task(promise, |task_context| {
         Box::new(PromiseFollower {
             context: task_context,
-            promise: promise.clone(),
+            promise: promise.root(),
             state: PromiseFollowerState::AwaitAssignment,
         })
     })
@@ -404,7 +410,7 @@ pub(super) fn eval_lazy_in(
             .lazy_task(lazy, |task_context| {
                 Box::new(LazyTaskMachine {
                     context: task_context,
-                    lazy: lazy.clone(),
+                    lazy: lazy.root(),
                     work: LazyTaskWork::Produce,
                 })
             })

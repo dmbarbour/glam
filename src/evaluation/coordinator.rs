@@ -7,12 +7,12 @@ use std::sync::{Arc, Condvar, Mutex, Weak};
 
 #[cfg(test)]
 use crate::core::LazyValue;
-use crate::core::{CoreValueFactory, PromiseCell, PromiseId, PromisedValue};
+use crate::core::{CoreValueFactory, ManagedPromiseRoot, PromiseId, PromisedValue};
 #[cfg(test)]
 use crate::runtime::RuntimeValueRoot;
 use crate::runtime::{
-    EvaluationRuntimeId, RuntimeFailureRoot, RuntimeIds, RuntimeMutationAdmission,
-    RuntimeMutationAuthority, RuntimeMutationGuard,
+    EvaluationRuntimeId, RuntimeIds, RuntimeMutationAdmission, RuntimeMutationAuthority,
+    RuntimeMutationGuard,
 };
 
 #[cfg(test)]
@@ -131,8 +131,36 @@ struct SettlementObligations {
 #[derive(Clone)]
 struct TaskOwnedPromiseObligation {
     promise: PromiseId,
-    cell: Weak<PromiseCell>,
+    root: ManagedPromiseRoot,
+    producer: Arc<PromiseProducerObligation>,
     wait: EvaluationWaitToken,
+}
+
+impl TaskOwnedPromiseObligation {
+    fn publish_failure_guarded(
+        &self,
+        coordinator: &Arc<EvaluationWorkCoordinator>,
+        mutation: &dyn RuntimeMutationAuthority,
+        failure: Arc<crate::core::EvaluationFailure>,
+    ) -> (PromiseProducerPublication, CompletionWake) {
+        let values = self
+            .root
+            .observer()
+            .upgrade()
+            .expect("a registered promise root must retain a live value domain owner");
+        values.with_runtime_value_access(|access| {
+            self.root
+                .access(&access)
+                .expect("task-owned promise root must belong to its value domain")
+                .publish_guarded(coordinator, mutation, Err(failure), |assignment| {
+                    self.producer
+                        .publish_assignment_guarded(coordinator, mutation, assignment)
+                })
+                .unwrap_or_else(|_| {
+                    panic!("a terminalizing task-owned promise must remain unresolved")
+                })
+        })
+    }
 }
 
 impl SettlementObligations {
@@ -212,7 +240,7 @@ enum WorkState {
 #[derive(Clone)]
 pub(crate) enum WorkDependency {
     Wait(EvaluationWaitToken),
-    Promise(PromisedValue),
+    Promise(ManagedPromiseRoot),
     #[cfg(test)]
     Test(TestWorkDependency),
 }
@@ -221,7 +249,7 @@ impl WorkDependency {
     fn runtime_id(&self) -> EvaluationRuntimeId {
         match self {
             Self::Wait(wait) => wait.runtime_id(),
-            Self::Promise(promise) => promise.runtime_id(),
+            Self::Promise(promise) => promise.observer().runtime_id(),
             #[cfg(test)]
             Self::Test(dependency) => dependency.runtime,
         }
@@ -245,10 +273,12 @@ impl WorkDependency {
     /// Resolver-owned promises have no producer edge. Task-owned promises
     /// project through the producer obligation while retaining the promise as
     /// the exact completion source in the machine block.
-    pub(super) fn producer_wait(&self) -> Option<&EvaluationWaitToken> {
+    pub(super) fn producer_wait(&self) -> Option<EvaluationWaitToken> {
         match self {
-            Self::Wait(wait) => Some(wait),
-            Self::Promise(promise) => promise.task().map(|task| task.wait()),
+            Self::Wait(wait) => Some(wait.clone()),
+            Self::Promise(promise) => PromisedValue::from_root(promise)
+                .task()
+                .map(|task| task.wait().clone()),
             #[cfg(test)]
             Self::Test(_) => None,
         }
@@ -270,7 +300,9 @@ impl WorkDependency {
     ) -> CompletionSubscriptionOutcome {
         match self {
             Self::Wait(wait) => wait.subscribe_work(runtime, registration),
-            Self::Promise(promise) => promise.subscribe_work(runtime, registration),
+            Self::Promise(promise) => {
+                PromisedValue::from_root(promise).subscribe_work(runtime, registration)
+            }
             #[cfg(test)]
             Self::Test(_) => {
                 unreachable!("synthetic completion sources install their own subscription")
@@ -281,7 +313,9 @@ impl WorkDependency {
     fn unsubscribe_work(&self, registration: WakeRegistration) -> bool {
         match self {
             Self::Wait(wait) => wait.unsubscribe_work(registration),
-            Self::Promise(promise) => promise.unsubscribe_work(registration),
+            Self::Promise(promise) => {
+                PromisedValue::from_root(promise).unsubscribe_work(registration)
+            }
             #[cfg(test)]
             Self::Test(_) => false,
         }
@@ -290,7 +324,7 @@ impl WorkDependency {
     fn is_terminal(&self) -> bool {
         match self {
             Self::Wait(wait) => wait.terminal_poll().is_some(),
-            Self::Promise(promise) => promise.assignment().is_some(),
+            Self::Promise(promise) => PromisedValue::from_root(promise).assignment().is_some(),
             #[cfg(test)]
             Self::Test(_) => false,
         }
@@ -1156,14 +1190,15 @@ impl EvaluationWorkCoordinator {
     }
 
     pub(super) fn register_task_promise(
-        &self,
+        self: &Arc<Self>,
         task: EvaluationTaskId,
         wait: EvaluationWaitToken,
-        promise: &Arc<PromiseCell>,
-    ) -> Result<EvaluationWorkId, Arc<str>> {
+        promise: &PromisedValue,
+    ) -> Result<Arc<PromiseProducerObligation>, Arc<str>> {
         debug_assert_eq!(wait.runtime_id(), self.runtime);
+        let root = promise.root();
         let mutation = self.admission.mutation_guard();
-        let work = {
+        let producer = {
             let mut state = self
                 .state
                 .lock()
@@ -1192,11 +1227,19 @@ impl EvaluationWorkCoordinator {
                     "a promise cannot be added after its producer stopped running",
                 ));
             }
+            let producer = Arc::new(PromiseProducerObligation::coordinator_owned(
+                task,
+                wait.clone(),
+                work,
+                promise.id(),
+                self,
+            ));
             record
                 .obligations
                 .add_owned_promise(TaskOwnedPromiseObligation {
                     promise: promise.id(),
-                    cell: Arc::downgrade(promise),
+                    root,
+                    producer: producer.clone(),
                     wait: wait.clone(),
                 });
             assert!(
@@ -1204,11 +1247,11 @@ impl EvaluationWorkCoordinator {
                 "evaluation wait tokens must be unique"
             );
             state.work_generation = state.work_generation.wrapping_add(1);
-            work
+            producer
         };
         drop(mutation);
         self.work_available.notify_all();
-        Ok(work)
+        Ok(producer)
     }
 
     pub(super) fn complete_task_promise_guarded(
@@ -1311,33 +1354,10 @@ impl EvaluationWorkCoordinator {
         }
         let mut promise_publications = Vec::with_capacity(promises.len());
         for obligation in promises {
-            if let Some(promise) = obligation.cell.upgrade() {
-                let (producer, completion) = promise
-                    .publish_guarded(self, &mutation, Err(promise_failure.clone()))
-                    .unwrap_or_else(|_| {
-                        panic!(
-                            "a terminalizing task-owned promise must remain unresolved until settlement"
-                        )
-                    });
-                promise_publications.push(producer);
-                completion_wakes.push(completion);
-            } else {
-                assert!(self.complete_task_promise_guarded(
-                    &mutation,
-                    work,
-                    &obligation.wait,
-                    obligation.promise,
-                ));
-                let (_, wake) = obligation.wait.publish_terminal_guarded(
-                    self,
-                    &mutation,
-                    EvaluationWaitTerminal::Failed(RuntimeFailureRoot::from_observer(
-                        obligation.wait.value_observer(),
-                        promise_failure.clone(),
-                    )),
-                );
-                completion_wakes.push(wake);
-            }
+            let (producer, completion) =
+                obligation.publish_failure_guarded(self, &mutation, promise_failure.clone());
+            promise_publications.push(producer);
+            completion_wakes.push(completion);
         }
         {
             let state = self

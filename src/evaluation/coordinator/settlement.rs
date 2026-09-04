@@ -472,31 +472,13 @@ impl EvaluationWorkCoordinator {
                 status_publishers.push(publisher);
             }
             for obligation in &selected.promises {
-                if let Some(promise) = obligation.cell.upgrade() {
-                    let publication = promise.publish_guarded(
-                        self,
-                        mutation,
-                        Err(selected.promise_failure.as_failure().clone()),
-                    );
-                    let (producer, completion) = publication.unwrap_or_else(|_| {
-                        panic!("an exit-owned promise must remain unresolved until settlement")
-                    });
-                    promise_publications.push(producer);
-                    completion_wakes.push(completion);
-                } else {
-                    assert!(self.complete_task_promise_guarded(
-                        mutation,
-                        selected.work,
-                        &obligation.wait,
-                        obligation.promise,
-                    ));
-                    let (_, wake) = obligation.wait.publish_terminal_guarded(
-                        self,
-                        mutation,
-                        EvaluationWaitTerminal::Failed(selected.promise_failure.clone()),
-                    );
-                    completion_wakes.push(wake);
-                }
+                let (producer, completion) = obligation.publish_failure_guarded(
+                    self,
+                    mutation,
+                    selected.promise_failure.as_failure().clone(),
+                );
+                promise_publications.push(producer);
+                completion_wakes.push(completion);
             }
         }
 

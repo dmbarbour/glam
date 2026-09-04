@@ -425,6 +425,13 @@ impl<S: NetSpecialization> ActivePairState<S> {
     }
 }
 
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "the generic shared-net facade remains as the non-core runtime test specialization"
+    )
+)]
 pub struct SharedRuntimeNet<S: NetSpecialization> {
     inner: Arc<RuntimeNetCell<S>>,
 }
@@ -1001,11 +1008,29 @@ pub(crate) enum RuntimeNetMutation<R> {
     Changed(R),
 }
 
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "the generic shared-net facade remains as the non-core runtime test specialization"
+    )
+)]
 impl<S: NetSpecialization> SharedRuntimeNet<S> {
     pub fn new(runtime: RuntimeNet<S>) -> Self {
         Self {
             inner: Arc::new(RuntimeNetCell::new(runtime)),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn into_runtime_for_managed_test(self) -> RuntimeNet<S> {
+        let mut cell = Arc::try_unwrap(self.inner)
+            .unwrap_or_else(|_| panic!("fresh test runtime net must have one owner"));
+        let state = cell
+            .runtime
+            .get_mut()
+            .expect("fresh test runtime-net mutex must not be poisoned");
+        std::mem::replace(&mut state.runtime, RuntimeNet::empty())
     }
 
     #[cfg(test)]
@@ -1196,6 +1221,13 @@ where
     }
 }
 
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "the generic shared-net facade remains as the non-core runtime test specialization"
+    )
+)]
 impl<S: NetSpecialization> SharedRuntimeNet<S> {
     pub fn ptr_eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.inner, &other.inner)

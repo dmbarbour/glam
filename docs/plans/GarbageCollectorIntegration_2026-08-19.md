@@ -270,17 +270,20 @@ API and ownership migration may now use that certified boundary, but no
 production automatic or explicit collection may run before the complete graph
 passes the later roadmap gates.
 
-`RuntimeValueRoot` currently stores `{EvaluationRuntimeId, core::Value}`. It
-protects provenance but does not register a collector root. Recursive core
+`RuntimeValueRoot` now stores small integers inline and otherwise retains a
+registered managed value node. I5D additionally moved the three recursive
+semantic identities behind exact managed edges. Remaining compatibility core
 ownership includes at least:
 
-- `Arc<LazyCell>` and its source/result graph;
-- `Arc<PromiseCell>` and successful assignments;
+- compatibility aggregates surrounding `ManagedLazyCell` source/result
+  edges;
+- compatibility aggregates surrounding `ManagedPromiseCell` assignment
+  edges;
 - metadata carriers;
 - partial builtin arguments, lazy applications, fixpoints, reflection tasks,
   function stages, and net construction inputs;
 - RPDS dictionary values and FingerTree/list chunks;
-- shared mutable interaction nets containing core data;
+- `ManagedCoreNetCell` topology containing compatibility core data;
 - runtime value caches and compiler attachments;
 - reflection store snapshots, volumes, queries, and transactions;
 - task waits, client demands, sparks, deferred work, diagnostic values, and
@@ -4455,7 +4458,8 @@ identities. The inventory distinguishes:
 - a bounded access carrier tied to matching mutator authority;
 - edge-free coordination state for IDs, subscriptions, revisions, waits, and
   notifications; and
-- producer-owned promise roots whose managed cells retain only weak backlinks,
+- producer-owned promise roots whose managed cells retain only an immutable,
+  root-free routing record with weak coordinator/local-owner routes,
   introducing no hidden root backedge.
 
 The binding decisions are:
@@ -4464,8 +4468,10 @@ The binding decisions are:
   owners use registered roots; evaluator-local operations use access-branded
   views; and routing-only state remains edge-free;
 - task/local promise producer obligations strongly own registered promise
-  roots until each individual promise settles, while `PromiseCell` holds only
-  a weak backlink to its externally owned obligation;
+  roots until each individual promise settles, while `PromiseCell` retains a
+  strong immutable producer record so wait provenance remains timing
+  independent after settlement. That record contains no root and reaches its
+  coordinator/local owner only weakly;
 - `PromiseResolver` owns a promise root plus a weak runtime observer and keeps
   `Option` only as its affine `Drop`-disarm state;
 - parked promise dependencies retain a clone of the registered promise root;
@@ -4486,14 +4492,15 @@ Production remains `NoAuto`.
 
 Completed 2026-09-04. The source-backed inventory in
 `src/core/managed/recursive_identity_inventory.rs` first failed against an
-intentionally empty baseline with 31 production declarations. The reconciled
-inventory assigns 11 declarations to exact managed edges, 10 to durable roots,
-9 to bounded access, and 1 to edge-free coordination. It identifies exactly
-`LazyCell`, `PromiseCell`, and `CoreRuntimeNet` as the authoritative mutable
-cycle sources; all other direct occurrences are classified edges, owners,
-access carriers, or coordination. The existing I4 durable-owner inventory
-continues to cover general `Value` and `RuntimeValueRoot` containers whose
-field spelling does not expose one family directly.
+intentionally empty baseline and classified the pre-cutover graph. I5D
+refreshed the same fail-closed inventory to 41 production declarations: 15
+exact managed-edge roles, 16 durable-root roles, and 10 bounded-access roles.
+It now identifies exactly `ManagedLazyCell`, `ManagedPromiseCell`, and
+`ManagedCoreNetCell` as the authoritative mutable cycle sources; all other
+direct occurrences are classified edges, owners, or access carriers. The
+existing I4 durable-owner inventory continues to cover general `Value` and
+`RuntimeValueRoot` containers whose field spelling does not expose one family
+directly.
 
 - Prove from current source that `LazyCell`, `PromiseCell`, and
   `CoreRuntimeNet` are the complete set of mutable/shared semantic identities
@@ -4781,15 +4788,15 @@ production identity graph:
    | `CoreValueFactory::instantiate_core_net`, `CoreRuntimeNet::instantiate_related`, function/net shells, and prepared copy sources | `allocate_managed_core_net`, `ManagedCoreNetEdge`, `ManagedCoreNetRoot`, and the owner-neutral `RuntimeNetCell` seam from I5C.1 | Make construction return the edge-qualified core facade, retain a root across any pre-installation handoff, and install cross-net sources as exact edges. |
    | `Value`, `ListThunk`, `EvaluationHalt`, function code/stages, lazy sources/results, promise assignments, and net payloads | The three exact edge types and compile-exhaustive I5B/I5C traces | Replace all three stop arms together and reject every surviving raw recursive identity in the I5D source latch. |
    | `LazyTaskMachine`, `DeferredProducer`, `DeferredLazyCycleMember`, `PromiseFollower`, reflection fix state/continuations, `WorkDependency::Promise`, and construction handoffs | Family registered roots, or the existing general `RuntimeValueRoot` when the durable state is an arbitrary value | Change fields and projections together; no durable bare `Gc` may survive the mutator region. |
-   | `PromiseResolver`, coordinator `TaskOwnedPromiseObligation`, and direct-runner `LocalPromiseObligation` | `ManagedPromiseRoot`; the managed cell has only `Weak<PromiseProducerObligation>` | Move the root into the external obligation, make the coordinator/local owner hold the strong obligation, and remove that individual root on settlement. These are one coupled ownership inversion, not preparatory production wiring. |
+   | `PromiseResolver`, coordinator `TaskOwnedPromiseObligation`, and direct-runner `LocalPromiseObligation` | `ManagedPromiseRoot`; the managed cell retains a root-free `PromiseProducerObligation` whose coordinator/local-owner routes are weak | Move the root into the external obligation, remove that individual root on settlement, and retain timing-independent wait provenance without a root backedge. These are one coupled ownership inversion, not preparatory production wiring. |
    | Lazy cache success/failure | `ManagedLazyAccess::cache` | Preserve terminal-before-source-release while converting retained machine snapshots to roots before yielding. |
-   | Promise `set`, `set_root`, failure, guarded task settlement, detached resolver/local publication, subscriptions, and wakeup | `ManagedPromiseAccess::{publish_detached,publish_guarded}`, one-write assignment, edge-free completion companion, and weak producer route | Project/root the wait terminal in the publication callback, remove the producer-owned root under the existing coordinator transaction, then notify after locks and admission are released. |
+   | Promise `set`, `set_root`, failure, guarded task settlement, detached resolver/local publication, subscriptions, and wakeup | `ManagedPromiseAccess::{publish_detached,publish_guarded}`, one-write assignment, edge-free completion companion, and root-free producer route | Project/root the wait terminal in the publication callback, remove the producer-owned root under the existing coordinator transaction, then notify after locks and admission are released. |
    | Core-net topology, claim, cursor, source-copy, and revision mutations | `ManagedCoreNetAccess`, owner-neutral cell mutation, scoped source-operation adapter, and edge-free disturbance companion | Re-express the existing facade methods over the managed cell and route semantic edge changes through the family mutation gateway; later concurrent-GC barriers activate at these same sites. |
    | Lazy producer release, settled/abandoned task promises, resolver `Drop`, deferred-cycle retirement, net destruction, and final root release | Passive managed cell destruction plus explicit external root retirement; `RuntimeNetCell::drop` closes only its edge-free disturbance companion | Preserve the current explicit terminalization order and release each root at its present semantic retirement point. No managed finalizer or managed-to-root backedge is introduced. |
 
-   The source-backed direct-identity inventory now proves that every one of
-   its 29 M/R/A declarations names an existing family edge, root, or access
-   destination. Focused fixtures prove split edge/root identity, matching and
+   At the I5C boundary, the source-backed direct-identity inventory proved that
+   every pre-cutover M/R/A declaration named an existing family edge, root, or
+   access destination. Focused fixtures prove split edge/root identity, matching and
    mismatched-domain access, detached and guarded assignment-before-callback
    order, and all prior lifecycle behavior. Existing production constructor,
    terminal-publication, cancellation, abandonment, net-locking, and
@@ -4808,13 +4815,33 @@ Preparatory commits may build and test unused private machinery, but no
 buildable production state may manage only a subset of lazy, promise, and core
 net identities.
 
+Completed 2026-09-04. `LazyValue`, `PromisedValue`, and `CoreRuntimeNet` now
+carry exact managed edges plus value-domain provenance; their synchronization
+cells live in the Glam-owned heap. Parked lazy producers, promise followers,
+producer obligations, normalization requests, source-copy handoffs, frontier
+observations, and reflection fix state retain the corresponding registered
+roots. Promise assignments contain ordinary traced `Value` edges rather than
+`RuntimeValueRoot`. The promise cell retains a strong immutable producer
+routing record so terminal and concurrent observers see stable wait
+provenance; that record contains no managed root and reaches coordinator/local
+owners only through `Weak` routes.
+
+The exact trace now follows lazy source/result payloads, promise assignments,
+all core-net values and stuck failures, cross-net sources, and nested
+`FunctionCode` nets held by operators. A focused rooted-net fixture latches
+that nested-net edge. Effect callbacks use a test-only structural scope probe
+to assert that evaluator value access has ended; they no longer force a
+collection of a shared compiler heap as an indirect check. The behavioral
+suites and updated M/R/A source inventories pass while production collection
+policy remains `NoAuto`.
+
 - Change `Value::Lazy`, `Value::Promised`, `Value::Net`, function/net shells,
   lazy sources, promise assignments, core-net payloads, and cross-net source
   references to the prepared managed identity representation together.
 - Activate the central transitive managed-edge walk from `ManagedValueNode`,
-  `LazyCell`, `PromiseCell`, and `CoreRuntimeNetCell`. Each raw compatibility
-  path must terminate at one of those managed identities; the collector
-  worklist follows the reported edge.
+  `ManagedLazyCell`, `ManagedPromiseCell`, and `ManagedCoreNetCell`. Each
+  compatibility path must terminate at one of those managed identities; the
+  collector worklist follows the reported edge.
 - Convert every durable Rust holder to the selected registered root and every
   evaluator-local holder to the bounded access representation. Install the
   edge-free coordination companions selected by I5.0.
@@ -4840,7 +4867,10 @@ does not run a full production collection.
 - Keep `PromiseResolver` and every producer/task owner which performs failure,
   cancellation, abandonment, notification, or wakeup as an external owner
   with exactly the root/capability authorized by I5.0. It is not a managed
-  finalizer and must not be reachable from a managed allocation.
+  finalizer and must not be reachable from a managed allocation. The root-free
+  immutable producer routing record retained by `ManagedPromiseCell` is not
+  such an owner: it has no active `Drop` behavior and only weakly reaches the
+  external coordinator/local owner.
 - Express cleanup as explicit idempotent retirement and preserve the existing
   `Drop` fallback where dropping the last unresolved resolver or producer
   establishes a terminal result. Preserve publication under the reviewed

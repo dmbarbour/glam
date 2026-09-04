@@ -562,22 +562,28 @@ mod tests {
             &source,
             Arc::from(["test".to_owned()]),
         ));
-        let loader_values = test_value_factory();
-        let context = CompileContext::default()
-            .with_importer_source(source)
-            .with_compilation_trace(trace.clone())
-            .with_local_binary_loader(Arc::new(move |args| {
-                loader_values
-                    .collect_managed_for_test()
-                    .expect("an import loader callback must inherit no evaluator mutator");
-                *captured
-                    .lock()
-                    .expect("loader mutex should not be poisoned") = Some(args);
-                Ok(RuntimeValueRoot::new(
-                    &loader_values,
-                    Value::binary_from_text("loaded"),
-                ))
-            }));
+        let loader_values = CoreValueFactory::new(
+            crate::runtime::allocate_evaluation_runtime_id(),
+            crate::runtime::RuntimeIds::new(),
+        );
+        let context = CompileContext::from_module_path_with_values(
+            loader_values.clone(),
+            std::iter::empty::<&str>(),
+        )
+        .with_importer_source(source)
+        .with_compilation_trace(trace.clone())
+        .with_local_binary_loader(Arc::new(move |args| {
+            loader_values
+                .collect_managed_for_test()
+                .expect("an import loader callback must inherit no evaluator mutator");
+            *captured
+                .lock()
+                .expect("loader mutex should not be poisoned") = Some(args);
+            Ok(RuntimeValueRoot::new(
+                &loader_values,
+                Value::binary_from_text("loaded"),
+            ))
+        }));
 
         let eval_context = crate::evaluation::EvalContext::isolated(context.values().clone());
         eval_context
@@ -652,7 +658,10 @@ mod tests {
 
     #[test]
     fn compiler_suspension_parks_only_roots() {
-        let values = test_value_factory();
+        let values = CoreValueFactory::new(
+            crate::runtime::allocate_evaluation_runtime_id(),
+            crate::runtime::RuntimeIds::new(),
+        );
         let callback_values = values.clone();
         let context = CompileContext::from_module_path_with_values(values.clone(), ["root"])
             .with_local_module_loader(Arc::new(move |args| {

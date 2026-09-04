@@ -1,5 +1,7 @@
 use glam_gc::{Allocator, Gc, Mutator, Root, Trace, UnsupportedLayout};
 use std::any::Any;
+#[cfg(test)]
+use std::cell::Cell;
 use std::sync::{Arc, Weak};
 
 use super::{CoreValueFactory, RuntimeValueDomain};
@@ -31,6 +33,43 @@ pub(crate) const fn managed_slot_extent<T>() -> usize {
 }
 
 const _: () = assert!(managed_slot_extent::<usize>() == MANAGED_SLOT_SIZE_FLOOR);
+
+#[cfg(test)]
+thread_local! {
+    static RUNTIME_VALUE_ACCESS_DEPTH: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+struct RuntimeValueAccessDepthGuard;
+
+#[cfg(test)]
+impl RuntimeValueAccessDepthGuard {
+    fn enter() -> Self {
+        RUNTIME_VALUE_ACCESS_DEPTH.with(|depth| depth.set(depth.get() + 1));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for RuntimeValueAccessDepthGuard {
+    fn drop(&mut self) {
+        RUNTIME_VALUE_ACCESS_DEPTH.with(|depth| {
+            let prior = depth.get();
+            debug_assert!(prior > 0, "runtime-value access depth underflowed");
+            depth.set(prior - 1);
+        });
+    }
+}
+
+/// Reports whether this thread currently owns a bounded value-access region.
+///
+/// This is a test-only structural probe. Unlike forcing a collection, it
+/// verifies callback placement without disturbing other sessions that share
+/// the compiler runtime.
+#[cfg(test)]
+pub(crate) fn thread_has_runtime_value_access_for_test() -> bool {
+    RUNTIME_VALUE_ACCESS_DEPTH.with(|depth| depth.get() != 0)
+}
 
 /// The reviewed destruction policy for one Glam-managed representation.
 ///
@@ -260,6 +299,10 @@ pub(crate) use external_owners::{ExternalOwnerHandle, ExternalOwnerRegistry};
 mod value_node;
 pub(crate) use value_node::PreparedRuntimeValueRoot;
 mod recursive_cells;
+pub(crate) use recursive_cells::{
+    ManagedCoreNetAccess, ManagedCoreNetEdge, ManagedCoreNetRoot, ManagedLazyAccess,
+    ManagedLazyEdge, ManagedLazyRoot, ManagedPromiseAccess, ManagedPromiseEdge, ManagedPromiseRoot,
+};
 
 // SAFETY: this is the existing scalar collector-access probe. It has no
 // managed edge, no drop glue, and no active capability. Production value
@@ -366,6 +409,8 @@ impl CoreValueFactory {
         operation: impl for<'scope> FnOnce(RuntimeValueAccess<'scope>) -> R,
     ) -> R {
         self.domain.heap.with_mutator(|mutator| {
+            #[cfg(test)]
+            let _access_depth = RuntimeValueAccessDepthGuard::enter();
             operation(RuntimeValueAccess {
                 domain: self.domain.as_ref(),
                 scope: CoreValueAllocationScope { mutator },

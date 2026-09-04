@@ -511,7 +511,7 @@ impl EvaluationWorkCoordinator {
                         record.state = WorkState::Blocked;
                         exact_subscription = Some((dependency.clone(), registration));
                         if let Some(wait) = dependency.producer_wait() {
-                            promote_deferred_wait_locked(&mut state, wait);
+                            promote_deferred_wait_locked(&mut state, &wait);
                         }
                         None
                     }

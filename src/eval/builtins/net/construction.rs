@@ -183,11 +183,10 @@ impl TaskSpecialization for InteractionNetEffects {
         context: &mut RequestContext<'_, Self>,
     ) -> Result<RequestResult, TaskHalt> {
         #[cfg(test)]
-        context
-            .eval_context()
-            .values()
-            .collect_managed_for_test()
-            .expect("interaction-net effect callbacks must not inherit an evaluator mutator");
+        assert!(
+            !crate::core::thread_has_runtime_value_access_for_test(),
+            "interaction-net effect callbacks must not inherit an evaluator value-access region"
+        );
         match request {
             InteractionNetRequest::Bind => construct_bind(arguments, context, &self.brand),
             InteractionNetRequest::Copy => construct_copy(arguments, context, &self.brand),

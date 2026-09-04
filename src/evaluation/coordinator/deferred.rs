@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use crate::core::{DeferredValueId, LazyValue, PromisedValue};
+use crate::core::{DeferredValueId, ManagedLazyRoot, ManagedPromiseRoot};
 
 use super::super::{EvaluationDemandState, EvaluationTaskBlock};
 #[cfg(test)]
@@ -247,7 +247,6 @@ impl EvaluationWorkCoordinator {
                 .as_ref()
                 .and_then(|block| block.dependency.as_ref())
                 .and_then(WorkDependency::producer_wait)
-                .cloned()
             {
                 promote_deferred_wait_locked(&mut state, &wait);
             }
@@ -397,8 +396,8 @@ impl EvaluationWorkCoordinator {
 
 #[derive(Clone)]
 pub(in crate::evaluation) enum DeferredProducer {
-    Lazy(LazyValue),
-    Promise(PromisedValue),
+    Lazy(ManagedLazyRoot),
+    Promise(ManagedPromiseRoot),
 }
 
 impl DeferredProducer {
@@ -465,7 +464,7 @@ pub(in crate::evaluation) enum DeferredWorkPoll {
 pub(in crate::evaluation) struct DeferredLazyCycleMember {
     pub(in crate::evaluation) work: EvaluationWorkId,
     pub(in crate::evaluation) wait: EvaluationWaitToken,
-    pub(in crate::evaluation) lazy: LazyValue,
+    pub(in crate::evaluation) lazy: ManagedLazyRoot,
     pub(in crate::evaluation) machine: Box<dyn EvaluationTaskMachine>,
 }
 
@@ -622,7 +621,7 @@ fn deferred_dependency_cycle(
         let dependency = deferred_work(record).block.as_ref()?.dependency.as_ref()?;
         promise_edges.push(matches!(dependency, WorkDependency::Promise(_)));
         let wait = dependency.producer_wait()?;
-        current = *state.deferred.by_wait.get(wait)?;
+        current = *state.deferred.by_wait.get(&wait)?;
     }
 }
 

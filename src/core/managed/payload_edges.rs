@@ -7,8 +7,7 @@
 
 use super::super::{
     BuiltinCall, EvaluatedValue, EvaluationFailure, FixpointComputation, LazyApplication,
-    LazyResult, LazySource, LazyValue, MetadataCarrier, PromiseAssignment, PromisedValue,
-    ReflectionComputation, SemanticComputation, Value,
+    LazySource, MetadataCarrier, ReflectionComputation, SemanticComputation, Value,
 };
 
 /// Reports every direct semantic `Value` edge held by one compatibility
@@ -33,30 +32,11 @@ mod runtime_net;
 pub(super) use managed::{
     visit_compatibility_managed_edges, visit_compatibility_payload_managed_edges,
 };
-pub(super) use runtime_net::visit_halt_value_edges;
+pub(super) use runtime_net::{CompatibilityNetEdges, visit_halt_value_edges};
 
 fn visit_values(values: &[Value], visit: &mut dyn FnMut(&Value)) {
     for value in values {
         visit(value);
-    }
-}
-
-fn visit_failure_result(result: &LazyResult, visit: &mut dyn FnMut(&Value)) {
-    match result {
-        Ok(value) => value.visit_compatibility_value_edges(visit),
-        Err(failure) => failure.visit_compatibility_value_edges(visit),
-    }
-}
-
-fn visit_promise_assignment(assignment: &PromiseAssignment, visit: &mut dyn FnMut(&Value)) {
-    match assignment {
-        Ok(value) => {
-            let value = value
-                .clone_core_in_own_domain()
-                .expect("compatibility promise edges are visited only in their live domain");
-            visit(&value);
-        }
-        Err(failure) => failure.visit_compatibility_value_edges(visit),
     }
 }
 
@@ -130,7 +110,8 @@ impl CompatibilityValueEdges for ReflectionComputation {
 impl CompatibilityValueEdges for LazySource {
     fn visit_compatibility_value_edges(&self, visit: &mut dyn FnMut(&Value)) {
         match self {
-            Self::Error | Self::HostCall(_) | Self::NetComputation(_) => {}
+            Self::Error | Self::HostCall(_) => {}
+            Self::NetComputation(_) => {}
             Self::ComputedFixpoint(computation) => {
                 computation.visit_compatibility_value_edges(visit);
             }
@@ -156,41 +137,9 @@ impl CompatibilityValueEdges for LazySource {
             Self::FunctionCall {
                 function: _,
                 arguments,
-            } => visit_values(arguments, visit),
-        }
-    }
-}
-
-impl CompatibilityValueEdges for LazyValue {
-    fn visit_compatibility_value_edges(&self, visit: &mut dyn FnMut(&Value)) {
-        // Result publication precedes source removal. Prefer the result once
-        // visible, otherwise clone one stable source snapshot. Cloning neither
-        // forces nor formats a contained value and avoids invoking the visitor
-        // while holding the source mutex.
-        if let Some(result) = self.0.result.get().cloned() {
-            visit_failure_result(&result, visit);
-            return;
-        }
-        let source = {
-            let source = self.0.source.lock().expect("lazy source cell was poisoned");
-            if let Some(result) = self.0.result.get().cloned() {
-                drop(source);
-                visit_failure_result(&result, visit);
-                return;
+            } => {
+                visit_values(arguments, visit);
             }
-            source
-                .as_ref()
-                .expect("an unresolved lazy must retain its source")
-                .clone()
-        };
-        source.visit_compatibility_value_edges(visit);
-    }
-}
-
-impl CompatibilityValueEdges for PromisedValue {
-    fn visit_compatibility_value_edges(&self, visit: &mut dyn FnMut(&Value)) {
-        if let Some(assignment) = self.0.assignment.get() {
-            visit_promise_assignment(assignment, visit);
         }
     }
 }
@@ -210,7 +159,7 @@ mod tests {
     use super::*;
     use crate::core::{
         Builtin, CoreValueFactory, FunctionValue, HostCallRecord, LazyCycle, LazyCycleMember,
-        LazyId, NetValue,
+        LazyId, LazyValue, NetValue, PromisedValue,
     };
     use crate::core_net::{CoreDataKey, CoreSpecialization};
     use crate::interaction_net::NetBuilder;
@@ -321,7 +270,7 @@ mod tests {
         promise
             .set(first.clone())
             .expect("the fresh promise should accept one assignment");
-        assert_eq!(edges(&promise), vec![first.clone()]);
+        assert_eq!(promise.assignment(), Some(Ok(first.clone())));
 
         let failed_promise = PromisedValue::new(&values, "compatibility visitor failure");
         failed_promise
@@ -330,7 +279,7 @@ mod tests {
                     .with_context(failure_context.clone()),
             ))
             .expect("the fresh promise should accept one failure");
-        assert_eq!(edges(&failed_promise), [failure_emission, failure_context]);
+        assert!(matches!(failed_promise.assignment(), Some(Err(_))));
 
         let pending = LazyValue::semantic_computation(
             &values,
@@ -338,7 +287,10 @@ mod tests {
             [first.clone(), second.clone()],
             return_first_capture,
         );
-        assert_eq!(edges(&pending), [first.clone(), second.clone()]);
+        let source = pending
+            .source_snapshot()
+            .expect("the pending lazy must retain its source");
+        assert_eq!(edges(&source), [first.clone(), second.clone()]);
 
         let complete = LazyValue::semantic_computation(
             &values,
@@ -353,7 +305,12 @@ mod tests {
             Ok(EvaluatedValue(first.clone()))
         );
         assert_eq!(
-            edges(&complete),
+            edges(
+                &complete
+                    .cached()
+                    .expect("the completed lazy must retain its result")
+                    .expect("the completed lazy should succeed")
+            ),
             [first],
             "terminal result publication replaces the source capture edge"
         );
@@ -401,10 +358,6 @@ mod tests {
                 panic!("failure edge visitation must not evaluate its values")
             },
         ));
-        let Value::Lazy(sentinel_lazy) = &sentinel else {
-            unreachable!("the sentinel constructor always produces a lazy value")
-        };
-        assert!(edges(sentinel_lazy).is_empty());
         assert!(!forced.load(Ordering::Acquire));
 
         let failure = EvaluationFailure::emission(sentinel.clone()).with_context(sentinel.clone());
@@ -415,19 +368,22 @@ mod tests {
 
     #[test]
     fn recursive_edge_mutations_use_representation_gateways() {
-        let source = include_str!("../../core.rs");
+        let source = include_str!("recursive_cells.rs");
         assert_eq!(
-            source.matches(".result.set(result)").count(),
+            source.matches("self.cell.result.set(result)").count(),
             1,
             "LazyValue::cache must remain the sole terminal-result writer"
         );
         assert_eq!(
-            source.matches("self.assignment.set(assignment)").count(),
+            source
+                .matches("self.cell.assignment.set(assignment)")
+                .count(),
             2,
             "promise assignment writes remain inside publish/publish_guarded"
         );
+        let core = include_str!("../../core.rs");
         assert_eq!(
-            source.matches(".task\n            .get_or_init").count(),
+            core.matches(".task\n            .get_or_init").count(),
             1,
             "reflection task reservation has one representation-local initializer"
         );

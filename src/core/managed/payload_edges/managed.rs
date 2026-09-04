@@ -1,9 +1,8 @@
 //! Transitive compatibility walk to the first managed identity boundary.
 //!
-//! Raw lazy, promise, and core-net handles remain `Arc`-owned until I5D. They
-//! are nevertheless stop points now: the compatibility walk must never enter
-//! those cells. I5D changes what the stop adapter reports, not which
-//! compatibility structures the walk crosses.
+//! Lazy, promise, and core-net handles are exact managed stop points. The
+//! compatibility walk traverses legacy aggregate shells only until it reaches
+//! one of those identities, then reports the managed edge to the collector.
 
 use glam_gc::Visitor;
 
@@ -16,14 +15,18 @@ trait ManagedIdentityStops {
     fn visit_stop(&self, value: &Value, visitor: &mut Visitor<'_>) -> bool;
 }
 
-struct RawIdentityStops;
+struct ManagedIdentityEdges;
 
-impl ManagedIdentityStops for RawIdentityStops {
-    fn visit_stop(&self, value: &Value, _visitor: &mut Visitor<'_>) -> bool {
-        matches!(
-            value,
-            Value::Lazy(_) | Value::Promised(_) | Value::Function(_) | Value::Net(_)
-        )
+impl ManagedIdentityStops for ManagedIdentityEdges {
+    fn visit_stop(&self, value: &Value, visitor: &mut Visitor<'_>) -> bool {
+        match value {
+            Value::Lazy(lazy) => lazy.trace_managed_edge(visitor),
+            Value::Promised(promise) => promise.trace_managed_edge(visitor),
+            Value::Function(function) => function.stage().runtime().trace_managed_edge(visitor),
+            Value::Net(net) => net.runtime().trace_managed_edge(visitor),
+            _ => return false,
+        }
+        true
     }
 }
 
@@ -38,12 +41,10 @@ fn visit_value_with(value: &Value, visitor: &mut Visitor<'_>, stops: &impl Manag
 
 /// Walks raw compatibility-owned structure to the first recursive identity.
 ///
-/// The current raw identities report no managed pointer, but remain hard stop
-/// points. This function performs no semantic operation and crosses no
-/// registered root. I5D replaces `RawIdentityStops` with the prepared managed
-/// identity adapter as part of the atomic representation cutover.
+/// This function performs no semantic operation and crosses no registered
+/// root. Recursive identities report their exact managed edge.
 pub(crate) fn visit_compatibility_managed_edges(value: &Value, visitor: &mut Visitor<'_>) {
-    visit_value_with(value, visitor, &RawIdentityStops);
+    visit_value_with(value, visitor, &ManagedIdentityEdges);
 }
 
 /// Walks one compatibility payload to the same first managed-identity

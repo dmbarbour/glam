@@ -568,7 +568,7 @@ impl ReflectionEnvironmentBuilder<'_> {
             values.wrap(CoreValue::Promised(promise.clone())),
             PromiseResolver {
                 runtime: self.host.resources.id,
-                promise: Some(promise),
+                promise: Some(promise.root()),
             },
         )
     }
@@ -849,7 +849,7 @@ impl Assembler {
             values.wrap(CoreValue::Promised(promise.clone())),
             PromiseResolver {
                 runtime: self.reasoning.runtime.id(),
-                promise: Some(promise),
+                promise: Some(promise.root()),
             },
         )
     }

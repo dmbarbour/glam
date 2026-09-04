@@ -1,19 +1,13 @@
-//! Dormant managed representations for the three recursive identity cells.
+//! Managed representations for the three recursive identity cells.
 //!
-//! I5C prepares these layouts and their access roles without routing any
-//! production constructor through them. I5D switches lazy, promise, and core
-//! net identities together only after their exact traces and durable roots
-//! are closed as one graph.
-
-#![allow(
-    dead_code,
-    reason = "I5C prepares private representations for the atomic I5D cutover"
-)]
+//! I5C prepared these layouts and their access roles. I5D routes lazy,
+//! promise, and core-net production identities through them as one exact
+//! traced graph.
 
 use std::fmt;
 use std::marker::PhantomData;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use glam_gc::{Gc, Root, Trace, UnsupportedLayout, Visitor};
 
@@ -21,17 +15,17 @@ use crate::core::{
     CoreValueFactory, EvaluationFailure, LazyId, LazyResult, LazySource, PromiseId,
     RuntimeValueAccess, RuntimeValueObserver, Value,
 };
-use crate::core_net::{CoreOperator, CoreWaitToken};
+use crate::core_net::CoreSpecialization;
 use crate::evaluation::{
     CompletionSubscriptionOutcome, CompletionSubscriptions, CompletionWake,
     EvaluationWorkCoordinator, PromiseProducerObligation, WakeRegistration,
 };
-use crate::interaction_net::{NetSpecialization, RuntimeNet, RuntimeNetCell, RuntimeNetPayload};
+use crate::interaction_net::{RuntimeNet, RuntimeNetCell, RuntimeNetPayload};
 use crate::runtime::RuntimeMutationAuthority;
 
 use super::payload_edges::{
-    visit_compatibility_managed_edges, visit_compatibility_payload_managed_edges,
-    visit_halt_value_edges,
+    CompatibilityNetEdges, visit_compatibility_managed_edges,
+    visit_compatibility_payload_managed_edges, visit_halt_value_edges,
 };
 use super::{ManagedDropRecord, ManagedFamily};
 
@@ -41,47 +35,44 @@ use super::{ManagedDropRecord, ManagedFamily};
 /// root: the containing promise cell itself is the traced owner.
 type ManagedPromiseAssignment = Result<Value, Arc<EvaluationFailure>>;
 
-/// Prepared synchronization-owning lazy identity.
+/// Synchronization-owning managed lazy identity.
 ///
 /// Publication keeps the existing result-before-source-release protocol. The
 /// separate fields retain the current lock-free terminal read opportunity.
-pub(super) struct ManagedLazyCell {
+pub(crate) struct ManagedLazyCell {
     id: LazyId,
     label: Arc<str>,
     source: Mutex<Option<LazySource>>,
     result: OnceLock<LazyResult>,
 }
 
-/// Prepared synchronization-owning promise identity.
+/// Synchronization-owning managed promise identity.
 ///
 /// Completion registrations contain only scheduler IDs and weak coordinator
-/// routing. The producer direction is deliberately weak; its external owner
-/// will hold the promise's registered root after the I5D cutover.
-pub(super) struct ManagedPromiseCell {
+/// routing. The producer obligation remains strongly associated with the
+/// promise so terminal observers retain its wait provenance; the obligation's
+/// coordinator/local-owner route is weak, so this backlink cannot retain the
+/// task registry or form an ownership cycle.
+pub(crate) struct ManagedPromiseCell {
     id: PromiseId,
     values: RuntimeValueObserver,
     label: Arc<str>,
     assignment: OnceLock<ManagedPromiseAssignment>,
     completion: CompletionSubscriptions,
-    producer: OnceLock<Weak<PromiseProducerObligation>>,
+    producer: OnceLock<Arc<PromiseProducerObligation>>,
 }
 
-/// Prepared synchronization-owning core interaction-net identity.
+/// Synchronization-owning managed core interaction-net identity.
 ///
 /// The owner-neutral generic cell remains the sole topology/revision mutex.
-/// I5C.3 supplies its exact payload trace; I5D replaces the current `Arc`
-/// facade with a managed edge and registered-root holders atomically.
-pub(super) struct ManagedCoreNetCell {
-    runtime: RuntimeNetCell<PreparedCoreSpecialization>,
+/// I5C.3 supplied its exact payload trace; I5D installed the managed edge and
+/// registered-root holders atomically.
+pub(crate) struct ManagedCoreNetCell {
+    runtime: RuntimeNetCell<CoreSpecialization>,
 }
 
-/// The dormant specialization makes cross-net ownership an exact managed
-/// edge without exposing that representation to production before I5D.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct PreparedCoreSpecialization;
-
 #[derive(Clone, Copy)]
-struct ManagedLazyEdge(Gc<ManagedLazyCell>);
+pub(crate) struct ManagedLazyEdge(Gc<ManagedLazyCell>);
 
 impl fmt::Debug for ManagedLazyEdge {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -98,7 +89,7 @@ impl PartialEq for ManagedLazyEdge {
 impl Eq for ManagedLazyEdge {}
 
 #[derive(Clone, Copy)]
-struct ManagedPromiseEdge(Gc<ManagedPromiseCell>);
+pub(crate) struct ManagedPromiseEdge(Gc<ManagedPromiseCell>);
 
 impl fmt::Debug for ManagedPromiseEdge {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -115,7 +106,7 @@ impl PartialEq for ManagedPromiseEdge {
 impl Eq for ManagedPromiseEdge {}
 
 #[derive(Clone, Copy)]
-struct ManagedCoreNetEdge(Gc<ManagedCoreNetCell>);
+pub(crate) struct ManagedCoreNetEdge(Gc<ManagedCoreNetCell>);
 
 impl fmt::Debug for ManagedCoreNetEdge {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -131,56 +122,61 @@ impl PartialEq for ManagedCoreNetEdge {
 
 impl Eq for ManagedCoreNetEdge {}
 
-impl NetSpecialization for PreparedCoreSpecialization {
-    type Data = Value;
-    type Operator = CoreOperator;
-    type RuntimeSource = ManagedCoreNetEdge;
-    type WaitToken = CoreWaitToken;
-    type StuckReason = crate::core::EvaluationHalt;
-}
-
 /// Durable external owners retain registered roots, never bare managed edges.
-#[derive(Clone)]
-pub(super) struct ManagedLazyRoot {
+#[derive(Clone, Debug)]
+pub(crate) struct ManagedLazyRoot {
+    id: LazyId,
+    label: Arc<str>,
+    edge: ManagedLazyEdge,
+    #[allow(
+        dead_code,
+        reason = "the registered root is retained for ownership and released by Drop"
+    )]
     root: Root<ManagedLazyCell>,
     observer: RuntimeValueObserver,
 }
 
-#[derive(Clone)]
-pub(super) struct ManagedPromiseRoot {
+#[derive(Clone, Debug)]
+pub(crate) struct ManagedPromiseRoot {
+    id: PromiseId,
+    label: Arc<str>,
+    edge: ManagedPromiseEdge,
     root: Root<ManagedPromiseCell>,
     observer: RuntimeValueObserver,
 }
 
-#[derive(Clone)]
-pub(super) struct ManagedCoreNetRoot {
+#[derive(Clone, Debug)]
+pub(crate) struct ManagedCoreNetRoot {
+    #[allow(
+        dead_code,
+        reason = "the registered root is retained for ownership and released by Drop"
+    )]
     root: Root<ManagedCoreNetCell>,
-    observer: RuntimeValueObserver,
 }
 
 /// A non-escaping lazy-cell observation authorized by one runtime value scope.
-pub(super) struct ManagedLazyAccess<'access, 'scope> {
+pub(crate) struct ManagedLazyAccess<'access, 'scope> {
     cell: &'access ManagedLazyCell,
     authority: &'access RuntimeValueAccess<'scope>,
     _thread_bound: PhantomData<Rc<()>>,
 }
 
 /// A non-escaping promise-cell observation authorized by one runtime value scope.
-pub(super) struct ManagedPromiseAccess<'access, 'scope> {
+pub(crate) struct ManagedPromiseAccess<'access, 'scope> {
     cell: &'access ManagedPromiseCell,
-    authority: &'access RuntimeValueAccess<'scope>,
+    _authority: &'access RuntimeValueAccess<'scope>,
     _thread_bound: PhantomData<Rc<()>>,
 }
 
 /// A non-escaping core-net observation authorized by one runtime value scope.
-pub(super) struct ManagedCoreNetAccess<'access, 'scope> {
+pub(crate) struct ManagedCoreNetAccess<'access, 'scope> {
     cell: &'access ManagedCoreNetCell,
     authority: &'access RuntimeValueAccess<'scope>,
     _thread_bound: PhantomData<Rc<()>>,
 }
 
 impl ManagedCoreNetCell {
-    fn new(runtime: RuntimeNet<PreparedCoreSpecialization>) -> Self {
+    fn new(runtime: RuntimeNet<CoreSpecialization>) -> Self {
         Self {
             runtime: RuntimeNetCell::new(runtime),
         }
@@ -221,7 +217,7 @@ impl ManagedPromiseCell {
 }
 
 impl RuntimeValueAccess<'_> {
-    fn allocate_managed_lazy(
+    pub(crate) fn allocate_managed_lazy(
         &self,
         values: &CoreValueFactory,
         label: impl Into<Arc<str>>,
@@ -237,7 +233,7 @@ impl RuntimeValueAccess<'_> {
         ))
     }
 
-    fn allocate_managed_promise(
+    pub(crate) fn allocate_managed_promise(
         &self,
         values: &CoreValueFactory,
         label: impl Into<Arc<str>>,
@@ -252,10 +248,10 @@ impl RuntimeValueAccess<'_> {
         ))
     }
 
-    fn allocate_managed_core_net(
+    pub(crate) fn allocate_managed_core_net(
         &self,
         values: &CoreValueFactory,
-        runtime: RuntimeNet<PreparedCoreSpecialization>,
+        runtime: RuntimeNet<CoreSpecialization>,
     ) -> Result<ManagedCoreNetEdge, UnsupportedLayout> {
         assert!(
             self.belongs_to(values),
@@ -267,7 +263,7 @@ impl RuntimeValueAccess<'_> {
         ))
     }
 
-    fn root_managed_lazy(
+    pub(crate) fn root_managed_lazy(
         &self,
         observer: RuntimeValueObserver,
         edge: ManagedLazyEdge,
@@ -276,13 +272,21 @@ impl RuntimeValueAccess<'_> {
             self.admits(&observer),
             "lazy root requires its value domain"
         );
+        let value = edge
+            .access(&observer, self)
+            .expect("lazy edge must belong to its root domain");
+        let id = value.id();
+        let label = value.label().clone();
         ManagedLazyRoot {
+            id,
+            label,
+            edge,
             root: self.root(edge.0),
             observer,
         }
     }
 
-    fn root_managed_promise(
+    pub(crate) fn root_managed_promise(
         &self,
         observer: RuntimeValueObserver,
         edge: ManagedPromiseEdge,
@@ -291,13 +295,21 @@ impl RuntimeValueAccess<'_> {
             self.admits(&observer),
             "promise root requires its value domain"
         );
+        let value = edge
+            .access(&observer, self)
+            .expect("promise edge must belong to its root domain");
+        let id = value.id();
+        let label = value.label().clone();
         ManagedPromiseRoot {
+            id,
+            label,
+            edge,
             root: self.root(edge.0),
             observer,
         }
     }
 
-    fn root_managed_core_net(
+    pub(crate) fn root_managed_core_net(
         &self,
         observer: RuntimeValueObserver,
         edge: ManagedCoreNetEdge,
@@ -308,10 +320,10 @@ impl RuntimeValueAccess<'_> {
         );
         ManagedCoreNetRoot {
             root: self.root(edge.0),
-            observer,
         }
     }
 
+    #[cfg(test)]
     fn root_new_managed_lazy(
         &self,
         values: &CoreValueFactory,
@@ -323,6 +335,7 @@ impl RuntimeValueAccess<'_> {
         Ok(self.root_managed_lazy(observer, edge))
     }
 
+    #[cfg(test)]
     fn root_new_managed_promise(
         &self,
         values: &CoreValueFactory,
@@ -333,10 +346,11 @@ impl RuntimeValueAccess<'_> {
         Ok(self.root_managed_promise(observer, edge))
     }
 
+    #[cfg(test)]
     fn root_new_managed_core_net(
         &self,
         values: &CoreValueFactory,
-        runtime: RuntimeNet<PreparedCoreSpecialization>,
+        runtime: RuntimeNet<CoreSpecialization>,
     ) -> Result<ManagedCoreNetRoot, UnsupportedLayout> {
         let observer = values.runtime_value_observer();
         let edge = self.allocate_managed_core_net(values, runtime)?;
@@ -345,7 +359,11 @@ impl RuntimeValueAccess<'_> {
 }
 
 impl ManagedLazyEdge {
-    fn access<'access, 'scope>(
+    pub(crate) fn trace(self, visitor: &mut Visitor<'_>) {
+        visitor.visit(self.0);
+    }
+
+    pub(crate) fn access<'access, 'scope>(
         self,
         observer: &RuntimeValueObserver,
         authority: &'access RuntimeValueAccess<'scope>,
@@ -362,7 +380,11 @@ impl ManagedLazyEdge {
 }
 
 impl ManagedPromiseEdge {
-    fn access<'access, 'scope>(
+    pub(crate) fn trace(self, visitor: &mut Visitor<'_>) {
+        visitor.visit(self.0);
+    }
+
+    pub(crate) fn access<'access, 'scope>(
         self,
         observer: &RuntimeValueObserver,
         authority: &'access RuntimeValueAccess<'scope>,
@@ -378,7 +400,11 @@ impl ManagedPromiseEdge {
 }
 
 impl ManagedCoreNetEdge {
-    fn access<'access, 'scope>(
+    pub(crate) fn trace(self, visitor: &mut Visitor<'_>) {
+        visitor.visit(self.0);
+    }
+
+    pub(crate) fn access<'access, 'scope>(
         self,
         observer: &RuntimeValueObserver,
         authority: &'access RuntimeValueAccess<'scope>,
@@ -394,7 +420,24 @@ impl ManagedCoreNetEdge {
 }
 
 impl ManagedLazyRoot {
-    fn access<'access, 'scope>(
+    pub(crate) fn id(&self) -> LazyId {
+        self.id
+    }
+
+    pub(crate) fn label(&self) -> &Arc<str> {
+        &self.label
+    }
+
+    pub(crate) fn edge(&self) -> ManagedLazyEdge {
+        self.edge
+    }
+
+    pub(crate) fn observer(&self) -> &RuntimeValueObserver {
+        &self.observer
+    }
+
+    #[cfg(test)]
+    pub(crate) fn access<'access, 'scope>(
         &'access self,
         authority: &'access RuntimeValueAccess<'scope>,
     ) -> Option<ManagedLazyAccess<'access, 'scope>> {
@@ -410,7 +453,23 @@ impl ManagedLazyRoot {
 }
 
 impl ManagedPromiseRoot {
-    fn access<'access, 'scope>(
+    pub(crate) fn id(&self) -> PromiseId {
+        self.id
+    }
+
+    pub(crate) fn label(&self) -> &Arc<str> {
+        &self.label
+    }
+
+    pub(crate) fn edge(&self) -> ManagedPromiseEdge {
+        self.edge
+    }
+
+    pub(crate) fn observer(&self) -> &RuntimeValueObserver {
+        &self.observer
+    }
+
+    pub(crate) fn access<'access, 'scope>(
         &'access self,
         authority: &'access RuntimeValueAccess<'scope>,
     ) -> Option<ManagedPromiseAccess<'access, 'scope>> {
@@ -422,18 +481,19 @@ impl ManagedPromiseRoot {
 }
 
 impl ManagedCoreNetRoot {
-    fn access<'access, 'scope>(
+    #[cfg(test)]
+    pub(crate) fn access<'access, 'scope>(
         &'access self,
         authority: &'access RuntimeValueAccess<'scope>,
     ) -> Option<ManagedCoreNetAccess<'access, 'scope>> {
-        if !authority.admits(&self.observer) || !authority.admits_root(&self.root) {
+        if !authority.admits_root(&self.root) {
             return None;
         }
-        ManagedCoreNetAccess::from_authorized_cell(
-            authority.get(&self.root),
-            &self.observer,
+        Some(ManagedCoreNetAccess {
+            cell: authority.get(&self.root),
             authority,
-        )
+            _thread_bound: PhantomData,
+        })
     }
 }
 
@@ -450,15 +510,15 @@ impl<'access, 'scope> ManagedLazyAccess<'access, 'scope> {
         })
     }
 
-    fn id(&self) -> LazyId {
+    pub(crate) fn id(&self) -> LazyId {
         self.cell.id
     }
 
-    fn label(&self) -> &Arc<str> {
+    pub(crate) fn label(&self) -> &Arc<str> {
         &self.cell.label
     }
 
-    fn source_snapshot(&self) -> Option<LazySource> {
+    pub(crate) fn source_snapshot(&self) -> Option<LazySource> {
         let _ = self.authority.runtime_id();
         if self.cell.result.get().is_some() {
             return None;
@@ -479,11 +539,11 @@ impl<'access, 'scope> ManagedLazyAccess<'access, 'scope> {
         )
     }
 
-    fn cached(&self) -> Option<LazyResult> {
+    pub(crate) fn cached(&self) -> Option<LazyResult> {
         self.cell.result.get().cloned()
     }
 
-    fn cache(&self, result: LazyResult) -> LazyResult {
+    pub(crate) fn cache(&self, result: LazyResult) -> LazyResult {
         let _ = self.cell.result.set(result);
         let result = self
             .cell
@@ -509,47 +569,49 @@ impl<'access, 'scope> ManagedPromiseAccess<'access, 'scope> {
     ) -> Option<Self> {
         authority.admits(&cell.values).then_some(Self {
             cell,
-            authority,
+            _authority: authority,
             _thread_bound: PhantomData,
         })
     }
 
-    fn id(&self) -> PromiseId {
+    pub(crate) fn id(&self) -> PromiseId {
         self.cell.id
     }
 
-    fn label(&self) -> &Arc<str> {
+    pub(crate) fn label(&self) -> &Arc<str> {
         &self.cell.label
     }
 
-    fn runtime_id(&self) -> crate::runtime::EvaluationRuntimeId {
-        debug_assert!(self.authority.admits(&self.cell.values));
+    #[cfg(test)]
+    pub(crate) fn runtime_id(&self) -> crate::runtime::EvaluationRuntimeId {
+        debug_assert!(self._authority.admits(&self.cell.values));
         self.cell.values.runtime_id()
     }
 
-    fn assignment(&self) -> Option<ManagedPromiseAssignment> {
+    pub(crate) fn assignment(&self) -> Option<ManagedPromiseAssignment> {
         self.cell.assignment.get().cloned()
     }
 
-    fn install_producer(
+    pub(crate) fn install_producer(
         &self,
         producer: &Arc<PromiseProducerObligation>,
-    ) -> Result<(), Weak<PromiseProducerObligation>> {
-        self.cell.producer.set(Arc::downgrade(producer))
+    ) -> Result<(), Arc<PromiseProducerObligation>> {
+        self.cell.producer.set(Arc::clone(producer))
     }
 
-    fn producer(&self) -> Option<Arc<PromiseProducerObligation>> {
-        self.cell.producer.get().and_then(Weak::upgrade)
+    pub(crate) fn producer(&self) -> Option<Arc<PromiseProducerObligation>> {
+        self.cell.producer.get().cloned()
     }
 
-    fn publish(
+    #[cfg(test)]
+    pub(crate) fn publish(
         &self,
         assignment: ManagedPromiseAssignment,
     ) -> Result<(), ManagedPromiseAssignment> {
         self.publish_detached(assignment, |_| ())
     }
 
-    fn publish_detached<T>(
+    pub(crate) fn publish_detached<T>(
         &self,
         assignment: ManagedPromiseAssignment,
         after_assignment: impl FnOnce(&ManagedPromiseAssignment) -> T,
@@ -562,7 +624,7 @@ impl<'access, 'scope> ManagedPromiseAccess<'access, 'scope> {
         })
     }
 
-    fn publish_guarded<T>(
+    pub(crate) fn publish_guarded<T>(
         &self,
         coordinator: &Arc<EvaluationWorkCoordinator>,
         mutation: &dyn RuntimeMutationAuthority,
@@ -579,7 +641,7 @@ impl<'access, 'scope> ManagedPromiseAccess<'access, 'scope> {
             })
     }
 
-    fn subscribe_work(
+    pub(crate) fn subscribe_work(
         &self,
         runtime: crate::runtime::EvaluationRuntimeId,
         registration: WakeRegistration,
@@ -589,8 +651,13 @@ impl<'access, 'scope> ManagedPromiseAccess<'access, 'scope> {
         })
     }
 
-    fn unsubscribe_work(&self, registration: WakeRegistration) -> bool {
+    pub(crate) fn unsubscribe_work(&self, registration: WakeRegistration) -> bool {
         self.cell.completion.unsubscribe(registration)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn exact_subscription_count(&self) -> usize {
+        self.cell.completion.len()
     }
 }
 
@@ -607,16 +674,21 @@ impl<'access, 'scope> ManagedCoreNetAccess<'access, 'scope> {
         })
     }
 
-    fn with<R>(&self, inspect: impl FnOnce(&RuntimeNet<PreparedCoreSpecialization>) -> R) -> R {
+    pub(crate) fn with<R>(&self, inspect: impl FnOnce(&RuntimeNet<CoreSpecialization>) -> R) -> R {
         let _ = self.authority.runtime_id();
         self.cell.runtime.with(inspect)
     }
 
-    fn with_mut<R>(
+    #[cfg(test)]
+    pub(crate) fn with_mut<R>(
         &self,
-        update: impl FnOnce(&mut RuntimeNet<PreparedCoreSpecialization>) -> R,
+        update: impl FnOnce(&mut RuntimeNet<CoreSpecialization>) -> R,
     ) -> R {
         self.cell.runtime.with_mut(update)
+    }
+
+    pub(crate) fn cell(&self) -> &RuntimeNetCell<CoreSpecialization> {
+        &self.cell.runtime
     }
 }
 
@@ -662,12 +734,16 @@ unsafe impl Trace for ManagedLazyCell {
                 .clone()
         };
         visit_compatibility_payload_managed_edges(&source, visitor);
+        source.visit_compatibility_net_edges(&mut |net| {
+            net.trace_managed_edge(visitor);
+        });
     }
 }
 
 // SAFETY: assignment is one-write state. Its success and failure payloads are
-// the cell's only semantic edges; subscriptions and the weak producer backlink
-// are edge-free coordination.
+// the cell's only semantic edges. Subscriptions and the strong immutable
+// producer record contain no managed edge or root; the record's coordinator
+// and local-owner routes are weak.
 unsafe impl Trace for ManagedPromiseCell {
     const REQUESTED_SLOT_SIZE: Option<usize> = Some(super::managed_slot_extent::<Self>());
 
@@ -693,8 +769,11 @@ unsafe impl Trace for ManagedCoreNetCell {
                 }
                 RuntimeNetPayload::Operator(operator) => {
                     visit_compatibility_payload_managed_edges(operator, visitor);
+                    operator.visit_compatibility_net_edges(&mut |net| {
+                        net.trace_managed_edge(visitor);
+                    });
                 }
-                RuntimeNetPayload::Source(source) => visitor.visit(source.0),
+                RuntimeNetPayload::Source(source) => source.trace_managed_edge(visitor),
                 RuntimeNetPayload::StuckReason(reason) => {
                     visit_halt_value_edges(reason, &mut |value| {
                         visit_compatibility_managed_edges(value, visitor);
@@ -718,8 +797,9 @@ unsafe impl ManagedFamily for ManagedLazyCell {
 }
 
 // SAFETY: assignment payloads passed the same passive compatibility closure.
-// Completion registrations, weak coordinator routing, and the weak producer
-// backlink contain no managed semantic edge and invoke no service on Drop.
+// Completion registrations, weak coordinator routing inside the producer
+// obligation, and the producer backlink contain no managed semantic edge and
+// invoke no service on Drop.
 unsafe impl ManagedFamily for ManagedPromiseCell {
     const DROP_RECORD: ManagedDropRecord = ManagedDropRecord::passive(
         "managed promise identity cell",
@@ -767,8 +847,8 @@ mod tests {
         CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new())
     }
 
-    fn prepared_runtime(value: i64) -> RuntimeNet<PreparedCoreSpecialization> {
-        let mut builder = NetBuilder::<PreparedCoreSpecialization>::new();
+    fn prepared_runtime(value: i64) -> RuntimeNet<CoreSpecialization> {
+        let mut builder = NetBuilder::<CoreSpecialization>::new();
         let exposed = builder.data(Value::Number(value.into()));
         builder.finish(exposed).instantiate()
     }
@@ -981,7 +1061,7 @@ mod tests {
         let values = new_values();
         let baseline = values
             .collect_managed_for_test()
-            .expect("the dormant recursive-cell heap should start collectible");
+            .expect("the recursive-cell heap should start collectible");
         let (lazy, promise, net) = values.with_runtime_value_access(|access| {
             (
                 access
@@ -1029,13 +1109,13 @@ mod tests {
         drop((lazy, promise, net));
         let dead = values
             .collect_managed_for_test()
-            .expect("unrooted dormant recursive cells should be reclaimed");
+            .expect("unrooted recursive cells should be reclaimed");
         assert_eq!(dead.root_entries(), baseline.root_entries());
         assert_eq!(dead.finalized_slots(), 3);
     }
 
     #[test]
-    fn semantic_edges_and_durable_roots_share_one_prepared_identity() {
+    fn semantic_edges_and_durable_roots_share_one_managed_identity() {
         let values = new_values();
         let observer = values.runtime_value_observer();
         let (lazy, promise, net, lazy_edge, promise_edge, net_edge) = values
@@ -1124,6 +1204,7 @@ mod tests {
                 .allocator::<ManagedCoreNetCell>()
                 .expect("the managed core-net cell should fit a run");
             let edge = allocator.alloc(ManagedCoreNetCell::new(prepared_runtime(23)));
+            let managed_edge = ManagedCoreNetEdge(edge);
 
             // SAFETY: `edge` is live in this access region's exact heap and
             // representation. The replacement adds precisely the self edge
@@ -1137,17 +1218,17 @@ mod tests {
                     .with_edge_replacement(edge, None, Some(edge), || {
                         cell.runtime.with_mut(|runtime| {
                             runtime.begin_copy(PreparedCopySource::new(
-                                ManagedCoreNetEdge(edge),
+                                crate::core_net::CoreRuntimeNet::from_managed_parts(
+                                    managed_edge,
+                                    observer.clone(),
+                                ),
                                 remote,
                             ));
                         });
                     });
             }
 
-            ManagedCoreNetRoot {
-                root: access.root(edge),
-                observer,
-            }
+            access.root_managed_core_net(observer, managed_edge)
         });
 
         let live = values
@@ -1166,6 +1247,7 @@ mod tests {
     fn recursive_cell_gateways_are_private_and_complete() {
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
         let owner_path = manifest.join("src/core/managed/recursive_cells.rs");
+        let inventory_path = manifest.join("src/core/managed/recursive_identity_inventory.rs");
         let owner = fs::read_to_string(&owner_path).expect("the recursive-cell source should read");
         let count = |parts: &[&str]| owner.matches(&parts.concat()).count();
 
@@ -1199,7 +1281,9 @@ mod tests {
                     stack.push(path);
                     continue;
                 }
-                if path.extension().is_none_or(|extension| extension != "rs") || path == owner_path
+                if path.extension().is_none_or(|extension| extension != "rs")
+                    || path == owner_path
+                    || path == inventory_path
                 {
                     continue;
                 }
@@ -1209,7 +1293,14 @@ mod tests {
                     "ManagedPromiseCell",
                     "ManagedCoreNetCell",
                 ];
-                if names.iter().any(|name| source.contains(name)) {
+                let legacy_arc_cells = [
+                    ["Arc<", "LazyCell"].concat(),
+                    ["Arc<", "PromiseCell"].concat(),
+                    ["Arc<", "RuntimeNetCell<CoreSpecialization"].concat(),
+                ];
+                if names.iter().any(|name| source.contains(name))
+                    || legacy_arc_cells.iter().any(|name| source.contains(name))
+                {
                     escaped.push(
                         path.strip_prefix(manifest)
                             .expect("source should belong to the package")
@@ -1220,7 +1311,7 @@ mod tests {
         }
         assert!(
             escaped.is_empty(),
-            "dormant recursive-cell representations escaped their private module: {escaped:?}"
+            "managed recursive-cell representations escaped their private module: {escaped:?}"
         );
     }
 
@@ -1252,7 +1343,7 @@ mod tests {
         }
         assert!(
             declaration("struct ManagedPromiseCell")
-                .contains("producer: OnceLock<Weak<PromiseProducerObligation>>")
+                .contains("producer: OnceLock<Arc<PromiseProducerObligation>>")
         );
 
         let completion = include_str!("../../evaluation/coordinator/completion.rs");
@@ -1280,7 +1371,7 @@ mod tests {
             let fragment = parts.concat();
             assert!(
                 source.contains(&fragment),
-                "{family} has no prepared destination for {fragment}"
+                "{family} has no managed destination for {fragment}"
             );
         };
 
@@ -1325,16 +1416,10 @@ mod tests {
             require(family, &["unsafe impl ManagedFamily for ", cell]);
         }
 
-        require(
-            "promise",
-            &["OnceLock<Weak<", "PromiseProducerObligation>>"],
-        );
+        require("promise", &["OnceLock<Arc<", "PromiseProducerObligation>>"]);
         require("promise", &["fn publish_", "detached"]);
         require("promise", &["fn publish_", "guarded"]);
         require("promise", &["Completion", "Subscriptions"]);
-        require(
-            "core net",
-            &["RuntimeNet", "Cell<PreparedCoreSpecialization>"],
-        );
+        require("core net", &["RuntimeNet", "Cell<CoreSpecialization>"]);
     }
 }

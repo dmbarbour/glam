@@ -94,6 +94,7 @@ enum NormalizationMode {
 #[derive(Clone)]
 struct NormalizationRequest {
     runtime: CoreRuntimeNet,
+    _root: crate::core::ManagedCoreNetRoot,
     root_interface: Port,
     mode: NormalizationMode,
 }
@@ -606,8 +607,10 @@ fn assert_semantic_step_is_unbatched(_runtime: &CoreRuntimeNet) {}
 
 impl NormalizationRequest {
     fn cursor_whnf(runtime: CoreRuntimeNet, root_interface: Port) -> Self {
+        let root = runtime.root();
         Self {
             runtime,
+            _root: root,
             root_interface,
             mode: NormalizationMode::CursorWhnf,
         }
@@ -715,7 +718,7 @@ struct CoreCallClaim<'claim, 'step> {
     context: &'claim EvaluatorStepContext<'step>,
     runtime: &'claim CoreRuntimeNet,
     call: Call,
-    callable: Value,
+    callable: crate::runtime::RuntimeValueRoot,
     fallback: Option<CallFallback>,
     _thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
 }
@@ -726,7 +729,8 @@ impl<'claim, 'step> CoreCallClaim<'claim, 'step> {
         runtime: &'claim CoreRuntimeNet,
         call: Call,
     ) -> Option<Self> {
-        let callable = with_core_net_access(context, runtime, |runtime| runtime.claim_call(call))?;
+        let callable =
+            with_core_net_access(context, runtime, |runtime| runtime.claim_call_rooted(call))?;
         Some(Self {
             context,
             runtime,
@@ -757,7 +761,7 @@ impl<'claim, 'step> CoreCallClaim<'claim, 'step> {
     }
 
     fn callable(&self) -> Value {
-        self.callable.clone()
+        self.context.project_root(&self.callable)
     }
 
     fn finish(mut self, disposition: CallDisposition) -> Result<bool, EvaluationHalt> {
@@ -1166,10 +1170,12 @@ mod driver_tests {
     ) {
         let NormalizationRequest {
             runtime,
+            _root,
             root_interface,
             mode,
         } = request;
         let _: &CoreRuntimeNet = runtime;
+        let _: &crate::core::ManagedCoreNetRoot = _root;
         let _: &Port = root_interface;
         let _: &NormalizationMode = mode;
 

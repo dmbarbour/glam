@@ -15,7 +15,7 @@ use super::session::{
     EvaluationUnfinishedTask, client_demand_halt_poll,
 };
 use super::{EvaluationDemandState, EvaluationPollContext, evaluation_failure};
-use crate::core::{EvaluationFailure, LazyCycle, LazyCycleMember};
+use crate::core::{EvaluationFailure, LazyCycle, LazyCycleMember, LazyValue};
 use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 
 impl ClientDemandOperation {
@@ -560,7 +560,7 @@ fn poison_lazy_cycle(
     let mut terminals = members
         .iter()
         .map(|member| {
-            let terminal = match member.lazy.cache(Err(failure.clone())) {
+            let terminal = match LazyValue::from_root(&member.lazy).cache(Err(failure.clone())) {
                 Err(error) => EvaluationWaitTerminal::Failed(RuntimeFailureRoot::from_observer(
                     member.wait.value_observer(),
                     error,
@@ -660,7 +660,7 @@ impl EvaluationWorkCoordinator {
                 if let Some(wait) = halt.blocked_on() {
                     coordinator::SparkWorkPoll::Blocked(WorkDependency::Wait(wait.0))
                 } else if let Some(promise) = halt.unassigned_promise() {
-                    coordinator::SparkWorkPoll::Blocked(WorkDependency::Promise(promise.clone()))
+                    coordinator::SparkWorkPoll::Blocked(WorkDependency::Promise(promise.root()))
                 } else {
                     coordinator::SparkWorkPoll::Complete
                 }

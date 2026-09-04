@@ -7,7 +7,9 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use rpds::RedBlackTreeMapSync;
 
-use crate::core::{EvaluationFailure, PromiseAssignment, PromiseCell, PromiseId};
+use crate::core::{
+    EvaluationFailure, ManagedPromiseRoot, PromiseAssignment, PromiseId, PromisedValue,
+};
 use crate::runtime::{
     EvaluationRuntimeId, RuntimeFailureRoot, RuntimeMutationAuthority, RuntimeValueRoot,
 };
@@ -524,27 +526,47 @@ enum PromiseProducerSource {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct LocalPromiseObligation {
     promise: PromiseId,
-    cell: Weak<PromiseCell>,
+    root: ManagedPromiseRoot,
     wait: EvaluationWaitToken,
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub(crate) struct LocalPromiseOwner {
     obligations: Mutex<Vec<LocalPromiseObligation>>,
 }
 
+impl std::fmt::Debug for LocalPromiseOwner {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LocalPromiseOwner")
+            .field(
+                "obligations",
+                &self
+                    .obligations
+                    .lock()
+                    .expect("local promise obligations were poisoned")
+                    .len(),
+            )
+            .finish()
+    }
+}
+
 impl LocalPromiseOwner {
-    fn register(&self, promise: &Arc<PromiseCell>, wait: EvaluationWaitToken) {
+    pub(crate) fn register(
+        &self,
+        root: ManagedPromiseRoot,
+        producer: Arc<PromiseProducerObligation>,
+    ) {
         self.obligations
             .lock()
             .expect("local promise obligations were poisoned")
             .push(LocalPromiseObligation {
-                promise: promise.id(),
-                cell: Arc::downgrade(promise),
-                wait,
+                promise: root.id(),
+                wait: producer.wait().clone(),
+                root,
             });
     }
 
@@ -576,20 +598,8 @@ impl LocalPromiseOwner {
             .expect("local promise obligations were poisoned")
             .clone();
         for obligation in obligations {
-            if let Some(cell) = obligation.cell.upgrade() {
-                let _ = cell.fail(failure.clone());
-            } else {
-                self.complete(obligation.promise, &obligation.wait);
-                obligation
-                    .wait
-                    .publish_terminal(EvaluationWaitTerminal::Failed(
-                        RuntimeFailureRoot::from_observer(
-                            obligation.wait.value_observer(),
-                            failure.clone(),
-                        ),
-                    ));
-                obligation.wait.notify_terminal();
-            }
+            let promise = PromisedValue::from_root(&obligation.root);
+            let _ = promise.fail(failure.clone());
         }
     }
 }
@@ -630,15 +640,14 @@ impl PromiseProducerObligation {
     pub(crate) fn local_owned(
         owner: EvaluationTaskId,
         wait: EvaluationWaitToken,
-        promise: &Arc<PromiseCell>,
+        promise: PromiseId,
         local_owner: &Arc<LocalPromiseOwner>,
     ) -> Self {
-        local_owner.register(promise, wait.clone());
         Self {
             owner,
             wait,
             source: PromiseProducerSource::Local {
-                promise: promise.id(),
+                promise,
                 owner: Arc::downgrade(local_owner),
             },
         }
@@ -697,10 +706,10 @@ fn promise_assignment_terminal(
     assignment: &PromiseAssignment,
 ) -> EvaluationWaitTerminal {
     match assignment {
-        Ok(value) => {
-            debug_assert_eq!(value.runtime_id(), wait.runtime_id());
-            EvaluationWaitTerminal::Complete(value.clone())
-        }
+        Ok(value) => EvaluationWaitTerminal::Complete(RuntimeValueRoot::from_observer(
+            wait.value_observer(),
+            value.clone(),
+        )),
         Err(error) => EvaluationWaitTerminal::Failed(RuntimeFailureRoot::from_observer(
             wait.value_observer(),
             error.clone(),
