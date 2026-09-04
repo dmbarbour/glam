@@ -6041,20 +6041,21 @@ fn metadata_seq_preserves_retryable_promise_blockage() {
 
 #[test]
 fn completed_metadata_updates_release_sources_and_task_records() {
-    let context = test_context();
+    let values = crate::core::CoreValueFactory::new(
+        crate::runtime::allocate_evaluation_runtime_id(),
+        crate::runtime::RuntimeIds::new(),
+    );
+    let context = EvalContext::isolated(values.clone());
     let prior_source_dropped = Arc::new(AtomicBool::new(false));
     let prior_signal = DropSignal(prior_source_dropped.clone());
-    let prior = Value::semantic_thunk(
-        &crate::core::test_value_factory(),
-        "discardable prior metadata",
-        move |_| {
-            let _keep_signal_captured = &prior_signal;
-            Ok(n(1))
-        },
-    );
+    let prior = Value::semantic_thunk(&values, "discardable prior metadata", move |_| {
+        let _keep_signal_captured = &prior_signal;
+        Ok(n(1))
+    });
     let outputs = run_metadata_update(
         &context,
-        closed_function_value(
+        closed_function_value_in(
+            &values,
             1,
             TestExpr::Value(Value::List(List::from_values(vec![n(7)]))),
         ),

@@ -14,6 +14,13 @@ use super::coordinator::{
 };
 use super::session::{EvaluationUnfinishedState, EvaluationUnfinishedTask};
 
+fn isolated_standalone_context() -> OwnedEvalContext {
+    EvalContext::isolated(crate::core::CoreValueFactory::new(
+        crate::runtime::allocate_evaluation_runtime_id(),
+        crate::runtime::RuntimeIds::new(),
+    ))
+}
+
 /// Compile-exhaustive ownership inventory for every value-bearing machine
 /// poll boundary established by I3A.4.
 ///
@@ -2123,7 +2130,7 @@ impl EvaluationTaskMachine for Cancellable {
 
 #[test]
 fn terminal_waits_retain_runtime_root_provenance() {
-    let context = EvalContext::standalone();
+    let context = isolated_standalone_context();
     let task = context
         .schedule_task(|_| Ok(Box::new(Complete)))
         .expect("task should schedule");
@@ -2227,7 +2234,7 @@ fn blocked_task_record_root_survives_collection_until_cancellation() {
 
 #[test]
 fn wait_completion_projection_requires_scoped_access() {
-    let context = EvalContext::standalone();
+    let context = isolated_standalone_context();
     let task = context
         .schedule_task(|_| Ok(Box::new(Complete)))
         .expect("completion projection task should schedule");
@@ -3938,7 +3945,7 @@ fn pump_and_quiescence_do_not_repoll_an_unchanged_block() {
 
 #[test]
 fn pump_reports_budget_exhaustion_for_runnable_work() {
-    let context = EvalContext::standalone();
+    let context = isolated_standalone_context();
     let target = context
         .schedule_task(|_| Ok(Box::new(AlwaysYields)))
         .expect("yielding task should schedule");

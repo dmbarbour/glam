@@ -55,7 +55,15 @@ pub(super) fn eval_key(value: &Value) -> Result<Key, EvaluationHalt> {
 }
 
 pub(super) fn closed_function_value(arity: usize, body: TestExpr) -> Value {
-    let code = lower_test_function_code(arity, body);
+    closed_function_value_in(&crate::core::test_value_factory(), arity, body)
+}
+
+pub(super) fn closed_function_value_in(
+    values: &CoreValueFactory,
+    arity: usize,
+    body: TestExpr,
+) -> Value {
+    let code = lower_test_function_code_in(values, arity, body);
     assert_eq!(code.capture_count(), 0, "test function must be closed");
     Value::Function(FunctionValue::new(
         NetValue::new(code.runtime().clone()),
@@ -64,9 +72,18 @@ pub(super) fn closed_function_value(arity: usize, body: TestExpr) -> Value {
 }
 
 pub(super) fn lower_test_function_code(arity: usize, body: TestExpr) -> FunctionCode {
+    lower_test_function_code_in(&crate::core::test_value_factory(), arity, body)
+}
+
+pub(super) fn lower_test_function_code_in(
+    values: &CoreValueFactory,
+    arity: usize,
+    body: TestExpr,
+) -> FunctionCode {
     let mut lowerer = FixtureNetLowerer {
         net: NetBuilder::new(),
         local_uses: Vec::new(),
+        values,
     };
     let boundary = lowerer.net.copy(1);
     lowerer.compile_into(&body, boundary.outputs[0]);
@@ -90,16 +107,17 @@ pub(super) fn lower_test_function_code(arity: usize, body: TestExpr) -> Function
         binds.input
     };
     let template = lowerer.net.finish(exposed);
-    let runtime = crate::core::test_value_factory().instantiate_core_net(&template);
+    let runtime = values.instantiate_core_net(&template);
     FunctionCode::new(runtime, arity, capture_count)
 }
 
-struct FixtureNetLowerer {
+struct FixtureNetLowerer<'values> {
     net: NetBuilder<CoreSpecialization>,
     local_uses: Vec<Vec<Port>>,
+    values: &'values CoreValueFactory,
 }
 
-impl FixtureNetLowerer {
+impl FixtureNetLowerer<'_> {
     fn compile_into(&mut self, expr: &TestExpr, target: Port) {
         match expr {
             TestExpr::Value(value) => self.data_into(value.clone(), target),
@@ -213,11 +231,11 @@ impl FixtureNetLowerer {
             self.data_into(value.clone(), target);
             return;
         }
-        let code = Arc::new(lower_test_function_code(0, expr.clone()));
+        let code = Arc::new(lower_test_function_code_in(self.values, 0, expr.clone()));
         if code.capture_count() == 0 {
             self.data_into(
                 Value::Lazy(LazyValue::from_net_computation(
-                    &crate::core::test_value_factory(),
+                    self.values,
                     NetValue::new(code.runtime().clone()),
                 )),
                 target,

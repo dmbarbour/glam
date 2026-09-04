@@ -840,7 +840,7 @@ mod tests {
     use std::path::Path;
 
     use super::*;
-    use crate::core::{CoreValueFactory, EvaluatedValue, LazySource};
+    use crate::core::{CoreValueFactory, EvaluatedValue, LazySource, LazyValue, PromisedValue};
     use crate::interaction_net::{NetBuilder, PreparedCopySource};
     use crate::runtime::{RuntimeIds, RuntimeMutationAdmission, allocate_evaluation_runtime_id};
 
@@ -1205,6 +1205,90 @@ mod tests {
     }
 
     #[test]
+    fn managed_lazy_source_self_cycle_is_traced_and_reclaimed() {
+        let values = new_values();
+        let baseline = values
+            .collect_managed_for_test()
+            .expect("the managed-lazy cycle fixture should start collectible");
+        let observer = values.runtime_value_observer();
+        let root = values.with_runtime_value_access(|access| {
+            let edge = access
+                .allocate_managed_lazy(&values, "lazy self cycle", LazySource::Error)
+                .expect("the managed lazy cell should fit a run");
+            let root = access.root_managed_lazy(observer.clone(), edge);
+            let lazy = LazyValue::from_root(&root);
+            let source = LazySource::ComputedFixpoint(Arc::new(
+                crate::core::FixpointComputation::Function(Value::Lazy(lazy)),
+            ));
+
+            // SAFETY: `edge` is live in this access region's exact heap and
+            // representation. The closure replaces the edge-free placeholder
+            // with precisely the self edge reported to the collector gateway.
+            unsafe {
+                let cell = access.scope.get_traced_edge(edge.0);
+                let mut stored = cell
+                    .source
+                    .lock()
+                    .expect("managed lazy source cell should not be poisoned");
+                assert!(matches!(stored.as_ref(), Some(LazySource::Error)));
+                access
+                    .scope
+                    .mutator
+                    .with_edge_replacement(edge.0, None, Some(edge.0), || {
+                        *stored = Some(source);
+                    });
+            }
+
+            root
+        });
+
+        let live = values
+            .collect_managed_for_test()
+            .expect("a rooted managed-lazy self-cycle should survive");
+        assert_eq!(live.root_entries(), baseline.root_entries() + 1);
+        assert_eq!(live.marked_slots(), baseline.marked_slots() + 1);
+
+        drop(root);
+        let dead = values
+            .collect_managed_for_test()
+            .expect("an unrooted managed-lazy self-cycle should be reclaimed");
+        assert_eq!(dead.root_entries(), baseline.root_entries());
+        assert_eq!(dead.finalized_slots(), 1);
+    }
+
+    #[test]
+    fn managed_promise_assignment_self_cycle_is_traced_and_reclaimed() {
+        let values = new_values();
+        let baseline = values
+            .collect_managed_for_test()
+            .expect("the managed-promise cycle fixture should start collectible");
+        let root = values.with_runtime_value_access(|access| {
+            let root = access
+                .root_new_managed_promise(&values, "promise self cycle")
+                .expect("the managed promise cell should fit a run");
+            let promise = PromisedValue::from_root(&root);
+            root.access(&access)
+                .expect("the rooted promise should be accessible")
+                .publish(Ok(Value::Promised(promise)))
+                .expect("the fresh promise should accept its self assignment");
+            root
+        });
+
+        let live = values
+            .collect_managed_for_test()
+            .expect("a rooted managed-promise self-cycle should survive");
+        assert_eq!(live.root_entries(), baseline.root_entries() + 1);
+        assert_eq!(live.marked_slots(), baseline.marked_slots() + 1);
+
+        drop(root);
+        let dead = values
+            .collect_managed_for_test()
+            .expect("an unrooted managed-promise self-cycle should be reclaimed");
+        assert_eq!(dead.root_entries(), baseline.root_entries());
+        assert_eq!(dead.finalized_slots(), 1);
+    }
+
+    #[test]
     fn managed_core_net_source_self_cycle_is_traced_and_reclaimed() {
         let values = new_values();
         let baseline = values
@@ -1246,12 +1330,14 @@ mod tests {
         let live = values
             .collect_managed_for_test()
             .expect("a rooted managed-net self-cycle should survive");
+        assert_eq!(live.root_entries(), baseline.root_entries() + 1);
         assert_eq!(live.marked_slots(), baseline.marked_slots() + 1);
 
         drop(root);
         let dead = values
             .collect_managed_for_test()
             .expect("an unrooted managed-net self-cycle should be reclaimed");
+        assert_eq!(dead.root_entries(), baseline.root_entries());
         assert_eq!(dead.finalized_slots(), 1);
     }
 

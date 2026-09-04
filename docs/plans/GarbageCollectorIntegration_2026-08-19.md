@@ -211,6 +211,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I5C | complete | representation-neutral recursive-identity family preparation |
 | I5D | complete | atomic managed lazy/promise/core-net identity cutover |
 | I5E | complete | external lifecycle and coordination closure |
+| I5F.1 | complete | direct managed-family self-cycle survival and reclamation |
 | I5 | pending | atomic managed lazy/promise/core-net identity closure and cycle audit |
 | I6 | pending | functions, applications, metadata, failures |
 | I7 | pending | persistent list and dictionary tracing |
@@ -4916,21 +4917,52 @@ and forced terminal-publication ordering tests. Add
 
 ### Phase I5F — Recursive Cycle-Closure Audit
 
-- First prove rooted survival, then remove the final root and reclaim direct
-  lazy, promise, and core-net self-cycles; every pairwise cycle; and one
-  lazy-to-net-to-promise-to-lazy cycle.
-- Repeat cycles through lists, dictionaries, partial applications, function
-  stages, fixpoint sources, metadata, failures/context frames, cursor state,
-  and shared persistent versions. These structures exercise the transitive
-  compatibility walk; they need not yet have their final compact managed
-  representation.
-- Re-run the cycle-source inventory and prove that removing managed lazy,
-  promise, and core-net identities leaves an acyclic compatibility-owned
-  semantic graph. Audit external owners for hidden roots and managed
-  backedges.
-- Record duplicate logical visits as profiling evidence only. Do not add
-  traversal caches, root deduplication, tagged values, or persistent-spine
-  optimizations; those belong to Value Representation Refinement.
+This audit is split into bounded checkpoints. Each reclamation fixture first
+retains exactly one registered root, forces a collection to prove the whole
+closed graph survives, removes that final root, and forces a second collection
+to prove reclamation. Fixtures use the production managed cells and production
+payload adapters; test-only code may install an otherwise hard-to-construct
+cycle through the same collector mutation gateway, but may not invent a
+parallel trace representation.
+
+1. **I5F.1 — Direct family self-cycles.** Cover lazy-source-to-self,
+   promise-assignment-to-self, and core-net-source-to-self cycles. Preserve the
+   existing core-net fixture and give all three cases the same rooted-survival
+   and exact-reclamation assertions. This checkpoint establishes one minimal
+   closed cycle per authoritative identity family before composing families.
+2. **I5F.2 — Cross-family closure.** Cover every pairwise cycle among lazy,
+   promise, and core net, plus one
+   lazy-to-net-to-promise-to-lazy cycle. Intermediate construction roots may
+   exist while edges are installed, but the live collection must retain only
+   one final root and reach every member transitively.
+3. **I5F.3 — Compatibility-path matrix.** Repeat closed cycles through lists,
+   dictionaries, partial applications, function stages, fixpoint sources,
+   metadata, failures/context frames, cursor state, and shared persistent
+   versions. These structures exercise the transitive compatibility walk;
+   they need not yet have their final compact managed representation. Group
+   multiple paths in one fixture only when exact member and edge accounting
+   still identifies a missing adapter.
+4. **I5F.4 — Closure and owner audit.** Re-run the cycle-source inventory and
+   prove that removing managed lazy, promise, and core-net identities leaves
+   an acyclic compatibility-owned semantic graph. Re-audit external owners for
+   hidden roots and managed backedges. Record duplicate logical visits as
+   profiling evidence only. Do not add traversal caches, root deduplication,
+   tagged values, or persistent-spine optimizations; those belong to Value
+   Representation Refinement.
+
+I5F.1 completed 2026-09-04. Three isolated production-family fixtures now
+form a fixpoint-source lazy self-cycle, a successful-assignment promise
+self-cycle, and a prepared-copy-source core-net self-cycle. Each fixture keeps
+exactly one registered family root, observes exactly one additional marked
+slot while rooted, then removes that root and observes exactly one finalized
+slot. The lazy fixture installs its post-allocation self edge through the
+collector mutation gateway; promise publication and core-net mutation use
+their production gateways. No parallel trace representation or automatic
+production collection was introduced. Full-suite verification also exposed a
+pre-existing test isolation defect: the metadata-release fixture collected the
+process-wide evaluator test value domain while unrelated tests could hold
+unrooted compatibility values. Its function lowerer now accepts an explicit
+value domain, and that collection fixture owns a fresh isolated domain.
 
 Only closed isolated fixtures collect. The complete production runtime remains
 `NoAuto`, and the mandatory post-I5 review follows before I6 begins.
