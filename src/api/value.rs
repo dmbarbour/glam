@@ -964,21 +964,42 @@ pub struct PromiseResolver {
 }
 
 impl PromiseResolver {
+    /// Releases this resolver's one registered promise root.
+    ///
+    /// Every terminal path disarms through this idempotent operation before
+    /// the consuming `PromiseResolver` runs `Drop`. A rejected foreign value
+    /// also retires the affine capability without assigning the promise, as
+    /// required by the existing public boundary.
+    fn retire(&mut self) -> Option<ManagedPromiseRoot> {
+        self.promise.take()
+    }
+
+    fn take_for_completion(&mut self) -> Result<(ManagedPromiseRoot, CoreValueFactory), Error> {
+        let promise = self
+            .retire()
+            .expect("a live promise resolver must retain its promise");
+        let Some(values) = promise.observer().upgrade() else {
+            return Err(Error::new(format!(
+                "evaluation runtime {} is no longer available for promise completion",
+                self.runtime.get()
+            )));
+        };
+        Ok((promise, values))
+    }
+
     /// Completes the promise successfully with `value`.
     pub fn resolve(mut self, value: Value) -> Result<(), Error> {
         if let Err(error) = value.require_runtime(self.runtime) {
-            self.promise.take();
+            let _ = self.retire();
             return Err(error);
         }
-        let promise = self
-            .promise
-            .take()
-            .expect("a live promise resolver must retain its promise");
+        let (promise, values) = self.take_for_completion()?;
         let label = promise.label().clone();
-        PromisedValue::from_root(&promise)
+        let published = PromisedValue::from_root(&promise)
             .set_root(value.into_runtime_root())
-            .map_err(|_| Error::new(format!("promise `{label}` was already completed")))?;
-        Ok(())
+            .map_err(|_| Error::new(format!("promise `{label}` was already completed")));
+        drop(values);
+        published
     }
 
     /// Completes the promise with an arbitrary Glam value as its permanent
@@ -986,7 +1007,7 @@ impl PromiseResolver {
     pub fn fail(self, failure: Value) -> Result<(), Error> {
         let mut resolver = self;
         if let Err(error) = failure.require_runtime(resolver.runtime) {
-            resolver.promise.take();
+            let _ = resolver.retire();
             return Err(error);
         }
         resolver.fail_with(Arc::new(EvaluationFailure::emission(
@@ -1000,21 +1021,22 @@ impl PromiseResolver {
     }
 
     fn fail_with(mut self, failure: Arc<EvaluationFailure>) -> Result<(), Error> {
-        let promise = self
-            .promise
-            .take()
-            .expect("a live promise resolver must retain its promise");
+        let (promise, values) = self.take_for_completion()?;
         let label = promise.label().clone();
-        PromisedValue::from_root(&promise)
+        let published = PromisedValue::from_root(&promise)
             .fail(failure)
-            .map_err(|_| Error::new(format!("promise `{label}` was already completed")))?;
-        Ok(())
+            .map_err(|_| Error::new(format!("promise `{label}` was already completed")));
+        drop(values);
+        published
     }
 }
 
 impl Drop for PromiseResolver {
     fn drop(&mut self) {
-        let Some(promise) = self.promise.take() else {
+        let Some(promise) = self.retire() else {
+            return;
+        };
+        let Some(values) = promise.observer().upgrade() else {
             return;
         };
         let message = format!(
@@ -1022,6 +1044,7 @@ impl Drop for PromiseResolver {
             promise.label()
         );
         let _ = PromisedValue::from_root(&promise).fail_message(message);
+        drop(values);
     }
 }
 

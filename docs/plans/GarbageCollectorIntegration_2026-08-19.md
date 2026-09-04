@@ -208,6 +208,9 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I5.0 | complete | durable/scoped/coordination and promise-root handle decision review |
 | I5A | complete | recursive cycle-source and direct identity-owner inventory |
 | I5B | complete | transitive compatibility walk to recursive identity stop edges |
+| I5C | complete | representation-neutral recursive-identity family preparation |
+| I5D | complete | atomic managed lazy/promise/core-net identity cutover |
+| I5E | complete | external lifecycle and coordination closure |
 | I5 | pending | atomic managed lazy/promise/core-net identity closure and cycle audit |
 | I6 | pending | functions, applications, metadata, failures |
 | I7 | pending | persistent list and dictionary tracing |
@@ -4469,9 +4472,10 @@ The binding decisions are:
   views; and routing-only state remains edge-free;
 - task/local promise producer obligations strongly own registered promise
   roots until each individual promise settles, while `PromiseCell` retains a
-  strong immutable producer record so wait provenance remains timing
+  strong immutable producer record so producer-task provenance remains timing
   independent after settlement. That record contains no root and reaches its
-  coordinator/local owner only weakly;
+  concrete wait state and coordinator/local owner only weakly; outstanding
+  external wait handles retain late terminal observation;
 - `PromiseResolver` owns a promise root plus a weak runtime observer and keeps
   `Option` only as its affine `Drop`-disarm state;
 - parked promise dependencies retain a clone of the registered promise root;
@@ -4493,8 +4497,9 @@ Production remains `NoAuto`.
 Completed 2026-09-04. The source-backed inventory in
 `src/core/managed/recursive_identity_inventory.rs` first failed against an
 intentionally empty baseline and classified the pre-cutover graph. I5D
-refreshed the same fail-closed inventory to 41 production declarations: 15
-exact managed-edge roles, 16 durable-root roles, and 10 bounded-access roles.
+refreshed the same fail-closed inventory to 41 production declarations. I5E's
+post-publication root handoff raised that total to 42: 15 exact managed-edge
+roles, 17 durable-root roles, and 10 bounded-access roles.
 It now identifies exactly `ManagedLazyCell`, `ManagedPromiseCell`, and
 `ManagedCoreNetCell` as the authoritative mutable cycle sources; all other
 direct occurrences are classified edges, owners, or access carriers. The
@@ -4788,7 +4793,7 @@ production identity graph:
    | `CoreValueFactory::instantiate_core_net`, `CoreRuntimeNet::instantiate_related`, function/net shells, and prepared copy sources | `allocate_managed_core_net`, `ManagedCoreNetEdge`, `ManagedCoreNetRoot`, and the owner-neutral `RuntimeNetCell` seam from I5C.1 | Make construction return the edge-qualified core facade, retain a root across any pre-installation handoff, and install cross-net sources as exact edges. |
    | `Value`, `ListThunk`, `EvaluationHalt`, function code/stages, lazy sources/results, promise assignments, and net payloads | The three exact edge types and compile-exhaustive I5B/I5C traces | Replace all three stop arms together and reject every surviving raw recursive identity in the I5D source latch. |
    | `LazyTaskMachine`, `DeferredProducer`, `DeferredLazyCycleMember`, `PromiseFollower`, reflection fix state/continuations, `WorkDependency::Promise`, and construction handoffs | Family registered roots, or the existing general `RuntimeValueRoot` when the durable state is an arbitrary value | Change fields and projections together; no durable bare `Gc` may survive the mutator region. |
-   | `PromiseResolver`, coordinator `TaskOwnedPromiseObligation`, and direct-runner `LocalPromiseObligation` | `ManagedPromiseRoot`; the managed cell retains a root-free `PromiseProducerObligation` whose coordinator/local-owner routes are weak | Move the root into the external obligation, remove that individual root on settlement, and retain timing-independent wait provenance without a root backedge. These are one coupled ownership inversion, not preparatory production wiring. |
+   | `PromiseResolver`, coordinator `TaskOwnedPromiseObligation`, and direct-runner `LocalPromiseObligation` | `ManagedPromiseRoot`; the managed cell retains a root-free `PromiseProducerObligation` whose wait-state and coordinator/local-owner routes are weak | Move the root into the external obligation, remove that individual root on settlement, and retain timing-independent producer provenance without a root backedge. Outstanding wait handles, not the managed promise, retain terminal wait observation. These are one coupled ownership inversion, not preparatory production wiring. |
    | Lazy cache success/failure | `ManagedLazyAccess::cache` | Preserve terminal-before-source-release while converting retained machine snapshots to roots before yielding. |
    | Promise `set`, `set_root`, failure, guarded task settlement, detached resolver/local publication, subscriptions, and wakeup | `ManagedPromiseAccess::{publish_detached,publish_guarded}`, one-write assignment, edge-free completion companion, and root-free producer route | Project/root the wait terminal in the publication callback, remove the producer-owned root under the existing coordinator transaction, then notify after locks and admission are released. |
    | Core-net topology, claim, cursor, source-copy, and revision mutations | `ManagedCoreNetAccess`, owner-neutral cell mutation, scoped source-operation adapter, and edge-free disturbance companion | Re-express the existing facade methods over the managed cell and route semantic edge changes through the family mutation gateway; later concurrent-GC barriers activate at these same sites. |
@@ -4822,9 +4827,10 @@ producer obligations, normalization requests, source-copy handoffs, frontier
 observations, and reflection fix state retain the corresponding registered
 roots. Promise assignments contain ordinary traced `Value` edges rather than
 `RuntimeValueRoot`. The promise cell retains a strong immutable producer
-routing record so terminal and concurrent observers see stable wait
-provenance; that record contains no managed root and reaches coordinator/local
-owners only through `Weak` routes.
+routing record so terminal and concurrent observers see stable producer
+provenance; that record contains no managed root and reaches the
+concrete wait state and coordinator/local owners only through `Weak` routes.
+Outstanding external wait handles retain late terminal observation.
 
 The exact trace now follows lazy source/result payloads, promise assignments,
 all core-net values and stuck failures, cross-net sources, and nested
@@ -4863,6 +4869,25 @@ any managed-reachable `Root`. Production remains `NoAuto`; this checkpoint
 does not run a full production collection.
 
 ### Phase I5E — External Lifecycle and Coordination Closure
+
+Completed 2026-09-04. `PromiseResolver` now disarms every terminal path through
+one idempotent retirement operation. Completion temporarily retains one strong
+value-domain lease, while resolver drop becomes inert after the runtime value
+domain has retired instead of attempting to dereference a dead managed root.
+Task and direct-runner producer obligations remove their individual registered
+promise root at assignment publication. A short `PromiseProducerPublication`
+handoff retains the removed root until component locks and runtime mutation
+admission have been released and the associated wake has been delivered; no
+root is delayed until whole-task retirement.
+
+The managed promise cell strongly retains only its immutable, root-free
+`PromiseProducerObligation`, whose wait-state and coordinator/local-owner
+routes are weak.
+Source latches prove that this routing record and the lazy/net coordination
+companions contain no managed edge, root, public value, or active external
+owner. Focused collection tests prove the resolver, task-owner, and local-owner
+roots retire exactly once, including runtime teardown before resolver drop.
+Production collection remains `NoAuto`.
 
 - Keep `PromiseResolver` and every producer/task owner which performs failure,
   cancellation, abandonment, notification, or wakeup as an external owner

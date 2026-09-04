@@ -1002,11 +1002,11 @@ impl EvalContext {
         } else if let Some(local_owner) = &self.local_promise_owner {
             let producer = Arc::new(PromiseProducerObligation::local_owned(
                 owner,
-                wait.clone(),
+                &wait,
                 promise.id(),
                 local_owner,
             ));
-            local_owner.register(promise.root(), producer.clone());
+            local_owner.register(promise.root(), wait);
             Ok(producer)
         } else {
             Err(format!(

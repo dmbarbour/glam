@@ -1313,13 +1313,15 @@ fn producer_failure_retires_every_owned_promise_wait() {
     let (promises, owner_task, _owner) = session
         .task_owned_promises([Arc::from("first fixpoint"), Arc::from("second fixpoint")])
         .unwrap();
-    let waits = promises.iter().map(|promise| {
-        promise
-            .task()
-            .expect("task-owned fixpoint should expose its wait")
-            .wait()
-            .clone()
-    });
+    let waits: Vec<_> = promises
+        .iter()
+        .map(|promise| {
+            promise
+                .task()
+                .expect("task-owned fixpoint should expose its wait")
+                .wait()
+        })
+        .collect();
 
     session.fail_wait(owner_task.wait(), "producer failed all fixpoints");
 

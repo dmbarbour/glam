@@ -1104,6 +1104,104 @@ fn value_evaluator_resumes_a_retained_resolver_promise_subscription() {
 }
 
 #[test]
+fn promise_resolver_drop_invokes_idempotent_retire_once() {
+    let assembler = Assembler::default();
+    let values = assembler.values();
+    let baseline = values
+        .core
+        .collect_managed_for_test()
+        .expect("the promise-resolver fixture should start collectible");
+
+    let (promise, resolver) = assembler.promise("affine resolver retirement");
+    let pending = values
+        .core
+        .collect_managed_for_test()
+        .expect("the public promise and resolver roots should remain live");
+    assert_eq!(pending.root_entries(), baseline.root_entries() + 2);
+
+    resolver
+        .resolve(values.integer(37))
+        .expect("the fresh resolver should publish exactly once");
+    let resolved = values
+        .core
+        .collect_managed_for_test()
+        .expect("consuming the resolver should release its managed root");
+    assert_eq!(resolved.root_entries(), baseline.root_entries() + 1);
+    {
+        let CoreValue::Promised(resolved_promise) = promise.clone_core_for_test() else {
+            panic!("public promise should retain its managed promise identity")
+        };
+        assert_eq!(
+            resolved_promise.assignment(),
+            Some(Ok(CoreValue::Number(Number::integer(37))))
+        );
+    }
+
+    drop(promise);
+    let reclaimed = values
+        .core
+        .collect_managed_for_test()
+        .expect("dropping the consumer should reclaim its value and promise cells");
+    assert_eq!(reclaimed.root_entries(), baseline.root_entries());
+    assert_eq!(reclaimed.finalized_slots(), 2);
+}
+
+#[test]
+fn promise_resolver_drop_after_runtime_retirement_is_inert() {
+    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+    let values = runtime.values();
+    let domain = Arc::downgrade(values.core.value_domain());
+    let assembler = Assembler::builder()
+        .evaluation_runtime(runtime.clone())
+        .build()
+        .expect("assembler should build");
+    let (promise, resolver) = assembler.promise("retired runtime");
+
+    drop(promise);
+    drop(assembler);
+    drop(values);
+    drop(runtime);
+    assert!(domain.upgrade().is_none());
+
+    drop(resolver);
+}
+
+#[test]
+fn promise_resolver_completion_after_runtime_retirement_is_rejected() {
+    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+    let values = runtime.values();
+    let domain = Arc::downgrade(values.core.value_domain());
+    let assembler = Assembler::builder()
+        .evaluation_runtime(runtime.clone())
+        .build()
+        .expect("assembler should build");
+    let (resolved_promise, resolved) = assembler.promise("retired resolution");
+    let (failed_promise, failed) = assembler.promise("retired failure");
+    let assignment = values.integer(43);
+
+    drop((resolved_promise, failed_promise));
+    drop(assembler);
+    drop(values);
+    drop(runtime);
+    assert!(domain.upgrade().is_none());
+
+    assert!(
+        resolved
+            .resolve(assignment)
+            .expect_err("a retired runtime cannot accept promise assignment")
+            .to_string()
+            .contains("no longer available for promise completion")
+    );
+    assert!(
+        failed
+            .fail_message("late failure")
+            .expect_err("a retired runtime cannot accept promise failure")
+            .to_string()
+            .contains("no longer available for promise completion")
+    );
+}
+
+#[test]
 fn value_evaluator_caches_lazy_success_and_preserves_structured_failure() {
     let assembler = Assembler::new();
     let values = assembler.values();

@@ -3116,7 +3116,7 @@ fn abandoned_lazy_claim_can_be_reclaimed_without_poisoning_the_lazy() {
 #[test]
 fn owner_session_drop_fails_task_promises_but_not_host_promises() {
     let fixture = SameRuntimeFixture::new();
-    let task_promise = {
+    let (task_promise, task_wait) = {
         let owner = fixture.context();
         let (promise, _owner_task, _owner_context) = owner
             .task_owned_promise(Arc::from("abandoned task promise"))
@@ -3129,7 +3129,7 @@ fn owner_session_drop_fails_task_promises_but_not_host_promises() {
             wait.subscribe_test_work(),
             CompletionSubscriptionOutcome::Pending
         );
-        promise
+        (promise, wait)
     };
     let observer = fixture.context();
     let error = task_promise
@@ -3137,21 +3137,9 @@ fn owner_session_drop_fails_task_promises_but_not_host_promises() {
         .expect("session closure must assign the task promise")
         .expect_err("an abandoned task promise must fail");
     assert!(error.to_string().contains("was abandoned"));
-    assert_eq!(
-        task_promise
-            .task()
-            .expect("task promise should retain producer provenance")
-            .wait()
-            .exact_subscription_count(),
-        0
-    );
+    assert_eq!(task_wait.exact_subscription_count(), 0);
     assert!(matches!(
-        observer.poll_wait(
-            task_promise
-                .task()
-                .expect("task promise should retain producer provenance")
-                .wait()
-        ),
+        observer.poll_wait(&task_wait),
         EvaluationWaitPoll::Failed(wait_error) if Arc::ptr_eq(&error, wait_error.as_failure())
     ));
 
@@ -3171,6 +3159,91 @@ fn owner_session_drop_fails_task_promises_but_not_host_promises() {
             .assignment()
             .is_some_and(|assignment| assignment.is_ok())
     );
+}
+
+#[test]
+fn promise_settlement_releases_task_and_local_owner_roots() {
+    let fixture = SameRuntimeFixture::new();
+    let context = fixture.context();
+    let baseline = context
+        .values()
+        .collect_managed_for_test()
+        .expect("the promise-owner fixture should start collectible");
+    let (task_promise, task, owner_context) = context
+        .task_owned_promise(Arc::from("individually retired task promise"))
+        .expect("task-owned promise should register");
+    let task_live = context
+        .values()
+        .collect_managed_for_test()
+        .expect("the producer obligation should root its promise");
+    assert_eq!(task_live.root_entries(), baseline.root_entries() + 1);
+
+    task_promise
+        .set(Value::Number(41.into()))
+        .expect("the task promise should settle once");
+    drop(task_promise);
+    let task_retired = context
+        .values()
+        .collect_managed_for_test()
+        .expect("individual task-promise settlement should release its root");
+    assert_eq!(task_retired.root_entries(), baseline.root_entries());
+    assert_eq!(task_retired.finalized_slots(), 1);
+    assert_eq!(task.cancel(), EvaluationTaskCancellation::Requested);
+    drop(owner_context);
+
+    let local_owner = fixture.context();
+    let local = EvalContext::clone(&local_owner).for_effect_task();
+    let local_promise = PromisedValue::fixpoint(&local, "individually retired local promise")
+        .expect("the direct effect runner should register its promise");
+    let local_live = local
+        .values()
+        .collect_managed_for_test()
+        .expect("the local producer obligation should root its promise");
+    assert_eq!(local_live.root_entries(), baseline.root_entries() + 1);
+
+    local_promise
+        .set(Value::Number(42.into()))
+        .expect("the local promise should settle once");
+    let local_retired = local
+        .values()
+        .collect_managed_for_test()
+        .expect("individual local-promise settlement should release its root");
+    assert_eq!(local_retired.root_entries(), baseline.root_entries());
+    assert_eq!(local_retired.finalized_slots(), 1);
+}
+
+#[test]
+fn settled_task_promise_has_no_rooted_wait_backedge() {
+    let fixture = SameRuntimeFixture::new();
+    let context = fixture.context();
+    let baseline = context
+        .values()
+        .collect_managed_for_test()
+        .expect("the promise-cycle fixture should start collectible");
+    let (promise, task, owner_context) = context
+        .task_owned_promise(Arc::from("self-referential task promise"))
+        .expect("task-owned promise should register");
+
+    promise
+        .set(Value::Promised(promise.clone()))
+        .expect("the promise should accept a recursive semantic assignment");
+    assert!(
+        promise
+            .task()
+            .expect("producer identity should remain available")
+            .try_wait()
+            .is_none(),
+        "the managed promise must not keep its terminal wait state alive"
+    );
+    let reclaimed = context
+        .values()
+        .collect_managed_for_test()
+        .expect("the settled promise must not retain itself through its producer wait");
+    assert_eq!(reclaimed.root_entries(), baseline.root_entries());
+    assert_eq!(reclaimed.finalized_slots(), 2);
+
+    assert_eq!(task.cancel(), EvaluationTaskCancellation::Requested);
+    drop(owner_context);
 }
 
 #[test]
@@ -4487,7 +4560,10 @@ fn task_owned_promise_dependency_reports_its_cross_session_producer() {
     assert_eq!(blocked.dependency_session, Some(owner.session_id()));
     assert_eq!(
         blocked.wait,
-        promise.task().map(|producer| producer.wait().get())
+        promise
+            .task()
+            .and_then(|producer| producer.try_wait())
+            .map(|wait| wait.get())
     );
     assert_eq!(promise.exact_subscription_count(), 1);
 

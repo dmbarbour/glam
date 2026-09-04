@@ -92,7 +92,7 @@ fn promise_dependency_projects_only_a_task_owned_producer_wait() {
     );
     assert_eq!(
         WorkDependency::Promise(task_owned.root()).producer_wait(),
-        task_owned.task().map(|task| task.wait().clone())
+        task_owned.task().and_then(|task| task.try_wait())
     );
 }
 

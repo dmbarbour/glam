@@ -472,7 +472,7 @@ impl EvaluationWorkCoordinator {
                 status_publishers.push(publisher);
             }
             for obligation in &selected.promises {
-                let (producer, completion) = obligation.publish_failure_guarded(
+                let (producer, completion) = obligation.clone().publish_failure_guarded(
                     self,
                     mutation,
                     selected.promise_failure.as_failure().clone(),

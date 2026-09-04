@@ -507,10 +507,15 @@ impl Hash for EvaluationWaitToken {
     }
 }
 
-/// Assignment-side access to one task-owned promise obligation.
+/// Assignment-side routing for one task-owned promise obligation.
+///
+/// The managed promise cell retains this record strongly for stable producer
+/// provenance. Its wait-state route is weak because a terminal wait may own
+/// rooted result data; the authoritative task/local obligation retains the
+/// strong wait until assignment publication removes that external owner.
 pub(crate) struct PromiseProducerObligation {
     owner: EvaluationTaskId,
-    wait: EvaluationWaitToken,
+    wait: Weak<EvaluationWaitState>,
     source: PromiseProducerSource,
 }
 
@@ -555,17 +560,13 @@ impl std::fmt::Debug for LocalPromiseOwner {
 }
 
 impl LocalPromiseOwner {
-    pub(crate) fn register(
-        &self,
-        root: ManagedPromiseRoot,
-        producer: Arc<PromiseProducerObligation>,
-    ) {
+    pub(crate) fn register(&self, root: ManagedPromiseRoot, wait: EvaluationWaitToken) {
         self.obligations
             .lock()
             .expect("local promise obligations were poisoned")
             .push(LocalPromiseObligation {
                 promise: root.id(),
-                wait: producer.wait().clone(),
+                wait,
                 root,
             });
     }
@@ -578,17 +579,21 @@ impl LocalPromiseOwner {
             .any(|obligation| obligation.wait == *wait)
     }
 
-    fn complete(&self, promise: PromiseId, wait: &EvaluationWaitToken) {
+    fn complete(
+        &self,
+        promise: PromiseId,
+        wait: &EvaluationWaitToken,
+    ) -> Option<ManagedPromiseRoot> {
         let mut obligations = self
             .obligations
             .lock()
             .expect("local promise obligations were poisoned");
-        if let Some(index) = obligations
+        let obligation = obligations
             .iter()
             .position(|obligation| obligation.promise == promise && obligation.wait == *wait)
-        {
-            obligations.swap_remove(index);
-        }
+            .map(|index| obligations.swap_remove(index));
+        drop(obligations);
+        obligation.map(|obligation| obligation.root)
     }
 
     pub(crate) fn fail_all(&self, failure: Arc<EvaluationFailure>) {
@@ -604,31 +609,73 @@ impl LocalPromiseOwner {
     }
 }
 
-pub(crate) enum PromiseProducerPublication {
+enum PromiseProducerNotification {
     Guarded(CompletionWake),
     Detached(EvaluationWaitToken),
 }
 
+/// Post-publication notification and roots retired by that publication.
+///
+/// Roots remain here until the caller releases component locks and runtime
+/// mutation admission, delivers the wake, and drops this record. The optional
+/// snapshot root covers terminal-settlement callers which had to clone an
+/// obligation before publishing through its authoritative coordinator entry.
+pub(crate) struct PromiseProducerPublication {
+    notification: PromiseProducerNotification,
+    retired_root: Option<ManagedPromiseRoot>,
+    snapshot_root: Option<ManagedPromiseRoot>,
+}
+
 impl PromiseProducerPublication {
-    pub(crate) fn notify(self) {
-        match self {
-            Self::Guarded(wake) => wake.notify(),
-            Self::Detached(wait) => wait.notify_terminal(),
+    fn guarded(wake: CompletionWake, retired_root: ManagedPromiseRoot) -> Self {
+        Self {
+            notification: PromiseProducerNotification::Guarded(wake),
+            retired_root: Some(retired_root),
+            snapshot_root: None,
         }
+    }
+
+    fn detached(wait: EvaluationWaitToken, retired_root: Option<ManagedPromiseRoot>) -> Self {
+        Self {
+            notification: PromiseProducerNotification::Detached(wait),
+            retired_root,
+            snapshot_root: None,
+        }
+    }
+
+    pub(super) fn retain_snapshot_root(mut self, root: ManagedPromiseRoot) -> Self {
+        assert!(
+            self.snapshot_root.replace(root).is_none(),
+            "a promise publication may retain only one settlement snapshot root"
+        );
+        self
+    }
+
+    pub(crate) fn notify(self) {
+        let Self {
+            notification,
+            retired_root,
+            snapshot_root,
+        } = self;
+        match notification {
+            PromiseProducerNotification::Guarded(wake) => wake.notify(),
+            PromiseProducerNotification::Detached(wait) => wait.notify_terminal(),
+        }
+        drop((retired_root, snapshot_root));
     }
 }
 
 impl PromiseProducerObligation {
     pub(crate) fn coordinator_owned(
         owner: EvaluationTaskId,
-        wait: EvaluationWaitToken,
+        wait: &EvaluationWaitToken,
         work: EvaluationWorkId,
         promise: PromiseId,
         coordinator: &Arc<EvaluationWorkCoordinator>,
     ) -> Self {
         Self {
             owner,
-            wait,
+            wait: Arc::downgrade(&wait.0),
             source: PromiseProducerSource::Coordinator {
                 work,
                 promise,
@@ -639,13 +686,13 @@ impl PromiseProducerObligation {
 
     pub(crate) fn local_owned(
         owner: EvaluationTaskId,
-        wait: EvaluationWaitToken,
+        wait: &EvaluationWaitToken,
         promise: PromiseId,
         local_owner: &Arc<LocalPromiseOwner>,
     ) -> Self {
         Self {
             owner,
-            wait,
+            wait: Arc::downgrade(&wait.0),
             source: PromiseProducerSource::Local {
                 promise,
                 owner: Arc::downgrade(local_owner),
@@ -657,8 +704,14 @@ impl PromiseProducerObligation {
         self.owner
     }
 
-    pub(crate) fn wait(&self) -> &EvaluationWaitToken {
-        &self.wait
+    pub(crate) fn try_wait(&self) -> Option<EvaluationWaitToken> {
+        self.wait.upgrade().map(EvaluationWaitToken)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn wait(&self) -> EvaluationWaitToken {
+        self.try_wait()
+            .expect("an unresolved producer must retain its external wait owner")
     }
 
     pub(crate) fn coordinator(&self) -> Option<Arc<EvaluationWorkCoordinator>> {
@@ -674,30 +727,37 @@ impl PromiseProducerObligation {
         mutation: &dyn RuntimeMutationAuthority,
         assignment: &PromiseAssignment,
     ) -> PromiseProducerPublication {
-        debug_assert_eq!(coordinator.runtime_id(), self.wait.runtime_id());
         let PromiseProducerSource::Coordinator { work, promise, .. } = self.source else {
             panic!("a task-local promise cannot publish through a coordinator guard");
         };
-        coordinator.complete_task_promise_guarded(mutation, work, &self.wait, promise);
-        let terminal = promise_assignment_terminal(&self.wait, assignment);
-        let (_, wake) = self
-            .wait
-            .publish_terminal_guarded(coordinator, mutation, terminal);
-        PromiseProducerPublication::Guarded(wake)
+        let wait = self
+            .try_wait()
+            .expect("an active task promise must retain its external wait owner");
+        debug_assert_eq!(coordinator.runtime_id(), wait.runtime_id());
+        let retired_root = coordinator
+            .complete_task_promise_guarded(mutation, work, &wait, promise)
+            .expect("a publishing task promise must retain its producer obligation");
+        let terminal = promise_assignment_terminal(&wait, assignment);
+        let (_, wake) = wait.publish_terminal_guarded(coordinator, mutation, terminal);
+        PromiseProducerPublication::guarded(wake, retired_root)
     }
 
     pub(crate) fn publish_assignment_detached(
         &self,
         assignment: &PromiseAssignment,
     ) -> PromiseProducerPublication {
-        if let PromiseProducerSource::Local { promise, owner } = &self.source
-            && let Some(owner) = owner.upgrade()
-        {
-            owner.complete(*promise, &self.wait);
-        }
-        let terminal = promise_assignment_terminal(&self.wait, assignment);
-        self.wait.publish_terminal(terminal);
-        PromiseProducerPublication::Detached(self.wait.clone())
+        let wait = self
+            .try_wait()
+            .expect("an active local promise must retain its external wait owner");
+        let retired_root = match &self.source {
+            PromiseProducerSource::Local { promise, owner } => owner
+                .upgrade()
+                .and_then(|owner| owner.complete(*promise, &wait)),
+            PromiseProducerSource::Coordinator { .. } => None,
+        };
+        let terminal = promise_assignment_terminal(&wait, assignment);
+        wait.publish_terminal(terminal);
+        PromiseProducerPublication::detached(wait, retired_root)
     }
 }
 

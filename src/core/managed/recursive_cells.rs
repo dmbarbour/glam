@@ -50,9 +50,10 @@ pub(crate) struct ManagedLazyCell {
 ///
 /// Completion registrations contain only scheduler IDs and weak coordinator
 /// routing. The producer obligation remains strongly associated with the
-/// promise so terminal observers retain its wait provenance; the obligation's
-/// coordinator/local-owner route is weak, so this backlink cannot retain the
-/// task registry or form an ownership cycle.
+/// promise so observers retain its producer provenance; the obligation's
+/// concrete wait state and coordinator/local-owner routes are weak, so this
+/// backlink cannot retain terminal roots, the task registry, or an ownership
+/// cycle. Outstanding external wait handles retain late terminal observation.
 pub(crate) struct ManagedPromiseCell {
     id: PromiseId,
     values: RuntimeValueObserver,
@@ -853,6 +854,17 @@ mod tests {
         builder.finish(exposed).instantiate()
     }
 
+    fn source_declaration<'source>(source: &'source str, name: &str) -> &'source str {
+        let start = source
+            .find(name)
+            .unwrap_or_else(|| panic!("missing declaration {name}"));
+        let tail = &source[start..];
+        let end = tail
+            .find("\n}")
+            .unwrap_or_else(|| panic!("unterminated declaration {name}"));
+        &tail[..end]
+    }
+
     macro_rules! assert_does_not_implement {
         ($module:ident, $type:ty, $trait:path) => {
             mod $module {
@@ -1316,25 +1328,15 @@ mod tests {
     }
 
     #[test]
-    fn managed_cells_and_coordination_companions_have_closed_roles() {
+    fn recursive_identity_coordination_is_edge_free() {
         let source = include_str!("recursive_cells.rs");
-        let declaration = |name: &str| {
-            let start = source
-                .find(name)
-                .unwrap_or_else(|| panic!("missing declaration {name}"));
-            let tail = &source[start..];
-            let end = tail
-                .find("\n}")
-                .unwrap_or_else(|| panic!("unterminated declaration {name}"));
-            &tail[..end]
-        };
 
         for cell in [
             "struct ManagedLazyCell",
             "struct ManagedPromiseCell",
             "struct ManagedCoreNetCell",
         ] {
-            let body = declaration(cell);
+            let body = source_declaration(source, cell);
             assert!(!body.contains("Root<"), "{cell} must not retain a root");
             assert!(
                 !body.contains("RuntimeValueRoot"),
@@ -1342,26 +1344,85 @@ mod tests {
             );
         }
         assert!(
-            declaration("struct ManagedPromiseCell")
+            source_declaration(source, "struct ManagedPromiseCell")
                 .contains("producer: OnceLock<Arc<PromiseProducerObligation>>")
         );
 
         let completion = include_str!("../../evaluation/coordinator/completion.rs");
-        let companion = {
-            let start = completion
-                .find("pub(crate) struct CompletionSubscriptions")
-                .expect("completion companion declaration should remain present");
-            let tail = &completion[start..];
-            &tail[..tail
-                .find("\n}")
-                .expect("completion companion declaration should terminate")]
-        };
-        for forbidden in ["Gc<", "Root<", "Value", "PromiseProducerObligation"] {
-            assert!(
-                !companion.contains(forbidden),
-                "completion coordination acquired a semantic edge: {forbidden}"
-            );
+        let runtime_net = include_str!("../../interaction_net/runtime.rs");
+        for (source, companion) in [
+            (completion, "pub(crate) struct CompletionSubscriptions"),
+            (runtime_net, "pub(crate) struct RuntimeNetDisturbance"),
+            (runtime_net, "struct RuntimeNetDisturbanceInner"),
+            (runtime_net, "struct NormalizationBatchState"),
+            (runtime_net, "struct ActiveNormalizationBatch"),
+        ] {
+            let body = source_declaration(source, companion);
+            for forbidden in [
+                "Gc<",
+                "Root<",
+                "RuntimeValueRoot",
+                "EvaluationWaitToken",
+                "ManagedLazy",
+                "ManagedPromise",
+                "ManagedCoreNet",
+                "PromiseProducerObligation",
+            ] {
+                assert!(
+                    !body.contains(forbidden),
+                    "{companion} acquired a semantic edge: {forbidden}"
+                );
+            }
         }
+    }
+
+    #[test]
+    fn external_promise_owner_has_no_managed_backedge() {
+        let recursive = include_str!("recursive_cells.rs");
+        let coordinator = include_str!("../../evaluation/coordinator.rs");
+        let task = include_str!("../../evaluation/coordinator/task.rs");
+
+        let cell = source_declaration(recursive, "struct ManagedPromiseCell");
+        assert!(cell.contains("Arc<PromiseProducerObligation>"));
+        assert!(!cell.contains("TaskOwnedPromiseObligation"));
+        assert!(!cell.contains("LocalPromiseObligation"));
+
+        for routing in [
+            source_declaration(task, "pub(crate) struct PromiseProducerObligation"),
+            source_declaration(task, "enum PromiseProducerSource"),
+        ] {
+            for forbidden in [
+                "Gc<",
+                "Root<",
+                "RuntimeValueRoot",
+                "EvaluationWaitToken",
+                "ManagedLazy",
+                "ManagedPromise",
+                "ManagedCoreNet",
+                "PromisedValue",
+            ] {
+                assert!(
+                    !routing.contains(forbidden),
+                    "promise routing acquired a managed backedge: {forbidden}"
+                );
+            }
+        }
+        let routes = source_declaration(task, "enum PromiseProducerSource");
+        let obligation = source_declaration(task, "pub(crate) struct PromiseProducerObligation");
+        assert!(obligation.contains("Weak<EvaluationWaitState>"));
+        assert!(!obligation.contains("EvaluationWaitToken"));
+        assert!(routes.contains("Weak<EvaluationWorkCoordinator>"));
+        assert!(routes.contains("Weak<LocalPromiseOwner>"));
+        assert!(!task.contains("impl Drop for PromiseProducerObligation"));
+
+        assert!(
+            source_declaration(coordinator, "struct TaskOwnedPromiseObligation")
+                .contains("ManagedPromiseRoot")
+        );
+        assert!(
+            source_declaration(task, "struct LocalPromiseObligation")
+                .contains("ManagedPromiseRoot")
+        );
     }
 
     #[test]

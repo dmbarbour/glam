@@ -595,6 +595,13 @@ const DIRECT_IDENTITY_INVENTORY: &[IdentityOwnerEntry] = &[
         "direct-runner producer obligation keeps each unresolved promise assignable"
     ),
     owner!(
+        "src/evaluation/coordinator/task.rs::PromiseProducerPublication",
+        [0, 2, 0],
+        DurableRoot,
+        None,
+        "post-publication handoff defers retired-root destruction until locks and mutation admission are released"
+    ),
+    owner!(
         "src/reflection/machine.rs::ActiveFix",
         [0, 1, 0],
         DurableRoot,
@@ -678,7 +685,7 @@ fn compatibility_graph_cycle_sources_are_classified() {
         });
     assert_eq!(
         counts,
-        [15, 16, 10],
+        [15, 17, 10],
         "every direct identity occurrence remains assigned to the reviewed M/R/A split"
     );
 }

@@ -138,7 +138,7 @@ struct TaskOwnedPromiseObligation {
 
 impl TaskOwnedPromiseObligation {
     fn publish_failure_guarded(
-        &self,
+        self,
         coordinator: &Arc<EvaluationWorkCoordinator>,
         mutation: &dyn RuntimeMutationAuthority,
         failure: Arc<crate::core::EvaluationFailure>,
@@ -148,7 +148,7 @@ impl TaskOwnedPromiseObligation {
             .observer()
             .upgrade()
             .expect("a registered promise root must retain a live value domain owner");
-        values.with_runtime_value_access(|access| {
+        let (publication, wake) = values.with_runtime_value_access(|access| {
             self.root
                 .access(&access)
                 .expect("task-owned promise root must belong to its value domain")
@@ -159,7 +159,8 @@ impl TaskOwnedPromiseObligation {
                 .unwrap_or_else(|_| {
                     panic!("a terminalizing task-owned promise must remain unresolved")
                 })
-        })
+        });
+        (publication.retain_snapshot_root(self.root), wake)
     }
 }
 
@@ -278,7 +279,7 @@ impl WorkDependency {
             Self::Wait(wait) => Some(wait.clone()),
             Self::Promise(promise) => PromisedValue::from_root(promise)
                 .task()
-                .map(|task| task.wait().clone()),
+                .and_then(|task| task.try_wait()),
             #[cfg(test)]
             Self::Test(_) => None,
         }
@@ -1229,7 +1230,7 @@ impl EvaluationWorkCoordinator {
             }
             let producer = Arc::new(PromiseProducerObligation::coordinator_owned(
                 task,
-                wait.clone(),
+                &wait,
                 work,
                 promise.id(),
                 self,
@@ -1260,13 +1261,13 @@ impl EvaluationWorkCoordinator {
         work: EvaluationWorkId,
         wait: &EvaluationWaitToken,
         promise: PromiseId,
-    ) -> bool {
+    ) -> Option<ManagedPromiseRoot> {
         let mut state = self
             .state
             .lock()
             .expect("evaluation work coordinator was poisoned");
         if state.promise_by_wait.get(wait).copied() != Some(work) {
-            return false;
+            return None;
         }
         let record = state
             .work
@@ -1279,7 +1280,8 @@ impl EvaluationWorkCoordinator {
         debug_assert_eq!(obligation.promise, promise);
         assert_eq!(state.promise_by_wait.remove(wait), Some(work));
         state.work_generation = state.work_generation.wrapping_add(1);
-        true
+        drop(state);
+        Some(obligation.root)
     }
 
     /// Consumes one terminalizing work record's producer obligation and

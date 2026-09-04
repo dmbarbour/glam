@@ -219,9 +219,9 @@ type names:
 | `LazyTaskMachine::lazy`, `DeferredProducer::Lazy`, and `DeferredLazyCycleMember::lazy` | `src/eval/value.rs`; `src/evaluation/coordinator/deferred.rs` | **R**: registered lazy root for each durable owner | High. Each can remain parked after its evaluator access region closes and must still publish a cache result or failure. Duplicate clones of one root cell are acceptable initially. |
 | `PromiseFollower::promise`, `DeferredProducer::Promise`, reflection `ActiveFix::handle`, and `Continuation::Fix` | `src/eval/value.rs`; `src/evaluation/coordinator/deferred.rs`; `src/reflection/machine.rs` | **R**: registered promise root | High. These are parked machine or coordinator state, not semantic interiors. |
 | `LazyTaskWork::Follow`, `PromiseFollowerState::FollowAssignment`, and other parked machine values which may contain any recursive identity | `src/eval/value.rs`; `src/reflection/machine.rs`; `src/eval/builtins/net/construction.rs` | Existing general `RuntimeValueRoot`, not a family-specific bare `Gc` | High. I4 already established the correct general durable-value surface. |
-| Public `PromiseResolver` | `src/api/value.rs`; constructors in `src/api/assembly.rs` | `RuntimeValueObserver` plus `Option<R>` for the promise | High. The weak observer reopens the matching runtime; `Option` is solely the affine `Drop`-disarm state. A live resolver intentionally retains its promise even if the public value was discarded. |
-| Coordinator `TaskOwnedPromiseObligation` and direct-runner `LocalPromiseObligation` | `src/evaluation/coordinator.rs`; `src/evaluation/coordinator/task.rs` | External producer obligation owns **R** until that individual promise settles | High. Retention is bounded by unresolved producer obligations already tracked today; disappearing observers do not semantically cancel the producer. The root is removed on promise settlement, not delayed until whole-task retirement. |
-| `PromiseCell::producer` | `src/core.rs`; `src/evaluation/coordinator/task.rs` | Weak backlink to an externally owned `Arc<PromiseProducerObligation>` (or an equivalent weak/scalar **C** link) | High. The current strong cell-to-obligation direction must reverse when the obligation gains a root, otherwise `cell -> obligation -> Root<cell>` is a permanent hidden cycle. Coordinator/local owner records become the strong obligation owners. |
+| Public `PromiseResolver` | `src/api/value.rs`; constructors in `src/api/assembly.rs` | `RuntimeValueObserver` plus `Option<R>` for the promise | High. The weak observer reopens the matching runtime; `Option` is solely the affine `Drop`-disarm state. A live resolver intentionally retains its promise if the public value is discarded, but does not retain the runtime value domain. I5E made terminal retirement idempotent and drop inert after domain retirement. |
+| Coordinator `TaskOwnedPromiseObligation` and direct-runner `LocalPromiseObligation` | `src/evaluation/coordinator.rs`; `src/evaluation/coordinator/task.rs` | External producer obligation owns **R** until that individual promise settles | High. Retention is bounded by unresolved producer obligations already tracked today; disappearing observers do not semantically cancel the producer. I5E removes the root on promise settlement and carries it in `PromiseProducerPublication` only until locks/admission are released and the wake is delivered, rather than delaying it until whole-task retirement. |
+| `PromiseCell::producer` | `src/core.rs`; `src/evaluation/coordinator/task.rs` | Strong immutable **C** route to `Arc<PromiseProducerObligation>`; the actual root and strong wait handle remain in a separate external owner | High. I5D/I5E separated root-free timing-independent producer provenance from `TaskOwnedPromiseObligation`/`LocalPromiseObligation`, so the cell may retain the route without forming `cell -> obligation -> Root<cell>`. Its wait-state and coordinator/local-owner links remain weak; outstanding external wait handles retain late terminal observation. |
 | `WorkDependency::Promise` | `src/evaluation/coordinator.rs`; `src/evaluation/coordinator/{completion,client_demand,spark}.rs` | **R** while the dependency record/subscription is live | High. The dependency actively observes assignment, subscribes, and may project a producer wait. Sharing the already registered root is simpler than a weak managed pointer and adds no new semantic retention: the blocked machine, spark input, or client demand already owns the demanded value. |
 | Lazy/promise ID and label reads, source/result/assignment inspection, cache/assignment publication | `src/core.rs`; `src/eval/value.rs`; `src/evaluation/session.rs` | **A** through matching runtime access | High. IDs and labels remain in the managed cell. Cycle diagnostics copy `LazyId` plus label only when constructing the diagnostic; no permanent duplicate label is required. |
 | `CompletionSubscriptions` and promise producer lookup | `src/evaluation/coordinator/completion.rs`; `src/evaluation/coordinator/task.rs` | **C** plus bounded access to the rooted promise where assignment state is needed | High for the boundary, medium for the exact field split. Registrations and weak coordinator routing are edge-free. A managed cell must not strongly reach an `EvaluationWaitToken` capable of later holding rooted terminal data. |
@@ -234,21 +234,22 @@ The producer-root ownership graph is therefore:
 
 ```text
 coordinator work record or LocalPromiseOwner
+  -> Root<PromiseCell>
   -> Arc<PromiseProducerObligation>
-       -> Root<PromiseCell>
-       -> producer/wait IDs and weak owner/coordinator route
+  -> EvaluationWaitToken
 
 PromiseCell
-  -> Weak<PromiseProducerObligation>
+  -> Arc<PromiseProducerObligation>
+       -> producer/source IDs and weak wait/owner/coordinator routes
   -> completion registrations with weak coordinator route
 ```
 
-Assignment temporarily upgrades the weak backlink, publishes the assignment,
-removes the authoritative obligation and its root, detaches wakes, leaves all
-locks/access regions, and only then notifies. Task termination instead walks
-the same rooted obligations and fails each still-unresolved promise. This
-preserves one terminal winner without requiring `Weak<Gc<_>>` or
-`WeakRoot<_>`.
+Assignment follows the cell's root-free route, publishes the assignment,
+removes the authoritative external obligation and its root, detaches wakes,
+leaves all locks/access regions, and only then notifies and releases the root.
+Task termination instead walks the same rooted obligations and fails each
+still-unresolved promise. This preserves one terminal winner without requiring
+`Weak<Gc<_>>` or `WeakRoot<_>`.
 
 #### Existing weak edges outside the promise ownership inversion
 
@@ -257,7 +258,7 @@ preserves one terminal winner without requiring `Weak<Gc<_>>` or
 | `RuntimeValueObserver -> RuntimeValueDomain` and `RuntimeValueDomain -> EvaluationWorkCoordinator` | Keep weak. Values/observers must not retain the runtime, and the value domain must not close the runtime/coordinator cycle. | High |
 | Coordinator demand-session registry, spark demand, and client-demand work -> `EvaluationDemandState` | Keep weak. Work cannot manufacture or prolong the external demand-owner lease. | High |
 | Executor, task handle, client-demand handle, wait/completion source -> coordinator | Keep weak. These are observation/control routes; escaped handles must not retain runtime execution. | High |
-| `PromiseProducerSource::{Coordinator,Local}` -> coordinator/local owner | Keep weak inside the producer obligation. The authoritative owner already owns the obligation, so a reverse strong link would cycle. | High |
+| `PromiseProducerSource::{Coordinator,Local}` -> coordinator/local owner | Keep weak inside the root-free producer route. The authoritative owner already owns the registered promise root and route, so a reverse strong link would cycle. | High |
 | `NormalizationBatchLease -> RuntimeNetCell` | Keep for non-core generic nets only. Replace the core specialization as described above. | Medium |
 | Collector root registry/TLS -> heap | Keep weak; this is the established `glam-gc` lifetime boundary and is independent of I5 semantic handles. | High |
 | Diagnostic ingress/bus, runtime event endpoint, reflection query domain, opaque external-owner lease, and effect-token domain weak routes | Keep weak and unchanged. They prevent unrelated external-owner/runtime cycles and do not point at lazy, promise, or core-net cells. | High |

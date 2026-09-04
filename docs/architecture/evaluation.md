@@ -486,7 +486,15 @@ A `PromisedValue` is a thin shared `PromiseCell`. Successful assignment,
 explicit failure, resolver drop, and task-producer termination all publish its
 one authoritative assignment under shared runtime mutation admission. The
 cell then fulfills an attached task producer obligation, detaches completion
-registrations, and releases notifications only after admission ends.
+registrations, and releases notifications only after admission ends. The cell
+retains only an immutable, root-free producer route with a weak link to the
+concrete wait state; task and direct-runner owners retain the registered
+promise roots and strong wait handles externally. Assignment removes the
+individual owner root under the publication protocol, carries it through an
+external post-publication handoff, and destroys it only after locks and
+mutation admission are released and its wake is delivered. A public resolver
+uses the same idempotent retirement rule and becomes inert if its runtime value
+domain has already retired.
 
 A task-owned promise has an active wait record only while its assignment is
 unresolved. Its producer obligation publishes the same terminal assignment
