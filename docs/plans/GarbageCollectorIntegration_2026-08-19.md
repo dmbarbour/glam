@@ -4694,9 +4694,12 @@ production identity graph:
      and stable-layout assertions together. Core-net tracing must cover every
      logical value/operator/stuck payload and each managed cross-net source.
    - **I5C.3b — Isolated lifecycle fixtures.** In fresh collector-ready value
-     domains, prove rooted survival, unrooted reclamation, recursive
-     lazy/promise cycles, core-net source cycles, and passive transitive
-     destruction. Force no collection over production constructors.
+     domains, prove rooted survival, unrooted reclamation, core-net source
+     cycles, and passive transitive destruction. Reuse I5B's synthetic
+     managed-identity stop fixtures for lazy/promise payload traversal. A real
+     lazy or promise cycle cannot exist in the dormant graph until I5D changes
+     the corresponding `Value` variants; I5F exercises those cycles after that
+     atomic switch instead of manufacturing a mixed representation here.
    - **I5C.3c — Gateway and source inventory closure.** Latch every dormant
      constructor, publication/replacement site, root/access projection, and
      trace implementation. Prove no managed cell can retain a registered root
@@ -4721,6 +4724,31 @@ production identity graph:
    Focused dormant tests exercise both matching and mismatched value domains.
    Root projection intentionally waits for I5C.3a rather than weakening
    `RuntimeValueAccess::get` or admitting an incomplete managed family.
+
+   I5C.3a completed 2026-09-04. Each dormant cell now has an exact `Trace`, a
+   stable slot-size request, and a reviewed passive `ManagedFamily` record.
+   Lazy source/result and promise assignment reuse the compile-exhaustive I5B
+   compatibility traversal; core-net tracing visits every logical data,
+   operator, source, and stuck-reason payload under one nonblocking stable
+   cell snapshot. Registered-root construction and projection are now admitted
+   through matching `RuntimeValueAccess`, while the three interior edge types
+   remain private and unreachable from production constructors.
+
+   I5C.3b completed 2026-09-04. Fresh `NoAuto` value domains prove all three
+   registered roots survive collection and all three cells reclaim after the
+   final root retires. A managed core-net source self-cycle survives while
+   rooted and reclaims after root removal through the exact cross-net `Gc`
+   visitor. The fixture routes its post-allocation edge through the collector's
+   replacement gateway. Lazy/promise recursive identity stops remain covered
+   synthetically by I5B until I5D makes those actual `Value` arms managed.
+
+   I5C.3c completed 2026-09-04. Source latches account for all three cell,
+   edge, root, access, constructor, trace, family-admission, and mutation roles;
+   reject any use of the dormant cell names outside their private module; and
+   prove managed cells contain no registered root. Promise producer direction
+   is weak, and its completion companion contains no `Gc`, root, value, or
+   producer obligation. I5C.1's forced close fixture remains the corresponding
+   proof for the edge-free core-net disturbance companion.
 4. **I5C.4 — Atomic-cutover readiness audit.** Prove every production
    constructor, durable owner, publication path, mutation path, and retirement
    path has a prepared destination. A missing destination blocks I5D rather

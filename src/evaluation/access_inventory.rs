@@ -108,7 +108,7 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // and reject unrelated runtime-value authority.
         (
             "src/core/managed/recursive_cells.rs",
-            GatewayCounts::new(6, 0),
+            GatewayCounts::new(10, 0),
         ),
         // I4F.2c keeps the production-shaped node and prepared root private
         // while their local lifecycle, provenance, and nested-access fixtures
