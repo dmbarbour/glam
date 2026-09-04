@@ -1101,7 +1101,10 @@ fn cursor_steps_report_pairless_pair_owned_stable_and_contended_states() {
         CursorStep::Contended(contention) => contention,
         other => panic!("claimed cursor should report contention, received {other:?}"),
     };
-    assert!(contention.runtime().ptr_eq(&claimed_target));
+    assert!(Arc::ptr_eq(
+        &contention.disturbance.inner,
+        &claimed_target.cell().disturbance.inner
+    ));
     assert_eq!(
         contention.revisions(),
         claimed_target.with_revisions(|_| ()).1
@@ -1241,7 +1244,10 @@ fn normalization_batch_lease_is_exclusive_and_drop_safe() {
     let contention = runtime
         .try_begin_normalization_batch()
         .expect_err("second batch must observe contention");
-    assert!(contention.runtime().ptr_eq(&runtime));
+    assert!(Arc::ptr_eq(
+        &contention.disturbance.inner,
+        &runtime.cell().disturbance.inner
+    ));
     assert_eq!(runtime.active_normalization_batch(), Some((first_id, true)));
 
     lease.close();
@@ -1308,9 +1314,7 @@ fn normalization_batch_wakes_a_registered_follower_once_at_release() {
             .try_begin_normalization_batch()
             .expect_err("leader must still own the batch");
         registered_tx.send(()).unwrap();
-        contention
-            .runtime()
-            .wait_for_disturbance(contention.revisions().disturbance_epoch());
+        assert!(contention.wait_for_disturbance());
         woke_tx.send(()).unwrap();
     });
 

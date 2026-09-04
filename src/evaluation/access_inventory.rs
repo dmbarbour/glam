@@ -111,7 +111,10 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // I4F.2b.2 briefly projects a rooted reflection effect through a
         // bounded access region before coordinator reservation.
         ("src/core.rs", GatewayCounts::new(3, 5)),
-        ("src/core_net.rs", GatewayCounts::new(7, 0)),
+        // I5C.1c scopes source-frontier traversal through the same matching
+        // value-domain authority instead of reopening a stored source owner;
+        // the existing test gateway also exercises mismatched-net rejection.
+        ("src/core_net.rs", GatewayCounts::new(8, 0)),
         // The reflection active-owner fixture proves that managed
         // finalization leaves reservation cancellation to the external drain.
         ("src/eval/tests.rs", GatewayCounts::new(0, 1)),

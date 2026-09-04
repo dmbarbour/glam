@@ -12,13 +12,14 @@ pub(crate) use builder::{NetBuildError, NetBuilder};
 pub(crate) use model::{
     ActivePairKey, InteractionNet, NetSpecialization, NodeId, OperatorYield, Port,
 };
+#[cfg(test)]
+pub(crate) use runtime::RuntimeNetRevisions;
 pub(crate) use runtime::{
     ActivePairStep, BlockedCall, BlockedOperatorCall, Call, CursorDependency,
     CursorDependencyDisposition, CursorDependencyResolution, CursorProgress, CursorStep,
     DemandEndpoint, FrontierObservation, InterfaceDemand, NetContention, OperatorCall,
     PreparedCopySource, Reduction, ReductionKind, RuntimeNet, RuntimeNetMutation,
-    RuntimeNetPayload, RuntimeNetPayloadVisitStats, RuntimeNetRevisions, SharedRuntimeNet,
-    StuckReason,
+    RuntimeNetPayload, RuntimeNetPayloadVisitStats, SharedRuntimeNet, SourceFrontier, StuckReason,
 };
 
 #[cfg(test)]

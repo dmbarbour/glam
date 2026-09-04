@@ -4634,6 +4634,34 @@ production identity graph:
    preserves exact topology/disturbance revision publication. Existing generic
    mutation, batch, contention, cursor, and core-facade behavior is unchanged.
 
+   I5C.1c completed 2026-09-04. Core topology now stores `CoreRuntimeNet` as
+   its opaque cross-net identity. `RuntimeNetCell` owns the cursor and
+   active-pair algorithms, but source-frontier inspection is injected by the
+   caller: generic test specializations use their direct shared adapter, while
+   `CoreRuntimeNetAccess` validates the source against its matching
+   `RuntimeValueAccess` and opens the source cell only after the target lock is
+   released. Prepared copy sources follow the same scoped path. Compile-time
+   source-type inventory and a mismatched-net frontier test latch that stored
+   identities cannot operate themselves or borrow unrelated scoped authority.
+
+   I5C.1d completed 2026-09-04. Core normalization uses a borrowed,
+   thread-bound `NormalizationBatchGuard` over `RuntimeNetCell`; it closes
+   before scoped access returns and on unwind. The generic self-owned test
+   adapter retains its weak `NormalizationBatchLease` only for compatibility.
+   `NetContention` now contains only the edge-free disturbance companion and
+   observed revisions. A forced contention fixture drops the semantic net and
+   observes companion closure, proving that a pending waiter does not retain
+   core topology or its value domain.
+
+   I5C.1e completed 2026-09-04. The generic cursor/copy/frontier suites, core
+   normalization and evaluator-net suites, managed-owner inventories, and
+   full project checks pass with the new seam. Source inventories now record
+   the additional scoped value-access gateway and deliberately remove the two
+   obsolete direct identity occurrences from frontier observations and
+   contention. Production core topology names only `CoreRuntimeNet`; direct
+   self-owned `SharedRuntimeNet` progression and its weak lease are confined
+   to the generic test specialization.
+
 2. **I5C.2 — Managed cell and access types.** Implement the selected managed
    lazy, promise, and synchronization-owning core-net cells; interior, durable,
    bounded-access, and coordination types from I5.0; stable layouts; and

@@ -18,6 +18,7 @@ impl<S: NetSpecialization> SourceFrontierShape<S> {
     }
 }
 
+#[cfg(test)]
 impl<S> SharedRuntimeNet<S>
 where
     S: NetSpecialization<RuntimeSource = SharedRuntimeNet<S>>,
@@ -38,10 +39,23 @@ where
         &self,
         anchor: Port,
     ) -> SourceFrontier<S> {
+        self.cell().inspect_source_frontier(self.clone(), anchor)
+    }
+}
+
+impl<S: NetSpecialization> RuntimeNetCell<S> {
+    /// Traverses one source demand spine through an already-authorized cell.
+    /// The source identity is retained only in the resulting observation; it
+    /// is never used to discover or reopen the cell implicitly.
+    pub(crate) fn inspect_source_frontier(
+        &self,
+        source: S::RuntimeSource,
+        anchor: Port,
+    ) -> SourceFrontier<S> {
         let (shape, observed_revisions) =
             self.with_revisions(|runtime| runtime.inspect_source_frontier_shape(anchor));
         let observation = shape.endpoint().map(|endpoint| FrontierObservation {
-            source: self.clone(),
+            source,
             observed_topology: observed_revisions.topology_revision(),
             endpoint,
         });
@@ -59,7 +73,7 @@ pub(crate) struct PreparedCopySource<S: NetSpecialization> {
 }
 
 impl<S: NetSpecialization> PreparedCopySource<S> {
-    pub(in crate::interaction_net::runtime) fn new(source: S::RuntimeSource, remote: Port) -> Self {
+    pub(crate) fn new(source: S::RuntimeSource, remote: Port) -> Self {
         Self { source, remote }
     }
 }

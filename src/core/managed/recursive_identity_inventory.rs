@@ -19,7 +19,6 @@ enum TargetDisposition {
     ExactManagedEdge,
     DurableRoot,
     BoundedAccess,
-    EdgeFreeCoordination,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -388,20 +387,6 @@ const DIRECT_IDENTITY_INVENTORY: &[IdentityOwnerEntry] = &[
         "borrowed halt payload exposes the same semantic promise edge"
     ),
     owner!(
-        "src/core_net.rs::CoreFrontierObservation",
-        [0, 0, 1],
-        BoundedAccess,
-        None,
-        "normalization-local observation of a source frontier"
-    ),
-    owner!(
-        "src/core_net.rs::CoreNetContention",
-        [0, 0, 1],
-        EdgeFreeCoordination,
-        None,
-        "future contention token retains revisions and disturbance routing, not net liveness"
-    ),
-    owner!(
         "src/core_net.rs::CoreRuntimeNet",
         [0, 0, 1],
         ExactManagedEdge,
@@ -577,19 +562,18 @@ fn compatibility_graph_cycle_sources_are_classified() {
 
     let counts = DIRECT_IDENTITY_INVENTORY
         .iter()
-        .fold([0usize; 4], |mut counts, entry| {
+        .fold([0usize; 3], |mut counts, entry| {
             let index = match entry.target {
                 TargetDisposition::ExactManagedEdge => 0,
                 TargetDisposition::DurableRoot => 1,
                 TargetDisposition::BoundedAccess => 2,
-                TargetDisposition::EdgeFreeCoordination => 3,
             };
             counts[index] += 1;
             counts
         });
     assert_eq!(
         counts,
-        [11, 10, 9, 1],
-        "every direct identity occurrence remains assigned to the reviewed M/R/A/C split"
+        [11, 10, 8],
+        "every direct identity occurrence remains assigned to the reviewed M/R/A split"
     );
 }
