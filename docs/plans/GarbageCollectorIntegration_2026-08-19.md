@@ -207,6 +207,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I4F.2 | complete | public managed-root production switch |
 | I5.0 | complete | durable/scoped/coordination and promise-root handle decision review |
 | I5A | complete | recursive cycle-source and direct identity-owner inventory |
+| I5B | complete | transitive compatibility walk to recursive identity stop edges |
 | I5 | pending | atomic managed lazy/promise/core-net identity closure and cycle audit |
 | I6 | pending | functions, applications, metadata, failures |
 | I7 | pending | persistent list and dictionary tracing |
@@ -4518,6 +4519,20 @@ changes no production representation and performs no collection.
 
 ### Phase I5B — Transitive Compatibility Managed-Edge Walk
 
+Completed 2026-09-04. `CompatibilityValueEdges for Value` is now the
+wildcard-free immediate-child dispatcher, and
+`payload_edges::managed::visit_compatibility_managed_edges` recursively
+composes those passive edges while treating raw lazy, promise, function, and
+net values as hard identity stops. `ManagedValueNode::trace` delegates to that
+one walk. The first synthetic nested-owner fixture deliberately omitted
+metadata and failed with four reported leaf occurrences instead of five; the
+reconciled matrix covers direct values, lists, dictionaries, partial builtin
+arguments, and metadata. A separate raw-identity fixture places the marker
+inside a lazy source, assigned promise, function net, and bare net payload and
+observes exactly the four identity stops with no marker traversal. Production
+identities still report no `Gc`, collection policy remains `NoAuto`, and this
+checkpoint changes no production value representation.
+
 - Introduce one central, wildcard-free traversal which recursively walks raw
   compatibility-owned value structure only far enough to find a managed
   identity. At a lazy, promise, or core-net identity it reports the `Gc` edge
@@ -4537,7 +4552,8 @@ changes no production representation and performs no collection.
 Verification: a nested matrix places a synthetic managed leaf beneath every
 compatibility owner capable of holding a `Value`; source latches prove that
 the production managed node delegates to the central walk and that identity
-stop points never recurse. Production remains `NoAuto` and does not collect.
+stop points never recurse. These focused fixtures now pass. Production remains
+`NoAuto` and does not collect.
 
 ### Phase I5C — Representation-Neutral Family Preparation
 

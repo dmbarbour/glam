@@ -26,8 +26,11 @@ pub(crate) trait CompatibilityValueEdges {
     fn visit_compatibility_value_edges(&self, visit: &mut dyn FnMut(&Value));
 }
 
+mod managed;
 mod persistent;
 mod runtime_net;
+
+pub(super) use managed::visit_compatibility_managed_edges;
 
 fn visit_values(values: &[Value], visit: &mut dyn FnMut(&Value)) {
     for value in values {
@@ -51,6 +54,26 @@ fn visit_promise_assignment(assignment: &PromiseAssignment, visit: &mut dyn FnMu
             visit(&value);
         }
         Err(failure) => failure.visit_compatibility_value_edges(visit),
+    }
+}
+
+impl CompatibilityValueEdges for Value {
+    fn visit_compatibility_value_edges(&self, visit: &mut dyn FnMut(&Value)) {
+        match self {
+            Self::List(list) => list.visit_compatibility_value_edges(visit),
+            Self::Dict(dict) => dict.visit_compatibility_value_edges(visit),
+            Self::PartialBuiltin(call) => call.visit_compatibility_value_edges(visit),
+            Self::Metadata(metadata) => metadata.visit_compatibility_value_edges(visit),
+            Self::Atom(_)
+            | Self::Number(_)
+            | Self::Binary(_)
+            | Self::Builtin(_)
+            | Self::Function(_)
+            | Self::Net(_)
+            | Self::Lazy(_)
+            | Self::Promised(_)
+            | Self::Opaque(_) => {}
+        }
     }
 }
 

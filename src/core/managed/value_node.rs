@@ -11,6 +11,7 @@ use glam_gc::{Root, Trace, UnsupportedLayout, Visitor};
 use super::{
     ManagedDropRecord, ManagedFamily, RuntimeValueAccess, RuntimeValueObserver, managed_slot_extent,
 };
+use crate::core::managed::payload_edges::visit_compatibility_managed_edges;
 use crate::core::{CoreValueFactory, Value};
 use crate::number::Number;
 
@@ -141,34 +142,20 @@ impl ManagedValueNode {
         &self.value
     }
 
-    /// Reports the exact managed edges of the current production shell.
+    /// Reports managed edges through the authoritative compatibility walk.
     ///
-    /// All arms are deliberately zero-edge while their payload families use
-    /// compatibility Rust ownership. I5-I8 replace the affected arm in the
-    /// same checkpoint that its payload first stores `Gc` pointers.
-    fn trace_managed_edges(&self, _visitor: &mut Visitor<'_>) {
-        match &self.value {
-            Value::Atom(_) => {}
-            Value::Number(_) => {}
-            Value::Binary(_) => {}
-            Value::List(_) => {}
-            Value::Dict(_) => {}
-            Value::Builtin(_) => {}
-            Value::PartialBuiltin(_) => {}
-            Value::Function(_) => {}
-            Value::Net(_) => {}
-            Value::Lazy(_) => {}
-            Value::Promised(_) => {}
-            Value::Metadata(_) => {}
-            Value::Opaque(_) => {}
-        }
+    /// Current raw recursive identities are hard stop points and report no
+    /// pointer. I5D changes their representation and stop adapter atomically;
+    /// persistent compatibility containers already compose transitively.
+    fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+        visit_compatibility_managed_edges(&self.value, visitor);
     }
 }
 
-// SAFETY: the wildcard-free dispatch above classifies every current `Value`
-// variant. Compatibility payloads currently own no `Gc` pointer, so every arm
-// reports zero edges. I5-I8 must replace an arm in
-// the same checkpoint that its payload first stores a managed pointer.
+// SAFETY: the central wildcard-free compatibility walk classifies every
+// current `Value` variant, recursively crosses only immediate passive payload
+// edges, and stops at every current raw recursive identity. Those identities
+// own no `Gc` pointer until I5D replaces the stop adapter atomically.
 unsafe impl Trace for ManagedValueNode {
     const REQUESTED_SLOT_SIZE: Option<usize> = Some(managed_slot_extent::<Self>());
 

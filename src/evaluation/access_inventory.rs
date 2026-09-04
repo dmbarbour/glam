@@ -94,6 +94,12 @@ fn all_managed_entries_have_bounded_mutator_regions() {
             "src/core/managed/payload_edges/persistent.rs",
             GatewayCounts::new(0, 1),
         ),
+        // I5B's synthetic managed-leaf fixtures construct closed graphs to
+        // verify transitive compatibility traversal and identity stops.
+        (
+            "src/core/managed/payload_edges/managed.rs",
+            GatewayCounts::new(0, 2),
+        ),
         (
             "src/core/managed/payload_edges/runtime_net.rs",
             GatewayCounts::new(3, 1),
