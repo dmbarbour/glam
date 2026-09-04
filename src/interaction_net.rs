@@ -18,7 +18,7 @@ pub(crate) use runtime::{
     ActivePairStep, BlockedCall, BlockedOperatorCall, Call, CursorDependency,
     CursorDependencyDisposition, CursorDependencyResolution, CursorProgress, CursorStep,
     DemandEndpoint, FrontierObservation, InterfaceDemand, NetContention, OperatorCall,
-    PreparedCopySource, Reduction, ReductionKind, RuntimeNet, RuntimeNetMutation,
+    PreparedCopySource, Reduction, ReductionKind, RuntimeNet, RuntimeNetCell, RuntimeNetMutation,
     RuntimeNetPayload, RuntimeNetPayloadVisitStats, SharedRuntimeNet, SourceFrontier, StuckReason,
 };
 

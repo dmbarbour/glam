@@ -4666,13 +4666,61 @@ production identity graph:
    lazy, promise, and synchronization-owning core-net cells; interior, durable,
    bounded-access, and coordination types from I5.0; stable layouts; and
    allocator admission. These types remain unreachable from production
-   constructors.
+   constructors. Split the work so unsafe collector admission never gets
+   ahead of the visitor which justifies it:
+   - **I5C.2a — Stable state and role types.** Add the dormant cell state,
+     semantic-edge aliases/wrappers, registered-root holders, and bounded
+     access views. Preserve the production source/result/assignment and net
+     synchronization shapes, but expose no production constructor and do not
+     implement `ManagedFamily` yet. Latch layouts and negative capability
+     properties.
+   - **I5C.2b — Scoped mutation and coordination gateways.** Add the private
+     cell-access constructors and the one-write/replaceable-edge operations
+     required by lazy publication, promise assignment, and core-net mutation.
+     Gate every operation on matching `RuntimeValueAccess`; keep subscriptions,
+     disturbance, revisions, IDs, and weak producer routes out of the managed
+     semantic edge set. Registered-root allocation and projection follow in
+     I5C.3a, because Glam's root gateway deliberately requires the completed
+     `ManagedFamily` admission record.
 3. **I5C.3 — Exact dormant traces and gateways.** Implement exact traces over
    lazy source/result, promise assignment, every core-net payload and cross-net
    reference, plus the representation-local mutation gateways. Trace one
    stable state, use nonblocking net locking under exclusive collection, and
    never perform semantic work. Complete passive direct/transitive destruction
-   records and isolated family fixtures.
+   records and isolated family fixtures:
+   - **I5C.3a — Trace closure and admission.** Compose the existing
+     compile-exhaustive compatibility payload walks with exact managed
+     identity stops. Add `Trace`, passive-drop records, allocator admission,
+     and stable-layout assertions together. Core-net tracing must cover every
+     logical value/operator/stuck payload and each managed cross-net source.
+   - **I5C.3b — Isolated lifecycle fixtures.** In fresh collector-ready value
+     domains, prove rooted survival, unrooted reclamation, recursive
+     lazy/promise cycles, core-net source cycles, and passive transitive
+     destruction. Force no collection over production constructors.
+   - **I5C.3c — Gateway and source inventory closure.** Latch every dormant
+     constructor, publication/replacement site, root/access projection, and
+     trace implementation. Prove no managed cell can retain a registered root
+     and no coordination companion can retain a managed semantic edge.
+
+   I5C.2a completed 2026-09-04. The private module now declares the selected
+   lazy, promise, and synchronization-owning core-net cell layouts, exact
+   cross-net `Gc` identity, registered-root holders, and thread-bound access
+   views. `Gc<T>` and `Root<T>` require `Trace` at their Rust type boundary, so
+   the exact visitors are present to make these dormant roles well formed;
+   allocator admission remains closed because none of the three types yet
+   implements Glam's additional `ManagedFamily` contract. Target-specific
+   layout latches and negative `Send` capability checks cover the access views.
+
+   I5C.2b completed 2026-09-04. Matching `RuntimeValueAccess` now authorizes
+   private lazy source/result, promise assignment/subscription/weak-producer,
+   and core-net inspection/mutation views; unrelated value domains are
+   rejected. Lazy publication preserves terminal-before-source-release and one
+   canonical winner. Promise publication uses `CompletionSubscriptions` so
+   assignment wins before registrations detach and wake. Core-net mutation
+   continues to publish one topology revision through the owner-neutral cell.
+   Focused dormant tests exercise both matching and mismatched value domains.
+   Root projection intentionally waits for I5C.3a rather than weakening
+   `RuntimeValueAccess::get` or admitting an incomplete managed family.
 4. **I5C.4 — Atomic-cutover readiness audit.** Prove every production
    constructor, durable owner, publication path, mutation path, and retirement
    path has a prepared destination. A missing destination blocks I5D rather

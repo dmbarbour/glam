@@ -46,6 +46,17 @@ pub(crate) fn visit_compatibility_managed_edges(value: &Value, visitor: &mut Vis
     visit_value_with(value, visitor, &RawIdentityStops);
 }
 
+/// Walks one compatibility payload to the same first managed-identity
+/// boundary used by the production value shell.
+pub(crate) fn visit_compatibility_payload_managed_edges(
+    payload: &impl CompatibilityValueEdges,
+    visitor: &mut Visitor<'_>,
+) {
+    payload.visit_compatibility_value_edges(&mut |value| {
+        visit_compatibility_managed_edges(value, visitor);
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;

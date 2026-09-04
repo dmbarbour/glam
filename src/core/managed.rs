@@ -259,6 +259,7 @@ mod external_owners;
 pub(crate) use external_owners::{ExternalOwnerHandle, ExternalOwnerRegistry};
 mod value_node;
 pub(crate) use value_node::PreparedRuntimeValueRoot;
+mod recursive_cells;
 
 // SAFETY: this is the existing scalar collector-access probe. It has no
 // managed edge, no drop glue, and no active capability. Production value

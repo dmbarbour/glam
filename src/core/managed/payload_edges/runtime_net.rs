@@ -144,7 +144,7 @@ impl CompatibilityNetEdges for CoreOperator {
     dead_code,
     reason = "I4E installs exact halt visitation before I8 uses the core net adapter in production tracing"
 )]
-fn visit_halt_value_edges(halt: &EvaluationHalt, visit: &mut dyn FnMut(&Value)) {
+pub(crate) fn visit_halt_value_edges(halt: &EvaluationHalt, visit: &mut dyn FnMut(&Value)) {
     match halt.payload() {
         EvaluationHaltPayload::Failure(failure) => {
             failure.visit_compatibility_value_edges(visit);

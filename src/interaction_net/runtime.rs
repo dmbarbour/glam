@@ -618,7 +618,7 @@ impl RuntimeNetDisturbance {
 }
 
 impl<S: NetSpecialization> RuntimeNetCell<S> {
-    fn new(runtime: RuntimeNet<S>) -> Self {
+    pub(crate) fn new(runtime: RuntimeNet<S>) -> Self {
         Self {
             runtime: Mutex::new(SharedRuntimeNetState {
                 runtime,
@@ -731,6 +731,23 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
             .expect("shared runtime net was poisoned");
         let revisions = self.revisions();
         (inspect(&state.runtime), revisions)
+    }
+
+    /// Visits one stable logical payload snapshot during exclusive tracing.
+    ///
+    /// A managed cell's mutation gateways require a mutator, so collection's
+    /// exclusive heap phase guarantees this lock is immediately available.
+    /// Failing rather than blocking keeps an integration violation
+    /// recoverable by the collector's trace-panic protocol.
+    pub(crate) fn try_visit_logical_payloads(
+        &self,
+        visit: &mut impl FnMut(RuntimeNetPayload<'_, S>),
+    ) -> RuntimeNetPayloadVisitStats {
+        let state = self
+            .runtime
+            .try_lock()
+            .expect("managed runtime net must be quiescent during tracing");
+        state.runtime.visit_logical_payloads(visit)
     }
 
     pub(crate) fn with_mut<R>(&self, update: impl FnOnce(&mut RuntimeNet<S>) -> R) -> R {
