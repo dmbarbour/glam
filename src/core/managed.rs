@@ -523,17 +523,17 @@ impl CoreValueAllocationScope<'_> {
         root.get(self.mutator)
     }
 
-    /// Borrows one exact managed edge discovered from an already authorized,
-    /// rooted family fixture.
+    /// Borrows one exact managed edge discovered from an already authorized
+    /// semantic owner.
     ///
     /// # Safety
     ///
-    /// `value` must be a live, exactly typed edge in this scope's heap. This
-    /// test-only gateway models the internal trace invariant; unlike a root,
-    /// `Gc<T>` does not carry independently checkable release-build
+    /// `value` must be a live, exactly typed edge in this scope's heap. The
+    /// caller establishes liveness either from a registered root or from a
+    /// traced edge reached through an already rooted managed owner. Unlike a
+    /// root, `Gc<T>` does not carry independently checkable release-build
     /// provenance.
-    #[cfg(test)]
-    pub(crate) unsafe fn get_traced_edge<T: ManagedFamily>(&self, value: Gc<T>) -> &T {
+    pub(super) unsafe fn get_traced_edge<T: ManagedFamily>(&self, value: Gc<T>) -> &T {
         // SAFETY: the caller supplies the exact same-heap traced-edge proof;
         // this scope's mutator excludes collection for the returned borrow.
         unsafe { value.get_unchecked(self.mutator) }

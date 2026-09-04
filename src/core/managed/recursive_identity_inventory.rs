@@ -577,3 +577,38 @@ fn compatibility_graph_cycle_sources_are_classified() {
         "every direct identity occurrence remains assigned to the reviewed M/R/A split"
     );
 }
+
+#[test]
+fn every_inventoried_identity_role_has_a_prepared_cutover_destination() {
+    let prepared = include_str!("recursive_cells.rs");
+    let destination = |family: CycleSource, target: TargetDisposition| match (family, target) {
+        (CycleSource::Lazy, TargetDisposition::ExactManagedEdge) => "ManagedLazyEdge",
+        (CycleSource::Lazy, TargetDisposition::DurableRoot) => "ManagedLazyRoot",
+        (CycleSource::Lazy, TargetDisposition::BoundedAccess) => "ManagedLazyAccess",
+        (CycleSource::Promise, TargetDisposition::ExactManagedEdge) => "ManagedPromiseEdge",
+        (CycleSource::Promise, TargetDisposition::DurableRoot) => "ManagedPromiseRoot",
+        (CycleSource::Promise, TargetDisposition::BoundedAccess) => "ManagedPromiseAccess",
+        (CycleSource::CoreNet, TargetDisposition::ExactManagedEdge) => "ManagedCoreNetEdge",
+        (CycleSource::CoreNet, TargetDisposition::DurableRoot) => "ManagedCoreNetRoot",
+        (CycleSource::CoreNet, TargetDisposition::BoundedAccess) => "ManagedCoreNetAccess",
+    };
+
+    for entry in DIRECT_IDENTITY_INVENTORY {
+        for (family, count) in [
+            (CycleSource::Lazy, entry.signals.lazy),
+            (CycleSource::Promise, entry.signals.promise),
+            (CycleSource::CoreNet, entry.signals.core_net),
+        ] {
+            if count == 0 {
+                continue;
+            }
+            let destination = destination(family, entry.target);
+            assert!(
+                prepared.contains(&format!("struct {destination}")),
+                "{} has no prepared {:?} destination {destination}",
+                entry.declaration,
+                entry.target
+            );
+        }
+    }
+}

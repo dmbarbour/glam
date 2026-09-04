@@ -4754,6 +4754,50 @@ production identity graph:
    path has a prepared destination. A missing destination blocks I5D rather
    than creating a temporary mixed representation.
 
+   Completed 2026-09-04. The audit found one preparation gap: I5C.3 could
+   allocate and root a cell as one operation, but the atomic cutover must give
+   the same allocation both an interior semantic edge and, where required, a
+   separately registered durable root. The private family gateway now exposes
+   that split, can reopen bounded access from either form, and keeps the
+   allocate-and-root helpers as compositions of the same operations. Bare
+   edge access remains an internal unsafe boundary whose liveness comes from
+   the containing traced owner or registered root; matching value-domain
+   authority is checked before dereference and debug collector checks verify
+   the heap and representation.
+
+   Promise publication also now has separate detached and mutation-guarded
+   gateways. Both establish the assignment before invoking the caller's
+   producer-terminal callback and before completion wake detachment. This is
+   the representation-neutral seam needed to root the published wait result
+   while leaving the managed cell's own successful assignment as an ordinary
+   traced `Value` rather than a `RuntimeValueRoot`.
+
+   The complete cutover accounting is:
+
+   | Current production role | Prepared destination | Atomic I5D edit still required |
+   | --- | --- | --- |
+   | `LazyValue::with_source` and every public/internal lazy constructor which funnels through it | `allocate_managed_lazy` produces `ManagedLazyEdge`; `root_managed_lazy` independently publishes a durable root | Require or derive one matching `RuntimeValueAccess`, install the edge in `Value`, and give parked producer state `ManagedLazyRoot` before the access region closes. |
+   | `PromisedValue::with_cell`, fixpoint promises, and the two public promise constructors | `allocate_managed_promise` plus independently shareable `ManagedPromiseRoot` | Publish the edge in the returned `Value`; give `PromiseResolver` and any producer obligation their selected root in the same access region. |
+   | `CoreValueFactory::instantiate_core_net`, `CoreRuntimeNet::instantiate_related`, function/net shells, and prepared copy sources | `allocate_managed_core_net`, `ManagedCoreNetEdge`, `ManagedCoreNetRoot`, and the owner-neutral `RuntimeNetCell` seam from I5C.1 | Make construction return the edge-qualified core facade, retain a root across any pre-installation handoff, and install cross-net sources as exact edges. |
+   | `Value`, `ListThunk`, `EvaluationHalt`, function code/stages, lazy sources/results, promise assignments, and net payloads | The three exact edge types and compile-exhaustive I5B/I5C traces | Replace all three stop arms together and reject every surviving raw recursive identity in the I5D source latch. |
+   | `LazyTaskMachine`, `DeferredProducer`, `DeferredLazyCycleMember`, `PromiseFollower`, reflection fix state/continuations, `WorkDependency::Promise`, and construction handoffs | Family registered roots, or the existing general `RuntimeValueRoot` when the durable state is an arbitrary value | Change fields and projections together; no durable bare `Gc` may survive the mutator region. |
+   | `PromiseResolver`, coordinator `TaskOwnedPromiseObligation`, and direct-runner `LocalPromiseObligation` | `ManagedPromiseRoot`; the managed cell has only `Weak<PromiseProducerObligation>` | Move the root into the external obligation, make the coordinator/local owner hold the strong obligation, and remove that individual root on settlement. These are one coupled ownership inversion, not preparatory production wiring. |
+   | Lazy cache success/failure | `ManagedLazyAccess::cache` | Preserve terminal-before-source-release while converting retained machine snapshots to roots before yielding. |
+   | Promise `set`, `set_root`, failure, guarded task settlement, detached resolver/local publication, subscriptions, and wakeup | `ManagedPromiseAccess::{publish_detached,publish_guarded}`, one-write assignment, edge-free completion companion, and weak producer route | Project/root the wait terminal in the publication callback, remove the producer-owned root under the existing coordinator transaction, then notify after locks and admission are released. |
+   | Core-net topology, claim, cursor, source-copy, and revision mutations | `ManagedCoreNetAccess`, owner-neutral cell mutation, scoped source-operation adapter, and edge-free disturbance companion | Re-express the existing facade methods over the managed cell and route semantic edge changes through the family mutation gateway; later concurrent-GC barriers activate at these same sites. |
+   | Lazy producer release, settled/abandoned task promises, resolver `Drop`, deferred-cycle retirement, net destruction, and final root release | Passive managed cell destruction plus explicit external root retirement; `RuntimeNetCell::drop` closes only its edge-free disturbance companion | Preserve the current explicit terminalization order and release each root at its present semantic retirement point. No managed finalizer or managed-to-root backedge is introduced. |
+
+   The source-backed direct-identity inventory now proves that every one of
+   its 29 M/R/A declarations names an existing family edge, root, or access
+   destination. Focused fixtures prove split edge/root identity, matching and
+   mismatched-domain access, detached and guarded assignment-before-callback
+   order, and all prior lifecycle behavior. Existing production constructor,
+   terminal-publication, cancellation, abandonment, net-locking, and
+   disturbance tests remain the behavioral oracle for the atomic signature
+   substitutions above. None of those substitutions is performed in I5C;
+   production still contains only the old recursive identities and remains
+   `NoAuto`.
+
 The dormant fixtures may force collection only over graphs closed entirely
 inside the prepared families. Production remains unchanged and `NoAuto`.
 

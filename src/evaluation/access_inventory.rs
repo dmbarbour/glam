@@ -104,11 +104,12 @@ fn all_managed_entries_have_bounded_mutator_regions() {
             "src/core/managed/payload_edges/runtime_net.rs",
             GatewayCounts::new(3, 1),
         ),
-        // I5C's dormant recursive-cell fixtures prove matching-domain access
-        // and reject unrelated runtime-value authority.
+        // I5C's dormant recursive-cell fixtures prove matching-domain access,
+        // split edge/root construction, publication ordering, and rejection
+        // of unrelated runtime-value authority.
         (
             "src/core/managed/recursive_cells.rs",
-            GatewayCounts::new(10, 0),
+            GatewayCounts::new(14, 0),
         ),
         // I4F.2c keeps the production-shaped node and prepared root private
         // while their local lifecycle, provenance, and nested-access fixtures
