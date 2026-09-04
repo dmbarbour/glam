@@ -228,7 +228,7 @@ type names:
 | `CoreRuntimeNetAccess`, call/operator claims, `NormalizationRequest`, `NetDriverWork`, `CoreFrontierObservation`, and `CorePreparedCopySource` before installation | `src/core_net.rs`; `src/eval/net.rs` | **A**, with a source-net **M** edge installed when a prepared copy enters topology | High. These values exist only inside one callback-free evaluator quantum and can be scope-branded instead of rooted. |
 | Core net construction or another handoff which must survive before installation into a managed semantic owner | `src/core_net.rs`; front-end/evaluator constructors | **R** until publication, then replace it with **M** | High. A constructor must never publish or park a bare `Gc`. |
 | `CoreNetContention` | `src/core_net.rs`; `src/eval/net.rs` | **C**: disturbance signal plus observed revision, while the enclosing request/access retains net liveness | Medium-high. It needs synchronization, not semantic ownership. The precise signal placement depends on the I5C.1 generic-net seam. |
-| Generic `NormalizationBatchLease<CoreSpecialization>` | `src/interaction_net/runtime.rs`; `src/core_net.rs` | Core use becomes an access-bounded guard or weak edge-free **C** lease; generic non-core `SharedRuntimeNet` may retain its current `Weak<SharedRuntimeNetInner<_>>` | Medium. The semantic disposition is fixed—no weak managed pointer and no durable root—but I5C.1 must choose the least intrusive generic API shape. |
+| Generic `NormalizationBatchLease<CoreSpecialization>` | `src/interaction_net/runtime.rs`; `src/core_net.rs` | Core use becomes an access-bounded guard or weak edge-free **C** lease; generic non-core `SharedRuntimeNet` may retain its current `Weak<RuntimeNetCell<_>>` | Medium. The semantic disposition is fixed—no weak managed pointer and no durable root—but I5C.1 must choose the least intrusive generic API shape. |
 
 The producer-root ownership graph is therefore:
 
@@ -258,7 +258,7 @@ preserves one terminal winner without requiring `Weak<Gc<_>>` or
 | Coordinator demand-session registry, spark demand, and client-demand work -> `EvaluationDemandState` | Keep weak. Work cannot manufacture or prolong the external demand-owner lease. | High |
 | Executor, task handle, client-demand handle, wait/completion source -> coordinator | Keep weak. These are observation/control routes; escaped handles must not retain runtime execution. | High |
 | `PromiseProducerSource::{Coordinator,Local}` -> coordinator/local owner | Keep weak inside the producer obligation. The authoritative owner already owns the obligation, so a reverse strong link would cycle. | High |
-| `NormalizationBatchLease -> SharedRuntimeNetInner` | Keep for non-core generic nets only. Replace the core specialization as described above. | Medium |
+| `NormalizationBatchLease -> RuntimeNetCell` | Keep for non-core generic nets only. Replace the core specialization as described above. | Medium |
 | Collector root registry/TLS -> heap | Keep weak; this is the established `glam-gc` lifetime boundary and is independent of I5 semantic handles. | High |
 | Diagnostic ingress/bus, runtime event endpoint, reflection query domain, opaque external-owner lease, and effect-token domain weak routes | Keep weak and unchanged. They prevent unrelated external-owner/runtime cycles and do not point at lazy, promise, or core-net cells. | High |
 

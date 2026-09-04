@@ -163,6 +163,19 @@ fn runtime_topology_retains_an_opaque_non_shared_source_identity() {
     assert_eq!(stats.source_nets, 1);
 }
 
+#[test]
+fn ownership_neutral_runtime_cell_preserves_mutation_publication() {
+    let cell = RuntimeNetCell::<OwnershipNeutralSpecialization>::new(RuntimeNet::empty());
+    let before = cell.with_revisions(|runtime| runtime.nodes.len()).1;
+
+    let node = cell.with_mut(|runtime| runtime.add_node(RuntimeNode::Data(())));
+    let (present, after) = cell.with_revisions(|runtime| runtime.node(node).is_some());
+
+    assert!(present);
+    assert_eq!(after.topology_revision(), before.topology_revision() + 1);
+    assert_eq!(after.disturbance_epoch(), before.disturbance_epoch() + 1);
+}
+
 fn finish_claimed_cursor<S>(target: &mut RuntimeNet<S>, cursor: NodeId) -> CursorProgress
 where
     S: NetSpecialization<RuntimeSource = SharedRuntimeNet<S>>,
@@ -651,6 +664,38 @@ fn shared_runtime_waiters_resume_when_a_claimed_pair_is_released() {
         .recv_timeout(Duration::from_secs(2))
         .expect("releasing a claimed pair should wake shared runtime waiters");
     waiter.join().expect("runtime waiter should not panic");
+}
+
+#[test]
+fn disturbance_companion_does_not_retain_the_net_and_close_wakes_a_waiter() {
+    let runtime = SharedRuntimeNet::<()>::new(RuntimeNet::empty());
+    let disturbance = runtime.cell().disturbance();
+    let observed_epoch = disturbance.epoch();
+    assert_eq!(
+        Arc::strong_count(&runtime.inner),
+        1,
+        "retaining the edge-free companion must not retain the semantic cell"
+    );
+
+    let (blocked_tx, blocked_rx) = mpsc::channel();
+    let waiter = thread::spawn(move || {
+        disturbance.wait_for_change_after(observed_epoch, || {
+            blocked_tx
+                .send(())
+                .expect("close-order latch receiver should remain open");
+        })
+    });
+    blocked_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("waiter must hold the signal lock immediately before blocking");
+
+    drop(runtime);
+    assert!(
+        !waiter
+            .join()
+            .expect("closed-signal waiter should not panic"),
+        "dropping the semantic cell must close its detached disturbance signal"
+    );
 }
 
 #[test]

@@ -356,7 +356,7 @@ impl CoreRuntimeNetAccess<'_, '_> {
     }
 
     pub(crate) fn with<R>(&self, inspect: impl FnOnce(&RuntimeNet<CoreSpecialization>) -> R) -> R {
-        self.runtime.inner.with(inspect)
+        self.runtime.inner.cell().with(inspect)
     }
 
     /// Enumerates the net's direct semantic payloads under its existing
@@ -397,7 +397,7 @@ impl CoreRuntimeNetAccess<'_, '_> {
         &self,
         update: impl FnOnce(&mut RuntimeNet<CoreSpecialization>) -> R,
     ) -> R {
-        self.runtime.inner.with_mut(update)
+        self.runtime.inner.cell().with_mut(update)
     }
 
     #[cfg(test)]
@@ -405,7 +405,7 @@ impl CoreRuntimeNetAccess<'_, '_> {
         &self,
         inspect: impl FnOnce(&RuntimeNet<CoreSpecialization>) -> R,
     ) -> (R, RuntimeNetRevisions) {
-        self.runtime.inner.with_revisions(inspect)
+        self.runtime.inner.cell().with_revisions(inspect)
     }
 
     #[cfg(test)]
@@ -413,7 +413,7 @@ impl CoreRuntimeNetAccess<'_, '_> {
         &self,
         update: impl FnOnce(&mut RuntimeNet<CoreSpecialization>) -> Option<R>,
     ) -> Option<R> {
-        self.runtime.inner.with_optional_mut(update)
+        self.runtime.inner.cell().with_optional_mut(update)
     }
 
     pub(crate) fn poll_interface_demand(&self, interface: Port) -> InterfaceDemand {
@@ -454,18 +454,22 @@ impl CoreRuntimeNetAccess<'_, '_> {
         let source = source.into_inner_for(&self.runtime.values);
         self.runtime
             .inner
+            .cell()
             .with_mut(|runtime| runtime.resume_claimed_call_with_copy(call, source));
     }
 
     pub(crate) fn claim_call(&self, call: crate::interaction_net::Call) -> Option<Value> {
-        self.runtime.inner.with(|runtime| runtime.claim_call(call))
+        self.runtime
+            .inner
+            .cell()
+            .with(|runtime| runtime.claim_call(call))
     }
 
     pub(crate) fn reclaim_blocked_call(
         &self,
         blocked: &BlockedCall<CoreWaitToken>,
     ) -> Option<(crate::interaction_net::Call, Value)> {
-        self.runtime.inner.with_conditional_mut(|runtime| {
+        self.runtime.inner.cell().with_conditional_mut(|runtime| {
             let Some(call) = runtime.call(blocked.pair) else {
                 return RuntimeNetMutation::Unchanged(None);
             };
@@ -484,7 +488,7 @@ impl CoreRuntimeNetAccess<'_, '_> {
         call: crate::interaction_net::Call,
         operator: CoreOperator,
     ) {
-        self.runtime.inner.with_mut(|runtime| {
+        self.runtime.inner.cell().with_mut(|runtime| {
             runtime.resume_claimed_call_with_operator(call, operator);
         });
     }
@@ -496,6 +500,7 @@ impl CoreRuntimeNetAccess<'_, '_> {
     ) {
         self.runtime
             .inner
+            .cell()
             .with_mut(|runtime| runtime.block_claimed_call(call, wait));
     }
 
@@ -506,11 +511,12 @@ impl CoreRuntimeNetAccess<'_, '_> {
     ) {
         self.runtime
             .inner
+            .cell()
             .with_mut(|runtime| runtime.fail_claimed_call(call, error));
     }
 
     pub(crate) fn release_claimed_call(&self, call: crate::interaction_net::Call) -> bool {
-        self.runtime.inner.with_conditional_mut(|runtime| {
+        self.runtime.inner.cell().with_conditional_mut(|runtime| {
             if runtime.release_claimed_call(call) {
                 RuntimeNetMutation::Changed(true)
             } else {
@@ -524,7 +530,7 @@ impl CoreRuntimeNetAccess<'_, '_> {
         call: crate::interaction_net::Call,
         wait: CoreWaitToken,
     ) -> bool {
-        self.runtime.inner.with_conditional_mut(|runtime| {
+        self.runtime.inner.cell().with_conditional_mut(|runtime| {
             if runtime.restore_blocked_call(call, wait) {
                 RuntimeNetMutation::Changed(true)
             } else {
@@ -539,6 +545,7 @@ impl CoreRuntimeNetAccess<'_, '_> {
     ) -> Option<(CoreOperator, Value)> {
         self.runtime
             .inner
+            .cell()
             .with(|runtime| runtime.claim_operator_call(call))
     }
 
@@ -546,7 +553,7 @@ impl CoreRuntimeNetAccess<'_, '_> {
         &self,
         blocked: &BlockedOperatorCall<CoreWaitToken>,
     ) -> Option<(crate::interaction_net::OperatorCall, CoreOperator, Value)> {
-        self.runtime.inner.with_conditional_mut(|runtime| {
+        self.runtime.inner.cell().with_conditional_mut(|runtime| {
             let Some(call) = runtime.operator_call(blocked.pair) else {
                 return RuntimeNetMutation::Unchanged(None);
             };
@@ -565,7 +572,7 @@ impl CoreRuntimeNetAccess<'_, '_> {
         call: crate::interaction_net::OperatorCall,
         result: OperatorYield<CoreSpecialization>,
     ) {
-        self.runtime.inner.with_mut(|runtime| {
+        self.runtime.inner.cell().with_mut(|runtime| {
             runtime.complete_operator_call(call, result);
         });
     }
@@ -577,6 +584,7 @@ impl CoreRuntimeNetAccess<'_, '_> {
     ) {
         self.runtime
             .inner
+            .cell()
             .with_mut(|runtime| runtime.block_claimed_operator_call(call, wait));
     }
 
@@ -587,6 +595,7 @@ impl CoreRuntimeNetAccess<'_, '_> {
     ) {
         self.runtime
             .inner
+            .cell()
             .with_mut(|runtime| runtime.fail_operator_call(call, error));
     }
 
@@ -594,7 +603,7 @@ impl CoreRuntimeNetAccess<'_, '_> {
         &self,
         call: crate::interaction_net::OperatorCall,
     ) -> bool {
-        self.runtime.inner.with_conditional_mut(|runtime| {
+        self.runtime.inner.cell().with_conditional_mut(|runtime| {
             if runtime.release_claimed_operator_call(call) {
                 RuntimeNetMutation::Changed(true)
             } else {
@@ -608,7 +617,7 @@ impl CoreRuntimeNetAccess<'_, '_> {
         call: crate::interaction_net::OperatorCall,
         wait: CoreWaitToken,
     ) -> bool {
-        self.runtime.inner.with_conditional_mut(|runtime| {
+        self.runtime.inner.cell().with_conditional_mut(|runtime| {
             if runtime.restore_blocked_operator_call(call, wait) {
                 RuntimeNetMutation::Changed(true)
             } else {

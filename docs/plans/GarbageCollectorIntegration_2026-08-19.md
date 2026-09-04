@@ -4562,7 +4562,7 @@ production identity graph:
 
 1. **I5C.1 — Ownership-neutral generic net seam.** Refactor generic shared-net
    and cross-net reference operations so the production core owner need not be
-   `Arc<SharedRuntimeNetInner<_>>`. Keep generic/test specializations
+   an `Arc<RuntimeNetCell<_>>`. Keep generic/test specializations
    collector-independent and preserve I3D.3 authority gating. Implement this
    through the following bounded checkpoints:
 
@@ -4611,6 +4611,28 @@ production identity graph:
    topology to an `Arc` owner. Direct frontier progression remains available
    only for the ordinary self-owned shared specialization until I5C.1c installs
    the scoped source-operation adapter.
+
+   I5C.1b completed 2026-09-04. `RuntimeNetCell<S>` now owns the synchronized
+   topology, normalization state, and topology revision without selecting an
+   owning pointer. `SharedRuntimeNet<S>` is the collector-independent `Arc`
+   adapter and delegates ordinary inspection, mutation, conditional mutation,
+   payload observation, and revision publication to that cell. The core facade
+   already reaches those owner-neutral operations through its scoped
+   `CoreRuntimeNetAccess`; source-progress operations remain on the shared
+   adapter pending I5C.1c.
+
+   Disturbance coordination now lives in a separate edge-free
+   `RuntimeNetDisturbance`. It has its own mutex/condition-variable protocol,
+   epoch, and closed state, contains no semantic-net edge, and may therefore
+   outlive the cell. Publishers may take the signal lock while holding the net
+   lock, but signal waiters never re-enter the net, so there is no reverse lock
+   edge. Dropping the cell closes the companion and wakes an already-blocked
+   waiter. A forced-order test latches the waiter immediately before its
+   condition-variable park, proves retaining the companion does not increment
+   the cell's `Arc` count, then drops the sole cell owner and observes closure.
+   A separate non-shared specialization exercises the cell directly and
+   preserves exact topology/disturbance revision publication. Existing generic
+   mutation, batch, contention, cursor, and core-facade behavior is unchanged.
 
 2. **I5C.2 — Managed cell and access types.** Implement the selected managed
    lazy, promise, and synchronization-owning core-net cells; interior, durable,
@@ -4661,7 +4683,7 @@ Verification: all existing lazy, promise, function/net, interaction-net,
 Cursor-WHNF, publication, cancellation, abandonment, and normalization suites
 pass at the new representation. Source latches reject any surviving production
 `Arc<LazyCell>`, `Arc<PromiseCell>`, or production
-`Arc<SharedRuntimeNetInner<CoreSpecialization>>`, any durable bare `Gc`, and
+`Arc<RuntimeNetCell<CoreSpecialization>>`, any durable bare `Gc`, and
 any managed-reachable `Root`. Production remains `NoAuto`; this checkpoint
 does not run a full production collection.
 
@@ -4847,7 +4869,7 @@ parked bare net handles. Production remains `NoAuto`.
 
 - Delete compatibility adapters and old generic-owner scaffolding made
   redundant specifically by I5's managed production net. A source-backed latch
-  proves no production `Arc`/`Weak<SharedRuntimeNetInner<CoreSpecialization>>`
+  proves no production `Arc`/`Weak<RuntimeNetCell<CoreSpecialization>>`
   owner or raw cross-net identity survives.
 - Do **not** delete the central transitive compatibility-value walk merely
   because net identity is managed. It remains the exact trace for raw

@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::marker::PhantomData;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use super::model::*;
@@ -417,14 +417,39 @@ impl<S: NetSpecialization> ActivePairState<S> {
 }
 
 pub struct SharedRuntimeNet<S: NetSpecialization> {
-    inner: Arc<SharedRuntimeNetInner<S>>,
+    inner: Arc<RuntimeNetCell<S>>,
 }
 
-struct SharedRuntimeNetInner<S: NetSpecialization> {
+/// Synchronization-owning mutable state for one runtime net.
+///
+/// This cell deliberately has no ownership policy. `SharedRuntimeNet` keeps
+/// using `Arc` for generic clients, while the core specialization may place
+/// the same cell behind managed ownership without changing its topology or
+/// mutation protocol.
+pub(crate) struct RuntimeNetCell<S: NetSpecialization> {
     runtime: Mutex<SharedRuntimeNetState<S>>,
-    changed: Condvar,
     topology_revision: AtomicU64,
-    disturbance_epoch: AtomicU64,
+    disturbance: RuntimeNetDisturbance,
+}
+
+/// Edge-free notification state for runtime-net progress.
+///
+/// A waiter may retain this companion without retaining the semantic net.
+/// Closing the owning cell advances the epoch and wakes every waiter, so a
+/// detached companion cannot wait forever on a net which no longer exists.
+/// Publishers may acquire the signal mutex while holding the runtime-net
+/// mutex; signal waiters never acquire or re-enter the runtime-net mutex, so
+/// the lock order has no reverse edge.
+#[derive(Clone)]
+pub(crate) struct RuntimeNetDisturbance {
+    inner: Arc<RuntimeNetDisturbanceInner>,
+}
+
+struct RuntimeNetDisturbanceInner {
+    changed: Condvar,
+    wait: Mutex<()>,
+    epoch: AtomicU64,
+    closed: AtomicBool,
 }
 
 struct SharedRuntimeNetState<S: NetSpecialization> {
@@ -445,7 +470,7 @@ struct ActiveNormalizationBatch {
 }
 
 pub struct NormalizationBatchLease<S: NetSpecialization> {
-    inner: std::sync::Weak<SharedRuntimeNetInner<S>>,
+    inner: std::sync::Weak<RuntimeNetCell<S>>,
     id: u64,
     closed: bool,
 }
@@ -493,12 +518,9 @@ impl<S: NetSpecialization> NormalizationBatchLease<S> {
             false
         };
         if publish {
-            inner.disturbance_epoch.fetch_add(1, Ordering::Relaxed);
+            inner.disturbance.publish();
         }
         drop(state);
-        if publish {
-            inner.changed.notify_all();
-        }
     }
 }
 
@@ -508,11 +530,86 @@ impl<S: NetSpecialization> Drop for NormalizationBatchLease<S> {
     }
 }
 
-impl<S: NetSpecialization> SharedRuntimeNetInner<S> {
+impl RuntimeNetDisturbance {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(RuntimeNetDisturbanceInner {
+                changed: Condvar::new(),
+                wait: Mutex::new(()),
+                epoch: AtomicU64::new(0),
+                closed: AtomicBool::new(false),
+            }),
+        }
+    }
+
+    fn epoch(&self) -> u64 {
+        self.inner.epoch.load(Ordering::Relaxed)
+    }
+
+    fn publish(&self) {
+        let _wait = self
+            .inner
+            .wait
+            .lock()
+            .expect("runtime-net disturbance signal was poisoned");
+        self.inner.epoch.fetch_add(1, Ordering::Relaxed);
+        self.inner.changed.notify_all();
+    }
+
+    fn close(&self) {
+        let _wait = self
+            .inner
+            .wait
+            .lock()
+            .expect("runtime-net disturbance signal was poisoned");
+        self.inner.closed.store(true, Ordering::Relaxed);
+        self.inner.epoch.fetch_add(1, Ordering::Relaxed);
+        self.inner.changed.notify_all();
+    }
+
+    /// Waits until the observed epoch changes. `false` reports that the
+    /// semantic cell closed instead of publishing further progress.
+    fn wait_for_change(&self, observed_epoch: u64) -> bool {
+        self.wait_for_change_after(observed_epoch, || {})
+    }
+
+    fn wait_for_change_after(&self, observed_epoch: u64, before_block: impl FnOnce()) -> bool {
+        let mut wait = self
+            .inner
+            .wait
+            .lock()
+            .expect("runtime-net disturbance signal was poisoned");
+        let mut before_block = Some(before_block);
+        while self.epoch() == observed_epoch && !self.inner.closed.load(Ordering::Relaxed) {
+            if let Some(before_block) = before_block.take() {
+                before_block();
+            }
+            wait = self
+                .inner
+                .changed
+                .wait(wait)
+                .expect("runtime-net disturbance signal was poisoned");
+        }
+        !self.inner.closed.load(Ordering::Relaxed)
+    }
+}
+
+impl<S: NetSpecialization> RuntimeNetCell<S> {
+    fn new(runtime: RuntimeNet<S>) -> Self {
+        Self {
+            runtime: Mutex::new(SharedRuntimeNetState {
+                runtime,
+                batches: NormalizationBatchState::default(),
+            }),
+            topology_revision: AtomicU64::new(0),
+            disturbance: RuntimeNetDisturbance::new(),
+        }
+    }
+
     fn revisions(&self) -> RuntimeNetRevisions {
         RuntimeNetRevisions {
             topology_revision: self.topology_revision.load(Ordering::Relaxed),
-            disturbance_epoch: self.disturbance_epoch.load(Ordering::Relaxed),
+            disturbance_epoch: self.disturbance.epoch(),
         }
     }
 
@@ -521,9 +618,109 @@ impl<S: NetSpecialization> SharedRuntimeNetInner<S> {
         if let Some(active) = batches.active.as_mut() {
             active.dirty = true;
         } else {
-            self.disturbance_epoch.fetch_add(1, Ordering::Relaxed);
-            self.changed.notify_all();
+            self.disturbance.publish();
         }
+    }
+
+    pub(crate) fn with<R>(&self, inspect: impl FnOnce(&RuntimeNet<S>) -> R) -> R {
+        let state = self
+            .runtime
+            .lock()
+            .expect("shared runtime net was poisoned");
+        inspect(&state.runtime)
+    }
+
+    pub(crate) fn with_revisions<R>(
+        &self,
+        inspect: impl FnOnce(&RuntimeNet<S>) -> R,
+    ) -> (R, RuntimeNetRevisions) {
+        let state = self
+            .runtime
+            .lock()
+            .expect("shared runtime net was poisoned");
+        let revisions = self.revisions();
+        (inspect(&state.runtime), revisions)
+    }
+
+    pub(crate) fn with_mut<R>(&self, update: impl FnOnce(&mut RuntimeNet<S>) -> R) -> R {
+        let mut state = self
+            .runtime
+            .lock()
+            .expect("shared runtime net was poisoned");
+        let result = update(&mut state.runtime);
+        self.publish_mutation(&mut state.batches);
+        result
+    }
+
+    pub(crate) fn with_conditional_mut<R>(
+        &self,
+        update: impl FnOnce(&mut RuntimeNet<S>) -> RuntimeNetMutation<R>,
+    ) -> R {
+        let mut state = self
+            .runtime
+            .lock()
+            .expect("shared runtime net was poisoned");
+        match update(&mut state.runtime) {
+            RuntimeNetMutation::Unchanged(result) => result,
+            RuntimeNetMutation::Changed(result) => {
+                self.publish_mutation(&mut state.batches);
+                result
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_optional_mut<R>(
+        &self,
+        update: impl FnOnce(&mut RuntimeNet<S>) -> Option<R>,
+    ) -> Option<R> {
+        self.with_conditional_mut(|runtime| match update(runtime) {
+            Some(result) => RuntimeNetMutation::Changed(Some(result)),
+            None => RuntimeNetMutation::Unchanged(None),
+        })
+    }
+
+    pub(crate) fn poll_interface_demand(&self, interface: Port) -> InterfaceDemand {
+        self.with_conditional_mut(|runtime| runtime.poll_interface_demand(interface))
+    }
+
+    pub(crate) fn resolve_cursor_dependency(
+        &self,
+        cursor: NodeId,
+        expected: &CursorDependency<S>,
+        disposition: CursorDependencyDisposition,
+    ) -> CursorDependencyResolution {
+        self.with_conditional_mut(|runtime| {
+            let resolution = runtime.resolve_cursor_dependency(cursor, expected, disposition);
+            if resolution == CursorDependencyResolution::Resolved {
+                RuntimeNetMutation::Changed(resolution)
+            } else {
+                RuntimeNetMutation::Unchanged(resolution)
+            }
+        })
+    }
+
+    fn disturbance(&self) -> RuntimeNetDisturbance {
+        self.disturbance.clone()
+    }
+
+    #[cfg(test)]
+    fn active_normalization_batch(&self) -> Option<(u64, bool)> {
+        let state = self
+            .runtime
+            .lock()
+            .expect("shared runtime net was poisoned");
+        state
+            .batches
+            .active
+            .as_ref()
+            .map(|active| (active.id, active.contended))
+    }
+}
+
+impl<S: NetSpecialization> Drop for RuntimeNetCell<S> {
+    fn drop(&mut self) {
+        self.disturbance.close();
     }
 }
 
@@ -540,15 +737,7 @@ where
 {
     pub fn new(runtime: RuntimeNet<S>) -> Self {
         Self {
-            inner: Arc::new(SharedRuntimeNetInner {
-                runtime: Mutex::new(SharedRuntimeNetState {
-                    runtime,
-                    batches: NormalizationBatchState::default(),
-                }),
-                changed: Condvar::new(),
-                topology_revision: AtomicU64::new(0),
-                disturbance_epoch: AtomicU64::new(0),
-            }),
+            inner: Arc::new(RuntimeNetCell::new(runtime)),
         }
     }
 
@@ -637,54 +826,25 @@ where
     }
 
     pub fn with<R>(&self, inspect: impl FnOnce(&RuntimeNet<S>) -> R) -> R {
-        let state = self
-            .inner
-            .runtime
-            .lock()
-            .expect("shared runtime net was poisoned");
-        inspect(&state.runtime)
+        self.inner.with(inspect)
     }
 
     pub fn with_revisions<R>(
         &self,
         inspect: impl FnOnce(&RuntimeNet<S>) -> R,
     ) -> (R, RuntimeNetRevisions) {
-        let state = self
-            .inner
-            .runtime
-            .lock()
-            .expect("shared runtime net was poisoned");
-        let revisions = self.inner.revisions();
-        (inspect(&state.runtime), revisions)
+        self.inner.with_revisions(inspect)
     }
 
     pub fn with_mut<R>(&self, update: impl FnOnce(&mut RuntimeNet<S>) -> R) -> R {
-        let mut state = self
-            .inner
-            .runtime
-            .lock()
-            .expect("shared runtime net was poisoned");
-        let result = update(&mut state.runtime);
-        self.inner.publish_mutation(&mut state.batches);
-        result
+        self.inner.with_mut(update)
     }
 
     pub(crate) fn with_conditional_mut<R>(
         &self,
         update: impl FnOnce(&mut RuntimeNet<S>) -> RuntimeNetMutation<R>,
     ) -> R {
-        let mut state = self
-            .inner
-            .runtime
-            .lock()
-            .expect("shared runtime net was poisoned");
-        match update(&mut state.runtime) {
-            RuntimeNetMutation::Unchanged(result) => result,
-            RuntimeNetMutation::Changed(result) => {
-                self.inner.publish_mutation(&mut state.batches);
-                result
-            }
-        }
+        self.inner.with_conditional_mut(update)
     }
 
     #[cfg(test)]
@@ -692,14 +852,11 @@ where
         &self,
         update: impl FnOnce(&mut RuntimeNet<S>) -> Option<R>,
     ) -> Option<R> {
-        self.with_conditional_mut(|runtime| match update(runtime) {
-            Some(result) => RuntimeNetMutation::Changed(Some(result)),
-            None => RuntimeNetMutation::Unchanged(None),
-        })
+        self.inner.with_optional_mut(update)
     }
 
     pub fn poll_interface_demand(&self, interface: Port) -> InterfaceDemand {
-        self.with_conditional_mut(|runtime| runtime.poll_interface_demand(interface))
+        self.inner.poll_interface_demand(interface)
     }
 
     pub fn resolve_cursor_dependency(
@@ -708,40 +865,19 @@ where
         expected: &CursorDependency<S>,
         disposition: CursorDependencyDisposition,
     ) -> CursorDependencyResolution {
-        self.with_conditional_mut(|runtime| {
-            let resolution = runtime.resolve_cursor_dependency(cursor, expected, disposition);
-            if resolution == CursorDependencyResolution::Resolved {
-                RuntimeNetMutation::Changed(resolution)
-            } else {
-                RuntimeNetMutation::Unchanged(resolution)
-            }
-        })
+        self.inner
+            .resolve_cursor_dependency(cursor, expected, disposition)
     }
 
     #[cfg(test)]
     fn revisions(&self) -> (u64, u64) {
-        let _state = self
-            .inner
-            .runtime
-            .lock()
-            .expect("shared runtime net was poisoned");
-        let revisions = self.inner.revisions();
+        let revisions = self.inner.with_revisions(|_| ()).1;
         (revisions.topology_revision(), revisions.disturbance_epoch())
     }
 
     pub fn wait_for_disturbance(&self, observed_epoch: u64) {
-        let mut state = self
-            .inner
-            .runtime
-            .lock()
-            .expect("shared runtime net was poisoned");
-        while self.inner.disturbance_epoch.load(Ordering::Relaxed) == observed_epoch {
-            state = self
-                .inner
-                .changed
-                .wait(state)
-                .expect("shared runtime net was poisoned");
-        }
+        let disturbance = self.inner.disturbance();
+        let _ = disturbance.wait_for_change(observed_epoch);
     }
 
     pub fn try_begin_normalization_batch(
@@ -777,16 +913,7 @@ where
 
     #[cfg(test)]
     pub(crate) fn active_normalization_batch(&self) -> Option<(u64, bool)> {
-        let state = self
-            .inner
-            .runtime
-            .lock()
-            .expect("shared runtime net was poisoned");
-        state
-            .batches
-            .active
-            .as_ref()
-            .map(|active| (active.id, active.contended))
+        self.inner.active_normalization_batch()
     }
 
     fn contention(&self, revisions: RuntimeNetRevisions) -> NetContention<S> {
@@ -955,6 +1082,10 @@ where
 impl<S: NetSpecialization> SharedRuntimeNet<S> {
     pub fn ptr_eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
+    pub(crate) fn cell(&self) -> &RuntimeNetCell<S> {
+        &self.inner
     }
 }
 
