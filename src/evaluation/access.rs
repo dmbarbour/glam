@@ -428,9 +428,11 @@ mod tests {
     fn runtime_tls_caches_remain_heap_qualified() {
         let _ = glam_gc::Heap::release_current_thread_caches();
         let first = value_factory();
+        let first_scoped = first.scoped();
         let second = value_factory();
 
-        first.with_runtime_value_access(|first_access| {
+        first_scoped.with_runtime_value_access(|first_access| {
+            assert!(std::ptr::eq(first_access.values(), &first_scoped));
             assert!(first_access.belongs_to(&first));
             assert!(!first_access.belongs_to(&second));
             second.with_runtime_value_access(|second_access| {

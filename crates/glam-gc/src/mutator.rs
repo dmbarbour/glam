@@ -120,6 +120,12 @@ pub struct Allocator<'mutator, T: Trace> {
 impl<T: Trace> Allocator<'_, T> {
     /// Allocates one value through this scoped heap-local allocation class.
     ///
+    /// The surrounding admitted mutator region is the liveness witness for
+    /// the returned pointer and for any unpublished graph assembled from it.
+    /// `alloc` does not publish a root. A pointer which must survive the end of
+    /// the region must first be installed beneath an already traced owner or
+    /// registered as a root.
+    ///
     /// Zero-sized managed types are unsupported:
     ///
     /// ```compile_fail,E0080

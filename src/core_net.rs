@@ -165,7 +165,7 @@ impl CoreValueFactory {
         let observer = self.runtime_value_observer();
         self.with_runtime_value_access(|access| CoreRuntimeNet {
             edge: access
-                .allocate_managed_core_net(self, template.instantiate())
+                .allocate_managed_core_net(template.instantiate())
                 .expect("managed core-net representation must fit one collector run"),
             values: observer,
         })
@@ -179,7 +179,7 @@ impl CoreValueFactory {
         let observer = self.runtime_value_observer();
         self.with_runtime_value_access(|access| CoreRuntimeNet {
             edge: access
-                .allocate_managed_core_net(self, inner.into_runtime_for_managed_test())
+                .allocate_managed_core_net(inner.into_runtime_for_managed_test())
                 .expect("managed core-net test representation must fit one collector run"),
             values: observer,
         })

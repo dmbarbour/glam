@@ -428,13 +428,24 @@ authority is a prerequisite for expressing the regional publication boundary;
 the owner-producing API should not first be designed around a bare domain and
 then immediately rebuilt around the factory.
 
-1. **B.1 — Access authority.** Keep `glam_gc::Allocator::alloc` returning
+1. **B.1 — Access authority (complete).** Keep
+   `glam_gc::Allocator::alloc` returning
    `Gc<T>`, and document that mutator admission is the liveness witness for all
    unpublished intermediate allocations in one construction region. Make
    `RuntimeValueAccess` borrow the entering `CoreValueFactory` while retaining
    its existing allocation scope and I3 lifetime/thread guarantees. Move or
    delegate only the operations needed by this repair; allocation and
    observation must not redundantly require a separately supplied factory.
+
+   Completed on 2026-09-07. `RuntimeValueAccess` now retains the exact entering
+   factory view, including compilation-local extensions, and derives managed
+   lazy, promise, and core-net construction state from that authority. The
+   allocators no longer accept a redundant factory argument. A focused test
+   distinguishes retention of the exact scoped factory view from ordinary
+   same-domain provenance checks. Collector and Glam access documentation now
+   state that active mutator admission protects an unpublished intermediate
+   graph only until the region ends; later survival still requires a root or
+   installation under an exactly traced owner. Root publication remains B.2.
 2. **B.2 — Root publication.** Add an access-owned containing-value root
    publisher over `RuntimeValueRoot::new_from_access`, plus a factory entry
    which runs a callback-free construction closure and publishes its returned

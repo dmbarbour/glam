@@ -622,7 +622,7 @@ impl LazyValue {
         let label = label.into();
         values.with_runtime_value_access(|access| {
             let edge = access
-                .allocate_managed_lazy(values, label.clone(), source)
+                .allocate_managed_lazy(label.clone(), source)
                 .expect("managed lazy representation must fit one collector run");
             let id = edge
                 .access(&observer, &access)
@@ -827,7 +827,7 @@ impl PromisedValue {
         let label = label.into();
         values.with_runtime_value_access(|access| {
             let edge = access
-                .allocate_managed_promise(values, label.clone())
+                .allocate_managed_promise(label.clone())
                 .expect("managed promise representation must fit one collector run");
             let id = edge
                 .access(&observer, &access)

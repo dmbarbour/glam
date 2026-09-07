@@ -325,21 +325,25 @@ unsafe impl OpaquePayloadFamily for u64 {
 ///
 /// The scope deliberately exposes neither the runtime heap nor the collector
 /// mutator. Managed allocation classes and borrows remain bounded by this
-/// region. Because bare `Gc<T>` is intentionally lifetime-free for use as an
-/// interior edge, integration must still ensure that any pointer leaving the
-/// region is installed as an exactly traced edge or published as a root.
+/// region. Mutator admission keeps every allocation in an unpublished
+/// intermediate graph live until the region ends, even before that graph has
+/// a root or a traced owner. Because bare `Gc<T>` is intentionally
+/// lifetime-free for use as an interior edge, integration must still install
+/// every pointer which must survive the region as an exactly traced edge or
+/// publish it as a root before returning.
 pub(crate) struct CoreValueAllocationScope<'scope> {
     mutator: &'scope Mutator<'scope>,
 }
 
-/// Domain-qualified managed access for one bounded runtime operation.
+/// Factory-qualified managed access for one bounded runtime operation.
 ///
 /// This is the foundational I3 authority. It combines I1's narrow allocation
-/// scope with the exact value domain which admitted its mutator. Subsystems
-/// derive shorter-lived views from this carrier rather than entering the heap
-/// independently.
+/// scope with the exact factory view which admitted its mutator, including any
+/// compilation-local extensions on that view. Subsystems derive shorter-lived
+/// views from this carrier rather than entering the heap independently or
+/// supplying a second factory argument which could disagree with it.
 pub(crate) struct RuntimeValueAccess<'scope> {
-    domain: &'scope RuntimeValueDomain,
+    values: &'scope CoreValueFactory,
     #[allow(
         dead_code,
         reason = "I4 introduces production managed allocation, rooting, and borrowing through this scope"
@@ -399,7 +403,7 @@ impl CoreValueFactory {
             .with_mutator(|mutator| operation(CoreValueAllocationScope { mutator }))
     }
 
-    /// Opens one domain-qualified managed-access region.
+    /// Opens one factory-qualified managed-access region.
     ///
     /// The higher-ranked callback prevents the access carrier, its mutator,
     /// allocators, and managed borrows from escaping. I3 scheduler poll
@@ -412,7 +416,7 @@ impl CoreValueFactory {
             #[cfg(test)]
             let _access_depth = RuntimeValueAccessDepthGuard::enter();
             operation(RuntimeValueAccess {
-                domain: self.domain.as_ref(),
+                values: self,
                 scope: CoreValueAllocationScope { mutator },
             })
         })
@@ -477,8 +481,16 @@ impl RuntimeValueObserver {
 }
 
 impl RuntimeValueAccess<'_> {
+    /// Returns the exact factory view which admitted this region.
+    ///
+    /// This includes compilation-local extensions; callers must not recover a
+    /// fresh domain-only factory when constructing related values.
+    pub(crate) fn values(&self) -> &CoreValueFactory {
+        self.values
+    }
+
     pub(crate) fn runtime_id(&self) -> EvaluationRuntimeId {
-        self.domain.runtime
+        self.values.runtime_id()
     }
 
     /// Returns whether `values` is another authorized view of this exact value
@@ -486,12 +498,12 @@ impl RuntimeValueAccess<'_> {
     /// this private check aligned with the heap authority already in hand and
     /// avoids treating an integer ID as the capability itself.
     pub(crate) fn belongs_to(&self, values: &CoreValueFactory) -> bool {
-        std::ptr::eq(self.domain, values.domain.as_ref())
+        Arc::ptr_eq(&self.values.domain, &values.domain)
     }
 
     /// Returns whether `observer` routes back to this admitted value domain.
     pub(crate) fn admits(&self, observer: &RuntimeValueObserver) -> bool {
-        std::ptr::eq(self.domain, observer.domain.as_ptr())
+        std::ptr::eq(self.values.domain.as_ref(), observer.domain.as_ptr())
     }
 
     /// Returns whether `root` belongs to this exact admitted value heap.
@@ -499,7 +511,7 @@ impl RuntimeValueAccess<'_> {
     /// Unlike a diagnostic runtime ID, collector-root provenance is the
     /// authoritative ownership check for managed value representations.
     pub(crate) fn admits_root<T: ManagedFamily>(&self, root: &Root<T>) -> bool {
-        self.domain.heap.owns(root)
+        self.values.domain.heap.owns(root)
     }
 
     /// Discovers or reuses one heap-local allocation class for this region.
