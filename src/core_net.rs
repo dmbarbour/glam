@@ -589,9 +589,8 @@ impl CoreRuntimeNetAccess<'_, '_> {
         &self,
         call: crate::interaction_net::Call,
     ) -> Option<RuntimeValueRoot> {
-        self.claim_call(call).map(|value| {
-            RuntimeValueRoot::new_from_access(self.owner.values.clone(), self.values, value)
-        })
+        self.claim_call(call)
+            .map(|value| self.values.root_runtime_value(value))
     }
 
     pub(crate) fn reclaim_blocked_call(
@@ -608,10 +607,7 @@ impl CoreRuntimeNetAccess<'_, '_> {
             let callable = runtime
                 .claim_call(call)
                 .expect("reclaimed call must expose its callable data");
-            RuntimeNetMutation::Changed(Some((
-                call,
-                RuntimeValueRoot::new_from_access(self.owner.values.clone(), self.values, callable),
-            )))
+            RuntimeNetMutation::Changed(Some((call, self.values.root_runtime_value(callable))))
         })
     }
 

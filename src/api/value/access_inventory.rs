@@ -1,7 +1,8 @@
 //! Production managed-root publication and forbidden-escape inventories.
 //!
 //! Registered root creation is a legitimate publication boundary and remains
-//! source-counted by owner. Authority-free bare-core conversions are not a
+//! source-counted by owner, including publication through an already-admitted
+//! `RuntimeValueAccess`. Authority-free bare-core conversions are not a
 //! migration allowance: the second latch rejects them anywhere in production.
 
 use std::collections::BTreeMap;
@@ -11,15 +12,22 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct RootPublicationCounts {
     root_new: usize,
+    access_root: usize,
 }
 
 impl RootPublicationCounts {
-    const fn new(root_new: usize) -> Self {
-        Self { root_new }
+    const fn new(root_new: usize, access_root: usize) -> Self {
+        Self {
+            root_new,
+            access_root,
+        }
     }
 
     fn in_source(source: &str) -> Self {
-        Self::new(source.matches("RuntimeValueRoot::new(").count())
+        Self::new(
+            source.matches("RuntimeValueRoot::new(").count(),
+            source.matches(".root_runtime_value(").count(),
+        )
     }
 }
 
@@ -31,10 +39,10 @@ struct InventoryEntry {
 }
 
 macro_rules! entry {
-    ($path:literal, $root_new:literal, $role:literal, $migration:literal) => {
+    ($path:literal, $root_new:literal, $access_root:literal, $role:literal, $migration:literal) => {
         InventoryEntry {
             path: $path,
-            counts: RootPublicationCounts::new($root_new),
+            counts: RootPublicationCounts::new($root_new, $access_root),
             role: $role,
             migration: $migration,
         }
@@ -45,90 +53,112 @@ const INVENTORY: &[InventoryEntry] = &[
     entry!(
         "src/api/assembly.rs",
         2,
+        0,
         "assembly setup, rooted compiler handoff, import results, modules, and reflection environment",
         "I3E.2 bounded compiler regions; I4F.1 durable roots"
     ),
     entry!(
         "src/api/value.rs",
+        0,
         1,
         "constructors, composite validation, observers, extraction, and net data",
-        "I3B.1 scoped construction/extraction; I4F.2 public facade switch"
+        "I3B.1 scoped construction/extraction; I4F.2 public facade switch; GCI5R-001B same-region root publication"
     ),
     entry!(
         "src/compiler.rs",
         10,
+        0,
         "rooted source context, origins, definition promises, and import handoff",
         "I3E.2 bounded compiler regions; I4F.1 durable roots"
     ),
     entry!(
         "src/core.rs",
         6,
+        1,
         "post-domain canonical-root initialization, promise publication, and externalized reflection effect/target roots",
-        "I4F.2d.0 canonical initialization; I4F.2a.1c fixture closure; I4F.2b.2 reflection ownership; I5 managed promise assignment"
+        "I4F.2d.0 canonical initialization; I4F.2a.1c fixture closure; I4F.2b.2 reflection ownership; I5 managed promise assignment; GCI5R-001B regional construction entry"
+    ),
+    entry!(
+        "src/core_net.rs",
+        0,
+        2,
+        "call claims rooted while matching managed net access remains admitted",
+        "I3D.3 scoped core-net mutation; GCI5R-001B access-owned containing roots"
     ),
     entry!(
         "src/core/managed/active_owner_inventory.rs",
         1,
+        0,
         "test-only external callback root-backedge containment proof",
         "I5F.4 external-owner closure audit; I10A deferred callback containment"
     ),
     entry!(
         "src/evaluation/access.rs",
         2,
+        0,
         "poll/evaluator-step completion rooting and scoped projection",
         "I3A.4/I3C.2 outcome typing and projection; I4F.2 managed root switch"
     ),
     entry!(
         "src/evaluation/coordinator/spark.rs",
         1,
+        0,
         "durable spark demand",
         "I3A.4/I3C.2 poll outcomes; I4F.1 coordinator roots"
     ),
     entry!(
         "src/evaluation/pump.rs",
         1,
+        0,
         "centralized client/spark evaluation and exceptional lazy-cycle publication",
         "I3A.3/I3B.1b/I3B.2/I3C.2 scoped polling; I4F.1 outcomes"
     ),
     entry!(
         "src/evaluation/session.rs",
         4,
+        0,
         "session demand, reserved reflection activation, effect entry, and patient completion",
         "I3A.3/I3B.2/I3C.1-I3D.1 scoped polling and activation; I4F.1 outcomes"
     ),
     entry!(
         "src/g_syntax.rs",
         2,
+        0,
         "rooted lowered definitions and compiler diagnostics across publication",
         "I3E.2 bounded compiler regions; I4F.1 durable roots"
     ),
     entry!(
         "src/g_syntax/compiler_values.rs",
         1,
+        0,
         "complete runtime-cached compiler helper bundles",
         "I3E.2 rooted cache publication; I4F.1 durable roots"
     ),
     entry!(
         "src/g_syntax/diagnostic_formatter.rs",
         1,
+        0,
         "runtime-cached closed diagnostic formatter",
         "I3E.2 rooted cache publication; I4F.1 durable roots"
     ),
     entry!(
         "src/g_syntax/module_lowering.rs",
         2,
+        0,
         "declaration-to-declaration definitions and reflection annotator",
         "I3E.2 bounded lowering regions; I4F.1 durable roots"
     ),
     entry!(
         "src/reflection/machine.rs",
         7,
+        0,
         "rooted reflection machine and decoded-request handoff plus bounded evaluator, parser, and store access",
         "I3D.2/I3D.4 interpreter phases; I4F.1d.3 complete machine roots and bounded raw values; I4F.2a compatibility-access retirement"
     ),
     entry!(
         "src/runtime.rs",
         1,
+        0,
         "shallow direct-value rooting for one runtime failure root",
         "I4F.1c.1 failure-root boundary; I6C managed failure shell"
     ),
@@ -181,7 +211,7 @@ fn registered_runtime_root_publication_inventory_is_complete() {
             }
             let source = fs::read_to_string(&path).expect("an inventoried source should be UTF-8");
             let counts = RootPublicationCounts::in_source(&source);
-            (counts != RootPublicationCounts::new(0)).then(|| {
+            (counts != RootPublicationCounts::new(0, 0)).then(|| {
                 (
                     relative
                         .to_str()

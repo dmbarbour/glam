@@ -1320,6 +1320,85 @@ mod tests {
     }
 
     #[test]
+    fn regional_value_publication_retains_only_the_returned_managed_graph() {
+        let values = new_values();
+        let baseline = values
+            .collect_managed_for_test()
+            .expect("the regional-construction fixture should start collectible");
+
+        let root = values.construct_runtime_value_root(|access| {
+            let observer = access.values().runtime_value_observer();
+            let _unreturned = access
+                .allocate_managed_lazy("unreturned regional lazy", LazySource::Error)
+                .expect("the unreturned managed lazy should fit a run");
+
+            let lazy_edge = access
+                .allocate_managed_lazy("returned regional lazy", LazySource::Error)
+                .expect("the returned managed lazy should fit a run");
+            let lazy_root = access.root_managed_lazy(observer.clone(), lazy_edge);
+            let lazy = LazyValue::from_root(&lazy_root);
+
+            let promise_edge = access
+                .allocate_managed_promise("returned regional promise")
+                .expect("the returned managed promise should fit a run");
+            let promise_root = access.root_managed_promise(observer, promise_edge);
+            let promise = PromisedValue::from_root(&promise_root);
+
+            drop((lazy_root, promise_root));
+            Value::List(List::from_values(vec![
+                Value::Lazy(lazy),
+                Value::Promised(promise),
+            ]))
+        });
+
+        let live = values
+            .collect_managed_for_test()
+            .expect("the containing value root should retain both returned children");
+        assert_eq!(live.root_entries(), baseline.root_entries() + 1);
+        assert_eq!(live.marked_slots(), baseline.marked_slots() + 3);
+        assert_eq!(
+            live.finalized_slots(),
+            1,
+            "the allocation omitted from the returned graph should be reclaimed"
+        );
+
+        assert!(matches!(
+            root.clone_core_in_own_domain(),
+            Some(Value::List(list)) if list.len() == 2
+        ));
+
+        drop(root);
+        let dead = values
+            .collect_managed_for_test()
+            .expect("dropping the containing root should release its graph");
+        assert_eq!(dead.root_entries(), baseline.root_entries());
+        assert_eq!(dead.finalized_slots(), 3);
+    }
+
+    #[test]
+    fn early_regional_return_leaves_partial_managed_graph_collectible() {
+        let values = new_values();
+        let baseline = values
+            .collect_managed_for_test()
+            .expect("the early-return fixture should start collectible");
+
+        let outcome = values.try_construct_runtime_value_root(|access| {
+            let _partial = access
+                .allocate_managed_promise("abandoned partial graph")
+                .expect("the partial managed promise should fit a run");
+            Err::<Value, &'static str>("construction stopped")
+        });
+        assert_eq!(outcome, Err("construction stopped"));
+
+        let collected = values
+            .collect_managed_for_test()
+            .expect("an unpublished partial graph should remain collectible");
+        assert_eq!(collected.root_entries(), baseline.root_entries());
+        assert_eq!(collected.marked_slots(), baseline.marked_slots());
+        assert_eq!(collected.finalized_slots(), 1);
+    }
+
+    #[test]
     fn managed_lazy_source_self_cycle_is_traced_and_reclaimed() {
         let values = new_values();
         let baseline = values

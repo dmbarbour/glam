@@ -5061,6 +5061,14 @@ is not required, must not expose an unrestricted ordinary-pointer conversion,
 and must not replace the regional forced-order proof. `glam_gc::Allocator`
 itself continues to return `Gc<T>`.
 
+GCI5R-001B completed the shared operational foundation on 2026-09-07:
+`RuntimeValueAccess` borrows its exact entering factory, supplies an
+access-owned containing-value root publisher, and the factory supplies
+infallible and fallible callback-free construction entries which publish only
+the returned graph before access ends. `ScopedValues::wrap` reuses that
+publisher without nested admission. The family cutovers in GCI5R-001C-F must
+still apply this foundation before the overall finding can close.
+
 ## Phase I6 — Functions, Applications, Metadata, and Failures
 
 ### Phase I6A — Functions, Applications, and Fixpoints

@@ -210,7 +210,7 @@ impl RuntimeValueRoot {
         }
     }
 
-    pub(crate) fn new_from_access(
+    fn new_from_access(
         observer: crate::core::RuntimeValueObserver,
         access: &crate::core::RuntimeValueAccess<'_>,
         value: Value,
@@ -272,6 +272,17 @@ impl RuntimeValueRoot {
     pub(crate) fn clone_core_for_test(&self) -> Value {
         self.clone_core_in_own_domain()
             .expect("test root observation requires its live value domain")
+    }
+}
+
+impl crate::core::RuntimeValueAccess<'_> {
+    /// Publishes one containing-value root through this admitted region.
+    ///
+    /// Every managed edge reachable from `value` may remain unpublished while
+    /// the region is active. Registering the outer root here transfers its
+    /// liveness to the collector before the region ends.
+    pub(crate) fn root_runtime_value(&self, value: Value) -> RuntimeValueRoot {
+        RuntimeValueRoot::new_from_access(self.values().runtime_value_observer(), self, value)
     }
 }
 

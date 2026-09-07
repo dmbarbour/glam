@@ -161,6 +161,18 @@ This is the compatibility shape before managed semantic values: I3B moves root
 construction to the evaluator-step publication boundary, and I4F.2 replaces
 the root's interior representation without reopening the scheduler boundary.
 
+Callback-free value construction uses the same regional rule. A
+`RuntimeValueAccess` borrows the exact entering `CoreValueFactory`, including
+its compilation-local view, and active mutator admission keeps an unpublished
+intermediate graph live only until that access ends. The factory's infallible
+and fallible construction entries publish the returned graph's containing
+`RuntimeValueRoot` before leaving the region; a fallible early return publishes
+nothing and leaves its partial graph collectible. `ScopedValues::wrap` uses
+the access-owned publisher directly rather than recursively entering managed
+access. Code which must wait, invoke a host callback, enter coordinator state,
+or cross another orchestration boundary instead retains the factory and opens
+a later access around its next bounded operation.
+
 Terminal wait records likewise retain `RuntimeValueRoot`. A general
 `EvaluationWaitPoll::Complete` observation receives that owned root; only
 `EvaluatorStepContext::project_root` may clone its semantic value back into a

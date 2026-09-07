@@ -29,6 +29,7 @@ mod runtime_cache;
 #[cfg(test)]
 pub(crate) use managed::{
     ClosedCompatibilityValue, ManagedDropRecord, ManagedFamily,
+    max_runtime_value_access_depth_for_test, reset_runtime_value_access_depth_for_test,
     thread_has_runtime_value_access_for_test,
 };
 pub(crate) use managed::{
@@ -391,6 +392,42 @@ impl CoreValueFactory {
             domain: self.domain.clone(),
             local_extensions: Some(Arc::new(Mutex::new(RuntimeCacheMap::default()))),
         }
+    }
+
+    /// Constructs one callback-free semantic graph and publishes its outer
+    /// runtime root before the admitted allocation region ends.
+    ///
+    /// The construction closure may allocate and connect unpublished managed
+    /// nodes through `access`. It must remain synchronous: code which waits,
+    /// invokes a host callback, enters coordinator state, or otherwise crosses
+    /// an orchestration boundary retains this factory and opens a later access
+    /// region instead. Family-specific installation beneath an existing
+    /// traced owner remains separate from this containing-value root path.
+    #[allow(
+        dead_code,
+        reason = "GCI5R-001B establishes the regional publisher before the C-F family cutovers"
+    )]
+    pub(crate) fn construct_runtime_value_root(
+        &self,
+        construction: impl for<'scope> FnOnce(&RuntimeValueAccess<'scope>) -> Value,
+    ) -> RuntimeValueRoot {
+        self.try_construct_runtime_value_root(|access| {
+            Ok::<_, std::convert::Infallible>(construction(access))
+        })
+        .expect("infallible runtime-value construction cannot fail")
+    }
+
+    /// Fallible counterpart to [`Self::construct_runtime_value_root`].
+    ///
+    /// An early `Err` ends the admitted region without publishing a root;
+    /// partial allocations remain ordinary unreachable collector garbage.
+    pub(crate) fn try_construct_runtime_value_root<E>(
+        &self,
+        construction: impl for<'scope> FnOnce(&RuntimeValueAccess<'scope>) -> Result<Value, E>,
+    ) -> Result<RuntimeValueRoot, E> {
+        self.with_runtime_value_access(|access| {
+            construction(&access).map(|value| access.root_runtime_value(value))
+        })
     }
 
     pub(crate) fn attach_work_coordinator(&self, coordinator: &Arc<EvaluationWorkCoordinator>) {

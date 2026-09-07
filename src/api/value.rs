@@ -25,6 +25,9 @@ mod access_inventory;
 #[cfg(test)]
 mod scoped_construction_tests {
     use super::*;
+    use crate::core::{
+        max_runtime_value_access_depth_for_test, reset_runtime_value_access_depth_for_test,
+    };
     use crate::runtime::{RuntimeIds, allocate_evaluation_runtime_id};
     use glam_gc::CollectionError;
 
@@ -65,6 +68,22 @@ mod scoped_construction_tests {
             .core
             .collect_managed_for_test()
             .expect("the one outer construction region must release its mutator");
+    }
+
+    #[test]
+    fn scoped_wrap_publishes_without_nested_managed_access() {
+        let values = values();
+        reset_runtime_value_access_depth_for_test();
+
+        let wrapped = values
+            .with_access(|access| access.wrap(CoreValue::Dict(crate::core::Dict::new_sync())));
+
+        assert_eq!(wrapped.runtime_id(), values.runtime_id());
+        assert_eq!(
+            max_runtime_value_access_depth_for_test(),
+            1,
+            "ScopedValues::wrap must publish through its existing access"
+        );
     }
 }
 
@@ -658,7 +677,7 @@ impl ScopedValues<'_> {
     pub(super) fn wrap(&self, value: CoreValue) -> Value {
         debug_assert_eq!(self.owner.runtime, self.core().runtime_id());
         debug_assert!(self.access.belongs_to(self.core()));
-        Value(RuntimeValueRoot::new(self.core(), value))
+        Value(self.access.root_runtime_value(value))
     }
 
     fn require(&self, value: &Value) -> Result<(), Error> {

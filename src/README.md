@@ -50,7 +50,7 @@ not define language semantics or collect subsystem invariants.
 | `g_syntax/diagnostic_formatter.rs` | Cached Glam `Diagnostic -> Bytes` formatter |
 | `text_pattern.rs` | Shared capture-free text-pattern language |
 | `core.rs`, `core/` | Syntax-independent values, runtime value-domain ownership, factory-scoped managed allocation/rooting, lazies, promises, functions, keys, builtins |
-| `core/managed.rs` | Factory-qualified collector access, domain-qualified `RuntimeValueAccess`, Glam's centralized managed-slot policy, and private managed-family destruction admission records |
+| `core/managed.rs` | Factory-qualified collector access and `RuntimeValueAccess`, Glam's centralized managed-slot policy, and private managed-family destruction admission records |
 | `core/managed/value_node.rs` | Private production inline-or-root preparation, the managed outer value shell, exhaustive variant dispatch, and root lifecycle fixtures |
 | `crates/glam-gc/` | Glam-owned typed-run tracing collector; each runtime value domain owns a no-auto heap while recursive payload families migrate in I5-I8 |
 | `core_net.rs` | Exact-value-domain facade plus scoped observation/mutation and non-reducing semantic-payload views for core interaction nets; raw shared-net ownership remains private |

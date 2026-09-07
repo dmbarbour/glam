@@ -118,7 +118,9 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         ("src/core/managed/value_node.rs", GatewayCounts::new(8, 0)),
         // I5D routes lazy and promise cell construction and access through the
         // same bounded domain gateway as reflection-value projection.
-        ("src/core.rs", GatewayCounts::new(7, 5)),
+        // GCI5R-001B adds one synchronous construction entry which publishes
+        // its returned graph before that same bounded access ends.
+        ("src/core.rs", GatewayCounts::new(8, 5)),
         // I5D scopes every managed core-net construction, root handoff, and
         // source-frontier traversal through matching value-domain authority.
         ("src/core_net.rs", GatewayCounts::new(12, 0)),

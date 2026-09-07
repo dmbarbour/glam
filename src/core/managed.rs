@@ -37,6 +37,7 @@ const _: () = assert!(managed_slot_extent::<usize>() == MANAGED_SLOT_SIZE_FLOOR)
 #[cfg(test)]
 thread_local! {
     static RUNTIME_VALUE_ACCESS_DEPTH: Cell<usize> = const { Cell::new(0) };
+    static RUNTIME_VALUE_ACCESS_MAX_DEPTH: Cell<usize> = const { Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -45,7 +46,13 @@ struct RuntimeValueAccessDepthGuard;
 #[cfg(test)]
 impl RuntimeValueAccessDepthGuard {
     fn enter() -> Self {
-        RUNTIME_VALUE_ACCESS_DEPTH.with(|depth| depth.set(depth.get() + 1));
+        RUNTIME_VALUE_ACCESS_DEPTH.with(|depth| {
+            let entered = depth.get() + 1;
+            depth.set(entered);
+            RUNTIME_VALUE_ACCESS_MAX_DEPTH.with(|maximum| {
+                maximum.set(maximum.get().max(entered));
+            });
+        });
         Self
     }
 }
@@ -69,6 +76,24 @@ impl Drop for RuntimeValueAccessDepthGuard {
 #[cfg(test)]
 pub(crate) fn thread_has_runtime_value_access_for_test() -> bool {
     RUNTIME_VALUE_ACCESS_DEPTH.with(|depth| depth.get() != 0)
+}
+
+/// Resets the current thread's test-only nested-access high-water mark.
+///
+/// Callers must be outside managed access so the next bounded operation owns
+/// the complete observation interval.
+#[cfg(test)]
+pub(crate) fn reset_runtime_value_access_depth_for_test() {
+    RUNTIME_VALUE_ACCESS_DEPTH.with(|depth| {
+        assert_eq!(depth.get(), 0, "cannot reset access depth while admitted");
+    });
+    RUNTIME_VALUE_ACCESS_MAX_DEPTH.with(|maximum| maximum.set(0));
+}
+
+/// Returns the greatest nested managed-access depth since the last reset.
+#[cfg(test)]
+pub(crate) fn max_runtime_value_access_depth_for_test() -> usize {
+    RUNTIME_VALUE_ACCESS_MAX_DEPTH.with(Cell::get)
 }
 
 /// The reviewed destruction policy for one Glam-managed representation.

@@ -11,8 +11,8 @@ use glam_gc::{Root, Trace, UnsupportedLayout, Visitor};
 use super::{
     ManagedDropRecord, ManagedFamily, RuntimeValueAccess, RuntimeValueObserver, managed_slot_extent,
 };
+use crate::core::Value;
 use crate::core::managed::payload_edges::visit_compatibility_managed_edges;
-use crate::core::{CoreValueFactory, Value};
 use crate::number::Number;
 
 pub(crate) struct ManagedValueNode {
@@ -55,7 +55,7 @@ impl fmt::Debug for PreparedRuntimeValueRoot {
 
 impl PreparedRuntimeValueRoot {
     /// Selects the private production inline-or-root representation.
-    pub(crate) fn prepare(values: &CoreValueFactory, value: Value) -> Self {
+    pub(crate) fn prepare(values: &crate::core::CoreValueFactory, value: Value) -> Self {
         if let Value::Number(number) = &value
             && let Some(value) = number.to_i64_if_integer()
         {

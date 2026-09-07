@@ -421,7 +421,7 @@ The normal focused run passes 28 recursive-cell tests and reports this one
 fixture ignored. `cargo fmt --check`, Clippy with warnings denied, and the full
 repository test suite also pass with the mismatch fixture ignored.
 
-##### GCI5R-001B — Operational regional-access foundation
+##### GCI5R-001B — Operational regional-access foundation (complete)
 
 This checkpoint absorbs the former operational-access checkpoint because its
 authority is a prerequisite for expressing the regional publication boundary;
@@ -446,14 +446,14 @@ then immediately rebuilt around the factory.
    state that active mutator admission protects an unpublished intermediate
    graph only until the region ends; later survival still requires a root or
    installation under an exactly traced owner. Root publication remains B.2.
-2. **B.2 — Root publication.** Add an access-owned containing-value root
+2. **B.2 — Root publication (complete).** Add an access-owned containing-value root
    publisher over `RuntimeValueRoot::new_from_access`, plus a factory entry
    which runs a callback-free construction closure and publishes its returned
    graph before managed access ends. Convert `ScopedValues::wrap` to that
    existing access instead of nesting another entry. Traced-owner installation
    remains family/owner specific rather than pretending an arbitrary `Value`
    destination is statically known to the collector.
-3. **B.3 — Boundary verification and documentation.** Keep runtime/coordinator
+3. **B.3 — Boundary verification and documentation (complete).** Keep runtime/coordinator
    ownership, external-owner operations, and access entry on the factory. Code
    crossing waits, callbacks, coordinator calls, or locks retains the factory
    and opens a later access; do not let `Deref` blur that boundary. Add focused
@@ -462,6 +462,27 @@ then immediately rebuilt around the factory.
    `ScopedValues::wrap`. Reconcile the regional liveness documentation. This
    foundation does not yet make the GCI5R-001A mismatch fixture pass because
    the family cutovers remain in D-F.
+
+Completed on 2026-09-07. `RuntimeValueAccess::root_runtime_value` is the one
+access-owned containing-value publisher over the now-private
+`RuntimeValueRoot::new_from_access`. `CoreValueFactory` provides infallible and
+fallible synchronous construction entries; both keep partial allocations in
+one admitted region, the successful path roots its complete returned graph
+before leaving, and the error path publishes nothing. Existing admitted
+core-net claim paths now use the same publisher. `ScopedValues::wrap` no longer
+re-enters the heap.
+
+`regional_value_publication_retains_only_the_returned_managed_graph` constructs
+two returned recursive cells plus one omitted cell, drops its temporary child
+roots before publishing the containing list, then proves one outer root traces
+the two returned identities while the omitted allocation is reclaimed.
+`early_regional_return_leaves_partial_managed_graph_collectible` covers the
+fallible exit. `scoped_wrap_publishes_without_nested_managed_access` uses a
+thread-local high-water latch to force the public wrapper's maximum access
+depth to one. The gateway and root-publication inventories were extended rather
+than weakened. The ownership ledger and current evaluation architecture now
+record regional liveness and orchestration boundaries. As planned, the ignored
+GCI5R-001A mismatch remains until the C-F family cutovers.
 
 ##### GCI5R-001C — Regional managed-family constructor gateways
 
