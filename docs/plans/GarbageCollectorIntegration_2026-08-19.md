@@ -4935,13 +4935,23 @@ parallel trace representation.
    lazy-to-net-to-promise-to-lazy cycle. Intermediate construction roots may
    exist while edges are installed, but the live collection must retain only
    one final root and reach every member transitively.
-3. **I5F.3 — Compatibility-path matrix.** Repeat closed cycles through lists,
-   dictionaries, partial applications, function stages, fixpoint sources,
-   metadata, failures/context frames, cursor state, and shared persistent
-   versions. These structures exercise the transitive compatibility walk;
-   they need not yet have their final compact managed representation. Group
-   multiple paths in one fixture only when exact member and edge accounting
-   still identifies a missing adapter.
+3. **I5F.3 — Compatibility-path matrix.** Repeat closed cycles through the
+   remaining compatibility owners in three bounded checkpoints:
+   - **I5F.3a — Aggregate shells.** Cover lists, dictionaries, partial builtin
+     applications, metadata carriers, and shared persistent list/map versions.
+     Give each logical adapter its own closed fixture so another path cannot
+     conceal a missing edge.
+   - **I5F.3b — Executable and diagnostic payloads.** Cover function stages
+     and failure emission/context frames. Latch the computed-fixpoint source
+     fixture from I5F.1 here rather than duplicating the same path.
+   - **I5F.3c — Cursor topology.** Form a cycle through a real remote-cursor
+     source relationship between managed core nets, not a synthetic net
+     payload.
+
+   These structures exercise the transitive compatibility walk; they need not
+   yet have their final compact managed representation. Group multiple paths
+   in one fixture only when exact member and edge accounting still identifies
+   a missing adapter.
 4. **I5F.4 — Closure and owner audit.** Re-run the cycle-source inventory and
    prove that removing managed lazy, promise, and core-net identities leaves
    an acyclic compatibility-owned semantic graph. Re-audit external owners for
@@ -4974,6 +4984,14 @@ source transitions use the collector mutation gateway, promise assignments use
 the production one-write publication path, and core-net data uses the
 compile-exhaustive compatibility visitor. No parallel trace representation or
 automatic production collection was introduced.
+
+I5F.3a completed 2026-09-07. Six isolated promise cycles now traverse one list,
+one dictionary, one partial builtin application, one metadata carrier, one
+shared list spine, or one persistent dictionary version before returning to
+the authoritative promise cell. Every fixture retains exactly one root and
+one managed cell while live, then finalizes that cell after the root is
+removed. A shared assertion harness changes no trace behavior and keeps each
+logical adapter independently responsible for closing its cycle.
 
 Only closed isolated fixtures collect. The complete production runtime remains
 `NoAuto`, and the mandatory post-I5 review follows before I6 begins.

@@ -841,7 +841,8 @@ mod tests {
 
     use super::*;
     use crate::core::{
-        CoreValueFactory, EvaluatedValue, LazySource, LazyValue, NetValue, PromisedValue,
+        Builtin, BuiltinCall, CoreValueFactory, Dict, EvaluatedValue, Key, LazySource, LazyValue,
+        List, NetValue, PromisedValue,
     };
     use crate::interaction_net::{NetBuilder, PreparedCopySource};
     use crate::runtime::{RuntimeIds, RuntimeMutationAdmission, allocate_evaluation_runtime_id};
@@ -883,6 +884,37 @@ mod tests {
                     *stored = Some(source);
                 });
         }
+    }
+
+    fn assert_single_promise_cycle_through(label: &str, wrap: impl FnOnce(Value) -> Value) {
+        let values = new_values();
+        let baseline = values.collect_managed_for_test().unwrap_or_else(|failure| {
+            panic!("the {label} fixture should start collectible: {failure}")
+        });
+        let root = values.with_runtime_value_access(|access| {
+            let root = access
+                .root_new_managed_promise(&values, label)
+                .expect("the managed promise cell should fit a run");
+            let promise = PromisedValue::from_root(&root);
+            root.access(&access)
+                .expect("the rooted promise should be accessible")
+                .publish(Ok(wrap(Value::Promised(promise))))
+                .expect("the fresh promise should accept its compatibility cycle");
+            root
+        });
+
+        let live = values.collect_managed_for_test().unwrap_or_else(|failure| {
+            panic!("one root should retain the {label} cycle: {failure}")
+        });
+        assert_eq!(live.root_entries(), baseline.root_entries() + 1);
+        assert_eq!(live.marked_slots(), baseline.marked_slots() + 1);
+
+        drop(root);
+        let dead = values.collect_managed_for_test().unwrap_or_else(|failure| {
+            panic!("the unrooted {label} cycle should reclaim: {failure}")
+        });
+        assert_eq!(dead.root_entries(), baseline.root_entries());
+        assert_eq!(dead.finalized_slots(), 1);
     }
 
     fn source_declaration<'source>(source: &'source str, name: &str) -> &'source str {
@@ -1561,6 +1593,51 @@ mod tests {
             .expect("the unrooted three-family cycle should be reclaimed");
         assert_eq!(dead.root_entries(), baseline.root_entries());
         assert_eq!(dead.finalized_slots(), 3);
+    }
+
+    #[test]
+    fn managed_promise_cycle_through_list_is_traced_and_reclaimed() {
+        assert_single_promise_cycle_through("list compatibility", |backedge| {
+            Value::List(List::from_values(vec![backedge]))
+        });
+    }
+
+    #[test]
+    fn managed_promise_cycle_through_dict_is_traced_and_reclaimed() {
+        assert_single_promise_cycle_through("dict compatibility", |backedge| {
+            Value::Dict(Dict::new_sync().insert(Key::binary_from_text("backedge"), backedge))
+        });
+    }
+
+    #[test]
+    fn managed_promise_cycle_through_partial_builtin_is_traced_and_reclaimed() {
+        assert_single_promise_cycle_through("partial builtin compatibility", |backedge| {
+            Value::PartialBuiltin(BuiltinCall {
+                builtin: Builtin::Append,
+                arguments: Arc::from([backedge]),
+            })
+        });
+    }
+
+    #[test]
+    fn managed_promise_cycle_through_metadata_is_traced_and_reclaimed() {
+        assert_single_promise_cycle_through("metadata compatibility", Value::metadata_carrier);
+    }
+
+    #[test]
+    fn managed_promise_cycle_through_shared_list_spine_is_traced_and_reclaimed() {
+        assert_single_promise_cycle_through("shared list compatibility", |backedge| {
+            let shared = List::from_values(vec![backedge]);
+            Value::List(List::concat(shared.clone(), shared))
+        });
+    }
+
+    #[test]
+    fn managed_promise_cycle_through_shared_dict_version_is_traced_and_reclaimed() {
+        assert_single_promise_cycle_through("shared dict compatibility", |backedge| {
+            let base = Dict::new_sync().insert(Key::binary_from_text("backedge"), backedge);
+            Value::Dict(base.insert(Key::binary_from_text("version"), Value::Number(1.into())))
+        });
     }
 
     #[test]
