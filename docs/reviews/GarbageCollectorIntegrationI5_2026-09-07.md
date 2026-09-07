@@ -421,95 +421,139 @@ The normal focused run passes 28 recursive-cell tests and reports this one
 fixture ignored. `cargo fmt --check`, Clippy with warnings denied, and the full
 repository test suite also pass with the mismatch fixture ignored.
 
-##### GCI5R-001B — Regional construction and publication boundary
+##### GCI5R-001B — Operational regional-access foundation
 
-1. Keep `glam_gc::Allocator::alloc` returning `Gc<T>`. Document that mutator
-   admission, rather than an individually branded pointer, is the liveness
-   witness for all unpublished intermediate allocations in one construction
-   region.
-2. Privatize the three raw `allocate_managed_*` operations to the smallest
-   Glam module which can implement both construction and publication. No
-   production managed-family constructor may open access and return a newly
-   allocated bare edge, facade, or compatibility `Value`.
-3. Establish owner-producing regional primitives for the two actual exits:
-   publish the completed graph as its intended root before access ends, or
-   install it into an already traced owner under the same access. Preserve
-   intentional registered roots for genuine orchestration handoffs rather
-   than introducing temporary construction roots.
-4. Prototype a private family-specific or generic fresh-allocation wrapper
+This checkpoint absorbs the former operational-access checkpoint because its
+authority is a prerequisite for expressing the regional publication boundary;
+the owner-producing API should not first be designed around a bare domain and
+then immediately rebuilt around the factory.
+
+1. **B.1 — Access authority.** Keep `glam_gc::Allocator::alloc` returning
+   `Gc<T>`, and document that mutator admission is the liveness witness for all
+   unpublished intermediate allocations in one construction region. Make
+   `RuntimeValueAccess` borrow the entering `CoreValueFactory` while retaining
+   its existing allocation scope and I3 lifetime/thread guarantees. Move or
+   delegate only the operations needed by this repair; allocation and
+   observation must not redundantly require a separately supplied factory.
+2. **B.2 — Root publication.** Add an access-owned containing-value root
+   publisher over `RuntimeValueRoot::new_from_access`, plus a factory entry
+   which runs a callback-free construction closure and publishes its returned
+   graph before managed access ends. Convert `ScopedValues::wrap` to that
+   existing access instead of nesting another entry. Traced-owner installation
+   remains family/owner specific rather than pretending an arbitrary `Value`
+   destination is statically known to the collector.
+3. **B.3 — Boundary verification and documentation.** Keep runtime/coordinator
+   ownership, external-owner operations, and access entry on the factory. Code
+   crossing waits, callbacks, coordinator calls, or locks retains the factory
+   and opens a later access; do not let `Deref` blur that boundary. Add focused
+   tests for multi-allocation graph construction followed by same-region root
+   publication, early-return garbage, and absence of nested access in
+   `ScopedValues::wrap`. Reconcile the regional liveness documentation. This
+   foundation does not yet make the GCI5R-001A mismatch fixture pass because
+   the family cutovers remain in D-F.
+
+##### GCI5R-001C — Regional managed-family constructor gateways
+
+1. Add access-taking, non-self-opening construction gateways for managed
+   lazies, promises, and core nets. A gateway may return its facade to code
+   already inside the admitted region, but must not open access itself or
+   imply that the facade is an owner.
+2. Add family-specific owner-producing variants for an immediately required
+   managed root and establish the owner-specific traced-edge installation
+   shape used by later cutovers. Initialize mandatory post-allocation state
+   before either publication, including the failed lazy's terminal cache.
+3. Reduce the three raw `allocate_managed_*` operations to the smallest module
+   visibility which supports these gateways. If migration temporarily requires
+   broader visibility, enumerate those exact callers and make final privacy a
+   hard G checkpoint rather than claiming the boundary is already sealed.
+4. Add a fail-closed source inventory which rejects new self-opening managed
+   constructors while allowing only the explicitly enumerated legacy wrappers
+   awaiting D-F. Do not mistake this lexical latch for the forced-order
+   behavioral proof.
+5. Prototype a private family-specific or generic fresh-allocation wrapper
    only if it makes the raw-to-owner transition more auditable. Retain it only
    when every conversion is coupled to actual root publication or traced-edge
    installation; an unrestricted `into_gc`, `Deref`, or equivalent escape
    fails the experiment and the wrapper should be dropped.
-5. Add focused tests for multi-allocation graph construction, direct root
-   publication, traced-owner installation, early-return garbage, and the
-   existing forced collection boundary. Compile-fail evidence is useful only
-   if the selected private API establishes a meaningful lifetime property.
-
-##### GCI5R-001C — Operational value-access facade
-
-1. Make `RuntimeValueAccess` borrow the entering `CoreValueFactory` and retain
-   the existing allocation scope. Preserve the lifetime and thread-boundary
-   guarantees established by I3.
-2. Move or delegate the value operations required by the three constructor
-   families onto access. Allocation calls must no longer redundantly accept
-   both `&RuntimeValueAccess` and `&CoreValueFactory`.
-3. Add access-owned root/value publication helpers so `ScopedValues` and other
-   already-admitted callers do not reopen nested access merely to publish the
-   containing `RuntimeValueRoot`.
-4. Keep runtime/coordinator ownership and access-opening operations on the
-   factory. Defer unrelated mechanical factory-call migration rather than
-   widening this defect repair.
+6. Verify direct regional construction, intentional rooted handoff,
+   traced-owner installation, discard/reclamation, and representation privacy.
+   Compile-fail evidence is useful only if the selected private API establishes
+   a meaningful lifetime property.
 
 ##### GCI5R-001D — Lazy construction cutover
 
-1. Replace self-opening `LazyValue::with_source` with access-taking fresh-lazy
-   construction. Keep all intermediate lazy facades inside the caller's
-   admitted construction region, and publish the completed graph or install
-   its exact edge before that region ends.
-2. Migrate every lazy constructor from the inventory. Keep callback-free
-   evaluator construction inside its existing `with_value_access` region;
-   split any path which presently spans callbacks or waits.
-3. Initialize already-terminal lazies, including failure values, before first
-   publication under the same access rather than reopening the heap through
-   the unrooted facade.
-4. Add forced-order survival, post-publication root-retirement, early-return
-   reclamation, and representative evaluator/public-value tests.
+This family has enough call-site breadth to remain partitioned:
+
+1. **D.1 — Core lazy gateway.** Introduce the access-taking replacements for
+   every `with_source` wrapper and initialize already-terminal lazies,
+   including failure values, before first publication under the same access.
+   Keep the enumerated self-opening wrappers only as temporary migration
+   shims.
+2. **D.2 — Already-admitted and public-value paths.** Convert `ScopedValues`,
+   access/application helpers, and other paths which already own an outer
+   access. Publish the containing root through B rather than reopening nested
+   access.
+3. **D.3 — Evaluator paths.** Convert application, operator, annotation,
+   object/effect/list/dictionary/net builtin, and machine-result construction.
+   Open or extend one callback-free `with_value_access` region through result
+   rooting or exact net installation; split any path which reaches a callback,
+   wait, reflection activation, or contention park.
+4. **D.4 — Compiler and reflection paths.** Convert source/net lowering,
+   per-declaration and final-definition publication, reflection-store edits,
+   reflection tasks, and external-host-call construction. Do not hold managed
+   access while invoking a host callback or coordinator operation.
+5. **D.5 — Lazy closure.** Delete the self-opening shims and update the source
+   inventory. Add forced-order survival, post-publication root-retirement,
+   early-return reclamation, and representative evaluator, compiler,
+   reflection, and public-value tests.
 
 ##### GCI5R-001E — Promise construction cutover
 
-1. Replace self-opening `PromisedValue::with_cell` with access-taking fresh
-   construction.
-2. Publish the root required by the resolver, local producer, or coordinator
-   owner before the allocation access ends. This is the promise's intended
-   durable owner, not an intermediate construction root.
-3. Do not hold managed access across coordinator callbacks or waits. Where
-   registration must proceed afterward, carry the already-intended root and
-   project the facade from it only while that root remains owned.
-4. Force collection between construction and registration/publication, and
-   preserve cancellation, abandonment, assignment, resolver drop, and root
-   retirement coverage.
+This family crosses coordinator ownership and therefore remains separate from
+the otherwise similar lazy conversion:
+
+1. **E.1 — Rooted host/compiler promises.** Convert the two public resolver
+   constructors and the compiler final-definitions promise. Publish the public
+   containing value root and resolver/owner root before allocation access
+   ends; these are intended owners, not temporary construction roots.
+2. **E.2 — Producer registration.** Change task/local/coordinator registration
+   to accept the already-intended `ManagedPromiseRoot`, carry it across the
+   orchestration boundary, and project the facade only while that root remains
+   owned. Do not hold managed access across coordinator calls or waits. Repair
+   `client_demand_halt` so an unassigned-promise halt cannot outlive the root
+   projected from its consumed dependency.
+3. **E.3 — Semantic promise graphs.** Convert list-effect fixpoints,
+   reflection fixpoints, and other evaluator graphs which embed promises as
+   traced values rather than producer-owned handles. Establish the containing
+   value root or traced owner before their construction region ends.
+4. **E.4 — Promise closure.** Delete self-opening `with_cell`/`new` paths which
+   can escape and update the source inventory. Force collection between
+   construction and registration/publication, and preserve cancellation,
+   abandonment, assignment, resolver drop, and root-retirement coverage.
 
 ##### GCI5R-001F — Core-net construction cutover
 
-1. Make core-net instantiation consume the active value access rather than
-   opening an allocation region and returning a bare `CoreRuntimeNet`.
-2. Install the fresh net directly into its containing traced value/net owner
-   when construction is local. Use an intentional managed-net or containing
-   value root only for a genuine external handoff.
-3. Generalize the ownership pattern already demonstrated by
-   `CorePreparedCopySource` where an existing normalization handoff truly must
-   leave access, without making prepared roots the default constructor result.
-4. Cover standalone instantiation, related instantiation, function/net
-   wrapping, copy-source handoff, and collection immediately after permanent
-   publication.
+1. **F.1 — Local and containing-value construction.** Convert standalone,
+   related, source-lowered, function-stage, and public `Assembler::net`
+   instantiation to the C gateway. Install the fresh net directly into its
+   containing traced value/net owner when construction is local.
+2. **F.2 — Genuine net handoffs.** Use an intentional managed-net or
+   containing value root only where normalization, copy-source, callable, or
+   frontier state must leave access. Generalize the ownership pattern already
+   demonstrated by `CorePreparedCopySource` without making prepared roots the
+   default constructor result.
+3. **F.3 — Net closure.** Delete factory methods which open an allocation
+   region and return a bare `CoreRuntimeNet`; update the source inventory and
+   cover standalone/related instantiation, function/net wrapping, copy-source
+   handoff, and collection immediately after permanent publication.
 
 ##### GCI5R-001G — Closure audit and review reconciliation
 
 1. Delete or privatize every constructor which can open managed access and
-   return a fresh bare edge or a structure containing one. Add a fail-closed
-   source inventory for this temporal rule; do not mistake it for the
-   forced-order behavioral proof.
+   return a fresh bare edge or a structure containing one. Seal any raw
+   allocator visibility left temporarily open by C, and make the fail-closed
+   source inventory reject both escape forms. Do not mistake that lexical rule
+   for the forced-order behavioral proof.
 2. Reconcile `CoreValueAllocationScope`, `RuntimeValueAccess`, collector, and
    ownership-ledger documentation with the final regional construction and
    authoritative-owner handoff vocabulary.
@@ -518,6 +562,23 @@ repository test suite also pass with the mismatch fixture ignored.
 4. Update this finding with final evidence and mark it closed only when the
    deterministic former-gap tests pass without relying on `NoAuto`. Then
    update the integration roadmap entry conditions for I11C and I12.
+
+The following local selections remain intentionally deferred to their first
+owning checkpoint rather than being guessed by this review:
+
+- B.2 chooses the concrete name and closure signature for same-region root
+  construction after B.1 exposes the factory-backed access API. Its fixed
+  contract is that the returned external object is already rooted, not that a
+  callback-free closure is typefully recognizable in arbitrary Rust code.
+- C chooses whether the narrowest practical allocator seam lives entirely in
+  `core::managed` or requires a temporary `pub(super)` bridge for core-net
+  construction. G must eliminate whichever temporary bridge is selected.
+- C's optional private fresh typestate is an experiment, not presumed work. A
+  need for an unrestricted conversion is sufficient evidence to omit it.
+- Installing into an already published traced owner must share the structural
+  mutation gateway selected by GCI5R-002. Installing into a new, unpublished
+  parent is construction rather than post-publication mutation; C must keep
+  those cases distinct instead of inventing a generic edge-install API.
 
 ### GCI5R-002 — Production writers do not yet enter the collector mutation gateway
 
