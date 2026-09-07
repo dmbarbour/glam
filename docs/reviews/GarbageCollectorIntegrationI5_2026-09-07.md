@@ -546,7 +546,7 @@ This family has enough call-site breadth to remain partitioned:
    including failure values, before first publication under the same access.
    Keep the enumerated self-opening wrappers only as temporary migration
    shims.
-2. **D.2 — Already-admitted and public-value paths.** Convert `ScopedValues`,
+2. **D.2 — Already-admitted and public-value paths (complete).** Convert `ScopedValues`,
    access/application helpers, and other paths which already own an outer
    access. Publish the containing root through B rather than reopening nested
    access.
@@ -571,6 +571,14 @@ gates/results, computed fixpoints, and already-terminal failures. The failed
 path initializes its cache in the allocating region. Factory-taking entry
 points remain temporary, explicitly inventoried shims for D.2-D.5; the unused
 generic `with_source` shim was removed.
+
+D.2 completed on 2026-09-07. Saturated builtin, access, application, and
+annotation construction through public `Values` now consumes the
+`RuntimeValueAccess` already held by `ScopedValues` and publishes its outer
+root before that region closes. The public `Assembler::net` callback still
+runs without managed access; after it returns, net allocation and containing
+value-root publication share one access region. The scoped-construction test
+now latches a maximum access depth of one across nested public construction.
 
 ##### GCI5R-001E — Promise construction cutover
 

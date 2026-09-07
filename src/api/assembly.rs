@@ -1023,9 +1023,13 @@ impl Assembler {
             .try_finish(exposed)
             .map_err(net_build_error)?;
         let values = self.values();
-        Ok(values.wrap(CoreValue::Net(NetValue::new(
-            values.core().instantiate_core_net(&template),
-        ))))
+        Ok(values.with_access(|values| {
+            let runtime = values
+                .runtime_access()
+                .construct_managed_core_net(template.instantiate())
+                .expect("managed core-net representation must fit one collector run");
+            values.wrap(CoreValue::Net(NetValue::new(runtime)))
+        }))
     }
 
     // TODO: add reflection snapshots and event subscriptions here. Reflection

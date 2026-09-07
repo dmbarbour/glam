@@ -122,7 +122,7 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // its returned graph before that same bounded access ends. C makes the
         // failed-lazy shim open one explicit region in place of allocation
         // followed by a facade-mediated second entry.
-        ("src/core.rs", GatewayCounts::new(9, 5)),
+        ("src/core.rs", GatewayCounts::new(22, 5)),
         // I5D scopes every managed core-net construction, root handoff, and
         // source-frontier traversal through matching value-domain authority.
         ("src/core_net.rs", GatewayCounts::new(12, 0)),

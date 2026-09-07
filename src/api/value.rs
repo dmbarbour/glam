@@ -41,6 +41,7 @@ mod scoped_construction_tests {
     #[test]
     fn recursive_construction_reuses_one_mutator() {
         let values = values();
+        reset_runtime_value_access_depth_for_test();
 
         let constructed = values.with_access(|access| {
             assert!(matches!(
@@ -64,6 +65,11 @@ mod scoped_construction_tests {
         });
 
         assert_eq!(constructed.runtime_id(), values.runtime_id());
+        assert_eq!(
+            max_runtime_value_access_depth_for_test(),
+            1,
+            "public access, annotation, and wrapping must share one construction region"
+        );
         values
             .core
             .collect_managed_for_test()
@@ -514,8 +520,8 @@ impl Values {
     /// demanding the list or binary value.
     pub fn list_slice(&self, value: &Value, range: Range<usize>) -> Result<Value, Error> {
         self.with_access(|values| {
-            Ok(values.wrap(CoreValue::builtin_call(
-                values.core(),
+            Ok(values.wrap(CoreValue::builtin_call_in(
+                values.runtime_access(),
                 Builtin::Slice,
                 vec![
                     CoreValue::Number(Number::from_usize(range.start)),
@@ -560,8 +566,8 @@ impl Values {
     /// demanding its key or value.
     pub fn dict_singleton(&self, key: Value, value: Value) -> Result<Value, Error> {
         self.with_access(|values| {
-            Ok(values.wrap(CoreValue::builtin_call(
-                values.core(),
+            Ok(values.wrap(CoreValue::builtin_call_in(
+                values.runtime_access(),
                 Builtin::DictSingleton,
                 vec![values.clone_core(&key)?, values.clone_core(&value)?],
             )))
@@ -572,8 +578,8 @@ impl Values {
     /// either dictionary.
     pub fn dict_union(&self, left: Value, right: Value) -> Result<Value, Error> {
         self.with_access(|values| {
-            Ok(values.wrap(CoreValue::builtin_call(
-                values.core(),
+            Ok(values.wrap(CoreValue::builtin_call_in(
+                values.runtime_access(),
                 Builtin::DictUnion,
                 vec![values.clone_core(&left)?, values.clone_core(&right)?],
             )))
@@ -589,8 +595,8 @@ impl Values {
         new_value: Value,
     ) -> Result<Value, Error> {
         self.with_access(|values| {
-            Ok(values.wrap(CoreValue::builtin_call(
-                values.core(),
+            Ok(values.wrap(CoreValue::builtin_call_in(
+                values.runtime_access(),
                 Builtin::DictUpdate,
                 vec![
                     values.clone_core(&path)?,
@@ -635,8 +641,8 @@ impl Values {
                         CoreValue::Builtin(Builtin::ObjectDefaultDefs),
                     ),
             );
-            Ok(values.wrap(CoreValue::builtin_call(
-                values.core(),
+            Ok(values.wrap(CoreValue::builtin_call_in(
+                values.runtime_access(),
                 Builtin::ObjectInstance,
                 vec![spec],
             )))
@@ -648,8 +654,8 @@ impl Values {
             let annotation = CoreValue::Dict(
                 Dict::new_sync().insert(Key::atom_from_text("refl"), values.clone_core(&effect)?),
             );
-            Ok(values.wrap(CoreValue::builtin_call(
-                values.core(),
+            Ok(values.wrap(CoreValue::builtin_call_in(
+                values.runtime_access(),
                 Builtin::Anno,
                 vec![annotation, values.clone_core(&target)?],
             )))
@@ -672,6 +678,10 @@ impl Values {
 impl ScopedValues<'_> {
     fn core(&self) -> &CoreValueFactory {
         self.owner.core()
+    }
+
+    pub(super) fn runtime_access(&self) -> &RuntimeValueAccess<'_> {
+        &self.access
     }
 
     pub(super) fn wrap(&self, value: CoreValue) -> Value {
@@ -707,8 +717,8 @@ impl ScopedValues<'_> {
 
     fn access(&self, base: &Value, key: &Value) -> Result<Value, Error> {
         Ok(
-            self.wrap(CoreValue::Lazy(crate::core::LazyValue::from_access(
-                self.core(),
+            self.wrap(CoreValue::Lazy(crate::core::LazyValue::from_access_in(
+                self.runtime_access(),
                 Arc::from([CoreDataKey::Index]),
                 Arc::from([self.clone_core(base)?, self.clone_core(key)?]),
             ))),
@@ -716,8 +726,8 @@ impl ScopedValues<'_> {
     }
 
     fn anno(&self, annotation: &Value, target: &Value) -> Result<Value, Error> {
-        Ok(self.wrap(CoreValue::builtin_call(
-            self.core(),
+        Ok(self.wrap(CoreValue::builtin_call_in(
+            self.runtime_access(),
             Builtin::Anno,
             vec![self.clone_core(annotation)?, self.clone_core(target)?],
         )))
@@ -736,8 +746,8 @@ impl ScopedValues<'_> {
         if arguments.is_empty() {
             return Ok(function.clone());
         }
-        Ok(self.wrap(CoreValue::Lazy(LazyValue::from_application(
-            self.core(),
+        Ok(self.wrap(CoreValue::Lazy(LazyValue::from_application_in(
+            self.runtime_access(),
             self.clone_core(function)?,
             Arc::from(arguments),
         ))))

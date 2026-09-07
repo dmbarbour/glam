@@ -2118,6 +2118,15 @@ impl Value {
         builtin: Builtin,
         arguments: Vec<Value>,
     ) -> Self {
+        values
+            .with_runtime_value_access(|access| Self::builtin_call_in(&access, builtin, arguments))
+    }
+
+    pub(crate) fn builtin_call_in(
+        access: &RuntimeValueAccess<'_>,
+        builtin: Builtin,
+        arguments: Vec<Value>,
+    ) -> Self {
         assert!(
             arguments.len() <= builtin.arity(),
             "builtin call contains too many arguments"
@@ -2128,8 +2137,8 @@ impl Value {
                 builtin,
                 arguments: Arc::from(arguments),
             }),
-            _ => Self::Lazy(LazyValue::from_builtin(
-                values,
+            _ => Self::Lazy(LazyValue::from_builtin_in(
+                access,
                 BuiltinCall {
                     builtin,
                     arguments: Arc::from(arguments),

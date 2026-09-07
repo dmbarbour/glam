@@ -1077,6 +1077,7 @@ mod tests {
                 | "from_net_computation_in"
                 | "from_reflection_gate_in"
                 | "reflection_task_result_in"
+                | "builtin_call_in"
         )
     }
 
@@ -2198,6 +2199,7 @@ mod tests {
         assert_eq!(
             entries,
             [
+                "src/core.rs::builtin_call",
                 "src/core.rs::computed_fixpoint",
                 "src/core.rs::error",
                 "src/core.rs::external_host_call",
