@@ -5011,6 +5011,27 @@ marked cells; removing the promise root finalizes all three. This exercises
 the production cursor/source topology rather than approximating it with an
 ordinary data payload.
 
+I5F.4 completed 2026-09-07. The refreshed fail-closed source inventory still
+identifies exactly `ManagedLazyCell`, `ManagedPromiseCell`, and
+`ManagedCoreNetCell` as mutable recursive semantic identities. A second
+inventory now classifies all 20 compatibility edge adapters: 15 are immutable
+construction-acyclic paths between identities, four project an exact managed
+identity, and `ReflectionComputation` is the sole adapter boundary whose
+semantic values deliberately live in external registered roots. Adding an
+adapter without a recursion disposition now fails the audit.
+
+The external-owner audit records all three registry insertion boundaries.
+Host callback environments and reflection effect/target ownership remain
+explicit root-capable I10A work; opaque payload admission continues to forbid
+`RuntimeValueRoot`, bare `Gc`, and unrooted recursive values. A production
+host-call fixture demonstrates the distinction: an external callback capture
+retains one rooted value shell and its managed lazy, removal of that explicit
+root makes both cells collectible, and the retired callback owner drains only
+after managed finalization. This prevents I5 from being mistaken for
+whole-runtime closure. Shared-list fixtures continue to report duplicate
+logical visits as profiling evidence while the collector marks the repeated
+managed identity once; no traversal cache or deduplication policy was added.
+
 Only closed isolated fixtures collect. The complete production runtime remains
 `NoAuto`, and the mandatory post-I5 review follows before I6 begins.
 

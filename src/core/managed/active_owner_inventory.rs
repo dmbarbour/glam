@@ -10,8 +10,8 @@
 
 use std::fs;
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 
@@ -22,6 +22,7 @@ use crate::core::{
 };
 use crate::core_net::CoreSpecialization;
 use crate::interaction_net::NetBuilder;
+use crate::runtime::RuntimeValueRoot;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ActiveDestructionKind {
@@ -30,12 +31,19 @@ enum ActiveDestructionKind {
     OpaquePayload,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RecursiveBackedgePolicy {
+    DeferredToI10A,
+    ForbiddenByAdmission,
+}
+
 struct ActiveDestructionFrontier {
     kind: ActiveDestructionKind,
     path: &'static str,
     owner: &'static str,
     active_action: &'static str,
     extraction: &'static str,
+    recursive_backedge: RecursiveBackedgePolicy,
 }
 
 const ACTIVE_DESTRUCTION_FRONTIERS: &[ActiveDestructionFrontier] = &[
@@ -45,6 +53,7 @@ const ACTIVE_DESTRUCTION_FRONTIERS: &[ActiveDestructionFrontier] = &[
         owner: "runtime-owned HostCallOwner closure environment",
         active_action: "arbitrary host-capture destruction is externally drained",
         extraction: "I4F.2b.1 external host-call registry",
+        recursive_backedge: RecursiveBackedgePolicy::DeferredToI10A,
     },
     ActiveDestructionFrontier {
         kind: ActiveDestructionKind::ReflectionReservation,
@@ -52,6 +61,7 @@ const ACTIVE_DESTRUCTION_FRONTIERS: &[ActiveDestructionFrontier] = &[
         owner: "runtime-owned reflection reservation and rooted activation",
         active_action: "unactivated reservation cancellation is externally drained",
         extraction: "I4F.2b.2 reflection-reservation registry",
+        recursive_backedge: RecursiveBackedgePolicy::DeferredToI10A,
     },
     ActiveDestructionFrontier {
         kind: ActiveDestructionKind::OpaquePayload,
@@ -59,6 +69,7 @@ const ACTIVE_DESTRUCTION_FRONTIERS: &[ActiveDestructionFrontier] = &[
         owner: "runtime-owned admitted opaque payload family",
         active_action: "type-erased or transitive external retirement is externally drained",
         extraction: "I4F.2b.3 opaque-payload registry",
+        recursive_backedge: RecursiveBackedgePolicy::ForbiddenByAdmission,
     },
 ];
 
@@ -340,6 +351,113 @@ fn active_value_destruction_frontiers_are_source_latched() {
             latch.needle
         );
     }
+}
+
+#[test]
+fn external_owner_recursive_backedges_are_explicitly_classified() {
+    let deferred = ACTIVE_DESTRUCTION_FRONTIERS
+        .iter()
+        .filter(|frontier| frontier.recursive_backedge == RecursiveBackedgePolicy::DeferredToI10A)
+        .map(|frontier| frontier.kind)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        deferred,
+        [
+            ActiveDestructionKind::HostCallback,
+            ActiveDestructionKind::ReflectionReservation,
+        ],
+        "root-capable external boundaries remain explicit I10A work"
+    );
+    let forbidden = ACTIVE_DESTRUCTION_FRONTIERS
+        .iter()
+        .filter(|frontier| {
+            frontier.recursive_backedge == RecursiveBackedgePolicy::ForbiddenByAdmission
+        })
+        .map(|frontier| frontier.kind)
+        .collect::<Vec<_>>();
+    assert_eq!(forbidden, [ActiveDestructionKind::OpaquePayload]);
+
+    let core = include_str!("../../core.rs");
+    assert_eq!(
+        core.matches(".external_owners.insert(").count(),
+        2,
+        "inline external-owner insertions require a recursive-backedge classification"
+    );
+    assert_eq!(
+        core.matches(".external_owners\n            .insert(")
+            .count(),
+        1,
+        "the formatted host-call insertion requires a recursive-backedge classification"
+    );
+    assert!(core.contains("type HostCallOperation = dyn Fn() -> Result<RuntimeValueRoot"));
+    assert!(core.contains("effect: RuntimeValueRoot"));
+    assert!(core.contains("target: Option<RuntimeValueRoot>"));
+    assert_eq!(
+        core.matches("fn new<T: OpaquePayloadFamily>").count(),
+        1,
+        "opaque insertion must remain gated by the reviewed family contract"
+    );
+
+    let managed = include_str!("../managed.rs");
+    assert!(managed.contains("The payload must contain no bare `Gc`"));
+    assert!(managed.contains("`RuntimeValueRoot`, or other unreported managed edge"));
+}
+
+#[test]
+fn host_callback_root_backedge_remains_explicitly_deferred_to_i10a() {
+    let values = crate::core::CoreValueFactory::new(
+        crate::runtime::allocate_evaluation_runtime_id(),
+        crate::runtime::RuntimeIds::new(),
+    );
+    let baseline = values
+        .collect_managed_for_test()
+        .expect("the host-backedge fixture should start collectible");
+    let captured_root = Arc::new(Mutex::new(None::<RuntimeValueRoot>));
+    let callback_capture = Arc::clone(&captured_root);
+    let value = Value::external_host_call(
+        &values,
+        "I5F.4 external-root backedge",
+        HostCallRecord::external(
+            "I5F.4 external-root backedge",
+            "src/core/managed/active_owner_inventory.rs",
+            "one explicitly removable same-runtime root",
+        ),
+        move || {
+            let _ = &callback_capture;
+            Err(Arc::new(crate::core::EvaluationFailure::message(
+                "the containment fixture must not invoke its callback",
+            )))
+        },
+    );
+    *captured_root
+        .lock()
+        .expect("the host capture should not be poisoned") =
+        Some(RuntimeValueRoot::new(&values, value));
+
+    let retained = values
+        .collect_managed_for_test()
+        .expect("the explicit external root should retain its lazy");
+    assert_eq!(retained.root_entries(), baseline.root_entries() + 1);
+    assert_eq!(
+        retained.marked_slots(),
+        baseline.marked_slots() + 2,
+        "the external root owns one value shell which reaches the managed lazy"
+    );
+    assert_eq!(values.external_owner_count_for_test(), 1);
+
+    drop(
+        captured_root
+            .lock()
+            .expect("the host capture should not be poisoned")
+            .take(),
+    );
+    let reclaimed = values
+        .collect_managed_for_test()
+        .expect("removing the explicit external root should make the lazy collectible");
+    assert_eq!(reclaimed.root_entries(), baseline.root_entries());
+    assert_eq!(reclaimed.finalized_slots(), 2);
+    assert_eq!(values.drain_external_owners_for_test(), 1);
+    assert_eq!(values.external_owner_count_for_test(), 0);
 }
 
 #[test]

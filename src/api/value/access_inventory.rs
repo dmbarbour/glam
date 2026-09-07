@@ -67,6 +67,12 @@ const INVENTORY: &[InventoryEntry] = &[
         "I4F.2d.0 canonical initialization; I4F.2a.1c fixture closure; I4F.2b.2 reflection ownership; I5 managed promise assignment"
     ),
     entry!(
+        "src/core/managed/active_owner_inventory.rs",
+        1,
+        "test-only external callback root-backedge containment proof",
+        "I5F.4 external-owner closure audit; I10A deferred callback containment"
+    ),
+    entry!(
         "src/evaluation/access.rs",
         2,
         "poll/evaluator-step completion rooting and scoped projection",
