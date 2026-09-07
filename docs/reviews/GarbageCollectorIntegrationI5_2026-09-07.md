@@ -505,14 +505,15 @@ GCI5R-001A mismatch remains until the C-F family cutovers.
    constructors while allowing only the explicitly enumerated legacy wrappers
    awaiting D-F. Do not mistake this lexical latch for the forced-order
    behavioral proof.
-5. **Deferred design discussion.** Reconsider a private family-specific or
-   generic fresh-allocation wrapper only after C.1-C.4 and C.6 reveal whether
-   the concrete gateway boundary remains difficult to audit. Do not add an
-   intermediate representation during this checkpoint: anything more than a
-   pointer-sized, zero-overhead carrier needs a demonstrated safety benefit.
-   If revisited, retain it only when every conversion is coupled to actual root
-   publication or traced-edge installation; an unrestricted `into_gc`,
-   `Deref`, or equivalent escape fails the experiment.
+5. **Deferred until after D-F.** Reconsider a private family-specific or
+   generic fresh-allocation wrapper only after the lazy, promise, and core-net
+   cutovers reveal whether an owner-neutral construction seam remains and is
+   genuinely difficult to audit. Do not add an intermediate representation
+   during C: anything more than a pointer-sized, zero-overhead carrier needs a
+   demonstrated safety benefit. If revisited, retain it only when every
+   conversion is coupled to actual root publication or traced-edge
+   installation; an unrestricted `into_gc`, `Deref`, or equivalent escape
+   fails the experiment.
 6. Verify direct regional construction, intentional rooted handoff,
    traced-owner installation, discard/reclamation, and representation privacy.
    Compile-fail evidence is useful only if the selected private API establishes
@@ -605,17 +606,23 @@ the otherwise similar lazy conversion:
 
 ##### GCI5R-001G — Closure audit and review reconciliation
 
-1. Delete or privatize every constructor which can open managed access and
+1. Revisit C.5 using the completed D-F call-site shapes. Prefer deleting or
+   fully privatizing any remaining owner-neutral fresh-construction seam. Add
+   a private pointer-sized lifetime carrier only if a necessary generic helper
+   still permits an otherwise hard-to-audit allocation-to-owner gap; do not
+   spread fresh lifetimes through public values or already-bounded read
+   accessors.
+2. Delete or privatize every constructor which can open managed access and
    return a fresh bare edge or a structure containing one. Seal any raw
    allocator visibility left temporarily open by C, and make the fail-closed
    source inventory reject both escape forms. Do not mistake that lexical rule
    for the forced-order behavioral proof.
-2. Reconcile `CoreValueAllocationScope`, `RuntimeValueAccess`, collector, and
+3. Reconcile `CoreValueAllocationScope`, `RuntimeValueAccess`, collector, and
    ownership-ledger documentation with the final regional construction and
    authoritative-owner handoff vocabulary.
-3. Run focused collector/managed/evaluator/net/publication tests, Miri for the
+4. Run focused collector/managed/evaluator/net/publication tests, Miri for the
    affected collector boundary, and the repository routine checks.
-4. Update this finding with final evidence and mark it closed only when the
+5. Update this finding with final evidence and mark it closed only when the
    deterministic former-gap tests pass without relying on `NoAuto`. Then
    update the integration roadmap entry conditions for I11C and I12.
 
@@ -629,8 +636,9 @@ owning checkpoint rather than being guessed by this review:
 - C chooses whether the narrowest practical allocator seam lives entirely in
   `core::managed` or requires a temporary `pub(super)` bridge for core-net
   construction. G must eliminate whichever temporary bridge is selected.
-- C's optional private fresh typestate is an experiment, not presumed work. A
-  need for an unrestricted conversion is sufficient evidence to omit it.
+- C.5's optional private fresh typestate is deferred to G after the D-F
+  cutovers, not presumed work. A need for an unrestricted conversion is
+  sufficient evidence to omit it.
 - Installing into an already published traced owner must share the structural
   mutation gateway selected by GCI5R-002. Installing into a new, unpublished
   parent is construction rather than post-publication mutation; C must keep
