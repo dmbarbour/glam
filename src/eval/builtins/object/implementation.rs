@@ -5,11 +5,13 @@ pub(super) fn eval_object_instance_builtin(
     context: &EvaluatorStepContext<'_>,
     spec: &Value,
 ) -> Result<Value, EvaluationHalt> {
-    Ok(Value::Lazy(LazyValue::computed_fixpoint(
-        context.context().values(),
-        "object self",
-        FixpointComputation::ObjectInstance(spec.clone()),
-    )))
+    Ok(Value::Lazy(context.construct_lazy(|access| {
+        LazyValue::computed_fixpoint_in(
+            access,
+            "object self",
+            FixpointComputation::ObjectInstance(spec.clone()),
+        )
+    })))
 }
 
 pub(in crate::eval) fn construct_object_instance_in(

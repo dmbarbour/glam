@@ -10,7 +10,11 @@ use crate::interaction_net::{
     DemandEndpoint, InterfaceDemand,
 };
 
-pub(super) fn attach_net_many(function: NetValue, arguments: Vec<Value>) -> NetValue {
+pub(super) fn attach_net_many(
+    context: &EvaluatorStepContext<'_>,
+    function: NetValue,
+    arguments: Vec<Value>,
+) -> NetValue {
     assert!(!arguments.is_empty(), "net attachment requires an argument");
     let owner = function.runtime().clone();
     let mut net = NetBuilder::new();
@@ -21,7 +25,12 @@ pub(super) fn attach_net_many(function: NetValue, arguments: Vec<Value>) -> NetV
         let argument = net.data(argument);
         net.wire(argument_port, argument);
     }
-    NetValue::new(owner.instantiate_related(&net.finish(spine.result)))
+    let template = net.finish(spine.result);
+    context.with_value_access(|access| {
+        let owner_access = access.net(&owner);
+        drop(owner_access);
+    });
+    NetValue::new(context.construct_core_net(template.instantiate()))
 }
 
 pub(super) fn extract_net_data(
@@ -56,7 +65,7 @@ pub(super) fn evaluate_function_call(
     function: &FunctionValue,
     arguments: &[Value],
 ) -> Result<Value, EvaluationHalt> {
-    let net = attach_net_many(function.stage().clone(), arguments.to_vec());
+    let net = attach_net_many(context, function.stage().clone(), arguments.to_vec());
     let runtime = net.into_runtime();
     let exposed = with_core_net_access(context, &runtime, |runtime| {
         runtime.with(|runtime| runtime.exposed())
@@ -72,8 +81,12 @@ fn with_core_net_access<R>(
     context.with_value_access(|access| operation(access.net(runtime)))
 }
 
-pub(super) fn attach_function_stage(function: NetValue, arguments: Vec<Value>) -> NetValue {
-    attach_net_many(function, arguments)
+pub(super) fn attach_function_stage(
+    context: &EvaluatorStepContext<'_>,
+    function: NetValue,
+    arguments: Vec<Value>,
+) -> NetValue {
+    attach_net_many(context, function, arguments)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

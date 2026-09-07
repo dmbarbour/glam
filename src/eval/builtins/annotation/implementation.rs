@@ -48,11 +48,9 @@ pub(super) fn eval_anno_builtin(
         RecognizedAnnotation::Deque => eval_deque_annotation(context, target),
         RecognizedAnnotation::Binary => eval_binary_annotation(context, target),
         RecognizedAnnotation::Array => eval_array_annotation(context, target),
-        RecognizedAnnotation::Reflection { effect } => Ok(defer_reflection_annotation(
-            context.context(),
-            effect,
-            target,
-        )),
+        RecognizedAnnotation::Reflection { effect } => {
+            Ok(defer_reflection_annotation(context, effect, target))
+        }
         RecognizedAnnotation::Seq { value } => {
             super::super::strategy::seq(context.context(), &value, target)
         }
@@ -310,7 +308,7 @@ pub(in crate::eval) fn annotation_error_value(
     context: &EvaluatorStepContext<'_>,
     message: impl Into<String>,
 ) -> Value {
-    Value::error(context.context().values(), message.into())
+    Value::Lazy(context.construct_lazy(|access| LazyValue::error_in(access, message.into())))
 }
 
 fn eval_metadata_pure_annotation(
@@ -320,11 +318,13 @@ fn eval_metadata_pure_annotation(
 ) -> Result<Value, EvaluationHalt> {
     let metadata = metadata_update_inputs(context, target, "meta_pure")?;
     let output_count = metadata.len();
-    let updates = Value::Lazy(LazyValue::from_application(
-        context.context().values(),
-        function,
-        Arc::from([Value::List(List::from_values(metadata))]),
-    ));
+    let updates = Value::Lazy(context.construct_lazy(|access| {
+        LazyValue::from_application_in(
+            access,
+            function,
+            Arc::from([Value::List(List::from_values(metadata))]),
+        )
+    }));
     Ok(metadata_update_outputs(context, output_count, updates))
 }
 
@@ -335,15 +335,17 @@ fn eval_metadata_reflection_annotation(
 ) -> Result<Value, EvaluationHalt> {
     let metadata = metadata_update_inputs(context, target, "meta_refl")?;
     let output_count = metadata.len();
-    let effect = Value::Lazy(LazyValue::from_application(
-        context.context().values(),
-        function,
-        Arc::from([Value::List(List::from_values(metadata))]),
-    ));
+    let effect = Value::Lazy(context.construct_lazy(|access| {
+        LazyValue::from_application_in(
+            access,
+            function,
+            Arc::from([Value::List(List::from_values(metadata))]),
+        )
+    }));
     Ok(metadata_update_outputs(
         context,
         output_count,
-        defer_metadata_reflection(context.context(), effect),
+        defer_metadata_reflection(context, effect),
     ))
 }
 
@@ -383,21 +385,27 @@ fn metadata_update_outputs(
     ));
     let carriers = (0..output_count)
         .map(|index| {
-            let projection = Value::Lazy(LazyValue::from_builtin(
-                context.context().values(),
-                BuiltinCall {
-                    builtin: Builtin::ListAt,
-                    arguments: Arc::from([
-                        Value::Number(Number::from_usize(index)),
-                        updates.clone(),
-                    ]),
-                },
-            ));
-            Value::metadata_carrier(Value::builtin_call(
-                context.context().values(),
-                Builtin::Anno,
-                vec![projection_context.clone(), projection],
-            ))
+            let projection = Value::Lazy(context.construct_lazy(|access| {
+                LazyValue::from_builtin_in(
+                    access,
+                    BuiltinCall {
+                        builtin: Builtin::ListAt,
+                        arguments: Arc::from([
+                            Value::Number(Number::from_usize(index)),
+                            updates.clone(),
+                        ]),
+                    },
+                )
+            }));
+            Value::metadata_carrier(Value::Lazy(context.construct_lazy(|access| {
+                LazyValue::from_builtin_in(
+                    access,
+                    BuiltinCall {
+                        builtin: Builtin::Anno,
+                        arguments: Arc::from([projection_context.clone(), projection]),
+                    },
+                )
+            })))
         })
         .collect();
     Value::List(List::from_values(carriers))
@@ -461,14 +469,25 @@ fn eval_array_annotation(
 
 /// Durable handoff for a reflection gate. The target is not evaluated here;
 /// its later reflection task runs outside any scoped value-access region.
-fn defer_reflection_annotation(context: &EvalContext, effect: Value, target: &Value) -> Value {
-    Value::reflection_gate(context.values(), effect, target.clone())
+fn defer_reflection_annotation(
+    context: &EvaluatorStepContext<'_>,
+    effect: Value,
+    target: &Value,
+) -> Value {
+    Value::Lazy(context.construct_lazy(|access| {
+        LazyValue::from_reflection_gate_in(access, effect, target.clone())
+    }))
 }
 
 /// Durable handoff for a metadata-reflection update. Input carrier validation
 /// is pure and scoped; only the eventual reflection task crosses this seam.
-fn defer_metadata_reflection(context: &EvalContext, effect: Value) -> Value {
-    Value::reflection_task_result(context.values(), effect)
+fn defer_metadata_reflection(context: &EvaluatorStepContext<'_>, effect: Value) -> Value {
+    let Value::Lazy(lazy) =
+        context.construct_lazy_value(|access| Value::reflection_task_result_in(access, effect))
+    else {
+        unreachable!("a reflection task result is always lazy")
+    };
+    Value::Lazy(lazy)
 }
 
 /// Compatibility warning sink for unknown annotations. This is deliberately

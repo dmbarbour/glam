@@ -100,7 +100,7 @@ fn apply_function_values_in(
     let remaining = function.remaining_arity();
     if arguments.len() < remaining {
         let supplied = arguments.len();
-        let stage = attach_function_stage(function.stage().clone(), arguments);
+        let stage = attach_function_stage(context, function.stage().clone(), arguments);
         return Ok(Value::Function(FunctionValue::new(
             stage,
             remaining - supplied,
@@ -109,11 +109,9 @@ fn apply_function_values_in(
 
     let mut saturating = arguments;
     let rest = saturating.split_off(remaining);
-    let result = Value::Lazy(LazyValue::from_function_call(
-        context.context().values(),
-        function,
-        Arc::from(saturating),
-    ));
+    let result = Value::Lazy(context.construct_lazy(|access| {
+        LazyValue::from_function_call_in(access, function, Arc::from(saturating))
+    }));
     if rest.is_empty() {
         Ok(result)
     } else {
@@ -160,6 +158,7 @@ pub(super) fn effect_value(function: Value) -> Value {
 }
 
 pub(super) fn instantiate_function(
+    context: &EvaluatorStepContext<'_>,
     code: &FunctionCode,
     captures: Vec<Value>,
 ) -> Result<Value, EvaluationHalt> {
@@ -169,7 +168,7 @@ pub(super) fn instantiate_function(
     let stage = if captures.is_empty() {
         NetValue::new(code.runtime().clone())
     } else {
-        attach_function_stage(NetValue::new(code.runtime().clone()), captures)
+        attach_function_stage(context, NetValue::new(code.runtime().clone()), captures)
     };
     Ok(Value::Function(FunctionValue::new(stage, code.arity())))
 }

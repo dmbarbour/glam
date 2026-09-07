@@ -839,6 +839,10 @@ impl LazyValue {
         self.with_runtime_access(|access| access.root_managed_lazy(observer, self.edge))
     }
 
+    pub(crate) fn root_in(&self, access: &RuntimeValueAccess<'_>) -> managed::ManagedLazyRoot {
+        access.root_managed_lazy(self.values.clone(), self.edge)
+    }
+
     fn with_runtime_access<R>(
         &self,
         operation: impl for<'scope> FnOnce(RuntimeValueAccess<'scope>) -> R,

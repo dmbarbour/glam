@@ -104,12 +104,12 @@ pub(super) fn apply_builtin_in(
         | Builtin::ObjectWithDefs
         | Builtin::ObjectComposedDefs
         | Builtin::ObjectOverrideDefs => object::apply(context, builtin, arguments),
-        Builtin::Fixpoint
-        | Builtin::EffectApply
+        Builtin::Fixpoint => effect::apply_fixpoint(context, arguments),
+        Builtin::EffectApply
         | Builtin::EffectCall
         | Builtin::EffectMap
         | Builtin::EffectMapRun
-        | Builtin::EffectMapContinue => effect::apply(context.context(), builtin, arguments),
+        | Builtin::EffectMapContinue => effect::apply(context, builtin, arguments),
         Builtin::Seq | Builtin::Spark => strategy::apply(context.context(), builtin, arguments),
         Builtin::InteractionNet | Builtin::NetArity => net::apply(context, builtin, arguments),
         Builtin::InspectOrigin => provenance::apply(context.context(), arguments),

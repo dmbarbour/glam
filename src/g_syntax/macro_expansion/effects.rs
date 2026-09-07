@@ -510,10 +510,12 @@ fn hidden_effect(context: &RequestContext<'_, MacroEffects>, tag: [&str; 5]) -> 
         Key::abstract_global_path(tag),
         CoreValue::List(List::empty()),
     ));
-    context.values().wrap(eval::constant_effect(
-        context.eval_context().values(),
-        request,
-    ))
+    Value::from_runtime_root(
+        context
+            .eval_context()
+            .values()
+            .construct_runtime_value_root(|access| eval::constant_effect_in(access, request)),
+    )
 }
 
 fn span_value(context: &RequestContext<'_, MacroEffects>, span: String) -> Value {

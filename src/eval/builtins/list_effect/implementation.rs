@@ -4,10 +4,7 @@ pub(super) fn eval_list_effect_builtin(
     context: &EvaluatorStepContext<'_>,
     effect: &Value,
 ) -> Result<Value, EvaluationHalt> {
-    Ok(Value::List(lazy_run_list_effect(
-        context.context().values(),
-        effect.clone(),
-    )))
+    Ok(Value::List(lazy_run_list_effect(context, effect.clone())))
 }
 
 pub(super) fn eval_list_effect_seq_builtin(
@@ -16,8 +13,8 @@ pub(super) fn eval_list_effect_seq_builtin(
     continuation: &Value,
 ) -> Result<Value, EvaluationHalt> {
     Ok(Value::List(flat_map_list_effect_results(
-        context.context().values(),
-        lazy_run_list_effect(context.context().values(), operation.clone()),
+        context,
+        lazy_run_list_effect(context, operation.clone()),
         continuation.clone(),
     )))
 }
@@ -28,8 +25,8 @@ pub(super) fn eval_list_effect_alt_builtin(
     right: &Value,
 ) -> Result<Value, EvaluationHalt> {
     Ok(Value::List(List::concat(
-        lazy_run_list_effect(context.context().values(), left.clone()),
-        lazy_run_list_effect(context.context().values(), right.clone()),
+        lazy_run_list_effect(context, left.clone()),
+        lazy_run_list_effect(context, right.clone()),
     )))
 }
 
@@ -38,7 +35,7 @@ pub(super) fn eval_list_effect_cut_builtin(
     operation: &Value,
 ) -> Result<Value, EvaluationHalt> {
     Ok(Value::List(cut_list_effect_results(
-        context.context().values(),
+        context,
         operation.clone(),
     )))
 }
@@ -48,18 +45,16 @@ pub(super) fn eval_list_effect_fix_builtin(
     function: &Value,
 ) -> Result<Value, EvaluationHalt> {
     let function = eval_value_in(context, function)?;
-    let handle = PromisedValue::new(context.context().values(), "list effect fixpoint");
+    let handle = context.construct_promise("list effect fixpoint");
     let marker = Value::Promised(handle.clone());
     let operation = apply_value_in(context, function, marker.clone())?;
     Ok(Value::List(fix_list_effect_results(
-        context.context().values(),
-        operation,
-        handle,
+        context, operation, handle,
     )))
 }
 
-fn lazy_run_list_effect(values: &CoreValueFactory, effect: Value) -> List {
-    deferred_list(values, "list effect", [effect], run_deferred_list_effect)
+fn lazy_run_list_effect(context: &EvaluatorStepContext<'_>, effect: Value) -> List {
+    deferred_list(context, "list effect", [effect], run_deferred_list_effect)
 }
 
 fn run_deferred_list_effect(
@@ -107,12 +102,12 @@ fn run_list_effect_to_list(
 }
 
 fn flat_map_list_effect_results(
-    values: &CoreValueFactory,
+    context: &EvaluatorStepContext<'_>,
     results: List,
     continuation: Value,
 ) -> List {
     deferred_list(
-        values,
+        context,
         "list effect seq",
         [Value::List(results), continuation],
         flat_map_deferred_list_effect_results,
@@ -132,14 +127,14 @@ fn flat_map_deferred_list_effect_results(
     let continuation = eval_value_in(context, continuation)?;
     let next = apply_value_in(context, continuation.clone(), head)?;
     Ok(Value::List(List::concat(
-        lazy_run_list_effect(context.context().values(), next),
-        flat_map_list_effect_results(context.context().values(), tail, continuation),
+        lazy_run_list_effect(context, next),
+        flat_map_list_effect_results(context, tail, continuation),
     )))
 }
 
-fn cut_list_effect_results(values: &CoreValueFactory, operation: Value) -> List {
+fn cut_list_effect_results(context: &EvaluatorStepContext<'_>, operation: Value) -> List {
     deferred_list(
-        values,
+        context,
         "list effect cut",
         [operation],
         cut_deferred_list_effect_results,
@@ -153,7 +148,7 @@ fn cut_deferred_list_effect_results(
     let [operation] = captures else {
         unreachable!("list effect cut computation has one explicit capture")
     };
-    let results = lazy_run_list_effect(context.context().values(), operation.clone());
+    let results = lazy_run_list_effect(context, operation.clone());
     let Some((head, _)) = pop_list_front_in(context, &results)? else {
         return Ok(Value::List(List::empty()));
     };
@@ -161,12 +156,12 @@ fn cut_deferred_list_effect_results(
 }
 
 fn fix_list_effect_results(
-    values: &CoreValueFactory,
+    context: &EvaluatorStepContext<'_>,
     operation: Value,
     handle: PromisedValue,
 ) -> List {
     deferred_list(
-        values,
+        context,
         "list effect fix",
         [operation, Value::Promised(handle)],
         fix_deferred_list_effect_results,
@@ -180,7 +175,7 @@ fn fix_deferred_list_effect_results(
     let [operation, Value::Promised(handle)] = captures else {
         unreachable!("list effect fix computation has its exact explicit captures")
     };
-    let results = lazy_run_list_effect(context.context().values(), operation.clone());
+    let results = lazy_run_list_effect(context, operation.clone());
     let Some((head, tail)) = pop_list_front_in(context, &results)? else {
         handle
             .set(Value::List(List::empty()))
@@ -197,12 +192,18 @@ fn fix_deferred_list_effect_results(
 }
 
 fn deferred_list(
-    values: &CoreValueFactory,
+    context: &EvaluatorStepContext<'_>,
     label: &'static str,
     captures: impl Into<Arc<[Value]>>,
     operation: crate::core::SemanticOperation,
 ) -> List {
-    List::from_thunk(LazyValue::semantic_computation(values, label, captures, operation).into())
+    List::from_thunk(
+        context
+            .construct_lazy(|access| {
+                LazyValue::semantic_computation_in(access, label, captures, operation)
+            })
+            .into(),
+    )
 }
 
 fn list_effect_api() -> Value {

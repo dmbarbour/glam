@@ -29,13 +29,15 @@ pub(super) fn apply_builtin_values_lazily(
     let mut saturating = arguments;
     let rest = saturating.split_off(remaining);
     supplied.extend(saturating);
-    let result = Value::Lazy(LazyValue::from_builtin(
-        context.context().values(),
-        BuiltinCall {
-            builtin,
-            arguments: Arc::from(supplied),
-        },
-    ));
+    let result = Value::Lazy(context.construct_lazy(|access| {
+        LazyValue::from_builtin_in(
+            access,
+            BuiltinCall {
+                builtin,
+                arguments: Arc::from(supplied),
+            },
+        )
+    }));
     if rest.is_empty() {
         Ok(result)
     } else {
@@ -149,7 +151,9 @@ pub(super) fn apply_core_operator(
                     Arc::from(captures),
                 )));
             }
-            Ok(OperatorYield::Data(instantiate_function(code, captures)?))
+            Ok(OperatorYield::Data(instantiate_function(
+                context, code, captures,
+            )?))
         }
         CoreOperator::ComputationCaptures { code, supplied } => {
             let mut captures = supplied.iter().cloned().collect::<Vec<_>>();
@@ -160,10 +164,10 @@ pub(super) fn apply_core_operator(
                     Arc::from(captures),
                 )));
             }
-            let stage = attach_net_many(NetValue::new(code.runtime().clone()), captures);
-            Ok(OperatorYield::Data(Value::Lazy(
-                LazyValue::from_net_computation(context.context().values(), stage),
-            )))
+            let stage = attach_net_many(context, NetValue::new(code.runtime().clone()), captures);
+            Ok(OperatorYield::Data(Value::Lazy(context.construct_lazy(
+                |access| LazyValue::from_net_computation_in(access, stage),
+            ))))
         }
         CoreOperator::Dict { keys, supplied } => {
             let mut values = supplied.iter().cloned().collect::<Vec<_>>();
@@ -197,11 +201,15 @@ pub(super) fn apply_core_operator(
                     "builtin operator received too many arguments",
                 ));
             }
-            Ok(OperatorYield::Data(Value::Lazy(LazyValue::from_builtin(
-                context.context().values(),
-                BuiltinCall {
-                    builtin: call.builtin,
-                    arguments: Arc::from(arguments),
+            Ok(OperatorYield::Data(Value::Lazy(context.construct_lazy(
+                |access| {
+                    LazyValue::from_builtin_in(
+                        access,
+                        BuiltinCall {
+                            builtin: call.builtin,
+                            arguments: Arc::from(arguments),
+                        },
+                    )
                 },
             ))))
         }
@@ -237,10 +245,8 @@ pub(super) fn apply_core_operator(
                     Arc::from(arguments),
                 )));
             }
-            Ok(OperatorYield::Data(Value::Lazy(LazyValue::from_access(
-                context.context().values(),
-                path.clone(),
-                Arc::from(arguments),
+            Ok(OperatorYield::Data(Value::Lazy(context.construct_lazy(
+                |access| LazyValue::from_access_in(access, path.clone(), Arc::from(arguments)),
             ))))
         }
         CoreOperator::Request {
@@ -264,7 +270,7 @@ pub(super) fn apply_core_operator(
                     .insert(tag.clone(), Value::List(List::from_values(arguments))),
             );
             Ok(OperatorYield::Data(if *wrap_effect {
-                constant_effect(context.context().values(), request)
+                constant_effect_in_step(context, request)
             } else {
                 request
             }))
@@ -272,17 +278,42 @@ pub(super) fn apply_core_operator(
     }
 }
 
-pub(crate) fn constant_effect(values: &CoreValueFactory, request: Value) -> Value {
+fn constant_effect_template(request: Value) -> crate::core_net::CoreInteractionNet {
     let mut net = crate::interaction_net::NetBuilder::<CoreSpecialization>::new();
     let [input, argument, result] = net.bind();
     let erase = net.copy(0).input;
     net.wire(argument, erase);
     let data = net.data(request);
     net.wire(result, data);
-    let template = net.finish(input);
+    net.finish(input)
+}
+
+pub(crate) fn constant_effect_in(
+    access: &crate::core::RuntimeValueAccess<'_>,
+    request: Value,
+) -> Value {
+    let template = constant_effect_template(request);
     let function = Value::Function(FunctionValue::new(
-        NetValue::new(values.instantiate_core_net(&template)),
+        NetValue::new(
+            access
+                .construct_managed_core_net(template.instantiate())
+                .expect("managed core-net representation must fit one collector run"),
+        ),
         1,
     ));
     Value::Dict(crate::core::Dict::new_sync().insert((*keys::EFF).clone(), function))
+}
+
+pub(crate) fn constant_effect_in_step(context: &EvaluatorStepContext<'_>, request: Value) -> Value {
+    let template = constant_effect_template(request);
+    let function = Value::Function(FunctionValue::new(
+        NetValue::new(context.construct_core_net(template.instantiate())),
+        1,
+    ));
+    Value::Dict(crate::core::Dict::new_sync().insert((*keys::EFF).clone(), function))
+}
+
+#[cfg(test)]
+pub(crate) fn constant_effect(values: &CoreValueFactory, request: Value) -> Value {
+    values.with_runtime_value_access(|access| constant_effect_in(&access, request))
 }

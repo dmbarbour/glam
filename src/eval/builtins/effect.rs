@@ -5,36 +5,32 @@ mod implementation;
 use implementation::*;
 
 pub(super) fn apply(
-    context: &EvalContext,
+    context: &EvaluatorStepContext<'_>,
     builtin: Builtin,
     arguments: Vec<Value>,
 ) -> Result<Value, EvaluationHalt> {
     match builtin {
-        Builtin::Fixpoint => {
-            let [function] = super::exact(arguments, "fixpoint")?;
-            eval_fixpoint_builtin(context, &function)
-        }
         Builtin::EffectApply => {
             let [function, argument, api] = super::exact(arguments, "effect apply")?;
-            apply_values(
+            apply_values_in(
                 context,
-                eval_value(context, &function)?,
+                eval_value_in(context, &function)?,
                 vec![api, argument],
             )
         }
         Builtin::EffectCall => {
             let [name, arguments, api] = super::exact(arguments, "effect call")?;
-            let name = value_to_key(context, &eval_value(context, &name)?)?;
-            let function = resolve_core_access(context, &[api], &[CoreDataKey::Key(name)])?;
-            let arguments = match eval_value(context, &arguments)? {
-                Value::List(arguments) => list_to_value_items(context, &arguments)?,
+            let name = value_to_key_in(context, &eval_value_in(context, &name)?)?;
+            let function = resolve_core_access_in(context, &[api], &[CoreDataKey::Key(name)])?;
+            let arguments = match eval_value_in(context, &arguments)? {
+                Value::List(arguments) => list_to_value_items_in(context, &arguments)?,
                 _ => {
                     return Err(EvaluationHalt::new(
                         "effect call builtin requires a list of arguments",
                     ));
                 }
             };
-            apply_values(context, function, arguments)
+            apply_values_in(context, function, arguments)
         }
         Builtin::EffectMap => {
             let [function, items] = super::exact(arguments, "effect map")?;
@@ -51,4 +47,12 @@ pub(super) fn apply(
         }
         _ => unreachable!("effect dispatcher received another builtin"),
     }
+}
+
+pub(super) fn apply_fixpoint(
+    context: &EvaluatorStepContext<'_>,
+    arguments: Vec<Value>,
+) -> Result<Value, EvaluationHalt> {
+    let [function] = super::exact(arguments, "fixpoint")?;
+    eval_fixpoint_builtin(context, &function)
 }

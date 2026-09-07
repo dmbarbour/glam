@@ -670,9 +670,13 @@ impl EvalContext {
     /// Constructs one semantic builtin call inside a callback-free value
     /// access region. The returned value is durable, but the access carrier
     /// and its mutator cannot escape the higher-ranked callback.
-    pub(crate) fn compose_builtin(&self, builtin: Builtin, arguments: Vec<Value>) -> Value {
-        self.values().with_runtime_value_access(|_access| {
-            Value::builtin_call(self.values(), builtin, arguments)
+    pub(crate) fn compose_builtin(
+        &self,
+        builtin: Builtin,
+        arguments: Vec<Value>,
+    ) -> RuntimeValueRoot {
+        self.values().construct_runtime_value_root(|access| {
+            Value::builtin_call_in(access, builtin, arguments)
         })
     }
 
@@ -684,7 +688,21 @@ impl EvalContext {
         arguments: Vec<Value>,
     ) -> Result<Value, crate::core::EvaluationHalt> {
         let value = self.compose_builtin(builtin, arguments);
-        self.evaluate_whnf(&value)
+        let handle = self
+            .demand_whnf(value)
+            .map_err(|error| crate::core::EvaluationHalt::new(error.as_ref()))?;
+        match self.drive_client_demand(handle)? {
+            ClientDemandResult::Complete(value) => {
+                let poll = EvaluationPollContext::for_context(self);
+                Ok(poll.evaluate(self, |evaluator| evaluator.project_root(&value)))
+            }
+            ClientDemandResult::Abandoned => unreachable!(
+                "WHNF client demand must return a value or a propagated evaluation failure"
+            ),
+            ClientDemandResult::Failed(_) | ClientDemandResult::Killed(_) => {
+                unreachable!("client failures are returned by drive_client_demand")
+            }
+        }
     }
 
     fn drive_client_demand(

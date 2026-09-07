@@ -14,10 +14,9 @@ pub(super) fn apply(
     match builtin {
         Builtin::InteractionNet => {
             let [effect] = super::exact(arguments, "interaction_net")?;
-            Ok(Value::Lazy(LazyValue::from_net_construction(
-                context.context().values(),
-                effect,
-            )))
+            Ok(Value::Lazy(context.construct_lazy(|access| {
+                LazyValue::from_net_construction_in(access, effect)
+            })))
         }
         Builtin::NetArity => apply_net_arity(context, arguments),
         _ => unreachable!("net builtin dispatcher received another builtin"),
@@ -38,10 +37,9 @@ fn apply_net_arity(
     };
 
     Ok(if arity == 0 {
-        Value::Lazy(LazyValue::from_net_computation(
-            context.context().values(),
-            net,
-        ))
+        Value::Lazy(
+            context.construct_lazy(|access| LazyValue::from_net_computation_in(access, net)),
+        )
     } else {
         Value::Function(FunctionValue::new(net, arity))
     })

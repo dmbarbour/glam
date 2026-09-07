@@ -550,7 +550,7 @@ This family has enough call-site breadth to remain partitioned:
    access/application helpers, and other paths which already own an outer
    access. Publish the containing root through B rather than reopening nested
    access.
-3. **D.3 — Evaluator paths.** Convert application, operator, annotation,
+3. **D.3 — Evaluator paths (complete).** Convert application, operator, annotation,
    object/effect/list/dictionary/net builtin, and machine-result construction.
    Open or extend one callback-free `with_value_access` region through result
    rooting or exact net installation; split any path which reaches a callback,
@@ -580,6 +580,16 @@ runs without managed access; after it returns, net allocation and containing
 value-root publication share one access region. The scoped-construction test
 now latches a maximum access depth of one across nested public construction.
 
+D.3 completed on 2026-09-07. Evaluator operations now retain only newly
+constructed lazy, promise, and core-net family identities in a private
+step-local publication nursery until the operation installs its result in a
+cache, net, or runtime root. Directly rootable reflection-machine results use
+same-region containing roots instead. The nursery crosses neither managed
+access nor host callbacks, waits, coordinator operations, nor delayed
+reflection activation; it is a narrow ownership handoff rather than a second
+value representation. Forced collection between construction and containing
+root publication covers all three managed families.
+
 ##### GCI5R-001E — Promise construction cutover
 
 This family crosses coordinator ownership and therefore remains separate from
@@ -595,7 +605,7 @@ the otherwise similar lazy conversion:
    owned. Do not hold managed access across coordinator calls or waits. Repair
    `client_demand_halt` so an unassigned-promise halt cannot outlive the root
    projected from its consumed dependency.
-3. **E.3 — Semantic promise graphs.** Convert list-effect fixpoints,
+3. **E.3 — Semantic promise graphs (complete).** Convert list-effect fixpoints,
    reflection fixpoints, and other evaluator graphs which embed promises as
    traced values rather than producer-owned handles. Establish the containing
    value root or traced owner before their construction region ends.
@@ -603,6 +613,11 @@ the otherwise similar lazy conversion:
    can escape and update the source inventory. Force collection between
    construction and registration/publication, and preserve cancellation,
    abandonment, assignment, resolver drop, and root-retirement coverage.
+
+E.3 completed on 2026-09-07. List-effect and computed-fixpoint promises are
+now admitted through the evaluator-step publication nursery and installed in
+their containing semantic graph before those guards retire. Producer-owned
+promises remain on the explicit rooted registration path established by E.2.
 
 ##### GCI5R-001F — Core-net construction cutover
 

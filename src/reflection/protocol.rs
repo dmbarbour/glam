@@ -100,13 +100,15 @@ impl<R> EffectRequestSpec<R> {
             .iter()
             .map(|argument| values.clone_core(argument))
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(values.wrap(eval::constant_effect(
-            values.core(),
-            request_value(
-                &Key::abstract_global_path(self.tag_path.iter().map(Arc::as_ref)),
-                arguments,
-            ),
-        )))
+        let request = request_value(
+            &Key::abstract_global_path(self.tag_path.iter().map(Arc::as_ref)),
+            arguments,
+        );
+        Ok(PublicValue::from_runtime_root(
+            values
+                .core()
+                .construct_runtime_value_root(|access| eval::constant_effect_in(access, request)),
+        ))
     }
 }
 

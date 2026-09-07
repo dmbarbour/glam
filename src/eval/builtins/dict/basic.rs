@@ -35,11 +35,7 @@ pub(in crate::eval::builtins) fn eval_dict_union_builtin_in(
         ));
     };
 
-    Ok(Value::Dict(merge_dicts(
-        context.context().values(),
-        &left_dict,
-        &right_dict,
-    )))
+    Ok(Value::Dict(merge_dicts(context, &left_dict, &right_dict)))
 }
 
 pub(super) fn eval_dict_update_builtin(
@@ -61,7 +57,7 @@ pub(super) fn eval_dict_update_builtin(
         ));
     };
     Ok(Value::Dict(update_dict_path(
-        context.context().values(),
+        context,
         &dict,
         &path,
         new_value.clone(),

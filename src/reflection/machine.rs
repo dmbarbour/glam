@@ -12,7 +12,7 @@ use super::store::{StoreJournal, VolumeId};
 use crate::api::Value as PublicValue;
 use crate::core::{
     Atom, Builtin, CoreValueFactory, Dict, EvaluationFailure, EvaluationHalt, FunctionValue, Key,
-    LazyValue, List, NetValue, PromisedValue, Value, keys,
+    LazyValue, List, NetValue, PromisedValue, RuntimeValueAccess, Value, keys,
 };
 use crate::core_net::{CoreDataKey, CoreSpecialization};
 use crate::eval;
@@ -250,7 +250,6 @@ impl<S: TaskSpecialization> EffectTask<S> {
             specialization.exposes_shared_heap(),
             exposes_exit,
         )?;
-        let api = RuntimeValueRoot::new(eval_context.values(), api);
         let id = eval_context
             .task_id()
             .map_err(|error| TaskHalt::new(error.as_ref()))?;
@@ -399,23 +398,28 @@ impl<S: TaskSpecialization> EffectTask<S> {
     fn capture_continuation(
         &mut self,
         continuation: CapturedContinuation,
-    ) -> Result<Value, TaskHalt> {
+    ) -> Result<RuntimeValueRoot, TaskHalt> {
         let id = self.next_continuation;
         self.next_continuation = self
             .next_continuation
             .checked_add(1)
             .ok_or_else(|| TaskHalt::new("reflection continuation IDs exhausted"))?;
         self.continuations.insert(id, continuation);
-        Ok(request_function(
-            self.eval_context.values(),
-            self.tags.resume.clone(),
-            3,
-            vec![
-                Value::Number(Number::from_u64(self.id.get())),
-                Value::Number(Number::from_u64(id)),
-            ],
-            true,
-        ))
+        Ok(self
+            .eval_context
+            .values()
+            .construct_runtime_value_root(|access| {
+                request_function_in(
+                    access,
+                    self.tags.resume.clone(),
+                    3,
+                    vec![
+                        Value::Number(Number::from_u64(self.id.get())),
+                        Value::Number(Number::from_u64(id)),
+                    ],
+                    true,
+                )
+            }))
     }
 
     fn start_fixpoint(
@@ -961,8 +965,8 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     branch.observe(checkpoint, snapshot.generation());
                     values.clone_core(snapshot.store().root())?
                 };
-                let value = lazy_value_path(&self.eval_context, heap, &path);
-                MachineWork::deliver(self.eval_context.values(), value, branch, scope_depth)
+                let value = lazy_value_path_root(&self.eval_context, heap, &path);
+                MachineWork::deliver_root(value, branch, scope_depth)
             }
             Request::HeapSet(path, value) => {
                 let path = context.evaluate(&self.eval_context, |evaluator| {
@@ -1078,11 +1082,19 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         let values = crate::api::Values::from_core_factory(
                             self.eval_context.values().clone(),
                         );
-                        lazy_value_path(&self.eval_context, values.clone_core(&root)?, &path)
+                        lazy_value_path_root(&self.eval_context, values.clone_core(&root)?, &path)
                     }
-                    None => missing_volume_value(&self.eval_context, volume),
+                    None => self
+                        .eval_context
+                        .values()
+                        .construct_runtime_value_root(|access| {
+                            Value::Lazy(LazyValue::error_in(
+                                access,
+                                format!("reflection volume {} has been revoked", volume.get()),
+                            ))
+                        }),
                 };
-                MachineWork::deliver(self.eval_context.values(), value, branch, scope_depth)
+                MachineWork::deliver_root(value, branch, scope_depth)
             }
             Request::VolumeSet(volume, path, value) => {
                 let path = context.evaluate(&self.eval_context, |evaluator| {
@@ -1195,7 +1207,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 })?;
                 frames.push(ResetFrame {
                     key,
-                    continuation: branch.root_value(self.eval_context.values(), continuation),
+                    continuation,
                     scope_depth,
                     order,
                 });
@@ -1255,12 +1267,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     .control
                     .sequence
                     .push(Continuation::Glam(target.continuation));
-                MachineWork::apply_roots(
-                    function,
-                    vec![branch.root_value(self.eval_context.values(), continuation)],
-                    branch,
-                    scope_depth,
-                )
+                MachineWork::apply_roots(function, vec![continuation], branch, scope_depth)
             }
             Request::Resume(task_id, id, value) => {
                 if task_id != self.id {
@@ -1349,14 +1356,11 @@ impl<S: TaskSpecialization> EffectTask<S> {
                                 scope_depth,
                             ),
                             _ => MachineWork::Drive {
-                                branch: branch.with_effect(
+                                branch: branch.with_effect_root(alternative_returns_root(
                                     self.eval_context.values(),
-                                    alternative_returns(
-                                        self.eval_context.values(),
-                                        &self.tags,
-                                        values,
-                                    ),
-                                ),
+                                    &self.tags,
+                                    values,
+                                )),
                                 scope_depth,
                             },
                         }
@@ -1430,15 +1434,15 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 }
                 Continuation::AssertUnit(diagnostic_context) => {
                     let value = context.evaluate(&self.eval_context, |evaluator| {
-                        let assertion = Value::builtin_call(
-                            self.eval_context.values(),
-                            Builtin::AssertUnit,
-                            vec![
-                                evaluator.project_root(&diagnostic_context),
-                                evaluator.project_root(&value),
-                                self.eval_context.values().unit(),
-                            ],
-                        );
+                        let diagnostic_context = evaluator.project_root(&diagnostic_context);
+                        let value = evaluator.project_root(&value);
+                        let assertion = evaluator.construct_lazy_value(|access| {
+                            Value::builtin_call_in(
+                                access,
+                                Builtin::AssertUnit,
+                                vec![diagnostic_context, value, self.eval_context.values().unit()],
+                            )
+                        });
                         evaluate_in(evaluator, assertion).map(|value| evaluator.root_value(value))
                     })?;
                     branch.control.sequence.pop();
@@ -3144,29 +3148,31 @@ fn parse_volume_request_tag(tag: &Key) -> Result<Option<VolumeRequestIdentity>, 
 }
 
 pub(crate) fn volume_effects(values: &CoreValueFactory, volume: VolumeId) -> PublicValue {
-    let entry = |name: &str, operation, arity| {
-        (
-            Key::atom_from_text(name),
-            request_function(
-                values,
-                volume_request_tag(volume, operation),
-                arity,
-                Vec::new(),
-                true,
-            ),
+    PublicValue::from_runtime_root(values.construct_runtime_value_root(|access| {
+        let entry = |name: &str, operation, arity| {
+            (
+                Key::atom_from_text(name),
+                request_function_in(
+                    access,
+                    volume_request_tag(volume, operation),
+                    arity,
+                    Vec::new(),
+                    true,
+                ),
+            )
+        };
+        Value::Dict(
+            [
+                entry("get", VolumeOperation::Get, 1),
+                entry("set", VolumeOperation::Set, 2),
+                entry("rewrite", VolumeOperation::Rewrite, 2),
+            ]
+            .into_iter()
+            .fold(Dict::new_sync(), |dict, (key, value)| {
+                dict.insert(key, value)
+            }),
         )
-    };
-    crate::api::Values::from_core_factory(values.clone()).wrap(Value::Dict(
-        [
-            entry("get", VolumeOperation::Get, 1),
-            entry("set", VolumeOperation::Set, 2),
-            entry("rewrite", VolumeOperation::Rewrite, 2),
-        ]
-        .into_iter()
-        .fold(Dict::new_sync(), |dict, (key, value)| {
-            dict.insert(key, value)
-        }),
-    ))
+    }))
 }
 
 fn request_id_in(
@@ -3190,131 +3196,140 @@ fn effect_api<R: Clone>(
     specs: Vec<EffectRequestSpec<R>>,
     expose_shared_heap: bool,
     expose_exit: bool,
-) -> Result<(Value, Vec<SpecializedRequest<R>>), TaskHalt> {
-    let entry = |name: &str, value| (Key::atom_from_text(name), value);
-    let heap_api = Value::Dict(
-        [
+) -> Result<(RuntimeValueRoot, Vec<SpecializedRequest<R>>), TaskHalt> {
+    let mut requests = Vec::with_capacity(specs.len());
+    let api = values.try_construct_runtime_value_root(|access| {
+        let entry = |name: &str, value| (Key::atom_from_text(name), value);
+        let heap_api = Value::Dict(
+            [
+                entry(
+                    "get",
+                    request_function_in(access, tags.heap_get.clone(), 1, Vec::new(), false),
+                ),
+                entry(
+                    "set",
+                    request_function_in(access, tags.heap_set.clone(), 2, Vec::new(), false),
+                ),
+                entry(
+                    "rewrite",
+                    request_function_in(access, tags.heap_rewrite.clone(), 2, Vec::new(), false),
+                ),
+            ]
+            .into_iter()
+            .fold(Dict::new_sync(), |dict, (key, value)| {
+                dict.insert(key, value)
+            }),
+        );
+        let mut entries = vec![
+            entry(
+                "r",
+                request_function_in(access, tags.r.clone(), 1, Vec::new(), false),
+            ),
+            entry(
+                "seq",
+                request_function_in(access, tags.seq.clone(), 2, Vec::new(), false),
+            ),
+            entry(
+                "alt",
+                request_function_in(access, tags.alt.clone(), 2, Vec::new(), false),
+            ),
+            entry("fail", nullary_request(tags.fail.clone())),
+            entry(
+                "cut",
+                request_function_in(access, tags.cut.clone(), 1, Vec::new(), false),
+            ),
+            entry(
+                "fix",
+                request_function_in(access, tags.fix.clone(), 1, Vec::new(), false),
+            ),
             entry(
                 "get",
-                request_function(values, tags.heap_get.clone(), 1, Vec::new(), false),
+                request_function_in(access, tags.get.clone(), 1, Vec::new(), false),
             ),
             entry(
                 "set",
-                request_function(values, tags.heap_set.clone(), 2, Vec::new(), false),
+                request_function_in(access, tags.set.clone(), 2, Vec::new(), false),
             ),
             entry(
-                "rewrite",
-                request_function(values, tags.heap_rewrite.clone(), 2, Vec::new(), false),
+                "reset",
+                request_function_in(access, tags.reset.clone(), 2, Vec::new(), false),
             ),
-        ]
-        .into_iter()
-        .fold(Dict::new_sync(), |dict, (key, value)| {
-            dict.insert(key, value)
-        }),
-    );
-    let mut entries = vec![
-        entry(
-            "r",
-            request_function(values, tags.r.clone(), 1, Vec::new(), false),
-        ),
-        entry(
-            "seq",
-            request_function(values, tags.seq.clone(), 2, Vec::new(), false),
-        ),
-        entry(
-            "alt",
-            request_function(values, tags.alt.clone(), 2, Vec::new(), false),
-        ),
-        entry("fail", nullary_request(tags.fail.clone())),
-        entry(
-            "cut",
-            request_function(values, tags.cut.clone(), 1, Vec::new(), false),
-        ),
-        entry(
-            "fix",
-            request_function(values, tags.fix.clone(), 1, Vec::new(), false),
-        ),
-        entry(
-            "get",
-            request_function(values, tags.get.clone(), 1, Vec::new(), false),
-        ),
-        entry(
-            "set",
-            request_function(values, tags.set.clone(), 2, Vec::new(), false),
-        ),
-        entry(
-            "reset",
-            request_function(values, tags.reset.clone(), 2, Vec::new(), false),
-        ),
-        entry(
-            "shift",
-            request_function(values, tags.shift.clone(), 2, Vec::new(), false),
-        ),
-    ];
-    if expose_shared_heap {
-        entries.push(entry("heap", heap_api));
-    }
-    if expose_exit {
-        entries.push(entry(
-            "exit",
-            Value::Dict(
-                [
-                    entry("success", nullary_request(tags.exit_success.clone())),
-                    entry(
-                        "error",
-                        request_function(values, tags.exit_error.clone(), 1, Vec::new(), false),
-                    ),
-                ]
-                .into_iter()
-                .fold(Dict::new_sync(), |dict, (key, value)| {
-                    dict.insert(key, value)
-                }),
+            entry(
+                "shift",
+                request_function_in(access, tags.shift.clone(), 2, Vec::new(), false),
             ),
-        ));
-    }
-    let mut api = entries
-        .into_iter()
-        .fold(Dict::new_sync(), |dict, (key, value)| {
-            dict.insert(key, value)
-        });
-    let mut requests = Vec::with_capacity(specs.len());
-    for spec in specs {
-        let tag = Key::abstract_global_path(spec.tag_path.iter().map(Arc::as_ref));
-        let api_name = spec
-            .api_path
-            .as_ref()
-            .map(|path| path.iter().map(Arc::as_ref).collect::<Vec<_>>().join("."));
-        if requests
-            .iter()
-            .any(|request: &SpecializedRequest<R>| request.tag == tag)
-        {
-            return Err(TaskHalt::new(format!(
-                "duplicate private tag for effect API name `{}`",
-                api_name.as_deref().unwrap_or("<hidden>")
-            )));
+        ];
+        if expose_shared_heap {
+            entries.push(entry("heap", heap_api));
         }
-        if let Some(path) = &spec.api_path {
-            let value = if spec.arity == 0 {
-                nullary_request(tag.clone())
-            } else {
-                request_function(values, tag.clone(), spec.arity, Vec::new(), false)
-            };
-            api = insert_effect_api_path(
-                api,
-                path,
-                value,
-                api_name
-                    .as_deref()
-                    .expect("visible request must have a name"),
-            )?;
+        if expose_exit {
+            entries.push(entry(
+                "exit",
+                Value::Dict(
+                    [
+                        entry("success", nullary_request(tags.exit_success.clone())),
+                        entry(
+                            "error",
+                            request_function_in(
+                                access,
+                                tags.exit_error.clone(),
+                                1,
+                                Vec::new(),
+                                false,
+                            ),
+                        ),
+                    ]
+                    .into_iter()
+                    .fold(Dict::new_sync(), |dict, (key, value)| {
+                        dict.insert(key, value)
+                    }),
+                ),
+            ));
         }
-        requests.push(SpecializedRequest {
-            tag,
-            arity: spec.arity,
-            request: spec.request,
-        });
-    }
-    Ok((Value::Dict(api), requests))
+        let mut api = entries
+            .into_iter()
+            .fold(Dict::new_sync(), |dict, (key, value)| {
+                dict.insert(key, value)
+            });
+        for spec in specs {
+            let tag = Key::abstract_global_path(spec.tag_path.iter().map(Arc::as_ref));
+            let api_name = spec
+                .api_path
+                .as_ref()
+                .map(|path| path.iter().map(Arc::as_ref).collect::<Vec<_>>().join("."));
+            if requests
+                .iter()
+                .any(|request: &SpecializedRequest<R>| request.tag == tag)
+            {
+                return Err(TaskHalt::new(format!(
+                    "duplicate private tag for effect API name `{}`",
+                    api_name.as_deref().unwrap_or("<hidden>")
+                )));
+            }
+            if let Some(path) = &spec.api_path {
+                let value = if spec.arity == 0 {
+                    nullary_request(tag.clone())
+                } else {
+                    request_function_in(access, tag.clone(), spec.arity, Vec::new(), false)
+                };
+                api = insert_effect_api_path(
+                    api,
+                    path,
+                    value,
+                    api_name
+                        .as_deref()
+                        .expect("visible request must have a name"),
+                )?;
+            }
+            requests.push(SpecializedRequest {
+                tag,
+                arity: spec.arity,
+                request: spec.request,
+            });
+        }
+        Ok::<_, TaskHalt>(Value::Dict(api))
+    })?;
+    Ok((api, requests))
 }
 
 fn insert_effect_api_path(
@@ -3349,8 +3364,8 @@ fn insert_effect_api_path(
     Ok(api.insert(key, Value::Dict(nested)))
 }
 
-fn request_function(
-    values: &CoreValueFactory,
+fn request_function_in(
+    access: &RuntimeValueAccess<'_>,
     tag: Key,
     arity: usize,
     supplied: Vec<Value>,
@@ -3366,7 +3381,11 @@ fn request_function(
     ));
     let template = net.finish(exposed);
     Value::Function(FunctionValue::new(
-        NetValue::new(values.instantiate_core_net(&template)),
+        NetValue::new(
+            access
+                .construct_managed_core_net(template.instantiate())
+                .expect("managed core-net representation must fit one collector run"),
+        ),
         remaining,
     ))
 }
@@ -3375,15 +3394,21 @@ fn nullary_request(tag: Key) -> Value {
     Value::Dict(Dict::new_sync().insert(tag, Value::List(List::empty())))
 }
 
-fn alternative_returns(factory: &CoreValueFactory, tags: &Tags, values: Vec<Value>) -> Value {
-    values
-        .into_iter()
-        .rev()
-        .map(|value| eval::constant_effect(factory, request_value(&tags.r, vec![value])))
-        .reduce(|right, left| {
-            eval::constant_effect(factory, request_value(&tags.alt, vec![left, right]))
-        })
-        .expect("alternative return construction requires at least two values")
+fn alternative_returns_root(
+    factory: &CoreValueFactory,
+    tags: &Tags,
+    values: Vec<Value>,
+) -> RuntimeValueRoot {
+    factory.construct_runtime_value_root(|access| {
+        values
+            .into_iter()
+            .rev()
+            .map(|value| eval::constant_effect_in(access, request_value(&tags.r, vec![value])))
+            .reduce(|right, left| {
+                eval::constant_effect_in(access, request_value(&tags.alt, vec![left, right]))
+            })
+            .expect("alternative return construction requires at least two values")
+    })
 }
 
 fn fuse_glam_delivery_in<S: TaskSpecialization>(
@@ -3440,13 +3465,6 @@ fn missing_volume_error(volume: VolumeId) -> TaskHalt {
     ))
 }
 
-fn missing_volume_value(context: &EvalContext, volume: VolumeId) -> Value {
-    Value::error(
-        context.values(),
-        format!("reflection volume {} has been revoked", volume.get()),
-    )
-}
-
 fn value_key_in(context: &EvaluatorStepContext<'_>, value: Value) -> Result<Key, TaskHalt> {
     Key::from_value(&evaluate_in(context, value)?)
         .ok_or_else(|| TaskHalt::new("effect index is not keyable"))
@@ -3470,20 +3488,22 @@ fn get_value_path_in(
     Ok(current)
 }
 
-fn lazy_value_path(context: &EvalContext, value: Value, path: &[Key]) -> Value {
-    if path.is_empty() {
-        return value;
-    }
-    Value::Lazy(LazyValue::from_access(
-        context.values(),
-        Arc::from(
-            path.iter()
-                .cloned()
-                .map(CoreDataKey::Key)
-                .collect::<Vec<_>>(),
-        ),
-        Arc::from([value]),
-    ))
+fn lazy_value_path_root(context: &EvalContext, value: Value, path: &[Key]) -> RuntimeValueRoot {
+    context.values().construct_runtime_value_root(|access| {
+        if path.is_empty() {
+            return value;
+        }
+        Value::Lazy(LazyValue::from_access_in(
+            access,
+            Arc::from(
+                path.iter()
+                    .cloned()
+                    .map(CoreDataKey::Key)
+                    .collect::<Vec<_>>(),
+            ),
+            Arc::from([value]),
+        ))
+    })
 }
 
 fn set_state_path_in(
@@ -3501,13 +3521,16 @@ fn set_state_path_in(
             .map(|key| key.to_value_with(context.context().values()))
             .collect(),
     ));
+    let state = require_state_dict_in(context, state)?;
     evaluate_in(
         context,
-        Value::builtin_call(
-            context.context().values(),
-            crate::core::Builtin::DictUpdate,
-            vec![path, value, require_state_dict_in(context, state)?],
-        ),
+        context.construct_lazy_value(|access| {
+            Value::builtin_call_in(
+                access,
+                crate::core::Builtin::DictUpdate,
+                vec![path, value, state],
+            )
+        }),
     )
 }
 

@@ -36,9 +36,11 @@ pub(crate) use application::apply_values;
 #[cfg(test)]
 pub(crate) use builtins::demand_strategy_value;
 pub(crate) use builtins::demand_strategy_value_in;
+#[cfg(test)]
+pub(crate) use operator::constant_effect;
 pub(crate) use operator::{
-    access_operator, apply_arity_operator, computation_capture_operator, constant_effect,
-    function_capture_operator, list_operator, request_operator,
+    access_operator, apply_arity_operator, computation_capture_operator, constant_effect_in,
+    constant_effect_in_step, function_capture_operator, list_operator, request_operator,
 };
 #[cfg(test)]
 pub(crate) use sequence::list_output_bytes;

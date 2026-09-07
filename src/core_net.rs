@@ -183,6 +183,10 @@ impl CoreValueFactory {
 }
 
 impl CoreRuntimeNet {
+    pub(crate) fn from_root(root: &ManagedCoreNetRoot) -> Self {
+        Self::from_managed_parts(root.edge(), root.observer().clone())
+    }
+
     pub(crate) fn from_managed_parts(
         edge: ManagedCoreNetEdge,
         values: RuntimeValueObserver,
@@ -238,7 +242,7 @@ impl CoreRuntimeNet {
             .with_runtime_value_access(|access| access.root_managed_core_net(observer, self.edge))
     }
 
-    fn root_in(&self, access: &RuntimeValueAccess<'_>) -> ManagedCoreNetRoot {
+    pub(crate) fn root_in(&self, access: &RuntimeValueAccess<'_>) -> ManagedCoreNetRoot {
         access.root_managed_core_net(self.values.clone(), self.edge)
     }
 

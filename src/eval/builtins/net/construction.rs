@@ -272,7 +272,7 @@ impl NetConstructionMachine {
                     .clone_core(branch.value().expect("successful branch checked above"))
                     .map_err(|error| EvaluationHalt::new(error.to_string()))?;
                 let exposed = construction_port_in(context, &exposed, &self.brand)?;
-                replay(context.context().values(), branch.journal(), exposed).map(Some)
+                replay(context, branch.journal(), exposed).map(Some)
             }
             IsolatedSearchPoll::Failed(halt) => {
                 let values = Values::from_core_factory(context.context().values().clone());
@@ -479,7 +479,7 @@ fn construction_port_value(
 }
 
 fn replay(
-    values: &crate::core::CoreValueFactory,
+    context: &EvaluatorStepContext<'_>,
     journal: &ConstructionJournal,
     exposed: ConstructionPortId,
 ) -> Result<Value, EvaluationHalt> {
@@ -520,7 +520,7 @@ fn replay(
         .try_finish(exposed)
         .map_err(|error| EvaluationHalt::new(error.to_string()))?;
     Ok(Value::Net(NetValue::new(
-        values.instantiate_core_net(&template),
+        context.construct_core_net(template.instantiate()),
     )))
 }
 

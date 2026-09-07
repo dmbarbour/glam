@@ -32,11 +32,9 @@ pub(super) fn eval_merge_duplicate_builtin(
     }
 
     match (&left, &right) {
-        (Value::Dict(left_dict), Value::Dict(right_dict)) => Ok(Value::Dict(merge_dicts(
-            context.context().values(),
-            left_dict,
-            right_dict,
-        ))),
+        (Value::Dict(left_dict), Value::Dict(right_dict)) => {
+            Ok(Value::Dict(merge_dicts(context, left_dict, right_dict)))
+        }
         _ => Ok(annotation_error_value(
             context,
             format!("dictionary union is ambiguous at key `{name}`"),
@@ -45,7 +43,7 @@ pub(super) fn eval_merge_duplicate_builtin(
 }
 
 pub(super) fn merge_dicts(
-    values: &CoreValueFactory,
+    context: &EvaluatorStepContext<'_>,
     left: &crate::core::Dict,
     right: &crate::core::Dict,
 ) -> crate::core::Dict {
@@ -57,7 +55,7 @@ pub(super) fn merge_dicts(
 
     for (key, value) in updates.iter() {
         let next_value = match merged.get(key) {
-            Some(existing) => Some(merge_duplicate_dict_value(values, key, existing, value)),
+            Some(existing) => Some(merge_duplicate_dict_value(context, key, existing, value)),
             None if is_undefined_dict_value(value) => None,
             None => Some(value.clone()),
         };
@@ -72,7 +70,7 @@ pub(super) fn merge_dicts(
 }
 
 fn merge_duplicate_dict_value(
-    values: &CoreValueFactory,
+    context: &EvaluatorStepContext<'_>,
     key: &Key,
     left: &Value,
     right: &Value,
@@ -86,25 +84,27 @@ fn merge_duplicate_dict_value(
         || is_deferred_value(right)
     {
         builtin_apply3_value(
-            values,
+            context,
             Builtin::MergeDuplicate,
             &Value::binary_from_text(&format_name_part(key)),
             left,
             right,
         )
     } else {
-        Value::error(
-            values,
-            format!(
-                "dictionary union is ambiguous at key `{}`",
-                format_name_part(key)
-            ),
-        )
+        Value::Lazy(context.construct_lazy(|access| {
+            LazyValue::error_in(
+                access,
+                format!(
+                    "dictionary union is ambiguous at key `{}`",
+                    format_name_part(key)
+                ),
+            )
+        }))
     }
 }
 
 pub(super) fn update_dict_path(
-    values: &CoreValueFactory,
+    context: &EvaluatorStepContext<'_>,
     dict: &crate::core::Dict,
     path: &[Key],
     new_value: Value,
@@ -120,7 +120,7 @@ pub(super) fn update_dict_path(
             .get(head)
             .cloned()
             .unwrap_or_else(|| Value::Dict(crate::core::Dict::new_sync()));
-        update_nested_dict_path(values, head, rest, new_value, prior)
+        update_nested_dict_path(context, head, rest, new_value, prior)
     };
 
     if is_undefined_dict_value(&next_value) {
@@ -131,28 +131,30 @@ pub(super) fn update_dict_path(
 }
 
 fn update_nested_dict_path(
-    values: &CoreValueFactory,
+    context: &EvaluatorStepContext<'_>,
     head: &Key,
     rest: &[Key],
     new_value: Value,
     prior: Value,
 ) -> Value {
     match prior {
-        Value::Dict(dict) => Value::Dict(update_dict_path(values, &dict, rest, new_value)),
+        Value::Dict(dict) => Value::Dict(update_dict_path(context, &dict, rest, new_value)),
         Value::Lazy(_) | Value::Promised(_) => builtin_apply3_value(
-            values,
+            context,
             Builtin::DictUpdate,
             &key_path_value(rest),
             &new_value,
             &prior,
         ),
-        _ => Value::error(
-            values,
-            format!(
-                "dictionary update path `{}` traverses a non-dictionary value",
-                format_name_part(head)
-            ),
-        ),
+        _ => Value::Lazy(context.construct_lazy(|access| {
+            LazyValue::error_in(
+                access,
+                format!(
+                    "dictionary update path `{}` traverses a non-dictionary value",
+                    format_name_part(head)
+                ),
+            )
+        })),
     }
 }
 
@@ -180,17 +182,19 @@ fn key_value(key: &Key) -> Value {
 }
 
 fn builtin_apply3_value(
-    values: &CoreValueFactory,
+    context: &EvaluatorStepContext<'_>,
     builtin: Builtin,
     first: &Value,
     second: &Value,
     third: &Value,
 ) -> Value {
-    Value::Lazy(LazyValue::from_builtin(
-        values,
-        BuiltinCall {
-            builtin,
-            arguments: Arc::from([first.clone(), second.clone(), third.clone()]),
-        },
-    ))
+    Value::Lazy(context.construct_lazy(|access| {
+        LazyValue::from_builtin_in(
+            access,
+            BuiltinCall {
+                builtin,
+                arguments: Arc::from([first.clone(), second.clone(), third.clone()]),
+            },
+        )
+    }))
 }

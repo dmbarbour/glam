@@ -7,8 +7,13 @@
 //! context; I3B-I3D partition the opaque evaluator operations which may safely
 //! open it.
 
-use crate::core::{EvaluationFailure, RuntimeValueAccess, Value};
+use crate::core::{
+    EvaluationFailure, LazyValue, ManagedCoreNetRoot, ManagedLazyRoot, ManagedPromiseRoot,
+    PromisedValue, RuntimeValueAccess, Value,
+};
+use crate::core_net::CoreSpecialization;
 use crate::core_net::{CoreRuntimeNet, CoreRuntimeNetAccess};
+use crate::interaction_net::RuntimeNet;
 use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 use std::cell::RefCell;
 use std::marker::PhantomData;
@@ -36,6 +41,7 @@ pub(crate) struct EvaluatorStepContext<'step> {
     admission: EvaluatorStepAdmission<'step>,
     context: &'step EvalContext,
     pending_reflection_activations: RefCell<Vec<ReflectionTaskReservation>>,
+    pending_managed_publications: RefCell<Vec<PendingManagedPublication>>,
     _thread_bound: PhantomData<Rc<()>>,
 }
 
@@ -47,6 +53,22 @@ enum EvaluatorStepAdmission<'step> {
     /// This route does not keep a mutator active. It exists only until those
     /// callers receive their scheduler- or runtime-service-owned authority.
     DirectCompatibility,
+}
+
+/// Temporary liveness carried only until one evaluator step has installed its
+/// fresh managed results into their real cache, net, or runtime root.
+///
+/// This is deliberately family-specific rather than a general value owner:
+/// existing semantic values do not acquire another root merely by passing
+/// through evaluation.
+#[allow(
+    dead_code,
+    reason = "variant payloads are retained solely as exact temporary owners until evaluator-step publication"
+)]
+enum PendingManagedPublication {
+    Lazy(ManagedLazyRoot),
+    Promise(ManagedPromiseRoot),
+    CoreNet(ManagedCoreNetRoot),
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -63,7 +85,6 @@ impl<'scope> EvaluationValueAccess<'scope> {
         Ok(Self { values })
     }
 
-    #[cfg(test)]
     pub(crate) fn values(&self) -> &RuntimeValueAccess<'scope> {
         &self.values
     }
@@ -89,6 +110,7 @@ impl EvaluatorStepContext<'_> {
             admission: EvaluatorStepAdmission::DirectCompatibility,
             context,
             pending_reflection_activations: RefCell::new(Vec::new()),
+            pending_managed_publications: RefCell::new(Vec::new()),
             _thread_bound: PhantomData,
         }
     }
@@ -125,6 +147,73 @@ impl EvaluatorStepContext<'_> {
         RuntimeFailureRoot::new(self.context.values(), failure)
     }
 
+    /// Constructs a lazy with a temporary exact owner which survives every
+    /// access boundary in this evaluator step. `finish` drops that owner only
+    /// after the step has published its result or durable blocked state.
+    pub(crate) fn construct_lazy(
+        &self,
+        construct: impl for<'scope> FnOnce(&RuntimeValueAccess<'scope>) -> LazyValue,
+    ) -> LazyValue {
+        let root = self.with_value_access(|access| {
+            let value = construct(access.values());
+            value.root_in(access.values())
+        });
+        let value = LazyValue::from_root(&root);
+        self.pending_managed_publications
+            .borrow_mut()
+            .push(PendingManagedPublication::Lazy(root));
+        value
+    }
+
+    pub(crate) fn construct_lazy_value(
+        &self,
+        construct: impl for<'scope> FnOnce(&RuntimeValueAccess<'scope>) -> Value,
+    ) -> Value {
+        let (value, root) = self.with_value_access(|access| {
+            let value = construct(access.values());
+            let root = match &value {
+                Value::Lazy(lazy) => lazy.root_in(access.values()),
+                _ => panic!("an evaluator lazy-value constructor must return a lazy value"),
+            };
+            (value, root)
+        });
+        self.pending_managed_publications
+            .borrow_mut()
+            .push(PendingManagedPublication::Lazy(root));
+        value
+    }
+
+    pub(crate) fn construct_promise(&self, label: impl Into<Arc<str>>) -> PromisedValue {
+        let root = self.with_value_access(|access| {
+            access
+                .values()
+                .construct_rooted_managed_promise(label)
+                .expect("managed promise representation must fit one collector run")
+        });
+        let value = PromisedValue::from_root(&root);
+        self.pending_managed_publications
+            .borrow_mut()
+            .push(PendingManagedPublication::Promise(root));
+        value
+    }
+
+    pub(crate) fn construct_core_net(
+        &self,
+        runtime: RuntimeNet<CoreSpecialization>,
+    ) -> CoreRuntimeNet {
+        let root = self.with_value_access(|access| {
+            access
+                .values()
+                .construct_rooted_managed_core_net(runtime)
+                .expect("managed core-net representation must fit one collector run")
+        });
+        let value = CoreRuntimeNet::from_root(&root);
+        self.pending_managed_publications
+            .borrow_mut()
+            .push(PendingManagedPublication::CoreNet(root));
+        value
+    }
+
     /// Projects one owned completion back into the active evaluator step.
     ///
     /// Wait and task observers outside evaluation retain the root. The bare
@@ -145,7 +234,9 @@ impl EvaluatorStepContext<'_> {
 
     pub(crate) fn finish(mut self) {
         let pending = std::mem::take(self.pending_reflection_activations.get_mut());
+        let managed = std::mem::take(self.pending_managed_publications.get_mut());
         drop(self);
+        drop(managed);
         for task in pending {
             task.activate();
         }
@@ -224,6 +315,7 @@ impl EvaluationPollContext {
             admission: EvaluatorStepAdmission::Poll(self),
             context,
             pending_reflection_activations: RefCell::new(Vec::new()),
+            pending_managed_publications: RefCell::new(Vec::new()),
             _thread_bound: PhantomData,
         }
     }
@@ -377,6 +469,50 @@ mod tests {
         evaluator.with_value_access(|access| {
             assert_eq!(*access.values.get(&second), 29);
         });
+    }
+
+    #[test]
+    fn evaluator_step_guards_fresh_managed_results_until_containing_root_publication() {
+        let values = value_factory();
+        values
+            .collect_managed_for_test()
+            .expect("the evaluator publication fixture should start collectible");
+        let context = EvalContext::isolated(values.clone());
+        let poll = EvaluationPollContext::for_context(&context);
+
+        let root = poll.evaluate(&context, |evaluator| {
+            let lazy = evaluator
+                .construct_lazy(|access| LazyValue::error_in(access, "guarded evaluator lazy"));
+            let promise = evaluator.construct_promise("guarded evaluator promise");
+            let mut builder = crate::interaction_net::NetBuilder::<CoreSpecialization>::new();
+            let exposed = builder.data(Value::Number(31.into()));
+            let net = evaluator.construct_core_net(builder.finish(exposed).instantiate());
+
+            let intervening = values
+                .collect_managed_for_test()
+                .expect("temporary evaluator owners should permit collection between regions");
+            assert_eq!(
+                intervening.finalized_slots(),
+                0,
+                "no fresh evaluator result may die before its containing owner is published"
+            );
+
+            evaluator.root_value(Value::List(crate::core::List::from_values(vec![
+                Value::Lazy(lazy),
+                Value::Promised(promise),
+                Value::Net(crate::core::NetValue::new(net)),
+            ])))
+        });
+
+        let retained = values
+            .collect_managed_for_test()
+            .expect("the containing runtime root should retain all three managed families");
+        assert!(retained.marked_slots() >= 4);
+        drop(root);
+        let retired = values
+            .collect_managed_for_test()
+            .expect("dropping the containing root should retire the guarded graph");
+        assert!(retired.finalized_slots() >= 4);
     }
 
     #[test]

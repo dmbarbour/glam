@@ -238,6 +238,8 @@ pub(crate) fn apply_updates(
 ) -> Result<Value, crate::core::EvaluationHalt> {
     let context = crate::evaluation::EvalContext::isolated(values.clone());
     let extension_defs = context.compose_builtin(Builtin::ObjectOverrideDefs, vec![updates]);
+    let extension_defs =
+        values.with_runtime_value_access(|access| extension_defs.clone_core_with(&access));
     context.evaluate_builtin_whnf(Builtin::ObjectWithDefs, vec![message, extension_defs])
 }
 

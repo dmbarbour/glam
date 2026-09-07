@@ -153,6 +153,8 @@ pub(crate) struct ManagedCoreNetRoot {
         reason = "the registered root is retained for ownership and released by Drop"
     )]
     root: Root<ManagedCoreNetCell>,
+    edge: ManagedCoreNetEdge,
+    observer: RuntimeValueObserver,
 }
 
 /// A non-escaping lazy-cell observation authorized by one runtime value scope.
@@ -378,6 +380,8 @@ impl RuntimeValueAccess<'_> {
         );
         ManagedCoreNetRoot {
             root: self.root(edge.0),
+            edge,
+            observer,
         }
     }
 
@@ -551,6 +555,14 @@ impl ManagedPromiseRoot {
 }
 
 impl ManagedCoreNetRoot {
+    pub(crate) fn edge(&self) -> ManagedCoreNetEdge {
+        self.edge
+    }
+
+    pub(crate) fn observer(&self) -> &RuntimeValueObserver {
+        &self.observer
+    }
+
     #[cfg(test)]
     pub(crate) fn access<'access, 'scope>(
         &'access self,
