@@ -184,13 +184,13 @@ between allocation-region exit and later publication could reclaim the cell;
 the weak value-domain observer keeps neither the allocation nor its heap root
 alive.
 
-Most evaluator construction is less exposed than the type shape suggests:
-nested runtime access keeps an outer mutator active and public `ScopedValues`
-usually roots the result before the outer region closes. The constructors do
-not encode that condition, however, and promise registration and stand-alone
-net construction have real two-region handoffs. I11C's collection-during-
-worker schedules and any I12 automatic outer-entry election cannot rely on
-`NoAuto` to cover the gap.
+Public `ScopedValues` construction is less exposed than the type shape
+suggests: its outer access remains active while a nested constructor and root
+publication run. That protection is local to the public value facade, however.
+Source lowering, semantic operator yields, builtin results, reflection-store
+edits, promise registration, and stand-alone net construction all contain real
+two-region handoffs. I11C's collection-during-worker schedules and any I12
+automatic outer-entry election cannot rely on `NoAuto` to cover those gaps.
 
 Recommended resolution before introducing another managed identity:
 
@@ -270,7 +270,7 @@ control flow does not become continuation-passing style.
 - The public `Values` API remains separate. It opens internal access and
   publishes a runtime root before returning a public value.
 
-##### GCI5R-001A — Construction and factory-use inventory
+##### GCI5R-001A — Construction and factory-use inventory (complete)
 
 1. Inventory every direct `allocate_managed_lazy`,
    `allocate_managed_promise`, and `allocate_managed_core_net` site and follow
@@ -291,6 +291,135 @@ control flow does not become continuation-passing style.
    without dereferencing the stale edge, fail under the desired invariant, and
    be updated with the implementation rather than retained as a contract for
    the defect.
+
+###### Direct allocation and constructor inventory
+
+All three allocation primitives are methods on `RuntimeValueAccess`, but each
+currently returns an ordinary copyable edge. Their production facade
+constructors open and close access internally:
+
+| Family | Direct allocator | Production facade constructor | Work after allocation | Current first durable owner |
+| --- | --- | --- | --- | --- |
+| lazy | `allocate_managed_lazy` | `LazyValue::with_source` | reads the ID before returning; `failure`/`error` then reopen access to cache the initial failure | a later containing `RuntimeValueRoot`, managed net payload, or machine result |
+| promise | `allocate_managed_promise` | `PromisedValue::with_cell`, reached by `new` and `fixpoint` | `fixpoint` later registers and installs its producer | a later `ManagedPromiseRoot` in a resolver/coordinator/local owner, or a containing value root |
+| core net | `allocate_managed_core_net` | `CoreValueFactory::instantiate_core_net`, also reached by `instantiate_related` | none before returning the facade | a later `ManagedCoreNetRoot`, containing value root, or traced net payload |
+
+The `root_new_managed_*` helpers in
+[`recursive_cells.rs`](../../src/core/managed/recursive_cells.rs) are test-only
+counterexamples which already allocate and register the intended root under
+one access. `CorePreparedCopySource`, `CoreFrontierObservation`, and
+`NormalizationRequest` similarly root an *existing* net before their genuine
+handoff. They are useful publication precedents, but they do not repair fresh
+construction.
+
+Every production lazy constructor reaches the one `with_source` boundary:
+
+- `computed_fixpoint`, `semantic_computation`, and `external_host_call` select
+  their corresponding source records;
+- `from_access`, `from_application`, `from_builtin`,
+  `from_net_construction`, `from_function_call`, `from_net_computation`, and
+  `from_reflection_gate` package semantic work; and
+- `error`/`failure` are the exceptional post-allocation path: the cell is
+  returned from its allocating access and then dereferenced in a second access
+  to install its already-terminal result.
+
+The test-only `semantic_thunk` and `host_call` wrappers use the same production
+boundary. `Value::{failure,error,external_host_call,reflection_gate,
+reflection_task_result,builtin_call}` add no ownership; they only select or
+wrap the same lazy constructors. The external host-call registry owns the
+callback producer, not the managed lazy cell.
+
+###### Allocation-to-owner chains
+
+The following table follows production construction through its first exact
+owner. “Gap” means collection can run after the listed access closes but before
+that owner is published. The liveness witness in every gap is currently only
+`CollectionPolicy::NoAuto`.
+
+| Construction zone | Active authority and crossed boundary | First authoritative owner | Disposition and retirement | Finding |
+| --- | --- | --- | --- | --- |
+| public `ScopedValues::{access,apply}` and saturated builtin wrapping | an outer `Values::with_access` remains active across nested construction and `ScopedValues::wrap`; no callback/wait | containing `RuntimeValueRoot` | publish directly from the existing access; retire when public `Value` drops | safe chronology today, but needlessly reenters access |
+| `Assembler::net` | `instantiate_core_net` closes access before `Values::wrap` opens another | public containing value root | scoped net construction followed by same-access value-root publication; retire with public `Value` | gap |
+| `Assembler::promise` and `ReflectionEnvironmentBuilder::promise` | promise allocation closes before both `Values::wrap` and `promise.root` | containing public value root plus resolver's `ManagedPromiseRoot` | publish both intended owners under construction access; resolver root retires on resolve/fail/drop, value root with public `Value` | gap |
+| `CompileContext::new` final-definitions promise | `PromisedValue::new` closes before outer `RuntimeValueRoot::new` | `CompileContext::final_defs` value root | install directly in that containing root; retire with compile context | gap |
+| per-declaration source lowering | `ModuleLowerer::lower_declaration` holds broad access while lowering, returns a bare definitions value from it, then roots afterward | replacement `ModuleLowerer::definitions` root | publish the replacement root before the access ends; prior root retires on replacement | gap |
+| completed source lowering | `ModuleLowerer::finish` projects its definitions root to a bare `LoweredSource`, consumes the old owner, and `compile_source` roots later | compiled definitions root | transfer/retain a root through `LoweredSource`, or publish the final root before return; retire with compiled module | unproven root-to-facade transfer and gap |
+| evaluator application, operator, and builtin result construction | callback-free semantic functions create lazies outside `EvaluationValueAccess`; results cross an operator-yield or machine-step boundary before `root_value` or net installation | evaluator result root, or exact traced payload installed by `claim.finish` | construct under a bounded access and consume into the immediate result owner; do not span waits, host callbacks, or contention parks | gap |
+| list-effect fixpoint and deferred lists | promise/lazy constructors run while building a bare list result; the promise is later reached through that graph rather than registered separately | eventual evaluator result root and traced list graph | construct and assemble graph under one callback-free access; retire with result graph | gap |
+| reflection-store rewrite | lazy access/application is built before `apply_value_at_path` calls public wrapping | replacement public store root | construct and publish the replacement under one access; prior root retires on committed replacement | gap |
+| task-owned `PromisedValue::fixpoint` | allocation closes before `register_promise`, which may enter coordinator state and therefore cannot run under managed access | coordinator/local-owner `ManagedPromiseRoot` | publish the intended root before registration, carry it across orchestration, and retire on assignment/cancellation/abandonment | gap; requires rooted handoff |
+| reflection fixpoint | task-owned registration is followed by a marker value root and an `ActiveFix` promise root | coordinator promise root, marker value root, and active-fix root | same rooted registration handoff; active roots retire when continuation completes | gap before registration |
+
+The evaluator row includes the concrete producers in
+[`operator.rs`](../../src/eval/operator.rs),
+[`application.rs`](../../src/eval/application.rs), and `eval/builtins/*`.
+`progress_core_operator_claim` confirms the chronology: semantic application
+returns an `OperatorYield` first, then `claim.finish` reenters net access to
+install it. The source-lowering row includes nested net construction in
+[`net_lowering.rs`](../../src/g_syntax/net_lowering.rs), not just the outer
+definitions dictionary.
+
+###### Root projection audit
+
+Projecting a facade from a durable root is valid only while that root, or an
+already-traced containing owner, remains live:
+
+| Projection sites | Liveness witness | Result |
+| --- | --- | --- |
+| `LazyTaskMachine::lazy` | the machine retains its `ManagedLazyRoot` field | proven |
+| deferred lazy-cycle completion in `evaluation/pump.rs` | the cycle member retains its root through cache publication and terminalization | proven |
+| `WorkDependency` coordinator probes/subscriptions | the dependency retains `ManagedPromiseRoot` for each immediate facade call | proven |
+| local-owner `fail_all` | each obligation retains its root through immediate failure publication | proven |
+| `PromiseResolver::{resolve,fail,drop}` | the affine resolver retains/takes its root through immediate publication | proven |
+| reflection `Continuation::Fix` | `ActiveFix` and the continuation retain cloned roots through immediate assignment | proven |
+| `client_demand_halt` | consumes `WorkDependency::Promise`, projects a facade, then drops the only root visible in the function before returning the halt | **unproven**; retain the root in the halt/dependency representation or prove a separate containing owner |
+
+No `from_root` call should be changed mechanically: the proven sites are the
+intended bounded projection API. The final site is an owner-transfer defect to
+resolve with the promise cutover.
+
+###### `CoreValueFactory` role classification
+
+The production uses divide cleanly enough to guide GCI5R-001C without turning
+this repair into a general API rewrite:
+
+| Role | Representative responsibilities | Disposition |
+| --- | --- | --- |
+| domain/control | runtime and managed IDs, heap/domain lifetime, coordinator binding, external-owner registry, canonical/runtime caches | remain on `CoreValueFactory` |
+| access entry | `with_runtime_value_access` and weak domain observers | remain on the factory; access should borrow the entering factory |
+| scoped value work | managed allocation, observation, edge mutation, root publication, cached-value cloning, and constructor helpers | move or delegate only the operations needed by this repair to `RuntimeValueAccess` |
+| orchestration boundary | `EvalContext`, compiler/source lowering, reflection store/machine, sessions, coordinator, and public `Values` retain a long-lived domain handle across waits/callbacks/locks | retain the factory, open a fresh narrow access on each safe side of the boundary |
+
+The inventory therefore does **not** recommend a literal factory/access merge.
+It recommends that `RuntimeValueAccess` borrow the factory so already-admitted
+code has the complete operational value API without passing two capabilities
+or reopening the heap.
+
+###### Latched mismatch evidence
+
+`fresh_managed_facades_survive_until_first_publication` constructs one failed
+lazy, one promise, and one core net through the production facades, ends each
+old allocation region, and collects before any first owner is published. It
+inspects only `CollectionReport`; it never dereferences the stale facades. The
+test is deliberately ignored until GCI5R-001B-F change the chronology, because
+its desired assertion currently fails deterministically:
+
+```text
+left: 3 finalized slots
+right: 0 finalized slots
+```
+
+This is a mismatch latch, not an accepted-behavior test. The cutover must
+remove the ignore marker and make the same forced boundary pass. The exact
+evidence command is:
+
+```sh
+cargo test -q fresh_managed_facades_survive_until_first_publication -- --ignored
+```
+
+The normal focused run passes 28 recursive-cell tests and reports this one
+fixture ignored. `cargo fmt --check`, Clippy with warnings denied, and the full
+repository test suite also pass with the mismatch fixture ignored.
 
 ##### GCI5R-001B — Scope-bound fresh allocation
 

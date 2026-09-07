@@ -1022,6 +1022,40 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "GCI5R-001: fresh managed facades currently escape before first publication"]
+    fn fresh_managed_facades_survive_until_first_publication() {
+        let values = new_values();
+        values
+            .collect_managed_for_test()
+            .expect("the mismatch fixture should start collectible");
+
+        // Exercise the production constructors, including the failed-lazy
+        // constructor's second managed-access region used to publish its
+        // initial result. None of these facade values is an authoritative GC
+        // owner under the intended contract.
+        let lazy = LazyValue::error(&values, "unpublished lazy");
+        let promise = PromisedValue::new(&values, "unpublished promise");
+        let mut builder = NetBuilder::<CoreSpecialization>::new();
+        let exposed = builder.data(Value::Number(67.into()));
+        let net = values.instantiate_core_net(&builder.finish(exposed));
+
+        // The desired construction invariant is that collection cannot
+        // intervene before each fresh allocation is installed in a traced
+        // owner or intentionally rooted. Observe reclamation only through the
+        // report: dereferencing one of the stale facade edges would be invalid.
+        let intervening = values
+            .collect_managed_for_test()
+            .expect("collection at the former publication boundary should complete");
+        assert_eq!(
+            intervening.finalized_slots(),
+            0,
+            "fresh managed allocations escaped their allocation regions before publication"
+        );
+
+        drop((lazy, promise, net));
+    }
+
+    #[test]
     fn bounded_lazy_gateway_preserves_terminal_publication_protocol() {
         let values = new_values();
         let observer = values.runtime_value_observer();
