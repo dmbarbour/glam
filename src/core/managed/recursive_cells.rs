@@ -917,6 +917,40 @@ mod tests {
         assert_eq!(dead.finalized_slots(), 1);
     }
 
+    fn assert_single_promise_failure_cycle_through(
+        label: &str,
+        wrap: impl FnOnce(Value) -> EvaluationFailure,
+    ) {
+        let values = new_values();
+        let baseline = values.collect_managed_for_test().unwrap_or_else(|failure| {
+            panic!("the {label} fixture should start collectible: {failure}")
+        });
+        let root = values.with_runtime_value_access(|access| {
+            let root = access
+                .root_new_managed_promise(&values, label)
+                .expect("the managed promise cell should fit a run");
+            let promise = PromisedValue::from_root(&root);
+            root.access(&access)
+                .expect("the rooted promise should be accessible")
+                .publish(Err(Arc::new(wrap(Value::Promised(promise)))))
+                .expect("the fresh promise should accept its failure cycle");
+            root
+        });
+
+        let live = values.collect_managed_for_test().unwrap_or_else(|failure| {
+            panic!("one root should retain the {label} cycle: {failure}")
+        });
+        assert_eq!(live.root_entries(), baseline.root_entries() + 1);
+        assert_eq!(live.marked_slots(), baseline.marked_slots() + 1);
+
+        drop(root);
+        let dead = values.collect_managed_for_test().unwrap_or_else(|failure| {
+            panic!("the unrooted {label} cycle should reclaim: {failure}")
+        });
+        assert_eq!(dead.root_entries(), baseline.root_entries());
+        assert_eq!(dead.finalized_slots(), 1);
+    }
+
     fn source_declaration<'source>(source: &'source str, name: &str) -> &'source str {
         let start = source
             .find(name)
@@ -1637,6 +1671,68 @@ mod tests {
         assert_single_promise_cycle_through("shared dict compatibility", |backedge| {
             let base = Dict::new_sync().insert(Key::binary_from_text("backedge"), backedge);
             Value::Dict(base.insert(Key::binary_from_text("version"), Value::Number(1.into())))
+        });
+    }
+
+    #[test]
+    fn managed_promise_cycle_through_function_stage_is_traced_and_reclaimed() {
+        let values = new_values();
+        let baseline = values
+            .collect_managed_for_test()
+            .expect("the function-stage cycle fixture should start collectible");
+        let observer = values.runtime_value_observer();
+        let root = values.with_runtime_value_access(|access| {
+            let promise_edge = access
+                .allocate_managed_promise(&values, "function stage compatibility")
+                .expect("the managed promise cell should fit a run");
+            let promise_root = access.root_managed_promise(observer.clone(), promise_edge);
+            let promise = PromisedValue::from_root(&promise_root);
+            let net_edge = access
+                .allocate_managed_core_net(&values, runtime_with_data(Value::Promised(promise)))
+                .expect("the managed core-net cell should fit a run");
+            let net_root = access.root_managed_core_net(observer.clone(), net_edge);
+            let stage = NetValue::new(crate::core_net::CoreRuntimeNet::from_managed_parts(
+                net_edge,
+                observer.clone(),
+            ));
+
+            promise_root
+                .access(&access)
+                .expect("the rooted promise should be accessible")
+                .publish(Ok(Value::Function(crate::core::FunctionValue::new(
+                    stage, 1,
+                ))))
+                .expect("the fresh promise should accept its function-stage cycle");
+            drop(net_root);
+            promise_root
+        });
+
+        let live = values
+            .collect_managed_for_test()
+            .expect("one root should retain the function-stage cycle");
+        assert_eq!(live.root_entries(), baseline.root_entries() + 1);
+        assert_eq!(live.marked_slots(), baseline.marked_slots() + 2);
+
+        drop(root);
+        let dead = values
+            .collect_managed_for_test()
+            .expect("the unrooted function-stage cycle should be reclaimed");
+        assert_eq!(dead.root_entries(), baseline.root_entries());
+        assert_eq!(dead.finalized_slots(), 2);
+    }
+
+    #[test]
+    fn managed_promise_cycle_through_failure_emission_is_traced_and_reclaimed() {
+        assert_single_promise_failure_cycle_through(
+            "failure emission compatibility",
+            EvaluationFailure::emission,
+        );
+    }
+
+    #[test]
+    fn managed_promise_cycle_through_failure_context_is_traced_and_reclaimed() {
+        assert_single_promise_failure_cycle_through("failure context compatibility", |backedge| {
+            EvaluationFailure::message("compatibility failure").with_context(backedge)
         });
     }
 

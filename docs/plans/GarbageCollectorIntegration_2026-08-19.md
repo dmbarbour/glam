@@ -4993,6 +4993,15 @@ one managed cell while live, then finalizes that cell after the root is
 removed. A shared assertion harness changes no trace behavior and keeps each
 logical adapter independently responsible for closing its cycle.
 
+I5F.3b completed 2026-09-07. A two-cell promise/function-stage cycle now proves
+that a compatibility function value reaches its authoritative managed net,
+and independent one-cell failure fixtures prove both emission and context
+values return to their promise identity. Each fixture retains one final root,
+checks its exact live managed-cell count, and observes exact reclamation after
+that root is removed. The computed-fixpoint-source latch remains I5F.1's
+`managed_lazy_source_self_cycle_is_traced_and_reclaimed`, which was rerun here
+instead of duplicating the same source path.
+
 Only closed isolated fixtures collect. The complete production runtime remains
 `NoAuto`, and the mandatory post-I5 review follows before I6 begins.
 

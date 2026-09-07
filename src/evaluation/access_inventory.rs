@@ -110,7 +110,7 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // projection.
         (
             "src/core/managed/recursive_cells.rs",
-            GatewayCounts::new(21, 0),
+            GatewayCounts::new(23, 0),
         ),
         // I4F.2c keeps the production-shaped node and prepared root private
         // while their local lifecycle, provenance, and nested-access fixtures
