@@ -777,6 +777,7 @@ mod root_inventory_tests {
     use crate::api::EffectTokenDomain;
     use crate::number::Number;
     use crate::reflection::{ExactConflictAnalysis, ReflectionStore};
+    use crate::runtime::{RuntimeIds, allocate_evaluation_runtime_id};
     use std::sync::Weak;
 
     #[derive(Clone, Copy)]
@@ -960,10 +961,16 @@ mod root_inventory_tests {
         ReflectionStore::new(values.core().clone(), Arc::new(ExactConflictAnalysis))
     }
 
+    fn protocol_values() -> Values {
+        Values::from_core_factory(CoreValueFactory::new(
+            allocate_evaluation_runtime_id(),
+            RuntimeIds::new(),
+        ))
+    }
+
     #[test]
     fn request_results_and_outcomes_retain_public_roots_until_retirement() {
-        let core = crate::core::test_value_factory();
-        let values = Values::from_core_factory(core);
+        let values = protocol_values();
         let domain = EffectTokenDomain::new(&values);
 
         for build in [
@@ -994,8 +1001,7 @@ mod root_inventory_tests {
 
     #[test]
     fn protocol_snapshots_commits_and_transactions_retain_specialization_roots() {
-        let core = crate::core::test_value_factory();
-        let values = Values::from_core_factory(core);
+        let values = protocol_values();
         let domain = EffectTokenDomain::new(&values);
         let store = protocol_store(&values);
 

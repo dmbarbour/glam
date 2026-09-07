@@ -27,8 +27,7 @@ pub(super) fn attach_net_many(
     }
     let template = net.finish(spine.result);
     context.with_value_access(|access| {
-        let owner_access = access.net(&owner);
-        drop(owner_access);
+        let _owner_access = access.net(&owner);
     });
     NetValue::new(context.construct_core_net(template.instantiate()))
 }

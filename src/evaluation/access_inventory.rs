@@ -79,7 +79,7 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         ("src/api/assembly.rs", GatewayCounts::new(1, 0)),
         ("src/api/tests.rs", GatewayCounts::new(0, 2)),
         ("src/api/value.rs", GatewayCounts::new(2, 0)),
-        ("src/compiler.rs", GatewayCounts::new(1, 0)),
+        ("src/compiler.rs", GatewayCounts::new(3, 0)),
         // I4.0's owner-local destruction fixtures exercise the admitted
         // construction gateway; production allocation still enters through
         // the same higher-ranked scope.
@@ -122,10 +122,12 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // its returned graph before that same bounded access ends. C makes the
         // failed-lazy shim open one explicit region in place of allocation
         // followed by a facade-mediated second entry.
-        ("src/core.rs", GatewayCounts::new(22, 5)),
+        ("src/core.rs", GatewayCounts::new(21, 5)),
         // I5D scopes every managed core-net construction, root handoff, and
         // source-frontier traversal through matching value-domain authority.
         ("src/core_net.rs", GatewayCounts::new(12, 0)),
+        ("src/diagnostic.rs", GatewayCounts::new(1, 0)),
+        ("src/eval/operator.rs", GatewayCounts::new(1, 0)),
         // The reflection active-owner fixture proves that managed
         // finalization leaves reservation cancellation to the external drain.
         ("src/eval/tests.rs", GatewayCounts::new(0, 1)),
@@ -134,13 +136,14 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // producer root while the coordinator mutation remains admitted.
         ("src/evaluation/coordinator.rs", GatewayCounts::new(1, 0)),
         ("src/evaluation/executor.rs", GatewayCounts::new(1, 0)),
-        ("src/evaluation/session.rs", GatewayCounts::new(2, 0)),
-        ("src/g_syntax/compiler_values.rs", GatewayCounts::new(1, 0)),
+        ("src/evaluation/session.rs", GatewayCounts::new(1, 0)),
+        ("src/g_syntax/compiler_values.rs", GatewayCounts::new(2, 0)),
         (
             "src/g_syntax/diagnostic_formatter.rs",
             GatewayCounts::new(1, 0),
         ),
         ("src/g_syntax/module_lowering.rs", GatewayCounts::new(3, 0)),
+        ("src/g_syntax/net_lowering.rs", GatewayCounts::new(3, 0)),
         ("src/runtime.rs", GatewayCounts::new(1, 0)),
     ]
     .into_iter()

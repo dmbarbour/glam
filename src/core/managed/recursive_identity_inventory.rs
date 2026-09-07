@@ -386,10 +386,10 @@ const DIRECT_IDENTITY_INVENTORY: &[IdentityOwnerEntry] = &[
     ),
     owner!(
         "src/core/evaluation_halt.rs::EvaluationHaltKind",
-        [0, 1, 0],
-        ExactManagedEdge,
+        [0, 2, 0],
+        DurableRoot,
         None,
-        "retryable halt refers to the promise being observed"
+        "retryable halt retains both its semantic promise and exact registered root"
     ),
     owner!(
         "src/core/evaluation_halt.rs::EvaluationHaltPayload",
@@ -470,10 +470,10 @@ const DIRECT_IDENTITY_INVENTORY: &[IdentityOwnerEntry] = &[
     ),
     owner!(
         "src/core/managed/recursive_cells.rs::ManagedCoreNetRoot",
-        [0, 0, 1],
+        [0, 0, 2],
         DurableRoot,
         None,
-        "registered core-net root retains the cell for bounded observation"
+        "registered core-net root retains both its root cell and reconstructible semantic edge"
     ),
     owner!(
         "src/core/managed/recursive_cells.rs::ManagedCoreNetAccess",
@@ -572,6 +572,13 @@ const DIRECT_IDENTITY_INVENTORY: &[IdentityOwnerEntry] = &[
         DurableRoot,
         None,
         "parked follower actively observes eventual assignment"
+    ),
+    owner!(
+        "src/evaluation/access.rs::PendingManagedPublication",
+        [1, 1, 1],
+        DurableRoot,
+        None,
+        "evaluator-step nursery retains only fresh family roots until containing publication"
     ),
     owner!(
         "src/evaluation/coordinator.rs::TaskOwnedPromiseObligation",

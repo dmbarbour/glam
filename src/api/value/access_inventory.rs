@@ -66,7 +66,7 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/compiler.rs",
-        10,
+        9,
         0,
         "rooted source context, origins, definition promises, and import handoff",
         "I3E.2 bounded compiler regions; I4F.1 durable roots"
@@ -122,7 +122,7 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/g_syntax.rs",
-        2,
+        1,
         0,
         "rooted lowered definitions and compiler diagnostics across publication",
         "I3E.2 bounded compiler regions; I4F.1 durable roots"
@@ -143,14 +143,14 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/g_syntax/module_lowering.rs",
-        2,
-        0,
+        1,
+        1,
         "declaration-to-declaration definitions and reflection annotator",
         "I3E.2 bounded lowering regions; I4F.1 durable roots"
     ),
     entry!(
         "src/reflection/machine.rs",
-        7,
+        6,
         0,
         "rooted reflection machine and decoded-request handoff plus bounded evaluator, parser, and store access",
         "I3D.2/I3D.4 interpreter phases; I4F.1d.3 complete machine roots and bounded raw values; I4F.2a compatibility-access retirement"

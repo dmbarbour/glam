@@ -35,8 +35,10 @@ impl ContainmentCounts {
     fn in_source(source: &str) -> Self {
         Self {
             semantic_thunk: source.matches("::semantic_thunk(").count(),
-            semantic_computation: source.matches("::semantic_computation(").count(),
-            external_host_call: source.matches("::external_host_call(").count(),
+            semantic_computation: source.matches("::semantic_computation(").count()
+                + source.matches("::semantic_computation_in(").count(),
+            external_host_call: source.matches("::external_host_call(").count()
+                + source.matches("::external_host_call_in(").count(),
             opaque_constructor: source.matches("OpaqueValue::new(").count(),
             opaque_admission: source.matches("OpaquePayloadFamily for").count(),
         }

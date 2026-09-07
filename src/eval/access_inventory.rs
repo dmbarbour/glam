@@ -99,8 +99,10 @@ impl LazyProducerCounts {
     fn in_source(source: &str) -> Self {
         Self {
             semantic_thunk: source.matches("::semantic_thunk(").count(),
-            semantic_computation: source.matches("::semantic_computation(").count(),
-            external_host_call: source.matches("::external_host_call(").count(),
+            semantic_computation: source.matches("::semantic_computation(").count()
+                + source.matches("::semantic_computation_in(").count(),
+            external_host_call: source.matches("::external_host_call(").count()
+                + source.matches("::external_host_call_in(").count(),
         }
     }
 
@@ -129,7 +131,7 @@ macro_rules! context_entry {
 const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     context_entry!(
         "src/eval/application.rs",
-        [4, 3],
+        [5, 3],
         "I3B.2 and I3D/I3E direct callers"
     ),
     context_entry!(
@@ -144,7 +146,7 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/builtins/annotation/implementation.rs",
-        [13, 2],
+        [15, 0],
         "I3B.1 pure annotations; I3D.1/I3D.2 reflection and strategy seams"
     ),
     context_entry!(
@@ -179,17 +181,17 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/builtins/dict/merge.rs",
-        [1, 0],
+        [6, 0],
         "I3B.1 scoped dictionary merge"
     ),
     context_entry!(
         "src/eval/builtins/effect.rs",
-        [0, 1],
+        [2, 0],
         "I3D.1/I3D.2 effect boundary"
     ),
     context_entry!(
         "src/eval/builtins/effect/implementation.rs",
-        [0, 3],
+        [3, 0],
         "I3D.1/I3D.2 effect control and reflection gates"
     ),
     context_entry!(
@@ -209,7 +211,7 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/builtins/list_effect/implementation.rs",
-        [10, 0],
+        [15, 0],
         "I3B.1 list-effect construction; I4B explicit semantic computation"
     ),
     context_entry!(
@@ -219,7 +221,7 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/builtins/net/construction.rs",
-        [2, 0],
+        [3, 0],
         "I3D.4 scoped result decoding; isolated-search construction takes owned durable context"
     ),
     context_entry!(
@@ -259,12 +261,12 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/net.rs",
-        [14, 7],
+        [16, 6],
         "I3D.3d-I3D.4 scoped batches, claims, access, and one-shot contention handoff; test and non-net durable helpers"
     ),
     context_entry!(
         "src/eval/operator.rs",
-        [2, 0],
+        [3, 0],
         "I3D.4 scoped core-net operator application"
     ),
     context_entry!(
@@ -274,7 +276,7 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/value.rs",
-        [20, 9],
+        [20, 8],
         "I3B.2/I3C.2 scoped wait and I4F.1c.2 failure-root projection; I3D reflection/net; I3E.1 deferred producers"
     ),
 ];
@@ -510,11 +512,10 @@ fn builtin_durable_context_downgrades_are_explicit_and_complete() {
 
     assert_eq!(
         dispatcher.matches("context.context()").count(),
-        3,
-        "only effects, strategies, and provenance may downgrade in the dispatcher"
+        2,
+        "only strategies and provenance may downgrade in the dispatcher"
     );
     for durable_call in [
-        "effect::apply(context.context(), builtin, arguments)",
         "strategy::apply(context.context(), builtin, arguments)",
         "provenance::apply(context.context(), arguments)",
     ] {
@@ -537,15 +538,15 @@ fn builtin_durable_context_downgrades_are_explicit_and_complete() {
     let annotation =
         fs::read_to_string(manifest.join("src/eval/builtins/annotation/implementation.rs"))
             .expect("annotation implementation source should be readable");
-    for durable_annotation_seam in [
-        "fn defer_reflection_annotation(context: &EvalContext",
-        "fn defer_metadata_reflection(context: &EvalContext",
+    for annotation_boundary in [
+        "fn defer_reflection_annotation(\n    context: &EvaluatorStepContext<'_>,\n    effect: Value,\n    target: &Value,",
+        "fn defer_metadata_reflection(context: &EvaluatorStepContext<'_>, effect: Value)",
         "strategy::seq(context.context(), &value, target)",
         "strategy::spark(\n            context.context(),",
     ] {
         assert!(
-            annotation.contains(durable_annotation_seam),
-            "missing durable annotation seam `{durable_annotation_seam}`"
+            annotation.contains(annotation_boundary),
+            "missing annotation authority boundary `{annotation_boundary}`"
         );
     }
 }

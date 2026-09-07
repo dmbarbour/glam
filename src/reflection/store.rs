@@ -783,14 +783,14 @@ fn apply_edit(values: &CoreValueFactory, root: PublicValue, edit: &StoreEdit) ->
             StoreEdit::Rewrite { address, updater } => {
                 let (_, path) = address.reflection_parts();
                 let prior = lazy_core_value_path(
-                    &access,
+                    access,
                     public_values
                         .clone_core(&root)
                         .expect("store root belongs to its store runtime"),
                     path.keys(),
                 );
                 let updated = Value::Lazy(LazyValue::from_application_in(
-                    &access,
+                    access,
                     public_values
                         .clone_core(updater)
                         .expect("store updater belongs to its store runtime"),
