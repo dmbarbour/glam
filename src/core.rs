@@ -650,17 +650,26 @@ impl LazyValue {
         self.edge.trace(visitor);
     }
 
-    fn with_source(
-        values: &CoreValueFactory,
+    fn with_source_in(
+        access: &RuntimeValueAccess<'_>,
         label: impl Into<Arc<str>>,
         source: LazySource,
     ) -> Self {
-        let label = label.into();
-        values.with_runtime_value_access(|access| {
-            access
-                .construct_managed_lazy(label, source)
-                .expect("managed lazy representation must fit one collector run")
-        })
+        access
+            .construct_managed_lazy(label, source)
+            .expect("managed lazy representation must fit one collector run")
+    }
+
+    pub(crate) fn computed_fixpoint_in(
+        access: &RuntimeValueAccess<'_>,
+        label: impl Into<Arc<str>>,
+        computation: FixpointComputation,
+    ) -> Self {
+        Self::with_source_in(
+            access,
+            label,
+            LazySource::ComputedFixpoint(Arc::new(computation)),
+        )
     }
 
     pub(crate) fn computed_fixpoint(
@@ -668,11 +677,21 @@ impl LazyValue {
         label: impl Into<Arc<str>>,
         computation: FixpointComputation,
     ) -> Self {
-        Self::with_source(
-            values,
-            label,
-            LazySource::ComputedFixpoint(Arc::new(computation)),
-        )
+        values.with_runtime_value_access(|access| {
+            Self::computed_fixpoint_in(&access, label, computation)
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn semantic_thunk_in(
+        access: &RuntimeValueAccess<'_>,
+        label: impl Into<Arc<str>>,
+        thunk: impl Fn(&EvaluatorStepContext<'_>) -> Result<Value, EvaluationHalt>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        Self::with_source_in(access, label, LazySource::SemanticThunk(Arc::new(thunk)))
     }
 
     #[cfg(test)]
@@ -684,7 +703,7 @@ impl LazyValue {
         + Sync
         + 'static,
     ) -> Self {
-        Self::with_source(values, label, LazySource::SemanticThunk(Arc::new(thunk)))
+        values.with_runtime_value_access(|access| Self::semantic_thunk_in(&access, label, thunk))
     }
 
     /// Defers callback-free evaluator work with every recursive value capture
@@ -698,8 +717,19 @@ impl LazyValue {
         captures: impl Into<Arc<[Value]>>,
         operation: SemanticOperation,
     ) -> Self {
-        Self::with_source(
-            values,
+        values.with_runtime_value_access(|access| {
+            Self::semantic_computation_in(&access, label, captures, operation)
+        })
+    }
+
+    pub(crate) fn semantic_computation_in(
+        access: &RuntimeValueAccess<'_>,
+        label: impl Into<Arc<str>>,
+        captures: impl Into<Arc<[Value]>>,
+        operation: SemanticOperation,
+    ) -> Self {
+        Self::with_source_in(
+            access,
             label,
             LazySource::SemanticComputation(Arc::new(SemanticComputation {
                 operation,
@@ -714,14 +744,26 @@ impl LazyValue {
         record: HostCallRecord,
         producer: impl Fn() -> Result<RuntimeValueRoot, Arc<EvaluationFailure>> + Send + Sync + 'static,
     ) -> Self {
-        let handle = values
+        values.with_runtime_value_access(|access| {
+            Self::external_host_call_in(&access, label, record, producer)
+        })
+    }
+
+    pub(crate) fn external_host_call_in(
+        access: &RuntimeValueAccess<'_>,
+        label: impl Into<Arc<str>>,
+        record: HostCallRecord,
+        producer: impl Fn() -> Result<RuntimeValueRoot, Arc<EvaluationFailure>> + Send + Sync + 'static,
+    ) -> Self {
+        let handle = access
+            .values()
             .domain
             .external_owners
             .insert(Arc::new(HostCallOwner {
                 operation: Arc::new(producer),
             }));
-        Self::with_source(
-            values,
+        Self::with_source_in(
+            access,
             label,
             LazySource::HostCall(Arc::new(HostCallProducer { handle, record })),
         )
@@ -746,8 +788,12 @@ impl LazyValue {
     }
 
     pub(crate) fn error(values: &CoreValueFactory, message: impl Into<Arc<str>>) -> Self {
-        Self::failure(
-            values,
+        values.with_runtime_value_access(|access| Self::error_in(&access, message))
+    }
+
+    pub(crate) fn error_in(access: &RuntimeValueAccess<'_>, message: impl Into<Arc<str>>) -> Self {
+        Self::failure_in(
+            access,
             "error",
             Arc::new(EvaluationFailure::message(message.into())),
         )
@@ -758,11 +804,17 @@ impl LazyValue {
         label: impl Into<Arc<str>>,
         failure: Arc<EvaluationFailure>,
     ) -> Self {
-        values.with_runtime_value_access(|access| {
-            access
-                .construct_failed_managed_lazy(label, failure)
-                .expect("managed lazy representation must fit one collector run")
-        })
+        values.with_runtime_value_access(|access| Self::failure_in(&access, label, failure))
+    }
+
+    pub(crate) fn failure_in(
+        access: &RuntimeValueAccess<'_>,
+        label: impl Into<Arc<str>>,
+        failure: Arc<EvaluationFailure>,
+    ) -> Self {
+        access
+            .construct_failed_managed_lazy(label, failure)
+            .expect("managed lazy representation must fit one collector run")
     }
 
     pub(crate) fn id(&self) -> LazyId {
@@ -1631,16 +1683,24 @@ impl ReflectionComputation {
 }
 
 impl LazyValue {
+    pub(crate) fn from_access_in(
+        access: &RuntimeValueAccess<'_>,
+        path: Arc<[CoreDataKey]>,
+        arguments: Arc<[Value]>,
+    ) -> Self {
+        Self::with_source_in(access, "access", LazySource::Access { path, arguments })
+    }
+
     pub(crate) fn from_access(
         values: &CoreValueFactory,
         path: Arc<[CoreDataKey]>,
         arguments: Arc<[Value]>,
     ) -> Self {
-        Self::with_source(values, "access", LazySource::Access { path, arguments })
+        values.with_runtime_value_access(|access| Self::from_access_in(&access, path, arguments))
     }
 
-    pub(crate) fn from_application(
-        values: &CoreValueFactory,
+    pub(crate) fn from_application_in(
+        access: &RuntimeValueAccess<'_>,
         function: Value,
         arguments: Arc<[Value]>,
     ) -> Self {
@@ -1648,8 +1708,8 @@ impl LazyValue {
             !arguments.is_empty(),
             "lazy application requires an argument"
         );
-        Self::with_source(
-            values,
+        Self::with_source_in(
+            access,
             "application",
             LazySource::Application(Arc::new(LazyApplication {
                 function,
@@ -1658,25 +1718,43 @@ impl LazyValue {
         )
     }
 
-    pub(crate) fn from_builtin(values: &CoreValueFactory, call: BuiltinCall) -> Self {
-        Self::with_source(values, "builtin call", LazySource::Builtin(call))
+    pub(crate) fn from_application(
+        values: &CoreValueFactory,
+        function: Value,
+        arguments: Arc<[Value]>,
+    ) -> Self {
+        values.with_runtime_value_access(|access| {
+            Self::from_application_in(&access, function, arguments)
+        })
     }
 
-    pub(crate) fn from_net_construction(values: &CoreValueFactory, effect: Value) -> Self {
-        Self::with_source(
-            values,
+    pub(crate) fn from_builtin_in(access: &RuntimeValueAccess<'_>, call: BuiltinCall) -> Self {
+        Self::with_source_in(access, "builtin call", LazySource::Builtin(call))
+    }
+
+    pub(crate) fn from_builtin(values: &CoreValueFactory, call: BuiltinCall) -> Self {
+        values.with_runtime_value_access(|access| Self::from_builtin_in(&access, call))
+    }
+
+    pub(crate) fn from_net_construction_in(access: &RuntimeValueAccess<'_>, effect: Value) -> Self {
+        Self::with_source_in(
+            access,
             "interaction-net construction",
             LazySource::NetConstruction(Arc::new(effect)),
         )
     }
 
-    pub(crate) fn from_function_call(
-        values: &CoreValueFactory,
+    pub(crate) fn from_net_construction(values: &CoreValueFactory, effect: Value) -> Self {
+        values.with_runtime_value_access(|access| Self::from_net_construction_in(&access, effect))
+    }
+
+    pub(crate) fn from_function_call_in(
+        access: &RuntimeValueAccess<'_>,
         function: FunctionValue,
         arguments: Arc<[Value]>,
     ) -> Self {
-        Self::with_source(
-            values,
+        Self::with_source_in(
+            access,
             "function call",
             LazySource::FunctionCall {
                 function,
@@ -1685,8 +1763,38 @@ impl LazyValue {
         )
     }
 
+    pub(crate) fn from_function_call(
+        values: &CoreValueFactory,
+        function: FunctionValue,
+        arguments: Arc<[Value]>,
+    ) -> Self {
+        values.with_runtime_value_access(|access| {
+            Self::from_function_call_in(&access, function, arguments)
+        })
+    }
+
+    pub(crate) fn from_net_computation_in(access: &RuntimeValueAccess<'_>, net: NetValue) -> Self {
+        Self::with_source_in(access, "net computation", LazySource::NetComputation(net))
+    }
+
     pub(crate) fn from_net_computation(values: &CoreValueFactory, net: NetValue) -> Self {
-        Self::with_source(values, "net computation", LazySource::NetComputation(net))
+        values.with_runtime_value_access(|access| Self::from_net_computation_in(&access, net))
+    }
+
+    pub(crate) fn from_reflection_gate_in(
+        access: &RuntimeValueAccess<'_>,
+        effect: Value,
+        target: Value,
+    ) -> Self {
+        Self::with_source_in(
+            access,
+            "reflection annotation",
+            LazySource::ReflectionTask(Arc::new(ReflectionComputation::gate(
+                access.values(),
+                effect,
+                target,
+            ))),
+        )
     }
 
     pub(crate) fn from_reflection_gate(
@@ -1694,13 +1802,9 @@ impl LazyValue {
         effect: Value,
         target: Value,
     ) -> Self {
-        Self::with_source(
-            values,
-            "reflection annotation",
-            LazySource::ReflectionTask(Arc::new(ReflectionComputation::gate(
-                values, effect, target,
-            ))),
-        )
+        values.with_runtime_value_access(|access| {
+            Self::from_reflection_gate_in(&access, effect, target)
+        })
     }
 }
 
@@ -1972,11 +2076,19 @@ impl Value {
     }
 
     pub(crate) fn reflection_task_result(values: &CoreValueFactory, effect: Value) -> Self {
-        Self::Lazy(LazyValue::with_source(
-            values,
+        values.with_runtime_value_access(|access| Self::reflection_task_result_in(&access, effect))
+    }
+
+    pub(crate) fn reflection_task_result_in(
+        access: &RuntimeValueAccess<'_>,
+        effect: Value,
+    ) -> Self {
+        Self::Lazy(LazyValue::with_source_in(
+            access,
             "reflection task result",
             LazySource::ReflectionTask(Arc::new(ReflectionComputation::return_value(
-                values, effect,
+                access.values(),
+                effect,
             ))),
         ))
     }

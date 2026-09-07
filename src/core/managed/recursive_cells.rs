@@ -1039,18 +1039,45 @@ mod tests {
     }
 
     impl<'ast> Visit<'ast> for ConstructorCallInventory {
+        fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+            if let syn::Expr::Path(path) = call.func.as_ref()
+                && let Some(segment) = path.path.segments.last()
+            {
+                self.calls_gateway |= is_constructor_gateway(&segment.ident.to_string());
+            }
+            visit::visit_expr_call(self, call);
+        }
+
         fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
             let method = call.method.to_string();
             self.opens_access |= method == "with_runtime_value_access";
-            self.calls_gateway |= matches!(
-                method.as_str(),
-                "construct_managed_lazy"
-                    | "construct_failed_managed_lazy"
-                    | "construct_managed_promise"
-                    | "construct_managed_core_net"
-            );
+            self.calls_gateway |= is_constructor_gateway(&method);
             visit::visit_expr_method_call(self, call);
         }
+    }
+
+    fn is_constructor_gateway(name: &str) -> bool {
+        matches!(
+            name,
+            "construct_managed_lazy"
+                | "construct_failed_managed_lazy"
+                | "construct_managed_promise"
+                | "construct_managed_core_net"
+                | "computed_fixpoint_in"
+                | "semantic_thunk_in"
+                | "semantic_computation_in"
+                | "external_host_call_in"
+                | "error_in"
+                | "failure_in"
+                | "from_access_in"
+                | "from_application_in"
+                | "from_builtin_in"
+                | "from_net_construction_in"
+                | "from_function_call_in"
+                | "from_net_computation_in"
+                | "from_reflection_gate_in"
+                | "reflection_task_result_in"
+        )
     }
 
     struct SelfOpeningVisitor<'path> {
@@ -2171,9 +2198,21 @@ mod tests {
         assert_eq!(
             entries,
             [
+                "src/core.rs::computed_fixpoint",
+                "src/core.rs::error",
+                "src/core.rs::external_host_call",
                 "src/core.rs::failure",
+                "src/core.rs::from_access",
+                "src/core.rs::from_application",
+                "src/core.rs::from_builtin",
+                "src/core.rs::from_function_call",
+                "src/core.rs::from_net_computation",
+                "src/core.rs::from_net_construction",
+                "src/core.rs::from_reflection_gate",
+                "src/core.rs::reflection_task_result",
+                "src/core.rs::semantic_computation",
+                "src/core.rs::semantic_thunk",
                 "src/core.rs::with_cell",
-                "src/core.rs::with_source",
                 "src/core_net.rs::adopt_core_net_for_test",
                 "src/core_net.rs::instantiate_core_net",
             ],

@@ -541,7 +541,7 @@ rather than prejudging it.
 
 This family has enough call-site breadth to remain partitioned:
 
-1. **D.1 — Core lazy gateway.** Introduce the access-taking replacements for
+1. **D.1 — Core lazy gateway (complete).** Introduce the access-taking replacements for
    every `with_source` wrapper and initialize already-terminal lazies,
    including failure values, before first publication under the same access.
    Keep the enumerated self-opening wrappers only as temporary migration
@@ -563,6 +563,14 @@ This family has enough call-site breadth to remain partitioned:
    inventory. Add forced-order survival, post-publication root-retirement,
    early-return reclamation, and representative evaluator, compiler,
    reflection, and public-value tests.
+
+D.1 completed on 2026-09-07. Every lazy source vocabulary member now has an
+access-taking constructor, including semantic computations, application and
+access thunks, builtins, net construction/computation, host calls, reflection
+gates/results, computed fixpoints, and already-terminal failures. The failed
+path initializes its cache in the allocating region. Factory-taking entry
+points remain temporary, explicitly inventoried shims for D.2-D.5; the unused
+generic `with_source` shim was removed.
 
 ##### GCI5R-001E — Promise construction cutover
 
