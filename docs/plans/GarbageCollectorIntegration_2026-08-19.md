@@ -5490,6 +5490,7 @@ remains `NoAuto`; only explicit tests/maintenance collect.
 
 ### Phase I11D — Gate G3 Certification
 
+- (Post-I11 review should run first)
 - Run the full repository suite under ordinary execution and the aggressive
   debug-collection mode.
 - Complete focused Miri, sanitizer, unsafe-site, trace-edge, mutation-gateway,
