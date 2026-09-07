@@ -4964,6 +4964,17 @@ process-wide evaluator test value domain while unrelated tests could hold
 unrooted compatibility values. Its function lowerer now accepts an explicit
 value domain, and that collection fixture owns a fresh isolated domain.
 
+I5F.2 completed 2026-09-07. Four isolated production-family fixtures now cover
+lazy/promise, lazy/core-net, and promise/core-net pairwise cycles plus one
+directed lazy-to-net-to-promise-to-lazy ring. Construction roots protect cells
+only while their post-allocation edges are installed; every live collection
+retains exactly one registered root and observes exactly two or three marked
+cells as appropriate. Removing that root finalizes the exact graph size. Lazy
+source transitions use the collector mutation gateway, promise assignments use
+the production one-write publication path, and core-net data uses the
+compile-exhaustive compatibility visitor. No parallel trace representation or
+automatic production collection was introduced.
+
 Only closed isolated fixtures collect. The complete production runtime remains
 `NoAuto`, and the mandatory post-I5 review follows before I6 begins.
 

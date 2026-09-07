@@ -840,7 +840,9 @@ mod tests {
     use std::path::Path;
 
     use super::*;
-    use crate::core::{CoreValueFactory, EvaluatedValue, LazySource, LazyValue, PromisedValue};
+    use crate::core::{
+        CoreValueFactory, EvaluatedValue, LazySource, LazyValue, NetValue, PromisedValue,
+    };
     use crate::interaction_net::{NetBuilder, PreparedCopySource};
     use crate::runtime::{RuntimeIds, RuntimeMutationAdmission, allocate_evaluation_runtime_id};
 
@@ -848,10 +850,39 @@ mod tests {
         CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new())
     }
 
-    fn prepared_runtime(value: i64) -> RuntimeNet<CoreSpecialization> {
+    fn runtime_with_data(value: Value) -> RuntimeNet<CoreSpecialization> {
         let mut builder = NetBuilder::<CoreSpecialization>::new();
-        let exposed = builder.data(Value::Number(value.into()));
+        let exposed = builder.data(value);
         builder.finish(exposed).instantiate()
+    }
+
+    fn prepared_runtime(value: i64) -> RuntimeNet<CoreSpecialization> {
+        runtime_with_data(Value::Number(value.into()))
+    }
+
+    fn replace_lazy_source_for_cycle<Edge: Trace>(
+        access: &RuntimeValueAccess<'_>,
+        owner: ManagedLazyEdge,
+        target: Gc<Edge>,
+        source: LazySource,
+    ) {
+        // SAFETY: both edges were allocated in this access region's exact
+        // heap. The fixture replaces the edge-free placeholder with precisely
+        // the one managed target reported to the production collector gateway.
+        unsafe {
+            let cell = access.scope.get_traced_edge(owner.0);
+            let mut stored = cell
+                .source
+                .lock()
+                .expect("managed lazy source cell should not be poisoned");
+            assert!(matches!(stored.as_ref(), Some(LazySource::Error)));
+            access
+                .scope
+                .mutator
+                .with_edge_replacement(owner.0, None, Some(target), || {
+                    *stored = Some(source);
+                });
+        }
     }
 
     fn source_declaration<'source>(source: &'source str, name: &str) -> &'source str {
@@ -1339,6 +1370,197 @@ mod tests {
             .expect("an unrooted managed-net self-cycle should be reclaimed");
         assert_eq!(dead.root_entries(), baseline.root_entries());
         assert_eq!(dead.finalized_slots(), 1);
+    }
+
+    #[test]
+    fn managed_lazy_promise_pair_cycle_is_traced_and_reclaimed() {
+        let values = new_values();
+        let baseline = values
+            .collect_managed_for_test()
+            .expect("the lazy-promise cycle fixture should start collectible");
+        let observer = values.runtime_value_observer();
+        let root = values.with_runtime_value_access(|access| {
+            let lazy_edge = access
+                .allocate_managed_lazy(&values, "lazy to promise", LazySource::Error)
+                .expect("the managed lazy cell should fit a run");
+            let promise_edge = access
+                .allocate_managed_promise(&values, "promise to lazy")
+                .expect("the managed promise cell should fit a run");
+            let lazy_root = access.root_managed_lazy(observer.clone(), lazy_edge);
+            let promise_root = access.root_managed_promise(observer.clone(), promise_edge);
+            let lazy = LazyValue::from_root(&lazy_root);
+            let promise = PromisedValue::from_root(&promise_root);
+
+            replace_lazy_source_for_cycle(
+                &access,
+                lazy_edge,
+                promise_edge.0,
+                LazySource::ComputedFixpoint(Arc::new(crate::core::FixpointComputation::Function(
+                    Value::Promised(promise),
+                ))),
+            );
+            promise_root
+                .access(&access)
+                .expect("the rooted promise should be accessible")
+                .publish(Ok(Value::Lazy(lazy)))
+                .expect("the fresh promise should accept its lazy assignment");
+            drop(promise_root);
+            lazy_root
+        });
+
+        let live = values
+            .collect_managed_for_test()
+            .expect("one root should retain the lazy-promise cycle");
+        assert_eq!(live.root_entries(), baseline.root_entries() + 1);
+        assert_eq!(live.marked_slots(), baseline.marked_slots() + 2);
+
+        drop(root);
+        let dead = values
+            .collect_managed_for_test()
+            .expect("the unrooted lazy-promise cycle should be reclaimed");
+        assert_eq!(dead.root_entries(), baseline.root_entries());
+        assert_eq!(dead.finalized_slots(), 2);
+    }
+
+    #[test]
+    fn managed_lazy_core_net_pair_cycle_is_traced_and_reclaimed() {
+        let values = new_values();
+        let baseline = values
+            .collect_managed_for_test()
+            .expect("the lazy-net cycle fixture should start collectible");
+        let observer = values.runtime_value_observer();
+        let root = values.with_runtime_value_access(|access| {
+            let lazy_edge = access
+                .allocate_managed_lazy(&values, "lazy to net", LazySource::Error)
+                .expect("the managed lazy cell should fit a run");
+            let lazy_root = access.root_managed_lazy(observer.clone(), lazy_edge);
+            let lazy = LazyValue::from_root(&lazy_root);
+            let net_edge = access
+                .allocate_managed_core_net(&values, runtime_with_data(Value::Lazy(lazy)))
+                .expect("the managed core-net cell should fit a run");
+            let net_root = access.root_managed_core_net(observer.clone(), net_edge);
+            let net =
+                crate::core_net::CoreRuntimeNet::from_managed_parts(net_edge, observer.clone());
+
+            replace_lazy_source_for_cycle(
+                &access,
+                lazy_edge,
+                net_edge.0,
+                LazySource::NetComputation(NetValue::new(net)),
+            );
+            drop(net_root);
+            lazy_root
+        });
+
+        let live = values
+            .collect_managed_for_test()
+            .expect("one root should retain the lazy-net cycle");
+        assert_eq!(live.root_entries(), baseline.root_entries() + 1);
+        assert_eq!(live.marked_slots(), baseline.marked_slots() + 2);
+
+        drop(root);
+        let dead = values
+            .collect_managed_for_test()
+            .expect("the unrooted lazy-net cycle should be reclaimed");
+        assert_eq!(dead.root_entries(), baseline.root_entries());
+        assert_eq!(dead.finalized_slots(), 2);
+    }
+
+    #[test]
+    fn managed_promise_core_net_pair_cycle_is_traced_and_reclaimed() {
+        let values = new_values();
+        let baseline = values
+            .collect_managed_for_test()
+            .expect("the promise-net cycle fixture should start collectible");
+        let observer = values.runtime_value_observer();
+        let root = values.with_runtime_value_access(|access| {
+            let promise_edge = access
+                .allocate_managed_promise(&values, "promise to net")
+                .expect("the managed promise cell should fit a run");
+            let promise_root = access.root_managed_promise(observer.clone(), promise_edge);
+            let promise = PromisedValue::from_root(&promise_root);
+            let net_edge = access
+                .allocate_managed_core_net(&values, runtime_with_data(Value::Promised(promise)))
+                .expect("the managed core-net cell should fit a run");
+            let net_root = access.root_managed_core_net(observer.clone(), net_edge);
+            let net =
+                crate::core_net::CoreRuntimeNet::from_managed_parts(net_edge, observer.clone());
+
+            promise_root
+                .access(&access)
+                .expect("the rooted promise should be accessible")
+                .publish(Ok(Value::Net(NetValue::new(net))))
+                .expect("the fresh promise should accept its net assignment");
+            drop(net_root);
+            promise_root
+        });
+
+        let live = values
+            .collect_managed_for_test()
+            .expect("one root should retain the promise-net cycle");
+        assert_eq!(live.root_entries(), baseline.root_entries() + 1);
+        assert_eq!(live.marked_slots(), baseline.marked_slots() + 2);
+
+        drop(root);
+        let dead = values
+            .collect_managed_for_test()
+            .expect("the unrooted promise-net cycle should be reclaimed");
+        assert_eq!(dead.root_entries(), baseline.root_entries());
+        assert_eq!(dead.finalized_slots(), 2);
+    }
+
+    #[test]
+    fn managed_lazy_net_promise_ring_is_traced_and_reclaimed() {
+        let values = new_values();
+        let baseline = values
+            .collect_managed_for_test()
+            .expect("the three-family cycle fixture should start collectible");
+        let observer = values.runtime_value_observer();
+        let root = values.with_runtime_value_access(|access| {
+            let lazy_edge = access
+                .allocate_managed_lazy(&values, "lazy to net ring", LazySource::Error)
+                .expect("the managed lazy cell should fit a run");
+            let promise_edge = access
+                .allocate_managed_promise(&values, "promise to lazy ring")
+                .expect("the managed promise cell should fit a run");
+            let lazy_root = access.root_managed_lazy(observer.clone(), lazy_edge);
+            let promise_root = access.root_managed_promise(observer.clone(), promise_edge);
+            let lazy = LazyValue::from_root(&lazy_root);
+            let promise = PromisedValue::from_root(&promise_root);
+            let net_edge = access
+                .allocate_managed_core_net(&values, runtime_with_data(Value::Promised(promise)))
+                .expect("the managed core-net cell should fit a run");
+            let net_root = access.root_managed_core_net(observer.clone(), net_edge);
+            let net =
+                crate::core_net::CoreRuntimeNet::from_managed_parts(net_edge, observer.clone());
+
+            replace_lazy_source_for_cycle(
+                &access,
+                lazy_edge,
+                net_edge.0,
+                LazySource::NetComputation(NetValue::new(net)),
+            );
+            promise_root
+                .access(&access)
+                .expect("the rooted promise should be accessible")
+                .publish(Ok(Value::Lazy(lazy)))
+                .expect("the fresh promise should accept its lazy assignment");
+            drop((promise_root, net_root));
+            lazy_root
+        });
+
+        let live = values
+            .collect_managed_for_test()
+            .expect("one root should retain the three-family cycle");
+        assert_eq!(live.root_entries(), baseline.root_entries() + 1);
+        assert_eq!(live.marked_slots(), baseline.marked_slots() + 3);
+
+        drop(root);
+        let dead = values
+            .collect_managed_for_test()
+            .expect("the unrooted three-family cycle should be reclaimed");
+        assert_eq!(dead.root_entries(), baseline.root_entries());
+        assert_eq!(dead.finalized_slots(), 3);
     }
 
     #[test]
