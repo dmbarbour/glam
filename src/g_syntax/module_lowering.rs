@@ -60,10 +60,10 @@ impl<'context> ModuleLowerer<'context> {
             };
             let result = match &declaration.kind {
                 DeclarationKind::Import(import) => {
-                    lower_import(import, line, self.context, &mut definitions)
+                    lower_import(import, line, self.context, &access, &mut definitions)
                 }
                 DeclarationKind::Unique(names) => {
-                    lower_unique(names, line, self.context, &mut definitions)
+                    lower_unique(names, line, self.context, &access, &mut definitions)
                 }
                 DeclarationKind::Definition(definition) => {
                     let scope = NameScope::module_with_reflection(
@@ -71,7 +71,14 @@ impl<'context> ModuleLowerer<'context> {
                         definitions.clone(),
                         module_reflection.clone(),
                     );
-                    lower_definition(definition, line, self.context, &mut definitions, &scope)
+                    lower_definition(
+                        definition,
+                        line,
+                        self.context,
+                        &access,
+                        &mut definitions,
+                        &scope,
+                    )
                 }
                 DeclarationKind::Object(object) => {
                     let scope = NameScope::module_with_reflection(
@@ -79,7 +86,14 @@ impl<'context> ModuleLowerer<'context> {
                         definitions.clone(),
                         module_reflection.clone(),
                     );
-                    lower_object(object, line, self.context, &mut definitions, &scope)
+                    lower_object(
+                        object,
+                        line,
+                        self.context,
+                        &access,
+                        &mut definitions,
+                        &scope,
+                    )
                 }
                 DeclarationKind::Extend(extend) => {
                     let scope = NameScope::module_with_reflection(
@@ -87,7 +101,14 @@ impl<'context> ModuleLowerer<'context> {
                         definitions.clone(),
                         module_reflection,
                     );
-                    lower_extend(extend, line, self.context, &mut definitions, &scope)
+                    lower_extend(
+                        extend,
+                        line,
+                        self.context,
+                        &access,
+                        &mut definitions,
+                        &scope,
+                    )
                 }
                 DeclarationKind::Language(_)
                 | DeclarationKind::Abstract(_)
@@ -151,6 +172,7 @@ pub(super) fn lower_definition(
     definition: &DefinitionDecl,
     line: usize,
     context: &CompileContext,
+    access: &RuntimeValueAccess<'_>,
     definitions: &mut Value,
     scope: &NameScope,
 ) -> Result<(), Diagnostic> {
@@ -164,6 +186,6 @@ pub(super) fn lower_definition(
         &scope.resolved(),
         &mut locals,
     )?;
-    *definitions = lower_resolved_expr(context.values(), resolved);
+    *definitions = lower_resolved_expr_in(access, resolved);
     Ok(())
 }

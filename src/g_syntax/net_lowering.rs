@@ -3,7 +3,9 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::core::{CoreValueFactory, FunctionCode, FunctionValue, NetValue, Value};
+#[cfg(test)]
+use crate::core::CoreValueFactory;
+use crate::core::{FunctionCode, FunctionValue, NetValue, RuntimeValueAccess, Value};
 use crate::core_net::{CoreDataKey, CoreOperator, CoreSpecialization};
 use crate::interaction_net::{NetBuilder, Port};
 
@@ -12,32 +14,51 @@ use super::resolved::{BindingId, ResolvedExpr, ResolvedPathPart};
 /// Consumes one closed front-end semantic expression and lowers it directly to
 /// a shared interaction-net computation. No syntax-shaped value survives this
 /// boundary.
+#[cfg(test)]
 pub(super) fn lower_resolved_expr(values: &CoreValueFactory, expr: ResolvedExpr<Value>) -> Value {
+    values.with_runtime_value_access(|access| lower_resolved_expr_in(&access, expr))
+}
+
+pub(super) fn lower_resolved_expr_in(
+    access: &RuntimeValueAccess<'_>,
+    expr: ResolvedExpr<Value>,
+) -> Value {
     match expr {
         ResolvedExpr::Embedded(value) | ResolvedExpr::Provided(value) => value,
         expr => {
-            let (code, captures) = ResolvedNetLowerer::lower_code(values, Vec::new(), expr);
+            let (code, captures) = ResolvedNetLowerer::lower_code_in(access, Vec::new(), expr);
             assert!(
                 captures.is_empty(),
                 "a value leaving g-syntax must be a closed interaction net"
             );
-            Value::Lazy(crate::core::LazyValue::from_net_computation(
-                values,
+            Value::Lazy(crate::core::LazyValue::from_net_computation_in(
+                access,
                 NetValue::new(code.runtime().clone()),
             ))
         }
     }
 }
 
-pub(super) struct ResolvedNetLowerer {
-    values: CoreValueFactory,
+pub(super) struct ResolvedNetLowerer<'access, 'scope> {
+    values: &'access RuntimeValueAccess<'scope>,
     net: NetBuilder<CoreSpecialization>,
     local_uses: BTreeMap<BindingId, Vec<Port>>,
 }
 
-impl ResolvedNetLowerer {
+impl<'access, 'scope> ResolvedNetLowerer<'access, 'scope> {
+    #[cfg(test)]
     pub(super) fn lower_code(
         values: &CoreValueFactory,
+        parameters: Vec<BindingId>,
+        body: ResolvedExpr<Value>,
+    ) -> (FunctionCode, Vec<BindingId>) {
+        values.with_runtime_value_access(|access| {
+            ResolvedNetLowerer::lower_code_in(&access, parameters, body)
+        })
+    }
+
+    pub(super) fn lower_code_in(
+        values: &'access RuntimeValueAccess<'scope>,
         parameters: Vec<BindingId>,
         body: ResolvedExpr<Value>,
     ) -> (FunctionCode, Vec<BindingId>) {
@@ -48,21 +69,34 @@ impl ResolvedNetLowerer {
         let captures = captures.into_iter().collect::<Vec<_>>();
         let mut inputs = captures.clone();
         inputs.extend(parameters.iter().copied());
-        let template = Self::lower_template(values, inputs, body);
-        let runtime = values.instantiate_core_net(&template);
+        let template = Self::lower_template_in(values, inputs, body);
+        let runtime = values
+            .construct_managed_core_net(template.instantiate())
+            .expect("managed core-net representation must fit one collector run");
         (
             FunctionCode::new(runtime, parameters.len(), captures.len()),
             captures,
         )
     }
 
+    #[cfg(test)]
     pub(super) fn lower_template(
         values: &CoreValueFactory,
         inputs: Vec<BindingId>,
         body: ResolvedExpr<Value>,
     ) -> crate::core_net::CoreInteractionNet {
+        values.with_runtime_value_access(|access| {
+            ResolvedNetLowerer::lower_template_in(&access, inputs, body)
+        })
+    }
+
+    pub(super) fn lower_template_in(
+        values: &'access RuntimeValueAccess<'scope>,
+        inputs: Vec<BindingId>,
+        body: ResolvedExpr<Value>,
+    ) -> crate::core_net::CoreInteractionNet {
         let mut lowerer = Self {
-            values: values.clone(),
+            values,
             net: NetBuilder::new(),
             local_uses: BTreeMap::new(),
         };
@@ -163,7 +197,7 @@ impl ResolvedNetLowerer {
         target: Port,
     ) {
         assert!(!parameters.is_empty(), "a function must bind an argument");
-        let (code, captures) = Self::lower_code(&self.values, parameters, body);
+        let (code, captures) = Self::lower_code_in(self.values, parameters, body);
         let code = Arc::new(code);
         if captures.is_empty() {
             self.data_into(
@@ -259,12 +293,12 @@ impl ResolvedNetLowerer {
                 self.data_into(value, target);
             }
             expr => {
-                let (code, captures) = Self::lower_code(&self.values, Vec::new(), expr);
+                let (code, captures) = Self::lower_code_in(self.values, Vec::new(), expr);
                 let code = Arc::new(code);
                 if captures.is_empty() {
                     self.data_into(
-                        Value::Lazy(crate::core::LazyValue::from_net_computation(
-                            &self.values,
+                        Value::Lazy(crate::core::LazyValue::from_net_computation_in(
+                            self.values,
                             NetValue::new(code.runtime().clone()),
                         )),
                         target,

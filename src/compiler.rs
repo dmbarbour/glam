@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::api::CompilationExecution;
 use crate::core::{
-    Atom, CoreValueFactory, Dict, EvaluationFailure, HostCallRecord, Key, Value, keys,
+    Atom, CoreValueFactory, Dict, EvaluationFailure, HostCallRecord, Key, LazyValue, Value, keys,
 };
 use crate::diagnostic::{CompilationTrace, Severity};
 use crate::runtime::RuntimeValueRoot;
@@ -49,6 +49,7 @@ pub(crate) struct CompileContext {
     importer_source: Option<Arc<SourceArtifact>>,
     compilation_trace: Option<Arc<CompilationTrace>>,
     opaque_origin: Option<RuntimeValueRoot>,
+    unavailable_origin: RuntimeValueRoot,
     module_path: Arc<[String]>,
     prior_defs: RuntimeValueRoot, // definitions visible before compiling this source
     final_defs: RuntimeValueRoot, // promised final definitions for recursive access
@@ -79,17 +80,24 @@ pub(crate) fn test_value_factory() -> CoreValueFactory {
 impl CompileContext {
     pub(crate) fn new(values: CoreValueFactory) -> Self {
         let prior_defs = RuntimeValueRoot::new(&values, Value::Dict(Dict::new_sync()));
-        let final_defs = values.with_runtime_value_access(|access| {
+        let final_defs = values.construct_runtime_value_root(|access| {
             let promise = access
                 .construct_managed_promise("final definitions")
                 .expect("managed promise representation must fit one collector run");
-            access.root_runtime_value(Value::Promised(promise))
+            Value::Promised(promise)
+        });
+        let unavailable_origin = values.construct_runtime_value_root(|access| {
+            Value::Lazy(LazyValue::error_in(
+                access,
+                "module origin is unavailable outside a source compilation context",
+            ))
         });
         Self {
             values: values.scoped(),
             importer_source: None,
             compilation_trace: None,
             opaque_origin: None,
+            unavailable_origin,
             module_path: Arc::from([]),
             prior_defs,
             final_defs,
@@ -222,6 +230,10 @@ impl CompileContext {
             .map(|origin| self.clone_root(origin))
     }
 
+    pub(crate) fn unavailable_origin(&self) -> Value {
+        self.clone_root(&self.unavailable_origin)
+    }
+
     /// Returns the abstract global-path value for a path relative to the
     /// current module without revealing its absolute namespace.
     pub(crate) fn abstract_global_path(&self, target: &str) -> Value {
@@ -245,8 +257,22 @@ impl CompileContext {
 
     /// Requests a module import in the current or a relative child namespace.
     /// Source resolution and absolute namespace qualification remain hidden.
+    #[cfg(test)]
     pub(crate) fn import_module(
         &self,
+        request: &str,
+        relative_namespace: Option<&str>,
+        prior_defs: Value,
+        final_defs: Value,
+    ) -> Value {
+        self.values.with_runtime_value_access(|access| {
+            self.import_module_in(&access, request, relative_namespace, prior_defs, final_defs)
+        })
+    }
+
+    pub(crate) fn import_module_in(
+        &self,
+        access: &crate::core::RuntimeValueAccess<'_>,
         request: &str,
         relative_namespace: Option<&str>,
         prior_defs: Value,
@@ -255,8 +281,8 @@ impl CompileContext {
         let request = match RelativeSourcePath::new(request) {
             Ok(request) => request,
             Err(error) => {
-                return invalid_import_request(
-                    &self.values,
+                return invalid_import_request_in(
+                    access,
                     request,
                     error.to_string(),
                     self.compilation_trace.as_deref(),
@@ -277,8 +303,8 @@ impl CompileContext {
         let label: Arc<str> = Arc::from(format!("import {}", args.request.as_str()));
         let loader = self.local_module_loader.clone();
 
-        Value::external_host_call(
-            &self.values,
+        Value::Lazy(LazyValue::external_host_call_in(
+            access,
             label,
             HostCallRecord::external(
                 "deferred module import",
@@ -299,15 +325,25 @@ impl CompileContext {
                 };
                 loader(args.clone())
             },
-        )
+        ))
     }
 
+    #[cfg(test)]
     pub(crate) fn import_binary(&self, request: &str) -> Value {
+        self.values
+            .with_runtime_value_access(|access| self.import_binary_in(&access, request))
+    }
+
+    pub(crate) fn import_binary_in(
+        &self,
+        access: &crate::core::RuntimeValueAccess<'_>,
+        request: &str,
+    ) -> Value {
         let request = match RelativeSourcePath::new(request) {
             Ok(request) => request,
             Err(error) => {
-                return invalid_import_request(
-                    &self.values,
+                return invalid_import_request_in(
+                    access,
                     request,
                     error.to_string(),
                     self.compilation_trace.as_deref(),
@@ -323,8 +359,8 @@ impl CompileContext {
         let label: Arc<str> = Arc::from(format!("import binary {}", args.request.as_str()));
         let loader = self.local_binary_loader.clone();
 
-        Value::external_host_call(
-            &self.values,
+        Value::Lazy(LazyValue::external_host_call_in(
+            access,
             label,
             HostCallRecord::external(
                 "deferred binary import",
@@ -345,7 +381,7 @@ impl CompileContext {
                 };
                 loader(args.clone())
             },
-        )
+        ))
     }
 
     fn qualify_module_path(
@@ -389,19 +425,19 @@ pub(crate) fn import_failure(
     Arc::new(EvaluationFailure::message(message).with_context(context))
 }
 
-fn invalid_import_request(
-    values: &CoreValueFactory,
+fn invalid_import_request_in(
+    access: &crate::core::RuntimeValueAccess<'_>,
     request: &str,
     message: impl AsRef<str>,
     trace: Option<&CompilationTrace>,
     importer_source: Option<&SourceArtifact>,
 ) -> Value {
     let failure = import_failure(message, request, trace, importer_source);
-    Value::failure(
-        values,
+    Value::Lazy(LazyValue::failure_in(
+        access,
         Arc::from(format!("invalid import request {request}")),
         failure,
-    )
+    ))
 }
 
 #[cfg(test)]
@@ -435,6 +471,7 @@ mod tests {
             importer_source: _,
             compilation_trace: _,
             opaque_origin,
+            unavailable_origin,
             module_path: _,
             prior_defs,
             final_defs,
@@ -444,6 +481,7 @@ mod tests {
             compilation_execution: _,
         } = context;
         let _: &Option<RuntimeValueRoot> = opaque_origin;
+        let _: &RuntimeValueRoot = unavailable_origin;
         let _: &RuntimeValueRoot = prior_defs;
         let _: &RuntimeValueRoot = final_defs;
     }

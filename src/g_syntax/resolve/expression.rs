@@ -943,12 +943,11 @@ pub(in crate::g_syntax) fn lower_name_expr_resolved(
     match name {
         "module" => return scope.module_final_defs.expr(),
         "module_origin" => {
-            return ResolvedExpr::Embedded(context.opaque_origin().unwrap_or_else(|| {
-                Value::error(
-                    context.values(),
-                    "module origin is unavailable outside a source compilation context",
-                )
-            }));
+            return ResolvedExpr::Embedded(
+                context
+                    .opaque_origin()
+                    .unwrap_or_else(|| context.unavailable_origin()),
+            );
         }
         "self" => {
             return scope

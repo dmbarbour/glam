@@ -64,7 +64,7 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/compiler.rs",
-        [28, 0, 1, 0],
+        [29, 0, 3, 0],
         "rooted source definitions, final promise, origin, and import request"
     ),
     entry!(
@@ -74,7 +74,7 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/g_syntax/compiler_values.rs",
-        [22, 0, 1, 0],
+        [22, 0, 2, 0],
         "admitted complete rooted compiler-helper and effect caches"
     ),
     entry!(
@@ -89,7 +89,7 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/g_syntax/module_lowering.rs",
-        [5, 0, 3, 0],
+        [4, 0, 3, 0],
         "rooted declaration-to-declaration definitions and reflection boundary"
     ),
     entry!(

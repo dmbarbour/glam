@@ -347,14 +347,29 @@ pub(in crate::g_syntax) fn run_pure_match_resolved(
     line: usize,
 ) -> ResolvedExpr<Value> {
     let cache = cache(values);
+    let error_key = Key::abstract_global_path([
+        "g_compiler".to_owned(),
+        "match_exhausted".to_owned(),
+        line.to_string(),
+    ]);
+    let candidate = values.construct_runtime_value_root(|access| {
+        Value::Lazy(crate::core::LazyValue::error_in(
+            access,
+            format!("match exhausted on line {line}"),
+        ))
+    });
+    let error = cache
+        .effects()
+        .lock()
+        .expect("g compiler effect-value cache must not be poisoned")
+        .entry(error_key)
+        .or_insert(candidate)
+        .clone();
     let exhausted = effect_call(
         values,
         cache.as_ref(),
         "r",
-        [ResolvedExpr::Embedded(Value::error(
-            values,
-            format!("match exhausted on line {line}"),
-        ))],
+        [ResolvedExpr::Embedded(project_value(values, &error))],
     );
     let operation = effect_call(
         values,
@@ -473,7 +488,9 @@ pub(in crate::g_syntax) fn evaluate_closed(
     values: &CoreValueFactory,
     expression: ResolvedExpr<Value>,
 ) -> Value {
-    let value = lower_resolved_expr(values, expression);
+    let input =
+        values.construct_runtime_value_root(|access| lower_resolved_expr_in(access, expression));
+    let value = values.with_runtime_value_access(|access| input.clone_core_with(&access));
     crate::evaluation::EvalContext::private_closed(values.clone())
         .evaluate_whnf(&value)
         .expect("closed g compiler helper must evaluate without session capabilities")

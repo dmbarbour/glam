@@ -1,5 +1,5 @@
 use crate::compiler::CompileContext;
-use crate::core::{Atom, CoreValueFactory, Dict, Key, Value};
+use crate::core::{Atom, CoreValueFactory, Dict, Key, RuntimeValueAccess, Value};
 use crate::core::{Builtin, keys};
 use crate::diagnostic::Severity;
 use crate::runtime::RuntimeValueRoot;
@@ -28,7 +28,9 @@ use resolve::*;
 
 #[cfg(test)]
 use net_lowering::ResolvedNetLowerer;
+#[cfg(test)]
 use net_lowering::lower_resolved_expr;
+use net_lowering::lower_resolved_expr_in;
 pub(crate) use parser::inspect_source;
 #[cfg(test)]
 pub use parser::parse_source;

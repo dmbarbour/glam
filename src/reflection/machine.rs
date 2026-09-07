@@ -2383,12 +2383,6 @@ impl<S: TaskSpecialization> Branch<S> {
         }
     }
 
-    fn with_effect(&self, values: &CoreValueFactory, effect: Value) -> Self {
-        let mut branch = self.clone();
-        branch.set_effect(values, effect);
-        branch
-    }
-
     fn with_effect_root(&self, effect: RuntimeValueRoot) -> Self {
         let mut branch = self.clone();
         branch.set_effect_root(effect);
@@ -3657,10 +3651,12 @@ fn replace_reset_frames(
     frames: &[ResetFrame],
 ) -> Value {
     let Value::Dict(state) = state else {
-        return Value::error(
-            context.context().values(),
-            "reflection user state must remain a dictionary",
-        );
+        return context.construct_lazy_value(|access| {
+            Value::Lazy(LazyValue::error_in(
+                access,
+                "reflection user state must remain a dictionary",
+            ))
+        });
     };
     Value::Dict(state.insert(
         continuation_state.clone(),

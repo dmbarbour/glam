@@ -371,16 +371,16 @@ pub(in crate::g_syntax) fn path_resolved_in_definitions(
     }
 }
 
-pub(in crate::g_syntax) fn update_module_value(
-    values: &CoreValueFactory,
+pub(in crate::g_syntax) fn update_module_value_in(
+    access: &RuntimeValueAccess<'_>,
     definitions: Value,
     target: &str,
     value: Value,
 ) -> Value {
     // Module definitions are ordered updates over the incoming namespace.
     // Ordinary dictionary literals still lower through DictUnion.
-    lower_resolved_expr(
-        values,
+    lower_resolved_expr_in(
+        access,
         apply_builtin_resolved(
             Builtin::DictUpdate,
             [
@@ -392,32 +392,32 @@ pub(in crate::g_syntax) fn update_module_value(
     )
 }
 
-pub(in crate::g_syntax) fn update_module_dict_value(
-    values: &CoreValueFactory,
+pub(in crate::g_syntax) fn update_module_dict_value_in(
+    access: &RuntimeValueAccess<'_>,
     definitions: Value,
     item: Value,
 ) -> Value {
     match item {
-        Value::Dict(dict) => update_module_dict_entries(values, definitions, Vec::new(), &dict),
+        Value::Dict(dict) => update_module_dict_entries_in(access, definitions, Vec::new(), &dict),
         _ => definitions,
     }
 }
 
-pub(in crate::g_syntax) fn update_module_dict_entries(
-    values: &CoreValueFactory,
+pub(in crate::g_syntax) fn update_module_dict_entries_in(
+    access: &RuntimeValueAccess<'_>,
     definitions: Value,
     prefix: Vec<Value>,
     dict: &Dict,
 ) -> Value {
     dict.iter().fold(definitions, |definitions, (key, value)| {
         let mut path = prefix.clone();
-        path.push(key_to_value(values, key));
+        path.push(key.to_value_with(access.values()));
         match value {
             Value::Dict(nested) if !nested.is_empty() => {
-                update_module_dict_entries(values, definitions, path, nested)
+                update_module_dict_entries_in(access, definitions, path, nested)
             }
-            _ => lower_resolved_expr(
-                values,
+            _ => lower_resolved_expr_in(
+                access,
                 apply_builtin_resolved(
                     Builtin::DictUpdate,
                     [
@@ -440,12 +440,8 @@ pub(in crate::g_syntax) fn path_value(target: &str) -> Value {
     ))
 }
 
-pub(in crate::g_syntax) fn key_to_value(values: &CoreValueFactory, key: &Key) -> Value {
-    key.to_value_with(values)
-}
-
-pub(in crate::g_syntax) fn path_value_in_definitions(
-    values: &CoreValueFactory,
+pub(in crate::g_syntax) fn path_value_in_definitions_in(
+    access: &RuntimeValueAccess<'_>,
     target: &str,
     definitions: Value,
 ) -> Result<Value, Diagnostic> {
@@ -453,8 +449,8 @@ pub(in crate::g_syntax) fn path_value_in_definitions(
         .split('.')
         .map(|part| ResolvedPathPart::Key(name_as_key(part)))
         .collect::<Vec<_>>();
-    Ok(lower_resolved_expr(
-        values,
+    Ok(lower_resolved_expr_in(
+        access,
         ResolvedExpr::Access {
             base: Box::new(ResolvedExpr::Provided(definitions)),
             path,
