@@ -14,6 +14,11 @@ pub struct EvaluationHalt {
     kind: EvaluationHaltKind,
 }
 
+// Evaluation halts travel through every recursive evaluator result frame.
+// Keep uncommon ownership payloads indirect so a blocked-path proof cannot
+// silently consume the evaluator's ordinary stack budget.
+const _: () = assert!(std::mem::size_of::<EvaluationHalt>() <= 64);
+
 #[derive(Debug, Clone)]
 enum EvaluationHaltKind {
     Failure(Arc<EvaluationFailure>),
@@ -22,8 +27,9 @@ enum EvaluationHaltKind {
         promise: PromisedValue,
         /// A halt may cross scheduler and client-demand boundaries before it
         /// is translated back into a dependency. Retain the promise's exact
-        /// managed owner for that entire interval.
-        _root: ManagedPromiseRoot,
+        /// managed owner for that entire interval. Box the uncommon payload
+        /// so ordinary evaluator result frames do not pay for its size.
+        _root: Box<ManagedPromiseRoot>,
     },
 }
 
@@ -125,7 +131,7 @@ impl EvaluationHalt {
         Self {
             kind: EvaluationHaltKind::UnassignedPromise {
                 promise,
-                _root: root,
+                _root: Box::new(root),
             },
         }
     }
@@ -135,7 +141,7 @@ impl EvaluationHalt {
         Self {
             kind: EvaluationHaltKind::UnassignedPromise {
                 promise,
-                _root: root,
+                _root: Box::new(root),
             },
         }
     }
