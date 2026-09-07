@@ -158,8 +158,9 @@ collector mutation API.
 **Classification:** ownership chronology and future collection safety  
 **Priority:** high  
 **Confidence:** high  
-**Status:** open; blocks I11C, automatic collection, and reuse of this
-constructor pattern by additional managed identities
+**Status:** remediation D-F complete; closure/reconciliation checkpoint G
+remains before I11C, automatic collection, or reuse of this constructor
+pattern by additional managed identities
 
 The collector contract is explicit: `Gc<T>` is a non-rooting pointer which may
 become stale after it leaves a mutator region. Glam's own
@@ -555,11 +556,11 @@ This family has enough call-site breadth to remain partitioned:
    Open or extend one callback-free `with_value_access` region through result
    rooting or exact net installation; split any path which reaches a callback,
    wait, reflection activation, or contention park.
-4. **D.4 — Compiler and reflection paths.** Convert source/net lowering,
+4. **D.4 — Compiler and reflection paths (complete).** Convert source/net lowering,
    per-declaration and final-definition publication, reflection-store edits,
    reflection tasks, and external-host-call construction. Do not hold managed
    access while invoking a host callback or coordinator operation.
-5. **D.5 — Lazy closure.** Delete the self-opening shims and update the source
+5. **D.5 — Lazy closure (complete).** Delete the self-opening shims and update the source
    inventory. Add forced-order survival, post-publication root-retirement,
    early-return reclamation, and representative evaluator, compiler,
    reflection, and public-value tests.
@@ -590,6 +591,23 @@ reflection activation; it is a narrow ownership handoff rather than a second
 value representation. Forced collection between construction and containing
 root publication covers all three managed families.
 
+D.4 completed on 2026-09-07. Source and net lowering now receive the active
+`RuntimeValueAccess` from their declaration operation, so function nets and
+their lazy computations are constructed before the declaration root is
+published. Deferred imports allocate their host-call lazy inside that same
+compiler region but invoke the loader only after managed access has ended.
+Compiler fallback values and final definitions are rooted at construction,
+and reflection request/result construction uses either the evaluator nursery
+or a same-region containing root.
+
+D.5 completed on 2026-09-07. Every factory-taking lazy constructor is now
+test-only or deleted; the fail-closed source inventory accepts no production
+self-opening constructor. The former ignored publication-gap fixture now
+forces collection after lazy, promise, and core-net construction beneath one
+containing root, then proves retirement after that root drops. Existing
+compiler, evaluator, reflection, and public-value suites remain the
+representative behavior matrix.
+
 ##### GCI5R-001E — Promise construction cutover
 
 This family crosses coordinator ownership and therefore remains separate from
@@ -609,7 +627,7 @@ the otherwise similar lazy conversion:
    reflection fixpoints, and other evaluator graphs which embed promises as
    traced values rather than producer-owned handles. Establish the containing
    value root or traced owner before their construction region ends.
-4. **E.4 — Promise closure.** Delete self-opening `with_cell`/`new` paths which
+4. **E.4 — Promise closure (complete).** Delete self-opening `with_cell`/`new` paths which
    can escape and update the source inventory. Force collection between
    construction and registration/publication, and preserve cancellation,
    abandonment, assignment, resolver drop, and root-retirement coverage.
@@ -619,21 +637,40 @@ now admitted through the evaluator-step publication nursery and installed in
 their containing semantic graph before those guards retire. Producer-owned
 promises remain on the explicit rooted registration path established by E.2.
 
+E.4 completed on 2026-09-07. The self-opening promise helpers are test-only;
+production construction either publishes a resolver/consumer root directly
+or remains in an evaluator/compiler construction region until a traced owner
+exists. Forced collection covers public resolver assignment and retirement,
+the containing-graph path, and evaluator-step publication. An unassigned
+promise halt retains its exact root indirectly: boxing this uncommon payload
+keeps ordinary recursive evaluator result frames at 64 bytes and repairs the
+deterministic stack regression exposed by the dictionary-pattern suite.
+
 ##### GCI5R-001F — Core-net construction cutover
 
-1. **F.1 — Local and containing-value construction.** Convert standalone,
+1. **F.1 — Local and containing-value construction (complete).** Convert standalone,
    related, source-lowered, function-stage, and public `Assembler::net`
    instantiation to the C gateway. Install the fresh net directly into its
    containing traced value/net owner when construction is local.
-2. **F.2 — Genuine net handoffs.** Use an intentional managed-net or
+2. **F.2 — Genuine net handoffs (complete).** Use an intentional managed-net or
    containing value root only where normalization, copy-source, callable, or
    frontier state must leave access. Generalize the ownership pattern already
    demonstrated by `CorePreparedCopySource` without making prepared roots the
    default constructor result.
-3. **F.3 — Net closure.** Delete factory methods which open an allocation
+3. **F.3 — Net closure (complete).** Delete factory methods which open an allocation
    region and return a bare `CoreRuntimeNet`; update the source inventory and
    cover standalone/related instantiation, function/net wrapping, copy-source
    handoff, and collection immediately after permanent publication.
+
+F.1-F.3 completed on 2026-09-07. Public net construction, function stages,
+source lowering, evaluator attachments, and reflection request functions now
+allocate through an already-active access and install the net in their
+containing value before it ends. The remaining durable handoffs are explicit:
+normalization requests, frontier observations, and prepared copy sources hold
+`ManagedCoreNetRoot`; ordinary net values do not. The self-opening factory
+constructor is test-only, the unused related-net wrapper is gone, and a
+forced-collection fixture proves that a prepared copy source alone retains
+and then retires its source net.
 
 ##### GCI5R-001G — Closure audit and review reconciliation
 

@@ -161,6 +161,7 @@ pub(crate) fn thread_has_active_core_normalization_scope() -> bool {
 
 impl CoreValueFactory {
     /// Instantiates a core net in this factory's exact value domain.
+    #[cfg(test)]
     pub(crate) fn instantiate_core_net(&self, template: &CoreInteractionNet) -> CoreRuntimeNet {
         self.with_runtime_value_access(|access| {
             access
@@ -192,15 +193,6 @@ impl CoreRuntimeNet {
         values: RuntimeValueObserver,
     ) -> Self {
         Self { edge, values }
-    }
-
-    /// Instantiates topology whose payloads were assembled from values already
-    /// admitted by this net's domain.
-    pub(crate) fn instantiate_related(&self, template: &CoreInteractionNet) -> Self {
-        self.values
-            .upgrade()
-            .expect("a related core net requires its live value domain")
-            .instantiate_core_net(template)
     }
 
     pub(crate) fn ptr_eq(&self, other: &Self) -> bool {
@@ -1145,6 +1137,30 @@ mod tests {
             retained.upgrade().is_none(),
             "retiring the managed net owner must retire its operator payload"
         );
+    }
+
+    #[test]
+    fn prepared_copy_source_is_an_exact_temporary_net_owner() {
+        let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
+        let baseline = values
+            .collect_managed_for_test()
+            .expect("the prepared-copy fixture should start collectible");
+        let source = values.instantiate_core_net(&closed_unit_template(&values));
+        let prepared = source.test_prepare_copy_source();
+        drop(source);
+
+        let retained = values
+            .collect_managed_for_test()
+            .expect("the prepared copy source should retain its semantic net");
+        assert_eq!(retained.root_entries(), baseline.root_entries() + 1);
+        assert_eq!(retained.marked_slots(), baseline.marked_slots() + 1);
+
+        drop(prepared);
+        let retired = values
+            .collect_managed_for_test()
+            .expect("dropping the prepared source should retire its semantic net");
+        assert_eq!(retired.root_entries(), baseline.root_entries());
+        assert_eq!(retired.finalized_slots(), 1);
     }
 
     #[test]

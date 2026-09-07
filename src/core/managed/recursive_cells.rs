@@ -1098,8 +1098,21 @@ mod tests {
         entries: Vec<String>,
     }
 
+    fn is_test_only(attributes: &[syn::Attribute]) -> bool {
+        attributes.iter().any(|attribute| {
+            attribute.path().is_ident("cfg")
+                && matches!(
+                    &attribute.meta,
+                    syn::Meta::List(list) if list.tokens.to_string() == "test"
+                )
+        })
+    }
+
     impl<'ast> Visit<'ast> for SelfOpeningVisitor<'_> {
         fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+            if is_test_only(&item.attrs) {
+                return;
+            }
             let mut calls = ConstructorCallInventory::default();
             calls.visit_block(&item.block);
             if calls.opens_access && calls.calls_gateway {
@@ -1110,6 +1123,9 @@ mod tests {
         }
 
         fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+            if is_test_only(&item.attrs) {
+                return;
+            }
             let mut calls = ConstructorCallInventory::default();
             calls.visit_block(&item.block);
             if calls.opens_access && calls.calls_gateway {
@@ -1180,37 +1196,43 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "GCI5R-001: fresh managed facades currently escape before first publication"]
     fn fresh_managed_facades_survive_until_first_publication() {
         let values = new_values();
         values
             .collect_managed_for_test()
-            .expect("the mismatch fixture should start collectible");
+            .expect("the publication fixture should start collectible");
 
-        // Exercise the production constructors, including the failed-lazy
-        // constructor's second managed-access region used to publish its
-        // initial result. None of these facade values is an authoritative GC
-        // owner under the intended contract.
-        let lazy = LazyValue::error(&values, "unpublished lazy");
-        let promise = PromisedValue::new(&values, "unpublished promise");
-        let mut builder = NetBuilder::<CoreSpecialization>::new();
-        let exposed = builder.data(Value::Number(67.into()));
-        let net = values.instantiate_core_net(&builder.finish(exposed));
+        let root = values.construct_runtime_value_root(|access| {
+            let lazy = LazyValue::error_in(access, "published lazy");
+            let promise = access
+                .construct_managed_promise("published promise")
+                .expect("managed promise representation must fit one collector run");
+            let mut builder = NetBuilder::<CoreSpecialization>::new();
+            let exposed = builder.data(Value::Number(67.into()));
+            let net = access
+                .construct_managed_core_net(builder.finish(exposed).instantiate())
+                .expect("managed core-net representation must fit one collector run");
+            Value::List(List::from_values(vec![
+                Value::Lazy(lazy),
+                Value::Promised(promise),
+                Value::Net(NetValue::new(net)),
+            ]))
+        });
 
-        // The desired construction invariant is that collection cannot
-        // intervene before each fresh allocation is installed in a traced
-        // owner or intentionally rooted. Observe reclamation only through the
-        // report: dereferencing one of the stale facade edges would be invalid.
         let intervening = values
             .collect_managed_for_test()
-            .expect("collection at the former publication boundary should complete");
+            .expect("the containing root should preserve every fresh family");
         assert_eq!(
             intervening.finalized_slots(),
             0,
-            "fresh managed allocations escaped their allocation regions before publication"
+            "fresh managed allocations must survive their first permanent publication"
         );
 
-        drop((lazy, promise, net));
+        drop(root);
+        let retired = values
+            .collect_managed_for_test()
+            .expect("dropping the containing root should retire the published graph");
+        assert!(retired.finalized_slots() >= 3);
     }
 
     #[test]
@@ -2208,29 +2230,9 @@ mod tests {
             }
         }
         entries.sort();
-        assert_eq!(
-            entries,
-            [
-                "src/core.rs::builtin_call",
-                "src/core.rs::computed_fixpoint",
-                "src/core.rs::error",
-                "src/core.rs::external_host_call",
-                "src/core.rs::failure",
-                "src/core.rs::from_access",
-                "src/core.rs::from_application",
-                "src/core.rs::from_builtin",
-                "src/core.rs::from_function_call",
-                "src/core.rs::from_net_computation",
-                "src/core.rs::from_net_construction",
-                "src/core.rs::from_reflection_gate",
-                "src/core.rs::reflection_task_result",
-                "src/core.rs::semantic_computation",
-                "src/core.rs::semantic_thunk",
-                "src/core.rs::with_cell",
-                "src/core_net.rs::adopt_core_net_for_test",
-                "src/core_net.rs::instantiate_core_net",
-            ],
-            "update the explicit legacy-constructor inventory before adding or removing a self-opening managed constructor"
+        assert!(
+            entries.is_empty(),
+            "production self-opening managed constructors escaped closure: {entries:?}"
         );
     }
 

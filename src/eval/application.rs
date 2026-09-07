@@ -1,5 +1,6 @@
 use super::*;
 
+#[cfg(test)]
 pub(super) fn apply_value(
     context: &EvalContext,
     function: Value,
@@ -35,6 +36,7 @@ pub(super) fn apply_value_in(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn apply_values(
     context: &EvalContext,
     function: Value,

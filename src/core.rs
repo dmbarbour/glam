@@ -672,6 +672,7 @@ impl LazyValue {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn computed_fixpoint(
         values: &CoreValueFactory,
         label: impl Into<Arc<str>>,
@@ -711,6 +712,7 @@ impl LazyValue {
     ///
     /// The operation is a function pointer rather than a closure, so the
     /// managed lazy representation can trace `captures` exactly after I5.
+    #[cfg(test)]
     pub(crate) fn semantic_computation(
         values: &CoreValueFactory,
         label: impl Into<Arc<str>>,
@@ -738,6 +740,7 @@ impl LazyValue {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn external_host_call(
         values: &CoreValueFactory,
         label: impl Into<Arc<str>>,
@@ -787,6 +790,7 @@ impl LazyValue {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn error(values: &CoreValueFactory, message: impl Into<Arc<str>>) -> Self {
         values.with_runtime_value_access(|access| Self::error_in(&access, message))
     }
@@ -797,14 +801,6 @@ impl LazyValue {
             "error",
             Arc::new(EvaluationFailure::message(message.into())),
         )
-    }
-
-    pub(crate) fn failure(
-        values: &CoreValueFactory,
-        label: impl Into<Arc<str>>,
-        failure: Arc<EvaluationFailure>,
-    ) -> Self {
-        values.with_runtime_value_access(|access| Self::failure_in(&access, label, failure))
     }
 
     pub(crate) fn failure_in(
@@ -889,6 +885,7 @@ impl PromisedValue {
         self.edge.trace(visitor);
     }
 
+    #[cfg(test)]
     pub(crate) fn new(values: &CoreValueFactory, label: impl Into<Arc<str>>) -> Self {
         Self::with_cell(values, label)
     }
@@ -910,6 +907,7 @@ impl PromisedValue {
         Ok(promise)
     }
 
+    #[cfg(test)]
     fn with_cell(values: &CoreValueFactory, label: impl Into<Arc<str>>) -> Self {
         let label = label.into();
         values.with_runtime_value_access(|access| {
@@ -1700,6 +1698,7 @@ impl LazyValue {
         Self::with_source_in(access, "access", LazySource::Access { path, arguments })
     }
 
+    #[cfg(test)]
     pub(crate) fn from_access(
         values: &CoreValueFactory,
         path: Arc<[CoreDataKey]>,
@@ -1727,6 +1726,7 @@ impl LazyValue {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn from_application(
         values: &CoreValueFactory,
         function: Value,
@@ -1741,10 +1741,6 @@ impl LazyValue {
         Self::with_source_in(access, "builtin call", LazySource::Builtin(call))
     }
 
-    pub(crate) fn from_builtin(values: &CoreValueFactory, call: BuiltinCall) -> Self {
-        values.with_runtime_value_access(|access| Self::from_builtin_in(&access, call))
-    }
-
     pub(crate) fn from_net_construction_in(access: &RuntimeValueAccess<'_>, effect: Value) -> Self {
         Self::with_source_in(
             access,
@@ -1753,6 +1749,7 @@ impl LazyValue {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn from_net_construction(values: &CoreValueFactory, effect: Value) -> Self {
         values.with_runtime_value_access(|access| Self::from_net_construction_in(&access, effect))
     }
@@ -1772,6 +1769,7 @@ impl LazyValue {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn from_function_call(
         values: &CoreValueFactory,
         function: FunctionValue,
@@ -1786,6 +1784,7 @@ impl LazyValue {
         Self::with_source_in(access, "net computation", LazySource::NetComputation(net))
     }
 
+    #[cfg(test)]
     pub(crate) fn from_net_computation(values: &CoreValueFactory, net: NetValue) -> Self {
         values.with_runtime_value_access(|access| Self::from_net_computation_in(&access, net))
     }
@@ -1806,6 +1805,7 @@ impl LazyValue {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn from_reflection_gate(
         values: &CoreValueFactory,
         effect: Value,
@@ -2057,14 +2057,7 @@ impl Value {
         Self::Lazy(LazyValue::semantic_thunk(values, label, thunk))
     }
 
-    pub(crate) fn failure(
-        values: &CoreValueFactory,
-        label: impl Into<Arc<str>>,
-        failure: Arc<EvaluationFailure>,
-    ) -> Self {
-        Self::Lazy(LazyValue::failure(values, label, failure))
-    }
-
+    #[cfg(test)]
     pub(crate) fn external_host_call(
         values: &CoreValueFactory,
         label: impl Into<Arc<str>>,
@@ -2076,14 +2069,17 @@ impl Value {
         ))
     }
 
+    #[cfg(test)]
     pub(crate) fn error(values: &CoreValueFactory, message: impl Into<Arc<str>>) -> Self {
         Self::Lazy(LazyValue::error(values, message))
     }
 
+    #[cfg(test)]
     pub(crate) fn reflection_gate(values: &CoreValueFactory, effect: Value, target: Value) -> Self {
         Self::Lazy(LazyValue::from_reflection_gate(values, effect, target))
     }
 
+    #[cfg(test)]
     pub(crate) fn reflection_task_result(values: &CoreValueFactory, effect: Value) -> Self {
         values.with_runtime_value_access(|access| Self::reflection_task_result_in(&access, effect))
     }
@@ -2122,6 +2118,7 @@ impl Value {
 
     /// Constructs a builtin value at a specific curried stage without
     /// evaluating a saturated call.
+    #[cfg(test)]
     pub(crate) fn builtin_call(
         values: &CoreValueFactory,
         builtin: Builtin,

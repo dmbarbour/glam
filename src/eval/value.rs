@@ -654,6 +654,7 @@ pub(super) fn format_name_part(key: &Key) -> String {
     }
 }
 
+#[cfg(test)]
 pub(super) fn value_to_key(context: &EvalContext, value: &Value) -> Result<Key, EvaluationHalt> {
     super::with_direct_evaluator(context, |evaluator| value_to_key_in(evaluator, value))
 }
@@ -693,13 +694,6 @@ pub(super) fn value_to_key_in(
             "dictionary keys must evaluate to keyable values",
         )),
     }
-}
-
-pub(super) fn force_list_thunk(
-    context: &EvalContext,
-    thunk: &ListThunk,
-) -> Result<List, EvaluationHalt> {
-    super::with_direct_evaluator(context, |evaluator| force_list_thunk_in(evaluator, thunk))
 }
 
 pub(super) fn force_list_thunk_in(

@@ -5,9 +5,11 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 
+#[cfg(test)]
+use crate::core::CoreValueFactory;
 use crate::core::{
-    Builtin, BuiltinCall, CoreValueFactory, EvaluationHalt, FunctionCode, FunctionValue, Key,
-    LazyValue, List, NetValue, PromisedValue, Value, keys,
+    Builtin, BuiltinCall, EvaluationHalt, FunctionCode, FunctionValue, Key, LazyValue, List,
+    NetValue, PromisedValue, Value, keys,
 };
 use crate::core_net::{CoreDataKey, CoreOperator, CoreSpecialization};
 use crate::evaluation::{EvalContext, EvaluatorStepContext};
@@ -32,6 +34,7 @@ mod sequence;
 mod test_support;
 mod value;
 
+#[cfg(test)]
 pub(crate) use application::apply_values;
 #[cfg(test)]
 pub(crate) use builtins::demand_strategy_value;
@@ -40,10 +43,11 @@ pub(crate) use builtins::demand_strategy_value_in;
 pub(crate) use operator::constant_effect;
 pub(crate) use operator::{
     access_operator, apply_arity_operator, computation_capture_operator, constant_effect_in,
-    constant_effect_in_step, function_capture_operator, list_operator, request_operator,
+    function_capture_operator, list_operator, request_operator,
 };
 #[cfg(test)]
 pub(crate) use sequence::list_output_bytes;
+#[cfg(test)]
 pub(crate) use sequence::list_to_value_items;
 pub use value::eval_value;
 pub(crate) use value::eval_value_in;

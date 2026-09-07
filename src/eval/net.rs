@@ -1122,16 +1122,6 @@ fn retryable_evaluation_wait(
         .map_err(|error| EvaluationHalt::new(error.as_ref()))
 }
 
-pub(super) fn resolve_core_access(
-    context: &EvalContext,
-    arguments: &[Value],
-    path: &[CoreDataKey],
-) -> Result<Value, EvaluationHalt> {
-    super::with_direct_evaluator(context, |evaluator| {
-        resolve_core_access_in(evaluator, arguments, path)
-    })
-}
-
 pub(super) fn resolve_core_access_in(
     context: &EvaluatorStepContext<'_>,
     arguments: &[Value],

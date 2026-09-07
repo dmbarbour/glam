@@ -55,6 +55,7 @@ pub(super) fn list_to_key_items_in(
     Ok(Arc::from(items.into_inner()))
 }
 
+#[cfg(test)]
 pub(crate) fn list_to_value_items(
     context: &EvalContext,
     list: &List,
