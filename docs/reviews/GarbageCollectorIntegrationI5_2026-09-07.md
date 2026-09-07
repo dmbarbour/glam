@@ -197,11 +197,11 @@ Recommended resolution before introducing another managed identity:
 1. inventory every allocation-to-first-owner handoff for the three families;
 2. distinguish construction which installs an edge within an existing access
    region from construction which returns to external Rust;
-3. make fresh allocation return a zero-cost scope-bound `NewGc<'scope, T>`
-   state which cannot escape its mutator region as an ordinary interior edge;
-4. consume that state by installing an exact traced edge or publishing the
-   root which the receiving owner actually requires; use a separately rooted
-   handoff only across a genuine access/orchestration boundary; and
+3. make raw family allocation private and keep the complete intermediate graph
+   within its caller-owned managed-access region;
+4. end that region only after installing the graph in an exact traced owner or
+   publishing the root which the receiving owner actually requires; use an
+   already-intended root across a genuine access/orchestration boundary; and
 5. add forced-order tests which stop immediately after allocation, attempt
    collection at the former escape boundary, and prove the selected traced
    owner or intentional root—not disabled collection—preserves liveness.
@@ -231,26 +231,26 @@ traffic to the value-construction hot path. A real rooted handoff remains
 available only when a wait, callback, coordinator operation, lock boundary, or
 other orchestration seam cannot retain managed access.
 
-The proposed zero-cost construction state is conceptually:
+The construction unit is the admitted region, not each individual allocation.
+Several new cells may safely remain unrooted while one mutator protects them;
+the completed graph must acquire its exact owner before that region ends. A
+generic `NewGc<'scope, T>` rejects direct escape from an allocator, but cannot
+prove that an eventual `Value` containing the converted edge was rooted or
+installed. An unrestricted conversion to `Gc<T>` would therefore move rather
+than close the safety boundary, while recursively branding `Value` and all of
+its containers would be a disproportionate migration.
 
-```rust
-#[repr(transparent)]
-struct NewGc<'scope, T> {
-    value: Gc<T>,
-    _scope: PhantomData<&'scope Mutator<'scope>>,
-}
-```
-
-This must be a wrapper rather than a type alias so the lifetime participates
-in Rust's type system. It is neither `Copy` nor `Clone`, has the same runtime
-representation as `Gc<T>`, may be dropped as ordinary future garbage, and
-does not expose a safe freely copyable `Gc<T>`. Root publication consumes it.
-Conversion to an interior `Gc<T>` is unsafe at the collector boundary because
-the collector cannot prove that the caller installed it in a traced owner;
-Glam's family-specific construction or mutation API provides the safe
-operation which performs that installation. Local scoped callbacks remain
-available for building a fresh parent from a fresh child, but evaluator
-control flow does not become continuation-passing style.
+The corrective design consequently keeps `Allocator::alloc` unchanged and
+narrows Glam's integration surface instead. Raw managed-family allocators are
+private to the regional construction/publication layer. External operations
+either build and publish the completed root under one `RuntimeValueAccess`, or
+install the completed edge into an already traced owner under that access. A
+real intended root crosses an unavoidable wait, callback, coordinator, or lock
+boundary. A private fresh-allocation wrapper remains an optional local
+implementation aid only if a prototype can consume every instance directly
+into one of those owner-producing operations without exposing an unrestricted
+escape. It is not a collector-wide contract or an entry condition for this
+repair.
 
 `CoreValueFactory` and `RuntimeValueAccess` retain distinct ownership roles:
 
@@ -421,20 +421,30 @@ The normal focused run passes 28 recursive-cell tests and reports this one
 fixture ignored. `cargo fmt --check`, Clippy with warnings denied, and the full
 repository test suite also pass with the mismatch fixture ignored.
 
-##### GCI5R-001B — Scope-bound fresh allocation
+##### GCI5R-001B — Regional construction and publication boundary
 
-1. Add the transparent `NewGc<'scope, T>` allocation result at the narrowest
-   collector boundary which prevents an ordinary fresh `Gc<T>` from escaping.
-   Prefer `Allocator::alloc` returning the new state; if a lower-level raw
-   constructor must remain, keep it private and document its safety proof.
-2. Provide consuming operations for intended root publication and an unsafe,
-   precisely documented collector-level transition to a traced interior edge.
-   Do not provide `Deref<Target = Gc<T>>`, `AsRef<Gc<T>>`, `Copy`, `Clone`, or a
-   safe unrestricted `into_gc` escape.
-3. Add compile-time representation checks plus focused allocation, rooting,
-   discard/reclamation, and Miri coverage. Add compile-fail evidence that the
-   scope-bound state cannot leave the mutator callback if that can be done
-   without adopting a disproportionate test framework.
+1. Keep `glam_gc::Allocator::alloc` returning `Gc<T>`. Document that mutator
+   admission, rather than an individually branded pointer, is the liveness
+   witness for all unpublished intermediate allocations in one construction
+   region.
+2. Privatize the three raw `allocate_managed_*` operations to the smallest
+   Glam module which can implement both construction and publication. No
+   production managed-family constructor may open access and return a newly
+   allocated bare edge, facade, or compatibility `Value`.
+3. Establish owner-producing regional primitives for the two actual exits:
+   publish the completed graph as its intended root before access ends, or
+   install it into an already traced owner under the same access. Preserve
+   intentional registered roots for genuine orchestration handoffs rather
+   than introducing temporary construction roots.
+4. Prototype a private family-specific or generic fresh-allocation wrapper
+   only if it makes the raw-to-owner transition more auditable. Retain it only
+   when every conversion is coupled to actual root publication or traced-edge
+   installation; an unrestricted `into_gc`, `Deref`, or equivalent escape
+   fails the experiment and the wrapper should be dropped.
+5. Add focused tests for multi-allocation graph construction, direct root
+   publication, traced-owner installation, early-return garbage, and the
+   existing forced collection boundary. Compile-fail evidence is useful only
+   if the selected private API establishes a meaningful lifetime property.
 
 ##### GCI5R-001C — Operational value-access facade
 
@@ -454,8 +464,9 @@ repository test suite also pass with the mismatch fixture ignored.
 ##### GCI5R-001D — Lazy construction cutover
 
 1. Replace self-opening `LazyValue::with_source` with access-taking fresh-lazy
-   construction. The ordinary result remains scope-bound until consumed into
-   a traced value/owner or intended root.
+   construction. Keep all intermediate lazy facades inside the caller's
+   admitted construction region, and publish the completed graph or install
+   its exact edge before that region ends.
 2. Migrate every lazy constructor from the inventory. Keep callback-free
    evaluator construction inside its existing `with_value_access` region;
    split any path which presently spans callbacks or waits.
@@ -500,7 +511,8 @@ repository test suite also pass with the mismatch fixture ignored.
    source inventory for this temporal rule; do not mistake it for the
    forced-order behavioral proof.
 2. Reconcile `CoreValueAllocationScope`, `RuntimeValueAccess`, collector, and
-   ownership-ledger documentation with the final `NewGc` handoff vocabulary.
+   ownership-ledger documentation with the final regional construction and
+   authoritative-owner handoff vocabulary.
 3. Run focused collector/managed/evaluator/net/publication tests, Miri for the
    affected collector boundary, and the repository routine checks.
 4. Update this finding with final evidence and mark it closed only when the

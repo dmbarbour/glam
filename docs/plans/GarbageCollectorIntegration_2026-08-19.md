@@ -5035,6 +5035,32 @@ managed identity once; no traversal cache or deduplication policy was added.
 Only closed isolated fixtures collect. The complete production runtime remains
 `NoAuto`, and the mandatory post-I5 review follows before I6 begins.
 
+### I6+ Regional Allocation Migration Rule
+
+GCI5R-001 must close before I6 begins. Its corrective pattern is also an entry
+condition for every later phase which introduces another managed allocation
+family. “Migrate” in I6 and beyond includes the allocator-to-owner chronology,
+not only representation and tracing:
+
+- keep the raw family allocator private to the smallest regional
+  construction/publication layer;
+- allocate all intermediate nodes under a caller-owned
+  `RuntimeValueAccess`, then publish the completed graph as its intended root
+  or install it in an already traced owner before that access ends;
+- prohibit self-opening constructors which return a fresh bare `Gc`, managed
+  edge, facade, or compatibility `Value`;
+- carry an already-intended registered root across a wait, callback,
+  coordinator operation, or lock boundary which cannot retain access; never
+  create a root merely to bridge adjacent construction statements; and
+- force collection at the former allocation/publication gap in the isolated
+  family fixture before declaring that phase complete.
+
+A private fresh-allocation typestate may be used as a local implementation aid
+when every consuming operation simultaneously establishes the real owner. It
+is not required, must not expose an unrestricted ordinary-pointer conversion,
+and must not replace the regional forced-order proof. `glam_gc::Allocator`
+itself continues to return `Gc<T>`.
+
 ## Phase I6 — Functions, Applications, Metadata, and Failures
 
 ### Phase I6A — Functions, Applications, and Fixpoints
