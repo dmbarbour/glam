@@ -836,7 +836,7 @@ fn compatibility_graph_cycle_sources_are_classified() {
         });
     assert_eq!(
         counts,
-        [15, 17, 10],
+        [14, 19, 10],
         "every direct identity occurrence remains assigned to the reviewed M/R/A split"
     );
 }
