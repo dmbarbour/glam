@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::core_net::CoreWaitToken;
 
-use super::{EvaluationFailure, PromisedValue, Value};
+use super::{EvaluationFailure, ManagedPromiseRoot, PromisedValue, Value};
 
 /// Explains why a demand could not currently produce a value.
 ///
@@ -14,12 +14,34 @@ pub struct EvaluationHalt {
     kind: EvaluationHaltKind,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 enum EvaluationHaltKind {
     Failure(Arc<EvaluationFailure>),
     Blocked(CoreWaitToken),
-    UnassignedPromise(PromisedValue),
+    UnassignedPromise {
+        promise: PromisedValue,
+        /// A halt may cross scheduler and client-demand boundaries before it
+        /// is translated back into a dependency. Retain the promise's exact
+        /// managed owner for that entire interval.
+        _root: ManagedPromiseRoot,
+    },
 }
+
+impl PartialEq for EvaluationHaltKind {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Failure(left), Self::Failure(right)) => left == right,
+            (Self::Blocked(left), Self::Blocked(right)) => left == right,
+            (
+                Self::UnassignedPromise { promise: left, .. },
+                Self::UnassignedPromise { promise: right, .. },
+            ) => left == right,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for EvaluationHaltKind {}
 
 /// Direct semantic payload retained by one halted evaluation.
 ///
@@ -64,8 +86,8 @@ impl EvaluationHalt {
             EvaluationHaltKind::Blocked(wait) => Self {
                 kind: EvaluationHaltKind::Blocked(wait),
             },
-            EvaluationHaltKind::UnassignedPromise(promise) => Self {
-                kind: EvaluationHaltKind::UnassignedPromise(promise),
+            EvaluationHaltKind::UnassignedPromise { promise, _root } => Self {
+                kind: EvaluationHaltKind::UnassignedPromise { promise, _root },
             },
         }
     }
@@ -80,27 +102,41 @@ impl EvaluationHalt {
     pub(crate) fn permanent_failure(&self) -> Option<&Arc<EvaluationFailure>> {
         match &self.kind {
             EvaluationHaltKind::Failure(failure) => Some(failure),
-            EvaluationHaltKind::Blocked(_) | EvaluationHaltKind::UnassignedPromise(_) => None,
+            EvaluationHaltKind::Blocked(_) | EvaluationHaltKind::UnassignedPromise { .. } => None,
         }
     }
 
     pub(crate) fn blocked_on(&self) -> Option<CoreWaitToken> {
         match &self.kind {
             EvaluationHaltKind::Blocked(wait) => Some(wait.clone()),
-            EvaluationHaltKind::Failure(_) | EvaluationHaltKind::UnassignedPromise(_) => None,
+            EvaluationHaltKind::Failure(_) | EvaluationHaltKind::UnassignedPromise { .. } => None,
         }
     }
 
     pub(crate) fn unassigned_promise(&self) -> Option<&PromisedValue> {
         match &self.kind {
-            EvaluationHaltKind::UnassignedPromise(promise) => Some(promise),
+            EvaluationHaltKind::UnassignedPromise { promise, .. } => Some(promise),
             EvaluationHaltKind::Failure(_) | EvaluationHaltKind::Blocked(_) => None,
         }
     }
 
     pub(crate) fn unassigned(promise: PromisedValue) -> Self {
+        let root = promise.root();
         Self {
-            kind: EvaluationHaltKind::UnassignedPromise(promise),
+            kind: EvaluationHaltKind::UnassignedPromise {
+                promise,
+                _root: root,
+            },
+        }
+    }
+
+    pub(crate) fn unassigned_root(root: ManagedPromiseRoot) -> Self {
+        let promise = PromisedValue::from_root(&root);
+        Self {
+            kind: EvaluationHaltKind::UnassignedPromise {
+                promise,
+                _root: root,
+            },
         }
     }
 
@@ -114,7 +150,7 @@ impl EvaluationHalt {
                 EvaluationHaltPayload::Failure(failure.as_ref())
             }
             EvaluationHaltKind::Blocked(_) => EvaluationHaltPayload::Blocked,
-            EvaluationHaltKind::UnassignedPromise(promise) => {
+            EvaluationHaltKind::UnassignedPromise { promise, .. } => {
                 EvaluationHaltPayload::UnassignedPromise(promise)
             }
         }
@@ -132,7 +168,7 @@ impl fmt::Display for EvaluationHalt {
                     wait.wait_id()
                 )
             }
-            EvaluationHaltKind::UnassignedPromise(_) => {
+            EvaluationHaltKind::UnassignedPromise { .. } => {
                 formatter.write_str("promised value was observed before initialization")
             }
         }

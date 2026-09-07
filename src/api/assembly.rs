@@ -563,14 +563,20 @@ impl ReflectionEnvironmentBuilder<'_> {
     /// the resolver needs no later assembler-specific arming step.
     pub fn promise(&mut self, label: impl Into<Arc<str>>) -> (Value, PromiseResolver) {
         let values = self.host.values();
-        let promise = PromisedValue::new(&values.core, label);
-        (
-            values.wrap(CoreValue::Promised(promise.clone())),
-            PromiseResolver {
-                runtime: self.host.resources.id,
-                promise: Some(promise.root()),
-            },
-        )
+        values.with_access(|scoped| {
+            let promise = scoped
+                .runtime_access()
+                .construct_rooted_managed_promise(label)
+                .expect("managed promise representation must fit one collector run");
+            let value = scoped.wrap(CoreValue::Promised(PromisedValue::from_root(&promise)));
+            (
+                value,
+                PromiseResolver {
+                    runtime: self.host.resources.id,
+                    promise: Some(promise),
+                },
+            )
+        })
     }
 }
 
@@ -843,15 +849,21 @@ impl Assembler {
     /// Resolving, failing, or dropping the resolver wakes each same-runtime
     /// work item currently blocked on the unresolved value.
     pub fn promise(&self, label: impl Into<Arc<str>>) -> (Value, PromiseResolver) {
-        let promise = PromisedValue::new(self.eval_context().values(), label);
         let values = self.values();
-        (
-            values.wrap(CoreValue::Promised(promise.clone())),
-            PromiseResolver {
-                runtime: self.reasoning.runtime.id(),
-                promise: Some(promise.root()),
-            },
-        )
+        values.with_access(|scoped| {
+            let promise = scoped
+                .runtime_access()
+                .construct_rooted_managed_promise(label)
+                .expect("managed promise representation must fit one collector run");
+            let value = scoped.wrap(CoreValue::Promised(PromisedValue::from_root(&promise)));
+            (
+                value,
+                PromiseResolver {
+                    runtime: self.reasoning.runtime.id(),
+                    promise: Some(promise),
+                },
+            )
+        })
     }
 
     /// Creates a protected reflection volume initialized with `initial`.

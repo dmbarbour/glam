@@ -2,8 +2,7 @@ use std::sync::Arc;
 
 use crate::api::CompilationExecution;
 use crate::core::{
-    Atom, CoreValueFactory, Dict, EvaluationFailure, HostCallRecord, Key, PromisedValue, Value,
-    keys,
+    Atom, CoreValueFactory, Dict, EvaluationFailure, HostCallRecord, Key, Value, keys,
 };
 use crate::diagnostic::{CompilationTrace, Severity};
 use crate::runtime::RuntimeValueRoot;
@@ -80,10 +79,12 @@ pub(crate) fn test_value_factory() -> CoreValueFactory {
 impl CompileContext {
     pub(crate) fn new(values: CoreValueFactory) -> Self {
         let prior_defs = RuntimeValueRoot::new(&values, Value::Dict(Dict::new_sync()));
-        let final_defs = RuntimeValueRoot::new(
-            &values,
-            Value::Promised(PromisedValue::new(&values, "final definitions")),
-        );
+        let final_defs = values.with_runtime_value_access(|access| {
+            let promise = access
+                .construct_managed_promise("final definitions")
+                .expect("managed promise representation must fit one collector run");
+            access.root_runtime_value(Value::Promised(promise))
+        });
         Self {
             values: values.scoped(),
             importer_source: None,

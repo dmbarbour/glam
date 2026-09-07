@@ -893,8 +893,13 @@ impl PromisedValue {
         context: &EvalContext,
         label: impl Into<Arc<str>>,
     ) -> Result<Self, Arc<str>> {
-        let promise = Self::with_cell(context.values(), label);
-        let producer = context.register_promise(&promise)?;
+        let root = context.values().with_runtime_value_access(|access| {
+            access
+                .construct_rooted_managed_promise(label)
+                .expect("managed promise representation must fit one collector run")
+        });
+        let promise = Self::from_root(&root);
+        let producer = context.register_promise(root)?;
         promise
             .with_access(|promise| promise.install_producer(&producer))
             .map_err(|_| Arc::<str>::from("promise producer was installed twice"))?;

@@ -9,7 +9,10 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
-use crate::core::{Builtin, CoreValueFactory, EvaluationFailure, LazyValue, PromisedValue, Value};
+use crate::core::{
+    Builtin, CoreValueFactory, EvaluationFailure, LazyValue, ManagedPromiseRoot, PromisedValue,
+    Value,
+};
 use crate::core_net::CoreWaitToken;
 use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 
@@ -989,7 +992,7 @@ impl EvalContext {
 
     pub(crate) fn register_promise(
         &self,
-        promise: &PromisedValue,
+        promise: ManagedPromiseRoot,
     ) -> Result<Arc<PromiseProducerObligation>, Arc<str>> {
         if self.session.is_closed() {
             return Err(Arc::from("evaluation demand session is closed"));
@@ -1000,13 +1003,14 @@ impl EvalContext {
             let coordinator = self.coordinator_for_admission()?;
             coordinator.register_task_promise(owner, wait, promise)
         } else if let Some(local_owner) = &self.local_promise_owner {
+            let promise_id = promise.id();
             let producer = Arc::new(PromiseProducerObligation::local_owned(
                 owner,
                 &wait,
-                promise.id(),
+                promise_id,
                 local_owner,
             ));
-            local_owner.register(promise.root(), wait);
+            local_owner.register(promise, wait);
             Ok(producer)
         } else {
             Err(format!(
@@ -1533,9 +1537,7 @@ pub(super) fn client_demand_halt_poll(
 fn client_demand_halt(dependency: WorkDependency) -> crate::core::EvaluationHalt {
     match dependency {
         WorkDependency::Wait(wait) => crate::core::EvaluationHalt::blocked(CoreWaitToken(wait)),
-        WorkDependency::Promise(promise) => {
-            crate::core::EvaluationHalt::unassigned(PromisedValue::from_root(&promise))
-        }
+        WorkDependency::Promise(promise) => crate::core::EvaluationHalt::unassigned_root(promise),
         #[cfg(test)]
         WorkDependency::Test(_) => crate::core::EvaluationHalt::new(
             "client evaluation blocked on a synthetic test dependency",

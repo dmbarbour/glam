@@ -1194,10 +1194,10 @@ impl EvaluationWorkCoordinator {
         self: &Arc<Self>,
         task: EvaluationTaskId,
         wait: EvaluationWaitToken,
-        promise: &PromisedValue,
+        root: ManagedPromiseRoot,
     ) -> Result<Arc<PromiseProducerObligation>, Arc<str>> {
         debug_assert_eq!(wait.runtime_id(), self.runtime);
-        let root = promise.root();
+        let promise = root.id();
         let mutation = self.admission.mutation_guard();
         let producer = {
             let mut state = self
@@ -1229,16 +1229,12 @@ impl EvaluationWorkCoordinator {
                 ));
             }
             let producer = Arc::new(PromiseProducerObligation::coordinator_owned(
-                task,
-                &wait,
-                work,
-                promise.id(),
-                self,
+                task, &wait, work, promise, self,
             ));
             record
                 .obligations
                 .add_owned_promise(TaskOwnedPromiseObligation {
-                    promise: promise.id(),
+                    promise,
                     root,
                     producer: producer.clone(),
                     wait: wait.clone(),
