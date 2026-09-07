@@ -5065,6 +5065,10 @@ itself continues to return `Gc<T>`.
 
 ### Phase I6A — Functions, Applications, and Fixpoints
 
+- Re-read and apply the
+  [I6+ Regional Allocation Migration Rule](#i6-regional-allocation-migration-rule)
+  to every managed family introduced here; tracing alone does not complete a
+  migration.
 - Migrate recursive function stages/wrappers, partial builtin arguments, lazy
   applications, and fixpoint computations according to the I4 granularity.
 - Preserve referential equality where current semantics relies on identity.
@@ -5078,6 +5082,9 @@ fixtures; production remains `NoAuto` and does not collect.
 
 ### Phase I6B — Metadata Identity
 
+- Re-read and apply the
+  [I6+ Regional Allocation Migration Rule](#i6-regional-allocation-migration-rule)
+  before adding the managed metadata allocator or constructor.
 - Migrate `MetadataCarrier` identity and its exact one-edge visitor so metadata
   can participate in cycles without leaking.
 - Preserve sealing, reorder/copy, `seq`, `spark`, and reflection-inspection
@@ -5090,6 +5097,9 @@ fixture collects; production remains `NoAuto`.
 
 ### Phase I6C — Failures and Context Frames
 
+- Re-read and apply the
+  [I6+ Regional Allocation Migration Rule](#i6-regional-allocation-migration-rule)
+  before adding any managed failure or context-frame allocator.
 - Migrate evaluation failures and context frames, visiting emission/context
   values without evaluating, formatting, or locking them.
 - Preserve shared failure identity and structured diagnostic projection.
@@ -5101,6 +5111,10 @@ The reclamation case uses a closed isolated family fixture; production remains
 
 ### Phase I6D.1 — Reflection Computation Payloads
 
+- Re-read and apply the
+  [I6+ Regional Allocation Migration Rule](#i6-regional-allocation-migration-rule)
+  to any managed reflection-computation allocation introduced by the selected
+  ownership split.
 - Migrate reflection effect, optional gate target, and installed failure/result
   ownership according to the external-owner split established by I4F.2b.2.
   Keep reservation activation and cancellation as external lifecycle state;
@@ -5118,6 +5132,10 @@ force collection.
 
 ### Phase I6D.2 — Net-Construction Payloads
 
+- Re-read and apply the
+  [I6+ Regional Allocation Migration Rule](#i6-regional-allocation-migration-rule)
+  if replacing the compatibility payload introduces a new managed allocation
+  family rather than only a new exact edge.
 - Replace the net-construction `Arc<Value>` compatibility payload with its exact
   managed edge representation after I5 has already installed the managed core
   runtime-net identity. This checkpoint does not reopen or duplicate the net
@@ -5132,6 +5150,10 @@ the closed net-construction fixture may force collection.
 ## Phase I7 — Persistent List and Dictionary Trace Audit
 
 - Keep RPDS and FingerTree/`Arc` spines initially.
+- If this audit discovers that a persistent representation must become a new
+  managed allocation family, stop and partition that migration under the
+  [I6+ Regional Allocation Migration Rule](#i6-regional-allocation-migration-rule)
+  rather than introducing its allocator incidentally during the audit.
 - Audit the already-active central managed-edge walk through keys, values, list
   chunks, lazy list thunks, concatenation nodes, and shared slices against the
   concrete representation inventory. Nested managed identities must already be
@@ -5158,7 +5180,11 @@ I5 already introduces the production managed core-net identity together with
 lazies and promises. I8 revisits that representation after I6 and I7 have
 migrated or audited every value family which a net may retain. It is not a
 second owner migration and may not defer an edge required by I5's initial
-recursive-identity closure.
+recursive-identity closure. If closure work unexpectedly requires another
+managed allocation family, move that work to an explicit prior checkpoint and
+apply the
+[I6+ Regional Allocation Migration Rule](#i6-regional-allocation-migration-rule)
+before resuming this audit.
 
 ### Phase I8A — Final Net Payload and Mutation Audit
 
@@ -5218,7 +5244,9 @@ surfaces before managed interiors can escape. I9 is a delta audit after the
 I5-I8 migrations, not a repetition of I4F's owner-by-owner proof. Discovering
 a first-time root-surface conversion here is a chronology failure: stop and
 repair the checkpoint which first allowed that owner to contain a managed
-edge.
+edge, including its
+[I6+ Regional Allocation Migration Rule](#i6-regional-allocation-migration-rule)
+evidence.
 
 ### Phase I9A-E — Phase-Entry Delta and Conditional Subsystem Audits
 
@@ -5304,6 +5332,12 @@ compiler loaders/emitters, or task launchers. Such a callback may execute
 outside evaluator authority and return roots, but Rust does not expose its
 captured environment for tracing or structural validation.
 
+If explicit traceable computation state introduced here requires a new managed
+allocation family, re-read and apply the
+[I6+ Regional Allocation Migration Rule](#i6-regional-allocation-migration-rule)
+before adding its allocator. An external rooted bundle does not constitute such
+a family.
+
 - Reconcile every production external callback constructor with I4B's
   source-backed record. Treat a textual `HostCallRecord` capture description as
   classification evidence, not proof of the closure environment.
@@ -5360,7 +5394,9 @@ The review selects exactly one bootstrap policy:
    stable ledger record, one-slot layout proof, exact edge visitor, provenance
    rule, I4.0 destruction proof, and mutator-bound typed access. Registration
    is sealed to reviewed Glam families; it is not a general host escape hatch,
-   and no owning managed reference may leave scoped access.
+   and no owning managed reference may leave scoped access. Its allocator and
+   first-owner chronology must also apply the
+   [I6+ Regional Allocation Migration Rule](#i6-regional-allocation-migration-rule).
 
 The decision is recorded in a dated opaque-representation review document. It
 must state why actual payload use cases justify the selected complexity and
@@ -5467,6 +5503,10 @@ fixtures, and the focused collector finalization suite. Production remains
 - Reconcile the final source inventory one-to-one with complete stable ledger
   records for values, traces, roots, closures, opaque families, caches,
   persistent collections, nets, and runtime owners.
+- Confirm that every managed allocation family has closed the
+  [I6+ Regional Allocation Migration Rule](#i6-regional-allocation-migration-rule)
+  with a private raw allocator, an exact first owner, and forced collection at
+  its former publication gap.
 - Audit every unsafe trace/downcast/mutation gateway and the I3 region/lock
   boundaries. Preserve GCI-007's resolved exact-edge chronology, GCI-008's
   scoped locked-net trace, GCI-009's isolated-fixture chronology, and
