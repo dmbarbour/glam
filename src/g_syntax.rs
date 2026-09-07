@@ -38,6 +38,9 @@ use resolved::{BindingId, ResolvedExpr, ResolvedPathPart};
 pub struct LoweredSource {
     pub definitions: Value, // open fixpoint, i.e. \ self -> Dict
     pub diagnostics: Vec<Diagnostic>,
+    /// Keeps every managed edge in `definitions` live until the lowered
+    /// source is either consumed by `compile_source` or dropped by a caller.
+    definitions_root: RuntimeValueRoot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,15 +53,15 @@ pub struct Diagnostic {
 
 pub(crate) fn compile_source(source: &[u8], context: &CompileContext) -> RuntimeValueRoot {
     let LoweredSource {
-        definitions,
+        definitions: _,
         diagnostics,
+        definitions_root,
     } = lower_source(source, context);
-    let definitions = RuntimeValueRoot::new(context.values(), definitions);
     for diagnostic in diagnostics {
         let severity = diagnostic.severity;
         context.emit_diagnostic(severity, diagnostic.into_emission());
     }
-    definitions
+    definitions_root
 }
 
 pub(crate) fn default_diagnostic_formatter(values: &CoreValueFactory) -> Value {

@@ -200,12 +200,16 @@ impl StoreSnapshot {
             };
         };
         EvaluationQueryPoll::State {
-            value: values.wrap(lazy_core_value_path(
-                &self.values,
-                values
-                    .clone_core(root)
-                    .expect("query root belongs to its store runtime"),
-                &query_path(handle.id),
+            value: PublicValue::from_runtime_root(self.values.construct_runtime_value_root(
+                |access| {
+                    lazy_core_value_path(
+                        access,
+                        values
+                            .clone_core(root)
+                            .expect("query root belongs to its store runtime"),
+                        &query_path(handle.id),
+                    )
+                },
             )),
             observed: true,
         }
@@ -358,13 +362,17 @@ impl StoreJournal {
             };
         };
         EvaluationQueryPoll::State {
-            value: values.wrap(lazy_core_value_path(
-                &self.snapshot.values,
-                values
-                    .clone_core(&root)
-                    .expect("query view belongs to its store runtime"),
-                &query_path(handle.id),
-            )),
+            value: PublicValue::from_runtime_root(
+                self.snapshot.values.construct_runtime_value_root(|access| {
+                    lazy_core_value_path(
+                        access,
+                        values
+                            .clone_core(&root)
+                            .expect("query view belongs to its store runtime"),
+                        &query_path(handle.id),
+                    )
+                }),
+            ),
             observed,
         }
     }
@@ -757,38 +765,41 @@ pub(crate) fn decode_query_state(values: &Values, value: &Value) -> Option<Evalu
 }
 
 fn apply_edit(values: &CoreValueFactory, root: PublicValue, edit: &StoreEdit) -> PublicValue {
-    let public_values = Values::from_core_factory(values.clone());
-    match edit {
-        StoreEdit::Set { address, value } => {
-            let (_, path) = address.reflection_parts();
-            apply_value_at_path(
-                values,
-                root,
-                path,
-                public_values
-                    .clone_core(value)
-                    .expect("store edit belongs to its store runtime"),
-            )
+    PublicValue::from_runtime_root(values.construct_runtime_value_root(|access| {
+        let public_values = Values::from_core_factory(values.clone());
+        match edit {
+            StoreEdit::Set { address, value } => {
+                let (_, path) = address.reflection_parts();
+                apply_value_at_path_in(
+                    access,
+                    values,
+                    &root,
+                    path,
+                    public_values
+                        .clone_core(value)
+                        .expect("store edit belongs to its store runtime"),
+                )
+            }
+            StoreEdit::Rewrite { address, updater } => {
+                let (_, path) = address.reflection_parts();
+                let prior = lazy_core_value_path(
+                    &access,
+                    public_values
+                        .clone_core(&root)
+                        .expect("store root belongs to its store runtime"),
+                    path.keys(),
+                );
+                let updated = Value::Lazy(LazyValue::from_application_in(
+                    &access,
+                    public_values
+                        .clone_core(updater)
+                        .expect("store updater belongs to its store runtime"),
+                    Arc::from([prior]),
+                ));
+                apply_value_at_path_in(access, values, &root, path, updated)
+            }
         }
-        StoreEdit::Rewrite { address, updater } => {
-            let (_, path) = address.reflection_parts();
-            let prior = lazy_core_value_path(
-                values,
-                public_values
-                    .clone_core(&root)
-                    .expect("store root belongs to its store runtime"),
-                path.keys(),
-            );
-            let updated = Value::Lazy(LazyValue::from_application(
-                values,
-                public_values
-                    .clone_core(updater)
-                    .expect("store updater belongs to its store runtime"),
-                Arc::from([prior]),
-            ));
-            apply_value_at_path(values, root, path, updated)
-        }
-    }
+    }))
 }
 
 fn apply_value_at_path(
@@ -797,9 +808,21 @@ fn apply_value_at_path(
     path: &ConflictPath,
     value: Value,
 ) -> PublicValue {
+    PublicValue::from_runtime_root(values.construct_runtime_value_root(|access| {
+        apply_value_at_path_in(access, values, &root, path, value)
+    }))
+}
+
+fn apply_value_at_path_in(
+    access: &crate::core::RuntimeValueAccess<'_>,
+    values: &CoreValueFactory,
+    root: &PublicValue,
+    path: &ConflictPath,
+    value: Value,
+) -> Value {
     let public_values = Values::from_core_factory(values.clone());
     if path.depth() == 0 {
-        return public_values.wrap(value);
+        return value;
     }
     let path = Value::List(List::from_values(
         path.keys()
@@ -807,25 +830,29 @@ fn apply_value_at_path(
             .map(|key| key.to_value_with(values))
             .collect(),
     ));
-    public_values.wrap(Value::builtin_call(
-        values,
+    Value::builtin_call_in(
+        access,
         Builtin::DictUpdate,
         vec![
             path,
             value,
             public_values
-                .clone_core(&root)
+                .clone_core(root)
                 .expect("store root belongs to its store runtime"),
         ],
-    ))
+    )
 }
 
-fn lazy_core_value_path(values: &CoreValueFactory, value: Value, path: &[Key]) -> Value {
+fn lazy_core_value_path(
+    access: &crate::core::RuntimeValueAccess<'_>,
+    value: Value,
+    path: &[Key],
+) -> Value {
     if path.is_empty() {
         return value;
     }
-    Value::Lazy(LazyValue::from_access(
-        values,
+    Value::Lazy(LazyValue::from_access_in(
+        access,
         Arc::from(
             path.iter()
                 .cloned()

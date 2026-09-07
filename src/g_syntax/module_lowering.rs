@@ -93,9 +93,9 @@ impl<'context> ModuleLowerer<'context> {
                 | DeclarationKind::Abstract(_)
                 | DeclarationKind::Unknown => Ok(()),
             };
-            (result, definitions)
+            (result, access.root_runtime_value(definitions))
         });
-        self.definitions = RuntimeValueRoot::new(self.context.values(), definitions);
+        self.definitions = definitions;
         if let Err(diagnostic) = result {
             self.diagnostics.push(diagnostic);
         }
@@ -118,13 +118,15 @@ impl<'context> ModuleLowerer<'context> {
     ) -> LoweredSource {
         source_diagnostics.extend(check_file_global_local_shadowing(&self.parsed_declarations));
         source_diagnostics.extend(self.diagnostics);
+        let definitions_root = self.definitions;
         let definitions = self
             .context
             .values()
-            .with_runtime_value_access(|access| self.definitions.clone_core_with(&access));
+            .with_runtime_value_access(|access| definitions_root.clone_core_with(&access));
         LoweredSource {
             definitions,
             diagnostics: source_diagnostics,
+            definitions_root,
         }
     }
 }

@@ -348,9 +348,10 @@ fn query_state_is_transactional_and_retired_after_the_last_handle() {
     let maintenance = StoreJournal::new(store.snapshot());
     assert_eq!(store.try_commit(&maintenance), StoreCommitResult::Committed);
     let root = store.roots.get(&store.runtime_volume).unwrap();
-    let retired = crate::api::Values::from_core_factory(store.values.clone()).wrap(
-        lazy_core_value_path(&store.values, root.clone_core_for_test(), &query_path(id)),
-    );
+    let retired =
+        crate::api::Value::from_runtime_root(store.values.construct_runtime_value_root(|access| {
+            lazy_core_value_path(access, root.clone_core_for_test(), &query_path(id))
+        }));
     let retired = assembler.evaluate(&retired).unwrap();
     assert!(
         assembler
