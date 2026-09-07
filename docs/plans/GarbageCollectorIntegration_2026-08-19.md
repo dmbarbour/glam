@@ -5002,6 +5002,15 @@ that root is removed. The computed-fixpoint-source latch remains I5F.1's
 `managed_lazy_source_self_cycle_is_traced_and_reclaimed`, which was rerun here
 instead of duplicating the same source path.
 
+I5F.3c completed 2026-09-07. One isolated three-cell cycle now runs from a
+promise assignment to a target managed net, through an actual remote cursor's
+`PreparedCopySource` relationship to a source managed net, and from that
+source net's data back to the promise. Construction roots are removed before
+the live collection, which observes one registered root and exactly three
+marked cells; removing the promise root finalizes all three. This exercises
+the production cursor/source topology rather than approximating it with an
+ordinary data payload.
+
 Only closed isolated fixtures collect. The complete production runtime remains
 `NoAuto`, and the mandatory post-I5 review follows before I6 begins.
 

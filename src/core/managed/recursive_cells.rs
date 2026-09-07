@@ -1737,6 +1737,66 @@ mod tests {
     }
 
     #[test]
+    fn managed_promise_cycle_through_remote_cursor_source_is_traced_and_reclaimed() {
+        let values = new_values();
+        let baseline = values
+            .collect_managed_for_test()
+            .expect("the remote-cursor cycle fixture should start collectible");
+        let observer = values.runtime_value_observer();
+        let root = values.with_runtime_value_access(|access| {
+            let promise_edge = access
+                .allocate_managed_promise(&values, "remote cursor compatibility")
+                .expect("the managed promise cell should fit a run");
+            let promise_root = access.root_managed_promise(observer.clone(), promise_edge);
+            let promise = PromisedValue::from_root(&promise_root);
+
+            let source_runtime = runtime_with_data(Value::Promised(promise));
+            let remote = source_runtime.exposed();
+            let source_edge = access
+                .allocate_managed_core_net(&values, source_runtime)
+                .expect("the source managed core-net cell should fit a run");
+            let source_root = access.root_managed_core_net(observer.clone(), source_edge);
+            let source =
+                crate::core_net::CoreRuntimeNet::from_managed_parts(source_edge, observer.clone());
+
+            let mut target_runtime = prepared_runtime(0);
+            let cursor = target_runtime.begin_copy(PreparedCopySource::new(source, remote));
+            assert_ne!(
+                cursor,
+                target_runtime.exposed().node(),
+                "the copy source must be retained by a distinct remote cursor"
+            );
+            let target_edge = access
+                .allocate_managed_core_net(&values, target_runtime)
+                .expect("the target managed core-net cell should fit a run");
+            let target_root = access.root_managed_core_net(observer.clone(), target_edge);
+            let target =
+                crate::core_net::CoreRuntimeNet::from_managed_parts(target_edge, observer.clone());
+
+            promise_root
+                .access(&access)
+                .expect("the rooted promise should be accessible")
+                .publish(Ok(Value::Net(NetValue::new(target))))
+                .expect("the fresh promise should accept its cursor cycle");
+            drop((source_root, target_root));
+            promise_root
+        });
+
+        let live = values
+            .collect_managed_for_test()
+            .expect("one root should retain the remote-cursor cycle");
+        assert_eq!(live.root_entries(), baseline.root_entries() + 1);
+        assert_eq!(live.marked_slots(), baseline.marked_slots() + 3);
+
+        drop(root);
+        let dead = values
+            .collect_managed_for_test()
+            .expect("the unrooted remote-cursor cycle should be reclaimed");
+        assert_eq!(dead.root_entries(), baseline.root_entries());
+        assert_eq!(dead.finalized_slots(), 3);
+    }
+
+    #[test]
     fn recursive_cell_gateways_are_private_and_complete() {
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
         let owner_path = manifest.join("src/core/managed/recursive_cells.rs");
