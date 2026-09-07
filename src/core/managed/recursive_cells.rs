@@ -12,10 +12,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 use glam_gc::{Gc, Root, Trace, UnsupportedLayout, Visitor};
 
 use crate::core::{
-    EvaluationFailure, LazyId, LazyResult, LazySource, PromiseId, RuntimeValueAccess,
-    RuntimeValueObserver, Value,
+    EvaluationFailure, LazyId, LazyResult, LazySource, LazyValue, PromiseId, PromisedValue,
+    RuntimeValueAccess, RuntimeValueObserver, Value,
 };
-use crate::core_net::CoreSpecialization;
+use crate::core_net::{CoreRuntimeNet, CoreSpecialization};
 use crate::evaluation::{
     CompletionSubscriptionOutcome, CompletionSubscriptions, CompletionWake,
     EvaluationWorkCoordinator, PromiseProducerObligation, WakeRegistration,
@@ -218,7 +218,7 @@ impl ManagedPromiseCell {
 }
 
 impl RuntimeValueAccess<'_> {
-    pub(crate) fn allocate_managed_lazy(
+    fn allocate_managed_lazy(
         &self,
         label: impl Into<Arc<str>>,
         source: LazySource,
@@ -231,7 +231,7 @@ impl RuntimeValueAccess<'_> {
         ))))
     }
 
-    pub(crate) fn allocate_managed_promise(
+    fn allocate_managed_promise(
         &self,
         label: impl Into<Arc<str>>,
     ) -> Result<ManagedPromiseEdge, UnsupportedLayout> {
@@ -241,7 +241,7 @@ impl RuntimeValueAccess<'_> {
         ))
     }
 
-    pub(crate) fn allocate_managed_core_net(
+    fn allocate_managed_core_net(
         &self,
         runtime: RuntimeNet<CoreSpecialization>,
     ) -> Result<ManagedCoreNetEdge, UnsupportedLayout> {
@@ -249,6 +249,76 @@ impl RuntimeValueAccess<'_> {
         Ok(ManagedCoreNetEdge(
             allocator.alloc(ManagedCoreNetCell::new(runtime)),
         ))
+    }
+
+    /// Constructs one lazy facade inside this already-admitted region.
+    ///
+    /// The returned facade is an interior semantic edge, not an owner. Code
+    /// which returns it from the region must first install it below an exact
+    /// traced owner or use [`Self::construct_rooted_managed_lazy`].
+    pub(crate) fn construct_managed_lazy(
+        &self,
+        label: impl Into<Arc<str>>,
+        source: LazySource,
+    ) -> Result<LazyValue, UnsupportedLayout> {
+        let observer = self.values().runtime_value_observer();
+        let label = label.into();
+        let edge = self.allocate_managed_lazy(label.clone(), source)?;
+        let id = edge
+            .access(&observer, self)
+            .expect("a new lazy must belong to its allocation domain")
+            .id();
+        Ok(LazyValue {
+            id,
+            label,
+            edge,
+            values: observer,
+        })
+    }
+
+    /// Constructs an already-terminal failed lazy before publishing its
+    /// facade from this region.
+    pub(crate) fn construct_failed_managed_lazy(
+        &self,
+        label: impl Into<Arc<str>>,
+        failure: Arc<EvaluationFailure>,
+    ) -> Result<LazyValue, UnsupportedLayout> {
+        let lazy = self.construct_managed_lazy(label, LazySource::Error)?;
+        let result = lazy.access(self).cache(Err(failure));
+        debug_assert!(result.is_err(), "new lazy errors must cache a failure");
+        Ok(lazy)
+    }
+
+    /// Constructs one promise facade inside this already-admitted region.
+    /// The facade must acquire a traced or registered owner before it escapes.
+    pub(crate) fn construct_managed_promise(
+        &self,
+        label: impl Into<Arc<str>>,
+    ) -> Result<PromisedValue, UnsupportedLayout> {
+        let observer = self.values().runtime_value_observer();
+        let label = label.into();
+        let edge = self.allocate_managed_promise(label.clone())?;
+        let id = edge
+            .access(&observer, self)
+            .expect("a new promise must belong to its allocation domain")
+            .id();
+        Ok(PromisedValue {
+            id,
+            label,
+            edge,
+            values: observer,
+        })
+    }
+
+    /// Constructs one core-net facade inside this already-admitted region.
+    /// The facade must acquire a traced or registered owner before it escapes.
+    pub(crate) fn construct_managed_core_net(
+        &self,
+        runtime: RuntimeNet<CoreSpecialization>,
+    ) -> Result<CoreRuntimeNet, UnsupportedLayout> {
+        let observer = self.values().runtime_value_observer();
+        let edge = self.allocate_managed_core_net(runtime)?;
+        Ok(CoreRuntimeNet::from_managed_parts(edge, observer))
     }
 
     pub(crate) fn root_managed_lazy(
@@ -311,29 +381,44 @@ impl RuntimeValueAccess<'_> {
         }
     }
 
-    #[cfg(test)]
-    fn root_new_managed_lazy(
+    /// Constructs one lazy and publishes its explicit registered owner before
+    /// this access region ends. A facade can be projected from the root while
+    /// that owner remains live.
+    #[allow(
+        dead_code,
+        reason = "GCI5R-001C establishes rooted handoff before the D-F production cutovers"
+    )]
+    pub(crate) fn construct_rooted_managed_lazy(
         &self,
         label: impl Into<Arc<str>>,
         source: LazySource,
     ) -> Result<ManagedLazyRoot, UnsupportedLayout> {
-        let observer = self.values().runtime_value_observer();
-        let edge = self.allocate_managed_lazy(label, source)?;
-        Ok(self.root_managed_lazy(observer, edge))
+        let lazy = self.construct_managed_lazy(label, source)?;
+        Ok(self.root_managed_lazy(lazy.values.clone(), lazy.edge))
     }
 
-    #[cfg(test)]
-    fn root_new_managed_promise(
+    /// Constructs one promise and publishes its explicit registered owner
+    /// before this access region ends. A facade can be projected from the root
+    /// while that owner remains live.
+    #[allow(
+        dead_code,
+        reason = "GCI5R-001C establishes rooted handoff before the D-F production cutovers"
+    )]
+    pub(crate) fn construct_rooted_managed_promise(
         &self,
         label: impl Into<Arc<str>>,
     ) -> Result<ManagedPromiseRoot, UnsupportedLayout> {
-        let observer = self.values().runtime_value_observer();
-        let edge = self.allocate_managed_promise(label)?;
-        Ok(self.root_managed_promise(observer, edge))
+        let promise = self.construct_managed_promise(label)?;
+        Ok(self.root_managed_promise(promise.values.clone(), promise.edge))
     }
 
-    #[cfg(test)]
-    fn root_new_managed_core_net(
+    /// Constructs one core net and publishes its explicit registered owner
+    /// before this access region ends.
+    #[allow(
+        dead_code,
+        reason = "GCI5R-001C establishes rooted handoff before the D-F production cutovers"
+    )]
+    pub(crate) fn construct_rooted_managed_core_net(
         &self,
         runtime: RuntimeNet<CoreSpecialization>,
     ) -> Result<ManagedCoreNetRoot, UnsupportedLayout> {
@@ -830,6 +915,7 @@ mod tests {
     };
     use crate::interaction_net::{NetBuilder, PreparedCopySource};
     use crate::runtime::{RuntimeIds, RuntimeMutationAdmission, allocate_evaluation_runtime_id};
+    use syn::visit::{self, Visit};
 
     fn new_values() -> CoreValueFactory {
         CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new())
@@ -877,7 +963,7 @@ mod tests {
         });
         let root = values.with_runtime_value_access(|access| {
             let root = access
-                .root_new_managed_promise(label)
+                .construct_rooted_managed_promise(label)
                 .expect("the managed promise cell should fit a run");
             let promise = PromisedValue::from_root(&root);
             root.access(&access)
@@ -911,7 +997,7 @@ mod tests {
         });
         let root = values.with_runtime_value_access(|access| {
             let root = access
-                .root_new_managed_promise(label)
+                .construct_rooted_managed_promise(label)
                 .expect("the managed promise cell should fit a run");
             let promise = PromisedValue::from_root(&root);
             root.access(&access)
@@ -944,6 +1030,54 @@ mod tests {
             .find("\n}")
             .unwrap_or_else(|| panic!("unterminated declaration {name}"));
         &tail[..end]
+    }
+
+    #[derive(Default)]
+    struct ConstructorCallInventory {
+        opens_access: bool,
+        calls_gateway: bool,
+    }
+
+    impl<'ast> Visit<'ast> for ConstructorCallInventory {
+        fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+            let method = call.method.to_string();
+            self.opens_access |= method == "with_runtime_value_access";
+            self.calls_gateway |= matches!(
+                method.as_str(),
+                "construct_managed_lazy"
+                    | "construct_failed_managed_lazy"
+                    | "construct_managed_promise"
+                    | "construct_managed_core_net"
+            );
+            visit::visit_expr_method_call(self, call);
+        }
+    }
+
+    struct SelfOpeningVisitor<'path> {
+        path: &'path Path,
+        entries: Vec<String>,
+    }
+
+    impl<'ast> Visit<'ast> for SelfOpeningVisitor<'_> {
+        fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+            let mut calls = ConstructorCallInventory::default();
+            calls.visit_block(&item.block);
+            if calls.opens_access && calls.calls_gateway {
+                self.entries
+                    .push(format!("{}::{}", self.path.display(), item.sig.ident));
+            }
+            visit::visit_impl_item_fn(self, item);
+        }
+
+        fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+            let mut calls = ConstructorCallInventory::default();
+            calls.visit_block(&item.block);
+            if calls.opens_access && calls.calls_gateway {
+                self.entries
+                    .push(format!("{}::{}", self.path.display(), item.sig.ident));
+            }
+            visit::visit_item_fn(self, item);
+        }
     }
 
     macro_rules! assert_does_not_implement {
@@ -1099,7 +1233,7 @@ mod tests {
 
         values.with_runtime_value_access(|access| {
             let root = access
-                .root_new_managed_promise("publication ordering")
+                .construct_rooted_managed_promise("publication ordering")
                 .expect("the managed promise cell should fit a run");
             let promise = root.access(&access).unwrap();
             let detached = promise
@@ -1110,7 +1244,7 @@ mod tests {
             assert_eq!(detached, Ok(Value::Number(31.into())));
 
             let guarded_root = access
-                .root_new_managed_promise("guarded publication ordering")
+                .construct_rooted_managed_promise("guarded publication ordering")
                 .expect("the managed promise cell should fit a run");
             let guarded = guarded_root.access(&access).unwrap();
             let mutation = admission.mutation_guard();
@@ -1192,13 +1326,13 @@ mod tests {
         let (lazy, promise, net) = values.with_runtime_value_access(|access| {
             (
                 access
-                    .root_new_managed_lazy("rooted lazy", LazySource::Error)
+                    .construct_rooted_managed_lazy("rooted lazy", LazySource::Error)
                     .expect("the managed lazy cell should fit a run"),
                 access
-                    .root_new_managed_promise("rooted promise")
+                    .construct_rooted_managed_promise("rooted promise")
                     .expect("the managed promise cell should fit a run"),
                 access
-                    .root_new_managed_core_net(prepared_runtime(17))
+                    .construct_rooted_managed_core_net(prepared_runtime(17))
                     .expect("the managed core-net cell should fit a run"),
             )
         });
@@ -1327,35 +1461,31 @@ mod tests {
             .expect("the regional-construction fixture should start collectible");
 
         let root = values.construct_runtime_value_root(|access| {
-            let observer = access.values().runtime_value_observer();
             let _unreturned = access
-                .allocate_managed_lazy("unreturned regional lazy", LazySource::Error)
+                .construct_managed_lazy("unreturned regional lazy", LazySource::Error)
                 .expect("the unreturned managed lazy should fit a run");
 
-            let lazy_edge = access
-                .allocate_managed_lazy("returned regional lazy", LazySource::Error)
+            let lazy = access
+                .construct_managed_lazy("returned regional lazy", LazySource::Error)
                 .expect("the returned managed lazy should fit a run");
-            let lazy_root = access.root_managed_lazy(observer.clone(), lazy_edge);
-            let lazy = LazyValue::from_root(&lazy_root);
-
-            let promise_edge = access
-                .allocate_managed_promise("returned regional promise")
+            let promise = access
+                .construct_managed_promise("returned regional promise")
                 .expect("the returned managed promise should fit a run");
-            let promise_root = access.root_managed_promise(observer, promise_edge);
-            let promise = PromisedValue::from_root(&promise_root);
-
-            drop((lazy_root, promise_root));
+            let net = access
+                .construct_managed_core_net(prepared_runtime(83))
+                .expect("the returned managed core net should fit a run");
             Value::List(List::from_values(vec![
                 Value::Lazy(lazy),
                 Value::Promised(promise),
+                Value::Net(NetValue::new(net)),
             ]))
         });
 
         let live = values
             .collect_managed_for_test()
-            .expect("the containing value root should retain both returned children");
+            .expect("the containing value root should retain all returned identities");
         assert_eq!(live.root_entries(), baseline.root_entries() + 1);
-        assert_eq!(live.marked_slots(), baseline.marked_slots() + 3);
+        assert_eq!(live.marked_slots(), baseline.marked_slots() + 4);
         assert_eq!(
             live.finalized_slots(),
             1,
@@ -1364,7 +1494,7 @@ mod tests {
 
         assert!(matches!(
             root.clone_core_in_own_domain(),
-            Some(Value::List(list)) if list.len() == 2
+            Some(Value::List(list)) if list.len() == 3
         ));
 
         drop(root);
@@ -1372,7 +1502,31 @@ mod tests {
             .collect_managed_for_test()
             .expect("dropping the containing root should release its graph");
         assert_eq!(dead.root_entries(), baseline.root_entries());
-        assert_eq!(dead.finalized_slots(), 3);
+        assert_eq!(dead.finalized_slots(), 4);
+    }
+
+    #[test]
+    fn failed_lazy_gateway_is_terminal_before_traced_handoff() {
+        let values = new_values();
+        let baseline = values
+            .collect_managed_for_test()
+            .expect("the failed-lazy fixture should start collectible");
+        let failure = Arc::new(EvaluationFailure::message("prepared failure"));
+        let root = values.construct_runtime_value_root(|access| {
+            let lazy = access
+                .construct_failed_managed_lazy("prepared failure", failure.clone())
+                .expect("the managed failed lazy should fit a run");
+            assert_eq!(lazy.access(access).cached(), Some(Err(failure.clone())));
+            assert!(lazy.access(access).source_snapshot().is_none());
+            Value::Lazy(lazy)
+        });
+
+        let live = values
+            .collect_managed_for_test()
+            .expect("the containing value root should retain the failed lazy");
+        assert_eq!(live.root_entries(), baseline.root_entries() + 1);
+        assert_eq!(live.marked_slots(), baseline.marked_slots() + 2);
+        drop(root);
     }
 
     #[test]
@@ -1383,9 +1537,15 @@ mod tests {
             .expect("the early-return fixture should start collectible");
 
         let outcome = values.try_construct_runtime_value_root(|access| {
-            let _partial = access
-                .allocate_managed_promise("abandoned partial graph")
+            let _promise = access
+                .construct_managed_promise("abandoned partial graph")
                 .expect("the partial managed promise should fit a run");
+            let _lazy = access
+                .construct_managed_lazy("abandoned partial lazy", LazySource::Error)
+                .expect("the partial managed lazy should fit a run");
+            let _net = access
+                .construct_managed_core_net(prepared_runtime(89))
+                .expect("the partial managed core net should fit a run");
             Err::<Value, &'static str>("construction stopped")
         });
         assert_eq!(outcome, Err("construction stopped"));
@@ -1395,7 +1555,7 @@ mod tests {
             .expect("an unpublished partial graph should remain collectible");
         assert_eq!(collected.root_entries(), baseline.root_entries());
         assert_eq!(collected.marked_slots(), baseline.marked_slots());
-        assert_eq!(collected.finalized_slots(), 1);
+        assert_eq!(collected.finalized_slots(), 3);
     }
 
     #[test]
@@ -1458,7 +1618,7 @@ mod tests {
             .expect("the managed-promise cycle fixture should start collectible");
         let root = values.with_runtime_value_access(|access| {
             let root = access
-                .root_new_managed_promise("promise self cycle")
+                .construct_rooted_managed_promise("promise self cycle")
                 .expect("the managed promise cell should fit a run");
             let promise = PromisedValue::from_root(&root);
             root.access(&access)
@@ -1901,8 +2061,11 @@ mod tests {
         let owner = fs::read_to_string(&owner_path).expect("the recursive-cell source should read");
         let count = |parts: &[&str]| owner.matches(&parts.concat()).count();
 
-        assert_eq!(count(&["fn root_new_", "managed_"]), 3);
+        assert_eq!(count(&["fn construct_rooted_", "managed_"]), 3);
+        assert_eq!(count(&["fn construct_", "managed_"]), 3);
+        assert_eq!(count(&["fn construct_failed_", "managed_lazy"]), 1);
         assert_eq!(count(&["fn allocate_", "managed_"]), 3);
+        assert_eq!(count(&["pub(crate) fn allocate_", "managed_"]), 0);
         assert_eq!(count(&["fn root_", "managed_"]), 3);
         assert_eq!(count(&["fn access<'", "access"]), 6);
         assert_eq!(count(&["fn from_authorized_", "cell"]), 3);
@@ -1950,6 +2113,13 @@ mod tests {
                 ];
                 if names.iter().any(|name| source.contains(name))
                     || legacy_arc_cells.iter().any(|name| source.contains(name))
+                    || [
+                        "allocate_managed_lazy",
+                        "allocate_managed_promise",
+                        "allocate_managed_core_net",
+                    ]
+                    .iter()
+                    .any(|name| source.contains(name))
                 {
                     escaped.push(
                         path.strip_prefix(manifest)
@@ -1962,6 +2132,52 @@ mod tests {
         assert!(
             escaped.is_empty(),
             "managed recursive-cell representations escaped their private module: {escaped:?}"
+        );
+    }
+
+    #[test]
+    fn self_opening_managed_constructors_are_fail_closed() {
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let owner_path = manifest.join("src/core/managed/recursive_cells.rs");
+        let mut stack = vec![manifest.join("src")];
+        let mut entries = Vec::new();
+        while let Some(directory) = stack.pop() {
+            for entry in fs::read_dir(directory).expect("the source tree should be readable") {
+                let path = entry.expect("a source entry should be readable").path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().is_none_or(|extension| extension != "rs") || path == owner_path
+                {
+                    continue;
+                }
+                let source = fs::read_to_string(&path).expect("Rust source should be readable");
+                let syntax = syn::parse_file(&source).unwrap_or_else(|failure| {
+                    panic!("failed to parse {}: {failure}", path.display())
+                });
+                let relative = path
+                    .strip_prefix(manifest)
+                    .expect("source should belong to the package");
+                let mut visitor = SelfOpeningVisitor {
+                    path: relative,
+                    entries: Vec::new(),
+                };
+                visitor.visit_file(&syntax);
+                entries.extend(visitor.entries);
+            }
+        }
+        entries.sort();
+        assert_eq!(
+            entries,
+            [
+                "src/core.rs::failure",
+                "src/core.rs::with_cell",
+                "src/core.rs::with_source",
+                "src/core_net.rs::adopt_core_net_for_test",
+                "src/core_net.rs::instantiate_core_net",
+            ],
+            "update the explicit legacy-constructor inventory before adding or removing a self-opening managed constructor"
         );
     }
 
@@ -2081,7 +2297,7 @@ mod tests {
                 "ManagedLazyEdge",
                 "ManagedLazyRoot",
                 "ManagedLazyAccess",
-                "root_new_managed_lazy",
+                "construct_rooted_managed_lazy",
                 "fn cache",
             ),
             (
@@ -2090,7 +2306,7 @@ mod tests {
                 "ManagedPromiseEdge",
                 "ManagedPromiseRoot",
                 "ManagedPromiseAccess",
-                "root_new_managed_promise",
+                "construct_rooted_managed_promise",
                 "fn publish",
             ),
             (
@@ -2099,7 +2315,7 @@ mod tests {
                 "ManagedCoreNetEdge",
                 "ManagedCoreNetRoot",
                 "ManagedCoreNetAccess",
-                "root_new_managed_core_net",
+                "construct_rooted_managed_core_net",
                 "fn with_mut",
             ),
         ] {

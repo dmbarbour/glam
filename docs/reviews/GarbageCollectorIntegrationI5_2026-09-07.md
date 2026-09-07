@@ -300,28 +300,31 @@ constructors open and close access internally:
 
 | Family | Direct allocator | Production facade constructor | Work after allocation | Current first durable owner |
 | --- | --- | --- | --- | --- |
-| lazy | `allocate_managed_lazy` | `LazyValue::with_source` | reads the ID before returning; `failure`/`error` then reopen access to cache the initial failure | a later containing `RuntimeValueRoot`, managed net payload, or machine result |
-| promise | `allocate_managed_promise` | `PromisedValue::with_cell`, reached by `new` and `fixpoint` | `fixpoint` later registers and installs its producer | a later `ManagedPromiseRoot` in a resolver/coordinator/local owner, or a containing value root |
-| core net | `allocate_managed_core_net` | `CoreValueFactory::instantiate_core_net`, also reached by `instantiate_related` | none before returning the facade | a later `ManagedCoreNetRoot`, containing value root, or traced net payload |
+| lazy | private `allocate_managed_lazy` | `LazyValue::with_source` or `failure`, delegating to regional gateways | reads the ID before returning; `failure`/`error` install the initial terminal cache before the gateway returns | a later containing `RuntimeValueRoot`, managed net payload, or machine result |
+| promise | private `allocate_managed_promise` | `PromisedValue::with_cell`, reached by `new` and `fixpoint`, delegating to a regional gateway | `fixpoint` later registers and installs its producer | a later `ManagedPromiseRoot` in a resolver/coordinator/local owner, or a containing value root |
+| core net | private `allocate_managed_core_net` | `CoreValueFactory::instantiate_core_net`, also reached by `instantiate_related`, delegating to a regional gateway | none before returning the facade | a later `ManagedCoreNetRoot`, containing value root, or traced net payload |
 
-The `root_new_managed_*` helpers in
-[`recursive_cells.rs`](../../src/core/managed/recursive_cells.rs) are test-only
-counterexamples which already allocate and register the intended root under
-one access. `CorePreparedCopySource`, `CoreFrontierObservation`, and
+The `construct_rooted_managed_*` gateways in
+[`recursive_cells.rs`](../../src/core/managed/recursive_cells.rs) now allocate
+and register the intended family root under one access. The complementary
+`construct_managed_*` gateways return an owner-neutral facade for immediate
+installation below a traced owner in the same region.
+`CorePreparedCopySource`, `CoreFrontierObservation`, and
 `NormalizationRequest` similarly root an *existing* net before their genuine
-handoff. They are useful publication precedents, but they do not repair fresh
-construction.
+handoff. These are publication precedents; the D-F cutovers still have to
+carry each production construction through its actual first owner.
 
-Every production lazy constructor reaches the one `with_source` boundary:
+Every nonterminal production lazy constructor reaches the one `with_source`
+boundary:
 
 - `computed_fixpoint`, `semantic_computation`, and `external_host_call` select
   their corresponding source records;
 - `from_access`, `from_application`, `from_builtin`,
   `from_net_construction`, `from_function_call`, `from_net_computation`, and
   `from_reflection_gate` package semantic work; and
-- `error`/`failure` are the exceptional post-allocation path: the cell is
-  returned from its allocating access and then dereferenced in a second access
-  to install its already-terminal result.
+- `error`/`failure` are the exceptional terminal path and now use
+  `construct_failed_managed_lazy` to install the cached failure before the
+  facade leaves its allocating access.
 
 The test-only `semantic_thunk` and `host_call` wrappers use the same production
 boundary. `Value::{failure,error,external_host_call,reflection_gate,
@@ -472,10 +475,10 @@ before leaving, and the error path publishes nothing. Existing admitted
 core-net claim paths now use the same publisher. `ScopedValues::wrap` no longer
 re-enters the heap.
 
-`regional_value_publication_retains_only_the_returned_managed_graph` constructs
-two returned recursive cells plus one omitted cell, drops its temporary child
-roots before publishing the containing list, then proves one outer root traces
-the two returned identities while the omitted allocation is reclaimed.
+`regional_value_publication_retains_only_the_returned_managed_graph` now
+constructs all three recursive facades plus one omitted cell without temporary
+family roots, then proves one outer root traces the three returned identities
+while the omitted allocation is reclaimed.
 `early_regional_return_leaves_partial_managed_graph_collectible` covers the
 fallible exit. `scoped_wrap_publishes_without_nested_managed_access` uses a
 thread-local high-water latch to force the public wrapper's maximum access
@@ -484,7 +487,7 @@ than weakened. The ownership ledger and current evaluation architecture now
 record regional liveness and orchestration boundaries. As planned, the ignored
 GCI5R-001A mismatch remains until the C-F family cutovers.
 
-##### GCI5R-001C — Regional managed-family constructor gateways
+##### GCI5R-001C — Regional managed-family constructor gateways (complete except deferred C.5)
 
 1. Add access-taking, non-self-opening construction gateways for managed
    lazies, promises, and core nets. A gateway may return its facade to code
@@ -502,15 +505,36 @@ GCI5R-001A mismatch remains until the C-F family cutovers.
    constructors while allowing only the explicitly enumerated legacy wrappers
    awaiting D-F. Do not mistake this lexical latch for the forced-order
    behavioral proof.
-5. Prototype a private family-specific or generic fresh-allocation wrapper
-   only if it makes the raw-to-owner transition more auditable. Retain it only
-   when every conversion is coupled to actual root publication or traced-edge
-   installation; an unrestricted `into_gc`, `Deref`, or equivalent escape
-   fails the experiment and the wrapper should be dropped.
+5. **Deferred design discussion.** Reconsider a private family-specific or
+   generic fresh-allocation wrapper only after C.1-C.4 and C.6 reveal whether
+   the concrete gateway boundary remains difficult to audit. Do not add an
+   intermediate representation during this checkpoint: anything more than a
+   pointer-sized, zero-overhead carrier needs a demonstrated safety benefit.
+   If revisited, retain it only when every conversion is coupled to actual root
+   publication or traced-edge installation; an unrestricted `into_gc`,
+   `Deref`, or equivalent escape fails the experiment.
 6. Verify direct regional construction, intentional rooted handoff,
    traced-owner installation, discard/reclamation, and representation privacy.
    Compile-fail evidence is useful only if the selected private API establishes
    a meaningful lifetime property.
+
+Completed on 2026-09-07, with C.5 deliberately deferred. The three raw
+`allocate_managed_*` methods are now private to `recursive_cells.rs`.
+`RuntimeValueAccess` exposes non-self-opening facade gateways for lazy,
+promise, and core-net construction, registered-owner variants for explicit
+handoff, and a failed-lazy gateway which installs the terminal cache before
+returning the facade. The existing production wrappers delegate to these
+gateways but remain explicitly inventoried self-opening migration shims for
+D-F.
+
+The source inventory rejects raw allocator use outside the representation
+module and parses every Rust function to latch the exact current set of
+self-opening wrappers. Focused collector tests cover all three facades under
+one traced containing-value root, all three explicit family-root handoffs,
+terminal failed-lazy initialization, and reclamation of discarded partial
+graphs. No intermediate fresh-allocation wrapper was introduced; the concrete
+boundary therefore provides the evidence for the separate C.5 discussion
+rather than prejudging it.
 
 ##### GCI5R-001D — Lazy construction cutover
 

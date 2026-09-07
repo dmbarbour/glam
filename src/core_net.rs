@@ -162,12 +162,10 @@ pub(crate) fn thread_has_active_core_normalization_scope() -> bool {
 impl CoreValueFactory {
     /// Instantiates a core net in this factory's exact value domain.
     pub(crate) fn instantiate_core_net(&self, template: &CoreInteractionNet) -> CoreRuntimeNet {
-        let observer = self.runtime_value_observer();
-        self.with_runtime_value_access(|access| CoreRuntimeNet {
-            edge: access
-                .allocate_managed_core_net(template.instantiate())
-                .expect("managed core-net representation must fit one collector run"),
-            values: observer,
+        self.with_runtime_value_access(|access| {
+            access
+                .construct_managed_core_net(template.instantiate())
+                .expect("managed core-net representation must fit one collector run")
         })
     }
 
@@ -176,18 +174,15 @@ impl CoreValueFactory {
         &self,
         inner: SharedRuntimeNet<CoreSpecialization>,
     ) -> CoreRuntimeNet {
-        let observer = self.runtime_value_observer();
-        self.with_runtime_value_access(|access| CoreRuntimeNet {
-            edge: access
-                .allocate_managed_core_net(inner.into_runtime_for_managed_test())
-                .expect("managed core-net test representation must fit one collector run"),
-            values: observer,
+        self.with_runtime_value_access(|access| {
+            access
+                .construct_managed_core_net(inner.into_runtime_for_managed_test())
+                .expect("managed core-net test representation must fit one collector run")
         })
     }
 }
 
 impl CoreRuntimeNet {
-    #[cfg(test)]
     pub(crate) fn from_managed_parts(
         edge: ManagedCoreNetEdge,
         values: RuntimeValueObserver,

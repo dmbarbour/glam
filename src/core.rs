@@ -655,22 +655,11 @@ impl LazyValue {
         label: impl Into<Arc<str>>,
         source: LazySource,
     ) -> Self {
-        let observer = values.runtime_value_observer();
         let label = label.into();
         values.with_runtime_value_access(|access| {
-            let edge = access
-                .allocate_managed_lazy(label.clone(), source)
-                .expect("managed lazy representation must fit one collector run");
-            let id = edge
-                .access(&observer, &access)
-                .expect("new lazy belongs to its allocation domain")
-                .id();
-            Self {
-                id,
-                label,
-                edge,
-                values: observer,
-            }
+            access
+                .construct_managed_lazy(label, source)
+                .expect("managed lazy representation must fit one collector run")
         })
     }
 
@@ -769,10 +758,11 @@ impl LazyValue {
         label: impl Into<Arc<str>>,
         failure: Arc<EvaluationFailure>,
     ) -> Self {
-        let value = Self::with_source(values, label, LazySource::Error);
-        let result = value.cache(Err(failure));
-        debug_assert!(result.is_err(), "new lazy errors must cache a failure");
-        value
+        values.with_runtime_value_access(|access| {
+            access
+                .construct_failed_managed_lazy(label, failure)
+                .expect("managed lazy representation must fit one collector run")
+        })
     }
 
     pub(crate) fn id(&self) -> LazyId {
@@ -860,22 +850,11 @@ impl PromisedValue {
     }
 
     fn with_cell(values: &CoreValueFactory, label: impl Into<Arc<str>>) -> Self {
-        let observer = values.runtime_value_observer();
         let label = label.into();
         values.with_runtime_value_access(|access| {
-            let edge = access
-                .allocate_managed_promise(label.clone())
-                .expect("managed promise representation must fit one collector run");
-            let id = edge
-                .access(&observer, &access)
-                .expect("new promise belongs to its allocation domain")
-                .id();
-            Self {
-                id,
-                label,
-                edge,
-                values: observer,
-            }
+            access
+                .construct_managed_promise(label)
+                .expect("managed promise representation must fit one collector run")
         })
     }
 
