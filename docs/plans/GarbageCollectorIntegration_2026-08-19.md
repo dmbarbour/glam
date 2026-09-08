@@ -5033,12 +5033,13 @@ logical visits as profiling evidence while the collector marks the repeated
 managed identity once; no traversal cache or deduplication policy was added.
 
 Only closed isolated fixtures collect. The complete production runtime remains
-`NoAuto`. The mandatory post-I5 review is complete; its GCI5R-001 regional-
-publication closure checkpoint remains an I6 entry condition.
+`NoAuto`. The mandatory post-I5 review is complete. GCI5R-001 closed its
+regional-publication repair and verification on 2026-09-08; the resulting rule
+remains an I6 entry condition.
 
 ### I6+ Regional Allocation Migration Rule
 
-GCI5R-001 must close before I6 begins. Its corrective pattern is also an entry
+GCI5R-001 closed on 2026-09-08. Its corrective pattern remains an entry
 condition for every later phase which introduces another managed allocation
 family. “Migrate” in I6 and beyond includes the allocator-to-owner chronology,
 not only representation and tracing:
@@ -5068,9 +5069,11 @@ access-owned containing-value root publisher, and the factory supplies
 infallible and fallible callback-free construction entries which publish only
 the returned graph before access ends. `ScopedValues::wrap` reuses that
 publisher without nested admission. GCI5R-001C-F have applied that foundation
-to lazies, promises, and core nets. The finding remains open only for the
-constructor-surface inventory, documentation, verification, and downstream
-reconciliation partitioned in
+to lazies, promises, and core nets. GCI5R-001G selected no fresh typestate,
+installed an exact classified constructor-surface change detector, narrowed
+the useful visibility seams, reconciled the ownership contract, and passed its
+focused and repository-wide verification. The closed finding and its exact
+evidence are recorded in
 [`GCI5R-001G`](../reviews/GarbageCollectorIntegrationI5_2026-09-07.md#gci5r-001g--closure-audit-and-review-reconciliation).
 
 ## Phase I6 — Functions, Applications, Metadata, and Failures
@@ -5518,7 +5521,10 @@ fixtures, and the focused collector finalization suite. Production remains
 - Confirm that every managed allocation family has closed the
   [I6+ Regional Allocation Migration Rule](#i6-regional-allocation-migration-rule)
   with a private raw allocator, an exact first owner, and forced collection at
-  its former publication gap.
+  its former publication gap. Consume GCI5R-001's classified constructor
+  inventory and deterministic regional/orchestration evidence as the I5
+  precedent; extend both for every I6+ family rather than restarting from a
+  declaration-only root inventory.
 - Audit every unsafe trace/downcast/mutation gateway and the I3 region/lock
   boundaries. Preserve GCI-007's resolved exact-edge chronology, GCI-008's
   scoped locked-net trace, GCI-009's isolated-fixture chronology, and

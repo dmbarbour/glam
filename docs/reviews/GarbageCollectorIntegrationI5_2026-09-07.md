@@ -2,17 +2,15 @@
 
 Baseline: `37186c1`, including completed implementation checkpoints I5A-I5F.4.
 
-Status: review complete; corrective work remains open. The implemented I5
-graph is sound under the current `CollectionPolicy::NoAuto` boundary and the
-closed isolated collection fixtures provide strong evidence for recursive
-cycle reclamation. Two structural contracts are not yet as strong as the plan
-claims: newly allocated interior edges can cross an allocation region before
-they are rooted or installed, and production managed-edge writers do not yet
-pass through the collector's structural mutation gateway. The former blocks
-concurrent production collection and any automatic policy; the latter blocks
+Status: review complete; GCI5R-001 is closed and corrective work remains open
+for the independent mutation-gateway finding. The implemented I5 graph is
+sound under the current `CollectionPolicy::NoAuto` boundary and the closed
+isolated collection fixtures provide strong evidence for recursive cycle
+reclamation. Regional construction now establishes an exact traced or rooted
+owner before managed access ends. Production managed-edge writers still do
+not pass through the collector's structural mutation gateway, which blocks
 claiming that the current code is ready for a future incremental or
-generational barrier. Neither issue is exercised by current production
-execution because production does not collect.
+generational barrier. Production still does not collect.
 
 The forward plan also needs revision before I6 begins. I5F.4 established that
 lazies, promises, and core nets are the mutable recursive identities, while
@@ -146,10 +144,10 @@ also passes `cargo fmt --check`,
 `cargo test -q` (1,374 library tests plus every integration suite). No new
 schedule-sensitive claim in this review relies on repeated execution.
 
-The important verification gaps are attached to GCI5R-001 and GCI5R-002:
-current source latches count writer functions and managed role declarations,
-but they do not prove root-before-region-exit chronology or a call into the
-collector mutation API.
+GCI5R-001's closure adds both an exact classified constructor-bearing source
+inventory and deterministic root-before-region-exit chronology. The remaining
+important verification gap is GCI5R-002: current writer latches count writer
+functions but do not prove a call into the collector mutation API.
 
 ## Findings
 
@@ -158,9 +156,8 @@ collector mutation API.
 **Classification:** ownership chronology and future collection safety  
 **Priority:** high  
 **Confidence:** high  
-**Status:** remediation D-F complete; closure/reconciliation checkpoint G
-remains before I11C, automatic collection, or reuse of this constructor
-pattern by additional managed identities
+**Status:** closed 2026-09-08 by GCI5R-001B-G; the regional-allocation rule
+remains mandatory for every later managed family
 
 The collector contract is explicit: `Gc<T>` is a non-rooting pointer which may
 become stale after it leaves a mutator region. Glam's own
@@ -168,8 +165,8 @@ become stale after it leaves a mutator region. Glam's own
 leaving the region to be installed as an exactly traced edge or published as a
 root.
 
-Three production constructor families currently cross that boundary with only
-an interior edge and a weak observer:
+At the review baseline, three production constructor families crossed that
+boundary with only an interior edge and a weak observer:
 
 - `LazyValue::with_source` allocates `ManagedLazyCell`, then returns
   `LazyValue { edge, values, ... }` after the allocation region closes;
@@ -177,21 +174,18 @@ an interior edge and a weak observer:
 - `CoreValueFactory::instantiate_core_net` returns `CoreRuntimeNet` containing
   a `ManagedCoreNetEdge` after its allocation region closes.
 
-Subsequent calls such as `LazyValue::root`, `PromisedValue::root`, and
-`CoreRuntimeNet::root` open another mutator region and treat the edge as live.
-That is safe today only because the production heap is `NoAuto` and explicit
-test collections occur after fixture roots have been installed. A collection
-between allocation-region exit and later publication could reclaim the cell;
-the weak value-domain observer keeps neither the allocation nor its heap root
-alive.
+Subsequent root publication originally opened another mutator region and
+treated the edge as live. That chronology was safe only while production
+remained `NoAuto`: a collection between allocation-region exit and later
+publication could reclaim the cell because the weak value-domain observer kept
+neither the allocation nor its heap root alive.
 
-Public `ScopedValues` construction is less exposed than the type shape
-suggests: its outer access remains active while a nested constructor and root
-publication run. That protection is local to the public value facade, however.
-Source lowering, semantic operator yields, builtin results, reflection-store
-edits, promise registration, and stand-alone net construction all contain real
-two-region handoffs. I11C's collection-during-worker schedules and any I12
-automatic outer-entry election cannot rely on `NoAuto` to cover those gaps.
+GCI5R-001B-F closed those gaps. Containing-value construction now publishes in
+the allocating access region; evaluator operations retain intended family
+roots in a step-local publication nursery; and genuine promise or core-net
+orchestration handoffs carry explicit family roots. `ScopedValues::wrap`
+publishes through its already-active access rather than nesting another entry.
+G.2 inventories and classifies the resulting constructor-bearing surface.
 
 Recommended resolution before introducing another managed identity:
 
@@ -207,9 +201,10 @@ Recommended resolution before introducing another managed identity:
    collection at the former escape boundary, and prove the selected traced
    owner or intentional root—not disabled collection—preserves liveness.
 
-This does not show a current production use-after-free: production collection
-is disabled. It does show that the current constructor boundary cannot be
-certified for the later collection modes described by the plan.
+The original finding did not demonstrate a production use-after-free because
+production collection was disabled. Its deterministic mismatch instead
+identified a constructor boundary which had to be repaired before the later
+collection modes described by the plan could be certified.
 
 #### GCI5R-001 remediation plan
 
@@ -401,29 +396,33 @@ or reopening the heap.
 
 ###### Latched mismatch evidence
 
-`fresh_managed_facades_survive_until_first_publication` constructs one failed
-lazy, one promise, and one core net through the production facades, ends each
-old allocation region, and collects before any first owner is published. It
-inspects only `CollectionReport`; it never dereferences the stale facades. The
-test is deliberately ignored until GCI5R-001B-F change the chronology, because
-its desired assertion currently fails deterministically:
+At the review baseline,
+`fresh_managed_facades_survive_until_first_publication` ended the old
+allocation region for one failed lazy, one promise, and one core net before
+publishing an owner. It then collected and observed the deterministic mismatch:
 
 ```text
 left: 3 finalized slots
 right: 0 finalized slots
 ```
 
-This is a mismatch latch, not an accepted-behavior test. The cutover must
-remove the ignore marker and make the same forced boundary pass. The exact
-evidence command is:
+That historical result was the mismatch latch, not accepted behavior. The
+current, non-ignored fixture constructs the three facades within one
+`construct_runtime_value_root` operation, attempts collection immediately
+after allocation and observes `CollectionError::ActiveMutator`, then collects
+after return and proves that the containing root retains all three identities.
+Dropping that root makes the graph collectible. The exact current evidence
+command is:
 
 ```sh
-cargo test -q fresh_managed_facades_survive_until_first_publication -- --ignored
+cargo test -q fresh_managed_facades_survive_until_first_publication
 ```
 
-The normal focused run passes 28 recursive-cell tests and reports this one
-fixture ignored. `cargo fmt --check`, Clippy with warnings denied, and the full
-repository test suite also pass with the mismatch fixture ignored.
+The distinct orchestration case is covered by
+`evaluator_step_guards_fresh_managed_results_until_containing_root_publication`:
+the evaluator publication nursery keeps the intended family roots alive across
+a successful collection between access regions. G.4 records the final focused
+and repository-wide results.
 
 ##### GCI5R-001B — Operational regional-access foundation (complete)
 
@@ -680,12 +679,12 @@ documentation, and behavioral evidence cannot be mistaken for one another:
 | Checkpoint | Status | Purpose |
 | --- | --- | --- |
 | G.1 | complete | decide the deferred C.5 fresh-typestate question from the completed D-F call sites |
-| G.2a | pending | replace the boolean source heuristic with an exact regional-constructor caller inventory and classifier tests |
-| G.2b | pending | delete or narrow obsolete constructor seams and seal the final production visibility surface |
-| G.3 | pending | reconcile current regional-liveness and owner-handoff documentation |
-| G.4a | pending | run focused publication, reclamation, evaluator, promise, and net evidence |
-| G.4b | pending | run the repository routine checks and any change-triggered unsafe-boundary tools |
-| G.5 | pending | close the finding and update downstream integration gates only after G.4 passes |
+| G.2a | complete | replace the boolean source heuristic with an exact regional-constructor caller inventory and classifier tests |
+| G.2b | complete | delete or narrow obsolete constructor seams and seal the final production visibility surface |
+| G.3 | complete | reconcile current regional-liveness and owner-handoff documentation |
+| G.4a | complete | run focused publication, reclamation, evaluator, promise, and net evidence |
+| G.4b | complete | run the repository routine checks and any change-triggered unsafe-boundary tools |
+| G.5 | complete | close the finding and update downstream integration gates only after G.4 passes |
 
 ###### G.1 — Post-cutover C.5 assessment and recommendation
 
@@ -793,6 +792,23 @@ structural mutation gateway selected in GCI5R-002. Installation into a new,
 unpublished parent is construction and must not be routed through a fake
 post-publication mutation solely to make the inventories look uniform.
 
+Completed on 2026-09-08. The source-backed inventory now records 55 exact
+production constructor-bearing functions and classifies them as 14 in-region
+forwarders, 16 containing-root regions, 22 evaluator publication-nursery
+handoffs, and 3 explicit family-root constructors. Synthetic fixtures prove
+that both a new self-opening bare-facade return and a containing-structure
+return are reported before the reviewed list is changed. The inventory is a
+lexical change detector over the explicit access and constructor vocabulary,
+not a substitute for Rust dataflow analysis or the behavioral chronology
+tests.
+
+Raw allocation remains private. Lazy owner-neutral construction and rooting
+are now visible only within `crate::core`, and the otherwise unused rooted-lazy
+constructor is test-only. Promise and core-net construction/root handoffs keep
+their crate-wide visibility because current compiler, evaluator, reflection,
+API, and net orchestration callers genuinely cross those module boundaries;
+moving equivalent forwarding methods would not narrow the authority.
+
 ###### G.3 — Ownership-contract reconciliation
 
 After G.2 fixes the final surface, reconcile one authoritative description of
@@ -815,6 +831,16 @@ regional liveness and link the adjacent layers to it:
 cross-layer rule or module responsibility. Do not churn them merely to repeat
 the ownership ledger.
 
+Completed on 2026-09-08. `CoreValueAllocationScope` and
+`RuntimeValueAccess` now state the distinction between temporary admission
+liveness and durable ownership; the family gateways state whether they return
+an owner-neutral facade or an explicit registered owner; and the evaluator
+publication nursery documents its exact temporary-owner role. The current
+evaluation architecture and ownership ledger record the four handoff forms.
+The collector's `Allocator::alloc` contract remains general and unchanged.
+G.2 did not alter a cross-layer module responsibility, so `AgentContext.md` and
+`src/README.md` were intentionally left alone.
+
 ###### G.4 — Verification
 
 **G.4a — Focused evidence.** Run the constructor-privacy and exact-caller
@@ -830,9 +856,9 @@ The historical gap now has two distinct replacement proofs:
   attempt collection after the fresh family allocations but before the closure
   returns and assert that active mutator admission excludes it. Then collect
   after the region closes and prove that the newly published containing root
-  retains exactly the returned graph. The current
-  `fresh_managed_facades_survive_until_first_publication` test covers only the
-  second half and must not be described as collection inside the former gap.
+  retains exactly the returned graph.
+  `fresh_managed_facades_survive_until_first_publication` now covers both
+  halves explicitly.
 - When an orchestration boundary genuinely requires separate access regions,
   retain the already-intended family root and force a successful collection in
   that interval. The evaluator publication-nursery, promise registration, and
@@ -854,6 +880,33 @@ machinery. Visibility, source-inventory, and documentation-only closure does
 not justify an unrelated Miri run; the integration verification matrix and
 Gate G3 retain the complete focused Miri/sanitizer obligation.
 
+Completed on 2026-09-08. The focused commands for
+`regional_constructor_`, `recursive_cell_gateways_are_private_and_complete`,
+`fresh_managed_facades_survive_until_first_publication`,
+`regional_value_publication_retains_only_the_returned_managed_graph`,
+`early_regional_return_leaves_partial_managed_graph_collectible`,
+`evaluator_step_guards_fresh_managed_results_until_containing_root_publication`,
+`promise_settlement_releases_task_and_local_owner_roots`,
+`prepared_copy_source_is_an_exact_temporary_net_owner`, and
+`promise_resolver_drop_invokes_idempotent_retire_once` all pass. The first
+broad run found that the older raw-text access inventory counted the two Rust
+snippets embedded in the new synthetic parser fixture. The fixture now
+assembles the access identifier at runtime, both inventories pass without
+changing the production count, and the final runs pass:
+
+```sh
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test -q
+cargo test --workspace -q
+```
+
+The final library run passes 1,383 tests with none ignored; the workspace run
+also passes the `glam-gc` suites (189 passing and 2 explicitly ignored in its
+main library group). G.2 changed no unsafe collector code, root implementation,
+managed dereference, or access-lifetime mechanism, so it did not trigger an
+ad-hoc Miri run. Gate G3 retains that broader obligation.
+
 ###### G.5 — Finding and roadmap closure
 
 Only after G.4 passes:
@@ -871,6 +924,12 @@ Only after G.4 passes:
 G.5 is administrative reconciliation, not permission to enable automatic
 collection. Production remains `NoAuto` until the later integration gates
 explicitly select another policy for newly constructed runtimes.
+
+Completed on 2026-09-08. GCI5R-001 is closed. The integration plan now treats
+the I5 repair and exact temporal evidence as the precedent consumed by I6+
+family migrations and Gate G2 rather than as an outstanding I11C/I12 blocker.
+GCI5R-002, whole-graph closure, readiness, and collection-policy gates remain
+independently open; this closeout does not enable production collection.
 
 ### GCI5R-002 — Production writers do not yet enter the collector mutation gateway
 
@@ -993,8 +1052,8 @@ Revise I6 before implementation:
    destruction already satisfy the initial collector;
 4. keep identity-sensitive metadata/failure behavior explicit if conversion
    is retained; and
-5. do not create new construction handoffs until GCI5R-001 has selected their
-   liveness protocol.
+5. apply GCI5R-001's closed regional-allocation and first-owner protocol to
+   every new construction handoff.
 
 At minimum, I6A must no longer combine function stages, partial builtin
 arguments, applications, and fixpoints in one checkpoint. I6B and I6C should
@@ -1080,11 +1139,11 @@ which I5 already completed:
   I6-I8 plus the mandatory final external-RAII/source inventory.
 - **I10:** retain arbitrary host-callback containment and the opaque decision
   gate. Remove reflection computation from I10A once I6D.1 owns it.
-- **I11/Gate G2:** add a temporal root-publication inventory and
-  forced-order evidence for GCI5R-001. A declaration-only root inventory does
+- **I11/Gate G2:** consume GCI5R-001's exact temporal root-publication
+  inventory and forced-order evidence. A declaration-only root inventory does
   not prove that an allocation remains live between allocation, handoff, and
-  first publication. I11C's worker/collection schedules may begin only after
-  that contract is closed.
+  first publication; every I6+ family must add the same evidence before Gate
+  G2 can close.
 
 I12's automatic-policy review must explicitly treat every constructor which
 can open a second mutator region while holding an interior edge. Even if I11's
@@ -1174,14 +1233,14 @@ GCI5R-001 and GCI5R-002, then reconcile the table, ledger header, stale
 | I9 | I5 already changed and audited several root/RAII surfaces. | Start from I5 inventories and test only I6-I8 deltas plus final mandatory source audits. |
 | I10 | Host callbacks and opaque storage remain real deferred boundaries. | Remove reflection after I6D.1; preserve host-capture and opaque decision gates. |
 | I11 | Stable-boundary forced collection remains viable in principle. | Gate worker-concurrent collection on root-before-exit chronology and complete barrier/source audits. |
-| I12 | Automatic entry can collect at the most dangerous handoff boundary. | Make GCI5R-001 a hard policy-review prerequisite and inventory second-entry constructors. |
+| I12 | Automatic entry can collect at the most dangerous handoff boundary. | Consume GCI5R-001's closed evidence as a hard policy-review prerequisite and inventory second-entry constructors. |
 | I13 | Redundant compatibility/provenance cleanup remains appropriate. | Do not defer liveness or mutation safety here; add any accepted ID/label cache to its cleanup ledger. |
 
 ## Recommended Resolution Order
 
-1. Resolve GCI5R-001's construction and first-publication protocol. This is
-   the only finding which can make a currently valid `Gc` stale before later
-   access once production collection is enabled.
+1. **Completed:** GCI5R-001's regional construction and first-publication
+   protocol now closes the only finding which could make a currently valid
+   `Gc` stale before later access once production collection is enabled.
 2. Select the owner/set mutation-gateway shape, then route lazy and promise
    writers through it. Leave the bounded high-volume net implementation to a
    newly explicit I8 checkpoint.

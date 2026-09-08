@@ -367,6 +367,9 @@ pub(crate) struct CoreValueAllocationScope<'scope> {
 /// compilation-local extensions on that view. Subsystems derive shorter-lived
 /// views from this carrier rather than entering the heap independently or
 /// supplying a second factory argument which could disagree with it.
+/// Admission is only temporary liveness: any fresh managed graph which must
+/// survive this access must be installed beneath an exactly traced owner or
+/// published through the intended registered-root operation before return.
 pub(crate) struct RuntimeValueAccess<'scope> {
     values: &'scope CoreValueFactory,
     #[allow(

@@ -173,6 +173,15 @@ access. Code which must wait, invoke a host callback, enter coordinator state,
 or cross another orchestration boundary instead retains the factory and opens
 a later access around its next bounded operation.
 
+The current recursive managed families use four owner-handoff shapes. Pure
+regional builders retain owner-neutral facades only until a containing value is
+rooted; evaluator steps acquire a family root into their publication nursery
+before ending a smaller access region; genuine orchestration handoffs carry an
+explicit promise or core-net family root; and nested semantic builders may pass
+facades through ordinary values and containers only while the whole
+unpublished graph remains inside one access region. None of those facades is a
+durable owner by itself.
+
 Terminal wait records likewise retain `RuntimeValueRoot`. A general
 `EvaluationWaitPoll::Complete` observation receives that owned root; only
 `EvaluatorStepContext::project_root` may clone its semantic value back into a

@@ -327,7 +327,12 @@ The integration inventory accounts for every root and recursive edge,
 including deferred closures, opaque payloads, persistent collections,
 interaction nets, reflection volumes, caches, event buffers, diagnostics, and
 coordinator records. Every graph-bearing type either implements exact tracing
-or has a reviewed conservative-retention rule.
+or has a reviewed conservative-retention rule. Every managed allocation family
+also has an exact first-owner chronology: raw allocation remains regional, and
+the allocation is installed beneath a traced owner or published as its intended
+root before that region ends. Gate review consumes the exact constructor
+inventory and forced-boundary evidence rather than inferring this chronology
+from declarations alone.
 
 Only after G2 may tests force a full collection over the complete production
 graph.

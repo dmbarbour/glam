@@ -258,7 +258,7 @@ impl RuntimeValueAccess<'_> {
     /// The returned facade is an interior semantic edge, not an owner. Code
     /// which returns it from the region must first install it below an exact
     /// traced owner or use [`Self::construct_rooted_managed_lazy`].
-    pub(crate) fn construct_managed_lazy(
+    pub(in crate::core) fn construct_managed_lazy(
         &self,
         label: impl Into<Arc<str>>,
         source: LazySource,
@@ -280,7 +280,7 @@ impl RuntimeValueAccess<'_> {
 
     /// Constructs an already-terminal failed lazy before publishing its
     /// facade from this region.
-    pub(crate) fn construct_failed_managed_lazy(
+    pub(in crate::core) fn construct_failed_managed_lazy(
         &self,
         label: impl Into<Arc<str>>,
         failure: Arc<EvaluationFailure>,
@@ -323,7 +323,7 @@ impl RuntimeValueAccess<'_> {
         Ok(CoreRuntimeNet::from_managed_parts(edge, observer))
     }
 
-    pub(crate) fn root_managed_lazy(
+    pub(in crate::core) fn root_managed_lazy(
         &self,
         observer: RuntimeValueObserver,
         edge: ManagedLazyEdge,
@@ -346,7 +346,7 @@ impl RuntimeValueAccess<'_> {
         }
     }
 
-    pub(crate) fn root_managed_promise(
+    pub(in crate::core) fn root_managed_promise(
         &self,
         observer: RuntimeValueObserver,
         edge: ManagedPromiseEdge,
@@ -388,11 +388,8 @@ impl RuntimeValueAccess<'_> {
     /// Constructs one lazy and publishes its explicit registered owner before
     /// this access region ends. A facade can be projected from the root while
     /// that owner remains live.
-    #[allow(
-        dead_code,
-        reason = "GCI5R-001C establishes rooted handoff before the D-F production cutovers"
-    )]
-    pub(crate) fn construct_rooted_managed_lazy(
+    #[cfg(test)]
+    pub(in crate::core) fn construct_rooted_managed_lazy(
         &self,
         label: impl Into<Arc<str>>,
         source: LazySource,
@@ -917,6 +914,7 @@ const _: () = {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::fs;
     use std::path::Path;
 
@@ -1044,10 +1042,13 @@ mod tests {
         &tail[..end]
     }
 
-    #[derive(Default)]
+    #[derive(Clone, Debug, Default, Eq, PartialEq)]
     struct ConstructorCallInventory {
-        opens_access: bool,
-        calls_gateway: bool,
+        access_entries: BTreeSet<String>,
+        owner_neutral: BTreeSet<String>,
+        rooted: BTreeSet<String>,
+        nursery: BTreeSet<String>,
+        publications: BTreeSet<String>,
     }
 
     impl<'ast> Visit<'ast> for ConstructorCallInventory {
@@ -1055,20 +1056,66 @@ mod tests {
             if let syn::Expr::Path(path) = call.func.as_ref()
                 && let Some(segment) = path.path.segments.last()
             {
-                self.calls_gateway |= is_constructor_gateway(&segment.ident.to_string());
+                self.record_call(&segment.ident.to_string());
             }
             visit::visit_expr_call(self, call);
         }
 
         fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
-            let method = call.method.to_string();
-            self.opens_access |= method == "with_runtime_value_access";
-            self.calls_gateway |= is_constructor_gateway(&method);
+            self.record_call(&call.method.to_string());
             visit::visit_expr_method_call(self, call);
         }
     }
 
-    fn is_constructor_gateway(name: &str) -> bool {
+    impl ConstructorCallInventory {
+        fn record_call(&mut self, name: &str) {
+            if is_access_entry(name) {
+                self.access_entries.insert(name.to_owned());
+            }
+            if is_owner_neutral_constructor(name) {
+                self.owner_neutral.insert(name.to_owned());
+            }
+            if is_rooted_constructor(name) {
+                self.rooted.insert(name.to_owned());
+            }
+            if is_evaluator_nursery(name) {
+                self.nursery.insert(name.to_owned());
+            }
+            if is_publication_operation(name) {
+                self.publications.insert(name.to_owned());
+            }
+        }
+
+        fn has_constructor(&self) -> bool {
+            !self.owner_neutral.is_empty() || !self.rooted.is_empty()
+        }
+
+        fn summary(&self, declaration: &str) -> String {
+            let joined =
+                |items: &BTreeSet<String>| items.iter().cloned().collect::<Vec<_>>().join(",");
+            format!(
+                "{declaration}|access={}|owner_neutral={}|rooted={}|nursery={}|publication={}",
+                joined(&self.access_entries),
+                joined(&self.owner_neutral),
+                joined(&self.rooted),
+                joined(&self.nursery),
+                joined(&self.publications),
+            )
+        }
+    }
+
+    fn is_access_entry(name: &str) -> bool {
+        matches!(
+            name,
+            "with_runtime_value_access"
+                | "with_access"
+                | "with_value_access"
+                | "construct_runtime_value_root"
+                | "try_construct_runtime_value_root"
+        )
+    }
+
+    fn is_owner_neutral_constructor(name: &str) -> bool {
         matches!(
             name,
             "construct_managed_lazy"
@@ -1093,32 +1140,132 @@ mod tests {
         )
     }
 
-    struct SelfOpeningVisitor<'path> {
+    fn is_rooted_constructor(name: &str) -> bool {
+        matches!(
+            name,
+            "construct_rooted_managed_lazy"
+                | "construct_rooted_managed_promise"
+                | "construct_rooted_managed_core_net"
+        )
+    }
+
+    fn is_evaluator_nursery(name: &str) -> bool {
+        matches!(
+            name,
+            "construct_lazy" | "construct_lazy_value" | "construct_promise" | "construct_core_net"
+        )
+    }
+
+    fn is_publication_operation(name: &str) -> bool {
+        matches!(
+            name,
+            "construct_runtime_value_root"
+                | "try_construct_runtime_value_root"
+                | "root_runtime_value"
+                | "root_in"
+                | "root_managed_lazy"
+                | "root_managed_promise"
+                | "root_managed_core_net"
+                | "root_value"
+                | "wrap"
+        )
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum RegionalConstructionDisposition {
+        InRegionForwarder,
+        ContainingRoot,
+        EvaluatorNursery,
+        ExplicitFamilyRoot,
+    }
+
+    struct ReviewedConstructorSite {
+        declaration: &'static str,
+        disposition: RegionalConstructionDisposition,
+        reason: &'static str,
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct RegionalConstructorSite {
+        declaration: String,
+        calls: ConstructorCallInventory,
+    }
+
+    struct RegionalConstructorVisitor<'path> {
         path: &'path Path,
-        entries: Vec<String>,
+        modules: Vec<String>,
+        owner: Option<String>,
+        sites: Vec<RegionalConstructorSite>,
     }
 
     fn is_test_only(attributes: &[syn::Attribute]) -> bool {
         attributes.iter().any(|attribute| {
-            attribute.path().is_ident("cfg")
-                && matches!(
-                    &attribute.meta,
-                    syn::Meta::List(list) if list.tokens.to_string() == "test"
-                )
+            attribute.path().is_ident("test")
+                || (attribute.path().is_ident("cfg")
+                    && matches!(
+                        &attribute.meta,
+                        syn::Meta::List(list) if list.tokens.to_string() == "test"
+                    ))
         })
     }
 
-    impl<'ast> Visit<'ast> for SelfOpeningVisitor<'_> {
+    fn simple_type_name(ty: &syn::Type) -> String {
+        match ty {
+            syn::Type::Path(path) => path
+                .path
+                .segments
+                .last()
+                .map_or_else(|| "<impl>".to_owned(), |segment| segment.ident.to_string()),
+            _ => "<impl>".to_owned(),
+        }
+    }
+
+    impl RegionalConstructorVisitor<'_> {
+        fn declaration(&self, function: &syn::Ident) -> String {
+            let mut parts = vec![self.path.display().to_string()];
+            parts.extend(self.modules.iter().cloned());
+            if let Some(owner) = &self.owner {
+                parts.push(owner.clone());
+            }
+            parts.push(function.to_string());
+            parts.join("::")
+        }
+
+        fn record(&mut self, function: &syn::Ident, block: &syn::Block) {
+            let mut calls = ConstructorCallInventory::default();
+            calls.visit_block(block);
+            if calls.has_constructor() {
+                let declaration = self.declaration(function);
+                self.sites
+                    .push(RegionalConstructorSite { declaration, calls });
+            }
+        }
+    }
+
+    impl<'ast> Visit<'ast> for RegionalConstructorVisitor<'_> {
+        fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+            if is_test_only(&item.attrs) {
+                return;
+            }
+            self.modules.push(item.ident.to_string());
+            visit::visit_item_mod(self, item);
+            self.modules.pop();
+        }
+
+        fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
+            if is_test_only(&item.attrs) {
+                return;
+            }
+            let prior = self.owner.replace(simple_type_name(&item.self_ty));
+            visit::visit_item_impl(self, item);
+            self.owner = prior;
+        }
+
         fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
             if is_test_only(&item.attrs) {
                 return;
             }
-            let mut calls = ConstructorCallInventory::default();
-            calls.visit_block(&item.block);
-            if calls.opens_access && calls.calls_gateway {
-                self.entries
-                    .push(format!("{}::{}", self.path.display(), item.sig.ident));
-            }
+            self.record(&item.sig.ident, &item.block);
             visit::visit_impl_item_fn(self, item);
         }
 
@@ -1126,13 +1273,150 @@ mod tests {
             if is_test_only(&item.attrs) {
                 return;
             }
-            let mut calls = ConstructorCallInventory::default();
-            calls.visit_block(&item.block);
-            if calls.opens_access && calls.calls_gateway {
-                self.entries
-                    .push(format!("{}::{}", self.path.display(), item.sig.ident));
-            }
+            self.record(&item.sig.ident, &item.block);
             visit::visit_item_fn(self, item);
+        }
+    }
+
+    fn regional_constructor_sites(path: &Path, source: &str) -> Vec<RegionalConstructorSite> {
+        let syntax = syn::parse_file(source)
+            .unwrap_or_else(|failure| panic!("failed to parse {}: {failure}", path.display()));
+        let mut visitor = RegionalConstructorVisitor {
+            path,
+            modules: Vec::new(),
+            owner: None,
+            sites: Vec::new(),
+        };
+        visitor.visit_file(&syntax);
+        visitor
+            .sites
+            .sort_by(|left, right| left.declaration.cmp(&right.declaration));
+        visitor.sites
+    }
+
+    fn reviewed_constructor_sites() -> Vec<ReviewedConstructorSite> {
+        let groups: &[(
+            RegionalConstructionDisposition,
+            &'static str,
+            &[&'static str],
+        )] = &[
+            (
+                RegionalConstructionDisposition::InRegionForwarder,
+                "borrows the caller's active RuntimeValueAccess; its caller establishes the containing owner",
+                &[
+                    "src/compiler.rs::CompileContext::import_binary_in",
+                    "src/compiler.rs::CompileContext::import_module_in",
+                    "src/compiler.rs::invalid_import_request_in",
+                    "src/core.rs::LazyValue::error_in",
+                    "src/core.rs::LazyValue::failure_in",
+                    "src/core.rs::LazyValue::with_source_in",
+                    "src/core.rs::Value::builtin_call_in",
+                    "src/eval/operator.rs::constant_effect_in",
+                    "src/g_syntax/net_lowering.rs::ResolvedNetLowerer::compile_lazy_into",
+                    "src/g_syntax/net_lowering.rs::ResolvedNetLowerer::lower_code_in",
+                    "src/g_syntax/net_lowering.rs::lower_resolved_expr_in",
+                    "src/reflection/machine.rs::request_function_in",
+                    "src/reflection/store.rs::apply_value_at_path_in",
+                    "src/reflection/store.rs::lazy_core_value_path",
+                ],
+            ),
+            (
+                RegionalConstructionDisposition::ContainingRoot,
+                "publishes the completed same-region graph through its containing runtime value root",
+                &[
+                    "src/api/assembly.rs::Assembler::net",
+                    "src/api/value.rs::ScopedValues::access",
+                    "src/api/value.rs::ScopedValues::anno",
+                    "src/api/value.rs::ScopedValues::apply",
+                    "src/api/value.rs::Values::after_reflection",
+                    "src/api/value.rs::Values::dict_singleton",
+                    "src/api/value.rs::Values::dict_union",
+                    "src/api/value.rs::Values::dict_update",
+                    "src/api/value.rs::Values::empty_object",
+                    "src/api/value.rs::Values::list_slice",
+                    "src/compiler.rs::CompileContext::new",
+                    "src/evaluation/session.rs::EvalContext::compose_builtin",
+                    "src/g_syntax/compiler_values.rs::run_pure_match_resolved",
+                    "src/reflection/machine.rs::EffectTask::interpret_prepared_drive",
+                    "src/reflection/machine.rs::lazy_value_path_root",
+                    "src/reflection/store.rs::apply_edit",
+                ],
+            ),
+            (
+                RegionalConstructionDisposition::EvaluatorNursery,
+                "the evaluator step acquires an exact family root before the small access region ends",
+                &[
+                    "src/eval/application.rs::apply_function_values_in",
+                    "src/eval/builtins/annotation/implementation.rs::annotation_error_value",
+                    "src/eval/builtins/annotation/implementation.rs::defer_metadata_reflection",
+                    "src/eval/builtins/annotation/implementation.rs::defer_reflection_annotation",
+                    "src/eval/builtins/annotation/implementation.rs::eval_metadata_pure_annotation",
+                    "src/eval/builtins/annotation/implementation.rs::eval_metadata_reflection_annotation",
+                    "src/eval/builtins/annotation/implementation.rs::metadata_update_outputs",
+                    "src/eval/builtins/dict/merge.rs::builtin_apply3_value",
+                    "src/eval/builtins/dict/merge.rs::merge_duplicate_dict_value",
+                    "src/eval/builtins/dict/merge.rs::update_nested_dict_path",
+                    "src/eval/builtins/effect/implementation.rs::eval_fixpoint_builtin",
+                    "src/eval/builtins/list_effect/implementation.rs::deferred_list",
+                    "src/eval/builtins/net.rs::apply_net_arity",
+                    "src/eval/builtins/net.rs::apply",
+                    "src/eval/builtins/object/implementation.rs::eval_object_instance_builtin",
+                    "src/eval/operator.rs::apply_builtin_values_lazily",
+                    "src/eval/operator.rs::apply_core_operator",
+                    "src/evaluation/access.rs::EvaluatorStepContext::construct_core_net",
+                    "src/evaluation/access.rs::EvaluatorStepContext::construct_promise",
+                    "src/reflection/machine.rs::EffectTask::deliver_step",
+                    "src/reflection/machine.rs::replace_reset_frames",
+                    "src/reflection/machine.rs::set_state_path_in",
+                ],
+            ),
+            (
+                RegionalConstructionDisposition::ExplicitFamilyRoot,
+                "carries an already-intended promise root across its public or coordinator handoff",
+                &[
+                    "src/api/assembly.rs::Assembler::promise",
+                    "src/api/assembly.rs::ReflectionEnvironmentBuilder::promise",
+                    "src/core.rs::PromisedValue::fixpoint",
+                ],
+            ),
+        ];
+
+        groups
+            .iter()
+            .flat_map(|(disposition, reason, declarations)| {
+                declarations
+                    .iter()
+                    .map(|declaration| ReviewedConstructorSite {
+                        declaration,
+                        disposition: *disposition,
+                        reason,
+                    })
+            })
+            .collect()
+    }
+
+    fn disposition_matches(
+        site: &RegionalConstructorSite,
+        disposition: RegionalConstructionDisposition,
+    ) -> bool {
+        match disposition {
+            RegionalConstructionDisposition::InRegionForwarder => {
+                site.calls.access_entries.is_empty()
+                    && site.calls.rooted.is_empty()
+                    && site.calls.nursery.is_empty()
+                    && site.calls.publications.is_empty()
+            }
+            RegionalConstructionDisposition::ContainingRoot => {
+                !site.calls.publications.is_empty() && site.calls.nursery.is_empty()
+            }
+            RegionalConstructionDisposition::EvaluatorNursery => {
+                !site.calls.nursery.is_empty()
+                    || (site.declaration.starts_with("src/evaluation/access.rs::")
+                        && !site.calls.rooted.is_empty())
+            }
+            RegionalConstructionDisposition::ExplicitFamilyRoot => {
+                !site.calls.rooted.is_empty() && site.calls.nursery.is_empty()
+            }
         }
     }
 
@@ -1212,6 +1496,10 @@ mod tests {
             let net = access
                 .construct_managed_core_net(builder.finish(exposed).instantiate())
                 .expect("managed core-net representation must fit one collector run");
+            assert!(matches!(
+                values.collect_managed_for_test(),
+                Err(glam_gc::CollectionError::ActiveMutator)
+            ));
             Value::List(List::from_values(vec![
                 Value::Lazy(lazy),
                 Value::Promised(promise),
@@ -2198,11 +2486,55 @@ mod tests {
     }
 
     #[test]
-    fn self_opening_managed_constructors_are_fail_closed() {
+    fn regional_constructor_inventory_detects_unreviewed_escape_shapes() {
+        // Keep this synthetic access spelling out of the older raw-text access
+        // inventory: that inventory counts production call syntax and cannot
+        // distinguish Rust embedded in a test string. The parser below still
+        // receives the exact spelling which this fixture is meant to detect.
+        let access_entry = ["with_runtime_value", "_access"].concat();
+        let source = format!(
+            r#"
+            fn bare(factory: &CoreValueFactory) -> LazyValue {{
+                factory.{access_entry}(|access| {{
+                    LazyValue::error_in(&access, "bare")
+                }})
+            }}
+
+            fn containing(factory: &CoreValueFactory) -> Holder {{
+                factory.{access_entry}(|access| Holder {{
+                    value: LazyValue::error_in(&access, "contained"),
+                }})
+            }}
+        "#
+        );
+        let sites = regional_constructor_sites(Path::new("synthetic_escape.rs"), &source);
+        assert_eq!(sites.len(), 2);
+        assert_eq!(sites[0].declaration, "synthetic_escape.rs::bare");
+        assert_eq!(
+            sites[0].calls.access_entries,
+            BTreeSet::from(["with_runtime_value_access".to_owned()])
+        );
+        assert_eq!(
+            sites[0].calls.owner_neutral,
+            BTreeSet::from(["error_in".to_owned()])
+        );
+        assert_eq!(sites[1].declaration, "synthetic_escape.rs::containing");
+        assert_eq!(
+            sites[1].calls.access_entries,
+            BTreeSet::from(["with_runtime_value_access".to_owned()])
+        );
+        assert_eq!(
+            sites[1].calls.owner_neutral,
+            BTreeSet::from(["error_in".to_owned()])
+        );
+    }
+
+    #[test]
+    fn regional_constructor_callers_are_exact_and_classified() {
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
         let owner_path = manifest.join("src/core/managed/recursive_cells.rs");
         let mut stack = vec![manifest.join("src")];
-        let mut entries = Vec::new();
+        let mut actual = Vec::new();
         while let Some(directory) = stack.pop() {
             for entry in fs::read_dir(directory).expect("the source tree should be readable") {
                 let path = entry.expect("a source entry should be readable").path();
@@ -2215,25 +2547,40 @@ mod tests {
                     continue;
                 }
                 let source = fs::read_to_string(&path).expect("Rust source should be readable");
-                let syntax = syn::parse_file(&source).unwrap_or_else(|failure| {
-                    panic!("failed to parse {}: {failure}", path.display())
-                });
                 let relative = path
                     .strip_prefix(manifest)
                     .expect("source should belong to the package");
-                let mut visitor = SelfOpeningVisitor {
-                    path: relative,
-                    entries: Vec::new(),
-                };
-                visitor.visit_file(&syntax);
-                entries.extend(visitor.entries);
+                actual.extend(regional_constructor_sites(relative, &source));
             }
         }
-        entries.sort();
-        assert!(
-            entries.is_empty(),
-            "production self-opening managed constructors escaped closure: {entries:?}"
+        actual.sort_by(|left, right| left.declaration.cmp(&right.declaration));
+
+        let mut reviewed = reviewed_constructor_sites();
+        reviewed.sort_by_key(|site| site.declaration);
+        for site in &reviewed {
+            assert!(!site.reason.is_empty());
+        }
+        let expected = reviewed
+            .iter()
+            .map(|site| site.declaration)
+            .collect::<Vec<_>>();
+        let actual_declarations = actual
+            .iter()
+            .map(|site| site.declaration.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual_declarations, expected,
+            "the production regional-constructor surface changed without an ownership classification"
         );
+        for (actual, reviewed) in actual.iter().zip(&reviewed) {
+            assert!(
+                disposition_matches(actual, reviewed.disposition),
+                "{} no longer matches its reviewed {:?} disposition: {}",
+                actual.declaration,
+                reviewed.disposition,
+                actual.calls.summary(&actual.declaration),
+            );
+        }
     }
 
     #[test]
