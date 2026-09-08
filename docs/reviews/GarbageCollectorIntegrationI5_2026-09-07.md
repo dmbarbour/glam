@@ -674,43 +674,203 @@ and then retires its source net.
 
 ##### GCI5R-001G — Closure audit and review reconciliation
 
-1. Revisit C.5 using the completed D-F call-site shapes. Prefer deleting or
-   fully privatizing any remaining owner-neutral fresh-construction seam. Add
-   a private pointer-sized lifetime carrier only if a necessary generic helper
-   still permits an otherwise hard-to-audit allocation-to-owner gap; do not
-   spread fresh lifetimes through public values or already-bounded read
-   accessors.
-2. Delete or privatize every constructor which can open managed access and
-   return a fresh bare edge or a structure containing one. Seal any raw
-   allocator visibility left temporarily open by C, and make the fail-closed
-   source inventory reject both escape forms. Do not mistake that lexical rule
-   for the forced-order behavioral proof.
-3. Reconcile `CoreValueAllocationScope`, `RuntimeValueAccess`, collector, and
-   ownership-ledger documentation with the final regional construction and
-   authoritative-owner handoff vocabulary.
-4. Run focused collector/managed/evaluator/net/publication tests, Miri for the
-   affected collector boundary, and the repository routine checks.
-5. Update this finding with final evidence and mark it closed only when the
-   deterministic former-gap tests pass without relying on `NoAuto`. Then
-   update the integration roadmap entry conditions for I11C and I12.
+G remains partitioned so the lexical closure latch, implementation surface,
+documentation, and behavioral evidence cannot be mistaken for one another:
 
-The following local selections remain intentionally deferred to their first
-owning checkpoint rather than being guessed by this review:
+| Checkpoint | Status | Purpose |
+| --- | --- | --- |
+| G.1 | complete | decide the deferred C.5 fresh-typestate question from the completed D-F call sites |
+| G.2a | pending | replace the boolean source heuristic with an exact regional-constructor caller inventory and classifier tests |
+| G.2b | pending | delete or narrow obsolete constructor seams and seal the final production visibility surface |
+| G.3 | pending | reconcile current regional-liveness and owner-handoff documentation |
+| G.4a | pending | run focused publication, reclamation, evaluator, promise, and net evidence |
+| G.4b | pending | run the repository routine checks and any change-triggered unsafe-boundary tools |
+| G.5 | pending | close the finding and update downstream integration gates only after G.4 passes |
 
-- B.2 chooses the concrete name and closure signature for same-region root
-  construction after B.1 exposes the factory-backed access API. Its fixed
-  contract is that the returned external object is already rooted, not that a
-  callback-free closure is typefully recognizable in arbitrary Rust code.
-- C chooses whether the narrowest practical allocator seam lives entirely in
-  `core::managed` or requires a temporary `pub(super)` bridge for core-net
-  construction. G must eliminate whichever temporary bridge is selected.
-- C.5's optional private fresh typestate is deferred to G after the D-F
-  cutovers, not presumed work. A need for an unrestricted conversion is
-  sufficient evidence to omit it.
-- Installing into an already published traced owner must share the structural
-  mutation gateway selected by GCI5R-002. Installing into a new, unpublished
-  parent is construction rather than post-publication mutation; C must keep
-  those cases distinct instead of inventing a generic edge-install API.
+###### G.1 — Post-cutover C.5 assessment and recommendation
+
+The completed D-F call sites do not reveal a useful local role for the
+previously considered fresh-allocation typestate. They divide into four
+concrete ownership shapes:
+
+1. A callback-free construction region builds an ordinary semantic graph and
+   `construct_runtime_value_root` or `ScopedValues::wrap` roots that complete
+   graph before managed access ends.
+2. Evaluator construction acquires a family root before leaving its small
+   access region, retains that root in the step-local publication nursery, and
+   retires it only after the result has entered its cache, net, or runtime
+   root.
+3. A genuine orchestration handoff carries `ManagedPromiseRoot` or
+   `ManagedCoreNetRoot`; the receiving coordinator, resolver, normalization,
+   frontier, or copy-source record is the intended durable owner.
+4. Same-region construction passes an owner-neutral facade through ordinary
+   `Value`, list, dictionary, function, and net builders before the complete
+   unpublished graph is installed beneath its eventual traced owner.
+
+A `Fresh<'scope, ManagedEdge>`-like carrier would constrain only the first
+step of case 4. Those builders need the normal semantic facade before its
+outer owner exists. An unrestricted facade projection would merely recreate
+the allocation-to-owner gap one line later; preventing that projection would
+require propagating the fresh lifetime through `Value` and every recursive
+container or introducing parallel fresh-aware builders. That is a broad
+semantic-representation transition, not a pointer-sized local guard. A
+lifetime tag on managed read pointers is also redundant: `RuntimeValueAccess`
+and the three `Managed*Access` types already carry the access lifetime and are
+thread-bound.
+
+**Recommendation:** do not introduce a fresh-allocation wrapper for the three
+I5 families. Keep the access-taking owner-neutral gateways as explicitly
+regional construction primitives, reduce their visibility where G.2 can do so
+without replacing them with equivalent forwarding APIs, and rely on three
+complementary closure checks:
+
+- raw allocation and cell/edge representations remain private to
+  `recursive_cells`;
+- the source inventory rejects production constructors which open their own
+  managed region and return a fresh facade or containing structure, while
+  separately enumerating the small regional gateway surface; and
+- forced collection at the former allocation/publication boundary proves that
+  each production handoff establishes its intended root or traced owner before
+  collection can intervene.
+
+Reconsider private fresh typestate for a later family only if that family
+introduces a necessary generic handoff whose intended owner cannot be kept in
+one regional operation. It remains acceptable only if every consuming
+operation simultaneously publishes a real root or installs the edge beneath
+a traced owner and there is no unrestricted facade/`Gc` conversion. The
+[I6+ Regional Allocation Migration Rule](../plans/GarbageCollectorIntegration_2026-08-19.md#i6-regional-allocation-migration-rule)
+continues to make that decision explicit at each new family.
+
+###### G.2 — Constructor-surface closure
+
+G.2 is source and API closure, not another representation migration.
+
+**G.2a — Exact regional caller inventory.** Replace
+`ConstructorCallInventory`'s current two booleans with a source-backed record of
+the exact production functions which call an owner-neutral constructor, call
+an in-region forwarding constructor, or open a managed access region around
+either operation. The access-entry vocabulary must include
+`with_runtime_value_access`, public-facade `Values::with_access`, and
+evaluator-step `with_value_access`; the constructor vocabulary must remain an
+explicit fail-closed set rather than a suffix match. Classify every admitted
+caller as one of:
+
+- an in-region forwarding helper which itself accepts `RuntimeValueAccess`;
+- a containing-root region which publishes through
+  `construct_runtime_value_root`, `try_construct_runtime_value_root`, or
+  `ScopedValues::wrap`;
+- an evaluator publication-nursery handoff which acquires its family root
+  before the small access region ends; or
+- an explicit family-root constructor for a genuine orchestration handoff.
+
+The inventory is deliberately an exact change detector, not an attempted Rust
+dataflow proof. Add synthetic parser/visitor fixtures which demonstrate that a
+new self-opening bare-facade return and a containing-structure return are
+reported before updating the production allowlist. A new caller must therefore
+fail the test and receive an ownership classification during review.
+
+**G.2b — Visibility and forwarding closure.** Starting from the G.2a record:
+
+- keep `allocate_managed_{lazy,promise,core_net}` and the concrete cell/edge
+  representations private to `recursive_cells`;
+- delete an obsolete self-opening or owner-neutral forwarding helper where it
+  has no remaining caller;
+- otherwise narrow visibility only when doing so does not replace the helper
+  with an equivalent forwarding API in another module;
+- retain test-only self-opening fixtures only when they exercise a distinct
+  lifecycle contract, and keep them excluded explicitly rather than by an
+  accidental parser blind spot; and
+- do not add fresh typestate, temporary roots, or a generic edge-install API as
+  incidental closure work.
+
+If the inventory proves that the present access-taking gateways are already
+the narrowest useful production seam, G.2b may close with no representation
+change. Its deliverable is the sealed surface and fail-closed regression latch,
+not a quota of deleted methods.
+
+Installing into an already published traced owner remains governed by the
+structural mutation gateway selected in GCI5R-002. Installation into a new,
+unpublished parent is construction and must not be routed through a fake
+post-publication mutation solely to make the inventories look uniform.
+
+###### G.3 — Ownership-contract reconciliation
+
+After G.2 fixes the final surface, reconcile one authoritative description of
+regional liveness and link the adjacent layers to it:
+
+- update `CoreValueAllocationScope`, `RuntimeValueAccess`, family gateway, and
+  evaluator publication-nursery comments to distinguish access-region
+  liveness from durable ownership;
+- keep the collector's `Allocator::alloc` contract general: allocation returns
+  a non-rooting pointer protected by the current mutator, while Glam supplies
+  its stricter graph-publication policy above that boundary;
+- update `docs/architecture/evaluation.md` with current control flow, and the
+  ownership ledger with the authoritative owner classes; and
+- update this review's GCI5R-001A mismatch-fixture account to distinguish its
+  historical failing chronology from the post-cutover same-region test;
+- remove completed migration wording from the integration plan without
+  copying review chronology into current architecture documentation.
+
+`docs/AgentContext.md` and `src/README.md` need changes only if G.2 changes a
+cross-layer rule or module responsibility. Do not churn them merely to repeat
+the ownership ledger.
+
+###### G.4 — Verification
+
+**G.4a — Focused evidence.** Run the constructor-privacy and exact-caller
+inventories together with the regional containing-root, early-return,
+former-gap replacement, evaluator publication-nursery, promise
+registration/retirement, and prepared-net handoff fixtures. Audit the tests
+before adding another: each of the four G.1 ownership shapes needs one
+deterministic example, but duplicate permutations add no proof.
+
+The historical gap now has two distinct replacement proofs:
+
+- When construction and containing-root publication share one access region,
+  attempt collection after the fresh family allocations but before the closure
+  returns and assert that active mutator admission excludes it. Then collect
+  after the region closes and prove that the newly published containing root
+  retains exactly the returned graph. The current
+  `fresh_managed_facades_survive_until_first_publication` test covers only the
+  second half and must not be described as collection inside the former gap.
+- When an orchestration boundary genuinely requires separate access regions,
+  retain the already-intended family root and force a successful collection in
+  that interval. The evaluator publication-nursery, promise registration, and
+  prepared-net tests cover representative forms; add a fixture only if their
+  forced chronology does not match the final call site.
+
+A passing test which merely inherits `CollectionPolicy::NoAuto` is not
+evidence. Same-thread `CollectionError::ActiveMutator` plus post-publication
+collection is sufficient for the regional case because the collector's
+mutator/exclusive-admission protocol is verified independently. Any claim
+about a concurrent handoff must instead use deterministic barriers or an
+existing forced-order fixture; no schedule-sensitive conclusion may rely on
+uncontrolled repetition.
+
+**G.4b — Broad and unsafe-boundary evidence.** Run the repository routine
+checks after the focused suite. Run targeted Miri only if G.2 changes collector
+unsafe code, root construction, managed dereference, or access-lifetime
+machinery. Visibility, source-inventory, and documentation-only closure does
+not justify an unrelated Miri run; the integration verification matrix and
+Gate G3 retain the complete focused Miri/sanitizer obligation.
+
+###### G.5 — Finding and roadmap closure
+
+Only after G.4 passes:
+
+1. record exact commands and results here, change GCI5R-001 to closed, and
+   update this review's summary while leaving GCI5R-002 independently open;
+2. reconcile the integration plan's I6+ regional-allocation entry condition
+   with the completed I5 precedent, without weakening the rule for new
+   families;
+3. update Gate G2/I11 certification language to consume the closed temporal
+   publication evidence; and
+4. remove the temporary GCI5R-001 block from I11C and I12 while preserving
+   their independent Gate G2, GCI5R-002, readiness, and policy prerequisites.
+
+G.5 is administrative reconciliation, not permission to enable automatic
+collection. Production remains `NoAuto` until the later integration gates
+explicitly select another policy for newly constructed runtimes.
 
 ### GCI5R-002 — Production writers do not yet enter the collector mutation gateway
 

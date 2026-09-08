@@ -5033,7 +5033,8 @@ logical visits as profiling evidence while the collector marks the repeated
 managed identity once; no traversal cache or deduplication policy was added.
 
 Only closed isolated fixtures collect. The complete production runtime remains
-`NoAuto`, and the mandatory post-I5 review follows before I6 begins.
+`NoAuto`. The mandatory post-I5 review is complete; its GCI5R-001 regional-
+publication closure checkpoint remains an I6 entry condition.
 
 ### I6+ Regional Allocation Migration Rule
 
@@ -5066,8 +5067,11 @@ GCI5R-001B completed the shared operational foundation on 2026-09-07:
 access-owned containing-value root publisher, and the factory supplies
 infallible and fallible callback-free construction entries which publish only
 the returned graph before access ends. `ScopedValues::wrap` reuses that
-publisher without nested admission. The family cutovers in GCI5R-001C-F must
-still apply this foundation before the overall finding can close.
+publisher without nested admission. GCI5R-001C-F have applied that foundation
+to lazies, promises, and core nets. The finding remains open only for the
+constructor-surface inventory, documentation, verification, and downstream
+reconciliation partitioned in
+[`GCI5R-001G`](../reviews/GarbageCollectorIntegrationI5_2026-09-07.md#gci5r-001g--closure-audit-and-review-reconciliation).
 
 ## Phase I6 — Functions, Applications, Metadata, and Failures
 
