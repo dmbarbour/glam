@@ -602,8 +602,8 @@ impl LocalPromiseOwner {
             .clone();
         for obligation in obligations {
             let values = obligation
-                .root
-                .observer()
+                .wait
+                .value_observer()
                 .upgrade()
                 .expect("a registered local promise must retain its live value domain");
             let _ = obligation.root.publish(&values, Err(failure.clone()));

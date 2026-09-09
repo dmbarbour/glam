@@ -564,9 +564,10 @@ impl ReflectionEnvironmentBuilder<'_> {
     pub fn promise(&mut self, label: impl Into<Arc<str>>) -> (Value, PromiseResolver) {
         let values = self.host.values();
         values.with_access(|scoped| {
+            let label = label.into();
             let promise = scoped
                 .runtime_access()
-                .construct_rooted_managed_promise(label)
+                .construct_rooted_managed_promise(label.clone())
                 .expect("managed promise representation must fit one collector run");
             let value = scoped.wrap(CoreValue::Promised(PromisedValue::from_root(
                 &promise,
@@ -575,7 +576,8 @@ impl ReflectionEnvironmentBuilder<'_> {
             (
                 value,
                 PromiseResolver {
-                    runtime: self.host.resources.id,
+                    observer: scoped.runtime_access().values().runtime_value_observer(),
+                    label,
                     promise: Some(promise),
                 },
             )
@@ -854,9 +856,10 @@ impl Assembler {
     pub fn promise(&self, label: impl Into<Arc<str>>) -> (Value, PromiseResolver) {
         let values = self.values();
         values.with_access(|scoped| {
+            let label = label.into();
             let promise = scoped
                 .runtime_access()
-                .construct_rooted_managed_promise(label)
+                .construct_rooted_managed_promise(label.clone())
                 .expect("managed promise representation must fit one collector run");
             let value = scoped.wrap(CoreValue::Promised(PromisedValue::from_root(
                 &promise,
@@ -865,7 +868,8 @@ impl Assembler {
             (
                 value,
                 PromiseResolver {
-                    runtime: self.reasoning.runtime.id(),
+                    observer: scoped.runtime_access().values().runtime_value_observer(),
+                    label,
                     promise: Some(promise),
                 },
             )

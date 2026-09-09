@@ -258,7 +258,8 @@ mod tests {
         let Value::Lazy(reflection_lazy) = reflection_value else {
             unreachable!("the reflection fixture must be lazy")
         };
-        let Some(LazySource::ReflectionTask(reflection)) = reflection_lazy.source_snapshot() else {
+        let Some(LazySource::ReflectionTask(reflection)) = reflection_lazy.source_snapshot(&values)
+        else {
             unreachable!("the reflection fixture must retain its source")
         };
         assert!(
@@ -269,7 +270,7 @@ mod tests {
         let promise = PromisedValue::new(&values, "compatibility visitor promise");
         crate::core::set_test_promise(&values, &promise, first.clone())
             .expect("the fresh promise should accept one assignment");
-        assert_eq!(promise.assignment(), Some(Ok(first.clone())));
+        assert_eq!(promise.assignment(&values), Some(Ok(first.clone())));
 
         let failed_promise = PromisedValue::new(&values, "compatibility visitor failure");
         crate::core::fail_test_promise(
@@ -281,7 +282,7 @@ mod tests {
             ),
         )
         .expect("the fresh promise should accept one failure");
-        assert!(matches!(failed_promise.assignment(), Some(Err(_))));
+        assert!(matches!(failed_promise.assignment(&values), Some(Err(_))));
 
         let pending = LazyValue::semantic_computation(
             &values,
@@ -290,7 +291,7 @@ mod tests {
             return_first_capture,
         );
         let source = pending
-            .source_snapshot()
+            .source_snapshot(&values)
             .expect("the pending lazy must retain its source");
         assert_eq!(edges(&source), [first.clone(), second.clone()]);
 
@@ -309,7 +310,7 @@ mod tests {
         assert_eq!(
             edges(
                 &complete
-                    .cached()
+                    .cached(&values)
                     .expect("the completed lazy must retain its result")
                     .expect("the completed lazy should succeed")
             ),
@@ -370,8 +371,9 @@ mod tests {
 
     #[test]
     fn external_host_call_has_no_reported_semantic_edge() {
+        let values = values();
         let source = LazyValue::external_host_call(
-            &values(),
+            &values,
             "compatibility visitor host call",
             HostCallRecord::external(
                 "compatibility visitor host call",
@@ -380,7 +382,7 @@ mod tests {
             ),
             || Err(Arc::new(EvaluationFailure::message("not invoked"))),
         )
-        .source_snapshot()
+        .source_snapshot(&values)
         .expect("the host call should remain pending");
 
         assert!(edges(&source).is_empty());

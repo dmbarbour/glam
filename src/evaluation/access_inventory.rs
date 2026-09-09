@@ -125,8 +125,10 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // its returned graph before that same bounded access ends. GCI5R-003E
         // adds the explicit producer-installation gateway plus test-only
         // promise/lazy publication helpers; semantic facades no longer reopen
-        // managed access to mutate themselves.
-        ("src/core.rs", GatewayCounts::new(23, 5)),
+        // managed access to mutate themselves. GCI5R-003F removes their weak
+        // observers; seven test-only inspection helpers now require an
+        // explicit matching factory and enter through this counted gateway.
+        ("src/core.rs", GatewayCounts::new(30, 5)),
         // I5D scopes every managed core-net construction, root handoff, and
         // source-frontier traversal through matching value-domain authority.
         // GCI5R-008's test-only prepared-source bridge reopens the matching

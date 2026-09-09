@@ -31,7 +31,7 @@ pub(super) fn eval_closed_expr(expr: &TestExpr) -> Result<Value, EvaluationHalt>
     let context = test_context();
     let mut value = eval_value(&context, &lower_test_computation_value(expr.clone()))?;
     while matches!(&value, Value::Lazy(lazy)
-    if lazy.source_snapshot().is_some_and(|source| {
+    if lazy.source_snapshot(context.values()).is_some_and(|source| {
         matches!(source, crate::core::LazySource::FunctionCall { .. })
     })) {
         value = eval_value(&context, &value)?;

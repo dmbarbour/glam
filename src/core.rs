@@ -271,7 +271,6 @@ pub(crate) struct LazyCycleMember {
 #[derive(Clone)]
 pub struct LazyValue {
     edge: managed::ManagedLazyEdge,
-    values: RuntimeValueObserver,
 }
 
 /// The one terminal assignment retained by a named promise.
@@ -284,7 +283,6 @@ pub(crate) type PromiseAssignment = Result<Value, Arc<EvaluationFailure>>;
 #[derive(Clone)]
 pub(crate) struct PromisedValue {
     edge: managed::ManagedPromiseEdge,
-    values: RuntimeValueObserver,
 }
 
 // GCI5R-003 records the pre-remediation façade cost explicitly. Later
@@ -292,8 +290,10 @@ pub(crate) struct PromisedValue {
 // are removed; they are not a language-level value-size policy.
 #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
 const _: () = {
-    assert!(std::mem::size_of::<LazyValue>() == 24);
-    assert!(std::mem::size_of::<PromisedValue>() == 24);
+    assert!(std::mem::size_of::<LazyValue>() == 8);
+    assert!(std::mem::size_of::<PromisedValue>() == 8);
+    assert!(!std::mem::needs_drop::<LazyValue>());
+    assert!(!std::mem::needs_drop::<PromisedValue>());
 };
 
 /// Runtime-selected construction authority for values which allocate stable
@@ -710,7 +710,6 @@ impl LazyValue {
     ) -> Self {
         Self {
             edge: root.edge(access),
-            values: root.observer().clone(),
         }
     }
 
@@ -885,50 +884,31 @@ impl LazyValue {
         &'access self,
         access: &'access RuntimeValueAccess<'scope>,
     ) -> managed::ManagedLazyAccess<'access, 'scope> {
-        self.edge
-            .access(&self.values, access)
-            .expect("lazy value and access must share one value domain")
+        self.edge.access(access)
     }
 
     #[cfg(test)]
-    pub(crate) fn root(&self) -> managed::ManagedLazyRoot {
-        let observer = self.values.clone();
-        self.with_runtime_access(|access| access.root_managed_lazy(observer, self.edge))
+    pub(crate) fn root(&self, values: &CoreValueFactory) -> managed::ManagedLazyRoot {
+        values.with_runtime_value_access(|access| self.root_in(&access))
     }
 
     pub(crate) fn root_in(&self, access: &RuntimeValueAccess<'_>) -> managed::ManagedLazyRoot {
-        access.root_managed_lazy(self.values.clone(), self.edge)
+        access.root_managed_lazy(self.edge)
     }
 
     #[cfg(test)]
-    pub(crate) fn id(&self) -> LazyId {
-        self.with_access(|lazy| lazy.id())
+    pub(crate) fn id(&self, values: &CoreValueFactory) -> LazyId {
+        values.with_runtime_value_access(|access| self.access(&access).id())
     }
 
     #[cfg(test)]
-    fn with_runtime_access<R>(
-        &self,
-        operation: impl for<'scope> FnOnce(RuntimeValueAccess<'scope>) -> R,
-    ) -> R {
-        self.values
-            .upgrade()
-            .expect("a managed lazy can only be observed in its live value domain")
-            .with_runtime_value_access(operation)
+    pub(crate) fn source_snapshot(&self, values: &CoreValueFactory) -> Option<LazySource> {
+        values.with_runtime_value_access(|access| self.access(&access).source_snapshot())
     }
 
     #[cfg(test)]
-    fn with_access<R>(&self, operation: impl FnOnce(managed::ManagedLazyAccess<'_, '_>) -> R) -> R {
-        self.with_runtime_access(|access| operation(self.access(&access)))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn source_snapshot(&self) -> Option<LazySource> {
-        self.with_access(|lazy| lazy.source_snapshot())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn cached(&self) -> Option<LazyResult> {
-        self.with_access(|lazy| lazy.cached())
+    pub(crate) fn cached(&self, values: &CoreValueFactory) -> Option<LazyResult> {
+        values.with_runtime_value_access(|access| self.access(&access).cached())
     }
 }
 
@@ -939,7 +919,6 @@ impl PromisedValue {
     ) -> Self {
         Self {
             edge: root.edge(access),
-            values: root.observer().clone(),
         }
     }
 
@@ -985,58 +964,39 @@ impl PromisedValue {
         &'access self,
         access: &'access RuntimeValueAccess<'scope>,
     ) -> managed::ManagedPromiseAccess<'access, 'scope> {
-        self.edge
-            .access(&self.values, access)
-            .expect("promise value and access must share one value domain")
+        self.edge.access(access)
     }
 
     #[cfg(test)]
-    pub(crate) fn root(&self) -> managed::ManagedPromiseRoot {
-        let observer = self.values.clone();
-        self.with_runtime_access(|access| access.root_managed_promise(observer, self.edge))
+    pub(crate) fn root(&self, values: &CoreValueFactory) -> managed::ManagedPromiseRoot {
+        values.with_runtime_value_access(|access| self.root_in(&access))
     }
 
     pub(crate) fn root_in(&self, access: &RuntimeValueAccess<'_>) -> managed::ManagedPromiseRoot {
-        access.root_managed_promise(self.values.clone(), self.edge)
+        access.root_managed_promise(self.edge)
     }
 
     #[cfg(test)]
-    pub(crate) fn id(&self) -> PromiseId {
-        self.with_access(|promise| promise.id())
+    pub(crate) fn id(&self, values: &CoreValueFactory) -> PromiseId {
+        values.with_runtime_value_access(|access| self.access(&access).id())
     }
 
     #[cfg(test)]
-    fn with_runtime_access<R>(
+    pub(crate) fn task(&self, values: &CoreValueFactory) -> Option<Arc<PromiseProducerObligation>> {
+        values.with_runtime_value_access(|access| self.access(&access).producer())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn assignment(
         &self,
-        operation: impl for<'scope> FnOnce(RuntimeValueAccess<'scope>) -> R,
-    ) -> R {
-        self.values
-            .upgrade()
-            .expect("a managed promise can only be observed in its live value domain")
-            .with_runtime_value_access(operation)
+        values: &CoreValueFactory,
+    ) -> Option<Result<Value, Arc<EvaluationFailure>>> {
+        values.with_runtime_value_access(|access| self.access(&access).assignment())
     }
 
     #[cfg(test)]
-    fn with_access<R>(
-        &self,
-        operation: impl FnOnce(managed::ManagedPromiseAccess<'_, '_>) -> R,
-    ) -> R {
-        self.with_runtime_access(|access| operation(self.access(&access)))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn task(&self) -> Option<Arc<PromiseProducerObligation>> {
-        self.with_access(|promise| promise.producer())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn assignment(&self) -> Option<Result<Value, Arc<EvaluationFailure>>> {
-        self.with_access(|promise| promise.assignment())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn exact_subscription_count(&self) -> usize {
-        self.with_access(|promise| promise.exact_subscription_count())
+    pub(crate) fn exact_subscription_count(&self, values: &CoreValueFactory) -> usize {
+        values.with_runtime_value_access(|access| self.access(&access).exact_subscription_count())
     }
 }
 
@@ -2546,13 +2506,13 @@ mod tests {
         });
         let observer = lazy.clone();
         let active_snapshot = lazy
-            .source_snapshot()
+            .source_snapshot(&values)
             .expect("an unresolved lazy should expose a source snapshot");
 
         let result = EvaluatedValue::try_from(values.unit()).expect("unit is already evaluated");
         assert!(cache_test_lazy(&values, &observer, Ok(result)).is_ok());
         assert!(
-            lazy.source_snapshot().is_none(),
+            lazy.source_snapshot(&values).is_none(),
             "all clones should observe the released shared source"
         );
         assert!(
@@ -2713,7 +2673,10 @@ mod tests {
 
         set_test_promise(&values, &promise, cycle)
             .expect("an unresolved promise should accept a recursive value graph");
-        assert!(matches!(promise.assignment(), Some(Ok(Value::Dict(_)))));
+        assert!(matches!(
+            promise.assignment(&values),
+            Some(Ok(Value::Dict(_)))
+        ));
     }
 
     #[test]
@@ -2723,20 +2686,20 @@ mod tests {
             RuntimeIds::new(),
         );
         let domain = Arc::downgrade(values.value_domain());
-        let promise = PromisedValue::new(&values, "weak publication authority");
+        let _promise = PromisedValue::new(&values, "weak publication authority");
 
         drop(values);
 
         assert!(domain.upgrade().is_none());
-        assert!(!promise.values.is_live());
     }
 
     #[test]
     fn semantic_values_can_hold_lazy_errors() {
-        let value = Value::error(&values(), "ambiguous key");
+        let values = values();
+        let value = Value::error(&values, "ambiguous key");
 
         assert!(
-            matches!(value, Value::Lazy(lazy) if lazy.cached().is_some_and(|value| value.is_err()))
+            matches!(value, Value::Lazy(lazy) if lazy.cached(&values).is_some_and(|value| value.is_err()))
         );
     }
 
@@ -2776,28 +2739,32 @@ mod tests {
             .expect("new promise should accept its target");
 
         assert!(matches!(
-            forwarding.assignment(),
+            forwarding.assignment(&values),
             Some(Ok(Value::Promised(_)))
         ));
 
         let ready = PromisedValue::new(&values, "ready");
         set_test_promise(&values, &ready, Value::Number(42.into()))
             .expect("new promise should accept its value");
-        assert_eq!(ready.assignment(), Some(Ok(Value::Number(42.into()))));
+        assert_eq!(
+            ready.assignment(&values),
+            Some(Ok(Value::Number(42.into())))
+        );
     }
 
     #[test]
     fn lazy_cycle_failures_retain_member_identity_and_labels() {
-        let first = LazyValue::error(&values(), "first failure");
-        let second = LazyValue::error(&values(), "second failure");
+        let values = values();
+        let first = LazyValue::error(&values, "first failure");
+        let second = LazyValue::error(&values, "second failure");
         let cycle = EvaluationFailure::dependency_cycle(Arc::new(LazyCycle {
             members: vec![
                 LazyCycleMember {
-                    id: first.id(),
+                    id: first.id(&values),
                     label: Arc::from("first"),
                 },
                 LazyCycleMember {
-                    id: second.id(),
+                    id: second.id(&values),
                     label: Arc::from("second"),
                 },
             ]
@@ -2808,9 +2775,9 @@ mod tests {
             cycle.to_string(),
             format!(
                 "lazy dependency cycle -> {} (first) -> {} (second) -> {}",
-                first.id().get(),
-                second.id().get(),
-                first.id().get()
+                first.id(&values).get(),
+                second.id(&values).get(),
+                first.id(&values).get()
             )
         );
     }

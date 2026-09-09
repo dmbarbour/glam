@@ -1169,11 +1169,11 @@ Loom coverage.
 **Classification:** undocumented representation drift  
 **Priority:** medium  
 **Confidence:** high  
-**Status:** remediation planned 2026-09-09; does not block current
-correctness, but should close before I6 establishes another façade precedent
+**Status:** remediation through GCI5R-003F completed 2026-09-09;
+GCI5R-003G closure and adjacent-façade audit remain
 
-The I5.0 disposition says IDs and labels remain cell-resident and are copied
-only into diagnostics or explicit indexes. The implementation stores both
+The I5.0 disposition said IDs and labels remain cell-resident and are copied
+only into diagnostics or explicit indexes. The implementation stored both
 `id` and `label` in every `LazyValue` and `PromisedValue` façade in addition to
 the same fields in the managed cell. Their registered-root holders repeat the
 fields again. `PartialEq`, dependency-key construction, cycle reporting, and
@@ -1189,9 +1189,12 @@ semantic edge and a durable diagnostic/coordination record.
 #### Accepted target
 
 `LazyValue` and `PromisedValue` become edge-only semantic façades. The managed
-cell is the canonical owner of its ID and diagnostic label. An ID or label is
-copied only into a concrete scheduler index, diagnostic record, or external
-capability which demonstrably needs to use it without managed access.
+cell is the canonical owner of identity metadata needed by semantic
+evaluation. The lazy cell retains its ID and diagnostic label; promise
+evaluation needs only the cell's ID after the public resolver takes ownership
+of its host-facing label. An ID or label is copied only into a concrete
+scheduler index, diagnostic record, or external capability which demonstrably
+needs to use it without managed access.
 
 A weak runtime observer is likewise not a property of an interior semantic
 edge. Managed reads require an explicit `RuntimeValueAccess` (or the narrower
@@ -1252,12 +1255,12 @@ The completed inventory found the following retained roles:
 | Location | Retained state | Disposition |
 | --- | --- | --- |
 | `ManagedLazyCell` | canonical lazy ID and label, source, terminal result | Keep; this is the managed identity. |
-| `LazyValue` | copied ID and label, managed edge, weak observer | Remove the copies in 003B, then the observer in 003F. |
-| `ManagedLazyRoot` | copied ID and label, edge, root, observer | Audit after scoped reads and root-owned writes are in place; its ID/label currently serve task indexing and cycle diagnostics. |
-| `ManagedPromiseCell` | canonical promise ID and label, weak observer, assignment, completion state, producer route | Remove the observer in 003C; it is not canonical state. |
-| `PromisedValue` | copied ID and label, managed edge, weak observer | Remove the copies in 003B, then the observer in 003F. |
-| `ManagedPromiseRoot` | copied ID and label, edge, root, observer | Keep through 003D/E, then retain only fields justified by coordinator or public-capability use. |
-| `PromiseResolver` | runtime ID and promise root | Convert in 003F to the explicit weak-observer, label, and affine-root exception. |
+| `LazyValue` | managed edge | Final after 003F. |
+| `ManagedLazyRoot` | lazy ID, cycle-diagnostic label, registered root | Final: scheduler/cycle reporting consumes the copies without managed access; GCI5R-008 removed its cached edge and 003F removed its observer. |
+| `ManagedPromiseCell` | promise ID, assignment, completion state, producer route | Final: 003C removed the observer and 003F removed the otherwise unread label. |
+| `PromisedValue` | managed edge | Final after 003F. |
+| `ManagedPromiseRoot` | promise ID, registered root, terminal/completion/producer sidecars | Final: the ID indexes work and the edge-free sidecars are inspected under coordinator locks; no label, observer, or cached edge remains. |
+| `PromiseResolver` | weak observer, host diagnostic label, affine promise root | Final exception after 003F. |
 
 The access-free façade methods are lazy `root`, `source_snapshot`, `cached`,
 and `cache`, plus promise `root`, `task`, assignment/subscription inspection,
@@ -1425,6 +1428,8 @@ GCI5R-003F.
 
 ##### GCI5R-003F — Remove semantic-edge observers and audit durable copies
 
+**Completed:** 2026-09-09
+
 **Entry condition:** close GCI5R-008 first. A registered root must be able to
 project its own managed edge so this checkpoint does not replace façade
 observers while preserving a redundant cached pointer elsewhere.
@@ -1447,6 +1452,38 @@ observers while preserving a redundant cached pointer elsewhere.
 - Verify the final 64-bit `LazyValue` and `PromisedValue` layouts are each one
   pointer, cloning them performs no `Arc`/`Weak` atomic operation, and resolver
   behavior remains correct after runtime retirement.
+
+The semantic lazy and promise façades now contain exactly one managed edge.
+Their target-specific layout latches record an 8-byte size and no drop glue on
+x86-64; source latches forbid observers, roots, `Arc`, `Weak`, IDs, and labels
+from returning to either façade. Because the remaining managed edge is
+`Copy`, derived façade cloning only copies that pointer and performs no
+reference-count atomic operation. Test inspection helpers now require an
+explicit matching `CoreValueFactory`; production code continues to use the
+already-open `RuntimeValueAccess` or evaluator access region.
+
+The durable-copy audit retained lazy ID and label on `ManagedLazyRoot` for
+scheduler indexing and concrete cycle diagnostics. `ManagedPromiseRoot`
+retains its ID plus the registered root and edge-free terminal, completion,
+and producer sidecars required while coordinator state is locked. It no longer
+retains a label, observer, or cached edge. The promise cell's label also had no
+remaining production reader, so it was removed; `PromiseResolver` now owns the
+only host-facing promise label together with its weak runtime observer and
+`Option<ManagedPromiseRoot>` affine disarm state.
+
+The unsafe access proof is structural. Private runtime-scoped constructors
+create each edge in one managed heap and publish it below either an exact
+registered root or a traced same-graph value before access ends. A bare edge is
+dereferenced only while traversing that live owner under its matching
+`RuntimeValueAccess`. Public value boundaries reject cross-runtime
+composition, while debug collector access checks validate heap and canonical
+type metadata. No façade can independently reopen a runtime or extend the
+mutator region across orchestration.
+
+Focused managed-cell, evaluator, coordinator, cycle, and public-resolver tests
+cover the migrated access shapes. Existing public API fixtures verify resolver
+drop and completion after runtime retirement through the resolver's deliberate
+weak-observer route.
 
 ##### GCI5R-003G — Closure and adjacent-façade audit
 

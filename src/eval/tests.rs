@@ -60,7 +60,7 @@ fn apply_test_values(function: Value, arguments: impl IntoIterator<Item = Value>
 }
 
 fn cached_value(lazy: &LazyValue) -> Value {
-    lazy.cached()
+    lazy.cached(&crate::core::test_value_factory())
         .expect("lazy value should be cached")
         .expect("lazy value should succeed")
         .into_value()
@@ -374,7 +374,7 @@ fn terminal_lazy_evaluation_releases_successful_and_failed_sources() {
         eval_lazy(&context, &success).expect("lazy source should succeed"),
         unit_value()
     );
-    assert!(success.source_snapshot().is_none());
+    assert!(success.source_snapshot(context.values()).is_none());
     assert!(
         success_dropped.load(Ordering::Acquire),
         "successful production should release its source captures"
@@ -393,7 +393,7 @@ fn terminal_lazy_evaluation_releases_successful_and_failed_sources() {
 
     let error = eval_lazy(&context, &failure).expect_err("lazy source should fail");
     assert_eq!(error.to_string(), "expected lazy failure");
-    assert!(failure.source_snapshot().is_none());
+    assert!(failure.source_snapshot(context.values()).is_none());
     assert!(
         failure_dropped.load(Ordering::Acquire),
         "failed production should release its source captures"
@@ -780,7 +780,7 @@ fn promised_values_fail_fast_without_poisoning_later_assignment() {
         eval_value(&context, &value).unwrap_err().to_string(),
         "promised value was observed before initialization"
     );
-    assert_eq!(promised.assignment(), None);
+    assert_eq!(promised.assignment(context.values()), None);
     set_promise(&context, &promised, n(42)).unwrap();
     assert_eq!(eval_value(&context, &value).unwrap(), n(42));
 }
@@ -809,7 +809,7 @@ fn deferred_computation_blockage_does_not_poison_its_lazy_cache() {
         eval_value(&observer, &value).expect_err("the unresolved input promise should block");
     assert!(blocked.blocked_on().is_some());
     assert!(
-        lazy.cached().is_none(),
+        lazy.cached(session.values()).is_none(),
         "a retryable deferred error must not poison the terminal lazy cache"
     );
     assert!(
@@ -868,7 +868,7 @@ fn deferred_computation_caches_one_structured_failure() {
         eval_value(&context, &value).expect_err("the deferred computation should fail permanently");
     let observed_failure = error.into_permanent_failure();
     let cached_failure = lazy
-        .cached()
+        .cached(context.values())
         .expect("a permanent deferred failure should be cached")
         .expect_err("the cached result should be the failure");
 
@@ -951,7 +951,7 @@ fn interaction_net_construction_dependency_does_not_poison_its_lazy_value() {
         .expect_err("net construction should block on its unresolved effect");
     assert!(blocked.blocked_on().is_some());
     assert!(
-        lazy.cached().is_none(),
+        lazy.cached(session.values()).is_none(),
         "a retryable construction dependency must not become a cached failure"
     );
 }
@@ -975,7 +975,7 @@ fn deferred_computation_caches_one_text_failure() {
         .expect_err("the deferred computation should fail")
         .into_permanent_failure();
     let cached = lazy
-        .cached()
+        .cached(context.values())
         .expect("the deferred failure should be cached")
         .expect_err("the terminal cache should contain a failure");
     assert!(Arc::ptr_eq(&first, &cached));
@@ -1030,15 +1030,15 @@ fn computed_lazy_waits_on_an_empty_promise_without_caching_its_error() {
 
     let blocked = eval_value(&context, &value).expect_err("empty promise should block its lazy");
     assert!(blocked.blocked_on().is_some());
-    assert_eq!(promise.exact_subscription_count(), 1);
-    assert!(lazy.cached().is_none());
-    assert_eq!(promise.assignment(), None);
+    assert_eq!(promise.exact_subscription_count(context.values()), 1);
+    assert!(lazy.cached(context.values()).is_none());
+    assert_eq!(promise.assignment(context.values()), None);
 
     set_promise(&context, &promise, n(42)).unwrap();
-    assert_eq!(promise.exact_subscription_count(), 0);
+    assert_eq!(promise.exact_subscription_count(context.values()), 0);
     assert_eq!(eval_value(&context, &value).unwrap(), n(42));
     assert_eq!(
-        lazy.cached(),
+        lazy.cached(context.values()),
         Some(Ok(EvaluatedValue::try_from(n(42)).unwrap()))
     );
 }
@@ -1057,11 +1057,11 @@ fn resolver_failure_exactly_wakes_its_deferred_follower() {
     let blocked = eval_value(&context, &value)
         .expect_err("an unresolved resolver promise should block its follower");
     assert!(blocked.blocked_on().is_some());
-    assert_eq!(promise.exact_subscription_count(), 1);
+    assert_eq!(promise.exact_subscription_count(context.values()), 1);
 
     fail_promise_message(&context, &promise, "resolver failed deliberately")
         .expect("the unresolved resolver promise should fail once");
-    assert_eq!(promise.exact_subscription_count(), 0);
+    assert_eq!(promise.exact_subscription_count(context.values()), 0);
     assert_eq!(
         eval_value(&context, &value)
             .expect_err("the woken follower should expose the resolver failure")
@@ -1087,16 +1087,16 @@ fn resolver_completion_wakes_only_its_cross_session_deferred_follower() {
 
     assert!(eval_value(&observer, &lazy_a).is_err());
     assert!(eval_value(&observer, &lazy_b).is_err());
-    assert_eq!(promise_a.exact_subscription_count(), 1);
-    assert_eq!(promise_b.exact_subscription_count(), 1);
+    assert_eq!(promise_a.exact_subscription_count(owner.values()), 1);
+    assert_eq!(promise_b.exact_subscription_count(owner.values()), 1);
 
     set_promise(&owner, &promise_a, n(41)).expect("promise A should accept its assignment");
-    assert_eq!(promise_a.exact_subscription_count(), 0);
-    assert_eq!(promise_b.exact_subscription_count(), 1);
+    assert_eq!(promise_a.exact_subscription_count(owner.values()), 0);
+    assert_eq!(promise_b.exact_subscription_count(owner.values()), 1);
     assert_eq!(eval_value(&observer, &lazy_a).unwrap(), n(41));
 
     set_promise(&owner, &promise_b, n(42)).expect("promise B should accept its assignment");
-    assert_eq!(promise_b.exact_subscription_count(), 0);
+    assert_eq!(promise_b.exact_subscription_count(owner.values()), 0);
     assert_eq!(eval_value(&observer, &lazy_b).unwrap(), n(42));
 }
 
@@ -1114,9 +1114,12 @@ fn promised_assignment_follows_a_lazy_without_resolving_the_raw_assignment() {
         eval_value(&context, &Value::Promised(promise.clone())).unwrap(),
         n(42)
     );
-    assert_eq!(promise.assignment(), Some(Ok(Value::Lazy(target.clone()))));
     assert_eq!(
-        target.cached(),
+        promise.assignment(context.values()),
+        Some(Ok(Value::Lazy(target.clone())))
+    );
+    assert_eq!(
+        target.cached(context.values()),
         Some(Ok(EvaluatedValue::try_from(n(42)).unwrap()))
     );
 }
@@ -1129,7 +1132,7 @@ fn promised_failure_preserves_structured_diagnostic_and_identity() {
         .unwrap();
     let observer = session.with_new_task().unwrap();
     let wait = promise
-        .task()
+        .task(session.values())
         .expect("task-owned promise should expose its wait")
         .wait()
         .clone();
@@ -1182,7 +1185,7 @@ fn promise_only_cycle_remains_blocked_without_poisoning_its_assignment() {
     assert!(error.blocked_on().is_some());
     assert!(context.promise_failure(&promise).is_none());
     assert!(matches!(
-        promise.assignment(),
+        promise.assignment(context.values()),
         Some(Ok(Value::Promised(assigned))) if assigned == promise
     ));
 }
@@ -1203,9 +1206,9 @@ fn mixed_promise_lazy_cycle_remains_retryable_without_poisoning_the_lazy() {
     assert!(error.blocked_on().is_some());
     assert!(context.promise_failure(&promise).is_none());
     assert!(context.lazy_failure(&lazy).is_none());
-    assert!(lazy.cached().is_none());
+    assert!(lazy.cached(context.values()).is_none());
     assert!(matches!(
-        promise.assignment(),
+        promise.assignment(context.values()),
         Some(Ok(Value::Lazy(assigned))) if assigned == lazy
     ));
 }
@@ -1218,7 +1221,7 @@ fn task_owned_fixpoint_rejects_recursive_demand_and_blocks_other_tasks() {
         .unwrap();
     let observer = session.with_new_task().unwrap();
     let wait = fixpoint
-        .task()
+        .task(session.values())
         .expect("task-owned fixpoint should expose its wait")
         .wait()
         .clone();
@@ -1233,14 +1236,14 @@ fn task_owned_fixpoint_rejects_recursive_demand_and_blocks_other_tasks() {
 
     let blocked = eval_value(&observer, &value).unwrap_err();
     assert!(blocked.blocked_on().is_some());
-    assert_eq!(fixpoint.exact_subscription_count(), 1);
+    assert_eq!(fixpoint.exact_subscription_count(session.values()), 1);
     let counts = session.task_registry_counts();
     assert_eq!(counts.promises_active, 1);
     assert_eq!(counts.promises_terminal, 0);
     assert_eq!(counts.owned_promise_waits, 1);
 
     set_promise(&session, &fixpoint, n(42)).unwrap();
-    assert_eq!(fixpoint.exact_subscription_count(), 0);
+    assert_eq!(fixpoint.exact_subscription_count(session.values()), 0);
     assert_eq!(eval_value(&observer, &value).unwrap(), n(42));
     assert_eq!(
         session.poll_wait(&wait),
@@ -1264,7 +1267,7 @@ fn failed_task_fails_its_unresolved_fixpoint_promises() {
         .unwrap();
     let observer = session.with_new_task().unwrap();
     let wait = fixpoint
-        .task()
+        .task(session.values())
         .expect("task-owned fixpoint should expose its wait")
         .wait()
         .clone();
@@ -1276,9 +1279,9 @@ fn failed_task_fails_its_unresolved_fixpoint_promises() {
             .blocked_on()
             .is_some()
     );
-    assert_eq!(fixpoint.exact_subscription_count(), 1);
+    assert_eq!(fixpoint.exact_subscription_count(session.values()), 1);
     session.fail_wait(owner_task.wait(), "producer failed deliberately");
-    assert_eq!(fixpoint.exact_subscription_count(), 0);
+    assert_eq!(fixpoint.exact_subscription_count(session.values()), 0);
     assert_eq!(
         eval_value(&observer, &value).unwrap_err().to_string(),
         "producer failed deliberately"
@@ -1301,7 +1304,7 @@ fn explicitly_failed_task_promise_retires_its_wait_record() {
         .task_owned_promise(Arc::from("test fixpoint"))
         .unwrap();
     let wait = fixpoint
-        .task()
+        .task(session.values())
         .expect("task-owned fixpoint should expose its wait")
         .wait()
         .clone();
@@ -1329,7 +1332,7 @@ fn producer_failure_retires_every_owned_promise_wait() {
         .iter()
         .map(|promise| {
             promise
-                .task()
+                .task(session.values())
                 .expect("task-owned fixpoint should expose its wait")
                 .wait()
         })
@@ -1358,7 +1361,7 @@ fn producer_completion_retires_a_dropped_task_promise() {
             .task_owned_promise(Arc::from("abandoned fixpoint"))
             .unwrap();
         let wait = promise
-            .task()
+            .task(session.values())
             .expect("task-owned fixpoint should expose its wait")
             .wait()
             .clone();
@@ -1412,7 +1415,7 @@ fn value_fixpoint_reports_its_strict_lazy_dependency_cycle() {
         cycle
             .members
             .iter()
-            .any(|member| member.id == fixpoint_lazy.id())
+            .any(|member| member.id == fixpoint_lazy.id(context.values()))
     );
 
     let observer = context.with_new_task().unwrap();
@@ -1487,7 +1490,7 @@ fn computed_fixpoint_uses_session_local_waits_while_sharing_its_result() {
         .expect_err("the second session should own an independent wait");
     assert!(first_block.blocked_on().is_some());
     assert!(second_block.blocked_on().is_some());
-    assert!(lazy.cached().is_none());
+    assert!(lazy.cached(first.values()).is_none());
 
     set_promise(&first, &promise, n(42)).unwrap();
     assert_eq!(eval_value(&first, &fixpoint).unwrap(), n(42));
@@ -1510,8 +1513,8 @@ fn computed_fixpoint_preserves_a_forwarded_structured_failure() {
         .expect_err("the source failure should fail the fixpoint");
     assert_eq!(error.to_string(), "fixpoint source failed");
 
-    let source_failure = source.cached().unwrap().unwrap_err();
-    let fixpoint_failure = fixpoint.cached().unwrap().unwrap_err();
+    let source_failure = source.cached(context.values()).unwrap().unwrap_err();
+    let fixpoint_failure = fixpoint.cached(context.values()).unwrap().unwrap_err();
     assert!(Arc::ptr_eq(&source_failure, &fixpoint_failure));
 }
 
@@ -1690,8 +1693,8 @@ fn forwarding_chain_preserves_one_structured_failure() {
         .expect_err("forwarding into an error should fail");
     assert_eq!(error.to_string(), "shared failure");
 
-    let leaf_failure = leaf.cached().unwrap().unwrap_err();
-    let root_failure = root.cached().unwrap().unwrap_err();
+    let leaf_failure = leaf.cached(context.values()).unwrap().unwrap_err();
+    let root_failure = root.cached(context.values()).unwrap().unwrap_err();
     assert!(Arc::ptr_eq(&leaf_failure, &root_failure));
 }
 
@@ -4911,11 +4914,15 @@ fn reflection_annotation(context: &EvalContext, effect: Value, target: Value) ->
         .expect("reflection annotation should construct a lazy gate")
 }
 
-fn reflection_computation(value: &Value) -> Arc<crate::core::ReflectionComputation> {
+fn reflection_computation(
+    values: &crate::core::CoreValueFactory,
+    value: &Value,
+) -> Arc<crate::core::ReflectionComputation> {
     let Value::Lazy(lazy) = value else {
         panic!("reflection computation must be represented by a lazy value")
     };
-    let Some(crate::core::LazySource::ReflectionTask(computation)) = lazy.source_snapshot() else {
+    let Some(crate::core::LazySource::ReflectionTask(computation)) = lazy.source_snapshot(values)
+    else {
         panic!("reflection lazy value must retain its unobserved computation")
     };
     computation
@@ -4934,8 +4941,10 @@ fn reflection_gate_reserves_inside_and_activates_outside_scope() {
             builds: builds.clone(),
         }))
         .expect("fresh test session should accept its reflection launcher");
-    let computation =
-        reflection_computation(&Value::reflection_task_result(context.values(), n(0)));
+    let computation = reflection_computation(
+        context.values(),
+        &Value::reflection_task_result(context.values(), n(0)),
+    );
     let poll = crate::evaluation::EvaluationPollContext::for_context(&context);
 
     let task = poll.evaluate(&context, |evaluator| {
@@ -4981,7 +4990,7 @@ fn unactivated_reflection_reservation_cancels_only_during_external_owner_drain()
         }))
         .expect("fresh test session should accept its reflection launcher");
     let value = Value::reflection_task_result(context.values(), n(0));
-    let computation = reflection_computation(&value);
+    let computation = reflection_computation(context.values(), &value);
     let reservation = computation
         .task(&context)
         .expect("reflection observation should reserve its task");
@@ -5048,7 +5057,10 @@ fn assert_reflection_gate_order(
     observer
         .install_reflection_launcher(launcher)
         .expect("fresh observer session should accept the same reflection launcher");
-    let computation = reflection_computation(&Value::reflection_task_result(owner.values(), n(0)));
+    let computation = reflection_computation(
+        owner.values(),
+        &Value::reflection_task_result(owner.values(), n(0)),
+    );
 
     let (first, second) = match first_observer {
         ReflectionParticipant::Owner => (&*owner, &*observer),
@@ -5137,8 +5149,10 @@ fn reflection_gate_cancellation_before_and_during_activation_is_terminal() {
             result_policies: Arc::new(Mutex::new(Vec::new())),
         }))
         .expect("fresh test session should accept its reflection launcher");
-    let before_computation =
-        reflection_computation(&Value::reflection_task_result(before.values(), n(0)));
+    let before_computation = reflection_computation(
+        before.values(),
+        &Value::reflection_task_result(before.values(), n(0)),
+    );
     let before_task = before_computation
         .task(&before)
         .expect("reflection observation should reserve its task")
@@ -5168,8 +5182,10 @@ fn reflection_gate_cancellation_before_and_during_activation_is_terminal() {
             builds: during_builds.clone(),
         }))
         .expect("fresh test session should accept its reflection launcher");
-    let during_computation =
-        reflection_computation(&Value::reflection_task_result(during.values(), n(0)));
+    let during_computation = reflection_computation(
+        during.values(),
+        &Value::reflection_task_result(during.values(), n(0)),
+    );
     let during_task = during_computation
         .task(&during)
         .expect("reflection observation should reserve its task")
@@ -5359,7 +5375,7 @@ fn running_reflection_gate_blocks_an_observer_session_without_poisoning_its_cach
         eval_value(&observer, &gate).expect_err("cross-session gate task should block");
     assert!(cross_session.blocked_on().is_some());
     assert_eq!(
-        gate_lazy.cached(),
+        gate_lazy.cached(owner.values()),
         None,
         "a live cross-session dependency must not become a permanent lazy failure"
     );
@@ -5436,7 +5452,7 @@ fn assert_structured_reflection_gate_failure(stage: GateFailureStage) {
         ]
     );
     let cached = gate_lazy
-        .cached()
+        .cached(context.values())
         .expect("the failed gate should have a terminal lazy cache")
         .expect_err("the terminal gate cache should contain its failure");
     assert!(Arc::ptr_eq(&first, &cached));
@@ -5714,12 +5730,12 @@ fn zero_worker_spark_discards_hidden_metadata_demand() {
     assert_eq!(eval_value(&context, &result).unwrap(), n(42));
 }
 
-fn wait_for_lazy_cache(lazy: &LazyValue, message: &str) {
+fn wait_for_lazy_cache(context: &EvalContext, lazy: &LazyValue, message: &str) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    while lazy.cached().is_none() && std::time::Instant::now() < deadline {
+    while lazy.cached(context.values()).is_none() && std::time::Instant::now() < deadline {
         std::thread::yield_now();
     }
-    assert!(lazy.cached().is_some(), "{message}");
+    assert!(lazy.cached(context.values()).is_some(), "{message}");
 }
 
 fn wait_for_no_deferred_tasks(context: &EvalContext, message: &str) {
@@ -5819,6 +5835,7 @@ fn metadata_strategy_failures_are_cached_and_seq_propagates_them() {
         .recv_timeout(std::time::Duration::from_secs(2))
         .expect("worker should demand the failing metadata");
     wait_for_lazy_cache(
+        &context,
         &metadata,
         "the worker must cache the terminal metadata failure",
     );
@@ -5870,7 +5887,7 @@ fn strategies_stop_at_nested_metadata_carriers() {
     finished_receiver
         .recv_timeout(std::time::Duration::from_secs(2))
         .expect("worker should finish the preceding metadata spark");
-    wait_for_lazy_cache(&sentinel, "worker must finish the sentinel spark");
+    wait_for_lazy_cache(&context, &sentinel, "worker must finish the sentinel spark");
     assert_eq!(
         hidden_forces.load(Ordering::SeqCst),
         0,
@@ -5914,8 +5931,9 @@ fn spark_admission_drops_whnf_and_follows_completed_promises() {
     finished_receiver
         .recv_timeout(std::time::Duration::from_secs(2))
         .expect("worker should process the earlier spark jobs first");
-    wait_for_lazy_cache(&sentinel, "worker must finish the sentinel spark");
+    wait_for_lazy_cache(&context, &sentinel, "worker must finish the sentinel spark");
     wait_for_lazy_cache(
+        &context,
         &promised_work,
         "worker must finish useful work exposed through the completed promise",
     );
@@ -5930,7 +5948,7 @@ fn spark_admission_drops_whnf_and_follows_completed_promises() {
         1,
         "a worker should pursue useful lazy work through a completed promise"
     );
-    assert!(promised_work.cached().is_some());
+    assert!(promised_work.cached(context.values()).is_some());
     assert_eq!(counts.deferred_active, 0);
     assert_eq!(counts.promises_active, 0);
 }
@@ -5962,7 +5980,7 @@ fn spark_resumes_after_a_resolver_owned_promise_completes() {
     forced_receiver
         .recv_timeout(std::time::Duration::from_secs(2))
         .expect("promise completion should resume and finish its spark");
-    wait_for_lazy_cache(&assigned, "resumed spark work must be cached");
+    wait_for_lazy_cache(&context, &assigned, "resumed spark work must be cached");
     wait_for_blocked_sparks(
         &coordinator,
         0,

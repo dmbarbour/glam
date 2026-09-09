@@ -60,7 +60,6 @@ pub(crate) struct ManagedLazyCell {
 /// cycle. Outstanding external wait handles retain late terminal observation.
 pub(crate) struct ManagedPromiseCell {
     id: PromiseId,
-    label: Arc<str>,
     assignment: OnceLock<ManagedPromiseAssignment>,
     terminal: Arc<AtomicBool>,
     completion: Arc<CompletionSubscriptions>,
@@ -133,15 +132,12 @@ pub(crate) struct ManagedLazyRoot {
     id: LazyId,
     label: Arc<str>,
     root: Root<ManagedLazyCell>,
-    observer: RuntimeValueObserver,
 }
 
 #[derive(Clone)]
 pub(crate) struct ManagedPromiseRoot {
     id: PromiseId,
-    label: Arc<str>,
     root: Root<ManagedPromiseCell>,
-    observer: RuntimeValueObserver,
     terminal: Arc<AtomicBool>,
     completion: Arc<CompletionSubscriptions>,
     producer: Arc<OnceLock<Arc<PromiseProducerObligation>>>,
@@ -207,11 +203,10 @@ impl ManagedLazyCell {
 }
 
 impl ManagedPromiseCell {
-    fn new(values: &crate::core::CoreValueFactory, label: impl Into<Arc<str>>) -> Self {
+    fn new(values: &crate::core::CoreValueFactory) -> Self {
         let id = PromiseId(values.deferred_value_id());
         Self {
             id,
-            label: label.into(),
             assignment: OnceLock::new(),
             terminal: Arc::new(AtomicBool::new(false)),
             completion: Arc::new(CompletionSubscriptions::for_promise(
@@ -240,11 +235,11 @@ impl RuntimeValueAccess<'_> {
 
     fn allocate_managed_promise(
         &self,
-        label: impl Into<Arc<str>>,
+        _label: impl Into<Arc<str>>,
     ) -> Result<ManagedPromiseEdge, UnsupportedLayout> {
         let allocator = self.allocator::<ManagedPromiseCell>()?;
         Ok(ManagedPromiseEdge(
-            allocator.alloc(ManagedPromiseCell::new(self.values(), label)),
+            allocator.alloc(ManagedPromiseCell::new(self.values())),
         ))
     }
 
@@ -268,12 +263,8 @@ impl RuntimeValueAccess<'_> {
         label: impl Into<Arc<str>>,
         source: LazySource,
     ) -> Result<LazyValue, UnsupportedLayout> {
-        let observer = self.values().runtime_value_observer();
         let edge = self.allocate_managed_lazy(label, source)?;
-        Ok(LazyValue {
-            edge,
-            values: observer,
-        })
+        Ok(LazyValue { edge })
     }
 
     /// Constructs an already-terminal failed lazy before publishing its
@@ -296,12 +287,8 @@ impl RuntimeValueAccess<'_> {
         &self,
         label: impl Into<Arc<str>>,
     ) -> Result<PromisedValue, UnsupportedLayout> {
-        let observer = self.values().runtime_value_observer();
         let edge = self.allocate_managed_promise(label)?;
-        Ok(PromisedValue {
-            edge,
-            values: observer,
-        })
+        Ok(PromisedValue { edge })
     }
 
     /// Constructs one core-net facade inside this already-admitted region.
@@ -315,47 +302,26 @@ impl RuntimeValueAccess<'_> {
         Ok(CoreRuntimeNet::from_managed_parts(edge, observer))
     }
 
-    pub(in crate::core) fn root_managed_lazy(
-        &self,
-        observer: RuntimeValueObserver,
-        edge: ManagedLazyEdge,
-    ) -> ManagedLazyRoot {
-        assert!(
-            self.admits(&observer),
-            "lazy root requires its value domain"
-        );
-        let value = edge
-            .access(&observer, self)
-            .expect("lazy edge must belong to its root domain");
+    pub(in crate::core) fn root_managed_lazy(&self, edge: ManagedLazyEdge) -> ManagedLazyRoot {
+        let value = edge.access(self);
         let id = value.id();
         let label = value.label().clone();
         ManagedLazyRoot {
             id,
             label,
             root: self.root(edge.0),
-            observer,
         }
     }
 
     pub(in crate::core) fn root_managed_promise(
         &self,
-        observer: RuntimeValueObserver,
         edge: ManagedPromiseEdge,
     ) -> ManagedPromiseRoot {
-        assert!(
-            self.admits(&observer),
-            "promise root requires its value domain"
-        );
-        let value = edge
-            .access(&observer, self)
-            .expect("promise edge must belong to its root domain");
+        let value = edge.access(self);
         let id = value.id();
-        let label = value.label().clone();
         ManagedPromiseRoot {
             id,
-            label,
             root: self.root(edge.0),
-            observer,
             terminal: Arc::clone(&value.cell.terminal),
             completion: Arc::clone(&value.cell.completion),
             producer: Arc::clone(&value.cell.producer),
@@ -387,7 +353,7 @@ impl RuntimeValueAccess<'_> {
         source: LazySource,
     ) -> Result<ManagedLazyRoot, UnsupportedLayout> {
         let lazy = self.construct_managed_lazy(label, source)?;
-        Ok(self.root_managed_lazy(lazy.values.clone(), lazy.edge))
+        Ok(self.root_managed_lazy(lazy.edge))
     }
 
     /// Constructs one promise and publishes its explicit registered owner
@@ -402,7 +368,7 @@ impl RuntimeValueAccess<'_> {
         label: impl Into<Arc<str>>,
     ) -> Result<ManagedPromiseRoot, UnsupportedLayout> {
         let promise = self.construct_managed_promise(label)?;
-        Ok(self.root_managed_promise(promise.values.clone(), promise.edge))
+        Ok(self.root_managed_promise(promise.edge))
     }
 
     /// Constructs one core net and publishes its explicit registered owner
@@ -428,17 +394,16 @@ impl ManagedLazyEdge {
 
     pub(crate) fn access<'access, 'scope>(
         self,
-        observer: &RuntimeValueObserver,
         authority: &'access RuntimeValueAccess<'scope>,
-    ) -> Option<ManagedLazyAccess<'access, 'scope>> {
-        if !authority.admits(observer) {
-            return None;
-        }
+    ) -> ManagedLazyAccess<'access, 'scope> {
         // SAFETY: this private edge can only be constructed by the matching
-        // value domain. Its caller supplies liveness through a rooted owner or
-        // a traced semantic edge reached within this access region.
+        // value domain, and it may escape that construction region only below
+        // a registered root or another traced value in the same graph. The
+        // caller reaches it from that live owner while holding this graph's
+        // access region. Public values reject foreign-runtime composition,
+        // and glam-gc debug builds recheck heap and representation provenance.
         let cell = unsafe { authority.scope.get_traced_edge(self.0) };
-        ManagedLazyAccess::from_authorized_cell(self, cell, observer, authority)
+        ManagedLazyAccess::from_authorized_cell(self, cell, authority)
     }
 }
 
@@ -449,18 +414,16 @@ impl ManagedPromiseEdge {
 
     pub(crate) fn access<'access, 'scope>(
         self,
-        observer: &RuntimeValueObserver,
         authority: &'access RuntimeValueAccess<'scope>,
-    ) -> Option<ManagedPromiseAccess<'access, 'scope>> {
-        if !authority.admits(observer) {
-            return None;
-        }
-        // SAFETY: the private constructor and observer preserve exact heap and
-        // representation provenance; the caller supplies current liveness.
+    ) -> ManagedPromiseAccess<'access, 'scope> {
+        // SAFETY: the private constructor preserves exact heap and
+        // representation provenance, and the edge may escape its construction
+        // region only below a registered root or another traced value in the
+        // same graph. The caller reaches it from that live owner while holding
+        // this graph's access region. Public values reject foreign-runtime
+        // composition, and glam-gc debug builds recheck heap and type metadata.
         let cell = unsafe { authority.scope.get_traced_edge(self.0) };
-        Some(ManagedPromiseAccess::from_authorized_cell(
-            self, cell, authority,
-        ))
+        ManagedPromiseAccess::from_authorized_cell(self, cell, authority)
     }
 }
 
@@ -497,24 +460,19 @@ impl ManagedLazyRoot {
         ManagedLazyEdge(authority.project_root(&self.root))
     }
 
-    pub(crate) fn observer(&self) -> &RuntimeValueObserver {
-        &self.observer
-    }
-
     pub(crate) fn access<'access, 'scope>(
         &'access self,
         authority: &'access RuntimeValueAccess<'scope>,
     ) -> Option<ManagedLazyAccess<'access, 'scope>> {
-        if !authority.admits(&self.observer) || !authority.admits_root(&self.root) {
+        if !authority.admits_root(&self.root) {
             return None;
         }
         let edge = self.edge(authority);
-        ManagedLazyAccess::from_authorized_cell(
+        Some(ManagedLazyAccess::from_authorized_cell(
             edge,
             authority.get(&self.root),
-            &self.observer,
             authority,
-        )
+        ))
     }
 
     /// Publishes one terminal result through this registered owner.
@@ -538,20 +496,16 @@ impl ManagedPromiseRoot {
         self.id
     }
 
-    pub(crate) fn label(&self) -> &Arc<str> {
-        &self.label
-    }
-
     pub(crate) fn edge(&self, authority: &RuntimeValueAccess<'_>) -> ManagedPromiseEdge {
         ManagedPromiseEdge(authority.project_root(&self.root))
     }
 
-    pub(crate) fn observer(&self) -> &RuntimeValueObserver {
-        &self.observer
+    pub(crate) fn same_promise(&self, other: &Self) -> bool {
+        self.root.ptr_eq(&other.root)
     }
 
-    pub(crate) fn same_promise(&self, other: &Self) -> bool {
-        self.id == other.id && self.observer.same_domain(&other.observer)
+    pub(crate) fn runtime_id(&self) -> crate::runtime::EvaluationRuntimeId {
+        self.completion.runtime_id()
     }
 
     pub(crate) fn producer(&self) -> Option<Arc<PromiseProducerObligation>> {
@@ -580,7 +534,7 @@ impl ManagedPromiseRoot {
         &'access self,
         authority: &'access RuntimeValueAccess<'scope>,
     ) -> Option<ManagedPromiseAccess<'access, 'scope>> {
-        if !authority.admits(&self.observer) || !authority.admits_root(&self.root) {
+        if !authority.admits_root(&self.root) {
             return None;
         }
         let edge = self.edge(authority);
@@ -603,7 +557,7 @@ impl ManagedPromiseRoot {
     ) -> Result<(), ManagedPromiseAssignment> {
         assert_eq!(
             values.runtime_id(),
-            self.observer.runtime_id(),
+            self.runtime_id(),
             "promise root and publication factory must share one value domain"
         );
         let producer = self.producer();
@@ -712,15 +666,14 @@ impl<'access, 'scope> ManagedLazyAccess<'access, 'scope> {
     fn from_authorized_cell(
         owner: ManagedLazyEdge,
         cell: &'access ManagedLazyCell,
-        observer: &RuntimeValueObserver,
         authority: &'access RuntimeValueAccess<'scope>,
-    ) -> Option<Self> {
-        authority.admits(observer).then_some(Self {
+    ) -> Self {
+        Self {
             owner,
             cell,
             authority,
             _thread_bound: PhantomData,
-        })
+        }
     }
 
     pub(crate) fn id(&self) -> LazyId {
@@ -818,10 +771,6 @@ impl<'access, 'scope> ManagedPromiseAccess<'access, 'scope> {
 
     pub(crate) fn id(&self) -> PromiseId {
         self.cell.id
-    }
-
-    pub(crate) fn label(&self) -> &Arc<str> {
-        &self.cell.label
     }
 
     #[cfg(test)]
@@ -1149,13 +1098,13 @@ unsafe impl ManagedFamily for ManagedCoreNetCell {
 const _: () = {
     assert!(std::mem::size_of::<ManagedLazyCell>() == 160);
     assert!(std::mem::align_of::<ManagedLazyCell>() == 8);
-    assert!(std::mem::size_of::<ManagedPromiseCell>() == 120);
+    assert!(std::mem::size_of::<ManagedPromiseCell>() == 104);
     assert!(std::mem::align_of::<ManagedPromiseCell>() == 8);
     assert!(std::mem::size_of::<ManagedCoreNetCell>() == 248);
     assert!(std::mem::align_of::<ManagedCoreNetCell>() == 8);
-    assert!(std::mem::size_of::<ManagedLazyRoot>() == 48);
+    assert!(std::mem::size_of::<ManagedLazyRoot>() == 32);
     assert!(std::mem::align_of::<ManagedLazyRoot>() == 8);
-    assert!(std::mem::size_of::<ManagedPromiseRoot>() == 72);
+    assert!(std::mem::size_of::<ManagedPromiseRoot>() == 40);
     assert!(std::mem::align_of::<ManagedPromiseRoot>() == 8);
     assert!(std::mem::size_of::<ManagedCoreNetRoot>() == 24);
     assert!(std::mem::align_of::<ManagedCoreNetRoot>() == 8);
@@ -1728,10 +1677,10 @@ mod tests {
     #[test]
     fn recursive_cell_layouts_are_recorded() {
         assert_eq!(std::mem::size_of::<ManagedLazyCell>(), 160);
-        assert_eq!(std::mem::size_of::<ManagedPromiseCell>(), 120);
+        assert_eq!(std::mem::size_of::<ManagedPromiseCell>(), 104);
         assert_eq!(std::mem::size_of::<ManagedCoreNetCell>(), 248);
-        assert_eq!(std::mem::size_of::<ManagedLazyRoot>(), 48);
-        assert_eq!(std::mem::size_of::<ManagedPromiseRoot>(), 72);
+        assert_eq!(std::mem::size_of::<ManagedLazyRoot>(), 32);
+        assert_eq!(std::mem::size_of::<ManagedPromiseRoot>(), 40);
         assert_eq!(std::mem::size_of::<ManagedCoreNetRoot>(), 24);
     }
 
@@ -1827,7 +1776,6 @@ mod tests {
                 .expect("the matching value domain should authorize its promise cell");
             assert_eq!(promise.id(), root.id());
             assert_eq!(promise.runtime_id(), values.runtime_id());
-            assert_eq!(promise.label().as_ref(), "prepared promise");
             assert!(promise.producer().is_none());
             assert_eq!(
                 root.publish_detached(&access, Ok(winner.clone()), |_| ()),
@@ -2212,10 +2160,6 @@ mod tests {
                 "rooted lazy"
             );
             assert_eq!(
-                promise.access(&access).unwrap().label().as_ref(),
-                "rooted promise"
-            );
-            assert_eq!(
                 net.access(&access)
                     .unwrap()
                     .with(|runtime| runtime.interface_data(runtime.exposed()).cloned()),
@@ -2260,22 +2204,7 @@ mod tests {
                     .allocate_managed_core_net(prepared_runtime(61))
                     .expect("the managed core-net cell should fit a run");
 
-                assert_eq!(
-                    lazy_edge
-                        .access(&observer, &access)
-                        .expect("a fresh lazy edge should be accessible")
-                        .label()
-                        .as_ref(),
-                    "split lazy"
-                );
-                assert_eq!(
-                    promise_edge
-                        .access(&observer, &access)
-                        .expect("a fresh promise edge should be accessible")
-                        .label()
-                        .as_ref(),
-                    "split promise"
-                );
+                assert_eq!(lazy_edge.access(&access).label().as_ref(), "split lazy");
                 assert_eq!(
                     net_edge
                         .access(&observer, &access)
@@ -2285,8 +2214,8 @@ mod tests {
                 );
 
                 (
-                    access.root_managed_lazy(observer.clone(), lazy_edge),
-                    access.root_managed_promise(observer.clone(), promise_edge),
+                    access.root_managed_lazy(lazy_edge),
+                    access.root_managed_promise(promise_edge),
                     access.root_managed_core_net(observer.clone(), net_edge),
                     lazy_edge,
                     promise_edge,
@@ -2297,11 +2226,11 @@ mod tests {
         values.with_runtime_value_access(|access| {
             assert_eq!(
                 lazy.access(&access).unwrap().id(),
-                lazy_edge.access(&observer, &access).unwrap().id()
+                lazy_edge.access(&access).id()
             );
             assert_eq!(
                 promise.access(&access).unwrap().id(),
-                promise_edge.access(&observer, &access).unwrap().id()
+                promise_edge.access(&access).id()
             );
             assert_eq!(
                 net.access(&access)
@@ -2316,8 +2245,8 @@ mod tests {
 
         let unrelated = new_values();
         unrelated.with_runtime_value_access(|access| {
-            assert!(lazy_edge.access(&observer, &access).is_none());
-            assert!(promise_edge.access(&observer, &access).is_none());
+            assert!(lazy.access(&access).is_none());
+            assert!(promise.access(&access).is_none());
             assert!(net_edge.access(&observer, &access).is_none());
         });
     }
@@ -2433,12 +2362,11 @@ mod tests {
         let baseline = values
             .collect_managed_for_test()
             .expect("the managed-lazy cycle fixture should start collectible");
-        let observer = values.runtime_value_observer();
         let root = values.with_runtime_value_access(|access| {
             let edge = access
                 .allocate_managed_lazy("lazy self cycle", LazySource::Error)
                 .expect("the managed lazy cell should fit a run");
-            let root = access.root_managed_lazy(observer.clone(), edge);
+            let root = access.root_managed_lazy(edge);
             let lazy = LazyValue::from_root(&root, &access);
             let source = LazySource::ComputedFixpoint(Arc::new(
                 crate::core::FixpointComputation::Function(Value::Lazy(lazy)),
@@ -2570,7 +2498,6 @@ mod tests {
         let baseline = values
             .collect_managed_for_test()
             .expect("the lazy-promise cycle fixture should start collectible");
-        let observer = values.runtime_value_observer();
         let root = values.with_runtime_value_access(|access| {
             let lazy_edge = access
                 .allocate_managed_lazy("lazy to promise", LazySource::Error)
@@ -2578,8 +2505,8 @@ mod tests {
             let promise_edge = access
                 .allocate_managed_promise("promise to lazy")
                 .expect("the managed promise cell should fit a run");
-            let lazy_root = access.root_managed_lazy(observer.clone(), lazy_edge);
-            let promise_root = access.root_managed_promise(observer.clone(), promise_edge);
+            let lazy_root = access.root_managed_lazy(lazy_edge);
+            let promise_root = access.root_managed_promise(promise_edge);
             let lazy = LazyValue::from_root(&lazy_root, &access);
             let promise = PromisedValue::from_root(&promise_root, &access);
 
@@ -2625,7 +2552,7 @@ mod tests {
             let lazy_edge = access
                 .allocate_managed_lazy("lazy to net", LazySource::Error)
                 .expect("the managed lazy cell should fit a run");
-            let lazy_root = access.root_managed_lazy(observer.clone(), lazy_edge);
+            let lazy_root = access.root_managed_lazy(lazy_edge);
             let lazy = LazyValue::from_root(&lazy_root, &access);
             let net_edge = access
                 .allocate_managed_core_net(runtime_with_data(Value::Lazy(lazy)))
@@ -2669,7 +2596,7 @@ mod tests {
             let promise_edge = access
                 .allocate_managed_promise("promise to net")
                 .expect("the managed promise cell should fit a run");
-            let promise_root = access.root_managed_promise(observer.clone(), promise_edge);
+            let promise_root = access.root_managed_promise(promise_edge);
             let promise = PromisedValue::from_root(&promise_root, &access);
             let net_edge = access
                 .allocate_managed_core_net(runtime_with_data(Value::Promised(promise)))
@@ -2715,8 +2642,8 @@ mod tests {
             let promise_edge = access
                 .allocate_managed_promise("promise to lazy ring")
                 .expect("the managed promise cell should fit a run");
-            let lazy_root = access.root_managed_lazy(observer.clone(), lazy_edge);
-            let promise_root = access.root_managed_promise(observer.clone(), promise_edge);
+            let lazy_root = access.root_managed_lazy(lazy_edge);
+            let promise_root = access.root_managed_promise(promise_edge);
             let lazy = LazyValue::from_root(&lazy_root, &access);
             let promise = PromisedValue::from_root(&promise_root, &access);
             let net_edge = access
@@ -2811,7 +2738,7 @@ mod tests {
             let promise_edge = access
                 .allocate_managed_promise("function stage compatibility")
                 .expect("the managed promise cell should fit a run");
-            let promise_root = access.root_managed_promise(observer.clone(), promise_edge);
+            let promise_root = access.root_managed_promise(promise_edge);
             let promise = PromisedValue::from_root(&promise_root, &access);
             let net_edge = access
                 .allocate_managed_core_net(runtime_with_data(Value::Promised(promise)))
@@ -2873,7 +2800,7 @@ mod tests {
             let promise_edge = access
                 .allocate_managed_promise("remote cursor compatibility")
                 .expect("the managed promise cell should fit a run");
-            let promise_root = access.root_managed_promise(observer.clone(), promise_edge);
+            let promise_root = access.root_managed_promise(promise_edge);
             let promise = PromisedValue::from_root(&promise_root, &access);
 
             let source_runtime = runtime_with_data(Value::Promised(promise));
@@ -3154,6 +3081,75 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn semantic_recursive_facades_are_managed_edges_only() {
+        let core = include_str!("../../core.rs");
+        for (facade, edge) in [
+            ("LazyValue", "ManagedLazyEdge"),
+            ("PromisedValue", "ManagedPromiseEdge"),
+        ] {
+            let declaration = source_declaration(core, &format!("struct {facade}"));
+            assert!(declaration.contains(edge));
+            for forbidden in [
+                "RuntimeValueObserver",
+                "Root<",
+                "Arc<",
+                "Weak<",
+                "id:",
+                "label:",
+            ] {
+                assert!(
+                    !declaration.contains(forbidden),
+                    "{facade} regained access or copied metadata through {forbidden}"
+                );
+            }
+        }
+
+        let lazy = source_declaration(core, "impl LazyValue {");
+        let promise = source_declaration(core, "impl PromisedValue {");
+        for facade in [lazy, promise] {
+            assert!(!facade.contains("fn with_runtime_access"));
+            assert!(!facade.contains("fn with_access"));
+        }
+    }
+
+    #[test]
+    fn durable_recursive_owner_copies_have_proven_roles() {
+        let recursive = include_str!("recursive_cells.rs");
+        let lazy = source_declaration(recursive, "struct ManagedLazyRoot");
+        assert!(lazy.contains("id: LazyId"));
+        assert!(lazy.contains("label: Arc<str>"));
+        assert!(lazy.contains("Root<ManagedLazyCell>"));
+        assert!(!lazy.contains("RuntimeValueObserver"));
+        assert!(!lazy.contains("ManagedLazyEdge"));
+
+        let promise = source_declaration(recursive, "struct ManagedPromiseRoot");
+        assert!(promise.contains("id: PromiseId"));
+        assert!(promise.contains("Root<ManagedPromiseCell>"));
+        assert!(promise.contains("Arc<CompletionSubscriptions>"));
+        assert!(promise.contains("Arc<OnceLock<Arc<PromiseProducerObligation>>>"));
+        for forbidden in ["label:", "RuntimeValueObserver", "ManagedPromiseEdge"] {
+            assert!(
+                !promise.contains(forbidden),
+                "promise owner retained unneeded state through {forbidden}"
+            );
+        }
+
+        let cell = source_declaration(recursive, "struct ManagedPromiseCell");
+        assert!(!cell.contains("label:"));
+
+        let resolver_source = include_str!("../../api/value.rs");
+        let resolver = source_declaration(resolver_source, "pub struct PromiseResolver");
+        for required in [
+            "observer: RuntimeValueObserver",
+            "label: Arc<str>",
+            "promise: Option<ManagedPromiseRoot>",
+        ] {
+            assert!(resolver.contains(required));
+        }
+        assert!(!resolver.contains("EvaluationRuntimeId"));
     }
 
     #[test]

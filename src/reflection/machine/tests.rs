@@ -1529,7 +1529,7 @@ fn fixpoint_frames_retain_the_shared_function_root_until_retirement() {
         root: root.clone(),
         choices: vec![FixChoice::Left],
         next_choice: 0,
-        handle: PromisedValue::new(&core, "test fixpoint").root(),
+        handle: PromisedValue::new(&core, "test fixpoint").root(&core),
     };
     let restart = FixRestart {
         root: root.clone(),
@@ -4964,13 +4964,13 @@ fn task_failure_propagates_one_structured_failure_to_owned_promises() {
     let resolved = promises.next().expect("resolved promise should exist");
     let waits = unresolved.each_ref().map(|promise| {
         promise
-            .task()
+            .task(context.values())
             .expect("task-owned promise should expose its wait")
             .wait()
             .clone()
     });
     let resolved_wait = resolved
-        .task()
+        .task(context.values())
         .expect("task-owned promise should expose its wait")
         .wait()
         .clone();
@@ -5046,7 +5046,7 @@ fn task_completion_and_cancellation_fail_unresolved_owned_promises() {
             .task_owned_promise(Arc::from("unfinished owned promise"))
             .unwrap();
         let wait = promise
-            .task()
+            .task(context.values())
             .expect("task-owned promise should expose its wait")
             .wait()
             .clone();

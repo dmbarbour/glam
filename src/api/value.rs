@@ -988,7 +988,8 @@ impl From<EvaluatedValue> for Value {
 /// ```
 #[must_use = "dropping an unresolved promise resolver fails its value"]
 pub struct PromiseResolver {
-    pub(super) runtime: EvaluationRuntimeId,
+    pub(super) observer: RuntimeValueObserver,
+    pub(super) label: Arc<str>,
     pub(super) promise: Option<ManagedPromiseRoot>,
 }
 
@@ -1007,10 +1008,10 @@ impl PromiseResolver {
         let promise = self
             .retire()
             .expect("a live promise resolver must retain its promise");
-        let Some(values) = promise.observer().upgrade() else {
+        let Some(values) = self.observer.upgrade() else {
             return Err(Error::new(format!(
                 "evaluation runtime {} is no longer available for promise completion",
-                self.runtime.get()
+                self.observer.runtime_id().get()
             )));
         };
         Ok((promise, values))
@@ -1018,13 +1019,13 @@ impl PromiseResolver {
 
     /// Completes the promise successfully with `value`.
     pub fn resolve(mut self, value: Value) -> Result<(), Error> {
-        if let Err(error) = value.require_runtime(self.runtime) {
+        if let Err(error) = value.require_runtime(self.observer.runtime_id()) {
             let _ = self.retire();
             return Err(error);
         }
         let (promise, values) = self.take_for_completion()?;
         let value = value.clone_core_in_own_domain()?;
-        let label = promise.label().clone();
+        let label = self.label.clone();
         let published = promise
             .publish(&values, Ok(value))
             .map_err(|_| Error::new(format!("promise `{label}` was already completed")));
@@ -1036,7 +1037,7 @@ impl PromiseResolver {
     /// producer error.
     pub fn fail(self, failure: Value) -> Result<(), Error> {
         let mut resolver = self;
-        if let Err(error) = failure.require_runtime(resolver.runtime) {
+        if let Err(error) = failure.require_runtime(resolver.observer.runtime_id()) {
             let _ = resolver.retire();
             return Err(error);
         }
@@ -1052,7 +1053,7 @@ impl PromiseResolver {
 
     fn fail_with(mut self, failure: Arc<EvaluationFailure>) -> Result<(), Error> {
         let (promise, values) = self.take_for_completion()?;
-        let label = promise.label().clone();
+        let label = self.label.clone();
         let published = promise
             .publish(&values, Err(failure))
             .map_err(|_| Error::new(format!("promise `{label}` was already completed")));
@@ -1066,12 +1067,12 @@ impl Drop for PromiseResolver {
         let Some(promise) = self.retire() else {
             return;
         };
-        let Some(values) = promise.observer().upgrade() else {
+        let Some(values) = self.observer.upgrade() else {
             return;
         };
         let message = format!(
             "promise resolver for `{}` was dropped before completion",
-            promise.label()
+            self.label
         );
         let _ = promise.publish(&values, Err(Arc::new(EvaluationFailure::message(message))));
         drop(values);

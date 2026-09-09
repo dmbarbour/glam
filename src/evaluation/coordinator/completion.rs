@@ -60,6 +60,10 @@ impl CompletionWake {
 }
 
 impl CompletionSubscriptions {
+    pub(crate) fn runtime_id(&self) -> EvaluationRuntimeId {
+        self.runtime
+    }
+
     pub(crate) fn coordinator(&self) -> Option<Arc<EvaluationWorkCoordinator>> {
         let coordinator = self
             .coordinator

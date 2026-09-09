@@ -1522,7 +1522,7 @@ impl EvalContext {
 
     #[cfg(test)]
     pub(crate) fn lazy_failure(&self, lazy: &LazyValue) -> Option<Arc<EvaluationFailure>> {
-        lazy.cached().and_then(Result::err)
+        lazy.cached(self.values()).and_then(Result::err)
     }
 
     #[cfg(test)]
@@ -1530,7 +1530,7 @@ impl EvalContext {
         &self,
         promise: &PromisedValue,
     ) -> Option<Arc<EvaluationFailure>> {
-        promise.assignment().and_then(Result::err)
+        promise.assignment(self.values()).and_then(Result::err)
     }
 
     pub(crate) fn lazy_failure_for_wait(

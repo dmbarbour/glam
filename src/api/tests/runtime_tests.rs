@@ -1141,13 +1141,13 @@ fn output_journaling_preserves_lazy_payload_until_decoder_demand() {
     events
         .write(&endpoint.writer(), lazy.clone())
         .expect("an unrestricted lazy output should journal");
-    assert_unclaimed_lazy(&lazy);
+    assert_unclaimed_lazy(&assembler, &lazy);
     assert_eq!(evaluations.load(Ordering::SeqCst), 0);
     assert_eq!(
         runtime.try_commit_transaction(&store, &events),
         crate::reflection::StoreCommitResult::Committed
     );
-    assert_unclaimed_lazy(&lazy);
+    assert_unclaimed_lazy(&assembler, &lazy);
     assert_eq!(evaluations.load(Ordering::SeqCst), 0);
 
     assert!(matches!(

@@ -57,7 +57,8 @@ fn value_is_undefined(assembler: &Assembler, value: &Value) -> bool {
         .unwrap()
 }
 
-fn assert_unclaimed_lazy(value: &Value) {
+fn assert_unclaimed_lazy(assembler: &Assembler, value: &Value) {
+    let values = assembler.core_values();
     let core = value.clone_core_for_test();
     let CoreValue::Lazy(lazy) = &core else {
         panic!(
@@ -66,16 +67,17 @@ fn assert_unclaimed_lazy(value: &Value) {
         );
     };
     assert!(
-        lazy.cached().is_none(),
+        lazy.cached(&values).is_none(),
         "constructor must not cache a result"
     );
     assert!(
-        lazy.source_snapshot().is_some(),
+        lazy.source_snapshot(&values).is_some(),
         "constructor must leave the lazy producer available"
     );
 }
 
-fn assert_unobserved_promise(value: &Value) {
+fn assert_unobserved_promise(assembler: &Assembler, value: &Value) {
+    let values = assembler.core_values();
     let core = value.clone_core_for_test();
     let CoreValue::Promised(promise) = &core else {
         panic!(
@@ -84,11 +86,11 @@ fn assert_unobserved_promise(value: &Value) {
         );
     };
     assert!(
-        promise.assignment().is_none(),
+        promise.assignment(&values).is_none(),
         "constructor must not assign the promise"
     );
     assert_eq!(
-        promise.exact_subscription_count(),
+        promise.exact_subscription_count(&values),
         0,
         "constructor must not subscribe demand to the promise"
     );
@@ -197,7 +199,10 @@ fn runtimes_own_independent_local_identity_domains_and_value_factories() {
     let second_lazy = LazyValue::semantic_thunk(&second_values, "second runtime", move |_| {
         Ok(second_unit.clone())
     });
-    assert_eq!(first_lazy.id().get(), second_lazy.id().get());
+    assert_eq!(
+        first_lazy.id(&first_values).get(),
+        second_lazy.id(&second_values).get()
+    );
 }
 
 #[test]
@@ -409,10 +414,10 @@ fn access_and_annotation_construction_do_not_demand_inputs() {
         .expect("same-runtime annotation construction should succeed");
 
     assert!(!demanded.load(Ordering::SeqCst));
-    assert_unclaimed_lazy(&lazy);
-    assert_unobserved_promise(&promise);
-    assert_unclaimed_lazy(&access);
-    assert_unclaimed_lazy(&annotation);
+    assert_unclaimed_lazy(&assembler, &lazy);
+    assert_unobserved_promise(&assembler, &promise);
+    assert_unclaimed_lazy(&assembler, &access);
+    assert_unclaimed_lazy(&assembler, &annotation);
 
     resolver
         .fail_message("fixture complete")
@@ -443,7 +448,7 @@ fn values_apply_is_lazy_and_matches_source_application_order() {
     let applied = values
         .apply(&function, [values.integer(50), values.integer(8)])
         .expect("same-runtime application should construct");
-    assert_unclaimed_lazy(&applied);
+    assert_unclaimed_lazy(&assembler, &applied);
     let applied = assembler
         .evaluate(&applied)
         .expect("constructed application should evaluate");
@@ -470,8 +475,8 @@ fn values_apply_is_lazy_and_matches_source_application_order() {
     let promised_application = values
         .apply(&promise, [values.integer(1)])
         .expect("a promised function may be applied lazily");
-    assert_unobserved_promise(&promise);
-    assert_unclaimed_lazy(&promised_application);
+    assert_unobserved_promise(&assembler, &promise);
+    assert_unclaimed_lazy(&assembler, &promised_application);
     resolver
         .fail_message("fixture complete")
         .expect("the promised function was not observed");
@@ -526,9 +531,9 @@ fn list_and_representation_constructors_are_lazy_semantic_operations() {
         .anno_deque(promise.clone())
         .expect("deque annotation should construct lazily");
 
-    assert_unobserved_promise(&promise);
+    assert_unobserved_promise(&assembler, &promise);
     for constructed in [&slice, &binary, &array, &deque] {
-        assert_unclaimed_lazy(constructed);
+        assert_unclaimed_lazy(&assembler, constructed);
     }
     resolver
         .fail_message("fixture complete")
@@ -584,7 +589,7 @@ fn array_and_deque_annotations_preserve_lazy_elements() {
         .expect("array representation should enumerate immediately");
     assert_eq!(items.len(), 2);
     assert!(matches!(&items[0], CoreValue::Lazy(_)));
-    assert_unclaimed_lazy(&element);
+    assert_unclaimed_lazy(&assembler, &element);
 
     let deque = values
         .anno_deque(list)
@@ -598,7 +603,7 @@ fn array_and_deque_annotations_preserve_lazy_elements() {
         .expect("balanced deque should enumerate after normalization");
     assert_eq!(items.len(), 2);
     assert!(matches!(&items[0], CoreValue::Lazy(_)));
-    assert_unclaimed_lazy(&element);
+    assert_unclaimed_lazy(&assembler, &element);
 }
 
 #[test]
@@ -617,9 +622,9 @@ fn dictionary_composition_is_lazy_and_rejects_foreign_members() {
         .dict_update(promise.clone(), promise.clone(), promise.clone())
         .expect("update construction should remain lazy");
 
-    assert_unobserved_promise(&promise);
+    assert_unobserved_promise(&assembler, &promise);
     for constructed in [&singleton, &union, &update] {
-        assert_unclaimed_lazy(constructed);
+        assert_unclaimed_lazy(&assembler, constructed);
     }
     resolver
         .fail_message("fixture complete")
@@ -959,7 +964,7 @@ fn evaluated_array_items_accept_only_one_strict_value_leaf() {
         .expect("strict value leaf should extract as an array");
     assert_eq!(items.len(), 2);
     assert!(same_representation(&assembler, &items[0], &lazy_element));
-    assert_unclaimed_lazy(&items[0]);
+    assert_unclaimed_lazy(&assembler, &items[0]);
 
     assert!(
         EvaluatedValue::from_whnf(&values, values.list([]).unwrap())
@@ -1013,7 +1018,7 @@ fn evaluated_array_items_accept_only_one_strict_value_leaf() {
             .unwrap()
             .is_none()
     );
-    assert_unobserved_promise(&promise);
+    assert_unobserved_promise(&assembler, &promise);
     resolver
         .fail_message("fixture complete")
         .expect("array inspection did not observe the deferred spine");
@@ -1088,7 +1093,7 @@ fn value_evaluator_resumes_a_retained_resolver_promise_subscription() {
         .eval(&waiting)
         .expect_err("a resolver-owned promise has no runtime-owned progress source");
     assert!(error.to_string().contains("blocked on wait token"));
-    assert_eq!(promise_core.exact_subscription_count(), 1);
+    assert_eq!(promise_core.exact_subscription_count(&values.core), 1);
     resolver
         .resolve(values.text("resolved"))
         .expect("resolver should publish the promised value");
@@ -1100,7 +1105,7 @@ fn value_evaluator_resumes_a_retained_resolver_promise_subscription() {
         evaluated.as_bytes().unwrap().as_deref(),
         Some(b"resolved".as_slice())
     );
-    assert_eq!(promise_core.exact_subscription_count(), 0);
+    assert_eq!(promise_core.exact_subscription_count(&values.core), 0);
 }
 
 #[test]
@@ -1132,7 +1137,7 @@ fn promise_resolver_drop_invokes_idempotent_retire_once() {
             panic!("public promise should retain its managed promise identity")
         };
         assert_eq!(
-            resolved_promise.assignment(),
+            resolved_promise.assignment(&values.core),
             Some(Ok(CoreValue::Number(Number::integer(37))))
         );
     }
@@ -1280,8 +1285,8 @@ fn semantic_binary_slice_does_not_force_an_unused_poisoned_tail() {
         evaluated.as_bytes().unwrap().as_deref(),
         Some(b"ok".as_slice())
     );
-    assert!(poison.cached().is_none());
-    assert!(poison.source_snapshot().is_some());
+    assert!(poison.cached(&core_values).is_none());
+    assert!(poison.source_snapshot(&core_values).is_some());
 }
 
 #[test]
@@ -1354,7 +1359,7 @@ fn reflection_kind_observes_an_unresolved_promise_without_demand() {
         assembler.reflection().kind(&promise).unwrap(),
         ValueKind::Lazy
     );
-    assert_unobserved_promise(&promise);
+    assert_unobserved_promise(&assembler, &promise);
 
     let foreign = EvaluationRuntime::new(0).expect("foreign runtime should build");
     assert!(
@@ -1419,7 +1424,7 @@ fn assembler_boundaries_reject_foreign_values_before_evaluation_or_storage() {
         panic!("public promise should retain its core promise cell")
     };
     assert!(
-        unassigned.assignment().is_none(),
+        unassigned.assignment(&assembler.core_values()).is_none(),
         "rejecting a foreign value must not terminalize the promise"
     );
     assert!(
@@ -1435,7 +1440,7 @@ fn assembler_boundaries_reject_foreign_values_before_evaluation_or_storage() {
         panic!("public promise should retain its core promise cell")
     };
     assert!(
-        unassigned.assignment().is_none(),
+        unassigned.assignment(&assembler.core_values()).is_none(),
         "rejecting a foreign failure must not terminalize the promise"
     );
 }

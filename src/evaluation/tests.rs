@@ -364,11 +364,11 @@ fn client_demand_exactly_restarts_after_promise_assignment() {
 
     assert!(poll_one_runtime_work(&coordinator));
     assert!(handle.poll().is_none());
-    assert_eq!(promise.exact_subscription_count(), 1);
+    assert_eq!(promise.exact_subscription_count(context.values()), 1);
 
     let expected = Value::Number(7.into());
     set_promise(&context, &promise, expected.clone()).expect("host promise should resolve once");
-    assert_eq!(promise.exact_subscription_count(), 0);
+    assert_eq!(promise.exact_subscription_count(context.values()), 0);
     assert!(poll_one_runtime_work(&coordinator));
     assert!(matches!(
         handle.poll(),
@@ -392,10 +392,10 @@ fn abandoning_one_client_demand_preserves_another_exact_consumer() {
 
     assert!(poll_one_runtime_work(&coordinator));
     assert!(poll_one_runtime_work(&coordinator));
-    assert_eq!(promise.exact_subscription_count(), 2);
+    assert_eq!(promise.exact_subscription_count(context.values()), 2);
     abandoned.abandon();
-    assert_eq!(promise.exact_subscription_count(), 1);
-    assert!(promise.assignment().is_none());
+    assert_eq!(promise.exact_subscription_count(context.values()), 1);
+    assert!(promise.assignment(context.values()).is_none());
 
     let expected = Value::Number(11.into());
     set_promise(&context, &promise, expected.clone())
@@ -425,7 +425,7 @@ fn client_demand_can_follow_a_lazy_producer_owned_by_another_session() {
 
     assert!(poll_one_runtime_work(&coordinator));
     assert!(owner_demand.poll().is_none());
-    assert_eq!(promise.exact_subscription_count(), 1);
+    assert_eq!(promise.exact_subscription_count(owner.values()), 1);
 
     let observer_demand = observer
         .demand_whnf(root)
@@ -433,7 +433,7 @@ fn client_demand_can_follow_a_lazy_producer_owned_by_another_session() {
     assert!(poll_one_runtime_work(&coordinator));
     assert!(observer_demand.poll().is_none());
     assert_eq!(
-        promise.exact_subscription_count(),
+        promise.exact_subscription_count(owner.values()),
         1,
         "both clients should share the one lazy producer"
     );
@@ -450,7 +450,10 @@ fn client_demand_can_follow_a_lazy_producer_owned_by_another_session() {
             Some(ClientDemandResult::Complete(value)) if value.clone_core_for_test() == expected
         ));
     }
-    assert!(lazy.cached().is_some_and(|result| result.is_ok()));
+    assert!(
+        lazy.cached(owner.values())
+            .is_some_and(|result| result.is_ok())
+    );
 }
 
 #[test]
@@ -596,10 +599,14 @@ fn client_demand_owner_close_and_forced_kill_answer_once() {
             .expect("closing demand should be admitted");
         let coordinator = owner.coordinator().expect("coordinator should be live");
         assert!(poll_one_runtime_work(&coordinator));
-        assert_eq!(promise.exact_subscription_count(), 1);
+        assert_eq!(promise.exact_subscription_count(owner.values()), 1);
         (handle, promise)
     };
-    assert_eq!(closed_promise.exact_subscription_count(), 0);
+    let observer = fixture.context();
+    assert_eq!(
+        closed_promise.exact_subscription_count(observer.values()),
+        0
+    );
     assert_eq!(closed_handle.poll(), Some(ClientDemandResult::Abandoned));
 
     let context = fixture.context();
@@ -615,7 +622,7 @@ fn client_demand_owner_close_and_forced_kill_answer_once() {
     let failure = Arc::new(EvaluationFailure::message("forced client disposition"));
     assert!(coordinator.kill_client_demand(handle.work(), failure.clone()));
     assert!(!coordinator.kill_client_demand(handle.work(), failure.clone()));
-    assert_eq!(promise.exact_subscription_count(), 0);
+    assert_eq!(promise.exact_subscription_count(context.values()), 0);
     assert!(matches!(
         handle.poll(),
         Some(ClientDemandResult::Killed(actual)) if Arc::ptr_eq(actual.as_failure(), &failure)
@@ -635,9 +642,9 @@ fn synchronous_whnf_facade_preserves_retryable_promise_behavior() {
         .expect_err("an unassigned host promise must remain retryable");
     assert_eq!(
         halt.unassigned_promise_root().map(ManagedPromiseRoot::id),
-        Some(promise.id())
+        Some(promise.id(context.values()))
     );
-    assert_eq!(promise.exact_subscription_count(), 0);
+    assert_eq!(promise.exact_subscription_count(context.values()), 0);
     assert_eq!(coordinator.client_demand_count(), 0);
 
     let expected = Value::Number(23.into());
@@ -1551,24 +1558,29 @@ impl EvaluationTaskMachine for Await {
 }
 
 struct AwaitPromise {
-    promise: PromisedValue,
+    context: EvalContext,
+    promise: ManagedPromiseRoot,
 }
 
 impl EvaluationTaskMachine for AwaitPromise {
     fn poll(
         &mut self,
-        _context: &crate::evaluation::EvaluationPollContext,
+        poll_context: &crate::evaluation::EvaluationPollContext,
         _step_budget: usize,
     ) -> EvaluationMachinePoll {
-        match self.promise.assignment() {
-            None => EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
-                dependency: Some(WorkDependency::Promise(self.promise.root())),
-                observed_epoch: None,
-                error: None,
-            }),
-            Some(Ok(value)) => EvaluationMachinePoll::Complete(_context.root_value(value)),
-            Some(Err(error)) => EvaluationMachinePoll::Failed(_context.root_failure(error)),
-        }
+        poll_context.evaluate(&self.context, |context| {
+            match context
+                .with_value_access(|access| access.promise_root(&self.promise).assignment())
+            {
+                None => EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
+                    dependency: Some(WorkDependency::Promise(self.promise.clone())),
+                    observed_epoch: None,
+                    error: None,
+                }),
+                Some(Ok(value)) => EvaluationMachinePoll::Complete(context.root_value(value)),
+                Some(Err(error)) => EvaluationMachinePoll::Failed(context.root_failure(error)),
+            }
+        })
     }
 }
 
@@ -1662,8 +1674,8 @@ fn assert_deferred_task_retired(context: &EvalContext, _lazy: &LazyValue) {
     assert_eq!(counts, (0, 0, 0), "coordinator indexes must be retired");
 }
 
-fn dependency_cycle(lazy: &LazyValue) -> Arc<LazyCycle> {
-    lazy.cached()
+fn dependency_cycle(context: &EvalContext, lazy: &LazyValue) -> Arc<LazyCycle> {
+    lazy.cached(context.values())
         .and_then(Result::err)
         .expect("test lazy should have a structured failure")
         .dependency_cycle_value()
@@ -3147,7 +3159,10 @@ fn abandoned_lazy_claim_can_be_reclaimed_without_poisoning_the_lazy() {
         expected
     );
     assert!(forced.load(Ordering::Acquire));
-    assert!(lazy.cached().is_some_and(|result| result.is_ok()));
+    assert!(
+        lazy.cached(observer.values())
+            .is_some_and(|result| result.is_ok())
+    );
 }
 
 #[test]
@@ -3159,7 +3174,7 @@ fn owner_session_drop_fails_task_promises_but_not_host_promises() {
             .task_owned_promise(Arc::from("abandoned task promise"))
             .expect("task promise should register");
         let producer = promise
-            .task()
+            .task(owner.values())
             .expect("task promise should retain producer provenance");
         let wait = producer.wait();
         assert_eq!(
@@ -3170,7 +3185,7 @@ fn owner_session_drop_fails_task_promises_but_not_host_promises() {
     };
     let observer = fixture.context();
     let error = task_promise
-        .assignment()
+        .assignment(observer.values())
         .expect("session closure must assign the task promise")
         .expect_err("an abandoned task promise must fail");
     assert!(error.to_string().contains("was abandoned"));
@@ -3185,14 +3200,14 @@ fn owner_session_drop_fails_task_promises_but_not_host_promises() {
         PromisedValue::new(transient_observer.values(), "host promise")
     };
     assert!(
-        host_promise.assignment().is_none(),
+        host_promise.assignment(observer.values()).is_none(),
         "dropping an unrelated observer session must not poison a host promise"
     );
     set_promise(&observer, &host_promise, observer.values().unit())
         .expect("the host promise should remain assignable");
     assert!(
         host_promise
-            .assignment()
+            .assignment(observer.values())
             .is_some_and(|assignment| assignment.is_ok())
     );
 }
@@ -3216,7 +3231,6 @@ fn promise_settlement_releases_task_and_local_owner_roots() {
 
     set_promise(&context, &task_promise, Value::Number(41.into()))
         .expect("the task promise should settle once");
-    drop(task_promise);
     let task_retired = context
         .values()
         .collect_managed_for_test()
@@ -3262,7 +3276,7 @@ fn settled_task_promise_has_no_rooted_wait_backedge() {
         .expect("the promise should accept a recursive semantic assignment");
     assert!(
         promise
-            .task()
+            .task(context.values())
             .expect("producer identity should remain available")
             .try_wait()
             .is_none(),
@@ -3296,14 +3310,14 @@ fn owner_session_drop_exactly_wakes_a_task_promise_follower() {
         let blocked = crate::eval::eval_value(&observer, &Value::Lazy(lazy.clone()))
             .expect_err("the unresolved task promise should block its follower");
         assert!(blocked.blocked_on().is_some());
-        assert_eq!(promise.exact_subscription_count(), 1);
+        assert_eq!(promise.exact_subscription_count(observer.values()), 1);
         (promise, lazy)
     };
 
-    assert_eq!(promise.exact_subscription_count(), 0);
+    assert_eq!(promise.exact_subscription_count(observer.values()), 0);
     assert!(
         promise
-            .assignment()
+            .assignment(observer.values())
             .is_some_and(|assignment| assignment.is_err())
     );
     assert!(
@@ -3331,9 +3345,9 @@ fn task_cancellation_exactly_wakes_its_promise_follower() {
     let blocked = crate::eval::eval_value(&observer, &Value::Lazy(lazy.clone()))
         .expect_err("the unresolved task promise should block its follower");
     assert!(blocked.blocked_on().is_some());
-    assert_eq!(promise.exact_subscription_count(), 1);
+    assert_eq!(promise.exact_subscription_count(observer.values()), 1);
     assert_eq!(owner_task.cancel(), EvaluationTaskCancellation::Requested);
-    assert_eq!(promise.exact_subscription_count(), 0);
+    assert_eq!(promise.exact_subscription_count(observer.values()), 0);
     assert!(
         crate::eval::eval_value(&observer, &Value::Lazy(lazy))
             .expect_err("producer cancellation should fail the exact follower")
@@ -3353,18 +3367,18 @@ fn task_terminal_surfaces_publish_under_one_mutation_admission() {
             Arc::from("dropped atomic terminal publication"),
         ])
         .expect("task-owned promises should register");
-    let dropped_promise = promises.pop().expect("dropped promise should exist");
-    let dropped_wait = dropped_promise
-        .task()
+    let unobserved_promise = promises.pop().expect("unobserved promise should exist");
+    let dropped_wait = unobserved_promise
+        .task(context.values())
         .expect("task-owned promise should expose its producer")
         .wait()
         .clone();
-    drop(dropped_promise);
     let promise = promises.pop().expect("live promise should exist");
     let task_wait = owner_task.wait().clone();
     let observed = Arc::new(Mutex::new(None));
     let probe_result = observed.clone();
     let weak_coordinator = Arc::downgrade(&coordinator);
+    let values = context.values().clone();
     let probed_dropped_wait = dropped_wait.clone();
     coordinator.set_terminal_publication_probe({
         let promise = promise.clone();
@@ -3376,7 +3390,7 @@ fn task_terminal_surfaces_publish_under_one_mutation_admission() {
                 .lock()
                 .expect("terminal publication probe result was poisoned") = Some((
                 task_wait.terminal_poll().is_some(),
-                promise.assignment().is_some(),
+                promise.assignment(&values).is_some(),
                 probed_dropped_wait.terminal_poll().is_some(),
                 admission_is_held,
             ));
@@ -3395,7 +3409,11 @@ fn task_terminal_surfaces_publish_under_one_mutation_admission() {
         context.poll_reflection_task(&owner_task),
         EvaluationWaitPoll::Cancelled
     ));
-    assert!(promise.assignment().is_some_and(|result| result.is_err()));
+    assert!(
+        promise
+            .assignment(context.values())
+            .is_some_and(|result| result.is_err())
+    );
     assert!(matches!(
         dropped_wait.terminal_poll(),
         Some(EvaluationWaitPoll::Failed(_))
@@ -3429,7 +3447,7 @@ fn assigned_task_promise_is_removed_before_later_task_terminalization() {
         .recv()
         .expect("task construction should publish its promise");
     let promise_wait = promise
-        .task()
+        .task(context.values())
         .expect("task promise should retain producer provenance")
         .wait()
         .clone();
@@ -3523,7 +3541,7 @@ fn long_lived_session_retains_only_unacknowledged_terminal_failures() {
             .task_owned_promise(Arc::from(format!("promise {index}")))
             .expect("task-owned promise should register");
         let wait = promise
-            .task()
+            .task(context.values())
             .expect("task-owned promise should expose its wait")
             .wait()
             .clone();
@@ -3658,9 +3676,9 @@ fn a_lazy_task_that_waits_on_itself_is_poisoned_as_a_cycle() {
         context.pump_wait(&wait, 256),
         EvaluationPumpOutcome::TargetReady
     );
-    let cycle = dependency_cycle(&lazy);
+    let cycle = dependency_cycle(&context, &lazy);
     assert_eq!(cycle.members.len(), 1);
-    assert_eq!(cycle.members[0].id, lazy.id());
+    assert_eq!(cycle.members[0].id, lazy.id(context.values()));
     assert_eq!(cycle.members[0].label.as_ref(), "self cycle");
     assert!(matches!(
         context.poll_wait(&wait),
@@ -3668,7 +3686,7 @@ fn a_lazy_task_that_waits_on_itself_is_poisoned_as_a_cycle() {
             if error.to_string().contains("lazy dependency cycle")
     ));
     assert!(
-        lazy.source_snapshot().is_none(),
+        lazy.source_snapshot(context.values()).is_none(),
         "cycle poisoning should release the lazy source"
     );
     assert_deferred_task_retired(&context, &lazy);
@@ -3736,20 +3754,20 @@ fn concurrently_demanded_lazy_tasks_share_one_two_node_cycle_failure() {
     let left_failure = context.lazy_failure(&left).unwrap();
     let right_failure = context.lazy_failure(&right).unwrap();
     assert!(Arc::ptr_eq(&left_failure, &right_failure));
-    assert!(left.source_snapshot().is_none());
-    assert!(right.source_snapshot().is_none());
+    assert!(left.source_snapshot(context.values()).is_none());
+    assert!(right.source_snapshot(context.values()).is_none());
     assert_eq!(left_wait.exact_subscription_count(), 0);
     assert_eq!(right_wait.exact_subscription_count(), 0);
     assert_deferred_task_retired(&context, &left);
     assert_deferred_task_retired(&context, &right);
-    let cycle = dependency_cycle(&left);
+    let cycle = dependency_cycle(&context, &left);
     assert_eq!(
         cycle
             .members
             .iter()
             .map(|member| member.id)
             .collect::<Vec<_>>(),
-        vec![left.id(), right.id()]
+        vec![left.id(context.values()), right.id(context.values())]
     );
 }
 
@@ -3795,17 +3813,20 @@ fn two_sessions_share_and_retire_one_pure_lazy_cycle_failure() {
         .lazy_failure(&right)
         .expect("right cycle member should retain its failure");
     assert!(Arc::ptr_eq(&left_failure, &right_failure));
-    let cycle = dependency_cycle(&left);
+    let cycle = dependency_cycle(&left_context, &left);
     assert_eq!(
         cycle
             .members
             .iter()
             .map(|member| member.id)
             .collect::<Vec<_>>(),
-        vec![left.id(), right.id()]
+        vec![
+            left.id(left_context.values()),
+            right.id(right_context.values())
+        ]
     );
-    assert!(left.source_snapshot().is_none());
-    assert!(right.source_snapshot().is_none());
+    assert!(left.source_snapshot(left_context.values()).is_none());
+    assert!(right.source_snapshot(right_context.values()).is_none());
     assert_eq!(left_wait.exact_subscription_count(), 0);
     assert_eq!(right_wait.exact_subscription_count(), 0);
     assert_deferred_task_retired(&left_context, &left);
@@ -3839,9 +3860,9 @@ fn a_cross_session_promise_lazy_cycle_remains_unpoisoned() {
         promise_context.pump_wait(&promise_wait, 256),
         EvaluationPumpOutcome::NoProgress
     );
-    assert!(lazy.cached().is_none());
-    assert!(lazy.source_snapshot().is_some());
-    assert!(promise.assignment().is_none());
+    assert!(lazy.cached(lazy_context.values()).is_none());
+    assert!(lazy.source_snapshot(lazy_context.values()).is_some());
+    assert!(promise.assignment(promise_context.values()).is_none());
     assert!(matches!(
         lazy_context.poll_wait(&lazy_wait),
         EvaluationWaitPoll::Pending(_)
@@ -3877,14 +3898,18 @@ fn lazy_cycles_are_canonical_and_exclude_upstream_dependents() {
         context.pump_wait(&upstream_wait, 512),
         EvaluationPumpOutcome::TargetReady
     );
-    let cycle = dependency_cycle(&first);
+    let cycle = dependency_cycle(&context, &first);
     assert_eq!(
         cycle
             .members
             .iter()
             .map(|member| member.id)
             .collect::<Vec<_>>(),
-        vec![first.id(), second.id(), third.id()]
+        vec![
+            first.id(context.values()),
+            second.id(context.values()),
+            third.id(context.values())
+        ]
     );
     let EvaluationWaitPoll::Failed(upstream_failure) = context.poll_wait(&upstream_wait) else {
         panic!("upstream dependent should receive the cycle failure");
@@ -3925,9 +3950,9 @@ fn a_mixed_lazy_reflection_cycle_remains_quiescent() {
         EvaluationPumpOutcome::NoProgress
     );
     assert!(context.lazy_failure(&lazy).is_none());
-    assert!(lazy.cached().is_none());
+    assert!(lazy.cached(context.values()).is_none());
     assert!(
-        lazy.source_snapshot().is_some(),
+        lazy.source_snapshot(context.values()).is_some(),
         "retryable blockage must retain the lazy source"
     );
     assert!(matches!(
@@ -4048,7 +4073,7 @@ fn running_cancellation_waits_for_release_then_wins_over_the_poll_result() {
         .recv()
         .expect("task construction should publish its owned promise");
     let promise_wait = promise
-        .task()
+        .task(context.values())
         .expect("task-owned promise should retain producer provenance")
         .wait()
         .clone();
@@ -4066,7 +4091,7 @@ fn running_cancellation_waits_for_release_then_wins_over_the_poll_result() {
         context.poll_reflection_task(&task),
         EvaluationWaitPoll::Pending(_)
     ));
-    assert!(promise.assignment().is_none());
+    assert!(promise.assignment(context.values()).is_none());
     assert!(matches!(
         context.poll_wait(&promise_wait),
         EvaluationWaitPoll::Pending(_)
@@ -4085,7 +4110,7 @@ fn running_cancellation_waits_for_release_then_wins_over_the_poll_result() {
     );
     assert!(cancelled.load(Ordering::Acquire));
     let promise_failure = promise
-        .assignment()
+        .assignment(context.values())
         .expect("owner-thread terminalization must settle its unresolved promise")
         .expect_err("cancellation must fail the unresolved task-owned promise");
     assert!(promise_failure.to_string().contains("was cancelled"));
@@ -4142,7 +4167,7 @@ fn executor_shutdown_preserves_worker_owned_cancellation_and_task_promise() {
         .recv()
         .expect("task construction should publish its promise");
     let promise_wait = promise
-        .task()
+        .task(context.values())
         .expect("task-owned promise should retain producer provenance")
         .wait()
         .clone();
@@ -4156,7 +4181,7 @@ fn executor_shutdown_preserves_worker_owned_cancellation_and_task_promise() {
         context.poll_reflection_task(&task),
         EvaluationWaitPoll::Pending(_)
     ));
-    assert!(promise.assignment().is_none());
+    assert!(promise.assignment(context.values()).is_none());
     assert!(
         !cancelled.load(Ordering::Acquire),
         "executor shutdown must not steal the worker-owned machine"
@@ -4183,7 +4208,7 @@ fn executor_shutdown_preserves_worker_owned_cancellation_and_task_promise() {
         EvaluationWaitPoll::Cancelled
     );
     let promise_failure = promise
-        .assignment()
+        .assignment(context.values())
         .expect("returning worker must settle its task-owned promise")
         .expect_err("cancellation must fail the unresolved promise");
     assert!(promise_failure.to_string().contains("was cancelled"));
@@ -4577,10 +4602,13 @@ fn task_owned_promise_dependency_reports_its_cross_session_producer() {
         .task_owned_promise(Arc::from("reported task promise"))
         .expect("task-owned promise should register");
     let observer = fixture.context();
+    let promise_root = promise.root(observer.values());
     let follower = observer
-        .schedule_task({
-            let promise = promise.clone();
-            move |_| Ok(Box::new(AwaitPromise { promise }))
+        .schedule_task(move |task_context| {
+            Ok(Box::new(AwaitPromise {
+                context: task_context,
+                promise: promise_root,
+            }))
         })
         .expect("promise follower should schedule");
 
@@ -4597,15 +4625,15 @@ fn task_owned_promise_dependency_reports_its_cross_session_producer() {
     assert_eq!(
         blocked.wait,
         promise
-            .task()
+            .task(observer.values())
             .and_then(|producer| producer.try_wait())
             .map(|wait| wait.get())
     );
-    assert_eq!(promise.exact_subscription_count(), 1);
+    assert_eq!(promise.exact_subscription_count(observer.values()), 1);
 
     set_promise(&observer, &promise, observer.values().unit())
         .expect("the task-owned promise should resolve once");
-    assert_eq!(promise.exact_subscription_count(), 0);
+    assert_eq!(promise.exact_subscription_count(observer.values()), 0);
     let EvaluationSessionRun::Complete(report) = observer.run_until_quiescent() else {
         panic!("the exact promise wake should complete its follower")
     };
@@ -4616,10 +4644,13 @@ fn task_owned_promise_dependency_reports_its_cross_session_producer() {
 fn resolver_owned_promise_dependency_reports_no_synthetic_producer() {
     let context = EvalContext::standalone();
     let promise = PromisedValue::new(context.values(), "reported resolver promise");
+    let promise_root = promise.root(context.values());
     let follower = context
-        .schedule_task({
-            let promise = promise.clone();
-            move |_| Ok(Box::new(AwaitPromise { promise }))
+        .schedule_task(move |task_context| {
+            Ok(Box::new(AwaitPromise {
+                context: task_context,
+                promise: promise_root,
+            }))
         })
         .expect("promise follower should schedule");
 
@@ -4634,11 +4665,11 @@ fn resolver_owned_promise_dependency_reports_no_synthetic_producer() {
     assert_eq!(blocked.dependency, None);
     assert_eq!(blocked.dependency_session, None);
     assert_eq!(blocked.wait, None);
-    assert_eq!(promise.exact_subscription_count(), 1);
+    assert_eq!(promise.exact_subscription_count(context.values()), 1);
 
     fail_promise_message(&context, &promise, "resolver promise failed")
         .expect("the resolver promise should fail once");
-    assert_eq!(promise.exact_subscription_count(), 0);
+    assert_eq!(promise.exact_subscription_count(context.values()), 0);
     let EvaluationSessionRun::Complete(report) = context.run_until_quiescent() else {
         panic!("the exact promise wake should terminalize its follower")
     };
@@ -4715,7 +4746,7 @@ fn pending_cross_session_task_promise_does_not_spin_a_deferred_retry() {
         .task_owned_promise(Arc::from("pending cross-session task promise"))
         .expect("task promise should register");
     let dependency = promise
-        .task()
+        .task(owner.values())
         .expect("task promise should retain producer provenance")
         .wait()
         .clone();
@@ -4787,15 +4818,13 @@ fn zero_worker_executor_drops_sparks_without_forcing_them() {
     let (coordinator, _executor) = test_execution_resources(0).unwrap();
     let session = EvaluationSession::shared(&coordinator);
     let context = EvalContext::new(&session);
-    let lazy = crate::core::LazyValue::semantic_thunk(
-        &crate::core::test_value_factory(),
-        "unforced spark",
-        |_| panic!("zero-worker spark must never be evaluated"),
-    );
+    let lazy = crate::core::LazyValue::semantic_thunk(context.values(), "unforced spark", |_| {
+        panic!("zero-worker spark must never be evaluated")
+    });
 
     context.spark(Value::Lazy(lazy.clone()));
 
-    assert!(lazy.cached().is_none());
+    assert!(lazy.cached(context.values()).is_none());
     assert_eq!(
         coordinator.retained_spark_count(),
         0,
@@ -5495,14 +5524,17 @@ fn forced_kill_abandons_a_deferred_lazy_claim_without_poisoning_the_lazy() {
         context.poll_wait(&wait),
         EvaluationWaitPoll::Killed(_)
     ));
-    assert!(lazy.cached().is_none());
+    assert!(lazy.cached(context.values()).is_none());
     assert_deferred_task_retired(&context, &lazy);
     assert_eq!(
         crate::eval::eval_value(&context, &Value::Lazy(lazy.clone()))
             .expect("a later demand should reclaim the lazy source"),
         expected
     );
-    assert!(lazy.cached().is_some_and(|result| result.is_ok()));
+    assert!(
+        lazy.cached(context.values())
+            .is_some_and(|result| result.is_ok())
+    );
 }
 
 #[test]
@@ -5578,7 +5610,7 @@ fn forced_kill_publishes_task_status_and_fails_owned_promises() {
         panic!("task wait should expose the killed terminal")
     };
     let promise_failure = promise
-        .assignment()
+        .assignment(context.values())
         .expect("owned promise should receive a terminal assignment")
         .expect_err("owned promise should fail when its producer is killed");
     assert_eq!(promise_failure, *task_failure.as_failure());
@@ -5691,7 +5723,7 @@ fn exit_settlement_fails_owned_promises_and_drops_reusable_machine_after_unlock(
         EvaluationWaitPoll::Exited
     );
     let promise_failure = promise
-        .assignment()
+        .assignment(context.values())
         .expect("settlement should terminalize the owned promise")
         .expect_err("an unfulfilled exit-owned promise must fail");
     assert!(
@@ -5756,7 +5788,7 @@ fn runtime_deadlock_retains_typed_task_and_client_dependencies() {
         Some(crate::api::RuntimeDependency::Promise {
             promise_id,
             producer: None,
-        }) if *promise_id == promise.id().get()
+        }) if *promise_id == promise.id(context.values()).get()
     ));
     assert!(snapshot.unfinished().iter().any(|work| {
         work.task_id() == Some(child.id().get())
@@ -6111,10 +6143,13 @@ fn spark_abandonment_wakes_useful_work_for_another_pump_pass() {
     let lazy = LazyValue::semantic_thunk(context.values(), "spark-owned lazy claim", move |_| {
         Ok(Value::Promised(followed.clone()))
     });
+    let promise_root = promise.root(context.values());
     let wait = context
-        .lazy_task(&lazy, {
-            let promise = promise.clone();
-            move |_, _| Box::new(AwaitPromise { promise })
+        .lazy_task(&lazy, move |task_context, _| {
+            Box::new(AwaitPromise {
+                context: task_context,
+                promise: promise_root,
+            })
         })
         .expect("deferred producer should register");
     assert!(coordinator.promote_deferred_wait(&wait));
@@ -6247,7 +6282,7 @@ fn one_promise_completion_wakes_exact_sparks_in_multiple_sessions() {
         park_next_spark(&coordinator);
     }
 
-    assert_eq!(promise.exact_subscription_count(), 2);
+    assert_eq!(promise.exact_subscription_count(left.values()), 2);
     assert_eq!(coordinator.spark_work_counts(), (0, 0, 2));
     set_promise(&left, &promise, left.values().unit())
         .expect("the shared host promise should resolve once");
@@ -6283,7 +6318,7 @@ fn promise_completion_wakes_only_sparks_parked_on_that_promise() {
     set_promise(&context, &promise_a, context.values().unit())
         .expect("promise A should resolve once");
     assert_eq!(coordinator.spark_work_counts(), (1, 0, 1));
-    assert_eq!(promise_b.exact_subscription_count(), 1);
+    assert_eq!(promise_b.exact_subscription_count(context.values()), 1);
 
     let coordinator::CoordinatorSelection::Spark(claimed) = coordinator.select() else {
         panic!("promise A should wake its own spark")
@@ -6324,7 +6359,7 @@ fn promise_completion_between_demand_and_subscription_requeues_the_spark() {
         .expect("the promise should resolve before subscription");
 
     coordinator.release_spark(claimed, coordinator::SparkWorkPoll::Blocked(dependency));
-    assert_eq!(promise.exact_subscription_count(), 0);
+    assert_eq!(promise.exact_subscription_count(context.values()), 0);
     assert_eq!(coordinator.spark_work_counts(), (1, 0, 0));
     let coordinator::CoordinatorSelection::Spark(claimed) = coordinator.select() else {
         panic!("terminal recheck should requeue the spark")
@@ -6455,7 +6490,7 @@ fn closing_a_session_abandons_a_blocked_spark_and_releases_its_lazy_claim() {
         0,
         "spark abandonment or the returning worker must release the reusable deferred claim"
     );
-    assert!(lazy.cached().is_none());
+    assert!(lazy.cached(context.values()).is_none());
 
     set_promise(&context, &promise, context.values().unit())
         .expect("host promise should accept its assignment");

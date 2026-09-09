@@ -145,9 +145,8 @@ impl TaskOwnedPromiseObligation {
         mutation: &dyn RuntimeMutationAuthority,
         failure: Arc<crate::core::EvaluationFailure>,
     ) -> (PromiseProducerPublication, CompletionWake) {
-        let values = self
-            .root
-            .observer()
+        let values = coordinator
+            .value_observer()
             .upgrade()
             .expect("a registered promise root must retain a live value domain owner");
         let (publication, wake) = values.with_runtime_value_access(|access| {
@@ -250,7 +249,7 @@ impl WorkDependency {
     fn runtime_id(&self) -> EvaluationRuntimeId {
         match self {
             Self::Wait(wait) => wait.runtime_id(),
-            Self::Promise(promise) => promise.observer().runtime_id(),
+            Self::Promise(promise) => promise.runtime_id(),
             #[cfg(test)]
             Self::Test(dependency) => dependency.runtime,
         }

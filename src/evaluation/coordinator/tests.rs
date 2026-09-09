@@ -86,13 +86,15 @@ fn promise_dependency_projects_only_a_task_owned_producer_wait() {
         .expect("the local task should own its promise");
 
     assert!(
-        WorkDependency::Promise(resolver_owned.root())
+        WorkDependency::Promise(resolver_owned.root(context.values()))
             .producer_wait()
             .is_none()
     );
     assert_eq!(
-        WorkDependency::Promise(task_owned.root()).producer_wait(),
-        task_owned.task().and_then(|task| task.try_wait())
+        WorkDependency::Promise(task_owned.root(context.values())).producer_wait(),
+        task_owned
+            .task(context.values())
+            .and_then(|task| task.try_wait())
     );
 }
 
@@ -675,7 +677,7 @@ fn static_producer_obligations_are_taken_once() {
     let lazy = LazyValue::semantic_thunk(&session.demand.values, "static obligation", |_| {
         panic!("static obligation test never evaluates its synthetic lazy")
     });
-    let producer = DeferredProducer::Lazy(lazy.root());
+    let producer = DeferredProducer::Lazy(lazy.root(&session.demand.values));
     let mut deferred = SettlementObligations::deferred_claim(wait.clone(), producer.clone());
     let Some(ProducerSettlementObligation::DeferredClaim {
         wait: obligation_wait,
@@ -981,10 +983,10 @@ fn foreign_promise_dependency_retires_work_without_subscribing() {
 
     coordinator.release_spark(
         claimed,
-        SparkWorkPoll::Blocked(WorkDependency::Promise(promise.root())),
+        SparkWorkPoll::Blocked(WorkDependency::Promise(promise.root(&foreign_values))),
     );
 
-    assert_eq!(promise.exact_subscription_count(), 0);
+    assert_eq!(promise.exact_subscription_count(&foreign_values), 0);
     assert_eq!(coordinator.retained_spark_count(), 0);
 }
 
@@ -1829,7 +1831,7 @@ fn deferred_insertion_is_immediately_dormant_and_promotable() {
             &session.demand,
             task,
             wait.clone(),
-            DeferredProducer::Lazy(lazy.root()),
+            DeferredProducer::Lazy(lazy.root(&session.demand.values)),
             Box::new(TestTaskMachine),
         )
         .expect("open test session should reserve deferred work")
@@ -1922,7 +1924,7 @@ fn closing_owner_immediately_after_deferred_insertion_abandons_the_dormant_recor
                 &session.demand,
                 task,
                 wait.clone(),
-                DeferredProducer::Lazy(lazy.root()),
+                DeferredProducer::Lazy(lazy.root(&session.demand.values)),
                 Box::new(TestTaskMachine),
             )
             .expect("open test session should reserve deferred work"),
@@ -1936,7 +1938,7 @@ fn closing_owner_immediately_after_deferred_insertion_abandons_the_dormant_recor
         wait.terminal_poll(),
         Some(super::super::EvaluationWaitPoll::Abandoned)
     );
-    assert!(lazy.cached().is_none());
+    assert!(lazy.cached(&coordinator.test_values()).is_none());
 }
 
 #[test]
@@ -1970,7 +1972,7 @@ fn racing_deferred_candidates_install_one_dormant_machine_and_drop_the_loser_unl
                     &demand,
                     task,
                     wait.clone(),
-                    DeferredProducer::Lazy(lazy.root()),
+                    DeferredProducer::Lazy(lazy.root(&demand.values)),
                     Box::new(CountDeferredDropLocks {
                         coordinator: Arc::downgrade(&coordinator),
                         drops,
@@ -2035,7 +2037,7 @@ fn deferred_claim_excludes_competitors_and_releases_its_machine_outside_runtime_
             &session.demand,
             task,
             wait.clone(),
-            DeferredProducer::Lazy(lazy.root()),
+            DeferredProducer::Lazy(lazy.root(&session.demand.values)),
             Box::new(CheckDeferredDropLocks {
                 coordinator: Arc::downgrade(&coordinator),
                 dropped_without_runtime_locks: dropped_without_runtime_locks.clone(),
@@ -2098,7 +2100,7 @@ fn outer_block_promotes_one_canonical_deferred_producer() {
             &producer_session.demand,
             producer_task,
             producer_wait.clone(),
-            DeferredProducer::Lazy(lazy.root()),
+            DeferredProducer::Lazy(lazy.root(&producer_session.demand.values)),
             Box::new(TestTaskMachine),
         )
         .expect("open producer session should reserve deferred work")
@@ -2118,7 +2120,7 @@ fn outer_block_promotes_one_canonical_deferred_producer() {
             &observer_session.demand,
             duplicate_task,
             duplicate_wait,
-            DeferredProducer::Lazy(lazy.root()),
+            DeferredProducer::Lazy(lazy.root(&observer_session.demand.values)),
             Box::new(TestTaskMachine),
         )
         .expect("open observer session should reuse deferred work")

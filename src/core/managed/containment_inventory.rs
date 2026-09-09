@@ -174,7 +174,7 @@ fn semantic_computation_captures_are_explicit() {
         [Value::Number(1.into()), Value::Number(2.into())],
         return_second_capture,
     );
-    let Some(LazySource::SemanticComputation(computation)) = lazy.source_snapshot() else {
+    let Some(LazySource::SemanticComputation(computation)) = lazy.source_snapshot(&values) else {
         panic!("semantic computation should retain its explicit source")
     };
 
@@ -203,7 +203,7 @@ fn external_host_call_requires_a_source_backed_record() {
             )))
         },
     );
-    let Some(LazySource::HostCall(producer)) = lazy.source_snapshot() else {
+    let Some(LazySource::HostCall(producer)) = lazy.source_snapshot(&values) else {
         panic!("external host call should retain its classified source")
     };
 
@@ -233,26 +233,26 @@ fn host_call_capture_retires_only_during_external_registry_drain() {
     );
     let drops = Arc::new(AtomicUsize::new(0));
     let capture = HostCaptureDrop(Arc::clone(&drops));
-    let lazy = LazyValue::external_host_call(
-        &values,
-        "external owner fixture",
-        HostCallRecord::external(
+    {
+        let _lazy = LazyValue::external_host_call(
+            &values,
             "external owner fixture",
-            "src/core/managed/containment_inventory.rs",
-            "passive drop observer",
-        ),
-        move || {
-            let _ = &capture;
-            Err(Arc::new(EvaluationFailure::message("not invoked")))
-        },
-    );
-    assert_eq!(values.external_owner_count_for_test(), 1);
-
-    drop(lazy);
+            HostCallRecord::external(
+                "external owner fixture",
+                "src/core/managed/containment_inventory.rs",
+                "passive drop observer",
+            ),
+            move || {
+                let _ = &capture;
+                Err(Arc::new(EvaluationFailure::message("not invoked")))
+            },
+        );
+        assert_eq!(values.external_owner_count_for_test(), 1);
+    }
     assert_eq!(
         drops.load(Ordering::Relaxed),
         0,
-        "dropping the lazy lease must not destroy its host capture"
+        "ending the lazy edge's scope must not destroy its host capture"
     );
     values
         .collect_managed_for_test()
