@@ -1,12 +1,54 @@
-use crate::{Gc, Mutator, Trace, trace::ErasedGc};
+use crate::{Gc, Mutator, Trace, Visitor, trace::ErasedGc};
 
 impl Mutator<'_> {
-    /// Reports one managed-edge transition while a closure performs it.
+    /// Reports one managed edge-set transition while a closure performs it.
     ///
-    /// The initial stop-the-world collector performs no barrier action. The
-    /// explicit owner/old/new shape preserves one audited integration point
-    /// for a future incremental or generational collector without imposing
-    /// bookkeeping on the current design.
+    /// `leaving` and `adding` synchronously describe the complete sets of
+    /// managed edges removed and installed by `transition`. They may borrow
+    /// representation state for this call, but must neither retain `visitor`
+    /// nor perform semantic work. The collector decides which side, if any,
+    /// it needs to visit. The initial stop-the-world collector visits neither.
+    ///
+    /// A future SATB collector can visit `leaving` before publication without
+    /// paying to walk `adding`; other collector policies may use both sides.
+    /// Calling the gateway does not itself prescribe one such policy.
+    ///
+    /// # Safety
+    ///
+    /// `owner` must be a live allocation in this mutator's heap. If invoked,
+    /// each edge visitor must synchronously report all and only the live
+    /// managed pointers represented by its side of this transition. The
+    /// closure must perform that one logical transition without letting an
+    /// unreported managed edge escape. If it panics after changing the graph,
+    /// the containing representation must remain valid; a future barrier may
+    /// conservatively retain both edge sets.
+    #[inline(always)]
+    pub unsafe fn with_edge_transition<Owner, Leaving, Adding, Result>(
+        &self,
+        owner: Gc<Owner>,
+        leaving: Leaving,
+        adding: Adding,
+        transition: impl FnOnce() -> Result,
+    ) -> Result
+    where
+        Owner: Trace,
+        Leaving: for<'visit> Fn(&mut Visitor<'visit>),
+        Adding: for<'visit> Fn(&mut Visitor<'visit>),
+    {
+        #[cfg(debug_assertions)]
+        owner.debug_assert_owned_by(self);
+
+        self.observe_edge_transition(owner.erase(), leaving, adding);
+        transition()
+    }
+
+    /// Reports one optional managed-edge replacement while a closure performs
+    /// it.
+    ///
+    /// This compatibility convenience delegates to the same edge-set
+    /// transition contract. New aggregate representations should use
+    /// [`Mutator::with_edge_transition`] directly instead of flattening their
+    /// semantic edges into repeated unrelated calls.
     ///
     /// # Safety
     ///
@@ -25,34 +67,73 @@ impl Mutator<'_> {
         new: Option<Gc<Edge>>,
         replace: impl FnOnce() -> Result,
     ) -> Result {
-        #[cfg(debug_assertions)]
-        {
-            owner.debug_assert_owned_by(self);
-            if let Some(old) = old {
-                old.debug_assert_owned_by(self);
-            }
-            if let Some(new) = new {
-                new.debug_assert_owned_by(self);
-            }
+        // SAFETY: the caller supplies the owner and exact optional edge before
+        // and after the replacement. `Option<Gc<Edge>>`'s `Trace`
+        // implementation reports precisely its present singleton edge.
+        unsafe {
+            self.with_edge_transition(
+                owner,
+                |visitor| old.trace(visitor),
+                |visitor| new.trace(visitor),
+                replace,
+            )
         }
-
-        self.observe_edge_replacement(owner.erase(), old.map(Gc::erase), new.map(Gc::erase));
-        replace()
     }
 
-    /// Collector action for the structural replacement gateway.
+    /// Collector action for the structural edge-transition gateway.
     ///
     /// Keeping this as a separate always-inlined operation makes the initial
-    /// no-op policy explicit. Optimized STW builds erase the call and all three
-    /// pointer arguments.
+    /// no-op policy explicit. Optimized STW builds erase the call, visitor
+    /// closures, and pointer arguments.
     #[inline(always)]
-    fn observe_edge_replacement(
+    fn observe_edge_transition<Leaving, Adding>(
         &self,
         _owner: ErasedGc,
-        _old: Option<ErasedGc>,
-        _new: Option<ErasedGc>,
-    ) {
+        leaving: Leaving,
+        adding: Adding,
+    ) where
+        Leaving: for<'visit> Fn(&mut Visitor<'visit>),
+        Adding: for<'visit> Fn(&mut Visitor<'visit>),
+    {
+        #[cfg(feature = "deterministic-test-hooks")]
+        if let Some(probe) = self.heap().edge_transition_probe() {
+            probe.observe(self, &leaving, &adding);
+        }
+
+        #[cfg(not(feature = "deterministic-test-hooks"))]
+        let _ = (leaving, adding);
     }
+
+    #[cfg(test)]
+    fn observe_edge_transition_for_test<Leaving, Adding>(
+        &self,
+        observe_leaving: bool,
+        observe_adding: bool,
+        leaving: Leaving,
+        adding: Adding,
+    ) -> ObservedEdgeTransition
+    where
+        Leaving: for<'visit> Fn(&mut Visitor<'visit>),
+        Adding: for<'visit> Fn(&mut Visitor<'visit>),
+    {
+        let mut observed = ObservedEdgeTransition::default();
+        if observe_leaving {
+            let mut visit = |edge| observed.leaving.push(edge);
+            leaving(&mut Visitor::new(&mut visit));
+        }
+        if observe_adding {
+            let mut visit = |edge| observed.adding.push(edge);
+            adding(&mut Visitor::new(&mut visit));
+        }
+        observed
+    }
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct ObservedEdgeTransition {
+    leaving: Vec<ErasedGc>,
+    adding: Vec<ErasedGc>,
 }
 
 #[cfg(test)]
@@ -126,6 +207,90 @@ mod tests {
                     .expect("test edge mutex should not be poisoned"),
                 Some(new)
             );
+        });
+    }
+
+    #[test]
+    fn stw_transition_gateway_does_not_walk_either_edge_set() {
+        let heap = Heap::new();
+        heap.with_mutator(|mutator| {
+            let leaves = mutator.allocator::<Leaf>().unwrap();
+            let nodes = mutator.allocator::<MutableNode>().unwrap();
+            let old = leaves.alloc(Leaf { _value: 1 });
+            let new = leaves.alloc(Leaf { _value: 2 });
+            let owner = nodes.alloc(MutableNode {
+                edge: Mutex::new(Some(old)),
+            });
+            // SAFETY: `owner` is live in this heap and the two visitors
+            // describe the exact old and new singleton edges. The closure
+            // performs that replacement once.
+            unsafe {
+                mutator.with_edge_transition(
+                    owner,
+                    |_| panic!("STW must not walk leaving edges"),
+                    |_| panic!("STW must not walk adding edges"),
+                    || {
+                        *owner.get_unchecked(mutator).edge.lock().unwrap() = Some(new);
+                    },
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn synthetic_observer_selects_distinct_empty_singleton_and_multi_edge_sets() {
+        let heap = Heap::new();
+        heap.with_mutator(|mutator| {
+            let leaves = mutator.allocator::<Leaf>().unwrap();
+            let first = leaves.alloc(Leaf { _value: 1 });
+            let second = leaves.alloc(Leaf { _value: 2 });
+            let third = leaves.alloc(Leaf { _value: 3 });
+
+            let neither = mutator.observe_edge_transition_for_test(
+                false,
+                false,
+                |visitor| [first, second].trace(visitor),
+                |visitor| Some(third).trace(visitor),
+            );
+            assert!(neither.leaving.is_empty());
+            assert!(neither.adding.is_empty());
+
+            let satb = mutator.observe_edge_transition_for_test(
+                true,
+                false,
+                |visitor| [first, second].trace(visitor),
+                |visitor| Some(third).trace(visitor),
+            );
+            assert_eq!(satb.leaving, [first.erase(), second.erase()]);
+            assert!(satb.adding.is_empty());
+
+            let both = mutator.observe_edge_transition_for_test(
+                true,
+                true,
+                |_visitor| (),
+                |visitor| Some(third).trace(visitor),
+            );
+            assert!(both.leaving.is_empty());
+            assert_eq!(both.adding, [third.erase()]);
+        });
+    }
+
+    #[test]
+    fn proposed_addition_may_be_observed_even_when_publication_loses() {
+        let heap = Heap::new();
+        heap.with_mutator(|mutator| {
+            let leaves = mutator.allocator::<Leaf>().unwrap();
+            let proposed = leaves.alloc(Leaf { _value: 1 });
+            let observed = mutator.observe_edge_transition_for_test(
+                false,
+                true,
+                |_visitor| (),
+                |visitor| proposed.trace(visitor),
+            );
+            let publication = Err::<(), _>(proposed);
+
+            assert_eq!(observed.adding, [proposed.erase()]);
+            assert_eq!(publication, Err(proposed));
         });
     }
 

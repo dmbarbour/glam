@@ -21,6 +21,11 @@ use crate::{
     trace::ErasedGc,
 };
 
+#[cfg(feature = "deterministic-test-hooks")]
+use crate::deterministic::{
+    EdgeTransitionObservation, EdgeTransitionProbe, EdgeTransitionProbeState,
+};
+
 const FIXED_SURVIVOR_RUN_HEADROOM: usize = crate::arena::RUNS_PER_CHUNK * 7 / 8;
 const SURVIVOR_GROWTH_NUMERATOR: usize = 1;
 const SURVIVOR_GROWTH_DENOMINATOR: usize = 2;
@@ -388,6 +393,31 @@ impl Heap {
         self.inner.statistics()
     }
 
+    /// Installs one heap-local deterministic edge-transition observer.
+    ///
+    /// This private-feature API exists only for repository verification. A
+    /// heap accepts one observer because replacement would make an exact
+    /// transition history ambiguous.
+    #[cfg(feature = "deterministic-test-hooks")]
+    #[doc(hidden)]
+    pub fn install_edge_transition_probe(
+        &self,
+        observation: EdgeTransitionObservation,
+    ) -> EdgeTransitionProbe {
+        let probe = EdgeTransitionProbe::new(observation);
+        let mut installed = self
+            .inner
+            .edge_transition_probe
+            .lock()
+            .expect("edge-transition test probe was poisoned");
+        assert!(
+            installed.is_none(),
+            "edge-transition probe already installed"
+        );
+        *installed = Some(Arc::clone(&probe.state));
+        probe
+    }
+
     /// Completes a full stop-the-world collection handshake synchronously.
     ///
     /// The collector clears mark state, seeds the stable root registry, traces
@@ -436,6 +466,8 @@ pub(crate) struct HeapInner {
     collection_requested: AtomicBool,
     admission_changed: Condvar,
     allocation_lease_epoch: AtomicU64,
+    #[cfg(feature = "deterministic-test-hooks")]
+    edge_transition_probe: Mutex<Option<Arc<EdgeTransitionProbeState>>>,
     #[cfg(test)]
     allocation_cursor_claims: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
@@ -496,6 +528,8 @@ impl HeapInner {
             collection_requested: AtomicBool::new(false),
             admission_changed: Condvar::new(),
             allocation_lease_epoch: AtomicU64::new(AllocationLeaseEpoch::INITIAL.get()),
+            #[cfg(feature = "deterministic-test-hooks")]
+            edge_transition_probe: Mutex::new(None),
             #[cfg(test)]
             allocation_cursor_claims: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
@@ -3194,6 +3228,23 @@ impl HeapInner {
 
         #[cfg(not(debug_assertions))]
         let _ = pointer;
+    }
+
+    #[cfg(feature = "deterministic-test-hooks")]
+    pub(crate) fn assert_observed_edge(&self, value: ErasedGc) {
+        let state = self.data.lock().expect("heap state should not be poisoned");
+        if let Err(error) = collector_slot_in(&state.arena, &state.classes, value) {
+            drop(state);
+            error.raise();
+        }
+    }
+
+    #[cfg(feature = "deterministic-test-hooks")]
+    pub(crate) fn edge_transition_probe(&self) -> Option<Arc<EdgeTransitionProbeState>> {
+        self.edge_transition_probe
+            .lock()
+            .expect("edge-transition test probe was poisoned")
+            .clone()
     }
 
     pub(crate) fn register_root<T: Trace>(self: &Arc<Self>, value: crate::Gc<T>) -> Root<T> {

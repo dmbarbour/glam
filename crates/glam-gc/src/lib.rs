@@ -44,6 +44,10 @@ mod trace;
 #[cfg(feature = "deterministic-test-hooks")]
 mod deterministic;
 
+#[cfg(feature = "deterministic-test-hooks")]
+#[doc(hidden)]
+pub use deterministic::{EdgeTransitionObservation, EdgeTransitionProbe, EdgeTransitionRecord};
+
 pub use class::UnsupportedLayout;
 pub use heap::{
     CollectionError, CollectionPolicy, CollectionReport, Heap, HeapActivity, HeapStatistics,

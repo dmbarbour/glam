@@ -4,6 +4,7 @@
 //! promise, and core-net production identities through them as one exact
 //! traced graph.
 
+use std::cell::RefCell;
 use std::fmt;
 use std::marker::PhantomData;
 use std::rc::Rc;
@@ -159,6 +160,7 @@ pub(crate) struct ManagedCoreNetRoot {
 
 /// A non-escaping lazy-cell observation authorized by one runtime value scope.
 pub(crate) struct ManagedLazyAccess<'access, 'scope> {
+    owner: ManagedLazyEdge,
     cell: &'access ManagedLazyCell,
     authority: &'access RuntimeValueAccess<'scope>,
     _thread_bound: PhantomData<Rc<()>>,
@@ -166,8 +168,9 @@ pub(crate) struct ManagedLazyAccess<'access, 'scope> {
 
 /// A non-escaping promise-cell observation authorized by one runtime value scope.
 pub(crate) struct ManagedPromiseAccess<'access, 'scope> {
+    owner: ManagedPromiseEdge,
     cell: &'access ManagedPromiseCell,
-    _authority: &'access RuntimeValueAccess<'scope>,
+    authority: &'access RuntimeValueAccess<'scope>,
     _thread_bound: PhantomData<Rc<()>>,
 }
 
@@ -446,7 +449,7 @@ impl ManagedLazyEdge {
         // value domain. Its caller supplies liveness through a rooted owner or
         // a traced semantic edge reached within this access region.
         let cell = unsafe { authority.scope.get_traced_edge(self.0) };
-        ManagedLazyAccess::from_authorized_cell(cell, observer, authority)
+        ManagedLazyAccess::from_authorized_cell(self, cell, observer, authority)
     }
 }
 
@@ -466,7 +469,7 @@ impl ManagedPromiseEdge {
         // SAFETY: the private constructor and observer preserve exact heap and
         // representation provenance; the caller supplies current liveness.
         let cell = unsafe { authority.scope.get_traced_edge(self.0) };
-        ManagedPromiseAccess::from_authorized_cell(cell, authority)
+        ManagedPromiseAccess::from_authorized_cell(self, cell, authority)
     }
 }
 
@@ -516,6 +519,7 @@ impl ManagedLazyRoot {
             return None;
         }
         ManagedLazyAccess::from_authorized_cell(
+            self.edge,
             authority.get(&self.root),
             &self.observer,
             authority,
@@ -547,7 +551,7 @@ impl ManagedPromiseRoot {
         if !authority.admits(&self.observer) || !authority.admits_root(&self.root) {
             return None;
         }
-        ManagedPromiseAccess::from_authorized_cell(authority.get(&self.root), authority)
+        ManagedPromiseAccess::from_authorized_cell(self.edge, authority.get(&self.root), authority)
     }
 }
 
@@ -578,11 +582,13 @@ impl ManagedCoreNetRoot {
 
 impl<'access, 'scope> ManagedLazyAccess<'access, 'scope> {
     fn from_authorized_cell(
+        owner: ManagedLazyEdge,
         cell: &'access ManagedLazyCell,
         observer: &RuntimeValueObserver,
         authority: &'access RuntimeValueAccess<'scope>,
     ) -> Option<Self> {
         authority.admits(observer).then_some(Self {
+            owner,
             cell,
             authority,
             _thread_bound: PhantomData,
@@ -623,32 +629,61 @@ impl<'access, 'scope> ManagedLazyAccess<'access, 'scope> {
     }
 
     pub(crate) fn cache(&self, result: LazyResult) -> LazyResult {
-        let _ = self.cell.result.set(result);
-        let result = self
-            .cell
-            .result
-            .get()
-            .expect("managed lazy cache must contain a value after set")
-            .clone();
-        let source = self
-            .cell
-            .source
-            .lock()
-            .expect("managed lazy source cell was poisoned")
-            .take();
-        drop(source);
-        result
+        let proposed = RefCell::new(Some(result));
+        // SAFETY: `self.owner` is the exact live lazy cell authorized by this
+        // access. The leaving visitor snapshots its pre-transition source
+        // under the source mutex, while the adding visitor reports the
+        // proposed terminal result without consuming it. The closure publishes
+        // exactly one terminal winner before removing the old source graph.
+        unsafe {
+            self.authority.with_managed_edge_transition(
+                self.owner.0,
+                |visitor| trace_lazy_source_cell(self.cell, visitor),
+                |visitor| {
+                    trace_lazy_result(
+                        proposed
+                            .borrow()
+                            .as_ref()
+                            .expect("lazy transition must retain its proposed result"),
+                        visitor,
+                    );
+                },
+                || {
+                    let proposed = proposed
+                        .borrow_mut()
+                        .take()
+                        .expect("lazy transition must consume its proposed result once");
+                    let _ = self.cell.result.set(proposed);
+                    let result = self
+                        .cell
+                        .result
+                        .get()
+                        .expect("managed lazy cache must contain a value after set")
+                        .clone();
+                    let source = self
+                        .cell
+                        .source
+                        .lock()
+                        .expect("managed lazy source cell was poisoned")
+                        .take();
+                    drop(source);
+                    result
+                },
+            )
+        }
     }
 }
 
 impl<'access, 'scope> ManagedPromiseAccess<'access, 'scope> {
     fn from_authorized_cell(
+        owner: ManagedPromiseEdge,
         cell: &'access ManagedPromiseCell,
         authority: &'access RuntimeValueAccess<'scope>,
     ) -> Option<Self> {
         authority.admits(&cell.values).then_some(Self {
+            owner,
             cell,
-            _authority: authority,
+            authority,
             _thread_bound: PhantomData,
         })
     }
@@ -663,7 +698,7 @@ impl<'access, 'scope> ManagedPromiseAccess<'access, 'scope> {
 
     #[cfg(test)]
     pub(crate) fn runtime_id(&self) -> crate::runtime::EvaluationRuntimeId {
-        debug_assert!(self._authority.admits(&self.cell.values));
+        debug_assert!(self.authority.admits(&self.cell.values));
         self.cell.values.runtime_id()
     }
 
@@ -695,12 +730,9 @@ impl<'access, 'scope> ManagedPromiseAccess<'access, 'scope> {
         assignment: ManagedPromiseAssignment,
         after_assignment: impl FnOnce(&ManagedPromiseAssignment) -> T,
     ) -> Result<T, ManagedPromiseAssignment> {
-        self.cell.completion.publish(|| {
-            self.cell.assignment.set(assignment)?;
-            Ok(after_assignment(self.cell.assignment.get().expect(
-                "managed promise publication must initialize its assignment",
-            )))
-        })
+        self.cell
+            .completion
+            .publish(|| self.publish_assignment(assignment, after_assignment))
     }
 
     pub(crate) fn publish_guarded<T>(
@@ -713,11 +745,45 @@ impl<'access, 'scope> ManagedPromiseAccess<'access, 'scope> {
         self.cell
             .completion
             .publish_guarded(coordinator, mutation, || {
-                self.cell.assignment.set(assignment)?;
-                Ok(after_assignment(self.cell.assignment.get().expect(
-                    "managed promise publication must initialize its assignment",
-                )))
+                self.publish_assignment(assignment, after_assignment)
             })
+    }
+
+    fn publish_assignment<T>(
+        &self,
+        assignment: ManagedPromiseAssignment,
+        after_assignment: impl FnOnce(&ManagedPromiseAssignment) -> T,
+    ) -> Result<T, ManagedPromiseAssignment> {
+        let proposed = RefCell::new(Some(assignment));
+        // SAFETY: `self.owner` is the exact live promise cell authorized by
+        // this access. Promise assignment has no leaving edge, and the adding
+        // visitor reports the complete proposed terminal assignment. The
+        // closure performs the representation's one-write publication.
+        unsafe {
+            self.authority.with_managed_edge_transition(
+                self.owner.0,
+                |_visitor| (),
+                |visitor| {
+                    trace_promise_assignment(
+                        proposed
+                            .borrow()
+                            .as_ref()
+                            .expect("promise transition must retain its proposed assignment"),
+                        visitor,
+                    );
+                },
+                || {
+                    let assignment = proposed
+                        .borrow_mut()
+                        .take()
+                        .expect("promise transition must consume its proposed assignment once");
+                    self.cell.assignment.set(assignment)?;
+                    Ok(after_assignment(self.cell.assignment.get().expect(
+                        "managed promise publication must initialize its assignment",
+                    )))
+                },
+            )
+        }
     }
 
     pub(crate) fn subscribe_work(
@@ -778,6 +844,23 @@ fn trace_lazy_result(result: &LazyResult, visitor: &mut Visitor<'_>) {
     }
 }
 
+fn trace_lazy_source(source: &LazySource, visitor: &mut Visitor<'_>) {
+    visit_compatibility_payload_managed_edges(source, visitor);
+    source.visit_compatibility_net_edges(&mut |net| {
+        net.trace_managed_edge(visitor);
+    });
+}
+
+fn trace_lazy_source_cell(cell: &ManagedLazyCell, visitor: &mut Visitor<'_>) {
+    let source = cell
+        .source
+        .lock()
+        .expect("managed lazy source cell was poisoned");
+    if let Some(source) = source.as_ref() {
+        trace_lazy_source(source, visitor);
+    }
+}
+
 fn trace_promise_assignment(assignment: &ManagedPromiseAssignment, visitor: &mut Visitor<'_>) {
     match assignment {
         Ok(value) => visit_compatibility_managed_edges(value, visitor),
@@ -812,10 +895,7 @@ unsafe impl Trace for ManagedLazyCell {
                 .expect("an unresolved managed lazy must retain its source")
                 .clone()
         };
-        visit_compatibility_payload_managed_edges(&source, visitor);
-        source.visit_compatibility_net_edges(&mut |net| {
-            net.trace_managed_edge(visitor);
-        });
+        trace_lazy_source(&source, visitor);
     }
 }
 
@@ -917,6 +997,7 @@ mod tests {
     use std::collections::BTreeSet;
     use std::fs;
     use std::path::Path;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::*;
     use crate::core::{
@@ -926,6 +1007,8 @@ mod tests {
     use crate::interaction_net::{NetBuilder, PreparedCopySource};
     use crate::runtime::{RuntimeIds, RuntimeMutationAdmission, allocate_evaluation_runtime_id};
     use syn::visit::{self, Visit};
+
+    use glam_gc::EdgeTransitionObservation;
 
     fn new_values() -> CoreValueFactory {
         CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new())
@@ -1526,15 +1609,19 @@ mod tests {
     #[test]
     fn bounded_lazy_gateway_preserves_terminal_publication_protocol() {
         let values = new_values();
-        let observer = values.runtime_value_observer();
-        let cell = ManagedLazyCell::new(&values, "prepared lazy", LazySource::Error);
+        let root = values.with_runtime_value_access(|access| {
+            access
+                .construct_rooted_managed_lazy("prepared lazy", LazySource::Error)
+                .expect("the managed lazy cell should fit a run")
+        });
         let winner = EvaluatedValue::try_from(Value::Number(42.into())).unwrap();
         let loser = EvaluatedValue::try_from(Value::Number(73.into())).unwrap();
 
         values.with_runtime_value_access(|access| {
-            let lazy = ManagedLazyAccess::from_authorized_cell(&cell, &observer, &access)
+            let lazy = root
+                .access(&access)
                 .expect("the matching value domain should authorize its lazy cell");
-            assert_eq!(lazy.id(), cell.id);
+            assert_eq!(lazy.id(), root.id());
             assert_eq!(lazy.label().as_ref(), "prepared lazy");
             assert!(lazy.source_snapshot().is_some());
             assert_eq!(lazy.cache(Ok(winner.clone())), Ok(winner.clone()));
@@ -1545,21 +1632,26 @@ mod tests {
 
         let unrelated = new_values();
         unrelated.with_runtime_value_access(|access| {
-            assert!(ManagedLazyAccess::from_authorized_cell(&cell, &observer, &access).is_none());
+            assert!(root.access(&access).is_none());
         });
     }
 
     #[test]
     fn bounded_promise_gateway_preserves_one_terminal_winner() {
         let values = new_values();
-        let cell = ManagedPromiseCell::new(&values, "prepared promise");
+        let root = values.with_runtime_value_access(|access| {
+            access
+                .construct_rooted_managed_promise("prepared promise")
+                .expect("the managed promise cell should fit a run")
+        });
         let winner = Value::Number(11.into());
         let loser = Value::Number(12.into());
 
         values.with_runtime_value_access(|access| {
-            let promise = ManagedPromiseAccess::from_authorized_cell(&cell, &access)
+            let promise = root
+                .access(&access)
                 .expect("the matching value domain should authorize its promise cell");
-            assert_eq!(promise.id(), cell.id);
+            assert_eq!(promise.id(), root.id());
             assert_eq!(promise.runtime_id(), values.runtime_id());
             assert_eq!(promise.label().as_ref(), "prepared promise");
             assert!(promise.producer().is_none());
@@ -1570,28 +1662,106 @@ mod tests {
 
         let unrelated = new_values();
         unrelated.with_runtime_value_access(|access| {
-            assert!(ManagedPromiseAccess::from_authorized_cell(&cell, &access).is_none());
+            assert!(root.access(&access).is_none());
         });
+    }
+
+    #[test]
+    fn lazy_success_transition_reports_source_removal_and_terminal_addition_without_forcing() {
+        let values = new_values();
+        let forced = Arc::new(AtomicBool::new(false));
+        let forced_by_thunk = Arc::clone(&forced);
+        let sentinel = LazyValue::semantic_thunk(&values, "transition sentinel", move |_| {
+            forced_by_thunk.store(true, Ordering::Release);
+            panic!("edge transition visitation must not evaluate a lazy value")
+        });
+        let probe = values.install_edge_transition_probe_for_test(EdgeTransitionObservation::Both);
+
+        values.with_runtime_value_access(|access| {
+            let root = access
+                .construct_rooted_managed_lazy(
+                    "transitioning lazy",
+                    LazySource::NetConstruction(Value::Lazy(sentinel.clone()).into()),
+                )
+                .expect("the managed lazy cell should fit a run");
+            let result =
+                EvaluatedValue::try_from(Value::List(List::from_values(vec![Value::Lazy(
+                    sentinel.clone(),
+                )])))
+                .expect("a list is already in weak-head normal form");
+            let lazy = root
+                .access(&access)
+                .expect("the rooted lazy should be live");
+
+            assert_eq!(lazy.cache(Ok(result.clone())), Ok(result));
+            assert!(lazy.source_snapshot().is_none());
+        });
+
+        assert!(!forced.load(Ordering::Acquire));
+        let records = probe.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].leaving_edges(), 1);
+        assert_eq!(records[0].adding_edges(), 1);
+    }
+
+    #[test]
+    fn lazy_failure_transition_reports_failure_edges_and_releases_source() {
+        let values = new_values();
+        let probe = values.install_edge_transition_probe_for_test(EdgeTransitionObservation::Both);
+
+        values.with_runtime_value_access(|access| {
+            let source = access
+                .construct_managed_promise("lazy failure source")
+                .expect("the source promise should fit a run");
+            let emitted = access
+                .construct_managed_promise("lazy failure emission")
+                .expect("the emission promise should fit a run");
+            let root = access
+                .construct_rooted_managed_lazy(
+                    "failing lazy",
+                    LazySource::NetConstruction(Value::Promised(source).into()),
+                )
+                .expect("the managed lazy cell should fit a run");
+            let failure = Arc::new(EvaluationFailure::emission(Value::List(List::from_values(
+                vec![Value::Promised(emitted)],
+            ))));
+            let lazy = root
+                .access(&access)
+                .expect("the rooted lazy should be live");
+
+            assert_eq!(lazy.cache(Err(Arc::clone(&failure))), Err(failure));
+            assert!(lazy.source_snapshot().is_none());
+        });
+
+        let records = probe.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].leaving_edges(), 1);
+        assert_eq!(records[0].adding_edges(), 1);
     }
 
     #[test]
     fn promise_publication_callbacks_observe_assignment_before_wake_detachment() {
         let values = new_values();
+        let probe = values.install_edge_transition_probe_for_test(EdgeTransitionObservation::Both);
         let admission = RuntimeMutationAdmission::new();
         let coordinator =
             EvaluationWorkCoordinator::new_for_test(values.clone(), admission.clone());
 
         values.with_runtime_value_access(|access| {
+            let target_root = access
+                .construct_rooted_managed_promise("publication target")
+                .expect("the managed promise cell should fit a run");
+            let target = Value::List(List::from_values(vec![Value::Promised(
+                PromisedValue::from_root(&target_root),
+            )]));
             let root = access
                 .construct_rooted_managed_promise("publication ordering")
                 .expect("the managed promise cell should fit a run");
             let promise = root.access(&access).unwrap();
             let detached = promise
-                .publish_detached(Ok(Value::Number(31.into())), |assignment| {
-                    assignment.clone()
-                })
+                .publish_detached(Ok(target.clone()), |assignment| assignment.clone())
                 .expect("the first detached publication should win");
-            assert_eq!(detached, Ok(Value::Number(31.into())));
+            assert_eq!(detached, Ok(target.clone()));
 
             let guarded_root = access
                 .construct_rooted_managed_promise("guarded publication ordering")
@@ -1602,14 +1772,94 @@ mod tests {
                 .publish_guarded(
                     &coordinator,
                     &mutation,
-                    Ok(Value::Number(47.into())),
+                    Err(Arc::new(EvaluationFailure::emission(target.clone()))),
                     |assignment| assignment.clone(),
                 )
                 .expect("the first guarded publication should win");
-            assert_eq!(observed, Ok(Value::Number(47.into())));
+            assert_eq!(
+                observed,
+                Err(Arc::new(EvaluationFailure::emission(target.clone())))
+            );
             drop(mutation);
             wake.notify();
         });
+
+        let records = probe.records();
+        assert_eq!(records.len(), 2);
+        for record in records {
+            assert_eq!(record.leaving_edges(), 0);
+            assert_eq!(record.adding_edges(), 1);
+        }
+    }
+
+    #[test]
+    fn losing_promise_publisher_reports_its_proposed_addition_without_changing_the_winner() {
+        let values = new_values();
+        let probe =
+            values.install_edge_transition_probe_for_test(EdgeTransitionObservation::Adding);
+        let (promise_root, first_target_root, second_target_root) = values
+            .with_runtime_value_access(|access| {
+                (
+                    access
+                        .construct_rooted_managed_promise("publication race")
+                        .expect("the managed promise cell should fit a run"),
+                    access
+                        .construct_rooted_managed_promise("first proposed target")
+                        .expect("the managed promise cell should fit a run"),
+                    access
+                        .construct_rooted_managed_promise("second proposed target")
+                        .expect("the managed promise cell should fit a run"),
+                )
+            });
+        let first_assignment = Value::List(List::from_values(vec![Value::Promised(
+            PromisedValue::from_root(&first_target_root),
+        )]));
+        let second_assignment = Value::List(List::from_values(vec![Value::Promised(
+            PromisedValue::from_root(&second_target_root),
+        )]));
+        let (winner_published, winner_observed) = std::sync::mpsc::channel();
+
+        let winner_values = values.clone();
+        let winner_root = promise_root.clone();
+        let winner_assignment_for_thread = first_assignment.clone();
+        let winner = std::thread::spawn(move || {
+            let published = winner_values.with_runtime_value_access(|access| {
+                winner_root
+                    .access(&access)
+                    .expect("the winner promise should remain live")
+                    .publish(Ok(winner_assignment_for_thread))
+            });
+            winner_published.send(()).unwrap();
+            published
+        });
+
+        let loser_values = values.clone();
+        let loser_root = promise_root.clone();
+        let loser = std::thread::spawn(move || {
+            winner_observed.recv().unwrap();
+            loser_values.with_runtime_value_access(|access| {
+                loser_root
+                    .access(&access)
+                    .expect("the loser promise should remain live")
+                    .publish(Ok(second_assignment))
+            })
+        });
+
+        assert_eq!(winner.join().expect("winner thread panicked"), Ok(()));
+        assert!(loser.join().expect("loser thread panicked").is_err());
+        values.with_runtime_value_access(|access| {
+            assert_eq!(
+                promise_root.access(&access).unwrap().assignment(),
+                Some(Ok(first_assignment))
+            );
+        });
+        let records = probe.records();
+        assert_eq!(records.len(), 2);
+        assert!(
+            records
+                .iter()
+                .all(|record| record.leaving_edges() == 0 && record.adding_edges() == 1)
+        );
     }
 
     #[test]

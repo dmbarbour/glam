@@ -367,29 +367,6 @@ mod tests {
     }
 
     #[test]
-    fn recursive_edge_mutations_use_representation_gateways() {
-        let source = include_str!("recursive_cells.rs");
-        assert_eq!(
-            source.matches("self.cell.result.set(result)").count(),
-            1,
-            "LazyValue::cache must remain the sole terminal-result writer"
-        );
-        assert_eq!(
-            source
-                .matches("self.cell.assignment.set(assignment)")
-                .count(),
-            2,
-            "promise assignment writes remain inside publish/publish_guarded"
-        );
-        let core = include_str!("../../core.rs");
-        assert_eq!(
-            core.matches(".task\n            .get_or_init").count(),
-            1,
-            "reflection task reservation has one representation-local initializer"
-        );
-    }
-
-    #[test]
     fn external_host_call_has_no_reported_semantic_edge() {
         let source = LazyValue::external_host_call(
             &values(),

@@ -1,4 +1,4 @@
-use glam_gc::{Allocator, Gc, Mutator, Root, Trace, UnsupportedLayout};
+use glam_gc::{Allocator, Gc, Mutator, Root, Trace, UnsupportedLayout, Visitor};
 use std::any::Any;
 #[cfg(test)]
 use std::cell::Cell;
@@ -570,6 +570,51 @@ impl RuntimeValueAccess<'_> {
     pub(crate) fn get<'access, T: ManagedFamily>(&'access self, root: &Root<T>) -> &'access T {
         self.scope.get(root)
     }
+
+    /// Performs one post-publication transition of a managed owner's outgoing
+    /// semantic edges.
+    ///
+    /// The synchronous visitors may borrow representation state for this call
+    /// and are invoked only when the collector's active barrier policy needs
+    /// that side. They must report exact managed edges without evaluating,
+    /// formatting, retaining the visitor, or calling a semantic service.
+    ///
+    /// # Safety
+    ///
+    /// `owner` must be live in this exact access region. The visitors and
+    /// `transition` must satisfy [`Mutator::with_edge_transition`]'s graph and
+    /// publication contract for that owner.
+    pub(crate) unsafe fn with_managed_edge_transition<Owner, Leaving, Adding, Result>(
+        &self,
+        owner: Gc<Owner>,
+        leaving: Leaving,
+        adding: Adding,
+        transition: impl FnOnce() -> Result,
+    ) -> Result
+    where
+        Owner: ManagedFamily,
+        Leaving: for<'visit> Fn(&mut Visitor<'visit>),
+        Adding: for<'visit> Fn(&mut Visitor<'visit>),
+    {
+        // SAFETY: this wrapper preserves the caller's exact owner/edge-set
+        // proof while withholding the raw collector mutator from production
+        // representation code.
+        unsafe {
+            self.scope
+                .mutator
+                .with_edge_transition(owner, leaving, adding, transition)
+        }
+    }
+}
+
+#[cfg(test)]
+impl CoreValueFactory {
+    pub(crate) fn install_edge_transition_probe_for_test(
+        &self,
+        observation: glam_gc::EdgeTransitionObservation,
+    ) -> glam_gc::EdgeTransitionProbe {
+        self.domain.heap.install_edge_transition_probe(observation)
+    }
 }
 
 impl CoreValueAllocationScope<'_> {
@@ -653,9 +698,9 @@ mod payload_edges;
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Weak};
+    use std::sync::{Arc, Mutex, Weak};
 
-    use glam_gc::{Gc, Root, Trace, Visitor};
+    use glam_gc::{EdgeTransitionObservation, Gc, Root, Trace, Visitor};
 
     use super::{ManagedDropRecord, ManagedFamily, OpaquePayloadFamily, OpaquePayloadRecord};
     use crate::core::{CoreValueFactory, RuntimeValueDomain, RuntimeValueObserver, Value};
@@ -799,6 +844,36 @@ mod tests {
         );
     }
 
+    struct TransitionFixture {
+        edges: Mutex<Vec<Gc<PassiveManagedFixture>>>,
+    }
+
+    // SAFETY: `edges` is the fixture's complete managed edge set. Its mutex
+    // supplies one coherent synchronous trace snapshot.
+    unsafe impl Trace for TransitionFixture {
+        fn trace(&self, visitor: &mut Visitor<'_>) {
+            for edge in self
+                .edges
+                .lock()
+                .expect("transition fixture mutex was poisoned")
+                .iter()
+            {
+                edge.trace(visitor);
+            }
+        }
+    }
+
+    // SAFETY: the fixture has no direct Drop behavior, and its mutex, vector,
+    // and inert managed pointers destroy without observing the managed heap.
+    unsafe impl ManagedFamily for TransitionFixture {
+        const DROP_RECORD: ManagedDropRecord = ManagedDropRecord::passive(
+            "GCI5R-002B transition fixture",
+            "src/core/managed.rs",
+            "no direct Drop implementation",
+            "mutex, vector, and inert Gc edges destroy passively",
+        );
+    }
+
     /// Compile-exhaustive field inventory for the passive fixture.
     ///
     /// Adding a field requires classifying its destruction here as well as in
@@ -854,6 +929,100 @@ mod tests {
                 resource: PassiveResource(Arc::clone(resource_drops)),
             }))
         })
+    }
+
+    #[test]
+    fn runtime_value_access_routes_borrowed_edge_sets_to_the_collector_gateway() {
+        let values = values();
+        let probe = values.install_edge_transition_probe_for_test(EdgeTransitionObservation::Both);
+        values.with_runtime_value_access(|access| {
+            let leaves = access
+                .allocator::<PassiveManagedFixture>()
+                .expect("transition leaves should fit one collector slot");
+            let owners = access
+                .allocator::<TransitionFixture>()
+                .expect("transition owner should fit one collector slot");
+            let drop_count = Arc::new(AtomicUsize::new(0));
+            let resource_count = Arc::new(AtomicUsize::new(0));
+            let old = leaves.alloc(PassiveManagedFixture {
+                child: None,
+                direct_drops: Arc::clone(&drop_count),
+                resource: PassiveResource(Arc::clone(&resource_count)),
+            });
+            let first = leaves.alloc(PassiveManagedFixture {
+                child: None,
+                direct_drops: Arc::clone(&drop_count),
+                resource: PassiveResource(Arc::clone(&resource_count)),
+            });
+            let second = leaves.alloc(PassiveManagedFixture {
+                child: None,
+                direct_drops: drop_count,
+                resource: PassiveResource(resource_count),
+            });
+            let owner = owners.alloc(TransitionFixture {
+                edges: Mutex::new(vec![old]),
+            });
+            // SAFETY: every allocation belongs to this exact access region.
+            // The visitors report the one old and two new edges around the
+            // single mutex-protected representation update.
+            unsafe {
+                access.with_managed_edge_transition(
+                    owner,
+                    |visitor| old.trace(visitor),
+                    |visitor| [first, second].trace(visitor),
+                    || {
+                        *owner
+                            .get_unchecked(access.scope.mutator)
+                            .edges
+                            .lock()
+                            .expect("transition fixture mutex was poisoned") = vec![first, second];
+                    },
+                );
+            }
+        });
+
+        let records = probe.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].leaving_edges(), 1);
+        assert_eq!(records[0].adding_edges(), 2);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn runtime_value_access_rejects_an_owner_from_another_heap_before_mutation() {
+        let first = values();
+        let second = values();
+        let (root, owner) = first.with_runtime_value_access(|access| {
+            let owner = access
+                .allocator::<TransitionFixture>()
+                .expect("transition owner should fit one collector slot")
+                .alloc(TransitionFixture {
+                    edges: Mutex::new(Vec::new()),
+                });
+            (access.root(owner), owner)
+        });
+        let changed = AtomicUsize::new(0);
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            second.with_runtime_value_access(|access| {
+                // SAFETY: this deliberately violates the exact-owner
+                // precondition to prove rejection before the closure runs.
+                unsafe {
+                    access.with_managed_edge_transition(
+                        owner,
+                        |_visitor| (),
+                        |_visitor| (),
+                        || {
+                            changed.fetch_add(1, Ordering::Relaxed);
+                        },
+                    );
+                }
+            });
+        }));
+
+        assert!(panic.is_err());
+        assert_eq!(changed.load(Ordering::Relaxed), 0);
+        drop(root);
     }
 
     #[test]

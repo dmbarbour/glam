@@ -7,6 +7,9 @@ use crate::thread_cache::ThreadCacheHandle;
 use crate::{Gc, Root, Trace, UnsupportedLayout, heap::HeapInner};
 use crate::{class::AllocationClass, class::metadata_for, run::RunGeometry};
 
+#[cfg(feature = "deterministic-test-hooks")]
+use crate::trace::ErasedGc;
+
 /// Scoped authority to access one [`crate::Heap`].
 ///
 /// It is intentionally neither `Send` nor `Sync`. Every operation remains
@@ -86,6 +89,11 @@ impl<'heap> Mutator<'heap> {
 
     pub(crate) fn heap(&self) -> &Arc<HeapInner> {
         self.heap
+    }
+
+    #[cfg(feature = "deterministic-test-hooks")]
+    pub(crate) fn assert_observed_edge_for_test(&self, edge: ErasedGc) {
+        self.heap.assert_observed_edge(edge);
     }
 }
 
