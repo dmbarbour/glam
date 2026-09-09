@@ -1425,6 +1425,10 @@ GCI5R-003F.
 
 ##### GCI5R-003F — Remove semantic-edge observers and audit durable copies
 
+**Entry condition:** close GCI5R-008 first. A registered root must be able to
+project its own managed edge so this checkpoint does not replace façade
+observers while preserving a redundant cached pointer elsewhere.
+
 - Remove the remaining weak observers and access-free `with_access`,
   `with_runtime_access`, and rooting helpers from the semantic façades. Their
   final representation is the managed edge alone.
@@ -1451,10 +1455,9 @@ GCI5R-003F.
 - Audit `CoreRuntimeNet`, which currently has the analogous managed edge plus
   weak-observer shape. Either apply the same policy now or assign its removal
   to a concrete I8 checkpoint; do not leave it as an undocumented exception.
-- Record duplicate `Root<T>` plus `Gc<T>` storage in registered roots as a
-  separate possible optimization. A mutator-qualified root-to-edge projection
-  may remove it later, but it does not block this remediation unless it proves
-  trivial during the root audit.
+- Consume closed finding GCI5R-008. Registered roots and the reviewed durable
+  handoffs must project rather than cache the managed edge for the allocation
+  they root.
 - Run focused managed-cell, evaluator, coordinator, cycle, and public-resolver
   tests; the complete repository checks; and targeted strict-provenance Miri
   because this work changes the authority surrounding unsafe managed-edge
@@ -1626,6 +1629,121 @@ Do not mark I5 fully complete merely by updating the table. First disposition
 GCI5R-001 and GCI5R-002, then reconcile the table, ledger header, stale
 `before I8` comments, and the future phase text in one closeout.
 
+### GCI5R-008 — Registered roots cannot project their managed allocation
+
+**Classification:** collector API omission and duplicate identity state
+
+**Priority:** medium
+
+**Confidence:** high
+
+**Status:** open; resolve before GCI5R-003F/G
+
+#### Defect
+
+`glam_gc::Root<T>` already contains the allocation address, erased inside its
+private `RootCell`. `Root::get` reconstructs the corresponding `Gc<T>` before
+dereferencing it, but the public collector API cannot return that inert typed
+pointer. Glam therefore stores both a `Root<T>` and a separately copied
+`Gc<T>` whenever a durable root must later produce a semantic edge.
+
+This costs one pointer in every such record and, more importantly, represents
+one allocation identity twice. Private constructors currently ensure the two
+values agree, but the type itself permits a mismatched root and edge. In that
+invalid state a root access could borrow one cell while reporting another cell
+as the owner to the mutation barrier. The duplicated field is therefore more
+than a layout opportunity: it is avoidable state whose consistency can only
+be maintained by convention.
+
+A safe `Root::as_gc(&self) -> Gc<T>` is sufficient for the current collector.
+It grants no dereference or heap-entry capability: `Gc<T>` remains an inert,
+non-rooting pointer, and `Root<T>`'s private construction already establishes
+its type and allocation identity. The projected pointer remains usable only
+while the root or another traced owner proves liveness, exactly like every
+other copied `Gc<T>`. `Root::get` should use the same projection so typed
+reconstruction has one implementation boundary.
+
+This API does not promise that a projected pointer survives a future moving
+collection. Such a collector must update root cells and either make `Gc<T>` a
+stable handle or bind projections to a non-moving mutator epoch. Caching the
+pointer beside the root would be strictly worse for that transition because
+the cached copy could not follow a relocated root.
+
+#### Current duplicate inventory
+
+The source and recursive-identity inventories found the following same-target
+pairs:
+
+| Record | Duplicate representation | Planned disposition |
+| --- | --- | --- |
+| `ManagedLazyRoot` | `Root<ManagedLazyCell>` plus `ManagedLazyEdge` | Remove the edge field; derive it from the root. |
+| `ManagedPromiseRoot` | `Root<ManagedPromiseCell>` plus `ManagedPromiseEdge` | Remove the edge field; derive it from the root. |
+| `ManagedCoreNetRoot` | `Root<ManagedCoreNetCell>` plus `ManagedCoreNetEdge` | Remove the edge field; derive it from the root. |
+| `EvaluationHaltKind::UnassignedPromise` | `ManagedPromiseRoot` plus `PromisedValue` for that root | Retain the root and project the semantic promise or trace edge when needed. |
+| `NormalizationRequest` | `ManagedCoreNetRoot` plus `CoreRuntimeNet` for that root | Retain the root and reconstruct the request's semantic net view. |
+| `CorePreparedCopySource` | `ManagedCoreNetRoot` plus a `CoreRuntimeNet` hidden in `PreparedCopySource` | Retain the root and the edge-free remote-port snapshot; construct the generic prepared source at consumption. |
+| `CoreFrontierObservation` | `ManagedCoreNetRoot` plus a `CoreRuntimeNet` hidden in `FrontierObservation` | Retain the root and the edge-free topology/endpoint snapshot; project the source for an attempted step. |
+
+`RootCell`'s own `ErasedGc` is the root representation, not a duplicate.
+`Managed*Access` values contain a bounded owner edge and borrowed cell but no
+root; mutation barriers require that owner identity. `PreparedRuntimeValueRoot`
+and ordinary scheduler records retain roots without duplicate semantic edges.
+Test fixtures containing unrelated roots and edges are outside this finding.
+
+#### Remediation plan
+
+##### GCI5R-008A — Add and verify root projection
+
+- Add `Root::as_gc(&self) -> Gc<T>` as an allocation-free, non-rooting
+  projection and implement `Root::get` through it.
+- Document the liveness and future-moving-collector limits above; do not add
+  dereference, heap retention, hashing, or value equality to either handle.
+- Verify projection preserves the original allocation identity, cloned roots
+  project the same allocation, distinct roots remain distinct, and projecting
+  does not change root registration or heap-retention behavior.
+- Add targeted strict-provenance Miri coverage for this private erased-to-typed
+  reconstruction boundary.
+
+##### GCI5R-008B — Remove direct family-root duplicates
+
+- Remove `edge` from all three `Managed*Root` records. Derive each
+  `Managed*Edge` from `root.as_gc()` in the representation-local projection
+  and bounded-access paths.
+- Make root construction accept one allocation identity, register it, and
+  retain only the resulting root. Eliminate the representable root/edge
+  mismatch rather than adding another equality assertion.
+- Update family layout assertions, the ownership ledger, and the recursive
+  identity inventory. Add a source latch that no registered family root stores
+  a `Gc`, `Managed*Edge`, or semantic façade.
+
+##### GCI5R-008C — Remove enclosing same-target duplicates
+
+- Make retryable promise halts root-only. Derive owned semantic views for
+  evaluator consumers and derive the exact promise edge for compatibility
+  tracing; do not restore an independently cached promise façade.
+- Make `NormalizationRequest` root-only apart from its interface and mode.
+  Project temporary `CoreRuntimeNet` views when constructing work.
+- Replace the source-bearing generic state inside `CorePreparedCopySource` and
+  `CoreFrontierObservation` with their edge-free remote-port or
+  topology/endpoint snapshots plus the root. Reconstruct the generic operation
+  input only at its bounded consumption point.
+- Preserve promise-halt equality, cursor-WHNF disturbance/retry behavior,
+  prepared-copy source identity, frontier version checks, and all existing
+  callback/mutator boundaries.
+
+##### GCI5R-008D — Close the inventory
+
+- Re-run the compile-exhaustive recursive-identity inventory and a repository
+  scan for direct or wrapper-hidden `Root<T>`/`Gc<T>` pairs. Every retained
+  pair must identify different allocations or have a documented independent
+  role.
+- Record the measured layout changes without treating them as stable ABI.
+- Run focused collector root, managed recursive-cell, evaluator halt,
+  interaction-net copy/frontier, and cursor-WHNF suites, followed by the
+  routine repository checks.
+- Close this finding before beginning GCI5R-003F; that phase may then remove
+  façade observers against one canonical root-to-edge projection.
+
 ## Drift Assessment
 
 ### Intentional and justified
@@ -1698,8 +1816,10 @@ GCI5R-001 and GCI5R-002, then reconcile the table, ledger header, stale
    shapes, routed lazy and promise writers through them, and installed the
    synchronized whole-net correctness bridge. Exact net deltas remain I8
    performance work.
-3. Decide whether façade-cached IDs and labels are intentional, and reconcile
-   the ledger either way.
+3. **In progress:** GCI5R-003A-E removed façade metadata duplication and moved
+   observation/publication behind explicit authority. Close GCI5R-008's root
+   projection defect before completing GCI5R-003F/G and the final durable-copy
+   audit.
 4. Rewrite I6 around the immutable-shell result and partition reflection
    computation into semantic and external-lifecycle checkpoints.
 5. Narrow I7, repartition I8, and update the I9-I12 entry conditions described
