@@ -160,7 +160,7 @@ const INVENTORY: &[InventoryEntry] = &[
         1,
         0,
         "shallow direct-value rooting for one runtime failure root",
-        "I4F.1c.1 failure-root boundary; I6C managed failure shell"
+        "I4F.1c.1 failure-root boundary; I6C failure-shell and owner audit"
     ),
 ];
 

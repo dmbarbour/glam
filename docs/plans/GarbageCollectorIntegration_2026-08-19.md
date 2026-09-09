@@ -2789,7 +2789,8 @@ compatibility roots become registered collector roots only at I4F.2c.
 
 Migrate the evaluation family through four bounded checkpoints. Shared failure
 identity remains an implementation property throughout this compatibility
-stage; I6C later replaces the failure shell and its recursive interiors.
+stage; I6C later audits the failure shell, its recursive interiors, and the
+durable wrapper before deciding whether replacement has an independent value.
 
 1. **I4F.1c.1 — Failure-root boundary.** Introduce one runtime-provenanced,
    non-forcing `RuntimeFailureRoot` compatibility wrapper. It retains the
@@ -2859,7 +2860,9 @@ before its reviewed count, fingerprint, and task-owner row were updated.
 Temporary projections back to `Arc<EvaluationFailure>` remain only at
 inventoried downstream client-demand, settlement/readiness, and reflection
 owners assigned to I4F.1c.3, I4F.1c.4, and I4F.1d; raw promise cells remain the
-separate recursive-core migration owned by I6C. Production remains `NoAuto`.
+separate recursive-core migration which I5 ultimately completed. I6C retains
+the later immutable failure-shell and durable-owner audit. Production remains
+`NoAuto`.
 
 I4F.1c.3 completed 2026-09-03. `ClientDemandPoll` and
 `ClientDemandResult` now carry `RuntimeFailureRoot`; a permanent
@@ -3647,8 +3650,8 @@ handoff instead of immediately extracting and recreating it. Configuration,
 logger, and event-adapter sources contain no compatibility conversions. The
 public-value and compiler-boundary inventories are relatched; the sole direct
 reflection-protocol projection remains the previously documented structured
-`ApiError` conversion owned by I6C's managed failure shell, rather than hidden
-host-integration debt.
+`ApiError` conversion owned by I6C's failure-shell/diagnostic ownership audit,
+rather than hidden host-integration debt.
 
 I4F.2a.1a completed 2026-09-03. Production `Value` and `EvaluatedValue` no
 longer implement semantic equality, and `Value::runtime_id` is no longer a
@@ -3758,8 +3761,9 @@ the CLI logger and internal callers supply it explicitly. Reflection store and
 search sources retain no compatibility projection or construction call. The
 one protocol exception is the structured `ApiError` to `TaskHalt` conversion:
 the current diagnostic owns a public root but not a reusable value service, so
-its emission projection remains source-latched to I6C's managed
-diagnostic/failure boundary rather than gaining an authority-free workaround.
+its emission projection remains source-latched to I6C's
+diagnostic/failure-owner audit rather than gaining an authority-free
+workaround.
 
 I4F.2a.3b completed 2026-09-03. Standard reflection request handlers now use
 `RequestContext::values` for construction and owned cloning, and inspect
@@ -4355,12 +4359,13 @@ unrestricted `as_core`/`into_core` method remains. The surviving
 still contains compatibility Rust payloads. Every `CompatibilityValueEdges`
 implementation has a named consumer: I5B composes their immediate-child
 enumeration into the central transitive walk; I5D replaces the lazy, promise,
-and core-net identity leaves; I6 replaces function, metadata, failure, and
-reflection steps; and I7 audits persistent containers. The central walk may
-remain beyond I8 while raw structural `Value` interiors remain and is finally
-replaced by Value Representation Refinement. Deleting these adapters now would
-discard the compile-exhaustive edge ledger which those phases must translate,
-not remove a live escape.
+and core-net identity leaves; I6 audits function, metadata, failure, and
+reflection steps and replaces only independently justified representations;
+and I7 audits persistent containers. The central walk may remain beyond I8
+while raw structural `Value` interiors remain and is finally replaced by Value
+Representation Refinement. Deleting these adapters now would discard the
+compile-exhaustive edge ledger which those phases must reconcile, not remove a
+live escape.
 
 I4F.2f.3 completed 2026-09-03. The former six-field compatibility-access
 counter had combined two opposing policies: registered `RuntimeValueRoot`
@@ -5094,53 +5099,127 @@ focused and repository-wide verification. The closed finding and its exact
 evidence are recorded in
 [`GCI5R-001G`](../reviews/GarbageCollectorIntegrationI5_2026-09-07.md#gci5r-001g--closure-audit-and-review-reconciliation).
 
-## Phase I6 — Functions, Applications, Metadata, and Failures
+## Phase I6 — Immutable Compatibility Paths and Reflection Ownership
 
-### Phase I6A — Functions, Applications, and Fixpoints
+I5F.4 proved that the exact compatibility walk already closes cycles through
+every immutable shell in I6A-C and I6D.2. Those shells are paths between the
+managed lazy, promise, and core-net identities, not independent safe-Rust cycle
+sources. I6 therefore does not presume that converting each shell into another
+managed allocation is a Gate-G2 correctness requirement.
 
-- Re-read and apply the
-  [I6+ Regional Allocation Migration Rule](#i6-regional-allocation-migration-rule)
-  to every managed family introduced here; tracing alone does not complete a
-  migration.
-- Migrate recursive function stages/wrappers, partial builtin arguments, lazy
-  applications, and fixpoint computations according to the I4 granularity.
-- Preserve referential equality where current semantics relies on identity.
-  Immutable argument arrays receive tracing but no mutation gateway.
+Each checkpoint below first records its concrete representation, identity
+semantics, exact outgoing edges, destruction behavior, and durable owners. It
+may complete as an audit-only checkpoint when the existing compatibility
+visitor and ownership boundary are sufficient. A managed conversion requires
+an independent recorded benefit—such as eliminating a real external root
+backedge, removing measured ownership/footprint cost needed before cutover, or
+establishing a representation boundary required by Value Representation
+Refinement. Merely replacing an immutable `Arc` is not sufficient.
 
-Verification: `managed_function_stage_cycle_reclaims`,
-`managed_partial_application_cycle_reclaims`, and
-`managed_fixpoint_cycle_reclaims`; existing shared-stage and recursive-function
-tests retain identity behavior. Reclamation tests use closed isolated family
-fixtures; production remains `NoAuto` and does not collect.
+When a checkpoint does introduce a managed family, it must re-read and apply
+the [I6+ Regional Allocation Migration Rule](#i6-regional-allocation-migration-rule),
+add the isolated collection-at-publication-gap proof, and preserve any current
+identity semantics. Audit-only completion keeps the source-backed
+compatibility adapter and its cycle evidence. Production remains `NoAuto`
+throughout I6.
 
-### Phase I6B — Metadata Identity
+### Phase I6A.0 — Function and Net Shell Audit
 
-- Re-read and apply the
-  [I6+ Regional Allocation Migration Rule](#i6-regional-allocation-migration-rule)
-  before adding the managed metadata allocator or constructor.
-- Migrate `MetadataCarrier` identity and its exact one-edge visitor so metadata
-  can participate in cycles without leaking.
-- Preserve sealing, reorder/copy, `seq`, `spark`, and reflection-inspection
-  semantics without exposing metadata to pure evaluation.
+- Audit `NetValue`, `FunctionCode`, and `FunctionValue` independently. They
+  are immutable scalar wrappers around an already-managed `CoreRuntimeNet`,
+  and the compatibility visitor reports that exact net identity without
+  reducing it.
+- Preserve shared-stage behavior, arity/capture state, and net referential
+  identity. Coordinate any layout-only cleanup with I8A.0 and Value
+  Representation Refinement rather than inventing another mutable identity.
+- Default to audit-only completion unless the inventory discovers a concrete
+  cost or ownership boundary which an additional managed shell actually
+  removes.
 
-Verification: `metadata_and_collections_can_participate_in_a_deferred_value_cycle`,
-the metadata update reorder/copy tests, and
-`managed_metadata_cycle_reclaims_in_isolated_heap`. Only the named closed
-fixture collects; production remains `NoAuto`.
+Verification: the existing shared-stage, recursive-function, function-code
+net-edge, and managed function-stage cycle fixtures. If audit-only, prove the
+adapter still reports exactly the nested core-net edge; if migrated, add the
+regional construction/reclamation proof.
 
-### Phase I6C — Failures and Context Frames
+### Phase I6A.1 — Partial Builtin and Lazy Application Audit
 
-- Re-read and apply the
-  [I6+ Regional Allocation Migration Rule](#i6-regional-allocation-migration-rule)
-  before adding any managed failure or context-frame allocator.
-- Migrate evaluation failures and context frames, visiting emission/context
-  values without evaluating, formatting, or locking them.
-- Preserve shared failure identity and structured diagnostic projection.
+- Audit `BuiltinCall` and `LazyApplication` separately from function stages.
+  Their immutable argument arrays and function value are already visited
+  exactly and have no independent identity or mutation gateway.
+- Default to retaining the compatibility representation. A conversion must
+  name and measure a representation benefit rather than citing cycle closure.
 
-Verification: `managed_failure_context_cycle_reclaims`, the existing
-structured-failure suite, and `failure_trace_invokes_no_semantic_service`.
-The reclamation case uses a closed isolated family fixture; production remains
-`NoAuto` and does not collect.
+Verification: existing partial-builtin/application behavior plus the closed
+cycles through partial builtin arguments and lazy applications. Source-backed
+edge inventories must remain compile-exhaustive.
+
+### Phase I6A.2 — Fixpoint Payload Audit
+
+- Audit both `FixpointComputation` variants and their `Arc` owner. Each holds
+  exactly one immutable semantic value below the already-managed lazy
+  identity.
+- Preserve function versus object-instance behavior. Default to audit-only
+  completion unless a later representation requirement justifies conversion.
+
+Verification: strict and guarded fixpoints, object instantiation, and the
+existing managed cycle through each payload shape.
+
+### Phase I6B.1 — Metadata Identity and Trace Audit
+
+- Audit `MetadataCarrier` as an immutable, sealed carrier with one exact
+  associated-value edge. Its pointer identity is hidden from Glam evaluation
+  but currently supports internal Rust equality and must not change
+  accidentally.
+- Prove that metadata inspection and updates do not create an external active
+  owner or registered-root backedge. Default to the current compatibility
+  representation when that proof holds.
+
+Verification: metadata reorder/copy, pure and reflection update, `seq`,
+`spark`, inspection, and collection of cycles which pass through metadata.
+
+### Phase I6B.2 — Optional Metadata Representation Conversion
+
+- Execute only if I6B.1 records an independent reason to manage the carrier
+  itself. Preserve sealing and identity behavior, install one exact edge, and
+  apply the regional allocation rule.
+- Otherwise close this checkpoint as not required and retain the audited
+  compatibility adapter for Value Representation Refinement.
+
+### Phase I6C.1 — Failure and Context Trace Audit
+
+- Audit `EvaluationFailure`, both failure kinds, ordered context frames, and
+  their shared `Arc` identity. The exact compatibility visitor must report
+  emission and context values without evaluating, formatting, or locking.
+- Prove that a cycle through a failure closes at one of the three managed
+  identities rather than in the immutable failure shell itself. Default to
+  audit-only completion when this holds.
+
+Verification: the structured-failure suite, dependency-cycle diagnostics,
+`failure_trace_invokes_no_semantic_service`, and closed cycles through both an
+emission and a context value.
+
+### Phase I6C.2 — Durable Failure and Diagnostic Ownership Audit
+
+- Audit `RuntimeFailureRoot` separately from the semantic failure shell. Its
+  shallow direct-value roots are deliberate external owners used while an
+  ordinary `Arc<EvaluationFailure>` remains canonical; prove the wrapper is
+  not managed-reachable and retires with its report/coordinator owner.
+- Audit diagnostic projection and logger/host handoffs without treating their
+  durable external roots as semantic edges. Keep this compatibility owner if
+  it remains exact and acyclic.
+
+Verification: fail-closed owner inventories, failure-ledger/report retirement,
+cross-session failure observation, and structured diagnostic projection.
+
+### Phase I6C.3 — Optional Failure Representation Conversion
+
+- Execute only if I6C.1-C.2 record an independent reason to replace the
+  semantic shell and its shallow external-root wrapper. Preserve shared
+  failure identity and diagnostic projection, apply the regional allocation
+  rule, and remove `RuntimeFailureRoot` value roots only after the managed
+  replacement is a proven durable owner.
+- Otherwise close this checkpoint as not required and retain the audited
+  compatibility representation.
 
 ### Phase I6D.1 — Reflection Computation Payloads
 
@@ -5165,20 +5244,19 @@ force collection.
 
 ### Phase I6D.2 — Net-Construction Payloads
 
-- Re-read and apply the
+- Audit the net-construction `Arc<Value>` as one immutable, exactly visited
+  effect edge. I5 already installed the distinct managed core runtime-net
+  identity; this payload has no independent mutation or cycle-source role.
+- Default to audit-only completion. Replace the compatibility payload only for
+  an independently justified representation benefit, applying the
   [I6+ Regional Allocation Migration Rule](#i6-regional-allocation-migration-rule)
-  if replacing the compatibility payload introduces a new managed allocation
-  family rather than only a new exact edge.
-- Replace the net-construction `Arc<Value>` compatibility payload with its exact
-  managed edge representation after I5 has already installed the managed core
-  runtime-net identity. This checkpoint does not reopen or duplicate the net
-  owner migration.
-- Preserve construction-machine polling and callback-free evaluator access;
-  the immutable effect edge requires no post-publication mutation gateway.
+  if that replacement introduces a managed allocation family.
+- Preserve construction-machine polling and callback-free evaluator access.
+  This checkpoint does not reopen or duplicate the net owner migration.
 
-Verification: `managed_net_construction_cycle_reclaims` and the current
-net-construction polling/publication tests. Production remains `NoAuto`; only
-the closed net-construction fixture may force collection.
+Verification: the existing closed cycle through a net-construction effect,
+the exact compatibility-edge inventory, and current polling/publication tests.
+Only a selected managed-conversion fixture may add another forced collection.
 
 ## Phase I7 — Persistent List and Dictionary Trace Audit
 

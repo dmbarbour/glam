@@ -2,7 +2,7 @@
 
 Baseline: `37186c1`, including completed implementation checkpoints I5A-I5F.4.
 
-Status: review complete; GCI5R-001 through GCI5R-003 and GCI5R-008 are closed.
+Status: review complete; GCI5R-001 through GCI5R-004 and GCI5R-008 are closed.
 The implemented I5
 graph is sound under the current `CollectionPolicy::NoAuto` boundary and the
 closed isolated collection fixtures provide strong evidence for recursive
@@ -1551,7 +1551,7 @@ one-pointer façades.
 **Classification:** future-phase role and scope drift  
 **Priority:** medium  
 **Confidence:** high  
-**Status:** open; blocks implementation of I6 as currently written
+**Status:** closed 2026-09-09
 
 I5F.4 records an important result: after removing the three mutable recursive
 identities, the compatibility-owned semantic graph is construction-acyclic.
@@ -1588,6 +1588,28 @@ At minimum, I6A must no longer combine function stages, partial builtin
 arguments, applications, and fixpoints in one checkpoint. I6B and I6C should
 separate semantic identity preservation from durable external
 `RuntimeFailureRoot`/diagnostic ownership.
+
+The integration plan now treats compatibility-traced immutable shells as
+audit targets rather than presumed new managed identities. I6A is partitioned
+into function/net shells, partial builtins/applications, and fixpoint payloads.
+I6B separates metadata identity/trace review from an optional conversion.
+I6C separately audits the semantic failure graph and durable
+`RuntimeFailureRoot`/diagnostic ownership before any optional conversion.
+I6D.2 likewise defaults to auditing its exact immutable net-construction
+effect edge.
+
+Every audit may close without representation work when the existing visitor,
+passive destruction, and external-owner boundary remain exact. Any selected
+managed conversion must name an independent benefit and apply GCI5R-001's
+regional allocation/first-owner rule. Reflection computation remains the
+deliberate exception: I6D.1 must resolve its effect/target registered-root
+backedge under GCI5R-005 rather than using audit-only completion.
+
+Closure verification passed the failure-boundary, public-facade,
+recursive-identity, and durable-owner source inventories. Formatting,
+all-target/all-feature Clippy with warnings denied, and the complete repository
+test suite also passed. This finding changes no production representation and
+does not authorize collection outside the existing closed fixtures.
 
 ### GCI5R-005 — Reflection closure is split inconsistently between I6D.1 and I10A
 
@@ -1930,7 +1952,7 @@ the managed root/edge identity projection fixture.
 
 | Phase | Current disposition after I5 | Required adjustment before execution |
 | --- | --- | --- |
-| I6A-C | Exact compatibility tracing already closes cycles through these immutable shells. | Partition by representation; justify managed conversion independently or permit audit-only completion. |
+| I6A-C | Exact compatibility tracing already closes cycles through these immutable shells. | Resolved by GCI5R-004: representation-specific audits default to retaining exact compatibility paths; conversion is optional and requires an independent benefit plus the regional allocation proof. |
 | I6D.1 | Required to eliminate reflection effect/target root backedges. | Split semantic edges from active reservation lifecycle and take ownership away from I10A. |
 | I6D.2 | Net-construction `Arc<Value>` is immutable and already traced. | Treat conversion as optional representation cleanup unless another identity/lifecycle need is found. |
 | I7 | Visitor and most cycle evidence already exist. | Narrow to delta audit, missing thunk/backedge shape, and duplicate-work measurement. |
@@ -1954,11 +1976,14 @@ the managed root/edge identity projection fixture.
    observers, moved observation/publication behind explicit authority,
    consumed GCI5R-008's root projection, and assigned the distinct net-wide
    observer retirement to I8A.0.
-4. Rewrite I6 around the immutable-shell result and partition reflection
-   computation into semantic and external-lifecycle checkpoints.
-5. Narrow I7, repartition I8, and update the I9-I12 entry conditions described
+4. **Completed:** GCI5R-004 rewrote I6A-C and I6D.2 around the immutable-shell
+   result, with audit-only completion and independently justified optional
+   conversions.
+5. Resolve GCI5R-005 by partitioning reflection computation into semantic and
+   external-lifecycle checkpoints.
+6. Narrow I7, repartition I8, and update the I9-I12 entry conditions described
    above.
-6. Re-run the focused and routine checks, update phase status and stale source
+7. Re-run the focused and routine checks, update phase status and stale source
    comments, and close I5 before implementation proceeds into I6.
 
 Production remains `CollectionPolicy::NoAuto`. This review authorizes no full

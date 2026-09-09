@@ -188,7 +188,7 @@ impl EvaluationFailure {
     /// evaluating, formatting, comparing, or recursively visiting it.
     ///
     /// Runtime failure roots use this as their complete compatibility edge
-    /// boundary until I6C replaces the failure representation itself.
+    /// boundary. I6C audits it and may retain it as the final bootstrap shape.
     pub(crate) fn visit_direct_values(&self, visit: &mut dyn FnMut(&Value)) {
         match &self.kind {
             EvaluationFailureKind::Emission(emission) => visit(emission),
@@ -2161,7 +2161,7 @@ mod tests {
     struct ManagedFamilyLayoutProbe([u8; 1]);
 
     /// Compile-exhaustive latch for the failure interiors deliberately left to
-    /// I6C by the I3A.4 poll-boundary migration.
+    /// the I6C compatibility audit by the I3A.4 poll-boundary migration.
     fn assert_evaluation_failure_boundary_inventory(failure: &EvaluationFailure) {
         let EvaluationFailure { kind, contexts } = failure;
         match kind {
