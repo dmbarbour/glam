@@ -43,6 +43,13 @@ slot size recorded in canonical object metadata, while preserving run-owner
 lookup independently of either. It does not choose Glam's tag budget, type
 alignment, or node-size policy. Compact representation is not a collector gate.
 
+A tentative post-integration
+[`GarbageCollectorScopedPointerSafety_2026-09-09.md`](GarbageCollectorScopedPointerSafety_2026-09-09.md)
+plan explores move-only stored edges and copyable mutator-branded working
+views. It is a safety and future-relocation option, not a requirement of this
+roadmap, and should be reconsidered against the actual compact value design
+rather than imposed on the current compatibility representation.
+
 ## Purpose
 
 Replace recursive `Arc` ownership which can leak fixpoint, promise, metadata,

@@ -42,6 +42,13 @@ The GC implementation may begin with ordinary typed `Gc<T>` pointers and a
 larger `core::Value`. Compact tagged values are not a prerequisite for exact
 collection.
 
+The tentative
+[`GarbageCollectorScopedPointerSafety_2026-09-09.md`](GarbageCollectorScopedPointerSafety_2026-09-09.md)
+plan considers making persistent managed edges move-only while exposing
+copyable mutator-branded working views. Review that model alongside the final
+internal `Value` copy policy before V2-V4; do not migrate today's compatibility
+representation merely to pre-empt that decision.
+
 ## Current Pressure
 
 The current enum stores representations such as `Number(BigRational)` inline.
