@@ -1276,6 +1276,8 @@ wake delivery, host callbacks, or task activation.
 
 ##### GCI5R-003B — Remove duplicated façade metadata
 
+**Completed:** 2026-09-09
+
 - Remove `id` and `label` from `LazyValue` and `PromisedValue`, temporarily
   retaining the edge and weak observer so this checkpoint changes identity
   storage without also changing access authority.
@@ -1290,6 +1292,14 @@ wake delivery, host callbacks, or task activation.
   cross-runtime rejection, cycle diagnostics, resolver diagnostics, and the
   expected 64-bit façade reduction from 48 to 24 bytes at this intermediate
   checkpoint.
+
+The implementation now stores only the managed edge and transitional weak
+observer in each façade. Equality follows exact managed-edge identity, Rust
+`Debug` is opaque, and IDs and labels are read from the canonical cell under
+the still-temporary self-opened access region. The target-specific compile-time
+layout latches record the intermediate 24-byte representations. Existing root
+records continue to preserve the scheduler and diagnostic fields needed by
+callers which already own durable roots.
 
 ##### GCI5R-003C — Remove the promise cell's observer
 

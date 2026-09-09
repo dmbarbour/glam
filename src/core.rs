@@ -268,8 +268,6 @@ pub(crate) struct LazyCycleMember {
 
 #[derive(Clone)]
 pub struct LazyValue {
-    id: LazyId,
-    label: Arc<str>,
     edge: managed::ManagedLazyEdge,
     values: RuntimeValueObserver,
 }
@@ -283,8 +281,6 @@ pub(crate) type PromiseAssignment = Result<Value, Arc<EvaluationFailure>>;
 
 #[derive(Clone)]
 pub(crate) struct PromisedValue {
-    id: PromiseId,
-    label: Arc<str>,
     edge: managed::ManagedPromiseEdge,
     values: RuntimeValueObserver,
 }
@@ -294,8 +290,8 @@ pub(crate) struct PromisedValue {
 // are removed; they are not a language-level value-size policy.
 #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
 const _: () = {
-    assert!(std::mem::size_of::<LazyValue>() == 48);
-    assert!(std::mem::size_of::<PromisedValue>() == 48);
+    assert!(std::mem::size_of::<LazyValue>() == 24);
+    assert!(std::mem::size_of::<PromisedValue>() == 24);
 };
 
 /// Runtime-selected construction authority for values which allocate stable
@@ -648,8 +644,6 @@ pub(crate) fn test_value_factory() -> CoreValueFactory {
 impl LazyValue {
     pub(crate) fn from_root(root: &managed::ManagedLazyRoot) -> Self {
         Self {
-            id: root.id(),
-            label: root.label().clone(),
             edge: root.edge(),
             values: root.observer().clone(),
         }
@@ -823,11 +817,7 @@ impl LazyValue {
     }
 
     pub(crate) fn id(&self) -> LazyId {
-        self.id
-    }
-
-    pub(crate) fn label(&self) -> &Arc<str> {
-        &self.label
+        self.with_access(|lazy| lazy.id())
     }
 
     pub(crate) fn access<'access, 'scope>(
@@ -883,8 +873,6 @@ impl LazyValue {
 impl PromisedValue {
     pub(crate) fn from_root(root: &managed::ManagedPromiseRoot) -> Self {
         Self {
-            id: root.id(),
-            label: root.label().clone(),
             edge: root.edge(),
             values: root.observer().clone(),
         }
@@ -958,15 +946,11 @@ impl PromisedValue {
     }
 
     pub(crate) fn id(&self) -> PromiseId {
-        self.id
+        self.with_access(|promise| promise.id())
     }
 
     pub(crate) fn runtime_id(&self) -> EvaluationRuntimeId {
         self.values.runtime_id()
-    }
-
-    pub(crate) fn label(&self) -> &Arc<str> {
-        &self.label
     }
 
     pub(crate) fn task(&self) -> Option<Arc<PromiseProducerObligation>> {
@@ -1063,7 +1047,7 @@ impl PromisedValue {
 
 impl PartialEq for LazyValue {
     fn eq(&self, other: &Self) -> bool {
-        self.id() == other.id()
+        self.edge == other.edge
     }
 }
 
@@ -1071,16 +1055,13 @@ impl Eq for LazyValue {}
 
 impl fmt::Debug for LazyValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("LazyValue")
-            .field("id", &self.id())
-            .field("label", self.label())
-            .finish_non_exhaustive()
+        f.write_str("LazyValue(..)")
     }
 }
 
 impl PartialEq for PromisedValue {
     fn eq(&self, other: &Self) -> bool {
-        self.id() == other.id()
+        self.edge == other.edge
     }
 }
 
@@ -1088,11 +1069,7 @@ impl Eq for PromisedValue {}
 
 impl fmt::Debug for PromisedValue {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("PromisedValue")
-            .field("id", &self.id())
-            .field("label", self.label())
-            .finish_non_exhaustive()
+        formatter.write_str("PromisedValue(..)")
     }
 }
 

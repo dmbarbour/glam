@@ -270,15 +270,8 @@ impl RuntimeValueAccess<'_> {
         source: LazySource,
     ) -> Result<LazyValue, UnsupportedLayout> {
         let observer = self.values().runtime_value_observer();
-        let label = label.into();
-        let edge = self.allocate_managed_lazy(label.clone(), source)?;
-        let id = edge
-            .access(&observer, self)
-            .expect("a new lazy must belong to its allocation domain")
-            .id();
+        let edge = self.allocate_managed_lazy(label, source)?;
         Ok(LazyValue {
-            id,
-            label,
             edge,
             values: observer,
         })
@@ -304,15 +297,8 @@ impl RuntimeValueAccess<'_> {
         label: impl Into<Arc<str>>,
     ) -> Result<PromisedValue, UnsupportedLayout> {
         let observer = self.values().runtime_value_observer();
-        let label = label.into();
-        let edge = self.allocate_managed_promise(label.clone())?;
-        let id = edge
-            .access(&observer, self)
-            .expect("a new promise must belong to its allocation domain")
-            .id();
+        let edge = self.allocate_managed_promise(label)?;
         Ok(PromisedValue {
-            id,
-            label,
             edge,
             values: observer,
         })
