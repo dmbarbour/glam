@@ -116,6 +116,39 @@ impl EdgeTransitionProbeState {
                 adding_edges,
             });
     }
+
+    pub(crate) fn observe_state_transition<State, Leaving, Adding, Result>(
+        &self,
+        mutator: &Mutator<'_>,
+        state: &mut State,
+        leaving: &Leaving,
+        adding: &Adding,
+        transition: impl FnOnce(&mut State) -> Result,
+    ) -> Result
+    where
+        Leaving: for<'visit> Fn(&State, &mut Visitor<'visit>),
+        Adding: for<'visit> Fn(&State, &mut Visitor<'visit>),
+    {
+        let leaving_edges = self
+            .observation
+            .leaving()
+            .then(|| count_state_and_validate(mutator, state, leaving))
+            .unwrap_or(0);
+        let result = transition(state);
+        let adding_edges = self
+            .observation
+            .adding()
+            .then(|| count_state_and_validate(mutator, state, adding))
+            .unwrap_or(0);
+        self.records
+            .lock()
+            .expect("edge-transition test probe was poisoned")
+            .push(EdgeTransitionRecord {
+                leaving_edges,
+                adding_edges,
+            });
+        result
+    }
 }
 
 fn count_and_validate<Edges>(mutator: &Mutator<'_>, edges: &Edges) -> usize
@@ -128,5 +161,22 @@ where
         count = count.checked_add(1).expect("observed edge count exhausted");
     };
     edges(&mut Visitor::new(&mut visit));
+    count
+}
+
+fn count_state_and_validate<State, Edges>(
+    mutator: &Mutator<'_>,
+    state: &State,
+    edges: &Edges,
+) -> usize
+where
+    Edges: for<'visit> Fn(&State, &mut Visitor<'visit>),
+{
+    let mut count = 0usize;
+    let mut visit = |edge: ErasedGc| {
+        mutator.assert_observed_edge_for_test(edge);
+        count = count.checked_add(1).expect("observed edge count exhausted");
+    };
+    edges(state, &mut Visitor::new(&mut visit));
     count
 }

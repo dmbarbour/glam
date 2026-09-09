@@ -29,12 +29,12 @@ macro_rules! assert_does_not_implement {
 
 assert_does_not_implement!(
     cursor_claim_guard_is_not_send,
-    CursorClaimGuard<'static, ()>,
+    CursorClaimGuard<'static, (), DirectRuntimeNetMutationGateway>,
     Send
 );
 assert_does_not_implement!(
     cursor_claim_guard_is_not_sync,
-    CursorClaimGuard<'static, ()>,
+    CursorClaimGuard<'static, (), DirectRuntimeNetMutationGateway>,
     Sync
 );
 

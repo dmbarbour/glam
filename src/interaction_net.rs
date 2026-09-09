@@ -17,7 +17,8 @@ pub(crate) use runtime::{
     CursorDependencyDisposition, CursorDependencyResolution, CursorProgress, CursorStep,
     DemandEndpoint, FrontierObservation, InterfaceDemand, NetContention, OperatorCall,
     PreparedCopySource, Reduction, ReductionKind, RuntimeNet, RuntimeNetCell, RuntimeNetMutation,
-    RuntimeNetPayload, RuntimeNetPayloadVisitStats, SourceFrontier, StuckReason,
+    RuntimeNetMutationGateway, RuntimeNetPayload, RuntimeNetPayloadVisitStats, SourceFrontier,
+    StuckReason,
 };
 #[cfg(test)]
 pub(crate) use runtime::{RuntimeNetRevisions, SharedRuntimeNet};

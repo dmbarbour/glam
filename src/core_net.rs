@@ -391,10 +391,7 @@ impl CoreRuntimeNet {
     #[cfg(test)]
     pub(crate) fn test_claim_pairless_cursor_obligation(&self, cursor: NodeId) -> bool {
         self.with_test_access(|access| {
-            access
-                .runtime
-                .cell()
-                .test_claim_pairless_cursor_obligation(cursor)
+            access.with_mut(|runtime| runtime.claim_pairless_cursor_obligation(cursor))
         })
     }
 }
@@ -477,11 +474,17 @@ impl CoreRuntimeNetAccess<'_, '_> {
         &self,
         update: impl FnOnce(&mut RuntimeNet<CoreSpecialization>) -> Option<R>,
     ) -> Option<R> {
-        self.runtime.cell().with_optional_mut(update)
+        self.runtime
+            .cell()
+            .with_optional_mut_via(&self.runtime, update)
     }
 
     pub(crate) fn poll_interface_demand(&self, interface: Port) -> InterfaceDemand {
-        self.runtime.cell().poll_interface_demand(interface)
+        self.runtime
+            .cell()
+            .with_conditional_mut_via(&self.runtime, |runtime| {
+                runtime.poll_interface_demand(interface)
+            })
     }
 
     pub(crate) fn resolve_cursor_dependency(
@@ -492,7 +495,15 @@ impl CoreRuntimeNetAccess<'_, '_> {
     ) -> CursorDependencyResolution {
         self.runtime
             .cell()
-            .resolve_cursor_dependency(cursor, &expected.to_generic(), disposition)
+            .with_conditional_mut_via(&self.runtime, |runtime| {
+                let resolution =
+                    runtime.resolve_cursor_dependency(cursor, &expected.to_generic(), disposition);
+                if resolution == CursorDependencyResolution::Resolved {
+                    RuntimeNetMutation::Changed(resolution)
+                } else {
+                    RuntimeNetMutation::Unchanged(resolution)
+                }
+            })
     }
 
     pub(crate) fn step_cursor(&self, cursor: NodeId) -> CoreCursorStep {
@@ -531,9 +542,10 @@ impl CoreRuntimeNetAccess<'_, '_> {
         cursor: NodeId,
         expected_topology_revision: Option<u64>,
     ) -> CoreCursorStep {
-        let step = self.runtime.cell().step_cursor_with(
+        let step = self.runtime.cell().step_cursor_with_gateway(
             cursor,
             expected_topology_revision,
+            &self.runtime,
             |source, anchor| self.inspect_source_frontier(source, anchor),
         );
         CoreCursorStep::from_generic(step, self.values)
@@ -544,9 +556,10 @@ impl CoreRuntimeNetAccess<'_, '_> {
         pair: ActivePairKey,
         expected_topology_revision: Option<u64>,
     ) -> CoreActivePairStep {
-        let step = self.runtime.cell().step_active_pair_with(
+        let step = self.runtime.cell().step_active_pair_with_gateway(
             pair,
             expected_topology_revision,
+            &self.runtime,
             |source, anchor| self.inspect_source_frontier(source, anchor),
         );
         CoreActivePairStep::from_generic(step)
@@ -556,7 +569,7 @@ impl CoreRuntimeNetAccess<'_, '_> {
     fn test_advance_claimed_cursor(&self, cursor: NodeId) -> Option<CursorProgress> {
         self.runtime
             .cell()
-            .test_advance_claimed_cursor_with(cursor, |source, anchor| {
+            .test_advance_claimed_cursor_with_gateway(cursor, &self.runtime, |source, anchor| {
                 self.inspect_source_frontier(source, anchor)
             })
     }
@@ -567,9 +580,9 @@ impl CoreRuntimeNetAccess<'_, '_> {
         source: CorePreparedCopySource,
     ) {
         let (source, _source_root) = source.into_inner_for(&self.owner.values);
-        self.runtime
-            .cell()
-            .with_mut(|runtime| runtime.resume_claimed_call_with_copy(call, source));
+        self.runtime.cell().with_mut_via(&self.runtime, |runtime| {
+            runtime.resume_claimed_call_with_copy(call, source)
+        });
     }
 
     pub(crate) fn claim_call(&self, call: crate::interaction_net::Call) -> Option<Value> {
@@ -588,18 +601,20 @@ impl CoreRuntimeNetAccess<'_, '_> {
         &self,
         blocked: &BlockedCall<CoreWaitToken>,
     ) -> Option<(crate::interaction_net::Call, RuntimeValueRoot)> {
-        self.runtime.cell().with_conditional_mut(|runtime| {
-            let Some(call) = runtime.call(blocked.pair) else {
-                return RuntimeNetMutation::Unchanged(None);
-            };
-            if !runtime.retry_blocked_call(call, &blocked.wait) {
-                return RuntimeNetMutation::Unchanged(None);
-            }
-            let callable = runtime
-                .claim_call(call)
-                .expect("reclaimed call must expose its callable data");
-            RuntimeNetMutation::Changed(Some((call, self.values.root_runtime_value(callable))))
-        })
+        self.runtime
+            .cell()
+            .with_conditional_mut_via(&self.runtime, |runtime| {
+                let Some(call) = runtime.call(blocked.pair) else {
+                    return RuntimeNetMutation::Unchanged(None);
+                };
+                if !runtime.retry_blocked_call(call, &blocked.wait) {
+                    return RuntimeNetMutation::Unchanged(None);
+                }
+                let callable = runtime
+                    .claim_call(call)
+                    .expect("reclaimed call must expose its callable data");
+                RuntimeNetMutation::Changed(Some((call, self.values.root_runtime_value(callable))))
+            })
     }
 
     pub(crate) fn resume_claimed_call_with_operator(
@@ -607,7 +622,7 @@ impl CoreRuntimeNetAccess<'_, '_> {
         call: crate::interaction_net::Call,
         operator: CoreOperator,
     ) {
-        self.runtime.cell().with_mut(|runtime| {
+        self.runtime.cell().with_mut_via(&self.runtime, |runtime| {
             runtime.resume_claimed_call_with_operator(call, operator);
         });
     }
@@ -617,9 +632,9 @@ impl CoreRuntimeNetAccess<'_, '_> {
         call: crate::interaction_net::Call,
         wait: CoreWaitToken,
     ) {
-        self.runtime
-            .cell()
-            .with_mut(|runtime| runtime.block_claimed_call(call, wait));
+        self.runtime.cell().with_mut_via(&self.runtime, |runtime| {
+            runtime.block_claimed_call(call, wait)
+        });
     }
 
     pub(crate) fn fail_claimed_call(
@@ -627,19 +642,21 @@ impl CoreRuntimeNetAccess<'_, '_> {
         call: crate::interaction_net::Call,
         error: EvaluationHalt,
     ) {
-        self.runtime
-            .cell()
-            .with_mut(|runtime| runtime.fail_claimed_call(call, error));
+        self.runtime.cell().with_mut_via(&self.runtime, |runtime| {
+            runtime.fail_claimed_call(call, error)
+        });
     }
 
     pub(crate) fn release_claimed_call(&self, call: crate::interaction_net::Call) -> bool {
-        self.runtime.cell().with_conditional_mut(|runtime| {
-            if runtime.release_claimed_call(call) {
-                RuntimeNetMutation::Changed(true)
-            } else {
-                RuntimeNetMutation::Unchanged(false)
-            }
-        })
+        self.runtime
+            .cell()
+            .with_conditional_mut_via(&self.runtime, |runtime| {
+                if runtime.release_claimed_call(call) {
+                    RuntimeNetMutation::Changed(true)
+                } else {
+                    RuntimeNetMutation::Unchanged(false)
+                }
+            })
     }
 
     pub(crate) fn restore_blocked_call(
@@ -647,13 +664,15 @@ impl CoreRuntimeNetAccess<'_, '_> {
         call: crate::interaction_net::Call,
         wait: CoreWaitToken,
     ) -> bool {
-        self.runtime.cell().with_conditional_mut(|runtime| {
-            if runtime.restore_blocked_call(call, wait) {
-                RuntimeNetMutation::Changed(true)
-            } else {
-                RuntimeNetMutation::Unchanged(false)
-            }
-        })
+        self.runtime
+            .cell()
+            .with_conditional_mut_via(&self.runtime, |runtime| {
+                if runtime.restore_blocked_call(call, wait) {
+                    RuntimeNetMutation::Changed(true)
+                } else {
+                    RuntimeNetMutation::Unchanged(false)
+                }
+            })
     }
 
     pub(crate) fn claim_operator_call(
@@ -669,18 +688,20 @@ impl CoreRuntimeNetAccess<'_, '_> {
         &self,
         blocked: &BlockedOperatorCall<CoreWaitToken>,
     ) -> Option<(crate::interaction_net::OperatorCall, CoreOperator, Value)> {
-        self.runtime.cell().with_conditional_mut(|runtime| {
-            let Some(call) = runtime.operator_call(blocked.pair) else {
-                return RuntimeNetMutation::Unchanged(None);
-            };
-            if !runtime.retry_blocked_operator_call(call, &blocked.wait) {
-                return RuntimeNetMutation::Unchanged(None);
-            }
-            let (operator, data) = runtime
-                .claim_operator_call(call)
-                .expect("reclaimed operator call must expose its payloads");
-            RuntimeNetMutation::Changed(Some((call, operator, data)))
-        })
+        self.runtime
+            .cell()
+            .with_conditional_mut_via(&self.runtime, |runtime| {
+                let Some(call) = runtime.operator_call(blocked.pair) else {
+                    return RuntimeNetMutation::Unchanged(None);
+                };
+                if !runtime.retry_blocked_operator_call(call, &blocked.wait) {
+                    return RuntimeNetMutation::Unchanged(None);
+                }
+                let (operator, data) = runtime
+                    .claim_operator_call(call)
+                    .expect("reclaimed operator call must expose its payloads");
+                RuntimeNetMutation::Changed(Some((call, operator, data)))
+            })
     }
 
     pub(crate) fn complete_claimed_operator_call(
@@ -688,7 +709,7 @@ impl CoreRuntimeNetAccess<'_, '_> {
         call: crate::interaction_net::OperatorCall,
         result: OperatorYield<CoreSpecialization>,
     ) {
-        self.runtime.cell().with_mut(|runtime| {
+        self.runtime.cell().with_mut_via(&self.runtime, |runtime| {
             runtime.complete_operator_call(call, result);
         });
     }
@@ -698,9 +719,9 @@ impl CoreRuntimeNetAccess<'_, '_> {
         call: crate::interaction_net::OperatorCall,
         wait: CoreWaitToken,
     ) {
-        self.runtime
-            .cell()
-            .with_mut(|runtime| runtime.block_claimed_operator_call(call, wait));
+        self.runtime.cell().with_mut_via(&self.runtime, |runtime| {
+            runtime.block_claimed_operator_call(call, wait)
+        });
     }
 
     pub(crate) fn fail_claimed_operator_call(
@@ -708,22 +729,24 @@ impl CoreRuntimeNetAccess<'_, '_> {
         call: crate::interaction_net::OperatorCall,
         error: EvaluationHalt,
     ) {
-        self.runtime
-            .cell()
-            .with_mut(|runtime| runtime.fail_operator_call(call, error));
+        self.runtime.cell().with_mut_via(&self.runtime, |runtime| {
+            runtime.fail_operator_call(call, error)
+        });
     }
 
     pub(crate) fn release_claimed_operator_call(
         &self,
         call: crate::interaction_net::OperatorCall,
     ) -> bool {
-        self.runtime.cell().with_conditional_mut(|runtime| {
-            if runtime.release_claimed_operator_call(call) {
-                RuntimeNetMutation::Changed(true)
-            } else {
-                RuntimeNetMutation::Unchanged(false)
-            }
-        })
+        self.runtime
+            .cell()
+            .with_conditional_mut_via(&self.runtime, |runtime| {
+                if runtime.release_claimed_operator_call(call) {
+                    RuntimeNetMutation::Changed(true)
+                } else {
+                    RuntimeNetMutation::Unchanged(false)
+                }
+            })
     }
 
     pub(crate) fn restore_blocked_operator_call(
@@ -731,13 +754,15 @@ impl CoreRuntimeNetAccess<'_, '_> {
         call: crate::interaction_net::OperatorCall,
         wait: CoreWaitToken,
     ) -> bool {
-        self.runtime.cell().with_conditional_mut(|runtime| {
-            if runtime.restore_blocked_operator_call(call, wait) {
-                RuntimeNetMutation::Changed(true)
-            } else {
-                RuntimeNetMutation::Unchanged(false)
-            }
-        })
+        self.runtime
+            .cell()
+            .with_conditional_mut_via(&self.runtime, |runtime| {
+                if runtime.restore_blocked_operator_call(call, wait) {
+                    RuntimeNetMutation::Changed(true)
+                } else {
+                    RuntimeNetMutation::Unchanged(false)
+                }
+            })
     }
 }
 

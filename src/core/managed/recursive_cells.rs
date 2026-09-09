@@ -21,7 +21,9 @@ use crate::evaluation::{
     CompletionSubscriptionOutcome, CompletionSubscriptions, CompletionWake,
     EvaluationWorkCoordinator, PromiseProducerObligation, WakeRegistration,
 };
-use crate::interaction_net::{RuntimeNet, RuntimeNetCell, RuntimeNetPayload};
+use crate::interaction_net::{
+    RuntimeNet, RuntimeNetCell, RuntimeNetMutationGateway, RuntimeNetPayload,
+};
 use crate::runtime::RuntimeMutationAuthority;
 
 use super::payload_edges::{
@@ -176,6 +178,7 @@ pub(crate) struct ManagedPromiseAccess<'access, 'scope> {
 
 /// A non-escaping core-net observation authorized by one runtime value scope.
 pub(crate) struct ManagedCoreNetAccess<'access, 'scope> {
+    owner: ManagedCoreNetEdge,
     cell: &'access ManagedCoreNetCell,
     authority: &'access RuntimeValueAccess<'scope>,
     _thread_bound: PhantomData<Rc<()>>,
@@ -489,7 +492,7 @@ impl ManagedCoreNetEdge {
         // SAFETY: the private constructor and observer preserve exact heap and
         // representation provenance; the caller supplies current liveness.
         let cell = unsafe { authority.scope.get_traced_edge(self.0) };
-        ManagedCoreNetAccess::from_authorized_cell(cell, observer, authority)
+        ManagedCoreNetAccess::from_authorized_cell(self, cell, observer, authority)
     }
 }
 
@@ -573,6 +576,7 @@ impl ManagedCoreNetRoot {
             return None;
         }
         Some(ManagedCoreNetAccess {
+            owner: self.edge,
             cell: authority.get(&self.root),
             authority,
             _thread_bound: PhantomData,
@@ -808,11 +812,13 @@ impl<'access, 'scope> ManagedPromiseAccess<'access, 'scope> {
 
 impl<'access, 'scope> ManagedCoreNetAccess<'access, 'scope> {
     fn from_authorized_cell(
+        owner: ManagedCoreNetEdge,
         cell: &'access ManagedCoreNetCell,
         observer: &RuntimeValueObserver,
         authority: &'access RuntimeValueAccess<'scope>,
     ) -> Option<Self> {
         authority.admits(observer).then_some(Self {
+            owner,
             cell,
             authority,
             _thread_bound: PhantomData,
@@ -829,11 +835,35 @@ impl<'access, 'scope> ManagedCoreNetAccess<'access, 'scope> {
         &self,
         update: impl FnOnce(&mut RuntimeNet<CoreSpecialization>) -> R,
     ) -> R {
-        self.cell.runtime.with_mut(update)
+        self.cell.runtime.with_mut_via(self, update)
     }
 
     pub(crate) fn cell(&self) -> &RuntimeNetCell<CoreSpecialization> {
         &self.cell.runtime
+    }
+}
+
+impl RuntimeNetMutationGateway<CoreSpecialization> for ManagedCoreNetAccess<'_, '_> {
+    #[inline(always)]
+    fn transition<Result>(
+        &self,
+        runtime: &mut RuntimeNet<CoreSpecialization>,
+        update: impl FnOnce(&mut RuntimeNet<CoreSpecialization>) -> Result,
+    ) -> Result {
+        // SAFETY: this access proves the managed owner is live in the exact
+        // value region. Both visitors enumerate the complete synchronized net
+        // state at their respective side of the one coupled update. The
+        // caller already holds the sole runtime-net mutation mutex, and these
+        // visitors operate on the borrowed state rather than reacquiring it.
+        unsafe {
+            self.authority.with_managed_edge_state_transition(
+                self.owner.0,
+                runtime,
+                trace_core_runtime_net,
+                trace_core_runtime_net,
+                update,
+            )
+        }
     }
 }
 
@@ -913,6 +943,26 @@ unsafe impl Trace for ManagedPromiseCell {
     }
 }
 
+fn trace_core_runtime_net(runtime: &RuntimeNet<CoreSpecialization>, visitor: &mut Visitor<'_>) {
+    runtime.visit_logical_payloads(&mut |payload| match payload {
+        RuntimeNetPayload::Data(value) => {
+            visit_compatibility_managed_edges(value, visitor);
+        }
+        RuntimeNetPayload::Operator(operator) => {
+            visit_compatibility_payload_managed_edges(operator, visitor);
+            operator.visit_compatibility_net_edges(&mut |net| {
+                net.trace_managed_edge(visitor);
+            });
+        }
+        RuntimeNetPayload::Source(source) => source.trace_managed_edge(visitor),
+        RuntimeNetPayload::StuckReason(reason) => {
+            visit_halt_value_edges(reason, &mut |value| {
+                visit_compatibility_managed_edges(value, visitor);
+            });
+        }
+    });
+}
+
 // SAFETY: the owner-neutral runtime cell exposes one stable logical payload
 // snapshot while mutation is excluded. Every value/operator/stuck payload is
 // traversed through its compile-exhaustive compatibility adapter, and every
@@ -921,8 +971,10 @@ unsafe impl Trace for ManagedCoreNetCell {
     const REQUESTED_SLOT_SIZE: Option<usize> = Some(super::managed_slot_extent::<Self>());
 
     fn trace(&self, visitor: &mut Visitor<'_>) {
-        self.runtime
-            .try_visit_logical_payloads(&mut |payload| match payload {
+        self.runtime.try_visit_logical_payloads(&mut |payload| {
+            // Reuse the same per-payload traversal as the mutation bridge
+            // without attempting to reacquire the runtime-net mutex.
+            match payload {
                 RuntimeNetPayload::Data(value) => {
                     visit_compatibility_managed_edges(value, visitor);
                 }
@@ -938,7 +990,8 @@ unsafe impl Trace for ManagedCoreNetCell {
                         visit_compatibility_managed_edges(value, visitor);
                     });
                 }
-            });
+            }
+        });
     }
 }
 
@@ -1865,28 +1918,114 @@ mod tests {
     #[test]
     fn bounded_core_net_gateway_preserves_cell_mutation_publication() {
         let values = new_values();
-        let observer = values.runtime_value_observer();
-        let cell = ManagedCoreNetCell::new(prepared_runtime(5));
+        let root = values.with_runtime_value_access(|access| {
+            access
+                .construct_rooted_managed_core_net(prepared_runtime(5))
+                .expect("the managed core net should fit one collector slot")
+        });
 
         values.with_runtime_value_access(|access| {
-            let net = ManagedCoreNetAccess::from_authorized_cell(&cell, &observer, &access)
+            let net = root
+                .access(&access)
                 .expect("the matching value domain should authorize its core net");
             assert_eq!(
                 net.with(|runtime| runtime.interface_data(runtime.exposed()).cloned()),
                 Some(Value::Number(5.into()))
             );
-            let before = cell.runtime.with_revisions(|_| ()).1;
+            let before = net.cell().with_revisions(|_| ()).1;
             net.with_mut(|_| ());
-            let after = cell.runtime.with_revisions(|_| ()).1;
+            let after = net.cell().with_revisions(|_| ()).1;
             assert_eq!(after.topology_revision(), before.topology_revision() + 1);
         });
 
         let unrelated = new_values();
         unrelated.with_runtime_value_access(|access| {
-            assert!(
-                ManagedCoreNetAccess::from_authorized_cell(&cell, &observer, &access).is_none()
-            );
+            assert!(root.access(&access).is_none());
         });
+    }
+
+    #[test]
+    fn core_net_transition_visits_locked_pre_and_post_payloads() {
+        let values = new_values();
+        let (old_root, new_root, net_root) = values.with_runtime_value_access(|access| {
+            let old_root = access
+                .construct_rooted_managed_lazy("old net payload", LazySource::Error)
+                .expect("the old managed lazy should fit one collector slot");
+            let new_root = access
+                .construct_rooted_managed_lazy("new net payload", LazySource::Error)
+                .expect("the new managed lazy should fit one collector slot");
+            let net_root = access
+                .construct_rooted_managed_core_net(runtime_with_data(Value::Lazy(
+                    LazyValue::from_root(&old_root),
+                )))
+                .expect("the managed core net should fit one collector slot");
+            (old_root, new_root, net_root)
+        });
+        let probe = values.install_edge_transition_probe_for_test(EdgeTransitionObservation::Both);
+
+        values.with_runtime_value_access(|access| {
+            let net = net_root
+                .access(&access)
+                .expect("the rooted core net should remain accessible");
+            net.with_mut(|runtime| {
+                *runtime = runtime_with_data(Value::Lazy(LazyValue::from_root(&new_root)));
+            });
+        });
+
+        let records = probe.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].leaving_edges(), 1);
+        assert_eq!(records[0].adding_edges(), 1);
+        drop((old_root, new_root, net_root));
+    }
+
+    #[test]
+    fn core_net_reduction_enters_the_same_managed_transition_gateway() {
+        let values = new_values();
+        let (lazy_root, net_root) = values.with_runtime_value_access(|access| {
+            let lazy_root = access
+                .construct_rooted_managed_lazy("erased net payload", LazySource::Error)
+                .expect("the managed lazy should fit one collector slot");
+            let mut builder = NetBuilder::<CoreSpecialization>::new();
+            let erase = builder.copy(0).input;
+            let data = builder.data(Value::Lazy(LazyValue::from_root(&lazy_root)));
+            builder.wire(erase, data);
+            let exposed = builder.data(Value::Number(97.into()));
+            let net_root = access
+                .construct_rooted_managed_core_net(builder.finish(exposed).instantiate())
+                .expect("the managed core net should fit one collector slot");
+            (lazy_root, net_root)
+        });
+        let probe = values.install_edge_transition_probe_for_test(EdgeTransitionObservation::Both);
+
+        values.with_runtime_value_access(|access| {
+            let net = net_root
+                .access(&access)
+                .expect("the rooted core net should remain accessible");
+            let pair = net
+                .with(|runtime| runtime.active_pairs().next())
+                .expect("the erase-data pair should be active");
+            assert!(matches!(
+                net.cell().step_active_pair_with_gateway(
+                    pair,
+                    None,
+                    &net,
+                    |_source, _anchor| unreachable!("erase does not inspect a source"),
+                ),
+                crate::interaction_net::ActivePairStep::Reduction(
+                    crate::interaction_net::Reduction {
+                        kind: crate::interaction_net::ReductionKind::Erase,
+                        ..
+                    }
+                )
+            ));
+        });
+
+        let records = probe.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].leaving_edges(), 1);
+        assert_eq!(records[0].adding_edges(), 0);
+        drop((lazy_root, net_root));
     }
 
     #[test]

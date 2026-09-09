@@ -1,6 +1,50 @@
 use crate::{Gc, Mutator, Trace, Visitor, trace::ErasedGc};
 
 impl Mutator<'_> {
+    /// Reports mutable representation state immediately before and after one
+    /// post-publication edge transition.
+    ///
+    /// This form is useful when both edge sets are properties of a larger
+    /// synchronized representation rather than standalone old/new values. The
+    /// collector invokes `leaving` against the pre-write state and `adding`
+    /// against the post-write state only when its active policy needs those
+    /// sides. No semantic graph snapshot is required merely to satisfy Rust's
+    /// borrowing rules.
+    ///
+    /// # Safety
+    ///
+    /// `owner` must be a live allocation in this mutator's heap. If invoked,
+    /// each visitor must synchronously report every managed edge represented
+    /// by `state` at that point. `transition` must perform the one logical
+    /// transition and leave `state` valid and traceable if it returns.
+    #[inline(always)]
+    pub unsafe fn with_edge_state_transition<Owner, State, Leaving, Adding, Result>(
+        &self,
+        owner: Gc<Owner>,
+        state: &mut State,
+        leaving: Leaving,
+        adding: Adding,
+        transition: impl FnOnce(&mut State) -> Result,
+    ) -> Result
+    where
+        Owner: Trace,
+        Leaving: for<'visit> Fn(&State, &mut Visitor<'visit>),
+        Adding: for<'visit> Fn(&State, &mut Visitor<'visit>),
+    {
+        #[cfg(debug_assertions)]
+        owner.debug_assert_owned_by(self);
+
+        #[cfg(feature = "deterministic-test-hooks")]
+        if let Some(probe) = self.heap().edge_transition_probe() {
+            return probe.observe_state_transition(self, state, &leaving, &adding, transition);
+        }
+
+        #[cfg(not(feature = "deterministic-test-hooks"))]
+        let _ = (leaving, adding);
+
+        transition(state)
+    }
+
     /// Reports one managed edge-set transition while a closure performs it.
     ///
     /// `leaving` and `adding` synchronously describe the complete sets of
@@ -142,6 +186,8 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    #[cfg(feature = "deterministic-test-hooks")]
+    use crate::EdgeTransitionObservation;
     use crate::{Gc, Heap, Trace, Visitor};
 
     struct Leaf {
@@ -208,6 +254,42 @@ mod tests {
                 Some(new)
             );
         });
+    }
+
+    #[cfg(feature = "deterministic-test-hooks")]
+    #[test]
+    fn state_transition_observes_the_locked_pre_and_post_write_graphs() {
+        let heap = Heap::new();
+        let probe = heap.install_edge_transition_probe(EdgeTransitionObservation::Both);
+        heap.with_mutator(|mutator| {
+            let leaves = mutator.allocator::<Leaf>().unwrap();
+            let nodes = mutator.allocator::<MutableNode>().unwrap();
+            let old = leaves.alloc(Leaf { _value: 1 });
+            let new = leaves.alloc(Leaf { _value: 2 });
+            let owner = nodes.alloc(MutableNode {
+                edge: Mutex::new(Some(old)),
+            });
+            // SAFETY: `owner` is live in this exact heap. Its locked option is
+            // its sole outgoing edge before and after the coupled update.
+            unsafe {
+                let owner_value = owner.get_unchecked(mutator);
+                let mut edge = owner_value
+                    .edge
+                    .lock()
+                    .expect("test edge mutex should not be poisoned");
+                mutator.with_edge_state_transition(
+                    owner,
+                    &mut *edge,
+                    |edge, visitor| edge.trace(visitor),
+                    |edge, visitor| edge.trace(visitor),
+                    |edge| *edge = Some(new),
+                );
+            }
+        });
+
+        assert_eq!(probe.records().len(), 1);
+        assert_eq!(probe.records()[0].leaving_edges(), 1);
+        assert_eq!(probe.records()[0].adding_edges(), 1);
     }
 
     #[test]

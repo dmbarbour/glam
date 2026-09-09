@@ -504,6 +504,44 @@ pub(crate) struct NormalizationBatchGuard<'cell, S: NetSpecialization> {
     _thread_bound: PhantomData<Rc<()>>,
 }
 
+/// Representation-local structural gateway around one runtime-net mutation.
+///
+/// The generic runtime supplies a no-op implementation. Managed
+/// specializations use this seam to keep collector edge accounting inside the
+/// same net mutex which authorizes the topology or payload edit.
+pub(crate) trait RuntimeNetMutationGateway<S: NetSpecialization> {
+    fn transition<Result>(
+        &self,
+        runtime: &mut RuntimeNet<S>,
+        update: impl FnOnce(&mut RuntimeNet<S>) -> Result,
+    ) -> Result;
+}
+
+#[derive(Clone, Copy)]
+#[allow(
+    dead_code,
+    reason = "the direct gateway serves the generic non-core test specialization"
+)]
+struct DirectRuntimeNetMutationGateway;
+
+impl<S: NetSpecialization> RuntimeNetMutationGateway<S> for DirectRuntimeNetMutationGateway {
+    #[inline(always)]
+    fn transition<Result>(
+        &self,
+        runtime: &mut RuntimeNet<S>,
+        update: impl FnOnce(&mut RuntimeNet<S>) -> Result,
+    ) -> Result {
+        update(runtime)
+    }
+}
+
+#[allow(
+    dead_code,
+    reason = "the direct gateway serves the generic non-core test specialization"
+)]
+const DIRECT_RUNTIME_NET_MUTATION_GATEWAY: DirectRuntimeNetMutationGateway =
+    DirectRuntimeNetMutationGateway;
+
 #[cfg(test)]
 impl<S: NetSpecialization> fmt::Debug for NormalizationBatchLease<S> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -757,25 +795,55 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
         state.runtime.visit_logical_payloads(visit)
     }
 
+    #[allow(
+        dead_code,
+        reason = "the direct gateway serves the generic non-core test specialization"
+    )]
     pub(crate) fn with_mut<R>(&self, update: impl FnOnce(&mut RuntimeNet<S>) -> R) -> R {
+        self.with_mut_via(&DIRECT_RUNTIME_NET_MUTATION_GATEWAY, update)
+    }
+
+    pub(crate) fn with_mut_via<Gateway, R>(
+        &self,
+        gateway: &Gateway,
+        update: impl FnOnce(&mut RuntimeNet<S>) -> R,
+    ) -> R
+    where
+        Gateway: RuntimeNetMutationGateway<S>,
+    {
         let mut state = self
             .runtime
             .lock()
             .expect("shared runtime net was poisoned");
-        let result = update(&mut state.runtime);
+        let result = gateway.transition(&mut state.runtime, update);
         self.publish_mutation(&mut state.batches);
         result
     }
 
+    #[allow(
+        dead_code,
+        reason = "the direct gateway serves the generic non-core test specialization"
+    )]
     pub(crate) fn with_conditional_mut<R>(
         &self,
         update: impl FnOnce(&mut RuntimeNet<S>) -> RuntimeNetMutation<R>,
     ) -> R {
+        self.with_conditional_mut_via(&DIRECT_RUNTIME_NET_MUTATION_GATEWAY, update)
+    }
+
+    pub(crate) fn with_conditional_mut_via<Gateway, R>(
+        &self,
+        gateway: &Gateway,
+        update: impl FnOnce(&mut RuntimeNet<S>) -> RuntimeNetMutation<R>,
+    ) -> R
+    where
+        Gateway: RuntimeNetMutationGateway<S>,
+    {
         let mut state = self
             .runtime
             .lock()
             .expect("shared runtime net was poisoned");
-        match update(&mut state.runtime) {
+        match gateway.transition(&mut state.runtime, update) {
             RuntimeNetMutation::Unchanged(result) => result,
             RuntimeNetMutation::Changed(result) => {
                 self.publish_mutation(&mut state.batches);
@@ -789,16 +857,36 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
         &self,
         update: impl FnOnce(&mut RuntimeNet<S>) -> Option<R>,
     ) -> Option<R> {
-        self.with_conditional_mut(|runtime| match update(runtime) {
+        self.with_optional_mut_via(&DIRECT_RUNTIME_NET_MUTATION_GATEWAY, update)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_optional_mut_via<Gateway, R>(
+        &self,
+        gateway: &Gateway,
+        update: impl FnOnce(&mut RuntimeNet<S>) -> Option<R>,
+    ) -> Option<R>
+    where
+        Gateway: RuntimeNetMutationGateway<S>,
+    {
+        self.with_conditional_mut_via(gateway, |runtime| match update(runtime) {
             Some(result) => RuntimeNetMutation::Changed(Some(result)),
             None => RuntimeNetMutation::Unchanged(None),
         })
     }
 
+    #[allow(
+        dead_code,
+        reason = "the direct gateway serves the generic non-core test specialization"
+    )]
     pub(crate) fn poll_interface_demand(&self, interface: Port) -> InterfaceDemand {
         self.with_conditional_mut(|runtime| runtime.poll_interface_demand(interface))
     }
 
+    #[allow(
+        dead_code,
+        reason = "the direct gateway serves the generic non-core test specialization"
+    )]
     pub(crate) fn resolve_cursor_dependency(
         &self,
         cursor: NodeId,
@@ -832,12 +920,34 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
             .map(|active| (active.id, active.contended))
     }
 
+    #[allow(
+        dead_code,
+        reason = "the direct gateway serves the generic non-core test specialization"
+    )]
     pub(crate) fn step_active_pair_with(
         &self,
         pair: ActivePairKey,
         expected_topology_revision: Option<u64>,
         inspect_source: impl FnOnce(&S::RuntimeSource, Port) -> SourceFrontier<S>,
     ) -> ActivePairStep<S> {
+        self.step_active_pair_with_gateway(
+            pair,
+            expected_topology_revision,
+            &DIRECT_RUNTIME_NET_MUTATION_GATEWAY,
+            inspect_source,
+        )
+    }
+
+    pub(crate) fn step_active_pair_with_gateway<Gateway>(
+        &self,
+        pair: ActivePairKey,
+        expected_topology_revision: Option<u64>,
+        gateway: &Gateway,
+        inspect_source: impl FnOnce(&S::RuntimeSource, Port) -> SourceFrontier<S>,
+    ) -> ActivePairStep<S>
+    where
+        Gateway: RuntimeNetMutationGateway<S>,
+    {
         let (mut outcome, cursor_claim) = {
             let mut state = self
                 .runtime
@@ -859,9 +969,8 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
             let mut cursor_claim = None;
             let (outcome, changed) = match pair_state {
                 Some(ActivePairState::Ready) => {
-                    let reduction = state
-                        .runtime
-                        .reduce_pair(pair)
+                    let reduction = gateway
+                        .transition(&mut state.runtime, |runtime| runtime.reduce_pair(pair))
                         .expect("ready pair must produce one reduction");
                     if let ReductionKind::RemoteCursor {
                         cursor,
@@ -901,7 +1010,7 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
             }
             (
                 outcome,
-                cursor_claim.map(|claim| CursorClaimGuard::new(self, claim)),
+                cursor_claim.map(|claim| CursorClaimGuard::new(self, claim, gateway)),
             )
         };
 
@@ -923,12 +1032,34 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
         outcome
     }
 
+    #[allow(
+        dead_code,
+        reason = "the direct gateway serves the generic non-core test specialization"
+    )]
     pub(crate) fn step_cursor_with(
         &self,
         cursor: NodeId,
         expected_topology_revision: Option<u64>,
         inspect_source: impl FnOnce(&S::RuntimeSource, Port) -> SourceFrontier<S>,
     ) -> CursorStep<S> {
+        self.step_cursor_with_gateway(
+            cursor,
+            expected_topology_revision,
+            &DIRECT_RUNTIME_NET_MUTATION_GATEWAY,
+            inspect_source,
+        )
+    }
+
+    pub(crate) fn step_cursor_with_gateway<Gateway>(
+        &self,
+        cursor: NodeId,
+        expected_topology_revision: Option<u64>,
+        gateway: &Gateway,
+        inspect_source: impl FnOnce(&S::RuntimeSource, Port) -> SourceFrontier<S>,
+    ) -> CursorStep<S>
+    where
+        Gateway: RuntimeNetMutationGateway<S>,
+    {
         let claim = {
             let mut state = self
                 .runtime
@@ -942,9 +1073,10 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
             }
             match state.runtime.inspect_cursor_step(cursor) {
                 CursorStepInspection::Claimable(expected_pair) => {
-                    let progress = state
-                        .runtime
-                        .begin_cursor_claim(cursor, expected_pair)
+                    let progress = gateway
+                        .transition(&mut state.runtime, |runtime| {
+                            runtime.begin_cursor_claim(cursor, expected_pair)
+                        })
                         .expect("claimable cursor must accept its owning transition");
                     assert_eq!(progress, CursorProgress::Claimed);
                     let claim = state
@@ -952,7 +1084,7 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
                         .cursor_claim(cursor)
                         .expect("claimed cursor step must retain its transition");
                     self.publish_mutation(&mut state.batches);
-                    CursorClaimGuard::new(self, claim)
+                    CursorClaimGuard::new(self, claim, gateway)
                 }
                 CursorStepInspection::Dependency(dependency) => {
                     return CursorStep::Dependency(dependency);
@@ -980,18 +1112,17 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
     }
 
     #[cfg(test)]
-    pub(crate) fn test_advance_claimed_cursor_with(
+    pub(crate) fn test_advance_claimed_cursor_with_gateway<Gateway>(
         &self,
         cursor: NodeId,
+        gateway: &Gateway,
         inspect_source: impl FnOnce(&S::RuntimeSource, Port) -> SourceFrontier<S>,
-    ) -> Option<CursorProgress> {
+    ) -> Option<CursorProgress>
+    where
+        Gateway: RuntimeNetMutationGateway<S>,
+    {
         let claim = self.with(|runtime| runtime.cursor_claim(cursor))?;
-        Some(CursorClaimGuard::new(self, claim).advance_with(inspect_source))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_claim_pairless_cursor_obligation(&self, cursor: NodeId) -> bool {
-        self.with_mut(|runtime| runtime.claim_pairless_cursor_obligation(cursor))
+        Some(CursorClaimGuard::new(self, claim, gateway).advance_with(inspect_source))
     }
 }
 
@@ -1107,9 +1238,16 @@ where
     S: NetSpecialization<RuntimeSource = SharedRuntimeNet<S>>,
 {
     #[cfg(test)]
-    fn test_cursor_claim_guard(&self, cursor: NodeId) -> Option<CursorClaimGuard<'_, S>> {
+    fn test_cursor_claim_guard(
+        &self,
+        cursor: NodeId,
+    ) -> Option<CursorClaimGuard<'_, S, DirectRuntimeNetMutationGateway>> {
         let claim = self.with(|runtime| runtime.cursor_claim(cursor))?;
-        Some(CursorClaimGuard::new(self.cell(), claim))
+        Some(CursorClaimGuard::new(
+            self.cell(),
+            claim,
+            &DIRECT_RUNTIME_NET_MUTATION_GATEWAY,
+        ))
     }
 
     #[cfg(test)]
@@ -1291,17 +1429,27 @@ enum CursorDisposition<S: NetSpecialization> {
 /// guard, so source-frontier inspection and target publication remain
 /// disjoint. Dropping an unfinished guard restores ready owner state.
 #[must_use = "a cursor claim must be advanced or released"]
-struct CursorClaimGuard<'claim, S: NetSpecialization> {
+struct CursorClaimGuard<'claim, S: NetSpecialization, Gateway: RuntimeNetMutationGateway<S>> {
     target: &'claim RuntimeNetCell<S>,
     claim: Option<CursorClaim<S>>,
+    gateway: &'claim Gateway,
     _thread_bound: PhantomData<Rc<()>>,
 }
 
-impl<'claim, S: NetSpecialization> CursorClaimGuard<'claim, S> {
-    fn new(target: &'claim RuntimeNetCell<S>, claim: CursorClaim<S>) -> Self {
+impl<'claim, S, Gateway> CursorClaimGuard<'claim, S, Gateway>
+where
+    S: NetSpecialization,
+    Gateway: RuntimeNetMutationGateway<S>,
+{
+    fn new(
+        target: &'claim RuntimeNetCell<S>,
+        claim: CursorClaim<S>,
+        gateway: &'claim Gateway,
+    ) -> Self {
         Self {
             target,
             claim: Some(claim),
+            gateway,
             _thread_bound: PhantomData,
         }
     }
@@ -1327,10 +1475,9 @@ impl<'claim, S: NetSpecialization> CursorClaimGuard<'claim, S> {
                     .as_ref()
                     .expect("an unfinished cursor guard must retain its claim")
                     .clone();
-                Some(
-                    self.target
-                        .with_mut(|target| target.finish_cursor_claim(claim, frontier)),
-                )
+                Some(self.target.with_mut_via(self.gateway, |target| {
+                    target.finish_cursor_claim(claim, frontier)
+                }))
             }
             CursorDisposition::Release => {
                 let restored = self.restore_fallback();
@@ -1346,17 +1493,22 @@ impl<'claim, S: NetSpecialization> CursorClaimGuard<'claim, S> {
         let Some(claim) = self.claim.as_ref() else {
             return true;
         };
-        self.target.with_conditional_mut(|target| {
-            if target.release_cursor_claim(claim) {
-                RuntimeNetMutation::Changed(true)
-            } else {
-                RuntimeNetMutation::Unchanged(false)
-            }
-        })
+        self.target
+            .with_conditional_mut_via(self.gateway, |target| {
+                if target.release_cursor_claim(claim) {
+                    RuntimeNetMutation::Changed(true)
+                } else {
+                    RuntimeNetMutation::Unchanged(false)
+                }
+            })
     }
 }
 
-impl<S: NetSpecialization> Drop for CursorClaimGuard<'_, S> {
+impl<S, Gateway> Drop for CursorClaimGuard<'_, S, Gateway>
+where
+    S: NetSpecialization,
+    Gateway: RuntimeNetMutationGateway<S>,
+{
     fn drop(&mut self) {
         if self.claim.is_some() {
             let _ = self.restore_fallback();
@@ -1714,7 +1866,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         true
     }
 
-    fn claim_pairless_cursor_obligation(&mut self, cursor: NodeId) -> bool {
+    pub(crate) fn claim_pairless_cursor_obligation(&mut self, cursor: NodeId) -> bool {
         let Some(obligation) = self.cursor_obligations.get_mut(&cursor) else {
             return false;
         };
@@ -2161,7 +2313,10 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         self.neighbor(interface)
     }
 
-    fn poll_interface_demand(&mut self, interface: Port) -> RuntimeNetMutation<InterfaceDemand> {
+    pub(crate) fn poll_interface_demand(
+        &mut self,
+        interface: Port,
+    ) -> RuntimeNetMutation<InterfaceDemand> {
         self.assert_interface(interface);
         let Some(neighbor) = self.neighbor(interface) else {
             return RuntimeNetMutation::Unchanged(InterfaceDemand::NormalForm);
@@ -2264,7 +2419,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         }
     }
 
-    fn resolve_cursor_dependency(
+    pub(crate) fn resolve_cursor_dependency(
         &mut self,
         cursor: NodeId,
         expected: &CursorDependency<S>,

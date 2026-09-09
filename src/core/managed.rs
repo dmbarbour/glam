@@ -605,6 +605,45 @@ impl RuntimeValueAccess<'_> {
                 .with_edge_transition(owner, leaving, adding, transition)
         }
     }
+
+    /// Performs one post-publication transition whose edge sets are derived
+    /// from synchronized representation state immediately before and after
+    /// the write.
+    ///
+    /// This is the borrowed-state counterpart to
+    /// [`RuntimeValueAccess::with_managed_edge_transition`]. It exists so a
+    /// representation can keep its own mutex held while collector-selected
+    /// visitors inspect the already-borrowed state, without cloning that state
+    /// or allowing a collector callback to reacquire the representation lock.
+    ///
+    /// # Safety
+    ///
+    /// `owner` must be live in this exact access region. The state visitors
+    /// and transition must satisfy
+    /// [`Mutator::with_edge_state_transition`]'s graph and publication
+    /// contract for that owner.
+    pub(crate) unsafe fn with_managed_edge_state_transition<Owner, State, Leaving, Adding, Result>(
+        &self,
+        owner: Gc<Owner>,
+        state: &mut State,
+        leaving: Leaving,
+        adding: Adding,
+        transition: impl FnOnce(&mut State) -> Result,
+    ) -> Result
+    where
+        Owner: ManagedFamily,
+        Leaving: for<'visit> Fn(&State, &mut Visitor<'visit>),
+        Adding: for<'visit> Fn(&State, &mut Visitor<'visit>),
+    {
+        // SAFETY: this wrapper preserves the caller's exact owner/state proof
+        // while withholding the raw collector mutator from production
+        // representation code.
+        unsafe {
+            self.scope
+                .mutator
+                .with_edge_state_transition(owner, state, leaving, adding, transition)
+        }
+    }
 }
 
 #[cfg(test)]
