@@ -3874,10 +3874,10 @@ mod tests {
     fn lease_words(run: &ClassificationRunSnapshot) -> Vec<u64> {
         let start = run.geometry.allocation_bitmap.byte_len();
         let end = start + run.geometry.lease_bitmap.byte_len();
-        run.side_metadata[start..end]
-            .chunks_exact(std::mem::size_of::<u64>())
-            .map(|word| u64::from_ne_bytes(word.try_into().unwrap()))
-            .collect()
+        let (words, remainder) =
+            run.side_metadata[start..end].as_chunks::<{ std::mem::size_of::<u64>() }>();
+        assert!(remainder.is_empty());
+        words.iter().map(|word| u64::from_ne_bytes(*word)).collect()
     }
 
     fn mark_bytes(run: &ClassificationRunSnapshot) -> &[u8] {

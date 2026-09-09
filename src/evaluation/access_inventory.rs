@@ -82,8 +82,9 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         ("src/compiler.rs", GatewayCounts::new(3, 0)),
         // I4.0's owner-local destruction fixtures exercise the admitted
         // construction gateway; production allocation still enters through
-        // the same higher-ranked scope.
-        ("src/core/managed.rs", GatewayCounts::new(0, 2)),
+        // the same higher-ranked scope. GCI5R-002B's scoped gateway and
+        // foreign-owner fixtures add three matching-domain access regions.
+        ("src/core/managed.rs", GatewayCounts::new(3, 2)),
         // I4F.2b's test-only passive-closure matrix allocates each real
         // compatibility value variant through the same bounded gateway.
         (
@@ -107,10 +108,12 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // I5D's recursive-cell cutover and I5F's closed self- and cross-family
         // cycle fixtures use matching-domain access for construction,
         // observation, publication, mutation-gateway installation, and root
-        // projection.
+        // projection. GCI5R-002 adds deterministic production-writer probes
+        // for lazy, promise, and synchronized net transitions through that
+        // same bounded access surface.
         (
             "src/core/managed/recursive_cells.rs",
-            GatewayCounts::new(24, 0),
+            GatewayCounts::new(37, 0),
         ),
         // I4F.2c keeps the production-shaped node and prepared root private
         // while their local lifecycle, provenance, and nested-access fixtures

@@ -207,20 +207,26 @@ local `Gc<T>`; CG0-CG1 must close that root problem separately.
 
 The provisional baseline is a conservative SATB-style protocol:
 
-- the existing managed-edge replacement gateway records the overwritten edge
-  and may initially shade both old and new edges;
+- the existing owner-qualified transition gateways expose separately selected
+  leaving and adding edge visitors; SATB observes the pre-write leaving side,
+  while another provisional policy may initially shade both sides;
 - external-root removal records the removed root before publication;
 - root insertion during an active epoch shades the inserted value;
 - one-write publications into managed cells participate in the same gateway;
-- allocations published after epoch initiation are retained for that cycle;
+- allocations born during concurrent marking are marked or otherwise retained
+  by the later CG2 phase/epoch protocol before publication; the current
+  transition gateway does not itself establish that birth rule;
 - mark bitmaps and work queues support atomic/concurrent discovery; and
 - final remark waits for every pre-remark participant to acknowledge and for
   all barrier buffers to drain, without depending on heap acquisition order.
 
 Tracing remains observational. Immutable objects need no object-local
 synchronization. Each mutable managed family must supply a reviewed coherent
-snapshot protocol, normally by briefly taking its semantic lock, copying or
-submitting exact edges, and releasing it without calling arbitrary code.
+snapshot protocol. The implemented borrowed-state transition form can retain
+one semantic lock while policy-selected visitors inspect the pre- and
+post-write states in place; callbacks may not reacquire that lock or invoke
+arbitrary code. A future singular managed-node representation may instead
+submit only the edited edge.
 
 The exact policy for post-snapshot allocation—black allocation bits, birth
 epochs, or segregated allocation runs—is a CG2 design gate. It must make

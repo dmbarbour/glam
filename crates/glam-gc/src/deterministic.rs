@@ -98,16 +98,16 @@ impl EdgeTransitionProbeState {
         Leaving: for<'visit> Fn(&mut Visitor<'visit>),
         Adding: for<'visit> Fn(&mut Visitor<'visit>),
     {
-        let leaving_edges = self
-            .observation
-            .leaving()
-            .then(|| count_and_validate(mutator, leaving))
-            .unwrap_or(0);
-        let adding_edges = self
-            .observation
-            .adding()
-            .then(|| count_and_validate(mutator, adding))
-            .unwrap_or(0);
+        let leaving_edges = if self.observation.leaving() {
+            count_and_validate(mutator, leaving)
+        } else {
+            0
+        };
+        let adding_edges = if self.observation.adding() {
+            count_and_validate(mutator, adding)
+        } else {
+            0
+        };
         self.records
             .lock()
             .expect("edge-transition test probe was poisoned")
@@ -129,17 +129,17 @@ impl EdgeTransitionProbeState {
         Leaving: for<'visit> Fn(&State, &mut Visitor<'visit>),
         Adding: for<'visit> Fn(&State, &mut Visitor<'visit>),
     {
-        let leaving_edges = self
-            .observation
-            .leaving()
-            .then(|| count_state_and_validate(mutator, state, leaving))
-            .unwrap_or(0);
+        let leaving_edges = if self.observation.leaving() {
+            count_state_and_validate(mutator, state, leaving)
+        } else {
+            0
+        };
         let result = transition(state);
-        let adding_edges = self
-            .observation
-            .adding()
-            .then(|| count_state_and_validate(mutator, state, adding))
-            .unwrap_or(0);
+        let adding_edges = if self.observation.adding() {
+            count_state_and_validate(mutator, state, adding)
+        } else {
+            0
+        };
         self.records
             .lock()
             .expect("edge-transition test probe was poisoned")

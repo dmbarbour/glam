@@ -1,5 +1,3 @@
-use chumsky::prelude::*;
-
 use super::*;
 use crate::diagnostic::Severity;
 use crate::g_syntax::parser::layout::{LayoutView, validate_delimited_layouts};

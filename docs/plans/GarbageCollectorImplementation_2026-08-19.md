@@ -296,9 +296,13 @@ unsafe inventory which fails on unreviewed modules or sites, and update
   the managed graph or collector metadata except through its visitor. A panic
   from an otherwise conforming trace may abort that collection attempt without
   making the graph unsafe to trace again.
-- Define a small managed-edge mutation gateway whose collector action is an
-  inline no-op for full stop-the-world collection. This latches the API shape
-  without imposing remembered-set or concurrent-marking work prematurely.
+- Define owner-qualified managed-edge transition gateways whose collector
+  action is an inline no-op for full stop-the-world collection. The general
+  form accepts separately selected leaving/adding visitors, the singular form
+  adapts an optional edge replacement, and the synchronized-state form visits
+  an already-borrowed representation immediately before and after its coupled
+  write. This latches structural barrier sites without imposing remembered-set
+  or concurrent-marking work prematurely.
 - Implement tracing manually for the C1B representative graph types. Provide
   narrowly reviewed structural implementations or visitor helpers for wrappers
   which contribute no representation policy of their own, initially options,

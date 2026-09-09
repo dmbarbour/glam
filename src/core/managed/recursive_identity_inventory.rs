@@ -421,10 +421,10 @@ const DIRECT_IDENTITY_INVENTORY: &[IdentityOwnerEntry] = &[
     ),
     owner!(
         "src/core/managed/recursive_cells.rs::ManagedLazyAccess",
-        [1, 0, 0],
+        [2, 0, 0],
         BoundedAccess,
         None,
-        "thread-bound lazy cell observation"
+        "thread-bound lazy cell observation plus owner-qualified mutation edge"
     ),
     owner!(
         "src/core/managed/recursive_cells.rs::ManagedPromiseCell",
@@ -449,10 +449,10 @@ const DIRECT_IDENTITY_INVENTORY: &[IdentityOwnerEntry] = &[
     ),
     owner!(
         "src/core/managed/recursive_cells.rs::ManagedPromiseAccess",
-        [0, 1, 0],
+        [0, 2, 0],
         BoundedAccess,
         None,
-        "thread-bound promise cell observation"
+        "thread-bound promise cell observation plus owner-qualified mutation edge"
     ),
     owner!(
         "src/core/managed/recursive_cells.rs::ManagedCoreNetCell",
@@ -477,10 +477,10 @@ const DIRECT_IDENTITY_INVENTORY: &[IdentityOwnerEntry] = &[
     ),
     owner!(
         "src/core/managed/recursive_cells.rs::ManagedCoreNetAccess",
-        [0, 0, 1],
+        [0, 0, 2],
         BoundedAccess,
         None,
-        "thread-bound core-net cell observation"
+        "thread-bound core-net cell observation plus owner-qualified mutation edge"
     ),
     owner!(
         "src/core_net.rs::CoreFrontierObservation",

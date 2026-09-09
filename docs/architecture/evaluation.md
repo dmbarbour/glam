@@ -182,6 +182,19 @@ facades through ordinary values and containers only while the whole
 unpublished graph remains inside one access region. None of those facades is a
 durable owner by itself.
 
+Post-publication changes to those families use the same bounded value-access
+authority. The lazy cache reports its deferred source as leaving and its
+terminal result as adding while preserving result-before-source-release.
+Detached and coordinator-guarded promise publication share one empty-to-result
+transition and retain their existing wake/retirement chronology. Managed core
+nets implement the generic `RuntimeNetMutationGateway`: direct and conditional
+edits, active-pair reductions, cursor claims, completion, and unwind restoration
+all enter one collector transition while the semantic net mutex remains held.
+The current bridge lets a selected collector policy visit the borrowed whole
+net immediately before and after the edit without reacquiring the mutex. STW
+`NoAuto` visits neither side; I8 replaces this correctness bridge with exact
+per-edit deltas before a concurrent policy may activate it at high volume.
+
 Terminal wait records likewise retain `RuntimeValueRoot`. A general
 `EvaluationWaitPoll::Complete` observation receives that owned root; only
 `EvaluatorStepContext::project_root` may clone its semantic value back into a

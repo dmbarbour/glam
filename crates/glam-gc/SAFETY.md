@@ -1261,31 +1261,46 @@ successful upgrade conservatively keeps its seed live for that collection even
 if the final public root is dropped concurrently; a failed upgrade cannot later
 become live because no strong cell reference remains.
 
-### `mutation::Mutator::with_edge_replacement`
+### `mutation::Mutator` edge-transition gateways
 
-The raw mutation gateway is named for the operation it encloses rather than an
-edge write it performs. It reports the owner, old edge, and new edge to the
-collector, then invokes the caller's closure; the closure performs the actual
-storage mutation. The gateway is unsafe because pointer-only `Gc<T>` does not
-carry release-visible heap provenance and because the collector cannot infer
-which representation slot the closure changes. The caller must prove that
-owner, old edge, and new edge are live allocations in the mutator heap; that
-old describes the slot before the closure; and that new describes it if the
-closure returns. The closure performs one logical replacement and leaves the
-containing representation valid even if it panics after mutation.
+`with_edge_transition` is the raw owner-qualified gateway for arbitrary
+leaving and adding edge sets. Its synchronous visitor closures describe the
+edges and the final closure performs the actual storage mutation. The
+collector selects which visitors its active policy needs; the current
+stop-the-world policy selects neither. `with_edge_replacement` is the exact
+optional-single-edge convenience form and delegates to that contract.
 
-Debug/test builds validate every supplied pointer before running the closure.
-The separate always-inlined collector hook receives erased owner/old/new
-pointers and is empty for the initial stop-the-world collector. Therefore it
-adds no optimized collector action today while preserving one auditable site
-for a later Dijkstra-, SATB-, or generation-specific barrier. A future barrier
-may conservatively retain both old and new edges if the mutation closure
-panics.
+`with_edge_state_transition` covers a larger synchronized representation whose
+outgoing graph is most naturally derived from the state itself. It receives a
+mutable state borrow, observes the leaving visitor before the write, runs the
+write closure, then observes the adding visitor against the post-write state.
+Policy selection remains lazy, so the stop-the-world path neither walks the
+state nor constructs an edge snapshot. This form allows a representation to
+hold its own semantic mutex once while the collector inspects the already
+borrowed state; neither visitor may reacquire that mutex.
+
+All forms are unsafe because pointer-only `Gc<T>` does not carry
+release-visible heap provenance and because the collector cannot infer which
+representation state the closure changes. The caller must prove that the
+owner is live in the mutator heap, every selected visitor reports the complete
+corresponding edge set, and the closure performs one logical transition while
+leaving the containing representation valid if it returns. A one-write loser
+may conservatively report its proposed addition; future barriers may retain
+extra valid edges but must never be given an invented or foreign pointer.
+
+Debug builds validate the owner before running the closure. Selected visitor
+edges are validated by the deterministic policy probe. The always-inlined
+collector hook is empty for the initial stop-the-world collector, preserving
+one auditable site for a later Dijkstra-, SATB-, or generation-specific barrier
+without adding graph traversal today. A future barrier may conservatively
+retain both sides if a mutation closure panics after changing valid state.
 
 The mutation fixtures access a managed `Mutex<Option<Gc<_>>>` only under its
 owner mutator. Its manual trace snapshots and releases the mutex before calling
 the visitor, so visitor panic neither poisons the mutex nor changes the graph's
-retraceability. The foreign-heap test proves debug rejection occurs before its
+retraceability. Focused probes cover no-op STW traversal, independently
+selected edge sets, pre/post state visitation, and conservative proposed
+additions. The foreign-heap test proves debug rejection occurs before its
 mutation closure runs.
 
 ## Verification and Review Status

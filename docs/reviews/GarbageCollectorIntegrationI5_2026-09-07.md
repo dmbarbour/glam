@@ -2,15 +2,14 @@
 
 Baseline: `37186c1`, including completed implementation checkpoints I5A-I5F.4.
 
-Status: review complete; GCI5R-001 is closed and corrective work remains open
-for the independent mutation-gateway finding. The implemented I5 graph is
-sound under the current `CollectionPolicy::NoAuto` boundary and the closed
-isolated collection fixtures provide strong evidence for recursive cycle
-reclamation. Regional construction now establishes an exact traced or rooted
-owner before managed access ends. Production managed-edge writers still do
-not pass through the collector's structural mutation gateway, which blocks
-claiming that the current code is ready for a future incremental or
-generational barrier. Production still does not collect.
+Status: review complete; GCI5R-001 and GCI5R-002 are closed. The implemented I5
+graph is sound under the current `CollectionPolicy::NoAuto` boundary and the
+closed isolated collection fixtures provide strong evidence for recursive
+cycle reclamation. Regional construction establishes an exact traced or rooted
+owner before managed access ends, and every current mutable managed family now
+enters an owner-qualified collector transition. Production still does not
+collect; I8 retains the explicit performance work of replacing the core net's
+whole-state correctness bridge with exact high-volume edit deltas.
 
 The forward plan also needs revision before I6 begins. I5F.4 established that
 lazies, promises, and core nets are the mutable recursive identities, while
@@ -138,16 +137,17 @@ collectible. The earlier process-wide metadata fixture interference was fixed
 by making the collecting fixture own its value domain, which is the right
 test boundary rather than evidence from repetition.
 
-The focused `cargo test -q core::managed` run passes 72 tests. The live review
+The focused `cargo test -q core::managed` run passed 72 tests at the original
+review baseline. The live review
 also passes `cargo fmt --check`,
 `cargo clippy --all-targets --all-features -- -D warnings`, and
 `cargo test -q` (1,374 library tests plus every integration suite). No new
 schedule-sensitive claim in this review relies on repeated execution.
 
 GCI5R-001's closure adds both an exact classified constructor-bearing source
-inventory and deterministic root-before-region-exit chronology. The remaining
-important verification gap is GCI5R-002: current writer latches count writer
-functions but do not prove a call into the collector mutation API.
+inventory and deterministic root-before-region-exit chronology. GCI5R-002's
+closure replaces the writer-count latch with deterministic collector-policy
+probes over the actual lazy, promise, and net writer boundaries.
 
 ## Findings
 
@@ -912,7 +912,8 @@ ad-hoc Miri run. Gate G3 retains that broader obligation.
 Only after G.4 passes:
 
 1. record exact commands and results here, change GCI5R-001 to closed, and
-   update this review's summary while leaving GCI5R-002 independently open;
+   update this review's summary while leaving GCI5R-002 independently open at
+   that checkpoint (GCI5R-002 was subsequently closed on 2026-09-09);
 2. reconcile the integration plan's I6+ regional-allocation entry condition
    with the completed I5 precedent, without weakening the rule for new
    families;
@@ -936,8 +937,9 @@ independently open; this closeout does not enable production collection.
 **Classification:** structural barrier contract drift  
 **Priority:** high  
 **Confidence:** high  
-**Status:** open; current STW execution is sound, but I8 and any concurrent,
-incremental, generational, or moving collector remain blocked
+**Status:** closed 2026-09-09 by GCI5R-002A-E; current STW execution remains
+`NoAuto`, and I8 retains the net-delta performance conversion required before
+activating a concurrent or incremental policy
 
 The roadmap and ownership ledger say every post-publication managed-edge
 mutation passes through the collector-owned structural gateway even though the
@@ -1018,6 +1020,8 @@ rather than moving synchronization into the collector.
 
 ##### GCI5R-002A — Collector edge-transition contract
 
+**Status:** completed 2026-09-09.
+
 - Generalize the single-edge replacement operation to an owner-qualified
   transition over arbitrary synchronous leaving and adding edge visitors. The
   visitors may borrow representation state for the duration of the call and
@@ -1041,6 +1045,8 @@ conservative observation of a losing proposed addition.
 
 ##### GCI5R-002B — Runtime value-access gateway
 
+**Status:** completed 2026-09-09.
+
 - Add the stable Glam-facing transition operation to `RuntimeValueAccess`.
   Production representations supply their managed owner and semantic edge-set
   adapters through this operation without receiving the raw collector mutator.
@@ -1057,6 +1063,8 @@ foreign owner, cannot outlive its `RuntimeValueAccess`, and invokes no semantic
 service while visiting compatibility edges.
 
 ##### GCI5R-002C — Lazy and promise production writers
+
+**Status:** completed 2026-09-09.
 
 - Route `ManagedLazyAccess::cache` through the transition gateway. Its logical
   transition adds the terminal result graph and removes the deferred source
@@ -1079,25 +1087,35 @@ guarded promise success/failure, a forced winning/losing publisher ordering,
 and unchanged terminal-before-source/root-retirement chronology. Re-run the
 existing lazy/promise reclamation and coordinator publication suites.
 
-##### GCI5R-002D — Core-net delta integration in I8
+##### GCI5R-002D — Core-net synchronized correctness bridge
+
+**Status:** completed 2026-09-09; exact high-volume deltas remain an explicit
+I8 audit/conversion rather than a prerequisite for closing the missing
+structural boundary.
 
 - Keep core-net transition reporting under the existing `RuntimeNetCell`
   synchronization boundary. No collector callback may acquire that mutex or
   reconstruct state after the write.
-- Inventory the concrete topology and payload edits, then report the affected
-  leaving/adding semantic edges. A whole-net before/after trace is acceptable
-  only as a measured correctness bridge; it must not silently become the
-  permanent high-volume path.
+- Inventory the concrete topology and payload edits and route all of their
+  synchronization paths through one gate. Use a lazily selected whole-net
+  before/after visitor as the measured correctness bridge; I8 then reports the
+  affected leaving/adding deltas before the gate becomes a live high-volume
+  concurrent barrier.
 - Align the final representation with the expectation that future managed net
   nodes usually mutate singular edges. Preserve current revision,
   materialization, disturbance, and active-pair publication behavior.
 
-This checkpoint is implemented with the I8 post-cutover net audit. GCI5R-002
-remains open after A-C and continues to block Gate G2, I11 production
-collection, and concurrent/incremental/generational/moving claims until D is
-complete.
+GCI5R-002D installs one generic `RuntimeNetMutationGateway` beneath every
+managed net mutation while retaining the existing net mutex and revision/
+disturbance chronology. Its collector-selected borrowed-state visitor sees the
+whole net immediately before and after a coupled write without cloning the
+semantic graph or reacquiring the mutex. The current STW policy visits neither
+side. I8 must replace this bridge with exact per-edit deltas before a concurrent
+policy activates it on this high-volume path.
 
 ##### GCI5R-002E — Closure and verification
+
+**Status:** completed 2026-09-09.
 
 - Replace source-count evidence with an exact writer/gateway inventory plus
   behavioral transition probes for lazy, promise, and net mutation.
@@ -1112,9 +1130,39 @@ complete.
 - Close GCI5R-002 only after the production inventory has no unmatched writer
   and all three managed families demonstrably enter the transition gateway.
 
+Resolution inventory:
+
+| Managed owner | Authoritative writers | Collector transition | Behavioral evidence |
+| --- | --- | --- | --- |
+| `ManagedLazyCell` | `ManagedLazyAccess::cache` | One owner-qualified transition visits the source graph as leaving and the terminal success/failure graph as adding; the existing closure still publishes result before taking source. | Success, failure, source release, and non-forcing visitors. |
+| `ManagedPromiseCell` | `publish_detached` and `publish_guarded`, both through `publish_assignment` | Empty leaving set and proposed assignment adding set. One-write losers preserve the winner even when an adding-policy probe already observed their valid proposal. | Detached/guarded success and failure, forced winner/loser order, assignment-before-wake callback. |
+| `ManagedCoreNetCell` | Managed `CoreRuntimeNetAccess` direct/conditional edits; active-pair and cursor steps; cursor finish/drop restoration | `ManagedCoreNetAccess` implements `RuntimeNetMutationGateway`; every path enters a borrowed-state pre/post transition while the one semantic mutex is held. Generic non-core tests use a separate direct gateway. | Exact pre/post payload replacement, real erase reduction, existing cursor/active-pair/runtime-net suites. |
+
+The net state visitor is deliberately conservative: it reports the complete
+valid pre- and post-write graphs, including unchanged edges. That is correct
+barrier input and avoids semantic graph snapshots, but it is not the permanent
+performance shape. I8 owns the source-backed mutation inventory again after
+I6/I7 payload changes and replaces this bridge with exact edit deltas before
+concurrent collection. Allocation during concurrent marking remains a separate
+CG2 epoch/birth rule; GCI5R-002 does not silently mark newly allocated objects
+or enable collection.
+
 No new mutable managed family may be declared complete after 002A without
 using this gateway. Production remains `CollectionPolicy::NoAuto`; completing
 this remediation supplies barrier structure but does not enable collection.
+
+Closure verification on 2026-09-09 covered the collector gateway directly
+(`6` focused mutation tests), all managed recursive-cell paths (`39` tests),
+the core-net facade (`17` tests), and the generic interaction-net runtime
+(`71` tests). The complete `glam-gc` check passed `193` unit tests, `7` Loom
+tests, `8` documentation tests, Clippy, formatting, and the unsafe-site audit.
+Strict-provenance Miri passed the six collector mutation tests and the targeted
+lazy, promise-publication, and core-net state-transition fixtures. The final
+repository checks passed formatting, all-target/all-feature Clippy with
+warnings denied, and the complete test suite. Repetition was not used as race
+evidence: the promise winner/loser and callback ordering cases use explicit
+deterministic probes, while the collector's concurrent protocols retain their
+Loom coverage.
 
 ### GCI5R-003 — Lazy and promise façades duplicate cell identity data
 
@@ -1256,9 +1304,9 @@ which I5 already completed:
   counters already exist. Keep I7 as a final source/representation audit and
   add only missing closed shapes such as a list-thunk backedge. Do not repeat
   all I5F.3a fixtures under new names.
-- **I8A:** this is now the natural home for the unresolved high-volume net
-  mutation gateway from GCI5R-002. Split payload/visitor reconciliation from
-  writer/gateway implementation and from lock/lifecycle revalidation.
+- **I8A:** GCI5R-002D has installed the high-volume net's conservative
+  whole-state gateway. Split payload/visitor reconciliation from exact
+  per-edit delta conversion and from lock/lifecycle revalidation.
 - **I8B:** direct self/pairwise/cursor-source cycles overlap I5F.1-I5F.3c.
   Retain only delta cases—stuck reasons, pending active-pair work, newly
   retained I6 payloads, and any state not already covered—and partition those
@@ -1349,8 +1397,9 @@ GCI5R-001 and GCI5R-002, then reconcile the table, ledger header, stale
 
 1. `LazyValue` and `PromisedValue` duplicate IDs and labels outside their
    managed cells without a recorded representation decision.
-2. Tests described as mutation-gateway evidence currently establish only
-   single-writer lexical structure.
+2. Tests described as mutation-gateway evidence originally established only
+   single-writer lexical structure. GCI5R-002 replaced that evidence with
+   deterministic policy probes at the production writer boundaries.
 3. Phase status, ownership-ledger introduction, and pre-I8 source comments did
    not follow the atomic net cutover.
 
@@ -1362,7 +1411,7 @@ GCI5R-001 and GCI5R-002, then reconcile the table, ledger header, stale
 | I6D.1 | Required to eliminate reflection effect/target root backedges. | Split semantic edges from active reservation lifecycle and take ownership away from I10A. |
 | I6D.2 | Net-construction `Arc<Value>` is immutable and already traced. | Treat conversion as optional representation cleanup unless another identity/lifecycle need is found. |
 | I7 | Visitor and most cycle evidence already exist. | Narrow to delta audit, missing thunk/backedge shape, and duplicate-work measurement. |
-| I8 | Managed core-net owner already exists. | Split final payload audit, structural mutation gateway, delta cycle states, and adapter/comment retirement. |
+| I8 | Managed core-net owner and a conservative synchronized transition gateway already exist. | Split final payload audit, exact per-edit delta conversion, delta cycle states, and adapter/comment retirement. |
 | I9 | I5 already changed and audited several root/RAII surfaces. | Start from I5 inventories and test only I6-I8 deltas plus final mandatory source audits. |
 | I10 | Host callbacks and opaque storage remain real deferred boundaries. | Remove reflection after I6D.1; preserve host-capture and opaque decision gates. |
 | I11 | Stable-boundary forced collection remains viable in principle. | Gate worker-concurrent collection on root-before-exit chronology and complete barrier/source audits. |
@@ -1374,9 +1423,10 @@ GCI5R-001 and GCI5R-002, then reconcile the table, ledger header, stale
 1. **Completed:** GCI5R-001's regional construction and first-publication
    protocol now closes the only finding which could make a currently valid
    `Gc` stale before later access once production collection is enabled.
-2. Select the owner/set mutation-gateway shape, then route lazy and promise
-   writers through it. Leave the bounded high-volume net implementation to a
-   newly explicit I8 checkpoint.
+2. **Completed:** GCI5R-002 selected the owner/set and borrowed-state gateway
+   shapes, routed lazy and promise writers through them, and installed the
+   synchronized whole-net correctness bridge. Exact net deltas remain I8
+   performance work.
 3. Decide whether façade-cached IDs and labels are intentional, and reconcile
    the ledger either way.
 4. Rewrite I6 around the immutable-shell result and partition reflection

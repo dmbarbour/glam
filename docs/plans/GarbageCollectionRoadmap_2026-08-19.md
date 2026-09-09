@@ -401,6 +401,11 @@ that cell. Generic non-core interaction-net ownership remains
 collector-independent. I5 performs this transition atomically with lazy and
 promise identity; I8 performs the final post-cutover payload, mutation, and
 cycle audit without introducing a managed allocation per net node.
+GCI5R-002 has already routed lazy, promise, and core-net production writers
+through owner-qualified collector transitions. The net route currently uses a
+policy-selected whole-net pre/post visitor under the existing mutex; I8 must
+replace that correctness bridge with exact edit deltas before concurrent
+collection makes it a high-volume barrier.
 
 C6D has resolved the collector-side terminal question: allocation capabilities
 are mutator-scoped and non-owning, roots retain their cell but only weakly name

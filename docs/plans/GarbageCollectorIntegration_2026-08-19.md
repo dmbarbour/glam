@@ -5211,8 +5211,17 @@ before resuming this audit.
   managed identity without reducing the net, following a cursor, or invoking
   semantic work.
 - Re-audit every insertion, replacement, and removal of a managed edge against
-  the I5 mutation gateways. Preserve the one semantic mutex boundary,
-  publication/revision order, and callback/destruction-after-unlock rules.
+  the owner-qualified gateway installed by GCI5R-002D. That corrective
+  checkpoint routes every managed core-net writer through one
+  `RuntimeNetMutationGateway` while the semantic mutex remains held and uses a
+  lazily selected whole-net pre/post visitor as its correctness bridge. The
+  current `NoAuto` STW policy walks neither side.
+- Replace that whole-net bridge with exact per-edit semantic deltas before any
+  concurrent or incremental policy can make net mutation a high-volume
+  traversal. Prefer singular managed-edge edits after a later managed-node
+  representation, but do not require per-agent GC allocation merely to finish
+  the current compatibility representation. Preserve revision,
+  materialization, disturbance, and active-pair publication ordering.
 - Recheck nonblocking trace acquisition under exclusive collection,
   `CoreRuntimeNetAccess` scope confinement, durable rooted net holders, and
   edge-free normalization/wait companions. Generic non-core specializations
@@ -5221,7 +5230,9 @@ before resuming this audit.
 Verification: compile-exhaustive payload and writer inventories, existing
 interaction-net and Cursor-WHNF suites, mutation-gateway tests for every
 value-installing rewrite, and privacy tests rejecting unscoped dereference or
-parked bare net handles. Production remains `NoAuto`.
+parked bare net handles. Retain the deterministic whole-net pre/post and real
+erase-reduction probes until exact delta probes supersede them. Production
+remains `NoAuto`.
 
 ### Phase I8B — Final Net Cycle Matrix
 

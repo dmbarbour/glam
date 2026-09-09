@@ -545,7 +545,9 @@ fn parse_digest_hex(text: &str) -> Option<ContentDigest> {
         return None;
     }
     let mut digest = [0; 32];
-    for (byte, pair) in digest.iter_mut().zip(text.as_bytes().chunks_exact(2)) {
+    let (pairs, remainder) = text.as_bytes().as_chunks::<2>();
+    debug_assert!(remainder.is_empty());
+    for (byte, pair) in digest.iter_mut().zip(pairs) {
         let high = hex_digit(pair[0])?;
         let low = hex_digit(pair[1])?;
         *byte = (high << 4) | low;
