@@ -568,7 +568,10 @@ impl ReflectionEnvironmentBuilder<'_> {
                 .runtime_access()
                 .construct_rooted_managed_promise(label)
                 .expect("managed promise representation must fit one collector run");
-            let value = scoped.wrap(CoreValue::Promised(PromisedValue::from_root(&promise)));
+            let value = scoped.wrap(CoreValue::Promised(PromisedValue::from_root(
+                &promise,
+                scoped.runtime_access(),
+            )));
             (
                 value,
                 PromiseResolver {
@@ -855,7 +858,10 @@ impl Assembler {
                 .runtime_access()
                 .construct_rooted_managed_promise(label)
                 .expect("managed promise representation must fit one collector run");
-            let value = scoped.wrap(CoreValue::Promised(PromisedValue::from_root(&promise)));
+            let value = scoped.wrap(CoreValue::Promised(PromisedValue::from_root(
+                &promise,
+                scoped.runtime_access(),
+            )));
             (
                 value,
                 PromiseResolver {

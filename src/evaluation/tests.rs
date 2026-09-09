@@ -5,7 +5,7 @@ use glam_gc::CollectionError;
 use std::sync::{Barrier, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
-use crate::core::{LazyCycle, LazyValue, PromisedValue};
+use crate::core::{LazyCycle, LazyValue, ManagedPromiseRoot, PromisedValue};
 use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 
 use super::coordinator::{
@@ -634,7 +634,7 @@ fn synchronous_whnf_facade_preserves_retryable_promise_behavior() {
         .evaluate_whnf(&promised)
         .expect_err("an unassigned host promise must remain retryable");
     assert_eq!(
-        halt.unassigned_promise().map(PromisedValue::id),
+        halt.unassigned_promise_root().map(ManagedPromiseRoot::id),
         Some(promise.id())
     );
     assert_eq!(promise.exact_subscription_count(), 0);
@@ -6208,8 +6208,8 @@ fn park_next_spark(coordinator: &EvaluationWorkCoordinator) {
         .expect_err("the unresolved promise should park its spark follower");
     let dependency = if let Some(wait) = halt.blocked_on() {
         coordinator::WorkDependency::Wait(wait.0)
-    } else if let Some(promise) = halt.unassigned_promise() {
-        coordinator::WorkDependency::Promise(promise.root())
+    } else if let Some(promise) = halt.unassigned_promise_root() {
+        coordinator::WorkDependency::Promise(promise.clone())
     } else {
         panic!("an unresolved promise should expose a retryable dependency")
     };
@@ -6316,9 +6316,9 @@ fn promise_completion_between_demand_and_subscription_requeues_the_spark() {
     let halt = crate::eval::eval_value(&spark_context, &claimed.value().clone_core_for_test())
         .expect_err("the unresolved promise should halt the spark");
     let dependency = coordinator::WorkDependency::Promise(
-        halt.unassigned_promise()
+        halt.unassigned_promise_root()
             .expect("the halt should preserve the promise")
-            .root(),
+            .clone(),
     );
     set_promise(&context, &promise, context.values().unit())
         .expect("the promise should resolve before subscription");
@@ -6414,7 +6414,7 @@ fn permanent_spark_failure_retires_without_a_dependency_subscription() {
         .expect_err("the spark fixture should fail permanently");
     assert!(halt.permanent_failure().is_some());
     assert!(halt.blocked_on().is_none());
-    assert!(halt.unassigned_promise().is_none());
+    assert!(halt.unassigned_promise_root().is_none());
     coordinator.release_spark(claimed, coordinator::SparkWorkPoll::Complete);
 
     assert_eq!(coordinator.retained_spark_count(), 0);

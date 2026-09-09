@@ -129,7 +129,9 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         ("src/core.rs", GatewayCounts::new(23, 5)),
         // I5D scopes every managed core-net construction, root handoff, and
         // source-frontier traversal through matching value-domain authority.
-        ("src/core_net.rs", GatewayCounts::new(12, 0)),
+        // GCI5R-008's test-only prepared-source bridge reopens the matching
+        // runtime solely to project a root-owned source for generic fixtures.
+        ("src/core_net.rs", GatewayCounts::new(13, 0)),
         ("src/diagnostic.rs", GatewayCounts::new(1, 0)),
         ("src/eval/operator.rs", GatewayCounts::new(1, 0)),
         // The reflection active-owner fixture proves that managed

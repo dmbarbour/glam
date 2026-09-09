@@ -207,6 +207,18 @@ pub struct FrontierObservation<S: NetSpecialization> {
 }
 
 impl<S: NetSpecialization> FrontierObservation<S> {
+    pub(crate) fn from_snapshot(
+        source: S::RuntimeSource,
+        observed_topology: u64,
+        endpoint: DemandEndpoint,
+    ) -> Self {
+        Self {
+            source,
+            observed_topology,
+            endpoint,
+        }
+    }
+
     pub fn source(&self) -> &S::RuntimeSource {
         &self.source
     }

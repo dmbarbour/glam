@@ -1,4 +1,5 @@
 use super::*;
+use crate::core::RuntimeValueAccess;
 use crate::core_net::{
     CoreActivePairStep as ActivePairStep, CoreCursorDependency as CursorDependency,
     CoreCursorStep as CursorStep, CoreFrontierObservation as FrontierObservation,
@@ -105,8 +106,7 @@ enum NormalizationMode {
 /// dropping this descriptor has no runtime lifecycle effect.
 #[derive(Clone)]
 struct NormalizationRequest {
-    runtime: CoreRuntimeNet,
-    _root: crate::core::ManagedCoreNetRoot,
+    root: crate::core::ManagedCoreNetRoot,
     root_interface: Port,
     mode: NormalizationMode,
 }
@@ -117,11 +117,11 @@ struct NormalizationRequest {
 #[derive(Clone)]
 enum NetDriverWork {
     RequestRoot {
-        runtime: crate::core_net::CoreRuntimeNet,
+        root: crate::core::ManagedCoreNetRoot,
         interface: Port,
     },
     Cursor {
-        runtime: crate::core_net::CoreRuntimeNet,
+        root: crate::core::ManagedCoreNetRoot,
         cursor: crate::interaction_net::NodeId,
     },
     ObservedCursor {
@@ -129,7 +129,7 @@ enum NetDriverWork {
         cursor: crate::interaction_net::NodeId,
     },
     ActivePair {
-        runtime: crate::core_net::CoreRuntimeNet,
+        root: crate::core::ManagedCoreNetRoot,
         pair: ActivePairKey,
     },
     ObservedActivePair {
@@ -137,7 +137,7 @@ enum NetDriverWork {
         pair: ActivePairKey,
     },
     ResumeCursorDependency {
-        runtime: crate::core_net::CoreRuntimeNet,
+        root: crate::core::ManagedCoreNetRoot,
         cursor: crate::interaction_net::NodeId,
         expected_dependency: CursorDependency,
         disposition: CursorDependencyDisposition,
@@ -160,18 +160,18 @@ impl NetDriverWorklist {
 
     fn follow_cursor_dependency(
         &mut self,
-        runtime: crate::core_net::CoreRuntimeNet,
+        root: crate::core::ManagedCoreNetRoot,
         cursor: crate::interaction_net::NodeId,
         dependency: CursorDependency,
     ) {
         self.push(NetDriverWork::ResumeCursorDependency {
-            runtime: runtime.clone(),
+            root: root.clone(),
             cursor,
             expected_dependency: dependency.clone(),
             disposition: CursorDependencyDisposition::Progressed,
         });
         self.push(match dependency {
-            CursorDependency::LocalCursor(cursor) => NetDriverWork::Cursor { runtime, cursor },
+            CursorDependency::LocalCursor(cursor) => NetDriverWork::Cursor { root, cursor },
             CursorDependency::SourceCursor(observation) => {
                 let DemandEndpoint::Cursor(cursor) = observation.endpoint() else {
                     unreachable!("source-cursor dependency must expose a cursor")
@@ -212,14 +212,14 @@ impl NetDriverWorklist {
 }
 
 impl NetDriverWork {
-    fn runtime(&self) -> &crate::core_net::CoreRuntimeNet {
+    fn runtime(&self, access: &RuntimeValueAccess<'_>) -> crate::core_net::CoreRuntimeNet {
         match self {
-            Self::RequestRoot { runtime, .. }
-            | Self::Cursor { runtime, .. }
-            | Self::ActivePair { runtime, .. }
-            | Self::ResumeCursorDependency { runtime, .. } => runtime,
+            Self::RequestRoot { root, .. }
+            | Self::Cursor { root, .. }
+            | Self::ActivePair { root, .. }
+            | Self::ResumeCursorDependency { root, .. } => CoreRuntimeNet::from_root(root, access),
             Self::ObservedCursor { observation, .. }
-            | Self::ObservedActivePair { observation, .. } => observation.source(),
+            | Self::ObservedActivePair { observation, .. } => observation.source(access),
         }
     }
 }
@@ -259,8 +259,8 @@ fn drive_net_work_in(
 ) -> Result<NetDriverOutcome, EvaluationHalt> {
     let mut driver = NetDriver::new(request);
     while let Some(work) = driver.worklist.pop() {
-        let work_runtime = work.runtime().clone();
         let outcome = context.with_value_access(|values| {
+            let work_runtime = work.runtime(values.values());
             let access = values.net(&work_runtime);
             access.with_normalization_batch(|access| {
                 drive_net_batch(&mut driver, &work_runtime, work, access)
@@ -273,12 +273,8 @@ fn drive_net_work_in(
         match outcome {
             NetBatchOutcome::Continue => {}
             NetBatchOutcome::Driver(outcome) => return Ok(outcome),
-            NetBatchOutcome::Semantic {
-                runtime,
-                pair,
-                step,
-            } => {
-                drive_active_pair_semantic_step(context, &mut driver, runtime, pair, step)?;
+            NetBatchOutcome::Semantic { root, pair, step } => {
+                drive_active_pair_semantic_step(context, &mut driver, root, pair, step)?;
             }
         }
     }
@@ -293,7 +289,7 @@ enum NetBatchOutcome {
     Continue,
     Driver(NetDriverOutcome),
     Semantic {
-        runtime: CoreRuntimeNet,
+        root: crate::core::ManagedCoreNetRoot,
         pair: ActivePairKey,
         step: ActivePairStep,
     },
@@ -306,7 +302,7 @@ fn drive_net_batch(
     access: &CoreRuntimeNetAccess<'_, '_>,
 ) -> Result<NetBatchOutcome, EvaluationHalt> {
     loop {
-        debug_assert!(work.runtime().ptr_eq(batch_runtime));
+        debug_assert!(work.runtime(access.values()).ptr_eq(batch_runtime));
         if let Some(outcome) = drive_net_work_item(driver, work, access)? {
             return Ok(outcome);
         }
@@ -317,7 +313,7 @@ fn drive_net_batch(
             );
             return Ok(NetBatchOutcome::Driver(NetDriverOutcome::Progressed));
         };
-        if !next.runtime().ptr_eq(batch_runtime) {
+        if !next.runtime(access.values()).ptr_eq(batch_runtime) {
             driver.worklist.push(next);
             return Ok(NetBatchOutcome::Continue);
         }
@@ -331,7 +327,7 @@ fn drive_net_work_item(
     access: &CoreRuntimeNetAccess<'_, '_>,
 ) -> Result<Option<NetBatchOutcome>, EvaluationHalt> {
     match work {
-        NetDriverWork::RequestRoot { runtime, interface } => {
+        NetDriverWork::RequestRoot { root, interface } => {
             match access.poll_interface_demand(interface) {
                 terminal @ (InterfaceDemand::Data
                 | InterfaceDemand::Bind
@@ -343,25 +339,23 @@ fn drive_net_work_item(
                 }
                 InterfaceDemand::Cursor(cursor) => {
                     driver.worklist.push(NetDriverWork::RequestRoot {
-                        runtime: runtime.clone(),
+                        root: root.clone(),
                         interface,
                     });
-                    driver
-                        .worklist
-                        .push(NetDriverWork::Cursor { runtime, cursor });
+                    driver.worklist.push(NetDriverWork::Cursor { root, cursor });
                 }
                 InterfaceDemand::ActivePair(pair) => {
                     driver.worklist.push(NetDriverWork::RequestRoot {
-                        runtime: runtime.clone(),
+                        root: root.clone(),
                         interface,
                     });
                     driver
                         .worklist
-                        .push(NetDriverWork::ActivePair { runtime, pair });
+                        .push(NetDriverWork::ActivePair { root, pair });
                 }
             }
         }
-        NetDriverWork::Cursor { runtime, cursor } => match access.step_cursor(cursor) {
+        NetDriverWork::Cursor { root, cursor } => match access.step_cursor(cursor) {
             CursorStep::Progressed(progress) => {
                 debug_assert_ne!(progress, crate::interaction_net::CursorProgress::Claimed);
                 driver.progressed = true;
@@ -372,7 +366,7 @@ fn drive_net_work_item(
             CursorStep::Dependency(dependency) => {
                 driver
                     .worklist
-                    .follow_cursor_dependency(runtime, cursor, dependency);
+                    .follow_cursor_dependency(root, cursor, dependency);
             }
             CursorStep::Stable => driver.worklist.mark_nearest_dependency_stable(),
             CursorStep::Contended(contention) => {
@@ -394,7 +388,7 @@ fn drive_net_work_item(
             }
             CursorStep::Dependency(dependency) => {
                 driver.worklist.follow_cursor_dependency(
-                    observation.source().clone(),
+                    observation.root().clone(),
                     cursor,
                     dependency,
                 );
@@ -406,11 +400,11 @@ fn drive_net_work_item(
                 ))));
             }
         },
-        NetDriverWork::ActivePair { runtime, pair } => {
+        NetDriverWork::ActivePair { root, pair } => {
             return prepare_active_pair_step(
                 driver,
                 access,
-                runtime,
+                root,
                 pair,
                 access.step_active_pair(pair),
             );
@@ -420,7 +414,7 @@ fn drive_net_work_item(
             return prepare_active_pair_step(
                 driver,
                 access,
-                observation.source().clone(),
+                observation.root().clone(),
                 pair,
                 step,
             );
@@ -449,7 +443,7 @@ fn drive_net_work_item(
 fn prepare_active_pair_step(
     driver: &mut NetDriver,
     access: &CoreRuntimeNetAccess<'_, '_>,
-    runtime: CoreRuntimeNet,
+    root: crate::core::ManagedCoreNetRoot,
     pair: ActivePairKey,
     step: ActivePairStep,
 ) -> Result<Option<NetBatchOutcome>, EvaluationHalt> {
@@ -461,7 +455,7 @@ fn prepare_active_pair_step(
                 ReductionKind::Call { .. } | ReductionKind::OperatorCall { .. }
             ) {
                 return Ok(Some(NetBatchOutcome::Semantic {
-                    runtime,
+                    root,
                     pair,
                     step: ActivePairStep::Reduction(reduction),
                 }));
@@ -471,25 +465,17 @@ fn prepare_active_pair_step(
                 ReductionKind::RemoteCursor { cursor, progress } => {
                     debug_assert_ne!(progress, crate::interaction_net::CursorProgress::Claimed);
                     if progress == crate::interaction_net::CursorProgress::Blocked {
-                        driver
-                            .worklist
-                            .push(NetDriverWork::Cursor { runtime, cursor });
+                        driver.worklist.push(NetDriverWork::Cursor { root, cursor });
                     }
                 }
                 _ => {}
             }
         }
         ActivePairStep::Cursor(cursor) => {
-            driver
-                .worklist
-                .push(NetDriverWork::Cursor { runtime, cursor });
+            driver.worklist.push(NetDriverWork::Cursor { root, cursor });
         }
         step @ (ActivePairStep::BlockedCall(_) | ActivePairStep::BlockedOperatorCall(_)) => {
-            return Ok(Some(NetBatchOutcome::Semantic {
-                runtime,
-                pair,
-                step,
-            }));
+            return Ok(Some(NetBatchOutcome::Semantic { root, pair, step }));
         }
         ActivePairStep::Stuck => return Err(stuck_pair_error_in(access, pair)),
         ActivePairStep::Contended(contention) => {
@@ -513,10 +499,12 @@ fn drive_net_work(
 fn drive_active_pair_semantic_step(
     context: &EvaluatorStepContext<'_>,
     driver: &mut NetDriver,
-    runtime: crate::core_net::CoreRuntimeNet,
+    root: crate::core::ManagedCoreNetRoot,
     pair: ActivePairKey,
     step: ActivePairStep,
 ) -> Result<(), EvaluationHalt> {
+    let runtime =
+        context.with_value_access(|access| CoreRuntimeNet::from_root(&root, access.values()));
     assert_semantic_step_is_unbatched(&runtime);
     match step {
         ActivePairStep::Reduction(reduction) => match reduction.kind {
@@ -527,7 +515,7 @@ fn drive_active_pair_semantic_step(
                 }
                 driver
                     .worklist
-                    .push(NetDriverWork::ActivePair { runtime, pair });
+                    .push(NetDriverWork::ActivePair { root, pair });
             }
             ReductionKind::OperatorCall { operator, data } => {
                 let call = OperatorCall {
@@ -542,7 +530,7 @@ fn drive_active_pair_semantic_step(
                 }
                 driver
                     .worklist
-                    .push(NetDriverWork::ActivePair { runtime, pair });
+                    .push(NetDriverWork::ActivePair { root, pair });
             }
             _ => unreachable!("only semantic reductions leave a normalization batch"),
         },
@@ -571,7 +559,7 @@ fn drive_active_pair_semantic_step(
             driver.progressed = true;
             driver
                 .worklist
-                .push(NetDriverWork::ActivePair { runtime, pair });
+                .push(NetDriverWork::ActivePair { root, pair });
         }
         ActivePairStep::BlockedOperatorCall(blocked) => {
             match context.context().poll_wait(&blocked.wait.0) {
@@ -598,7 +586,7 @@ fn drive_active_pair_semantic_step(
             driver.progressed = true;
             driver
                 .worklist
-                .push(NetDriverWork::ActivePair { runtime, pair });
+                .push(NetDriverWork::ActivePair { root, pair });
         }
         _ => unreachable!("non-semantic active-pair work must remain inside its batch"),
     }
@@ -619,10 +607,8 @@ fn assert_semantic_step_is_unbatched(_runtime: &CoreRuntimeNet) {}
 
 impl NormalizationRequest {
     fn cursor_whnf(runtime: CoreRuntimeNet, root_interface: Port) -> Self {
-        let root = runtime.root();
         Self {
-            runtime,
-            _root: root,
+            root: runtime.root(),
             root_interface,
             mode: NormalizationMode::CursorWhnf,
         }
@@ -630,7 +616,7 @@ impl NormalizationRequest {
 
     fn root_work(&self) -> NetDriverWork {
         NetDriverWork::RequestRoot {
-            runtime: self.runtime.clone(),
+            root: self.root.clone(),
             interface: self.root_interface,
         }
     }
@@ -1112,10 +1098,10 @@ fn retryable_evaluation_wait(
     if let Some(wait) = error.blocked_on() {
         return Ok(Some(wait));
     }
-    let Some(promise) = error.unassigned_promise() else {
+    let Some(promise) = error.unassigned_promise_root() else {
         return Ok(None);
     };
-    promise_wait(context, promise)
+    promise_root_wait(context, promise)
         .map(crate::core_net::CoreWaitToken)
         .map(Some)
         .map_err(|error| EvaluationHalt::new(error.as_ref()))
@@ -1171,27 +1157,25 @@ mod driver_tests {
         driver: &NetDriver,
     ) {
         let NormalizationRequest {
-            runtime,
-            _root,
+            root,
             root_interface,
             mode,
         } = request;
-        let _: &CoreRuntimeNet = runtime;
-        let _: &crate::core::ManagedCoreNetRoot = _root;
+        let _: &crate::core::ManagedCoreNetRoot = root;
         let _: &Port = root_interface;
         let _: &NormalizationMode = mode;
 
         match work {
-            NetDriverWork::RequestRoot { runtime, interface } => {
-                let _: &CoreRuntimeNet = runtime;
+            NetDriverWork::RequestRoot { root, interface } => {
+                let _: &crate::core::ManagedCoreNetRoot = root;
                 let _: &Port = interface;
             }
-            NetDriverWork::Cursor { runtime, cursor } => {
-                let _: &CoreRuntimeNet = runtime;
+            NetDriverWork::Cursor { root, cursor } => {
+                let _: &crate::core::ManagedCoreNetRoot = root;
                 let _: &crate::interaction_net::NodeId = cursor;
             }
-            NetDriverWork::ActivePair { runtime, pair } => {
-                let _: &CoreRuntimeNet = runtime;
+            NetDriverWork::ActivePair { root, pair } => {
+                let _: &crate::core::ManagedCoreNetRoot = root;
                 let _: &ActivePairKey = pair;
             }
             NetDriverWork::ObservedCursor {
@@ -1206,12 +1190,12 @@ mod driver_tests {
                 let _: &ActivePairKey = pair;
             }
             NetDriverWork::ResumeCursorDependency {
-                runtime,
+                root,
                 cursor,
                 expected_dependency,
                 disposition,
             } => {
-                let _: &CoreRuntimeNet = runtime;
+                let _: &crate::core::ManagedCoreNetRoot = root;
                 let _: &crate::interaction_net::NodeId = cursor;
                 let _: &CursorDependency = expected_dependency;
                 let _: &CursorDependencyDisposition = disposition;
@@ -1340,32 +1324,33 @@ mod driver_tests {
         });
 
         let mut worklist = NetDriverWorklist::default();
-        worklist.follow_cursor_dependency(
-            runtime.clone(),
-            cursor,
-            CursorDependency::LocalCursor(cursor),
-        );
+        let root = runtime.root();
+        let expected_root = root.clone();
+        worklist.follow_cursor_dependency(root, cursor, CursorDependency::LocalCursor(cursor));
 
         match worklist.pop().expect("child work must be present") {
             NetDriverWork::Cursor {
-                runtime: child_runtime,
+                root: child_root,
                 cursor: child,
             } => {
-                assert!(child_runtime.ptr_eq(&runtime));
+                assert!(child_root.same_root(&expected_root));
                 assert_eq!(child, cursor);
             }
             _ => panic!("cursor dependency must schedule its child first"),
         }
         match worklist.pop().expect("parent resumption must be present") {
             NetDriverWork::ResumeCursorDependency {
-                runtime: parent_runtime,
+                root: parent_root,
                 cursor: parent,
                 expected_dependency,
                 disposition,
             } => {
-                assert!(parent_runtime.ptr_eq(&runtime));
+                assert!(parent_root.same_root(&expected_root));
                 assert_eq!(parent, cursor);
-                assert_eq!(expected_dependency, CursorDependency::LocalCursor(cursor));
+                assert!(matches!(
+                    expected_dependency,
+                    CursorDependency::LocalCursor(actual) if actual == cursor
+                ));
                 assert_eq!(disposition, CursorDependencyDisposition::Progressed);
             }
             _ => panic!("cursor dependency must retain a parent retry"),

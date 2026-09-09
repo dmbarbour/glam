@@ -135,11 +135,9 @@ pub(crate) fn visit_halt_value_edges(halt: &EvaluationHalt, visit: &mut dyn FnMu
             failure.visit_compatibility_value_edges(visit);
         }
         EvaluationHaltPayload::Blocked => {}
-        EvaluationHaltPayload::UnassignedPromise(promise) => {
-            // The promise cell is the direct semantic identity. The
-            // compatibility shell represents it through the existing arm.
-            visit(&Value::Promised(promise.clone()));
-        }
+        // The registered root is already an independent collector root. It
+        // must not also appear as an interior compatibility edge.
+        EvaluationHaltPayload::UnassignedPromise => {}
     }
 }
 

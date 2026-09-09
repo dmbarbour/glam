@@ -386,17 +386,10 @@ const DIRECT_IDENTITY_INVENTORY: &[IdentityOwnerEntry] = &[
     ),
     owner!(
         "src/core/evaluation_halt.rs::EvaluationHaltKind",
-        [0, 2, 0],
+        [0, 1, 0],
         DurableRoot,
         None,
-        "retryable halt retains both its semantic promise and exact registered root"
-    ),
-    owner!(
-        "src/core/evaluation_halt.rs::EvaluationHaltPayload",
-        [0, 1, 0],
-        ExactManagedEdge,
-        None,
-        "borrowed halt payload exposes the same semantic promise edge"
+        "retryable halt retains only its exact registered promise root"
     ),
     owner!(
         "src/core/managed/recursive_cells.rs::ManagedLazyCell",
@@ -414,10 +407,10 @@ const DIRECT_IDENTITY_INVENTORY: &[IdentityOwnerEntry] = &[
     ),
     owner!(
         "src/core/managed/recursive_cells.rs::ManagedLazyRoot",
-        [2, 0, 0],
+        [1, 0, 0],
         DurableRoot,
         None,
-        "registered lazy root retains its reconstructible semantic edge"
+        "registered lazy root projects its semantic edge only under bounded access"
     ),
     owner!(
         "src/core/managed/recursive_cells.rs::ManagedLazyAccess",
@@ -442,10 +435,10 @@ const DIRECT_IDENTITY_INVENTORY: &[IdentityOwnerEntry] = &[
     ),
     owner!(
         "src/core/managed/recursive_cells.rs::ManagedPromiseRoot",
-        [0, 2, 0],
+        [0, 1, 0],
         DurableRoot,
         None,
-        "registered promise root retains its reconstructible semantic edge"
+        "registered promise root projects its semantic edge only under bounded access"
     ),
     owner!(
         "src/core/managed/recursive_cells.rs::ManagedPromiseAccess",
@@ -470,10 +463,10 @@ const DIRECT_IDENTITY_INVENTORY: &[IdentityOwnerEntry] = &[
     ),
     owner!(
         "src/core/managed/recursive_cells.rs::ManagedCoreNetRoot",
-        [0, 0, 2],
+        [0, 0, 1],
         DurableRoot,
         None,
-        "registered core-net root retains both its root cell and reconstructible semantic edge"
+        "registered core-net root projects its semantic edge only under bounded access"
     ),
     owner!(
         "src/core/managed/recursive_cells.rs::ManagedCoreNetAccess",
@@ -554,10 +547,10 @@ const DIRECT_IDENTITY_INVENTORY: &[IdentityOwnerEntry] = &[
     ),
     owner!(
         "src/eval/net.rs::NormalizationRequest",
-        [0, 0, 2],
+        [0, 0, 1],
         DurableRoot,
         None,
-        "normalization request roots its net across retryable evaluator boundaries"
+        "normalization request retains only its net root across retryable evaluator boundaries"
     ),
     owner!(
         "src/eval/value.rs::LazyTaskMachine",
@@ -830,7 +823,7 @@ fn compatibility_graph_cycle_sources_are_classified() {
         });
     assert_eq!(
         counts,
-        [14, 19, 10],
+        [13, 19, 10],
         "every direct identity occurrence remains assigned to the reviewed M/R/A split"
     );
 }

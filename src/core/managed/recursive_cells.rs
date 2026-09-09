@@ -132,11 +132,6 @@ impl Eq for ManagedCoreNetEdge {}
 pub(crate) struct ManagedLazyRoot {
     id: LazyId,
     label: Arc<str>,
-    edge: ManagedLazyEdge,
-    #[allow(
-        dead_code,
-        reason = "the registered root is retained for ownership and released by Drop"
-    )]
     root: Root<ManagedLazyCell>,
     observer: RuntimeValueObserver,
 }
@@ -145,7 +140,6 @@ pub(crate) struct ManagedLazyRoot {
 pub(crate) struct ManagedPromiseRoot {
     id: PromiseId,
     label: Arc<str>,
-    edge: ManagedPromiseEdge,
     root: Root<ManagedPromiseCell>,
     observer: RuntimeValueObserver,
     terminal: Arc<AtomicBool>,
@@ -161,12 +155,7 @@ impl fmt::Debug for ManagedPromiseRoot {
 
 #[derive(Clone, Debug)]
 pub(crate) struct ManagedCoreNetRoot {
-    #[allow(
-        dead_code,
-        reason = "the registered root is retained for ownership and released by Drop"
-    )]
     root: Root<ManagedCoreNetCell>,
-    edge: ManagedCoreNetEdge,
     observer: RuntimeValueObserver,
 }
 
@@ -343,7 +332,6 @@ impl RuntimeValueAccess<'_> {
         ManagedLazyRoot {
             id,
             label,
-            edge,
             root: self.root(edge.0),
             observer,
         }
@@ -366,7 +354,6 @@ impl RuntimeValueAccess<'_> {
         ManagedPromiseRoot {
             id,
             label,
-            edge,
             root: self.root(edge.0),
             observer,
             terminal: Arc::clone(&value.cell.terminal),
@@ -386,7 +373,6 @@ impl RuntimeValueAccess<'_> {
         );
         ManagedCoreNetRoot {
             root: self.root(edge.0),
-            edge,
             observer,
         }
     }
@@ -507,8 +493,8 @@ impl ManagedLazyRoot {
         &self.label
     }
 
-    pub(crate) fn edge(&self) -> ManagedLazyEdge {
-        self.edge
+    pub(crate) fn edge(&self, authority: &RuntimeValueAccess<'_>) -> ManagedLazyEdge {
+        ManagedLazyEdge(authority.project_root(&self.root))
     }
 
     pub(crate) fn observer(&self) -> &RuntimeValueObserver {
@@ -522,8 +508,9 @@ impl ManagedLazyRoot {
         if !authority.admits(&self.observer) || !authority.admits_root(&self.root) {
             return None;
         }
+        let edge = self.edge(authority);
         ManagedLazyAccess::from_authorized_cell(
-            self.edge,
+            edge,
             authority.get(&self.root),
             &self.observer,
             authority,
@@ -555,12 +542,16 @@ impl ManagedPromiseRoot {
         &self.label
     }
 
-    pub(crate) fn edge(&self) -> ManagedPromiseEdge {
-        self.edge
+    pub(crate) fn edge(&self, authority: &RuntimeValueAccess<'_>) -> ManagedPromiseEdge {
+        ManagedPromiseEdge(authority.project_root(&self.root))
     }
 
     pub(crate) fn observer(&self) -> &RuntimeValueObserver {
         &self.observer
+    }
+
+    pub(crate) fn same_promise(&self, other: &Self) -> bool {
+        self.id == other.id && self.observer.same_domain(&other.observer)
     }
 
     pub(crate) fn producer(&self) -> Option<Arc<PromiseProducerObligation>> {
@@ -592,8 +583,9 @@ impl ManagedPromiseRoot {
         if !authority.admits(&self.observer) || !authority.admits_root(&self.root) {
             return None;
         }
+        let edge = self.edge(authority);
         Some(ManagedPromiseAccess::from_authorized_cell(
-            self.edge,
+            edge,
             authority.get(&self.root),
             authority,
         ))
@@ -685,8 +677,8 @@ impl ManagedPromiseRoot {
 }
 
 impl ManagedCoreNetRoot {
-    pub(crate) fn edge(&self) -> ManagedCoreNetEdge {
-        self.edge
+    pub(crate) fn edge(&self, authority: &RuntimeValueAccess<'_>) -> ManagedCoreNetEdge {
+        ManagedCoreNetEdge(authority.project_root(&self.root))
     }
 
     pub(crate) fn observer(&self) -> &RuntimeValueObserver {
@@ -694,15 +686,21 @@ impl ManagedCoreNetRoot {
     }
 
     #[cfg(test)]
+    pub(crate) fn same_root(&self, other: &Self) -> bool {
+        self.root.ptr_eq(&other.root)
+    }
+
+    #[cfg(test)]
     pub(crate) fn access<'access, 'scope>(
         &'access self,
         authority: &'access RuntimeValueAccess<'scope>,
     ) -> Option<ManagedCoreNetAccess<'access, 'scope>> {
-        if !authority.admits_root(&self.root) {
+        if !authority.admits(&self.observer) || !authority.admits_root(&self.root) {
             return None;
         }
+        let edge = self.edge(authority);
         Some(ManagedCoreNetAccess {
-            owner: self.edge,
+            owner: edge,
             cell: authority.get(&self.root),
             authority,
             _thread_bound: PhantomData,
@@ -1155,6 +1153,12 @@ const _: () = {
     assert!(std::mem::align_of::<ManagedPromiseCell>() == 8);
     assert!(std::mem::size_of::<ManagedCoreNetCell>() == 248);
     assert!(std::mem::align_of::<ManagedCoreNetCell>() == 8);
+    assert!(std::mem::size_of::<ManagedLazyRoot>() == 48);
+    assert!(std::mem::align_of::<ManagedLazyRoot>() == 8);
+    assert!(std::mem::size_of::<ManagedPromiseRoot>() == 72);
+    assert!(std::mem::align_of::<ManagedPromiseRoot>() == 8);
+    assert!(std::mem::size_of::<ManagedCoreNetRoot>() == 24);
+    assert!(std::mem::align_of::<ManagedCoreNetRoot>() == 8);
 };
 
 #[cfg(test)]
@@ -1169,6 +1173,7 @@ mod tests {
         Builtin, BuiltinCall, CoreValueFactory, Dict, EvaluatedValue, Key, LazySource, LazyValue,
         List, NetValue, PromisedValue,
     };
+
     use crate::interaction_net::{NetBuilder, PreparedCopySource};
     use crate::runtime::{RuntimeIds, RuntimeMutationAdmission, allocate_evaluation_runtime_id};
     use syn::visit::{self, Visit};
@@ -1223,7 +1228,7 @@ mod tests {
             let root = access
                 .construct_rooted_managed_promise(label)
                 .expect("the managed promise cell should fit a run");
-            let promise = PromisedValue::from_root(&root);
+            let promise = PromisedValue::from_root(&root, &access);
             root.access(&access)
                 .expect("the rooted promise should be accessible")
                 .publish(Ok(wrap(Value::Promised(promise))))
@@ -1257,7 +1262,7 @@ mod tests {
             let root = access
                 .construct_rooted_managed_promise(label)
                 .expect("the managed promise cell should fit a run");
-            let promise = PromisedValue::from_root(&root);
+            let promise = PromisedValue::from_root(&root, &access);
             root.access(&access)
                 .expect("the rooted promise should be accessible")
                 .publish(Err(Arc::new(wrap(Value::Promised(promise)))))
@@ -1725,6 +1730,9 @@ mod tests {
         assert_eq!(std::mem::size_of::<ManagedLazyCell>(), 160);
         assert_eq!(std::mem::size_of::<ManagedPromiseCell>(), 120);
         assert_eq!(std::mem::size_of::<ManagedCoreNetCell>(), 248);
+        assert_eq!(std::mem::size_of::<ManagedLazyRoot>(), 48);
+        assert_eq!(std::mem::size_of::<ManagedPromiseRoot>(), 72);
+        assert_eq!(std::mem::size_of::<ManagedCoreNetRoot>(), 24);
     }
 
     #[test]
@@ -1917,7 +1925,7 @@ mod tests {
                 .construct_rooted_managed_promise("publication target")
                 .expect("the managed promise cell should fit a run");
             let target = Value::List(List::from_values(vec![Value::Promised(
-                PromisedValue::from_root(&target_root),
+                PromisedValue::from_root(&target_root, &access),
             )]));
             let root = access
                 .construct_rooted_managed_promise("publication ordering")
@@ -1962,26 +1970,36 @@ mod tests {
         let values = new_values();
         let probe =
             values.install_edge_transition_probe_for_test(EdgeTransitionObservation::Adding);
-        let (promise_root, first_target_root, second_target_root) = values
-            .with_runtime_value_access(|access| {
-                (
-                    access
-                        .construct_rooted_managed_promise("publication race")
-                        .expect("the managed promise cell should fit a run"),
-                    access
-                        .construct_rooted_managed_promise("first proposed target")
-                        .expect("the managed promise cell should fit a run"),
-                    access
-                        .construct_rooted_managed_promise("second proposed target")
-                        .expect("the managed promise cell should fit a run"),
-                )
-            });
-        let first_assignment = Value::List(List::from_values(vec![Value::Promised(
-            PromisedValue::from_root(&first_target_root),
-        )]));
-        let second_assignment = Value::List(List::from_values(vec![Value::Promised(
-            PromisedValue::from_root(&second_target_root),
-        )]));
+        let (
+            promise_root,
+            _first_target_root,
+            _second_target_root,
+            first_assignment,
+            second_assignment,
+        ) = values.with_runtime_value_access(|access| {
+            let promise_root = access
+                .construct_rooted_managed_promise("publication race")
+                .expect("the managed promise cell should fit a run");
+            let first_target_root = access
+                .construct_rooted_managed_promise("first proposed target")
+                .expect("the managed promise cell should fit a run");
+            let second_target_root = access
+                .construct_rooted_managed_promise("second proposed target")
+                .expect("the managed promise cell should fit a run");
+            let first_assignment = Value::List(List::from_values(vec![Value::Promised(
+                PromisedValue::from_root(&first_target_root, &access),
+            )]));
+            let second_assignment = Value::List(List::from_values(vec![Value::Promised(
+                PromisedValue::from_root(&second_target_root, &access),
+            )]));
+            (
+                promise_root,
+                first_target_root,
+                second_target_root,
+                first_assignment,
+                second_assignment,
+            )
+        });
         let (winner_published, winner_observed) = std::sync::mpsc::channel();
 
         let winner_values = values.clone();
@@ -2068,7 +2086,7 @@ mod tests {
                 .expect("the new managed lazy should fit one collector slot");
             let net_root = access
                 .construct_rooted_managed_core_net(runtime_with_data(Value::Lazy(
-                    LazyValue::from_root(&old_root),
+                    LazyValue::from_root(&old_root, &access),
                 )))
                 .expect("the managed core net should fit one collector slot");
             (old_root, new_root, net_root)
@@ -2080,7 +2098,7 @@ mod tests {
                 .access(&access)
                 .expect("the rooted core net should remain accessible");
             net.with_mut(|runtime| {
-                *runtime = runtime_with_data(Value::Lazy(LazyValue::from_root(&new_root)));
+                *runtime = runtime_with_data(Value::Lazy(LazyValue::from_root(&new_root, &access)));
             });
         });
 
@@ -2100,7 +2118,7 @@ mod tests {
                 .expect("the managed lazy should fit one collector slot");
             let mut builder = NetBuilder::<CoreSpecialization>::new();
             let erase = builder.copy(0).input;
-            let data = builder.data(Value::Lazy(LazyValue::from_root(&lazy_root)));
+            let data = builder.data(Value::Lazy(LazyValue::from_root(&lazy_root, &access)));
             builder.wire(erase, data);
             let exposed = builder.data(Value::Number(97.into()));
             let net_root = access
@@ -2421,7 +2439,7 @@ mod tests {
                 .allocate_managed_lazy("lazy self cycle", LazySource::Error)
                 .expect("the managed lazy cell should fit a run");
             let root = access.root_managed_lazy(observer.clone(), edge);
-            let lazy = LazyValue::from_root(&root);
+            let lazy = LazyValue::from_root(&root, &access);
             let source = LazySource::ComputedFixpoint(Arc::new(
                 crate::core::FixpointComputation::Function(Value::Lazy(lazy)),
             ));
@@ -2471,7 +2489,7 @@ mod tests {
             let root = access
                 .construct_rooted_managed_promise("promise self cycle")
                 .expect("the managed promise cell should fit a run");
-            let promise = PromisedValue::from_root(&root);
+            let promise = PromisedValue::from_root(&root, &access);
             root.access(&access)
                 .expect("the rooted promise should be accessible")
                 .publish(Ok(Value::Promised(promise)))
@@ -2562,8 +2580,8 @@ mod tests {
                 .expect("the managed promise cell should fit a run");
             let lazy_root = access.root_managed_lazy(observer.clone(), lazy_edge);
             let promise_root = access.root_managed_promise(observer.clone(), promise_edge);
-            let lazy = LazyValue::from_root(&lazy_root);
-            let promise = PromisedValue::from_root(&promise_root);
+            let lazy = LazyValue::from_root(&lazy_root, &access);
+            let promise = PromisedValue::from_root(&promise_root, &access);
 
             replace_lazy_source_for_cycle(
                 &access,
@@ -2608,7 +2626,7 @@ mod tests {
                 .allocate_managed_lazy("lazy to net", LazySource::Error)
                 .expect("the managed lazy cell should fit a run");
             let lazy_root = access.root_managed_lazy(observer.clone(), lazy_edge);
-            let lazy = LazyValue::from_root(&lazy_root);
+            let lazy = LazyValue::from_root(&lazy_root, &access);
             let net_edge = access
                 .allocate_managed_core_net(runtime_with_data(Value::Lazy(lazy)))
                 .expect("the managed core-net cell should fit a run");
@@ -2652,7 +2670,7 @@ mod tests {
                 .allocate_managed_promise("promise to net")
                 .expect("the managed promise cell should fit a run");
             let promise_root = access.root_managed_promise(observer.clone(), promise_edge);
-            let promise = PromisedValue::from_root(&promise_root);
+            let promise = PromisedValue::from_root(&promise_root, &access);
             let net_edge = access
                 .allocate_managed_core_net(runtime_with_data(Value::Promised(promise)))
                 .expect("the managed core-net cell should fit a run");
@@ -2699,8 +2717,8 @@ mod tests {
                 .expect("the managed promise cell should fit a run");
             let lazy_root = access.root_managed_lazy(observer.clone(), lazy_edge);
             let promise_root = access.root_managed_promise(observer.clone(), promise_edge);
-            let lazy = LazyValue::from_root(&lazy_root);
-            let promise = PromisedValue::from_root(&promise_root);
+            let lazy = LazyValue::from_root(&lazy_root, &access);
+            let promise = PromisedValue::from_root(&promise_root, &access);
             let net_edge = access
                 .allocate_managed_core_net(runtime_with_data(Value::Promised(promise)))
                 .expect("the managed core-net cell should fit a run");
@@ -2794,7 +2812,7 @@ mod tests {
                 .allocate_managed_promise("function stage compatibility")
                 .expect("the managed promise cell should fit a run");
             let promise_root = access.root_managed_promise(observer.clone(), promise_edge);
-            let promise = PromisedValue::from_root(&promise_root);
+            let promise = PromisedValue::from_root(&promise_root, &access);
             let net_edge = access
                 .allocate_managed_core_net(runtime_with_data(Value::Promised(promise)))
                 .expect("the managed core-net cell should fit a run");
@@ -2856,7 +2874,7 @@ mod tests {
                 .allocate_managed_promise("remote cursor compatibility")
                 .expect("the managed promise cell should fit a run");
             let promise_root = access.root_managed_promise(observer.clone(), promise_edge);
-            let promise = PromisedValue::from_root(&promise_root);
+            let promise = PromisedValue::from_root(&promise_root, &access);
 
             let source_runtime = runtime_with_data(Value::Promised(promise));
             let remote = source_runtime.exposed();
@@ -3279,5 +3297,71 @@ mod tests {
         let resolver = source_declaration(resolver, "impl PromiseResolver {");
         assert!(resolver.contains(".publish(&values"));
         assert!(resolver.contains("take_for_completion"));
+    }
+
+    #[test]
+    fn registered_family_roots_store_one_canonical_allocation_identity() {
+        let recursive = include_str!("recursive_cells.rs");
+        for (root, cell) in [
+            ("ManagedLazyRoot", "ManagedLazyCell"),
+            ("ManagedPromiseRoot", "ManagedPromiseCell"),
+            ("ManagedCoreNetRoot", "ManagedCoreNetCell"),
+        ] {
+            let declaration = source_declaration(recursive, &format!("struct {root}"));
+            assert!(
+                declaration.contains(&format!("Root<{cell}>")),
+                "{root} lost its canonical registered root"
+            );
+            for forbidden in [
+                "Gc<",
+                "ManagedLazyEdge",
+                "ManagedPromiseEdge",
+                "ManagedCoreNetEdge",
+                "LazyValue",
+                "PromisedValue",
+                "CoreRuntimeNet",
+            ] {
+                assert!(
+                    !declaration.contains(forbidden),
+                    "{root} caches a second allocation identity through {forbidden}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn durable_recursive_wrappers_do_not_hide_a_second_semantic_identity() {
+        let halt = include_str!("../../core/evaluation_halt.rs");
+        let core_net = include_str!("../../core_net.rs");
+        let eval_net = include_str!("../../eval/net.rs");
+
+        for (declaration, required, forbidden) in [
+            (
+                source_declaration(halt, "enum EvaluationHaltKind"),
+                "ManagedPromiseRoot",
+                "PromisedValue",
+            ),
+            (
+                source_declaration(eval_net, "struct NormalizationRequest"),
+                "ManagedCoreNetRoot",
+                "CoreRuntimeNet",
+            ),
+            (
+                source_declaration(core_net, "struct CorePreparedCopySource"),
+                "ManagedCoreNetRoot",
+                "PreparedCopySource<",
+            ),
+            (
+                source_declaration(core_net, "struct CoreFrontierObservation"),
+                "ManagedCoreNetRoot",
+                "FrontierObservation<",
+            ),
+        ] {
+            assert!(declaration.contains(required));
+            assert!(
+                !declaration.contains(forbidden),
+                "durable {required} wrapper also caches {forbidden}"
+            );
+        }
     }
 }

@@ -185,11 +185,12 @@ impl EvaluatorStepContext<'_> {
         &self,
         construct: impl for<'scope> FnOnce(&RuntimeValueAccess<'scope>) -> LazyValue,
     ) -> LazyValue {
-        let root = self.with_value_access(|access| {
+        let (value, root) = self.with_value_access(|access| {
             let value = construct(access.values());
-            value.root_in(access.values())
+            let root = value.root_in(access.values());
+            let value = LazyValue::from_root(&root, access.values());
+            (value, root)
         });
-        let value = LazyValue::from_root(&root);
         self.pending_managed_publications
             .borrow_mut()
             .push(PendingManagedPublication::Lazy(root));
@@ -215,13 +216,14 @@ impl EvaluatorStepContext<'_> {
     }
 
     pub(crate) fn construct_promise(&self, label: impl Into<Arc<str>>) -> PromisedValue {
-        let root = self.with_value_access(|access| {
-            access
+        let (value, root) = self.with_value_access(|access| {
+            let root = access
                 .values()
                 .construct_rooted_managed_promise(label)
-                .expect("managed promise representation must fit one collector run")
+                .expect("managed promise representation must fit one collector run");
+            let value = PromisedValue::from_root(&root, access.values());
+            (value, root)
         });
-        let value = PromisedValue::from_root(&root);
         self.pending_managed_publications
             .borrow_mut()
             .push(PendingManagedPublication::Promise(root));
@@ -232,13 +234,14 @@ impl EvaluatorStepContext<'_> {
         &self,
         runtime: RuntimeNet<CoreSpecialization>,
     ) -> CoreRuntimeNet {
-        let root = self.with_value_access(|access| {
-            access
+        let (value, root) = self.with_value_access(|access| {
+            let root = access
                 .values()
                 .construct_rooted_managed_core_net(runtime)
-                .expect("managed core-net representation must fit one collector run")
+                .expect("managed core-net representation must fit one collector run");
+            let value = CoreRuntimeNet::from_root(&root, access.values());
+            (value, root)
         });
-        let value = CoreRuntimeNet::from_root(&root);
         self.pending_managed_publications
             .borrow_mut()
             .push(PendingManagedPublication::CoreNet(root));

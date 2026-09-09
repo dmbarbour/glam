@@ -144,8 +144,8 @@ struct LazyTaskMachine {
 }
 
 impl LazyTaskMachine {
-    fn lazy(&self) -> LazyValue {
-        LazyValue::from_root(&self.lazy)
+    fn lazy(&self, context: &EvaluatorStepContext<'_>) -> LazyValue {
+        context.with_value_access(|access| LazyValue::from_root(&self.lazy, access.values()))
     }
 
     fn complete(&self, context: &EvaluatorStepContext<'_>, value: Value) -> EvaluationMachinePoll {
@@ -246,7 +246,7 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                     self.work = LazyTaskWork::HostCall(producer);
                     return EvaluationMachinePoll::Yielded;
                 }
-                let result = produce_lazy_source_in(context, &self.lazy(), &source);
+                let result = produce_lazy_source_in(context, &self.lazy(context), &source);
                 return self.finish_poll(context, result);
             }
 
@@ -280,8 +280,8 @@ impl LazyTaskMachine {
                 error: None,
             });
         }
-        if let Some(promise) = error.unassigned_promise() {
-            let wait = match promise_wait(context.context(), promise) {
+        if let Some(promise) = error.unassigned_promise_root() {
+            let wait = match promise_root_wait(context.context(), promise) {
                 Ok(wait) => wait,
                 Err(error) => {
                     return EvaluationMachinePoll::Failed(
@@ -371,6 +371,19 @@ pub(super) fn promise_wait(
     })
 }
 
+pub(super) fn promise_root_wait(
+    context: &EvalContext,
+    promise: &ManagedPromiseRoot,
+) -> Result<crate::evaluation::EvaluationWaitToken, Arc<str>> {
+    context.promise_root_task(promise, |task_context, promise| {
+        Box::new(PromiseFollower {
+            context: task_context,
+            promise,
+            state: PromiseFollowerState::AwaitAssignment,
+        })
+    })
+}
+
 fn block_or_fail(
     context: &EvaluatorStepContext<'_>,
     error: EvaluationHalt,
@@ -382,8 +395,8 @@ fn block_or_fail(
             error: None,
         });
     }
-    if let Some(promise) = error.unassigned_promise() {
-        return match promise_wait(context.context(), promise) {
+    if let Some(promise) = error.unassigned_promise_root() {
+        return match promise_root_wait(context.context(), promise) {
             Ok(wait) => EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
                 dependency: Some(WorkDependency::Wait(wait)),
                 observed_epoch: None,

@@ -704,9 +704,12 @@ pub(crate) fn cache_test_lazy(
 }
 
 impl LazyValue {
-    pub(crate) fn from_root(root: &managed::ManagedLazyRoot) -> Self {
+    pub(crate) fn from_root(
+        root: &managed::ManagedLazyRoot,
+        access: &RuntimeValueAccess<'_>,
+    ) -> Self {
         Self {
-            edge: root.edge(),
+            edge: root.edge(access),
             values: root.observer().clone(),
         }
     }
@@ -930,9 +933,12 @@ impl LazyValue {
 }
 
 impl PromisedValue {
-    pub(crate) fn from_root(root: &managed::ManagedPromiseRoot) -> Self {
+    pub(crate) fn from_root(
+        root: &managed::ManagedPromiseRoot,
+        access: &RuntimeValueAccess<'_>,
+    ) -> Self {
         Self {
-            edge: root.edge(),
+            edge: root.edge(access),
             values: root.observer().clone(),
         }
     }
@@ -950,12 +956,13 @@ impl PromisedValue {
         context: &EvalContext,
         label: impl Into<Arc<str>>,
     ) -> Result<Self, Arc<str>> {
-        let root = context.values().with_runtime_value_access(|access| {
-            access
+        let (promise, root) = context.values().with_runtime_value_access(|access| {
+            let root = access
                 .construct_rooted_managed_promise(label)
-                .expect("managed promise representation must fit one collector run")
+                .expect("managed promise representation must fit one collector run");
+            let promise = Self::from_root(&root, &access);
+            (promise, root)
         });
-        let promise = Self::from_root(&root);
         let producer = context.register_promise(root.clone())?;
         context
             .values()

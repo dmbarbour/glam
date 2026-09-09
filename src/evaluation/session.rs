@@ -893,6 +893,18 @@ impl EvalContext {
         let root = self
             .values()
             .with_runtime_value_access(|access| promise.root_in(&access));
+        self.promise_root_task(&root, build)
+    }
+
+    pub(crate) fn promise_root_task<F>(
+        &self,
+        root: &ManagedPromiseRoot,
+        build: F,
+    ) -> Result<EvaluationWaitToken, Arc<str>>
+    where
+        F: FnOnce(EvalContext, ManagedPromiseRoot) -> Box<dyn EvaluationTaskMachine>,
+    {
+        let root = root.clone();
         let machine_root = root.clone();
         self.deferred_task(DeferredProducer::Promise(root), |context| {
             build(context, machine_root)

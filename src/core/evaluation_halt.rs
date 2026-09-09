@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::core_net::CoreWaitToken;
 
-use super::{EvaluationFailure, ManagedPromiseRoot, PromisedValue, Value};
+use super::{EvaluationFailure, ManagedPromiseRoot, Value};
 
 /// Explains why a demand could not currently produce a value.
 ///
@@ -24,12 +24,11 @@ enum EvaluationHaltKind {
     Failure(Arc<EvaluationFailure>),
     Blocked(CoreWaitToken),
     UnassignedPromise {
-        promise: PromisedValue,
         /// A halt may cross scheduler and client-demand boundaries before it
         /// is translated back into a dependency. Retain the promise's exact
         /// managed owner for that entire interval. Box the uncommon payload
         /// so ordinary evaluator result frames do not pay for its size.
-        _root: Box<ManagedPromiseRoot>,
+        root: Box<ManagedPromiseRoot>,
     },
 }
 
@@ -38,10 +37,9 @@ impl PartialEq for EvaluationHaltKind {
         match (self, other) {
             (Self::Failure(left), Self::Failure(right)) => left == right,
             (Self::Blocked(left), Self::Blocked(right)) => left == right,
-            (
-                Self::UnassignedPromise { promise: left, .. },
-                Self::UnassignedPromise { promise: right, .. },
-            ) => left == right,
+            (Self::UnassignedPromise { root: left }, Self::UnassignedPromise { root: right }) => {
+                left.same_promise(right)
+            }
             _ => false,
         }
     }
@@ -60,7 +58,7 @@ impl Eq for EvaluationHaltKind {}
 pub(crate) enum EvaluationHaltPayload<'payload> {
     Failure(&'payload EvaluationFailure),
     Blocked,
-    UnassignedPromise(&'payload PromisedValue),
+    UnassignedPromise,
 }
 
 impl EvaluationHalt {
@@ -92,8 +90,8 @@ impl EvaluationHalt {
             EvaluationHaltKind::Blocked(wait) => Self {
                 kind: EvaluationHaltKind::Blocked(wait),
             },
-            EvaluationHaltKind::UnassignedPromise { promise, _root } => Self {
-                kind: EvaluationHaltKind::UnassignedPromise { promise, _root },
+            EvaluationHaltKind::UnassignedPromise { root } => Self {
+                kind: EvaluationHaltKind::UnassignedPromise { root },
             },
         }
     }
@@ -119,26 +117,17 @@ impl EvaluationHalt {
         }
     }
 
-    pub(crate) fn unassigned_promise(&self) -> Option<&PromisedValue> {
-        match &self.kind {
-            EvaluationHaltKind::UnassignedPromise { promise, .. } => Some(promise),
-            EvaluationHaltKind::Failure(_) | EvaluationHaltKind::Blocked(_) => None,
-        }
-    }
-
     pub(crate) fn unassigned_promise_root(&self) -> Option<&ManagedPromiseRoot> {
         match &self.kind {
-            EvaluationHaltKind::UnassignedPromise { _root, .. } => Some(_root),
+            EvaluationHaltKind::UnassignedPromise { root } => Some(root),
             EvaluationHaltKind::Failure(_) | EvaluationHaltKind::Blocked(_) => None,
         }
     }
 
     pub(crate) fn unassigned_root(root: ManagedPromiseRoot) -> Self {
-        let promise = PromisedValue::from_root(&root);
         Self {
             kind: EvaluationHaltKind::UnassignedPromise {
-                promise,
-                _root: Box::new(root),
+                root: Box::new(root),
             },
         }
     }
@@ -153,8 +142,8 @@ impl EvaluationHalt {
                 EvaluationHaltPayload::Failure(failure.as_ref())
             }
             EvaluationHaltKind::Blocked(_) => EvaluationHaltPayload::Blocked,
-            EvaluationHaltKind::UnassignedPromise { promise, .. } => {
-                EvaluationHaltPayload::UnassignedPromise(promise)
+            EvaluationHaltKind::UnassignedPromise { .. } => {
+                EvaluationHaltPayload::UnassignedPromise
             }
         }
     }

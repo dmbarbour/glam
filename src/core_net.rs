@@ -184,8 +184,8 @@ impl CoreValueFactory {
 }
 
 impl CoreRuntimeNet {
-    pub(crate) fn from_root(root: &ManagedCoreNetRoot) -> Self {
-        Self::from_managed_parts(root.edge(), root.observer().clone())
+    pub(crate) fn from_root(root: &ManagedCoreNetRoot, access: &RuntimeValueAccess<'_>) -> Self {
+        Self::from_managed_parts(root.edge(access), root.observer().clone())
     }
 
     pub(crate) fn from_managed_parts(
@@ -330,7 +330,9 @@ impl CoreRuntimeNet {
     #[cfg(test)]
     pub(crate) fn test_copy_layer(source: Self) -> (Self, Port) {
         let values = source.values.clone();
-        let (prepared, _source_root) = source.test_prepare_copy_source().into_inner_for(&values);
+        let (prepared, _source_root) = source
+            .test_prepare_copy_source()
+            .into_inner_for_observer(&values);
         let (inner, interface) = SharedRuntimeNet::test_copy_layer_from(prepared);
         (
             values
@@ -344,7 +346,9 @@ impl CoreRuntimeNet {
     #[cfg(test)]
     pub(crate) fn test_pair_owned_copy_layer(source: Self) -> (Self, Port, NodeId) {
         let values = source.values.clone();
-        let (prepared, _source_root) = source.test_prepare_copy_source().into_inner_for(&values);
+        let (prepared, _source_root) = source
+            .test_prepare_copy_source()
+            .into_inner_for_observer(&values);
         let (inner, interface, cursor) =
             SharedRuntimeNet::test_pair_owned_copy_layer_from(prepared);
         (
@@ -360,7 +364,9 @@ impl CoreRuntimeNet {
     #[cfg(test)]
     pub(crate) fn test_productive_pair_owned_copy_layer(source: Self) -> (Self, Port) {
         let values = source.values.clone();
-        let (prepared, _source_root) = source.test_prepare_copy_source().into_inner_for(&values);
+        let (prepared, _source_root) = source
+            .test_prepare_copy_source()
+            .into_inner_for_observer(&values);
         let (inner, interface) =
             SharedRuntimeNet::test_productive_pair_owned_copy_layer_from(prepared);
         (
@@ -375,7 +381,9 @@ impl CoreRuntimeNet {
     #[cfg(test)]
     pub(crate) fn test_stable_root_with_claimed_cursor(source: Self) -> (Self, Port, NodeId) {
         let values = source.values.clone();
-        let (prepared, _source_root) = source.test_prepare_copy_source().into_inner_for(&values);
+        let (prepared, _source_root) = source
+            .test_prepare_copy_source()
+            .into_inner_for_observer(&values);
         let (inner, interface, cursor) =
             SharedRuntimeNet::test_stable_root_with_claimed_cursor_from(prepared);
         (
@@ -397,6 +405,10 @@ impl CoreRuntimeNet {
 }
 
 impl CoreRuntimeNetAccess<'_, '_> {
+    pub(crate) fn values(&self) -> &RuntimeValueAccess<'_> {
+        self.values
+    }
+
     /// Runs one same-net normalization batch inside this managed-access
     /// region. The generic lease remains private to this call, closes before
     /// the callback result is returned, and falls back to `Drop` on unwind.
@@ -496,8 +508,11 @@ impl CoreRuntimeNetAccess<'_, '_> {
         self.runtime
             .cell()
             .with_conditional_mut_via(&self.runtime, |runtime| {
-                let resolution =
-                    runtime.resolve_cursor_dependency(cursor, &expected.to_generic(), disposition);
+                let resolution = runtime.resolve_cursor_dependency(
+                    cursor,
+                    &expected.to_generic(self.values),
+                    disposition,
+                );
                 if resolution == CursorDependencyResolution::Resolved {
                     RuntimeNetMutation::Changed(resolution)
                 } else {
@@ -516,12 +531,8 @@ impl CoreRuntimeNetAccess<'_, '_> {
 
     pub(crate) fn prepare_copy_source(&self) -> CorePreparedCopySource {
         CorePreparedCopySource {
-            inner: PreparedCopySource::new(
-                self.owner.clone(),
-                self.runtime.with(RuntimeNet::exposed),
-            ),
             root: self.owner.root_in(self.values),
-            values: self.owner.values.clone(),
+            remote: self.runtime.with(RuntimeNet::exposed),
         }
     }
 
@@ -579,7 +590,7 @@ impl CoreRuntimeNetAccess<'_, '_> {
         call: crate::interaction_net::Call,
         source: CorePreparedCopySource,
     ) {
-        let (source, _source_root) = source.into_inner_for(&self.owner.values);
+        let (source, _source_root) = source.into_inner_for(self.values);
         self.runtime.cell().with_mut_via(&self.runtime, |runtime| {
             runtime.resume_claimed_call_with_copy(call, source)
         });
@@ -784,21 +795,32 @@ impl PartialEq for CoreRuntimeNet {
 impl Eq for CoreRuntimeNet {}
 
 pub(crate) struct CorePreparedCopySource {
-    inner: PreparedCopySource<CoreSpecialization>,
     root: ManagedCoreNetRoot,
-    values: RuntimeValueObserver,
+    remote: Port,
 }
 
 impl CorePreparedCopySource {
     fn into_inner_for(
         self,
-        target: &RuntimeValueObserver,
+        target: &RuntimeValueAccess<'_>,
     ) -> (PreparedCopySource<CoreSpecialization>, ManagedCoreNetRoot) {
         assert!(
-            target.same_domain(&self.values),
+            target.admits(self.root.observer()),
             "a core net cannot copy topology from another value domain"
         );
-        (self.inner, self.root)
+        let source = CoreRuntimeNet::from_root(&self.root, target);
+        (PreparedCopySource::new(source, self.remote), self.root)
+    }
+
+    #[cfg(test)]
+    fn into_inner_for_observer(
+        self,
+        target: &RuntimeValueObserver,
+    ) -> (PreparedCopySource<CoreSpecialization>, ManagedCoreNetRoot) {
+        target
+            .upgrade()
+            .expect("a prepared source requires its live value domain")
+            .with_runtime_value_access(|access| self.into_inner_for(&access))
     }
 }
 
@@ -834,8 +856,9 @@ impl std::fmt::Debug for CoreNetContention {
 
 #[derive(Clone, Debug)]
 pub(crate) struct CoreFrontierObservation {
-    inner: FrontierObservation<CoreSpecialization>,
-    _root: ManagedCoreNetRoot,
+    root: ManagedCoreNetRoot,
+    observed_topology: u64,
+    endpoint: DemandEndpoint,
 }
 
 impl CoreFrontierObservation {
@@ -843,16 +866,23 @@ impl CoreFrontierObservation {
         inner: FrontierObservation<CoreSpecialization>,
         access: &RuntimeValueAccess<'_>,
     ) -> Self {
-        let root = inner.source().root_in(access);
-        Self { inner, _root: root }
+        Self {
+            root: inner.source().root_in(access),
+            observed_topology: inner.observed_topology_revision(),
+            endpoint: inner.endpoint(),
+        }
     }
 
-    pub(crate) fn source(&self) -> &CoreRuntimeNet {
-        self.inner.source()
+    pub(crate) fn source(&self, access: &RuntimeValueAccess<'_>) -> CoreRuntimeNet {
+        CoreRuntimeNet::from_root(&self.root, access)
     }
 
     pub(crate) fn endpoint(&self) -> DemandEndpoint {
-        self.inner.endpoint()
+        self.endpoint
+    }
+
+    pub(crate) fn root(&self) -> &ManagedCoreNetRoot {
+        &self.root
     }
 
     pub(crate) fn step_active_pair(
@@ -861,10 +891,10 @@ impl CoreFrontierObservation {
         pair: ActivePairKey,
     ) -> CoreActivePairStep {
         assert!(
-            self.source().ptr_eq(access.owner),
+            self.source(access.values).ptr_eq(access.owner),
             "frontier observation requires access to its source net"
         );
-        access.step_active_pair_if_current(pair, Some(self.inner.observed_topology_revision()))
+        access.step_active_pair_if_current(pair, Some(self.observed_topology))
     }
 
     pub(crate) fn step_cursor(
@@ -873,22 +903,25 @@ impl CoreFrontierObservation {
         cursor: NodeId,
     ) -> CoreCursorStep {
         assert!(
-            self.source().ptr_eq(access.owner),
+            self.source(access.values).ptr_eq(access.owner),
             "frontier observation requires access to its source net"
         );
-        access.step_cursor_if_current(cursor, Some(self.inner.observed_topology_revision()))
+        access.step_cursor_if_current(cursor, Some(self.observed_topology))
+    }
+
+    fn to_generic(
+        &self,
+        access: &RuntimeValueAccess<'_>,
+    ) -> FrontierObservation<CoreSpecialization> {
+        FrontierObservation::from_snapshot(
+            self.source(access),
+            self.observed_topology,
+            self.endpoint,
+        )
     }
 }
 
-impl PartialEq for CoreFrontierObservation {
-    fn eq(&self, other: &Self) -> bool {
-        self.inner == other.inner
-    }
-}
-
-impl Eq for CoreFrontierObservation {}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub(crate) enum CoreCursorDependency {
     LocalCursor(NodeId),
     SourceCursor(CoreFrontierObservation),
@@ -911,14 +944,14 @@ impl CoreCursorDependency {
         }
     }
 
-    fn to_generic(&self) -> CursorDependency<CoreSpecialization> {
+    fn to_generic(&self, access: &RuntimeValueAccess<'_>) -> CursorDependency<CoreSpecialization> {
         match self {
             Self::LocalCursor(cursor) => CursorDependency::LocalCursor(*cursor),
             Self::SourceCursor(observation) => {
-                CursorDependency::SourceCursor(observation.inner.clone())
+                CursorDependency::SourceCursor(observation.to_generic(access))
             }
             Self::SourceFrontier(observation) => {
-                CursorDependency::SourceFrontier(observation.inner.clone())
+                CursorDependency::SourceFrontier(observation.to_generic(access))
             }
         }
     }
@@ -1017,21 +1050,21 @@ mod tests {
         let _: &ManagedCoreNetEdge = edge;
         let _: &RuntimeValueObserver = values;
 
-        let CorePreparedCopySource {
-            inner,
-            root,
-            values,
-        } = prepared;
-        let _: &PreparedCopySource<CoreSpecialization> = inner;
+        let CorePreparedCopySource { root, remote } = prepared;
         let _: &ManagedCoreNetRoot = root;
-        let _: &RuntimeValueObserver = values;
+        let _: &Port = remote;
 
         let CoreNetContention { inner } = contention;
         let _: &NetContention = inner;
 
-        let CoreFrontierObservation { inner, _root } = observation;
-        let _: &FrontierObservation<CoreSpecialization> = inner;
-        let _: &ManagedCoreNetRoot = _root;
+        let CoreFrontierObservation {
+            root,
+            observed_topology,
+            endpoint,
+        } = observation;
+        let _: &ManagedCoreNetRoot = root;
+        let _: &u64 = observed_topology;
+        let _: &DemandEndpoint = endpoint;
 
         match operator {
             CoreOperator::ApplyArity { arity, supplied }
@@ -1392,7 +1425,7 @@ mod tests {
             .test_prepare_copy_source();
         let target = second.instantiate_core_net(&second_template);
 
-        let _ = source.into_inner_for(&target.values);
+        let _ = source.into_inner_for_observer(&target.values);
     }
 
     #[test]

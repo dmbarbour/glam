@@ -571,6 +571,12 @@ impl RuntimeValueAccess<'_> {
         self.scope.get(root)
     }
 
+    /// Projects one registered root back to its exact interior edge while
+    /// this matching value-domain region keeps the allocation live.
+    pub(crate) fn project_root<T: ManagedFamily>(&self, root: &Root<T>) -> Gc<T> {
+        self.scope.project_root(root)
+    }
+
     /// Performs one post-publication transition of a managed owner's outgoing
     /// semantic edges.
     ///
@@ -690,6 +696,12 @@ impl CoreValueAllocationScope<'_> {
     )]
     pub(crate) fn get<'access, T: ManagedFamily>(&'access self, root: &Root<T>) -> &'access T {
         root.get(self.mutator)
+    }
+
+    /// Projects one registered root back to its exact interior edge while
+    /// this allocation region keeps the allocation live.
+    fn project_root<T: ManagedFamily>(&self, root: &Root<T>) -> Gc<T> {
+        root.as_gc(self.mutator)
     }
 
     /// Borrows one exact managed edge discovered from an already authorized

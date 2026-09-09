@@ -1637,7 +1637,7 @@ GCI5R-001 and GCI5R-002, then reconcile the table, ledger header, stale
 
 **Confidence:** high
 
-**Status:** open; resolve before GCI5R-003F/G
+**Status:** closed 2026-09-09
 
 #### Defect
 
@@ -1685,13 +1685,13 @@ pairs:
 
 | Record | Duplicate representation | Planned disposition |
 | --- | --- | --- |
-| `ManagedLazyRoot` | `Root<ManagedLazyCell>` plus `ManagedLazyEdge` | Remove the edge field; derive it from the root. |
-| `ManagedPromiseRoot` | `Root<ManagedPromiseCell>` plus `ManagedPromiseEdge` | Remove the edge field; derive it from the root. |
-| `ManagedCoreNetRoot` | `Root<ManagedCoreNetCell>` plus `ManagedCoreNetEdge` | Remove the edge field; derive it from the root. |
-| `EvaluationHaltKind::UnassignedPromise` | `ManagedPromiseRoot` plus `PromisedValue` for that root | Retain the root and project the semantic promise inside evaluator access; compatibility tracing must rely on the registered root rather than bypassing mutator admission. |
-| `NormalizationRequest` | `ManagedCoreNetRoot` plus `CoreRuntimeNet` for that root | Retain the root and reconstruct the request's semantic net view inside evaluator access. |
-| `CorePreparedCopySource` | `ManagedCoreNetRoot` plus a `CoreRuntimeNet` hidden in `PreparedCopySource` | Retain the root and the edge-free remote-port snapshot; construct the generic prepared source at consumption. |
-| `CoreFrontierObservation` | `ManagedCoreNetRoot` plus a `CoreRuntimeNet` hidden in `FrontierObservation` | Retain the root and the edge-free topology/endpoint snapshot; project the source for an attempted step. |
+| `ManagedLazyRoot` | `Root<ManagedLazyCell>` plus `ManagedLazyEdge` | Resolved: the edge field was removed and is projected from the root under matching access. |
+| `ManagedPromiseRoot` | `Root<ManagedPromiseCell>` plus `ManagedPromiseEdge` | Resolved: the edge field was removed and is projected from the root under matching access. |
+| `ManagedCoreNetRoot` | `Root<ManagedCoreNetCell>` plus `ManagedCoreNetEdge` | Resolved: the edge field was removed and is projected from the root under matching access. |
+| `EvaluationHaltKind::UnassignedPromise` | `ManagedPromiseRoot` plus `PromisedValue` for that root | Resolved: retryable halts retain only the registered root; compatibility tracing relies on that root. |
+| `NormalizationRequest` | `ManagedCoreNetRoot` plus `CoreRuntimeNet` for that root | Resolved: the request and its work descriptors retain roots and construct temporary semantic views under access. |
+| `CorePreparedCopySource` | `ManagedCoreNetRoot` plus a `CoreRuntimeNet` hidden in `PreparedCopySource` | Resolved: the handoff retains its root and remote port and constructs the generic source at consumption. |
+| `CoreFrontierObservation` | `ManagedCoreNetRoot` plus a `CoreRuntimeNet` hidden in `FrontierObservation` | Resolved: the observation retains its root, topology revision, and endpoint and projects the source for an attempted step. |
 
 `RootCell`'s own `ErasedGc` is the root representation, not a duplicate.
 `Managed*Access` values contain a bounded owner edge and borrowed cell but no
@@ -1727,6 +1727,8 @@ and all-build rejection of a foreign-heap mutator.
 
 ##### GCI5R-008B — Remove direct family-root duplicates
 
+**Completed:** 2026-09-09
+
 - Remove `edge` from all three `Managed*Root` records. Derive each
   `Managed*Edge` from `root.as_gc(mutator)` only in the
   representation-local bounded-access paths. Access-free `edge()` and
@@ -1739,7 +1741,16 @@ and all-build rejection of a foreign-heap mutator.
   identity inventory. Add a source latch that no registered family root stores
   a `Gc`, `Managed*Edge`, or semantic façade.
 
+All three registered family roots now retain one `Root<T>` as their canonical
+allocation identity and project the corresponding private edge only through a
+matching `RuntimeValueAccess`. Root construction cannot represent a mismatched
+root/edge pair. Target-specific layout latches record the resulting 48-byte
+lazy root, 72-byte promise root, and 24-byte core-net root on x86-64; these are
+implementation measurements, not ABI.
+
 ##### GCI5R-008C — Remove enclosing same-target duplicates
+
+**Completed:** 2026-09-09
 
 - Make retryable promise halts root-only. Derive owned semantic views for
   evaluator consumers inside their existing bounded access. The compatibility
@@ -1758,7 +1769,18 @@ and all-build rejection of a foreign-heap mutator.
   prepared-copy source identity, frontier version checks, and all existing
   callback/mutator boundaries.
 
+Retryable promise halts now carry only the boxed promise root, and scheduler
+consumers construct promise followers directly from that root. Normalization
+requests and work descriptors retain core-net roots rather than semantic net
+facades. Prepared copies retain a root plus the remote port; frontier
+observations retain a root plus topology revision and endpoint. Each generic
+source facade is reconstructed at its bounded consumption point. Semantic
+call and operator work still leaves the normalization scope before evaluator
+logic runs.
+
 ##### GCI5R-008D — Close the inventory
+
+**Completed:** 2026-09-09
 
 - Re-run the compile-exhaustive recursive-identity inventory and a repository
   scan for direct or wrapper-hidden `Root<T>`/`Gc<T>` pairs. Every retained
@@ -1770,6 +1792,17 @@ and all-build rejection of a foreign-heap mutator.
   routine repository checks.
 - Close this finding before beginning GCI5R-003F; that phase may then remove
   façade observers against one canonical root-to-edge projection.
+
+The compile-exhaustive recursive-identity, durable-owner, evaluator-context,
+and managed-entry inventories were first observed failing on the changed
+representations, then updated to the reviewed root-only shapes. Source latches
+reject direct family-root edge caches and wrapper-hidden semantic duplicates.
+The ownership ledger records x86-64 measurements of 32 bytes for prepared
+sources, 48 for frontier observations, and 32 for normalization requests, in
+addition to the family-root measurements above. Focused root, recursive-cell,
+promise-halt, copy/frontier, and cursor-WHNF suites pass; the routine format,
+Clippy, and full repository test gates pass; and strict-provenance Miri passes
+the managed root/edge identity projection fixture.
 
 ## Drift Assessment
 
@@ -1844,9 +1877,9 @@ and all-build rejection of a foreign-heap mutator.
    synchronized whole-net correctness bridge. Exact net deltas remain I8
    performance work.
 3. **In progress:** GCI5R-003A-E removed façade metadata duplication and moved
-   observation/publication behind explicit authority. Close GCI5R-008's root
-   projection defect before completing GCI5R-003F/G and the final durable-copy
-   audit.
+   observation/publication behind explicit authority. GCI5R-008 has now closed
+   the root-projection defect; GCI5R-003F/G may proceed with façade-observer
+   removal and the final durable-copy audit.
 4. Rewrite I6 around the immutable-shell result and partition reflection
    computation into semantic and external-lifecycle checkpoints.
 5. Narrow I7, repartition I8, and update the I9-I12 entry conditions described
