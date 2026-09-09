@@ -323,13 +323,15 @@ implementation performs the available debug/test indexed heap and canonical
 metadata checks before `as_ref`; its result lifetime is bounded by the mutator
 borrow.
 
-The only production caller is `Root::get`. Its still-live registered root cell
-is visited by every exclusive root walk, so the allocation is marked before
-reclamation; the matching mutator then excludes collection for the returned
-reference's lifetime. Other internal/test callers must establish equivalent
-liveness explicitly. Wrong-heap and wrong-representation tests deliberately
-arrange a diagnostic mismatch and establish that indexed validation panics
-before `as_ref` runs. Those checks are not part of the release-build proof.
+`Root::get` is the collector crate's direct production caller. Its still-live
+registered root cell is visited by every exclusive root walk, so the allocation
+is marked before reclamation; the matching mutator then excludes collection
+for the returned reference's lifetime. Glam may also consume the typed edge
+from `Root::as_gc` through its separately audited access gateways. Other
+internal/test callers must establish equivalent liveness explicitly.
+Wrong-heap and wrong-representation tests deliberately arrange a diagnostic
+mismatch and establish that indexed validation panics before `as_ref` runs.
+Those checks are not part of the release-build proof.
 
 ### Canonical object metadata and erased dispatch
 
@@ -1243,14 +1245,18 @@ with the live mutator's `Arc` cannot mistake a reused heap allocation for the
 original heap. The cell never upgrades that weak reference merely to read a
 value, and a root does not retain or re-enter its value domain.
 
-`Root::get` rejects a nonmatching mutator in every build before reconstructing
-the private typed `Gc<T>` and invoking its existing unsafe access gateway. The
-private constructor established the representation, allocation, and heap
-invariants; registry publication makes every still-live root cell a collection
-seed, and the live matching mutator prevents reclamation for the returned
-reference's lifetime. Dropping `RootCell` releases only its weak heap reference
-and pointer bits; it never dereferences or destroys the managed payload and
-invokes no user code.
+`Root::as_gc` rejects a nonmatching mutator in every build before
+reconstructing the private typed `Gc<T>`. The edge is non-rooting and not
+lifetime-branded; retaining it beyond the admitted region does not retain the
+heap or provide a later liveness proof. The matching mutator prevents
+collection while the projection is intended to be consumed. `Root::get`
+delegates to that single typed reconstruction boundary and then invokes the
+existing unsafe access gateway. The private root constructor established the
+representation, allocation, and heap invariants; registry publication makes
+every still-live root cell a collection seed, and the live matching mutator
+prevents reclamation for the returned reference's lifetime. Dropping
+`RootCell` releases only its weak heap reference and pointer bits; it never
+dereferences or destroys the managed payload and invokes no user code.
 
 Exclusive root traversal holds the managed-data mutex after the
 coordinator has stopped every mutator. No new root cell can therefore be

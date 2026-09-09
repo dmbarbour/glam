@@ -866,6 +866,26 @@ The collector unit matrix now contains 189 tests (187 passing plus two ignored
 scale fixtures). GCI-001 adds no unsafe site and does not change automatic-mode
 behavior.
 
+## Integration GCI5R-008A Root Projection
+
+`Root::as_gc` now reconstructs the root's exact typed, non-rooting edge only
+under a matching admitted mutator. `Root::get` delegates to that projection,
+so the existing erased-to-typed conversion remains one unsafe implementation
+boundary. Deterministic tests prove original and cloned-root identity,
+distinct-allocation inequality, unchanged root-registry cardinality, and
+all-build foreign-heap rejection. The focused strict-provenance check is:
+
+```sh
+MIRIFLAGS='-Zmiri-strict-provenance' \
+  cargo +nightly miri test -p glam-gc --lib --all-features \
+    root::tests::root_projection_preserves_identity_without_registering_another_root \
+    -- --exact
+```
+
+This checkpoint moves rather than adds an unsafe reconstruction site. The
+returned `Gc<T>` remains unbranded and cannot justify use after the root or
+another traced owner ceases to prove liveness.
+
 ## Gate G1 Certification
 
 C6D.3 certified the isolated collector on 2026-08-25. The review is recorded in

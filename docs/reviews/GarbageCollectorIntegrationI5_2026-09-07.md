@@ -1703,6 +1703,8 @@ Test fixtures containing unrelated roots and edges are outside this finding.
 
 ##### GCI5R-008A — Add and verify root projection
 
+**Completed:** 2026-09-09
+
 - Add `Root::as_gc(&self, mutator: &Mutator<'_>) -> Gc<T>` as an
   allocation-free, non-rooting projection and implement `Root::get` through
   it. Reject a mutator from another heap before reconstructing the typed
@@ -1715,6 +1717,13 @@ Test fixtures containing unrelated roots and edges are outside this finding.
   foreign-heap mutator is rejected.
 - Add targeted strict-provenance Miri coverage for this private erased-to-typed
   reconstruction boundary.
+
+`Root::as_gc` now validates one matching admitted mutator before reconstructing
+the root cell's typed non-rooting edge, and `Root::get` delegates to that
+projection. The root remains one word and the implementation adds no unsafe
+site. Native and strict-provenance Miri tests prove original/cloned-root
+identity, distinct-allocation inequality, unchanged root-registry cardinality,
+and all-build rejection of a foreign-heap mutator.
 
 ##### GCI5R-008B — Remove direct family-root duplicates
 
