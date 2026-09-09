@@ -4,9 +4,13 @@
 	"name": "Debian",
 	// Or use a Dockerfile or Docker Compose file. More info: https://containers.dev/guide/dockerfile
 	"image": "mcr.microsoft.com/devcontainers/base:trixie",
+	// Treat the disposable dev container as the security boundary. Codex uses
+	// bubblewrap internally and needs mount-namespace capabilities such as
+	// CAP_SYS_ADMIN to construct its nested sandbox.
+	"privileged": true,
 	"features": {
 		"ghcr.io/devcontainers/features/rust:1": {},
-		"ghcr.io/sliekens/devcontainer-features/codex:1": {},
+		"ghcr.io/cjcrobin/devcontainer-features/codexcli:1": {},
 	},
 
 	// Use 'forwardPorts' to make a list of ports inside the container available locally.
@@ -21,11 +25,13 @@
 
     "containerEnv": {
         "GLAM_CONF": "/workspaces/glam/samples/config/dev.g",
-        "DISPLAY": "${localEnv:DISPLAY}"
+        "DISPLAY": "${localEnv:DISPLAY}",
+        "CODEX_HOME": "/root/.codex",
     },
     "mounts":[
         "source=/tmp/.X11-unix,target=/tmp/.X11-unix,type=bind,consistency=cached",
         "source=${localEnv:HOME}/.Xauthority,target=/root/.Xauthority,type=bind,readonly",
+        "source=${localEnv:HOME}/.codex,target=/root/.codex,type=bind,consistency=cached",
     ],
     "runArgs":[
         // "--net=host",
