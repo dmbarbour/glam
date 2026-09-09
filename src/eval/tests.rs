@@ -5652,14 +5652,10 @@ fn strategies_demand_hidden_metadata_without_exposing_the_carrier() {
     let context = test_context();
     let metadata_forces = Arc::new(AtomicUsize::new(0));
     let counted_metadata_forces = metadata_forces.clone();
-    let metadata = Value::semantic_thunk(
-        &crate::core::test_value_factory(),
-        "sequenced metadata",
-        move |_| {
-            counted_metadata_forces.fetch_add(1, Ordering::SeqCst);
-            Ok(n(7))
-        },
-    );
+    let metadata = Value::semantic_thunk(context.values(), "sequenced metadata", move |_| {
+        counted_metadata_forces.fetch_add(1, Ordering::SeqCst);
+        Ok(n(7))
+    });
     let carrier = Value::metadata_carrier(metadata);
     let target_forces = Arc::new(AtomicUsize::new(0));
     let counted_target_forces = target_forces.clone();
@@ -5745,19 +5741,15 @@ fn worker_spark_demands_metadata_behind_a_lazy_carrier_shell() {
     let context = EvalContext::new(&session);
     let (shell_sender, shell_receiver) = std::sync::mpsc::channel();
     let (metadata_sender, metadata_receiver) = std::sync::mpsc::channel();
-    let metadata = Value::semantic_thunk(
-        &crate::core::test_value_factory(),
-        "worker metadata",
-        move |_| {
-            metadata_sender
-                .send(())
-                .expect("metadata receiver should remain open");
-            Ok(n(7))
-        },
-    );
+    let metadata = Value::semantic_thunk(context.values(), "worker metadata", move |_| {
+        metadata_sender
+            .send(())
+            .expect("metadata receiver should remain open");
+        Ok(n(7))
+    });
     let carrier = Value::metadata_carrier(metadata);
     let lazy_carrier = Value::semantic_thunk(
-        &crate::core::test_value_factory(),
+        context.values(),
         "lazy worker metadata carrier",
         move |_| {
             shell_sender
@@ -5791,17 +5783,14 @@ fn metadata_strategy_failures_are_cached_and_seq_propagates_them() {
     let attempts = Arc::new(AtomicUsize::new(0));
     let counted_attempts = attempts.clone();
     let (attempt_sender, attempt_receiver) = std::sync::mpsc::channel();
-    let metadata = LazyValue::semantic_thunk(
-        &crate::core::test_value_factory(),
-        "failing metadata strategy",
-        move |_| {
+    let metadata =
+        LazyValue::semantic_thunk(context.values(), "failing metadata strategy", move |_| {
             counted_attempts.fetch_add(1, Ordering::SeqCst);
             attempt_sender
                 .send(())
                 .expect("attempt receiver should remain open");
             Err(EvaluationHalt::new("metadata strategy failed"))
-        },
-    );
+        });
     let carrier = Value::metadata_carrier(Value::Lazy(metadata.clone()));
 
     let result = apply_values(
@@ -5833,14 +5822,10 @@ fn strategies_stop_at_nested_metadata_carriers() {
     let context = EvalContext::new(&session);
     let hidden_forces = Arc::new(AtomicUsize::new(0));
     let counted_hidden_forces = hidden_forces.clone();
-    let hidden = Value::semantic_thunk(
-        &crate::core::test_value_factory(),
-        "nested hidden metadata",
-        move |_| {
-            counted_hidden_forces.fetch_add(1, Ordering::SeqCst);
-            Ok(n(7))
-        },
-    );
+    let hidden = Value::semantic_thunk(context.values(), "nested hidden metadata", move |_| {
+        counted_hidden_forces.fetch_add(1, Ordering::SeqCst);
+        Ok(n(7))
+    });
     let outer = Value::metadata_carrier(Value::metadata_carrier(hidden));
 
     assert_eq!(
@@ -5857,7 +5842,7 @@ fn strategies_stop_at_nested_metadata_carriers() {
     context.spark(outer);
     let (finished_sender, finished_receiver) = std::sync::mpsc::channel();
     let sentinel = LazyValue::semantic_thunk(
-        &crate::core::test_value_factory(),
+        context.values(),
         "nested metadata spark sentinel",
         move |_| {
             finished_sender
@@ -5892,14 +5877,11 @@ fn spark_admission_drops_whnf_and_follows_completed_promises() {
     )));
     let promised_forces = Arc::new(AtomicUsize::new(0));
     let counted_promised_forces = promised_forces.clone();
-    let promised_work = LazyValue::semantic_thunk(
-        &crate::core::test_value_factory(),
-        "promised spark work",
-        move |_| {
+    let promised_work =
+        LazyValue::semantic_thunk(context.values(), "promised spark work", move |_| {
             counted_promised_forces.fetch_add(1, Ordering::SeqCst);
             Ok(n(7))
-        },
-    );
+        });
     let promise = PromisedValue::new(context.values(), "resolved spark input");
     promise
         .set(Value::Lazy(promised_work.clone()))
@@ -5907,16 +5889,13 @@ fn spark_admission_drops_whnf_and_follows_completed_promises() {
     context.spark(Value::Promised(promise));
 
     let (finished_sender, finished_receiver) = std::sync::mpsc::channel();
-    let sentinel = LazyValue::semantic_thunk(
-        &crate::core::test_value_factory(),
-        "spark admission sentinel",
-        move |_| {
+    let sentinel =
+        LazyValue::semantic_thunk(context.values(), "spark admission sentinel", move |_| {
             finished_sender
                 .send(())
                 .expect("sentinel receiver should remain open");
             Ok(unit_value())
-        },
-    );
+        });
     context.spark(Value::Lazy(sentinel.clone()));
     finished_receiver
         .recv_timeout(std::time::Duration::from_secs(2))
@@ -5957,16 +5936,12 @@ fn spark_resumes_after_a_resolver_owned_promise_completes() {
     );
 
     let (forced_sender, forced_receiver) = std::sync::mpsc::channel();
-    let assigned = LazyValue::semantic_thunk(
-        &crate::core::test_value_factory(),
-        "resolved spark work",
-        move |_| {
-            forced_sender
-                .send(())
-                .expect("spark result receiver should remain open");
-            Ok(n(7))
-        },
-    );
+    let assigned = LazyValue::semantic_thunk(context.values(), "resolved spark work", move |_| {
+        forced_sender
+            .send(())
+            .expect("spark result receiver should remain open");
+        Ok(n(7))
+    });
     promise
         .set(Value::Lazy(assigned.clone()))
         .expect("promise should accept its one assignment");

@@ -10,8 +10,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use crate::core::{
-    Builtin, CoreValueFactory, EvaluationFailure, LazyValue, ManagedPromiseRoot, PromisedValue,
-    Value,
+    Builtin, CoreValueFactory, EvaluationFailure, LazyValue, ManagedLazyRoot, ManagedPromiseRoot,
+    PromisedValue, Value,
 };
 use crate::core_net::CoreWaitToken;
 use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
@@ -871,9 +871,15 @@ impl EvalContext {
         build: F,
     ) -> Result<EvaluationWaitToken, Arc<str>>
     where
-        F: FnOnce(EvalContext) -> Box<dyn EvaluationTaskMachine>,
+        F: FnOnce(EvalContext, ManagedLazyRoot) -> Box<dyn EvaluationTaskMachine>,
     {
-        self.deferred_task(DeferredProducer::Lazy(lazy.root()), build)
+        let root = self
+            .values()
+            .with_runtime_value_access(|access| lazy.root_in(&access));
+        let machine_root = root.clone();
+        self.deferred_task(DeferredProducer::Lazy(root), |context| {
+            build(context, machine_root)
+        })
     }
 
     pub(crate) fn promise_task<F>(
@@ -882,9 +888,15 @@ impl EvalContext {
         build: F,
     ) -> Result<EvaluationWaitToken, Arc<str>>
     where
-        F: FnOnce(EvalContext) -> Box<dyn EvaluationTaskMachine>,
+        F: FnOnce(EvalContext, ManagedPromiseRoot) -> Box<dyn EvaluationTaskMachine>,
     {
-        self.deferred_task(DeferredProducer::Promise(promise.root()), build)
+        let root = self
+            .values()
+            .with_runtime_value_access(|access| promise.root_in(&access));
+        let machine_root = root.clone();
+        self.deferred_task(DeferredProducer::Promise(root), |context| {
+            build(context, machine_root)
+        })
     }
 
     fn deferred_task<F>(
@@ -1545,8 +1557,8 @@ pub(super) fn client_demand_halt_poll(
 ) -> coordinator::ClientDemandPoll {
     if let Some(wait) = halt.blocked_on() {
         coordinator::ClientDemandPoll::Blocked(WorkDependency::Wait(wait.0))
-    } else if let Some(promise) = halt.unassigned_promise() {
-        coordinator::ClientDemandPoll::Blocked(WorkDependency::Promise(promise.root()))
+    } else if let Some(promise) = halt.unassigned_promise_root() {
+        coordinator::ClientDemandPoll::Blocked(WorkDependency::Promise(promise.clone()))
     } else {
         coordinator::ClientDemandPoll::Failed(context.root_failure(halt.into_permanent_failure()))
     }

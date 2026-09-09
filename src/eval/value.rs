@@ -158,11 +158,8 @@ impl LazyTaskMachine {
     }
 
     fn cached_poll(&self, context: &EvaluatorStepContext<'_>) -> EvaluationMachinePoll {
-        match self
-            .lazy()
-            .cached()
-            .expect("a released lazy source must have a terminal cache")
-        {
+        let result = context.with_value_access(|access| access.lazy_root(&self.lazy).cached());
+        match result.expect("a released lazy source must have a terminal cache") {
             Ok(value) => EvaluationMachinePoll::Complete(context.root_value(value.into_value())),
             Err(error) => EvaluationMachinePoll::Failed(context.root_failure(error)),
         }
@@ -215,7 +212,9 @@ impl EvaluationTaskMachine for LazyTaskMachine {
             });
         }
         poll_context.evaluate(&durable_context, |context| {
-            if let Some(result) = self.lazy().cached() {
+            if let Some(result) =
+                context.with_value_access(|access| access.lazy_root(&self.lazy).cached())
+            {
                 return match result {
                     Ok(value) => {
                         EvaluationMachinePoll::Complete(context.root_value(value.into_value()))
@@ -225,7 +224,9 @@ impl EvaluationTaskMachine for LazyTaskMachine {
             }
 
             if matches!(self.work, LazyTaskWork::Produce) {
-                let Some(source) = self.lazy().source_snapshot() else {
+                let source = context
+                    .with_value_access(|access| access.lazy_root(&self.lazy).source_snapshot());
+                let Some(source) = source else {
                     return self.cached_poll(context);
                 };
                 if let LazySource::NetConstruction(effect) = source {
@@ -321,7 +322,9 @@ impl EvaluationTaskMachine for PromiseFollower {
         poll_context.evaluate(&durable_context, |context| {
             let result = match &self.state {
                 PromiseFollowerState::AwaitAssignment => {
-                    match PromisedValue::from_root(&self.promise).assignment() {
+                    match context
+                        .with_value_access(|access| access.promise_root(&self.promise).assignment())
+                    {
                         Some(result) => result.map_err(EvaluationHalt::failure),
                         None => {
                             return EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
@@ -355,10 +358,10 @@ pub(super) fn promise_wait(
     context: &EvalContext,
     promise: &PromisedValue,
 ) -> Result<crate::evaluation::EvaluationWaitToken, Arc<str>> {
-    context.promise_task(promise, |task_context| {
+    context.promise_task(promise, |task_context, promise| {
         Box::new(PromiseFollower {
             context: task_context,
-            promise: promise.root(),
+            promise,
             state: PromiseFollowerState::AwaitAssignment,
         })
     })
@@ -400,17 +403,17 @@ pub(super) fn eval_lazy_in(
     lazy: &LazyValue,
 ) -> Result<Value, EvaluationHalt> {
     loop {
-        if let Some(result) = lazy.cached() {
+        if let Some(result) = context.with_value_access(|access| access.lazy(lazy).cached()) {
             return result
                 .map(EvaluatedValue::into_value)
                 .map_err(EvaluationHalt::failure);
         }
         let wait = context
             .context()
-            .lazy_task(lazy, |task_context| {
+            .lazy_task(lazy, |task_context, lazy| {
                 Box::new(LazyTaskMachine {
                     context: task_context,
-                    lazy: lazy.root(),
+                    lazy,
                     work: LazyTaskWork::Produce,
                 })
             })
@@ -548,7 +551,11 @@ fn eval_promised_in(
     promise: &PromisedValue,
 ) -> Result<Value, EvaluationHalt> {
     loop {
-        if let Some(assignment) = promise.assignment() {
+        let (assignment, task, id) = context.with_value_access(|access| {
+            let promise = access.promise(promise);
+            (promise.assignment(), promise.producer(), promise.id())
+        });
+        if let Some(assignment) = assignment {
             let value = assignment.map_err(EvaluationHalt::failure)?;
             if !is_deferred(&value) {
                 return Ok(value);
@@ -560,11 +567,11 @@ fn eval_promised_in(
             }
             continue;
         }
-        if let Some(task) = promise.task() {
+        if let Some(task) = task {
             if context.context().observes_as_task(task.owner()) {
                 return Err(EvaluationHalt::new(format!(
                     "reflection promise {} recursively observed itself in task {}",
-                    promise.id().get(),
+                    id.get(),
                     task.owner().get()
                 )));
             }
@@ -575,7 +582,8 @@ fn eval_promised_in(
             }
             continue;
         }
-        return Err(EvaluationHalt::unassigned(promise.clone()));
+        let root = context.with_value_access(|access| promise.root_in(access.values()));
+        return Err(EvaluationHalt::unassigned_root(root));
     }
 }
 
@@ -782,8 +790,10 @@ pub(super) fn is_deferred_value(value: &Value) -> bool {
     matches!(value, Value::Lazy(_) | Value::Promised(_))
 }
 
-pub(super) fn is_error_lazy_value(value: &Value) -> bool {
-    matches!(value, Value::Lazy(lazy) if lazy.cached().is_some_and(|result| result.is_err()))
+pub(super) fn is_error_lazy_value(context: &EvaluatorStepContext<'_>, value: &Value) -> bool {
+    matches!(value, Value::Lazy(lazy)
+        if context.with_value_access(|access| access.lazy(lazy).cached())
+            .is_some_and(|result| result.is_err()))
 }
 
 pub(super) fn is_undefined_dict_value(value: &Value) -> bool {

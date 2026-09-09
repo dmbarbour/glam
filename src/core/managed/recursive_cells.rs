@@ -8,6 +8,7 @@ use std::cell::RefCell;
 use std::fmt;
 use std::marker::PhantomData;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use glam_gc::{Gc, Root, Trace, UnsupportedLayout, Visitor};
@@ -61,8 +62,9 @@ pub(crate) struct ManagedPromiseCell {
     id: PromiseId,
     label: Arc<str>,
     assignment: OnceLock<ManagedPromiseAssignment>,
-    completion: CompletionSubscriptions,
-    producer: OnceLock<Arc<PromiseProducerObligation>>,
+    terminal: Arc<AtomicBool>,
+    completion: Arc<CompletionSubscriptions>,
+    producer: Arc<OnceLock<Arc<PromiseProducerObligation>>>,
 }
 
 /// Synchronization-owning managed core interaction-net identity.
@@ -139,13 +141,22 @@ pub(crate) struct ManagedLazyRoot {
     observer: RuntimeValueObserver,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct ManagedPromiseRoot {
     id: PromiseId,
     label: Arc<str>,
     edge: ManagedPromiseEdge,
     root: Root<ManagedPromiseCell>,
     observer: RuntimeValueObserver,
+    terminal: Arc<AtomicBool>,
+    completion: Arc<CompletionSubscriptions>,
+    producer: Arc<OnceLock<Arc<PromiseProducerObligation>>>,
+}
+
+impl fmt::Debug for ManagedPromiseRoot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ManagedPromiseRoot(..)")
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -213,12 +224,13 @@ impl ManagedPromiseCell {
             id,
             label: label.into(),
             assignment: OnceLock::new(),
-            completion: CompletionSubscriptions::for_promise(
+            terminal: Arc::new(AtomicBool::new(false)),
+            completion: Arc::new(CompletionSubscriptions::for_promise(
                 values.runtime_id(),
                 id,
                 values.work_coordinator_binding(),
-            ),
-            producer: OnceLock::new(),
+            )),
+            producer: Arc::new(OnceLock::new()),
         }
     }
 }
@@ -356,6 +368,9 @@ impl RuntimeValueAccess<'_> {
             edge,
             root: self.root(edge.0),
             observer,
+            terminal: Arc::clone(&value.cell.terminal),
+            completion: Arc::clone(&value.cell.completion),
+            producer: Arc::clone(&value.cell.producer),
         }
     }
 
@@ -499,7 +514,6 @@ impl ManagedLazyRoot {
         &self.observer
     }
 
-    #[cfg(test)]
     pub(crate) fn access<'access, 'scope>(
         &'access self,
         authority: &'access RuntimeValueAccess<'scope>,
@@ -531,6 +545,28 @@ impl ManagedPromiseRoot {
 
     pub(crate) fn observer(&self) -> &RuntimeValueObserver {
         &self.observer
+    }
+
+    pub(crate) fn producer(&self) -> Option<Arc<PromiseProducerObligation>> {
+        self.producer.get().cloned()
+    }
+
+    pub(crate) fn subscribe_work(
+        &self,
+        runtime: crate::runtime::EvaluationRuntimeId,
+        registration: WakeRegistration,
+    ) -> CompletionSubscriptionOutcome {
+        self.completion.subscribe(runtime, registration, || {
+            self.terminal.load(Ordering::Acquire)
+        })
+    }
+
+    pub(crate) fn unsubscribe_work(&self, registration: WakeRegistration) -> bool {
+        self.completion.unsubscribe(registration)
+    }
+
+    pub(crate) fn is_terminal(&self) -> bool {
+        self.terminal.load(Ordering::Acquire)
     }
 
     pub(crate) fn access<'access, 'scope>(
@@ -771,26 +807,13 @@ impl<'access, 'scope> ManagedPromiseAccess<'access, 'scope> {
                         .take()
                         .expect("promise transition must consume its proposed assignment once");
                     self.cell.assignment.set(assignment)?;
+                    self.cell.terminal.store(true, Ordering::Release);
                     Ok(after_assignment(self.cell.assignment.get().expect(
                         "managed promise publication must initialize its assignment",
                     )))
                 },
             )
         }
-    }
-
-    pub(crate) fn subscribe_work(
-        &self,
-        runtime: crate::runtime::EvaluationRuntimeId,
-        registration: WakeRegistration,
-    ) -> CompletionSubscriptionOutcome {
-        self.cell.completion.subscribe(runtime, registration, || {
-            self.cell.assignment.get().is_some()
-        })
-    }
-
-    pub(crate) fn unsubscribe_work(&self, registration: WakeRegistration) -> bool {
-        self.cell.completion.unsubscribe(registration)
     }
 
     #[cfg(test)]
@@ -1028,7 +1051,7 @@ unsafe impl ManagedFamily for ManagedCoreNetCell {
 const _: () = {
     assert!(std::mem::size_of::<ManagedLazyCell>() == 160);
     assert!(std::mem::align_of::<ManagedLazyCell>() == 8);
-    assert!(std::mem::size_of::<ManagedPromiseCell>() == 176);
+    assert!(std::mem::size_of::<ManagedPromiseCell>() == 120);
     assert!(std::mem::align_of::<ManagedPromiseCell>() == 8);
     assert!(std::mem::size_of::<ManagedCoreNetCell>() == 248);
     assert!(std::mem::align_of::<ManagedCoreNetCell>() == 8);
@@ -1600,7 +1623,7 @@ mod tests {
     #[test]
     fn recursive_cell_layouts_are_recorded() {
         assert_eq!(std::mem::size_of::<ManagedLazyCell>(), 160);
-        assert_eq!(std::mem::size_of::<ManagedPromiseCell>(), 176);
+        assert_eq!(std::mem::size_of::<ManagedPromiseCell>(), 120);
         assert_eq!(std::mem::size_of::<ManagedCoreNetCell>(), 248);
     }
 
@@ -1689,6 +1712,7 @@ mod tests {
         let winner = Value::Number(11.into());
         let loser = Value::Number(12.into());
 
+        assert!(!root.is_terminal());
         values.with_runtime_value_access(|access| {
             let promise = root
                 .access(&access)
@@ -1701,6 +1725,7 @@ mod tests {
             assert_eq!(promise.publish(Ok(loser.clone())), Err(Ok(loser)));
             assert_eq!(promise.assignment(), Some(Ok(winner)));
         });
+        assert!(root.is_terminal());
 
         let unrelated = new_values();
         unrelated.with_runtime_value_access(|access| {
@@ -2979,7 +3004,7 @@ mod tests {
         }
         assert!(
             source_declaration(source, "struct ManagedPromiseCell")
-                .contains("producer: OnceLock<Arc<PromiseProducerObligation>>")
+                .contains("producer: Arc<OnceLock<Arc<PromiseProducerObligation>>>")
         );
         assert!(
             !source_declaration(source, "struct ManagedPromiseCell")

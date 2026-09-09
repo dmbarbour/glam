@@ -93,8 +93,8 @@ They are diagnostics for representation planning, not a stable ABI.
 | --- | ---: | --- |
 | `core::Value` | 64/8 | Inline tagged shell; visitor dispatch in I4. |
 | `core::Key`, `Number` | 64/8, 64/8 | External/persistent leaves except nested key values, which are converted before storage. |
-| `LazyValue`, `ManagedLazyCell`, `LazySource` | 48/8, 160/8, 40/8 | I5D installed the typed managed identity; the facade carries its exact edge and weak domain observer. |
-| `PromisedValue`, `ManagedPromiseCell` | 24/8, 176/8 | GCI5R-003B removed duplicated façade identity metadata. GCI5R-003C removed the cell's vestigial weak observer; the façade temporarily retains its exact edge and weak domain observer until scoped-access migration closes. |
+| `LazyValue`, `ManagedLazyCell`, `LazySource` | 24/8, 160/8, 40/8 | GCI5R-003B removed duplicated façade identity metadata. Production observation now requires bounded runtime access; the façade temporarily retains its exact edge and weak domain observer until GCI5R-003F. |
+| `PromisedValue`, `ManagedPromiseCell` | 24/8, 120/8 | GCI5R-003B/C removed duplicated façade metadata and the cell observer. GCI5R-003D moved edge-free terminal/subscription and producer routing into shared registered-root sidecars so coordinator traversal never opens the managed semantic payload; the façade observer remains only until GCI5R-003F. |
 | `MetadataCarrier`, `OpaqueValue` | 8/8, 16/8 | Metadata becomes managed in I6; opaque remains a checked boundary. |
 | `NetValue`, `FunctionCode`, `FunctionValue` | 8/8, 24/8, 16/8 | Net identity integration in I5; remaining function shells in I6. |
 | `BuiltinCall`, `EvaluationFailure` | 24/8, 80/8 | Exact visitors in I4/I6. |

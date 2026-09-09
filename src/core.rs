@@ -13,10 +13,11 @@ use internment::Intern;
 use rpds::RedBlackTreeMapSync;
 
 use crate::core_net::{CoreDataKey, CoreRuntimeNet};
+#[cfg(test)]
+use crate::evaluation::PromiseProducerObligation;
 use crate::evaluation::{
-    CompletionSubscriptionOutcome, EvalContext, EvaluationWorkCoordinator, EvaluatorStepContext,
-    PromiseProducerObligation, ReflectionTaskReservation, ReflectionTaskResultPolicy,
-    WakeRegistration,
+    EvalContext, EvaluationWorkCoordinator, EvaluatorStepContext, ReflectionTaskReservation,
+    ReflectionTaskResultPolicy,
 };
 use crate::number::Number;
 use crate::runtime::{EvaluationRuntimeId, RuntimeIds, RuntimeValueRoot};
@@ -34,8 +35,9 @@ pub(crate) use managed::{
 };
 pub(crate) use managed::{
     ExternalOwnerHandle, ExternalOwnerRegistry, ManagedCoreNetAccess, ManagedCoreNetEdge,
-    ManagedCoreNetRoot, ManagedLazyRoot, ManagedPromiseRoot, OpaquePayloadFamily,
-    OpaquePayloadRecord, PreparedRuntimeValueRoot, RuntimeValueAccess, RuntimeValueObserver,
+    ManagedCoreNetRoot, ManagedLazyAccess, ManagedLazyRoot, ManagedPromiseAccess,
+    ManagedPromiseRoot, OpaquePayloadFamily, OpaquePayloadRecord, PreparedRuntimeValueRoot,
+    RuntimeValueAccess, RuntimeValueObserver,
 };
 use runtime_cache::{RuntimeCacheEntry, RuntimeCacheMap, SharedRuntimeCacheMap};
 pub(crate) use runtime_cache::{RuntimeCacheFamily, RuntimeCacheFamilyRecord};
@@ -816,10 +818,6 @@ impl LazyValue {
             .expect("managed lazy representation must fit one collector run")
     }
 
-    pub(crate) fn id(&self) -> LazyId {
-        self.with_access(|lazy| lazy.id())
-    }
-
     pub(crate) fn access<'access, 'scope>(
         &'access self,
         access: &'access RuntimeValueAccess<'scope>,
@@ -829,6 +827,7 @@ impl LazyValue {
             .expect("lazy value and access must share one value domain")
     }
 
+    #[cfg(test)]
     pub(crate) fn root(&self) -> managed::ManagedLazyRoot {
         let observer = self.values.clone();
         self.with_runtime_access(|access| access.root_managed_lazy(observer, self.edge))
@@ -836,6 +835,11 @@ impl LazyValue {
 
     pub(crate) fn root_in(&self, access: &RuntimeValueAccess<'_>) -> managed::ManagedLazyRoot {
         access.root_managed_lazy(self.values.clone(), self.edge)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn id(&self) -> LazyId {
+        self.with_access(|lazy| lazy.id())
     }
 
     fn with_runtime_access<R>(
@@ -857,16 +861,18 @@ impl LazyValue {
     /// Terminal results are published before the shared source is removed.
     /// A worker which wins this snapshot may therefore finish concurrent work,
     /// while later observers take the lock-free cached-result path.
+    pub(crate) fn cache(&self, result: LazyResult) -> LazyResult {
+        self.with_access(|lazy| lazy.cache(result))
+    }
+
+    #[cfg(test)]
     pub(crate) fn source_snapshot(&self) -> Option<LazySource> {
         self.with_access(|lazy| lazy.source_snapshot())
     }
 
+    #[cfg(test)]
     pub(crate) fn cached(&self) -> Option<LazyResult> {
         self.with_access(|lazy| lazy.cached())
-    }
-
-    pub(crate) fn cache(&self, result: LazyResult) -> LazyResult {
-        self.with_access(|lazy| lazy.cache(result))
     }
 }
 
@@ -923,9 +929,19 @@ impl PromisedValue {
             .expect("promise value and access must share one value domain")
     }
 
+    #[cfg(test)]
     pub(crate) fn root(&self) -> managed::ManagedPromiseRoot {
         let observer = self.values.clone();
         self.with_runtime_access(|access| access.root_managed_promise(observer, self.edge))
+    }
+
+    pub(crate) fn root_in(&self, access: &RuntimeValueAccess<'_>) -> managed::ManagedPromiseRoot {
+        access.root_managed_promise(self.values.clone(), self.edge)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn id(&self) -> PromiseId {
+        self.with_access(|promise| promise.id())
     }
 
     fn with_runtime_access<R>(
@@ -945,16 +961,8 @@ impl PromisedValue {
         self.with_runtime_access(|access| operation(self.access(&access)))
     }
 
-    pub(crate) fn id(&self) -> PromiseId {
-        self.with_access(|promise| promise.id())
-    }
-
     pub(crate) fn runtime_id(&self) -> EvaluationRuntimeId {
         self.values.runtime_id()
-    }
-
-    pub(crate) fn task(&self) -> Option<Arc<PromiseProducerObligation>> {
-        self.with_access(|promise| promise.producer())
     }
 
     pub(crate) fn set(&self, value: Value) -> Result<(), Value> {
@@ -992,27 +1000,6 @@ impl PromisedValue {
         self.fail(Arc::new(EvaluationFailure::message(message.into())))
     }
 
-    pub(crate) fn assignment(&self) -> Option<Result<Value, Arc<EvaluationFailure>>> {
-        self.with_access(|promise| promise.assignment())
-    }
-
-    pub(crate) fn subscribe_work(
-        &self,
-        runtime: EvaluationRuntimeId,
-        registration: WakeRegistration,
-    ) -> CompletionSubscriptionOutcome {
-        self.with_access(|promise| promise.subscribe_work(runtime, registration))
-    }
-
-    pub(crate) fn unsubscribe_work(&self, registration: WakeRegistration) -> bool {
-        self.with_access(|promise| promise.unsubscribe_work(registration))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn exact_subscription_count(&self) -> usize {
-        self.with_access(|promise| promise.exact_subscription_count())
-    }
-
     fn publish(&self, assignment: PromiseAssignment) -> Result<(), PromiseAssignment> {
         let producer = self.with_access(|promise| promise.producer());
         if let Some(producer) = producer
@@ -1042,6 +1029,21 @@ impl PromisedValue {
             producer.notify();
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn task(&self) -> Option<Arc<PromiseProducerObligation>> {
+        self.with_access(|promise| promise.producer())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn assignment(&self) -> Option<Result<Value, Arc<EvaluationFailure>>> {
+        self.with_access(|promise| promise.assignment())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn exact_subscription_count(&self) -> usize {
+        self.with_access(|promise| promise.exact_subscription_count())
     }
 }
 
@@ -1753,17 +1755,6 @@ impl LazyValue {
                 arguments,
             },
         )
-    }
-
-    #[cfg(test)]
-    pub(crate) fn from_function_call(
-        values: &CoreValueFactory,
-        function: FunctionValue,
-        arguments: Arc<[Value]>,
-    ) -> Self {
-        values.with_runtime_value_access(|access| {
-            Self::from_function_call_in(&access, function, arguments)
-        })
     }
 
     pub(crate) fn from_net_computation_in(access: &RuntimeValueAccess<'_>, net: NetValue) -> Self {

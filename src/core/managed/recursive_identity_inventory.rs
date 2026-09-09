@@ -756,12 +756,6 @@ const COMPATIBILITY_ADAPTER_INVENTORY: &[CompatibilityAdapterEntry] = &[
     },
     CompatibilityAdapterEntry {
         path: "src/core/managed/payload_edges/runtime_net.rs",
-        declaration: "impl CompatibilityNetEdges for LazyValue {",
-        role: CompatibilityRecursionRole::ManagedIdentityProjection,
-        reason: "bounded source projection from an exact managed lazy identity",
-    },
-    CompatibilityAdapterEntry {
-        path: "src/core/managed/payload_edges/runtime_net.rs",
         declaration: "impl CompatibilityNetEdges for CoreOperator {",
         role: CompatibilityRecursionRole::ImmutablePath,
         reason: "operator-held function-code net dispatch",
@@ -881,7 +875,7 @@ fn compatibility_adapter_inventory_is_closed_and_acyclic_between_identities() {
         );
     }
 
-    assert_eq!(roles, [15, 4, 1]);
+    assert_eq!(roles, [15, 3, 1]);
     let external = COMPATIBILITY_ADAPTER_INVENTORY
         .iter()
         .filter(|entry| entry.role == CompatibilityRecursionRole::ExternalRootBoundary)

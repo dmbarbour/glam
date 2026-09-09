@@ -2,8 +2,7 @@
 
 use super::{CompatibilityValueEdges, visit_values};
 use crate::core::{
-    EvaluationHalt, EvaluationHaltPayload, FunctionCode, FunctionValue, LazySource, LazyValue,
-    NetValue, Value,
+    EvaluationHalt, EvaluationHaltPayload, FunctionCode, FunctionValue, LazySource, NetValue, Value,
 };
 use crate::core_net::{CoreOperator, CoreRuntimeNet, CoreRuntimeNetAccess, CoreRuntimeNetPayload};
 use crate::interaction_net::RuntimeNetPayloadVisitStats;
@@ -89,20 +88,6 @@ impl CompatibilityNetEdges for LazySource {
             | Self::NetConstruction(_) => {}
             #[cfg(test)]
             Self::SemanticThunk(_) => {}
-        }
-    }
-}
-
-impl CompatibilityNetEdges for LazyValue {
-    fn visit_compatibility_net_edges(&self, visit: &mut dyn FnMut(&CoreRuntimeNet)) {
-        // A terminal result is already the lazy cell's direct `Value` edge;
-        // any net below that value belongs to the value shell. Only an
-        // unresolved producer can contain a direct net identity here. I5's
-        // managed visitor must obtain one stable source/result snapshot for
-        // both value and net categories; it must not call the two
-        // compatibility adapters independently across a publication race.
-        if let Some(source) = self.source_snapshot() {
-            source.visit_compatibility_net_edges(visit);
         }
     }
 }
@@ -351,10 +336,9 @@ mod tests {
         assert!(net_edges(&Value::Function(function.clone()))[0].ptr_eq(&function_runtime));
         assert!(net_edges(&Value::Net(stage.clone()))[0].ptr_eq(&function_runtime));
 
-        let net_lazy = LazyValue::from_net_computation(&values, stage);
-        assert!(net_edges(&net_lazy)[0].ptr_eq(&function_runtime));
-        let call_lazy = LazyValue::from_function_call(&values, function, Arc::from([first]));
-        assert!(net_edges(&call_lazy)[0].ptr_eq(&function_runtime));
+        // Lazy source graphs are visited by the managed identity's exact trace.
+        // The semantic façade no longer reopens managed access solely for a
+        // compatibility net-edge adapter.
     }
 
     #[test]

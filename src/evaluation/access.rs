@@ -8,8 +8,8 @@
 //! open it.
 
 use crate::core::{
-    EvaluationFailure, LazyValue, ManagedCoreNetRoot, ManagedLazyRoot, ManagedPromiseRoot,
-    PromisedValue, RuntimeValueAccess, Value,
+    EvaluationFailure, LazyValue, ManagedCoreNetRoot, ManagedLazyAccess, ManagedLazyRoot,
+    ManagedPromiseAccess, ManagedPromiseRoot, PromisedValue, RuntimeValueAccess, Value,
 };
 use crate::core_net::CoreSpecialization;
 use crate::core_net::{CoreRuntimeNet, CoreRuntimeNetAccess};
@@ -95,6 +95,37 @@ impl<'scope> EvaluationValueAccess<'scope> {
         runtime: &'access CoreRuntimeNet,
     ) -> CoreRuntimeNetAccess<'access, 'scope> {
         runtime.access(&self.values)
+    }
+
+    pub(crate) fn lazy<'access>(
+        &'access self,
+        lazy: &'access LazyValue,
+    ) -> ManagedLazyAccess<'access, 'scope> {
+        lazy.access(&self.values)
+    }
+
+    pub(crate) fn lazy_root<'access>(
+        &'access self,
+        lazy: &'access ManagedLazyRoot,
+    ) -> ManagedLazyAccess<'access, 'scope> {
+        lazy.access(&self.values)
+            .expect("evaluator access and rooted lazy must share one value domain")
+    }
+
+    pub(crate) fn promise<'access>(
+        &'access self,
+        promise: &'access PromisedValue,
+    ) -> ManagedPromiseAccess<'access, 'scope> {
+        promise.access(&self.values)
+    }
+
+    pub(crate) fn promise_root<'access>(
+        &'access self,
+        promise: &'access ManagedPromiseRoot,
+    ) -> ManagedPromiseAccess<'access, 'scope> {
+        promise
+            .access(&self.values)
+            .expect("evaluator access and rooted promise must share one value domain")
     }
 
     /// Clones one compatibility root only while matching value-domain access

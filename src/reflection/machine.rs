@@ -451,7 +451,10 @@ impl<S: TaskSpecialization> EffectTask<S> {
         let marker = branch.root_value(self.eval_context.values(), Value::Promised(handle.clone()));
         let outer_control = std::mem::take(&mut branch.control);
         branch.state = state;
-        let handle = handle.root();
+        let handle = self
+            .eval_context
+            .values()
+            .with_runtime_value_access(|access| handle.root_in(&access));
         branch.active_fixes.push(ActiveFix {
             root: root.clone(),
             choices,

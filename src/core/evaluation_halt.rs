@@ -126,13 +126,10 @@ impl EvaluationHalt {
         }
     }
 
-    pub(crate) fn unassigned(promise: PromisedValue) -> Self {
-        let root = promise.root();
-        Self {
-            kind: EvaluationHaltKind::UnassignedPromise {
-                promise,
-                _root: Box::new(root),
-            },
+    pub(crate) fn unassigned_promise_root(&self) -> Option<&ManagedPromiseRoot> {
+        match &self.kind {
+            EvaluationHaltKind::UnassignedPromise { _root, .. } => Some(_root),
+            EvaluationHaltKind::Failure(_) | EvaluationHaltKind::Blocked(_) => None,
         }
     }
 

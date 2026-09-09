@@ -1326,6 +1326,8 @@ bytes and the ownership ledger now records that result.
 
 ##### GCI5R-003D — Require scoped authority for observation
 
+**Completed:** 2026-09-09
+
 - Change lazy and promise reads to accept `ManagedLazyAccess` or
   `ManagedPromiseAccess` obtained from `RuntimeValueAccess` or the existing
   evaluator-step access. Remove self-upgrading read helpers from semantic
@@ -1340,6 +1342,36 @@ bytes and the ownership ledger now records that result.
   delivery, or other host work.
 - Verify ordinary evaluation, lazy and promise cycles, access-region reuse,
   and dead-runtime behavior with deterministic fixtures.
+
+Production lazy and promise observation now occurs through
+`EvaluationValueAccess::{lazy,lazy_root,promise,promise_root}` or an equivalent
+bounded `RuntimeValueAccess`. The evaluator reuses its existing step region,
+and `EvalContext::{lazy_task,promise_task}` roots the producer before entering
+coordinator admission and hands a clone of that root directly to the new
+machine. `EvaluationHalt` exposes its already-retained promise root to spark
+and client-demand blocking paths instead of rerooting the semantic façade.
+
+Coordinator dependency traversal revealed a stricter case: promise producer
+and completion bookkeeping can be inspected while the coordinator state is
+locked, where opening a managed region would invert the intended boundary.
+Those edge-free components are therefore shared by the cell and its registered
+roots: an `Arc<OnceLock<Arc<PromiseProducerObligation>>>`, an
+`Arc<CompletionSubscriptions>`, and an acquire/release terminal bit. Semantic
+assignment data remains solely in `ManagedPromiseCell` and is read only under
+managed access. Subscription still performs subscribe-and-recheck against the
+terminal bit, while assignment publication stores the semantic result before
+publishing that bit. The resulting 64-bit cell layout is 120 bytes.
+
+Access-free production read methods have been removed from both semantic
+façades. Their remaining self-opened operations are mutation and publication
+paths assigned to 003E. `cfg(test)` compatibility probes remain while the
+façade observer itself exists; the bounded gateway tests exercise the intended
+production access shape, and 003F removes those probes with the observer.
+
+The migration also exposed five spark fixtures which constructed lazies in
+the process-global test domain and evaluated them in another runtime. They now
+allocate through the tested context's value domain, making the existing
+same-runtime contract explicit rather than preserving an invalid fixture.
 
 ##### GCI5R-003E — Move mutation authority to durable roots
 

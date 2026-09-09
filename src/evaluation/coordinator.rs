@@ -7,7 +7,9 @@ use std::sync::{Arc, Condvar, Mutex, Weak};
 
 #[cfg(test)]
 use crate::core::LazyValue;
-use crate::core::{CoreValueFactory, ManagedPromiseRoot, PromiseId, PromisedValue};
+#[cfg(test)]
+use crate::core::PromisedValue;
+use crate::core::{CoreValueFactory, ManagedPromiseRoot, PromiseId};
 #[cfg(test)]
 use crate::runtime::RuntimeValueRoot;
 use crate::runtime::{
@@ -277,9 +279,7 @@ impl WorkDependency {
     pub(super) fn producer_wait(&self) -> Option<EvaluationWaitToken> {
         match self {
             Self::Wait(wait) => Some(wait.clone()),
-            Self::Promise(promise) => PromisedValue::from_root(promise)
-                .task()
-                .and_then(|task| task.try_wait()),
+            Self::Promise(promise) => promise.producer().and_then(|task| task.try_wait()),
             #[cfg(test)]
             Self::Test(_) => None,
         }
@@ -301,9 +301,7 @@ impl WorkDependency {
     ) -> CompletionSubscriptionOutcome {
         match self {
             Self::Wait(wait) => wait.subscribe_work(runtime, registration),
-            Self::Promise(promise) => {
-                PromisedValue::from_root(promise).subscribe_work(runtime, registration)
-            }
+            Self::Promise(promise) => promise.subscribe_work(runtime, registration),
             #[cfg(test)]
             Self::Test(_) => {
                 unreachable!("synthetic completion sources install their own subscription")
@@ -314,9 +312,7 @@ impl WorkDependency {
     fn unsubscribe_work(&self, registration: WakeRegistration) -> bool {
         match self {
             Self::Wait(wait) => wait.unsubscribe_work(registration),
-            Self::Promise(promise) => {
-                PromisedValue::from_root(promise).unsubscribe_work(registration)
-            }
+            Self::Promise(promise) => promise.unsubscribe_work(registration),
             #[cfg(test)]
             Self::Test(_) => false,
         }
@@ -325,7 +321,7 @@ impl WorkDependency {
     fn is_terminal(&self) -> bool {
         match self {
             Self::Wait(wait) => wait.terminal_poll().is_some(),
-            Self::Promise(promise) => PromisedValue::from_root(promise).assignment().is_some(),
+            Self::Promise(promise) => promise.is_terminal(),
             #[cfg(test)]
             Self::Test(_) => false,
         }

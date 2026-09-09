@@ -1178,7 +1178,7 @@ fn running_deferred_machine_is_coordinator_owned_after_owner_drop() {
     let (started_sender, started_receiver) = mpsc::channel();
     let (release_sender, release_receiver) = mpsc::channel();
     let wait = context
-        .lazy_task(&lazy, move |_| {
+        .lazy_task(&lazy, move |_, _| {
             Box::new(CompleteAfterRelease {
                 started: Some(started_sender),
                 release: release_receiver,
@@ -1611,7 +1611,7 @@ fn register_lazy_await(
     dependency: Arc<OnceLock<EvaluationWaitToken>>,
 ) -> EvaluationWaitToken {
     context
-        .lazy_task(lazy, move |task_context| {
+        .lazy_task(lazy, move |task_context, _| {
             Box::new(AwaitCell {
                 context: task_context,
                 dependency,
@@ -1626,7 +1626,7 @@ fn register_promise_await(
     dependency: Arc<OnceLock<EvaluationWaitToken>>,
 ) -> EvaluationWaitToken {
     context
-        .promise_task(promise, move |task_context| {
+        .promise_task(promise, move |task_context, _| {
             Box::new(AwaitCell {
                 context: task_context,
                 dependency,
@@ -2358,7 +2358,7 @@ fn completed_deferred_tasks_release_their_machines() {
     let wait = context
         .lazy_task(&lazy, {
             let dropped = dropped.clone();
-            move |_| Box::new(CompleteAndSignalDrop { dropped })
+            move |_, _| Box::new(CompleteAndSignalDrop { dropped })
         })
         .expect("test lazy task should register");
 
@@ -2405,7 +2405,7 @@ fn redundant_deferred_registration_observes_the_canonical_lazy_cache() {
         std::thread::spawn(move || {
             let machine_lazy = lazy.clone();
             context
-                .lazy_task(&lazy, move |_| {
+                .lazy_task(&lazy, move |_, _| {
                     build_started_sender
                         .send(())
                         .expect("test build observer should remain open");
@@ -2428,7 +2428,7 @@ fn redundant_deferred_registration_observes_the_canonical_lazy_cache() {
         .lazy_task(&lazy, {
             let lazy = lazy.clone();
             let failure = failure.clone();
-            move |_| Box::new(CacheLazyFailure { lazy, failure })
+            move |_, _| Box::new(CacheLazyFailure { lazy, failure })
         })
         .expect("canonical lazy task should register");
     assert_eq!(
@@ -2737,7 +2737,7 @@ fn patient_claimed_task_wait_releases_mutator() {
     let (started_sender, started_receiver) = mpsc::channel();
     let (release_sender, release_receiver) = mpsc::channel();
     let wait = context
-        .lazy_task(&lazy, move |_| {
+        .lazy_task(&lazy, move |_, _| {
             Box::new(CompleteAfterRelease {
                 started: Some(started_sender),
                 release: release_receiver,
@@ -2943,7 +2943,7 @@ fn terminal_wait_tokens_outlive_their_owner_session() {
             panic!("the terminal wait fixture supplies its own task machine")
         });
         let wait = owner
-            .lazy_task(&lazy, |_| Box::new(Complete))
+            .lazy_task(&lazy, |_, _| Box::new(Complete))
             .expect("deferred task should schedule");
         assert_eq!(
             owner.pump_wait(&wait, 256),
@@ -3101,7 +3101,7 @@ fn abandoned_lazy_claim_can_be_reclaimed_without_poisoning_the_lazy() {
             }
         });
         let wait = owner
-            .lazy_task(&lazy, |_| Box::new(AlwaysBlocked))
+            .lazy_task(&lazy, |_, _| Box::new(AlwaysBlocked))
             .expect("first lazy claim should register");
         (lazy, wait, expected)
     };
@@ -4695,9 +4695,9 @@ fn pending_cross_session_task_promise_does_not_spin_a_deferred_retry() {
     let observer = fixture.context();
     assert_ne!(dependency.owner_id(), observer.session_id());
 
-    let lazy = inert_lazy("cross-session promise follower");
+    let lazy = inert_lazy_for(observer.values(), "cross-session promise follower");
     let wait = observer
-        .lazy_task(&lazy, move |task_context| {
+        .lazy_task(&lazy, move |task_context, _| {
             Box::new(Await {
                 context: task_context,
                 dependency,
@@ -5449,7 +5449,7 @@ fn forced_kill_abandons_a_deferred_lazy_claim_without_poisoning_the_lazy() {
         move |_| Ok(expected.clone())
     });
     let wait = context
-        .lazy_task(&lazy, |_| Box::new(AlwaysBlocked))
+        .lazy_task(&lazy, |_, _| Box::new(AlwaysBlocked))
         .expect("dormant deferred claim should register");
 
     let crate::api::RuntimeReadiness::Deadlocked(deadlock) = fixture.runtime.readiness() else {
@@ -5765,7 +5765,7 @@ fn dormant_and_reserved_work_are_reported_as_deadlock_anomalies() {
     let coordinator = context.coordinator().expect("coordinator should be live");
     let lazy = inert_lazy_for(context.values(), "dormant readiness producer");
     let deferred_wait = context
-        .lazy_task(&lazy, |_| Box::new(Complete))
+        .lazy_task(&lazy, |_, _| Box::new(Complete))
         .expect("dormant deferred work should register");
     let task = allocate_task_id(context.values()).expect("task ID should allocate");
     let wait = allocate_wait_token(&context.session, task).expect("wait ID should allocate");
@@ -6089,7 +6089,7 @@ fn spark_abandonment_wakes_useful_work_for_another_pump_pass() {
     let wait = context
         .lazy_task(&lazy, {
             let promise = promise.clone();
-            move |_| Box::new(AwaitPromise { promise })
+            move |_, _| Box::new(AwaitPromise { promise })
         })
         .expect("deferred producer should register");
     assert!(coordinator.promote_deferred_wait(&wait));

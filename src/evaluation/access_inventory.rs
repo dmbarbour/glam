@@ -125,7 +125,7 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // its returned graph before that same bounded access ends. C makes the
         // failed-lazy shim open one explicit region in place of allocation
         // followed by a facade-mediated second entry.
-        ("src/core.rs", GatewayCounts::new(21, 5)),
+        ("src/core.rs", GatewayCounts::new(20, 5)),
         // I5D scopes every managed core-net construction, root handoff, and
         // source-frontier traversal through matching value-domain authority.
         ("src/core_net.rs", GatewayCounts::new(12, 0)),
@@ -139,7 +139,9 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // producer root while the coordinator mutation remains admitted.
         ("src/evaluation/coordinator.rs", GatewayCounts::new(1, 0)),
         ("src/evaluation/executor.rs", GatewayCounts::new(1, 0)),
-        ("src/evaluation/session.rs", GatewayCounts::new(1, 0)),
+        // GCI5R-003D roots lazy and promise producers before coordinator
+        // admission instead of letting either semantic façade reopen access.
+        ("src/evaluation/session.rs", GatewayCounts::new(3, 0)),
         ("src/g_syntax/compiler_values.rs", GatewayCounts::new(2, 0)),
         (
             "src/g_syntax/diagnostic_formatter.rs",
@@ -147,6 +149,9 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         ),
         ("src/g_syntax/module_lowering.rs", GatewayCounts::new(3, 0)),
         ("src/g_syntax/net_lowering.rs", GatewayCounts::new(3, 0)),
+        // GCI5R-003D roots a freshly constructed reflection fixpoint before
+        // publishing it into branch/coordinator state.
+        ("src/reflection/machine.rs", GatewayCounts::new(1, 0)),
         ("src/runtime.rs", GatewayCounts::new(1, 0)),
     ]
     .into_iter()

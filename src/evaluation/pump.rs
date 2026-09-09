@@ -659,8 +659,8 @@ impl EvaluationWorkCoordinator {
             Err(halt) => {
                 if let Some(wait) = halt.blocked_on() {
                     coordinator::SparkWorkPoll::Blocked(WorkDependency::Wait(wait.0))
-                } else if let Some(promise) = halt.unassigned_promise() {
-                    coordinator::SparkWorkPoll::Blocked(WorkDependency::Promise(promise.root()))
+                } else if let Some(promise) = halt.unassigned_promise_root() {
+                    coordinator::SparkWorkPoll::Blocked(WorkDependency::Promise(promise.clone()))
                 } else {
                     coordinator::SparkWorkPoll::Complete
                 }
