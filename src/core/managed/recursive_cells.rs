@@ -59,7 +59,6 @@ pub(crate) struct ManagedLazyCell {
 /// cycle. Outstanding external wait handles retain late terminal observation.
 pub(crate) struct ManagedPromiseCell {
     id: PromiseId,
-    values: RuntimeValueObserver,
     label: Arc<str>,
     assignment: OnceLock<ManagedPromiseAssignment>,
     completion: CompletionSubscriptions,
@@ -212,7 +211,6 @@ impl ManagedPromiseCell {
         let id = PromiseId(values.deferred_value_id());
         Self {
             id,
-            values: values.runtime_value_observer(),
             label: label.into(),
             assignment: OnceLock::new(),
             completion: CompletionSubscriptions::for_promise(
@@ -458,7 +456,9 @@ impl ManagedPromiseEdge {
         // SAFETY: the private constructor and observer preserve exact heap and
         // representation provenance; the caller supplies current liveness.
         let cell = unsafe { authority.scope.get_traced_edge(self.0) };
-        ManagedPromiseAccess::from_authorized_cell(self, cell, authority)
+        Some(ManagedPromiseAccess::from_authorized_cell(
+            self, cell, authority,
+        ))
     }
 }
 
@@ -540,7 +540,11 @@ impl ManagedPromiseRoot {
         if !authority.admits(&self.observer) || !authority.admits_root(&self.root) {
             return None;
         }
-        ManagedPromiseAccess::from_authorized_cell(self.edge, authority.get(&self.root), authority)
+        Some(ManagedPromiseAccess::from_authorized_cell(
+            self.edge,
+            authority.get(&self.root),
+            authority,
+        ))
     }
 }
 
@@ -669,13 +673,13 @@ impl<'access, 'scope> ManagedPromiseAccess<'access, 'scope> {
         owner: ManagedPromiseEdge,
         cell: &'access ManagedPromiseCell,
         authority: &'access RuntimeValueAccess<'scope>,
-    ) -> Option<Self> {
-        authority.admits(&cell.values).then_some(Self {
+    ) -> Self {
+        Self {
             owner,
             cell,
             authority,
             _thread_bound: PhantomData,
-        })
+        }
     }
 
     pub(crate) fn id(&self) -> PromiseId {
@@ -688,8 +692,7 @@ impl<'access, 'scope> ManagedPromiseAccess<'access, 'scope> {
 
     #[cfg(test)]
     pub(crate) fn runtime_id(&self) -> crate::runtime::EvaluationRuntimeId {
-        debug_assert!(self.authority.admits(&self.cell.values));
-        self.cell.values.runtime_id()
+        self.authority.runtime_id()
     }
 
     pub(crate) fn assignment(&self) -> Option<ManagedPromiseAssignment> {
@@ -1025,7 +1028,7 @@ unsafe impl ManagedFamily for ManagedCoreNetCell {
 const _: () = {
     assert!(std::mem::size_of::<ManagedLazyCell>() == 160);
     assert!(std::mem::align_of::<ManagedLazyCell>() == 8);
-    assert!(std::mem::size_of::<ManagedPromiseCell>() == 192);
+    assert!(std::mem::size_of::<ManagedPromiseCell>() == 176);
     assert!(std::mem::align_of::<ManagedPromiseCell>() == 8);
     assert!(std::mem::size_of::<ManagedCoreNetCell>() == 248);
     assert!(std::mem::align_of::<ManagedCoreNetCell>() == 8);
@@ -1597,7 +1600,7 @@ mod tests {
     #[test]
     fn recursive_cell_layouts_are_recorded() {
         assert_eq!(std::mem::size_of::<ManagedLazyCell>(), 160);
-        assert_eq!(std::mem::size_of::<ManagedPromiseCell>(), 192);
+        assert_eq!(std::mem::size_of::<ManagedPromiseCell>(), 176);
         assert_eq!(std::mem::size_of::<ManagedCoreNetCell>(), 248);
     }
 
@@ -2977,6 +2980,11 @@ mod tests {
         assert!(
             source_declaration(source, "struct ManagedPromiseCell")
                 .contains("producer: OnceLock<Arc<PromiseProducerObligation>>")
+        );
+        assert!(
+            !source_declaration(source, "struct ManagedPromiseCell")
+                .contains("RuntimeValueObserver"),
+            "the managed promise cell must not retain runtime re-entry authority"
         );
 
         let completion = include_str!("../../evaluation/coordinator/completion.rs");

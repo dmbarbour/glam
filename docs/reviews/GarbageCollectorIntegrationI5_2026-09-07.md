@@ -1303,6 +1303,8 @@ callers which already own durable roots.
 
 ##### GCI5R-003C — Remove the promise cell's observer
 
+**Completed:** 2026-09-09
+
 - Remove `ManagedPromiseCell`'s `RuntimeValueObserver`. Completion, waiting,
   and terminal publication must use the already durable promise/wait root or
   an explicit access region.
@@ -1314,6 +1316,13 @@ callers which already own durable roots.
 - Refresh the managed-cell layout ledger from the compiler rather than
   freezing an estimated size, and verify terminal publication, failed-runtime
   behavior, and promise cleanup unchanged.
+
+`ManagedPromiseCell` no longer retains a `RuntimeValueObserver`. Its bounded
+access borrows provenance from the façade or registered root during this
+transition, while the cell's own access object reports the runtime of its
+explicit authority. A source-structure latch prevents the observer from
+returning unnoticed. The measured 64-bit cell layout fell from 192 to 176
+bytes and the ownership ledger now records that result.
 
 ##### GCI5R-003D — Require scoped authority for observation
 
