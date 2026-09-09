@@ -983,6 +983,139 @@ Recommended staging:
 - replace the current writer-count latch with tests which prove every
   production edge-changing path invokes the appropriate structural gateway.
 
+#### GCI5R-002 remediation plan
+
+This remediation establishes a structural mutation boundary without selecting
+the eventual concurrent collector. Its target invariant is:
+
+> Every post-publication change to a managed object's outgoing graph passes
+> through an owner-qualified edge-transition gateway. The call site supplies
+> complete, lazily traversed leaving and adding edge sets, and the active
+> collector policy decides which sets it must observe before the write becomes
+> visible.
+
+Initialization of a new unpublished object remains governed by GCI5R-001's
+regional construction rule and is not a post-publication mutation. The
+transition API must accept distinct synchronous edge visitors for the two sets
+and must not eagerly walk either one merely because the gateway was called.
+Ordinary `Trace` values can supply those visitors directly; the temporary
+compatibility representations can adapt their existing exact borrowed walks
+without cloning a semantic graph or pretending those borrowed views are
+managed allocations. The current stop-the-world collector observes neither
+set. A future snapshot-at-the-beginning collector may mark allocations born
+during concurrent marking and observe only leaving edges; another incremental
+or generational policy may also use the owner and adding edges.
+Moving collection may later require a rewrite-capable visitor, but routing all
+writes through this gateway is its prerequisite rather than a claim that the
+initial trace-only API completes moving support.
+
+The transition describes the graph conservatively. A policy may inspect a
+proposed adding set before a one-write publication discovers that it lost; the
+extra marking or remembered-set work is harmless. Leaving edges need be
+reported only for a mutation which can actually remove them. Representation
+gateways should retain their existing winner, lock, and publication ordering
+rather than moving synchronization into the collector.
+
+##### GCI5R-002A — Collector edge-transition contract
+
+- Generalize the single-edge replacement operation to an owner-qualified
+  transition over arbitrary synchronous leaving and adding edge visitors. The
+  visitors may borrow representation state for the duration of the call and
+  must report exact managed edges without evaluation or retention. Keep a
+  `Trace` adapter and singleton-edge convenience operation only if both
+  delegate to the same contract.
+- Couple the representation-specific write to the transition operation; a
+  detached notification before or after an unrelated write is not sufficient.
+- Make edge traversal policy-selected and lazy, so the STW implementation pays
+  only the gateway call cost and SATB need not traverse adding values.
+- Validate owner provenance at the gateway. Edge provenance remains part of
+  the visitor contract and is validated when a selected policy actually walks
+  that side; the STW no-op must not traverse a set merely to validate it. Add a
+  test-only observer which records which transition sides a selected policy
+  requests. Do not expose collector phase state to Glam code.
+
+Verification: focused collector tests cover empty, singleton, and multi-edge
+sets; distinct leaving/adding adapter types; no traversal under the current STW
+policy; leaving-only traversal under a synthetic SATB-like observer; and
+conservative observation of a losing proposed addition.
+
+##### GCI5R-002B — Runtime value-access gateway
+
+- Add the stable Glam-facing transition operation to `RuntimeValueAccess`.
+  Production representations supply their managed owner and semantic edge-set
+  adapters through this operation without receiving the raw collector mutator.
+- Reuse the exact compatibility edge visitors while `Value`, failures, lists,
+  dictionaries, and net payload shells remain Rust-owned. Do not force,
+  evaluate, format, or clone a complete semantic graph merely to describe a
+  transition.
+- Preserve a direct singleton path for later managed list/dictionary/net nodes,
+  where most edits should become one or a few `Gc` edge changes after the
+  compatibility representations are retired.
+
+Verification: a scoped-access fixture proves that a transition rejects a
+foreign owner, cannot outlive its `RuntimeValueAccess`, and invokes no semantic
+service while visiting compatibility edges.
+
+##### GCI5R-002C — Lazy and promise production writers
+
+- Route `ManagedLazyAccess::cache` through the transition gateway. Its logical
+  transition adds the terminal result graph and removes the deferred source
+  graph while preserving terminal publication before source removal. Under
+  SATB only the source removal requires traversal.
+- Route `ManagedPromiseAccess::{publish_detached,publish_guarded}` through the
+  same gateway. Promise settlement has an empty leaving set and adds the
+  assignment graph; losing publishers must not alter semantic state, although
+  a future policy may conservatively inspect their proposed addition.
+- Keep notification, retired-root destruction, and other external lifecycle
+  work after the existing representation/coordinator locks and runtime mutation
+  admission. The collector gateway changes edge accounting, not wake or
+  retirement order.
+- Replace the current lexical writer-count claim with behavioral instrumentation
+  proving that every winning production path enters the owner-qualified
+  gateway and supplies the expected edge-set direction.
+
+Verification: cover lazy success and failure, source release, detached and
+guarded promise success/failure, a forced winning/losing publisher ordering,
+and unchanged terminal-before-source/root-retirement chronology. Re-run the
+existing lazy/promise reclamation and coordinator publication suites.
+
+##### GCI5R-002D — Core-net delta integration in I8
+
+- Keep core-net transition reporting under the existing `RuntimeNetCell`
+  synchronization boundary. No collector callback may acquire that mutex or
+  reconstruct state after the write.
+- Inventory the concrete topology and payload edits, then report the affected
+  leaving/adding semantic edges. A whole-net before/after trace is acceptable
+  only as a measured correctness bridge; it must not silently become the
+  permanent high-volume path.
+- Align the final representation with the expectation that future managed net
+  nodes usually mutate singular edges. Preserve current revision,
+  materialization, disturbance, and active-pair publication behavior.
+
+This checkpoint is implemented with the I8 post-cutover net audit. GCI5R-002
+remains open after A-C and continues to block Gate G2, I11 production
+collection, and concurrent/incremental/generational/moving claims until D is
+complete.
+
+##### GCI5R-002E — Closure and verification
+
+- Replace source-count evidence with an exact writer/gateway inventory plus
+  behavioral transition probes for lazy, promise, and net mutation.
+- Reconcile the ownership/mutation ledger, collector contract, evaluation
+  architecture, I8 plan, and concurrent-collector plan. Record explicitly that
+  allocations born marked during concurrent marking belong to the later SATB
+  phase/epoch protocol, not to this STW remediation.
+- Run focused mutation, reclamation, forced-order publication, net, and
+  collector-policy tests, followed by the repository routine checks. Add Miri
+  coverage if implementation changes unsafe tracing, managed dereference, or
+  mutation/access lifetimes.
+- Close GCI5R-002 only after the production inventory has no unmatched writer
+  and all three managed families demonstrably enter the transition gateway.
+
+No new mutable managed family may be declared complete after 002A without
+using this gateway. Production remains `CollectionPolicy::NoAuto`; completing
+this remediation supplies barrier structure but does not enable collection.
+
 ### GCI5R-003 — Lazy and promise façades duplicate cell identity data
 
 **Classification:** undocumented representation drift  
