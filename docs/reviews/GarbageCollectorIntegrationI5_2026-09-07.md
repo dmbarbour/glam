@@ -1228,6 +1228,8 @@ repeat the same-domain check or expose a test-only runtime ID.
 
 ##### GCI5R-003A — Inventory and proof baseline
 
+**Completed:** 2026-09-09
+
 - Build compile-exhaustive construction and use inventories for
   `ManagedLazyCell`, `ManagedPromiseCell`, `LazyValue`, `PromisedValue`, their
   registered roots, and `PromiseResolver`.
@@ -1244,6 +1246,33 @@ repeat the same-domain check or expose a test-only runtime ID.
   orchestration.
 - Latch the inventory and current observable behavior with source/shape tests
   where useful. Repeated concurrent execution is not race evidence.
+
+The completed inventory found the following retained roles:
+
+| Location | Retained state | Disposition |
+| --- | --- | --- |
+| `ManagedLazyCell` | canonical lazy ID and label, source, terminal result | Keep; this is the managed identity. |
+| `LazyValue` | copied ID and label, managed edge, weak observer | Remove the copies in 003B, then the observer in 003F. |
+| `ManagedLazyRoot` | copied ID and label, edge, root, observer | Audit after scoped reads and root-owned writes are in place; its ID/label currently serve task indexing and cycle diagnostics. |
+| `ManagedPromiseCell` | canonical promise ID and label, weak observer, assignment, completion state, producer route | Remove the observer in 003C; it is not canonical state. |
+| `PromisedValue` | copied ID and label, managed edge, weak observer | Remove the copies in 003B, then the observer in 003F. |
+| `ManagedPromiseRoot` | copied ID and label, edge, root, observer | Keep through 003D/E, then retain only fields justified by coordinator or public-capability use. |
+| `PromiseResolver` | runtime ID and promise root | Convert in 003F to the explicit weak-observer, label, and affine-root exception. |
+
+The access-free façade methods are lazy `root`, `source_snapshot`, `cached`,
+and `cache`, plus promise `root`, `task`, assignment/subscription inspection,
+and terminal publication. They all reopen a mutator through the façade's weak
+observer. The evaluator already has `EvaluatorStepContext::with_value_access`
+and managed access types, while registered roots already provide liveness;
+003D can therefore migrate observations without inventing another authority.
+Mutation remains access-free until 003E by design.
+
+The current 64-bit 48-byte façade layouts are now compile-time latches beside
+their declarations. Existing regional-construction, recursive-identity,
+completion-order, and mutation-gateway inventories cover construction and
+publication boundaries. The migration must continue to root values before
+coordinator registration and release access before coordinator locks, waits,
+wake delivery, host callbacks, or task activation.
 
 ##### GCI5R-003B — Remove duplicated façade metadata
 

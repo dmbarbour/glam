@@ -289,6 +289,15 @@ pub(crate) struct PromisedValue {
     values: RuntimeValueObserver,
 }
 
+// GCI5R-003 records the pre-remediation façade cost explicitly. Later
+// checkpoints update these target-specific representation latches as fields
+// are removed; they are not a language-level value-size policy.
+#[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+const _: () = {
+    assert!(std::mem::size_of::<LazyValue>() == 48);
+    assert!(std::mem::size_of::<PromisedValue>() == 48);
+};
+
 /// Runtime-selected construction authority for values which allocate stable
 /// evaluator identities.
 #[derive(Clone)]
