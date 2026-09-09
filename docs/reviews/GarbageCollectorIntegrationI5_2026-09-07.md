@@ -1169,7 +1169,8 @@ Loom coverage.
 **Classification:** undocumented representation drift  
 **Priority:** medium  
 **Confidence:** high  
-**Status:** open design choice; does not block current correctness
+**Status:** remediation planned 2026-09-09; does not block current
+correctness, but should close before I6 establishes another façade precedent
 
 The I5.0 disposition says IDs and labels remain cell-resident and are copied
 only into diagnostics or explicit indexes. The implementation stores both
@@ -1185,18 +1186,174 @@ non-rooting edge continue to expose diagnostic state after the allocation has
 become stale. It also weakens the intended distinction between a managed
 semantic edge and a durable diagnostic/coordination record.
 
-Before I6 establishes more façade patterns, select and document one policy:
+#### Accepted target
 
-- keep only edge plus weak domain on semantic façades and copy identity into
-  the durable roots/work records which genuinely need it;
-- retain a compact copied ID on façades but keep labels cell/root resident; or
-- explicitly accept the duplicate identity cache as a performance tradeoff
-  and add it to the ownership ledger and later Value Representation Refinement
-  work.
+`LazyValue` and `PromisedValue` become edge-only semantic façades. The managed
+cell is the canonical owner of its ID and diagnostic label. An ID or label is
+copied only into a concrete scheduler index, diagnostic record, or external
+capability which demonstrably needs to use it without managed access.
 
-The registered root may reasonably cache identity needed outside a mutator;
-the finding is principally about every interior `LazyValue`/`PromisedValue`
-occurrence.
+A weak runtime observer is likewise not a property of an interior semantic
+edge. Managed reads require an explicit `RuntimeValueAccess` (or the narrower
+evaluator-step access derived from it), and managed writes use the durable root
+owned by the producer or task. This restores the rule that an unrooted
+`Gc<T>` is usable only within a matching mutator region instead of allowing
+each façade to reopen that region for itself.
+
+`PromiseResolver` is the deliberate exception. It is a public, affine host
+capability which may outlive the `EvaluationRuntime` façade, must not retain
+the runtime, and must still resolve, fail, or poison its promise from `Drop`.
+Its target representation is approximately:
+
+```rust
+struct PromiseResolver {
+    observer: RuntimeValueObserver,
+    label: Arc<str>,
+    promise: Option<ManagedPromiseRoot>,
+}
+```
+
+The observer supplies runtime re-entry and runtime identity, so a second
+copied runtime field should not be necessary. The `Option` remains the affine
+disarm state required because Rust still invokes `Drop` after an explicitly
+consuming method. `EvaluatedValue` is another legitimate public weak-observer
+owner and is outside this finding.
+
+The present observer on `ManagedPromiseCell` is transitional rather than
+canonical. Promise terminal publication already proceeds through a durable
+promise/wait root, so the cell should not retain a weak observer merely to
+repeat the same-domain check or expose a test-only runtime ID.
+
+#### Remediation checkpoints
+
+##### GCI5R-003A — Inventory and proof baseline
+
+- Build compile-exhaustive construction and use inventories for
+  `ManagedLazyCell`, `ManagedPromiseCell`, `LazyValue`, `PromisedValue`, their
+  registered roots, and `PromiseResolver`.
+- Classify every copied ID, label, edge, and observer as canonical cell
+  metadata, semantic edge, scheduler index, diagnostic record, or runtime
+  re-entry authority. An unclassified copy blocks removal.
+- Record the current façade layouts and the access-free façade operations
+  which upgrade an observer and enter a mutator internally. On the current
+  64-bit target both façades are 48 bytes; the managed edge itself is one
+  pointer.
+- Identify every coordinator, wait, callback, and wake-delivery boundary near
+  those operations, together with every unsafe dereference of the bare managed
+  edge. This is the baseline for proving that no mutator escapes into host
+  orchestration.
+- Latch the inventory and current observable behavior with source/shape tests
+  where useful. Repeated concurrent execution is not race evidence.
+
+##### GCI5R-003B — Remove duplicated façade metadata
+
+- Remove `id` and `label` from `LazyValue` and `PromisedValue`, temporarily
+  retaining the edge and weak observer so this checkpoint changes identity
+  storage without also changing access authority.
+- Define internal façade equality by managed-edge identity. Same-runtime
+  provenance is a construction invariant; foreign-runtime values continue to
+  be rejected at the public runtime/value boundary.
+- Make Rust `Debug` output intentionally opaque. Diagnostics obtain IDs and
+  labels through managed access or from durable scheduler/diagnostic records.
+- Preserve the existing user-visible lazy-cycle and promise diagnostics,
+  including their labels and stable IDs.
+- Verify same-allocation equality, distinct-allocation inequality,
+  cross-runtime rejection, cycle diagnostics, resolver diagnostics, and the
+  expected 64-bit façade reduction from 48 to 24 bytes at this intermediate
+  checkpoint.
+
+##### GCI5R-003C — Remove the promise cell's observer
+
+- Remove `ManagedPromiseCell`'s `RuntimeValueObserver`. Completion, waiting,
+  and terminal publication must use the already durable promise/wait root or
+  an explicit access region.
+- Remove the observer-backed, test-only runtime accessor. Tests which need to
+  prove provenance should do so through the runtime access boundary.
+- During the transition, validate an edge before dereference through the
+  façade or root authority already in scope; GCI5R-003D and GCI5R-003F replace
+  that temporary proof with the final structural one.
+- Refresh the managed-cell layout ledger from the compiler rather than
+  freezing an estimated size, and verify terminal publication, failed-runtime
+  behavior, and promise cleanup unchanged.
+
+##### GCI5R-003D — Require scoped authority for observation
+
+- Change lazy and promise reads to accept `ManagedLazyAccess` or
+  `ManagedPromiseAccess` obtained from `RuntimeValueAccess` or the existing
+  evaluator-step access. Remove self-upgrading read helpers from semantic
+  façades.
+- Reuse an already-open evaluator access region for batches of reads rather
+  than nesting a mutator entry for each field observation.
+- Enable the rooted lazy-access path in production. Prepare any root required
+  by task registration or `EvaluationHalt` before entering coordinator
+  orchestration.
+- Audit the resulting source and lifetime inventories. No managed access may
+  remain live across a wait, user callback, coordinator operation, wake
+  delivery, or other host work.
+- Verify ordinary evaluation, lazy and promise cycles, access-region reuse,
+  and dead-runtime behavior with deterministic fixtures.
+
+##### GCI5R-003E — Move mutation authority to durable roots
+
+- Publish lazy cache results through the task-held `ManagedLazyRoot`, and
+  promise results through the producer- or resolver-held
+  `ManagedPromiseRoot`. Remove mutation APIs from `LazyValue` and
+  `PromisedValue`.
+- Make `PromiseResolver` upgrade its weak observer, enter one bounded access
+  region, publish through its root, and release managed access before wakes or
+  callbacks are delivered.
+- Preserve the GCI5R-002 mutation-gateway contract and existing chronology:
+  lazy result publication precedes source release; promise assignment is
+  visible before wake delivery and root retirement; exactly one competing
+  publisher wins.
+- Force both relevant orderings with barriers or deterministic probes. Do not
+  accept a test merely because it passes under repetition.
+
+##### GCI5R-003F — Remove semantic-edge observers and audit durable copies
+
+- Remove the remaining weak observers and access-free `with_access`,
+  `with_runtime_access`, and rooting helpers from the semantic façades. Their
+  final representation is the managed edge alone.
+- Adopt the `PromiseResolver` exception described above. Keep its label for
+  host-side diagnostics and its `Option<ManagedPromiseRoot>` for affine
+  disarming; use its observer as the sole weak runtime route.
+- Audit registered roots and coordinator records. Keep copied IDs only where
+  they are actual scheduler/index keys, keep a lazy label only where it is a
+  concrete cycle-diagnostic record, and keep a promise label or observer only
+  on the resolver or another proven external record.
+- State the final unsafe-access proof explicitly: private constructors install
+  interior edges into the matching runtime graph; a caller may dereference
+  such an edge only under access derived from that graph's live root/runtime;
+  public APIs reject foreign-runtime values; debug builds retain cheap
+  provenance assertions.
+- Verify the final 64-bit `LazyValue` and `PromisedValue` layouts are each one
+  pointer, cloning them performs no `Arc`/`Weak` atomic operation, and resolver
+  behavior remains correct after runtime retirement.
+
+##### GCI5R-003G — Closure and adjacent-façade audit
+
+- Reconcile the I5.0 disposition, ownership ledger, evaluator architecture,
+  and GC integration plan with the implemented policy.
+- Audit `CoreRuntimeNet`, which currently has the analogous managed edge plus
+  weak-observer shape. Either apply the same policy now or assign its removal
+  to a concrete I8 checkpoint; do not leave it as an undocumented exception.
+- Record duplicate `Root<T>` plus `Gc<T>` storage in registered roots as a
+  separate possible optimization. A mutator-qualified root-to-edge projection
+  may remove it later, but it does not block this remediation unless it proves
+  trivial during the root audit.
+- Run focused managed-cell, evaluator, coordinator, cycle, and public-resolver
+  tests; the complete repository checks; and targeted strict-provenance Miri
+  because this work changes the authority surrounding unsafe managed-edge
+  dereferences.
+- Close GCI5R-003 only when the production inventory finds no duplicate
+  ID, label, or weak observer in the two semantic façades and every retained
+  copy has a named durable role.
+
+The order is intentional: first remove passive metadata duplication, then
+move reads and writes behind explicit authority, and only then remove the weak
+observer which currently makes those access-free operations possible. That
+keeps each checkpoint behaviorally reviewable while converging on the final
+one-pointer façades.
 
 ### GCI5R-004 — I6 treats traced immutable paths as mandatory new identities
 
