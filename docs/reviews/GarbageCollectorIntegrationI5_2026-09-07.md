@@ -1655,19 +1655,28 @@ as the owner to the mutation barrier. The duplicated field is therefore more
 than a layout opportunity: it is avoidable state whose consistency can only
 be maintained by convention.
 
-A safe `Root::as_gc(&self) -> Gc<T>` is sufficient for the current collector.
-It grants no dereference or heap-entry capability: `Gc<T>` remains an inert,
-non-rooting pointer, and `Root<T>`'s private construction already establishes
-its type and allocation identity. The projected pointer remains usable only
-while the root or another traced owner proves liveness, exactly like every
-other copied `Gc<T>`. `Root::get` should use the same projection so typed
-reconstruction has one implementation boundary.
+A safe `Root::as_gc(&self, mutator: &Mutator<'_>) -> Gc<T>` is sufficient for
+the current collector. The mutator validates that the root belongs to the
+entered heap and keeps that heap in a non-collecting safepoint state while the
+projection is intended to be used. The result grants no dereference or heap
+retention: `Gc<T>` remains an inert, non-rooting pointer, and `Root<T>`'s
+private construction already establishes its type and allocation identity.
+`Root::get` should use the same projection so typed reconstruction has one
+implementation boundary.
 
-This API does not promise that a projected pointer survives a future moving
-collection. Such a collector must update root cells and either make `Gc<T>` a
-stable handle or bind projections to a non-moving mutator epoch. Caching the
-pointer beside the root would be strictly worse for that transition because
-the cached copy could not follow a relocated root.
+The current `Gc<T>` is not lifetime-branded, so Rust cannot prevent a caller
+from copying the projected pointer beyond the mutator borrow. That copy has no
+valid use after its liveness or safepoint proof ends; every dereference still
+requires a matching mutator and an independent liveness proof. Glam's internal
+root projections should therefore be consumed within the bounded
+`RuntimeValueAccess` which requested them rather than cached again.
+
+This form leaves a direct path to moving collection: root cells can be updated
+while mutators are stopped, and the next admitted projection observes the new
+address. A future collector may additionally lifetime-brand projected edges
+or make `Gc<T>` a stable handle. Caching the pointer beside the root would be
+strictly worse because that copy could neither participate in safepoint
+coordination nor follow a relocated root.
 
 #### Current duplicate inventory
 
@@ -1679,8 +1688,8 @@ pairs:
 | `ManagedLazyRoot` | `Root<ManagedLazyCell>` plus `ManagedLazyEdge` | Remove the edge field; derive it from the root. |
 | `ManagedPromiseRoot` | `Root<ManagedPromiseCell>` plus `ManagedPromiseEdge` | Remove the edge field; derive it from the root. |
 | `ManagedCoreNetRoot` | `Root<ManagedCoreNetCell>` plus `ManagedCoreNetEdge` | Remove the edge field; derive it from the root. |
-| `EvaluationHaltKind::UnassignedPromise` | `ManagedPromiseRoot` plus `PromisedValue` for that root | Retain the root and project the semantic promise or trace edge when needed. |
-| `NormalizationRequest` | `ManagedCoreNetRoot` plus `CoreRuntimeNet` for that root | Retain the root and reconstruct the request's semantic net view. |
+| `EvaluationHaltKind::UnassignedPromise` | `ManagedPromiseRoot` plus `PromisedValue` for that root | Retain the root and project the semantic promise inside evaluator access; compatibility tracing must rely on the registered root rather than bypassing mutator admission. |
+| `NormalizationRequest` | `ManagedCoreNetRoot` plus `CoreRuntimeNet` for that root | Retain the root and reconstruct the request's semantic net view inside evaluator access. |
 | `CorePreparedCopySource` | `ManagedCoreNetRoot` plus a `CoreRuntimeNet` hidden in `PreparedCopySource` | Retain the root and the edge-free remote-port snapshot; construct the generic prepared source at consumption. |
 | `CoreFrontierObservation` | `ManagedCoreNetRoot` plus a `CoreRuntimeNet` hidden in `FrontierObservation` | Retain the root and the edge-free topology/endpoint snapshot; project the source for an attempted step. |
 
@@ -1694,21 +1703,26 @@ Test fixtures containing unrelated roots and edges are outside this finding.
 
 ##### GCI5R-008A — Add and verify root projection
 
-- Add `Root::as_gc(&self) -> Gc<T>` as an allocation-free, non-rooting
-  projection and implement `Root::get` through it.
+- Add `Root::as_gc(&self, mutator: &Mutator<'_>) -> Gc<T>` as an
+  allocation-free, non-rooting projection and implement `Root::get` through
+  it. Reject a mutator from another heap before reconstructing the typed
+  pointer.
 - Document the liveness and future-moving-collector limits above; do not add
   dereference, heap retention, hashing, or value equality to either handle.
 - Verify projection preserves the original allocation identity, cloned roots
   project the same allocation, distinct roots remain distinct, and projecting
-  does not change root registration or heap-retention behavior.
+  does not change root registration or heap-retention behavior. Verify a
+  foreign-heap mutator is rejected.
 - Add targeted strict-provenance Miri coverage for this private erased-to-typed
   reconstruction boundary.
 
 ##### GCI5R-008B — Remove direct family-root duplicates
 
 - Remove `edge` from all three `Managed*Root` records. Derive each
-  `Managed*Edge` from `root.as_gc()` in the representation-local projection
-  and bounded-access paths.
+  `Managed*Edge` from `root.as_gc(mutator)` only in the
+  representation-local bounded-access paths. Access-free `edge()` and
+  `from_root()` helpers must either accept matching runtime access or be
+  removed.
 - Make root construction accept one allocation identity, register it, and
   retain only the resulting root. Eliminate the representable root/edge
   mismatch rather than adding another equality assertion.
@@ -1719,14 +1733,18 @@ Test fixtures containing unrelated roots and edges are outside this finding.
 ##### GCI5R-008C — Remove enclosing same-target duplicates
 
 - Make retryable promise halts root-only. Derive owned semantic views for
-  evaluator consumers and derive the exact promise edge for compatibility
-  tracing; do not restore an independently cached promise façade.
+  evaluator consumers inside their existing bounded access. The compatibility
+  visitor must recognize that the registered root is already the durable
+  liveness authority; it must not gain a mutator-free edge projection merely
+  to preserve the old façade trace. Do not restore an independently cached
+  promise façade.
 - Make `NormalizationRequest` root-only apart from its interface and mode.
-  Project temporary `CoreRuntimeNet` views when constructing work.
+  Project temporary `CoreRuntimeNet` views inside evaluator access when
+  constructing work.
 - Replace the source-bearing generic state inside `CorePreparedCopySource` and
   `CoreFrontierObservation` with their edge-free remote-port or
   topology/endpoint snapshots plus the root. Reconstruct the generic operation
-  input only at its bounded consumption point.
+  input only at its bounded, mutator-admitted consumption point.
 - Preserve promise-halt equality, cursor-WHNF disturbance/retry behavior,
   prepared-copy source identity, frontier version checks, and all existing
   callback/mutator boundaries.
